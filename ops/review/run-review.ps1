@@ -326,6 +326,28 @@ function Test-ReviewAttemptRateLimit {
     return $false
 }
 
+function Get-ReviewRedactionRules {
+    # Shared by diagnostics and the publication gate. Never print a matching value.
+    return @(
+        [pscustomobject]@{ Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+'; Replacement = 'Bearer [REDACTED]' }
+        [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
+        [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
+        [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]' }
+        [pscustomobject]@{ Pattern = '(?i)(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|/(?:Users|home)/[^/\s]+|/root)(?:[\\/]|\b)'; Replacement = '[REDACTED PROFILE PATH]' }
+    )
+}
+
+function Assert-ReviewOutputSafe {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Text)
+
+    foreach ($rule in (Get-ReviewRedactionRules)) {
+        if ($Text -match $rule.Pattern) {
+            throw 'Review did not complete: output failed the publication safety scan.'
+        }
+    }
+}
+
 function Get-ReviewDiagnosticTail {
     [CmdletBinding()]
     param(
@@ -337,10 +359,9 @@ function Get-ReviewDiagnosticTail {
     if ([string]::IsNullOrWhiteSpace($Stderr)) { return '' }
     $lines = @($Stderr -split "`r?`n")
     $redacted = (($lines | Select-Object -Last $MaxLines) -join [Environment]::NewLine)
-    $redacted = $redacted -replace '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer [REDACTED]'
-    $redacted = $redacted -replace '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)', '$1$2[REDACTED]'
-    $redacted = $redacted -replace '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b', '[REDACTED]'
-    $redacted = $redacted -replace '\b[A-Za-z0-9+/=_-]{40,}\b', '[REDACTED]'
+    foreach ($rule in (Get-ReviewRedactionRules)) {
+        $redacted = $redacted -replace $rule.Pattern, $rule.Replacement
+    }
     if ($redacted.Length -gt $MaxCharacters) {
         $redacted = $redacted.Substring($redacted.Length - $MaxCharacters)
     }
@@ -563,8 +584,9 @@ function Get-ReviewBackendCommand {
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'claude'
-                # manual is intentional: in -p mode it prevents prompts and denies unapproved tools.
-                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob', '--setting-sources', 'user', '--strict-mcp-config', '--disable-slash-commands') + $modelArgs + $effortArgs
+                # Scope file reads to WorkingDirectory; no bare Grep/Glob allow rules.
+                # Disable settings sources so inherited allows/additional directories cannot widen access.
+                Arguments = @('-p', '--output-format', 'text', '--permission-mode', 'manual', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read(./**)', '--setting-sources=', '--strict-mcp-config', '--disable-slash-commands') + $modelArgs + $effortArgs
                 InputText = $Prompt
                 WorkingDirectory = $Workspace
                 ResultPath = $null
@@ -1109,6 +1131,8 @@ function Write-ReviewResult {
         [bool]$PublishMarker = $true
     )
 
+    # Remove a stale body before checking this attempt. The workflow skips posting on failure.
+    Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
     $label = $Result.Backend
     $resultEffort = if ($Result.PSObject.Properties['Effort']) { [string]$Result.Effort } else { '' }
     if (-not [string]::IsNullOrWhiteSpace([string]$Result.Model)) {
@@ -1124,11 +1148,15 @@ function Write-ReviewResult {
     if ($PublishMarker -and (Test-GitObjectId -Sha $HeadSha.Trim())) {
         $markerText = "sha=$($HeadSha.Trim()) mode=$postedMode"
         if (Test-ReviewBaseRef -BaseRef $BaseRef) {
+            Assert-ReviewOutputSafe -Text $BaseRef
             $markerText = "$markerText base=$($BaseRef.Trim())"
         }
         $marker = "`r`n`r`n<!-- agent-review: $markerText -->"
     }
-    $body = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**.{3}" -f $CoverageLine.Trim(), $Result.Output.Trim(), $label, $marker
+    $body = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**." -f $CoverageLine.Trim(), $Result.Output.Trim(), $label
+    Assert-ReviewOutputSafe -Text $body
+    # The marker contains validated Git metadata; its SHA intentionally resembles a long token.
+    $body += $marker
     $body | Out-File -LiteralPath $OutputPath -Encoding utf8
 }
 

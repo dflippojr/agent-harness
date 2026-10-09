@@ -217,9 +217,16 @@ has no effort variable: choose effort through the model id (for example `cursor-
 Optional `REVIEW_MAX_DIFF_BYTES` sets how many bytes of PR diff are embedded in the review prompt (default `204800`; accepted range `20480` to `2097152`, digits only). A larger cap covers more of a big PR but grows the prompt, so each review costs more tokens and risks exceeding the model's context; a smaller cap is cheaper but omits more. An invalid value fails closed before a backend runs. When the diff exceeds the cap, whole files are dropped by a fixed rule: source files are kept first, then tests, then docs, then lockfiles and generated or vendored output, in diff order within each tier; a file that does not fit is omitted even if a smaller later file still fits. The comment then opens with `PARTIAL REVIEW: reviewed N of M files (X of Y KB of diff). Not reviewed: <files>` instead of `Reviewed the full diff`, and the `<!-- agent-review: ... -->` marker is withheld so the next run reviews the whole PR instead of treating it as covered. A single file larger than the cap is always listed as not reviewed. Omitted files are not reviewed in additional passes; raise the cap to cover them.
 
 All three CLIs run under the review runner service user and must be logged in for that same user. Cursor uses ask mode
-with its sandbox enabled. Codex ignores the service user's configuration, restores only the required unelevated Windows
+with its sandbox enabled on non-Windows hosts; the flag is skipped on Windows because that CLI does not support it.
+Windows ask mode is not an OS sandbox; keep Cursor opt-in rather than adding it to the default Windows pool. Codex ignores the service user's configuration, restores only the required unelevated Windows
 sandbox setting, disables apps and plugins, and supplies an empty MCP server table before entering its read-only sandbox.
-Claude exposes only Read/Grep/Glob. The wrapper, rather than a model, writes the final comment file. It fetches the pull
+Claude exposes only Read/Grep/Glob, with `--allowedTools Read(./**)` anchored to the PR workspace as its working
+directory. No bare Read, Grep or Glob allow is passed, and `--setting-sources=` disables inherited settings that could
+add broader permissions or additional directories. This uses the [Claude permission rule syntax](https://code.claude.com/docs/en/permissions). The wrapper, rather than a model, writes the final comment file. Before writing `review-output.md`, it scans the
+public review body using the diagnostic redaction patterns (bearer values, named credentials, provider tokens and
+long tokens), plus Windows/macOS/Linux user-profile absolute paths. A match discards the whole body, removes any
+stale output and fails closed with `Review did not complete`; nothing is posted or copied into the check summary.
+Validated Git metadata in the coverage marker is added only after the scan. It fetches the pull
 request diff before starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review
 sandboxes do not need GitHub network access. Larger diffs identify every omitted file in the prompt. After installing or
 changing a CLI, verify each backend explicitly against a disposable pull request:
@@ -245,8 +252,9 @@ accepts deployments from `main` only.
 
 Other projects call this repository's `review.yml` as a reusable workflow (`on: workflow_call`) instead of carrying a
 copy, so a fix here reaches every project. The job checks out `ops/review/run-review.ps1` from
-`dflippojr/agent-harness` at the `tooling_ref` input (default `review-v1`) into `.review-tooling`; the consumer repo
-needs no `ops/review` directory.
+`dflippojr/agent-harness` at the `tooling_ref` input (default `main`, the trusted default branch) into `.review-tooling`; the consumer repo
+needs no `ops/review` directory. This repository also checks out tooling from the trusted default branch, never
+from the triggering commit; the PR head is checked out separately in `pr` for review context only.
 
 **Caller file.** Add `.github/workflows/review.yml` to the consumer repo, with that repo's runner label in `runs_on`:
 
@@ -293,12 +301,17 @@ jobs:
 
 Do not add a workflow-level `concurrency` group to the caller; the shared job already serializes per repository and
 PR. Optional inputs: `max_diff_bytes` (otherwise the consumer's `REVIEW_MAX_DIFF_BYTES` variable, then `204800`) and
-`tooling_ref` (keep it equal to the `@ref` in `uses:`). The `REVIEW_*` repository variables are read from the consumer
+`tooling_ref` (use the trusted default branch or a maintainer-pinned tag, never a PR ref). The `REVIEW_*` repository variables are read from the consumer
 repository.
 
 **Runner label.** Register a self-hosted Windows runner for the consumer repo with
 `ops/github/install-runner.ps1 -Labels <project>-review` under a service user whose Codex, Claude, and Cursor CLIs are
 logged in, and pass that label in `runs_on`.
+
+**Runner access (owner step).** Create a self-hosted runner group in GitHub and restrict it to the specific trusted
+review/deploy workflows that need those runners, with workflow refs on the default branch or trusted tags. Labels
+select runners but do not restrict who may schedule them. Keep fork-PR approval required for all outside contributors.
+This GitHub administration step cannot be enforced by this repository change; the owner must configure it.
 
 **Permissions.** The caller's `permissions` block must grant `contents: read`, `pull-requests: write` (PR comment), and
 `checks: write` (the `Automated Code Review` check). A called workflow can only narrow these.

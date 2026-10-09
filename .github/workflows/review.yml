@@ -82,9 +82,9 @@ on:
         default: ""
         type: string
       tooling_ref:
-        description: "agent-harness ref that supplies ops/review/run-review.ps1; keep it equal to the ref in uses:"
+        description: "agent-harness ref that supplies ops/review/run-review.ps1; use only the trusted default branch or a maintainer-pinned tag"
         required: false
-        default: review-v1
+        default: main
         type: string
 
 permissions:
@@ -110,9 +110,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: dflippojr/agent-harness
-          # This repository reviews with its own tooling at the triggering commit;
-          # callers get the pinned tooling_ref (review-v1 by default).
-          ref: ${{ github.repository == 'dflippojr/agent-harness' && github.sha || inputs.tooling_ref }}
+          # Tooling is trusted independently of the PR head, including this repo's own PRs.
+          # Callers may select a maintainer-pinned tag; otherwise use the default branch.
+          ref: ${{ inputs.tooling_ref || 'main' }}
           path: .review-tooling
           persist-credentials: false
 

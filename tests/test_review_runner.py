@@ -70,6 +70,63 @@ $value | ConvertTo-Json -Compress
     assert "unsupported review backend 'unknown'" in output(invalid)
 
 
+def test_publication_safety_pester_regressions(tmp_path):
+    pester_path = str(ROOT / "tests" / "review-output.Tests.ps1").replace("'", "''")
+    result = run_powershell(
+        tmp_path,
+        f"""
+Import-Module Pester -ErrorAction Stop
+$r = Invoke-Pester '{pester_path}' -PassThru
+if ($r.FailedCount -gt 0 -or $r.PassedCount -lt 10) {{ exit 1 }}
+""",
+    )
+    assert result.returncode == 0, output(result)
+
+
+def test_rejected_output_fails_the_check_without_posting(tmp_path):
+    output_path = str(tmp_path / "review-output.md").replace("'", "''")
+    github_output = str(tmp_path / "github-output.txt").replace("'", "''")
+    result = run_powershell(
+        tmp_path,
+        f"""
+$env:GITHUB_OUTPUT = '{github_output}'
+function Get-ReviewCoverage {{
+    [pscustomobject]@{{ Mode = 'full'; Diff = 'synthetic diff'; HeadSha = '{HEAD_SHA}'; BaseRef = 'main'; CoverageLine = 'Reviewed the full diff' }}
+}}
+function Remove-UntrustedReviewAgentConfiguration {{ return 0 }}
+function Invoke-ReviewBackendProcess {{
+    param($Command, $ScratchDirectory)
+    [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings. ghp_synthetic12345678`nREVIEW_VERDICT: CLEAN`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+}}
+try {{
+    Invoke-ReviewMain -Backend claude -Workspace '{tmp_path}' -PrNumber 7 -Prompt 'synthetic review' -OutputPath '{output_path}' -ScratchDirectory '{tmp_path}'
+    throw 'Expected publication rejection'
+}} catch {{
+    if ($_.Exception.Message -notlike 'Review did not complete*') {{ throw }}
+}}
+[ordered]@{{ bodyExists = (Test-Path -LiteralPath '{output_path}'); outputsExist = (Test-Path -LiteralPath '{github_output}') }} | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert json.loads(result.stdout.strip()) == {"bodyExists": False, "outputsExist": False}
+    fields = _complete_check(tmp_path, {"AGENT_CONCLUSION": "failure", "POST_CONCLUSION": "skipped"})
+    assert fields["conclusion"] == "failure"
+    assert fields["output[title]"] == "Review did not complete"
+    assert "synthetic12345678" not in fields["output[summary]"]
+    assert "a.py:1" not in fields["output[summary]"]
+    assert "if" not in _workflow_step("Post review as PR comment")  # default success() gates posting
+
+
+def test_ci_docs_describe_review_safety_boundaries():
+    docs = CI_DOCS.read_text(encoding="utf-8")
+    assert "flag is skipped on Windows" in docs
+    assert "Read(./**)" in docs
+    assert "--setting-sources=" in docs
+    assert "Review did not complete" in docs
+    assert "runner group" in docs
+    assert "fork-PR approval required for all outside contributors" in docs
+
+
 LAST_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 HEAD_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 OTHER_SHA = "cccccccccccccccccccccccccccccccccccccccc"
@@ -421,7 +478,7 @@ $commands = @(
     Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
     Get-ReviewBackendCommand -Backend claude -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
 )
-$commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | ConvertTo-Json -Depth 4 -Compress
+$commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath,WorkingDirectory | ConvertTo-Json -Depth 4 -Compress
 """,
     )
     assert result.returncode == 0, output(result)
@@ -473,7 +530,10 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
     assert all("Bash" not in arg for arg in claude_args)
     assert not {"Edit", "Write", "NotebookEdit"}.intersection(claude_args)
     assert "--strict-mcp-config" in claude_args
-    assert claude_args[claude_args.index("--setting-sources") + 1] == "user"
+    assert claude_args[claude_args.index("--allowedTools") + 1] == "Read(./**)"
+    assert "--setting-sources=" in claude_args
+    assert "--setting-sources" not in claude_args
+    assert commands["claude"]["WorkingDirectory"] == str(workspace)
     assert commands["claude"]["InputText"] == "prompt"
 
 
@@ -1746,7 +1806,7 @@ def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     call_inputs = triggers["workflow_call"]["inputs"]
     assert set(call_inputs) == {"pr_number", "backend", "mode", "runs_on", "max_diff_bytes", "tooling_ref"}
     assert call_inputs["runs_on"]["required"] is True
-    assert call_inputs["tooling_ref"]["default"] == "review-v1"
+    assert call_inputs["tooling_ref"]["default"] == "main"
     assert "push" not in triggers
     assert triggers["pull_request"] == {"types": ["opened"]}
     job = workflow["jobs"]["review"]
@@ -1754,7 +1814,9 @@ def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     tooling = _workflow_step("Check out review tooling")["with"]
     assert tooling["repository"] == "dflippojr/agent-harness"
     assert tooling["path"] == ".review-tooling"
-    assert "inputs.tooling_ref" in tooling["ref"]
+    assert tooling["ref"] == "${{ inputs.tooling_ref || 'main' }}"
+    assert "github.sha" not in tooling["ref"]
+    assert "pull_request.head" not in tooling["ref"]
     resolve = _workflow_step("Resolve PR number")["run"]
     assert "isCrossRepository" in resolve
     assert "Refusing to review PR" in resolve
