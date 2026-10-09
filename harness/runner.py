@@ -2083,9 +2083,11 @@ class Runner:
         if github_branch:
             from dataclasses import replace
             project = replace(project, base_branch=github_branch)
+        base_only = bool(s.get("app_id"))  # an App session sees only the base branch, not other agent/* branches
         if remote:
             return await self.hub.call(s["target"], "prepare", {"session": s["id"], "repo": project.repo,
-                                                                "base_branch": project.base_branch}, timeout=900)
+                                                                "base_branch": project.base_branch,
+                                                                "base_only": base_only}, timeout=900)
         if member:
             from . import clone, storage
             uid = session_user_id(s)
@@ -2097,12 +2099,15 @@ class Runner:
                     self._member_clone_budget(uid))
             except clone.QuotaExceeded as e:
                 raise projects.GitError(str(e)) from e
-        # An App session sees only the base branch, not other sessions' published agent/* branches.
-        return await asyncio.to_thread(projects.prepare, project, ws, s["id"], base_only=bool(s.get("app_id")))
+        if base_only:
+            return await asyncio.to_thread(projects.prepare, project, ws, s["id"], base_only=True)
+        return await asyncio.to_thread(projects.prepare, project, ws, s["id"])
 
     async def _refresh_origin(self, s: dict, ws: Path, remote: bool, member: bool):
+        base = (s.get("base_branch") or "") if s.get("app_id") else ""
         if remote:
-            return await self.hub.call(s["target"], "refresh_origin", {"session": s["id"]}, timeout=400)
+            return await self.hub.call(s["target"], "refresh_origin", {"session": s["id"], "base_branch": base},
+                                       timeout=400)
         if member:
             from . import clone, storage
             from .fileops import dir_size
@@ -2114,7 +2119,6 @@ class Runner:
             cap = None if remaining is None else remaining + dir_size(ws)
             return await asyncio.to_thread(
                 clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, uid), cap)
-        base = (s.get("base_branch") or "") if s.get("app_id") else ""
         return await asyncio.to_thread(projects.refresh_origin, ws, base)
 
     async def _github_refresh(self, s: dict, project) -> None:

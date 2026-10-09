@@ -1769,6 +1769,7 @@ class Manager:
         if sandbox is not None:
             await sandbox.remove()
         await self._erase_cli_history(s)
+        await self._erase_remote_app_branch(s)
         await asyncio.to_thread(self._erase_files, s)
         await asyncio.to_thread(self.db.delete_session, sid)
         log.info("session erasure completed")
@@ -1803,6 +1804,20 @@ class Manager:
         remove_tree(dirs["checkpoints"] / s["id"])
         (dirs["transcripts"] / f"{s['id']}.md").unlink(missing_ok=True)
         self._erase_app_branch(s)
+
+    async def _erase_remote_app_branch(self, s: dict) -> None:
+        """An App session on a runner: its branch and working directory there go with it (best effort: a runner that
+        is asleep keeps them until its own cleanup)."""
+        if not s.get("app_id") or not s.get("branch") or s["target"] == "tower":
+            return
+        project = self.project_for_session(s)
+        if project is None or not project.repo:
+            return
+        try:
+            await self.remote(s, "discard", {"repo": project.repo, "branch": s["branch"],
+                                             "base_branch": s["base_branch"], "title": s["title"]}, timeout=600)
+        except HarnessError:
+            log.warning("could not delete an erased App session's branch on its runner")
 
     def _erase_app_branch(self, s: dict) -> None:
         """An App session's published agent/<sid> branch in a local source goes with the session. Owner sessions'

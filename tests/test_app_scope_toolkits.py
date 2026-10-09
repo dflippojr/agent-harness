@@ -182,3 +182,18 @@ def test_owner_session_erase_keeps_its_branch(tmp_path):
         assert sh(src, "branch", "--list", s["branch"]) != ""
         await m.stop()
     asyncio.run(body())
+
+
+def test_runner_base_only_prepare_and_refresh_hold_just_the_base_branch(tmp_path):
+    from test_phase4 import executor
+
+    src, other = _source_with_session_branch(tmp_path / "Projects")
+    ex = executor(tmp_path, [tmp_path / "Projects"])
+    sid = "0123456789"
+    info = ex.handle("r1", "prepare", {"session": sid, "repo": str(src), "base_branch": "", "base_only": True})
+    assert info["base_branch"] == "main"
+    ws = ex.workspace(sid)
+    assert not _has_object(ws, other)
+    sh(ws, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+    assert ex.handle("r2", "refresh_origin", {"session": sid, "base_branch": "main"}) == ""
+    assert not _has_object(ws, other)

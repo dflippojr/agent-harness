@@ -704,7 +704,8 @@ snapshots, transcript and its `agent/<session id>` branch in a local project's r
 the session, its events, tool calls and results, approvals, artifacts, checkpoints, review drafts and search entries.
 It is idempotent: deleting a session that is already gone returns `204` again. Usage counters (tokens, cost) stay
 with the owner as metadata. Older nightly backups keep the session until they rotate out (see Backups above). A
-session that ran on a runner (the Mac) keeps its working directory there until that runner's own cleanup.
+session that ran on a runner (the Mac) has its branch and working directory there removed too when the runner is
+awake; otherwise they stay until that runner's own cleanup.
 
 ### `GET /api/v1/sessions/{id}/approvals`, `POST /api/v1/sessions/{id}/approvals/{approval_id}`  (scope `approvals` to decide)
 `{"decision": "approve" | "deny", "note": "..."}`. The note is recorded with your app's name. The owner's Web doesn't

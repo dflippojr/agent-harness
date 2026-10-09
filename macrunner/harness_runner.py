@@ -325,11 +325,14 @@ class Executor:
             raise OpError(f"only {self.free_gb()} GB free on the MacBook (minimum {self.min_free_gb} GB)")
         ws = self.workspace(p["session"], create=True)
         # --shared: the clone borrows the source's objects (no copy on a full disk). The sandbox can't write to the
-        # source, and the session branch is fetched back into it after every run.
-        return projects.prepare(project, ws, p["session"], shared=not projects.is_url(project.repo))
+        # source, and the session branch is fetched back into it after every run. An App session (`base_only`)
+        # gets only the base branch and its objects instead.
+        base_only = bool(p.get("base_only"))
+        return projects.prepare(project, ws, p["session"], shared=not base_only and not projects.is_url(project.repo),
+                                base_only=base_only)
 
     def op_refresh_origin(self, p: dict):
-        return projects.refresh_origin(self.workspace(p["session"]))
+        return projects.refresh_origin(self.workspace(p["session"]), p.get("base_branch") or "")
 
     def op_save_branch(self, p: dict):
         project, ws, sid = self.project(p), self.workspace(p["session"]), p["session"]
