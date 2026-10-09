@@ -2097,7 +2097,8 @@ class Runner:
                     self._member_clone_budget(uid))
             except clone.QuotaExceeded as e:
                 raise projects.GitError(str(e)) from e
-        return await asyncio.to_thread(projects.prepare, project, ws, s["id"])
+        # An App session sees only the base branch, not other sessions' published agent/* branches.
+        return await asyncio.to_thread(projects.prepare, project, ws, s["id"], base_only=bool(s.get("app_id")))
 
     async def _refresh_origin(self, s: dict, ws: Path, remote: bool, member: bool):
         if remote:
@@ -2113,7 +2114,8 @@ class Runner:
             cap = None if remaining is None else remaining + dir_size(ws)
             return await asyncio.to_thread(
                 clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, uid), cap)
-        return await asyncio.to_thread(projects.refresh_origin, ws)
+        base = (s.get("base_branch") or "") if s.get("app_id") else ""
+        return await asyncio.to_thread(projects.refresh_origin, ws, base)
 
     async def _github_refresh(self, s: dict, project) -> None:
         """Issue #63: update a member's managed copy from their private GitHub origin, host-side and credentialed.
