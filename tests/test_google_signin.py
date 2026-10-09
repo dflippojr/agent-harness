@@ -345,6 +345,8 @@ def test_config_problems_keep_feature_disabled(env, change, fragment):
     assert all(SECRET not in p and str(env.secret_file) not in p for p in problems)
     env.m.google_signin._static = None
     assert not env.m.google_signin.enabled()
+    # Reach the sign-in guard through an admitted address even when this case breaks the public URL.
+    env.client.headers["Host"] = f"localhost:{env.cfg.port}"
     assert env.browser(KITCHEN).get("/api/v1/auth/session").status_code == 403
 
 

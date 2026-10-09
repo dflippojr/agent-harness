@@ -116,7 +116,16 @@ def local_owner_client():
 
     def build_request(self, *args, **kwargs):
         request = original(self, *args, **kwargs)
+        # TestClient's synthetic default stands in for the daemon's configured loopback listener. Explicit
+        # hosts and custom base URLs are left intact so Host validation tests exercise the real guard.
         manager = getattr(getattr(self.app, "state", None), "manager", None)
+        headers = kwargs.get("headers") or {}
+        names = headers.keys() if hasattr(headers, "keys") else (key for key, _ in headers)
+        if (manager and str(self.base_url).rstrip("/") == "http://testserver"
+                and request.url.host == "testserver" and not any(key.lower() == "host" for key in names)
+                and "host" not in self.headers):
+            request.url = request.url.copy_with(host="127.0.0.1", port=manager.cfg.port)
+            request.headers["Host"] = f"127.0.0.1:{manager.cfg.port}"
         token = getattr(manager, "local_owner_token", "")
         # Like the CLI, it sends no local token with another credential; a browser preflight never carries one.
         if (token and getattr(self, "local_owner", True) and local_owner.HEADER not in request.headers

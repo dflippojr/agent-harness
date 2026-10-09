@@ -7,6 +7,12 @@ PWA installs continue to work. The same directory can also be hosted at a separa
 The PWA manifest name and browser title are **Agent Harness Web**. Its short name and Apple standalone title are
 **Harness**. Functional navigation labels such as Agents, Jobs, Images, Profile, and Settings remain task-oriented.
 
+The bundled Server accepts requests only for `127.0.0.1`, `localhost`, or `[::1]` on its configured listen port,
+or the exact authority in `public_url` (including its public port). Other Host headers receive **421** on every
+method, including GET; forwarded-host headers do not grant access. Every Server response carries
+`Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`, so other sites cannot embed the Web
+shell. A separately hosted copy needs the same framing headers from its own static host.
+
 ## Navigation
 
 A bottom tab bar holds the primary sections: **Chat** (owner only), **Agents**, **Jobs**, **Images** and **Profile**.

@@ -62,7 +62,7 @@ def test_presence_routes_settings_tools_and_prompts(tmp_path, selection):
     async def check():
         app = create_app(m)
         app.state.manager = m
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=f"http://127.0.0.1:{m.cfg.port}",
                                      headers={local_owner.HEADER: m.local_owner_token}) as c:
             for prefix in ("", "/api/admin/v1"):
                 response = await c.get(prefix + "/memory")
@@ -100,7 +100,7 @@ def test_profile_route_tool_error(tmp_path, monkeypatch):
     async def check():
         app = create_app(m)
         app.state.manager = m
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=f"http://127.0.0.1:{m.cfg.port}",
                                      headers={local_owner.HEADER: m.local_owner_token}) as c:
             response = await c.put("/api/admin/v1/memory/profile", json={"content": "x"})
             assert response.status_code == 400

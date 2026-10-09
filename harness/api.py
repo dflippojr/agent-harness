@@ -12,11 +12,13 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
+from starlette.datastructures import MutableHeaders
 
 from . import operation_audit, namespace_audit, access as access_mod
 from . import compat
@@ -335,6 +337,13 @@ async def _identity_from_tailscaled(request: Request, m: Manager) -> None:
 
 async def guard(request: Request, call_next):
     m: Manager = request.app.state.manager
+    if not _host_allowed(request, m.cfg):
+        return JSONResponse({"detail": "request Host is not a daemon address"}, status_code=421)
+    return await call_next(request)
+
+
+async def _access_guard(request: Request, call_next):
+    m: Manager = request.app.state.manager
     await _identity_from_tailscaled(request, m)
     public_path = request.scope.get("harness_original_path", request.url.path)
     info = _origin_info(request, m, public_path)
@@ -384,6 +393,27 @@ async def guard(request: Request, call_next):
     if web.clear_cookie:
         google_signin.clear_session_cookie(response)
     return response
+
+
+def _host_allowed(request: Request, cfg: config_mod.Config) -> bool:
+    """Match one exact authority, never a forwarded host or a caller-supplied URL."""
+    from .apps import normalize_origin
+
+    hosts = request.headers.getlist("host")
+    if len(hosts) != 1:
+        return False
+    allowed = {f"{host}:{cfg.port}" for host in ("127.0.0.1", "localhost", "[::1]")}
+    if cfg.port == 80:
+        allowed.update({"127.0.0.1", "localhost", "[::1]"})
+    try:
+        public = urlsplit(normalize_origin(cfg.public_url))
+    except ValueError:
+        pass  # An absent/invalid public URL never widens the loopback allowlist.
+    else:
+        allowed.add(public.netloc)
+        if public.port is None:
+            allowed.add(f"{public.netloc}:{443 if public.scheme == 'https' else 80}")
+    return hosts[0].lower() in allowed
 
 
 def _web_session_refusal(request: Request, m: Manager, ident, web, public_path: str,
@@ -1154,6 +1184,23 @@ async def revoke_key(kid: str, request: Request):
     return Response(status_code=204)
 
 
+class _FramingFastAPI(FastAPI):
+    """Apply framing policy outside the error middleware, including its generated 500 responses."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await super().__call__(scope, receive, send)
+
+        async def framed_send(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+                headers["X-Frame-Options"] = "DENY"
+            await send(message)
+
+        await super().__call__(scope, receive, framed_send)
+
+
 def create_app(manager: Manager | None = None) -> FastAPI:
     # Built now, not in the lifespan: which add-on modules are present decides which routes exist.
     manager = manager or Manager(config_mod.load())
@@ -1169,8 +1216,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
         await app.state.manager.stop()
         await probe.stop()
 
-    app = FastAPI(title="agent-harness", lifespan=lifespan)
-    app.middleware("http")(guard)
+    app = _FramingFastAPI(title="agent-harness", lifespan=lifespan)
+    app.middleware("http")(_access_guard)
     app.add_middleware(WebGzipMiddleware, web=WEB)
     app.add_exception_handler(HarnessError, harness_error)
     web_router.install(app)
@@ -1185,4 +1232,6 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     # Keep /static for installed bundled clients, while making harness/web directly deployable at a static-site root.
     # This catch-all mount is last so daemon/API routes always win.
     app.mount("/", StaticFiles(directory=WEB), name="web-root")
+    # Registered last so Host admission precedes even aliases/module middleware that return early.
+    app.middleware("http")(guard)
     return app
