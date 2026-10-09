@@ -14,6 +14,8 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toas
       return;
     }
     const list = h("div", { class: "job-groups" });
+    // Job id -> the enabled state being saved. paint() rebuilds every row, so a row mid-save takes its state from here.
+    const saving = new Map();
     // #511: grouped by attention, each row with an inline Enabled switch; the row body still opens the full form.
     const paint = () => fill(list, JOB_GROUPS.flatMap(([key, label]) => {
       const rows = jobs.filter((j) => jobGroup(j) === key);
@@ -27,9 +29,9 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toas
       const pill = j.enabled ? lastRunPill(last) : ["", "Paused"];
       const next = j.enabled && j.next_run_at ? `Next ${shortWhen(j.next_run_at)}` : null;
       const toggle = h("input", { type: "checkbox", class: "switch", role: "switch", "aria-label": `${j.name} enabled`,
-        disabled: isGuest() });
-      toggle.checked = !!j.enabled;
-      toggle.addEventListener("change", () => setEnabled(j, toggle.checked, toggle));
+        disabled: isGuest() || saving.has(j.id) });
+      toggle.checked = saving.has(j.id) ? saving.get(j.id) : !!j.enabled;
+      toggle.addEventListener("change", () => setEnabled(j, toggle.checked, true));
       return h("div", { class: `job-row${j.enabled ? "" : " paused"}`, "data-job": j.id },
         h("a", { class: "job-main", href: `#/jobs/${j.id}` },
           h("h3", {}, j.name),
@@ -41,21 +43,24 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toas
     }
 
     // PUT replaces the whole job, so re-read it first: an edit made elsewhere since the list loaded is kept.
-    async function setEnabled(j, enabled, toggle = null) {
-      if (toggle) toggle.disabled = true;
+    async function setEnabled(j, enabled, undoable = false) {
+      if (saving.has(j.id)) return;
+      saving.set(j.id, enabled);
+      paint();
       try {
         const fresh = await api(`/jobs/${j.id}`);
         if (fresh.enabled !== enabled) Object.assign(j, await api(`/jobs/${j.id}`, { method: "PUT", body: jobBody(fresh, { enabled }) }));
         else Object.assign(j, fresh);
       } catch (err) {
-        if (toggle) { toggle.checked = !enabled; toggle.disabled = false; }
         toast(err.message, 5000);
         return;
+      } finally {
+        saving.delete(j.id);
+        paint();
       }
-      paint();
-      if (toggle) list.querySelector(`[data-job="${j.id}"] .switch`)?.focus();  // keep keyboard focus on the row that moved
+      if (undoable) list.querySelector(`[data-job="${j.id}"] .switch`)?.focus();  // keep keyboard focus on the row that moved
       const said = `${j.name} ${enabled ? "resumed" : "paused"}`;
-      if (toggle) toast(said, 5000, { label: "Undo", onClick: () => setEnabled(j, !enabled) });
+      if (undoable) toast(said, 5000, { label: "Undo", onClick: () => setEnabled(j, !enabled) });
       else toast(said);
     }
     paint();

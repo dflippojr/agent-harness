@@ -49,11 +49,13 @@ const jobs = [
 ];
 const calls = [];
 let failPut = false;
+let gate = null;  // while set, PUTs wait on it, so a test can hold saves in flight
 const api = async (path, opts = {}) => {
   calls.push({ path, method: opts.method || "GET", body: opts.body });
   if (path === "/jobs") return structuredClone(jobs);
   const j = jobs.find((x) => path === `/jobs/${x.id}`);
   if (j && opts.method === "PUT") {
+    if (gate) await gate;
     if (failPut) throw new Error("no such project: homelab");
     Object.assign(j, opts.body);
     return structuredClone(j);
@@ -103,7 +105,8 @@ calls.length = 0;
 let sw = toggleOf("j2");
 sw.checked = false;
 sw.dispatchEvent({ type: "change" });
-assert.equal(sw.disabled, true, "the switch waits for the save");
+assert.equal(toggleOf("j2").disabled, true, "the switch waits for the save");
+assert.equal(toggleOf("j2").checked, false);
 await flush(); await flush();
 assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /jobs/j2", "PUT /jobs/j2"]);
 assert.deepEqual(Object.keys(calls[1].body).sort(), [...JOB_FIELDS].sort());
@@ -131,11 +134,31 @@ sw = toggleOf("j4");
 sw.checked = true;
 sw.dispatchEvent({ type: "change" });
 await flush(); await flush();
-assert.equal(sw.checked, false);
-assert.equal(sw.disabled, false);
+assert.equal(toggleOf("j4").checked, false);
+assert.equal(toggleOf("j4").disabled, false);
 assert.equal(toasts.at(-1).text, "no such project: homelab");
 assert.deepEqual(sections(), ["Needs attention1", "Scheduled2", "Paused1"]);
 failPut = false;
+
+// Two saves in flight: when one finishes and the list repaints, the other row stays locked on its pending state.
+let open;
+gate = new Promise((r) => { open = r; });
+calls.length = 0;
+sw = toggleOf("j2"); sw.checked = false; sw.dispatchEvent({ type: "change" });
+await flush();
+sw = toggleOf("j3"); sw.checked = false; sw.dispatchEvent({ type: "change" });
+await flush();
+assert.equal(toggleOf("j2").disabled, true);
+assert.equal(toggleOf("j3").disabled, true);
+toggleOf("j2").dispatchEvent({ type: "change" });  // a second tap on a locked row starts nothing
+await flush();
+assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /jobs/j2", "PUT /jobs/j2", "GET /jobs/j3", "PUT /jobs/j3"]);
+gate = null;
+open();
+await flush(); await flush(); await flush();
+assert.equal(calls.filter((c) => c.method === "PUT").length, 2, "one PUT per row, no duplicates");
+assert.deepEqual(sections(), ["Needs attention1", "Paused3"]);
+for (const id of ["j2", "j3"]) { assert.equal(toggleOf(id).disabled, false); assert.equal(toggleOf(id).checked, false); }
 
 // Guests see the switches disabled.
 const guest = mount(true);
