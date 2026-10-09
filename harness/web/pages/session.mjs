@@ -14,7 +14,7 @@ const SESSION_EVENT_TYPES = [
   "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "state", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
   "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "waiting_memory", "memory_recovered", "app_context", "app_tool_call", "app_tool_result",
-  "quote_check", "ungrounded_quotes", "taint_added", "taint_cleared", "checkpoint", "rewound", "forked",
+  "quote_check", "ungrounded_quotes", "taint_added", "taint_cleared", "checkpoint", "rewound", "forked", "sandbox_setup",
 ];
 
 export function mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,

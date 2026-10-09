@@ -214,7 +214,11 @@ class Runner:
             sb_cfg = self.cfg.sandbox
             if project and project.sandbox:
                 sb_cfg = type(sb_cfg)(**{**sb_cfg.__dict__, **project.sandbox})
-            self._sandboxes[s["id"]] = Sandbox(s["id"], Path(s["workspace"]), sb_cfg)
+            sid = s["id"]
+            self._sandboxes[sid] = Sandbox(
+                sid, Path(s["workspace"]), sb_cfg, project=project.name if project else "",
+                setup=project.setup if project else "", known=self.db.has_tool_result(sid),
+                on_event=lambda type_, data: self.bus.emit(sid, type_, data))
         return self._sandboxes[s["id"]]
 
     async def _park_sandbox(self, sid: str) -> None:

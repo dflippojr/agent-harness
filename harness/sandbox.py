@@ -18,6 +18,9 @@ from .config import SandboxConfig
 from .fileops import CappedStream
 
 
+SETUP_TIMEOUT = 600
+
+
 class SandboxUnavailable(Exception):
     """Docker isn't reachable or the container can't be started."""
 
@@ -176,8 +179,13 @@ async def ensure_networks(cfg: SandboxConfig) -> None:
 
 
 class Sandbox:
-    def __init__(self, session_id: str, workspace: Path, cfg: SandboxConfig):
+    def __init__(self, session_id: str, workspace: Path, cfg: SandboxConfig, *, project: str = "", setup: str = "",
+                 known: bool = False, on_event=None):
         self.session_id = session_id
+        self.project = project      # names the per-project pip/npm cache volumes (#429)
+        self.setup = setup.strip()  # run (with network) each time a container is created
+        self.known = known          # the session has run tools before, so a "created" container is a recreation
+        self.on_event = on_event    # on_event(type, data): session events from here (setup result)
         self.workspace = workspace.resolve()
         self.cfg = cfg
         self.name = f"harness-{session_id}"
@@ -211,12 +219,50 @@ class Sandbox:
             "--security-opt", "no-new-privileges",
             "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD", "--cap-drop", "AUDIT_WRITE",
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
+            *self._cache_mounts(),
             "-w", "/workspace",
             self.cfg.image, "sleep", "infinity",
         ], timeout=120)
         if code != 0:
             raise SandboxUnavailable(f"could not start sandbox container: {(err or out).strip()[:500]}")
         return "created"
+
+    def _cache_mounts(self) -> list[str]:
+        """Named per-project volumes for the pip and npm caches, so a recreated container reinstalls from cache."""
+        if not self.project:
+            return []
+        out: list[str] = []
+        for name, target in (("pip", "/root/.cache/pip"), ("npm", "/root/.npm")):
+            out += ["--mount", f"type=volume,source=harness-cache-{name}-{self.project},target={target}"]
+        return out
+
+    async def _network(self, attach: bool) -> None:
+        if attach:
+            code, out, err = await run_cmd(
+                ["docker", "network", "connect", self.cfg.egress_network, self.name], timeout=30)
+            if code != 0 and "already exists" not in err:
+                raise SandboxUnavailable(f"could not enable network: {err.strip()[:300]}")
+        else:
+            await asyncio.shield(run_cmd(
+                ["docker", "network", "disconnect", "-f", self.cfg.egress_network, self.name], timeout=30))
+
+    async def _run_setup(self) -> str:
+        """Run the project's setup command in a fresh container. Returns 'ok' or a failure description, and reports
+        it as a `sandbox_setup` session event; a failing command doesn't raise."""
+        try:
+            await self._network(True)
+            try:
+                code, out, err = await run_cmd(
+                    ["docker", "exec", "-w", "/workspace", self.name,
+                     "timeout", "-k", "5", str(SETUP_TIMEOUT), "sh", "-c", self.setup], timeout=SETUP_TIMEOUT + 30)
+            finally:
+                await self._network(False)
+            detail = "" if code == 0 else f"exit {code}: {(err or out).strip()[-500:]}"
+        except SandboxUnavailable as e:
+            code, detail = 1, str(e)
+        if self.on_event:
+            self.on_event("sandbox_setup", {"command": self.setup, "ok": code == 0, "detail": detail})
+        return "ok" if code == 0 else f"failed ({detail})"
 
     def _cancel_idle_timer(self) -> None:
         if self._idle_timer is not None:
@@ -258,15 +304,20 @@ class Sandbox:
         notice = ""
         async with self._lock:
             started = await self.ensure_running()
-            if self._idle_stopped and started != "running":
+            setup_result = await self._run_setup() if started == "created" and self.setup else None
+            if started == "created" and self.known:
+                notice = ("[sandbox environment recreated: /workspace and your checkpoints are intact, but packages "
+                          "installed outside /workspace and processes you started earlier (servers, watchers) are gone. "
+                          + (f"The project setup command was re-run: {setup_result}."
+                             if setup_result else "No project setup command is configured, so reinstall what you need.")
+                          + "]\n")
+            elif self._idle_stopped and started != "running":
                 notice = ("[sandbox restarted after an idle stop: processes you started earlier (servers, watchers) "
                           "are no longer running; /workspace is intact.]\n")
             self._idle_stopped = False
+            self.known = True
             if network:
-                code, out, err = await run_cmd(
-                    ["docker", "network", "connect", self.cfg.egress_network, self.name], timeout=30)
-                if code != 0 and "already exists" not in err:
-                    raise SandboxUnavailable(f"could not enable network: {err.strip()[:300]}")
+                await self._network(True)
             try:
                 # `timeout` inside the container stops the command; the host timeout is only a backstop.
                 code, out, err = await run_cmd(
@@ -276,8 +327,7 @@ class Sandbox:
                 )
             finally:
                 if network:
-                    await asyncio.shield(run_cmd(
-                        ["docker", "network", "disconnect", "-f", self.cfg.egress_network, self.name], timeout=30))
+                    await self._network(False)
         output = notice + out + (("\n" + err) if err else "")
         if code == 124:
             output += f"\n[command timed out after {timeout}s]"

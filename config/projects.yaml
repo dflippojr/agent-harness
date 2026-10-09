@@ -10,6 +10,12 @@
 # target:      tower (default) or a runner from harness.yaml `runners`, e.g. macbook. For a runner, repo is a path on
 #              that machine and must be under one of the runner's repo_roots; homelab tools aren't available.
 #
+# setup:       optional shell command run in the sandbox (with network) each time its container is created, e.g.
+#              `pip install -e .[dev]`; a plain start of a stopped container doesn't re-run it. The pip and npm
+#              caches live in per-project volumes, so a recreated container reinstalls from cache. The result is a
+#              sandbox_setup session event (a failure doesn't stop the session), and the model's next tool result
+#              says the environment was recreated.
+#
 # tool_output: optional overlay on the global tool_output: block in harness.yaml.
 # verify:      list of {name, command, timeout, parser?} checks for the verify tool. parser is pytest or
 #              generic; omitted means pytest iff the command matches \bpytest\b. Commands are owner-trusted
