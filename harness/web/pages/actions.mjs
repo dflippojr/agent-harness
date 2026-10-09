@@ -4,8 +4,10 @@
 import { ago, pluralize, fmtBytes, gpuText } from "../lib/format.mjs";
 import { TARGET_LABEL } from "../lib/targets.mjs";
 import { lastUpdateText, compatibilityText, lastSeenText } from "../lib/settings-text.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
-export function mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar }) {
+export function mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar,
+  confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet, formSheet = sheets.formSheet }) {
   // Issue #63: the owner switches member GitHub sign-in on/off and can erase a member's credential. The owner
   // never sees repository URLs, GitHub usernames, or codes, and cannot connect, test, or use the credential.
   function githubOwnerCard(view, rerender) {
@@ -16,8 +18,10 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
     const pf = view.preflight;
     const toggle = async () => {
       const next = !view.enabled;
-      if (!confirm(next ? "Let household members connect their own GitHub accounts?"
-        : "Turn off member GitHub sign-in? Connection attempts and running GitHub operations stop now; stored credentials are not erased.")) return;
+      if (!(await confirmSheet(next
+        ? { title: "Turn on member GitHub sign-in?", message: "Household members can connect their own GitHub accounts.", confirmLabel: "Turn on" }
+        : { title: "Turn off member GitHub sign-in?", message: "Connection attempts and running GitHub operations stop now; stored credentials are not erased.",
+          confirmLabel: "Turn off", destructive: true }))) return;
       try { await api("/github-member-auth", { method: "PUT", surface: "admin", body: { enabled: next } }); await rerender(); }
       catch (e) { toast(e.message, 6000); }
     };
@@ -62,15 +66,16 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
         rows.length ? rows.map((a) => {
           const gh = githubState[a.user_id];
           const resetGithub = async () => {
-            if (!confirm(`Erase ${a.display_name}'s stored GitHub credential? This only erases it; they can connect again themselves.`)) return;
+            if (!(await confirmSheet({ title: `Erase ${a.display_name}'s GitHub credential?`,
+              message: "This only erases it; they can connect again themselves.", confirmLabel: "Erase", destructive: true }))) return;
             try {
               await api(`/accounts/${a.user_id}/github-connection/reset`, { method: "POST", surface: "admin", body: { confirm: true } });
               toast("GitHub credential erased");
               await render();
             } catch (err) { toast(err.message, 6000); }
           };
-          const patch = async (body, confirmText) => {
-            if (confirmText && !confirm(confirmText)) return;
+          const patch = async (body, ask) => {
+            if (ask && !(await confirmSheet(ask))) return;
             try {
               await api(`/accounts/${a.user_id}`, { method: "PATCH", surface: "admin", body });
               await render();
@@ -85,31 +90,34 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
             gh && github?.configured ? h("p", { class: "muted small" },
               `GitHub: ${gh.status.replace("_", " ")}${gh.last_used_at ? ` · last used ${ago(gh.last_used_at)}` : ""}`) : null,
             h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
-              h("button", { class: "btn small", type: "button", onclick: () => {
-                const next = window.prompt("Display name", a.display_name);
-                if (next) void patch({ display_name: next });
+              h("button", { class: "btn small", type: "button", onclick: async () => {
+                const next = (await promptSheet({ title: `Rename ${a.display_name}`, label: "Display name", value: a.display_name,
+                  confirmLabel: "Rename", validate: sheets.required("a display name") }))?.trim();
+                if (next && next !== a.display_name) void patch({ display_name: next });
               } }, "Rename"),
-              h("button", { class: "btn small", type: "button", onclick: () => {
-                const next = window.prompt("New Tailscale login", a.login);
-                if (next && next !== a.login && confirm(`Rebind this account to ${next}? The old login stops working immediately.`)) {
-                  void patch({ login: next });
-                }
+              h("button", { class: "btn small", type: "button", onclick: async () => {
+                const next = (await promptSheet({ title: `Rebind ${a.display_name}'s login`, label: "New Tailscale login", value: a.login,
+                  message: "The old login stops working immediately.", confirmLabel: "Rebind", validate: sheets.required("a Tailscale login") }))?.trim();
+                if (next && next !== a.login) void patch({ login: next });
               } }, "Rebind login"),
-              h("button", { class: "btn small", type: "button", onclick: () => {
-                const next = window.prompt("Disk quota in GiB", String(Math.round(a.disk_quota_bytes / 2 ** 30)));
+              h("button", { class: "btn small", type: "button", onclick: async () => {
+                const next = await promptSheet({ title: `Disk quota for ${a.display_name}`, label: "Disk quota in GiB",
+                  value: String(Math.round(a.disk_quota_bytes / 2 ** 30)), inputmode: "decimal",
+                  validate: (v) => (Number(v) > 0 ? "" : "Enter a size in GiB, more than 0.") });
                 if (next) void patch({ disk_quota_bytes: Math.round(Number(next) * 2 ** 30) });
               } }, "Quota"),
-              h("button", { class: "btn small", type: "button", onclick: () => {
-                const running = window.prompt("Max running sessions", String(a.max_running));
-                const queued = window.prompt("Max queued sessions", String(a.max_queued));
-                if (running || queued) void patch({
-                  max_running: running ? Number(running) : a.max_running,
-                  max_queued: queued ? Number(queued) : a.max_queued,
-                });
+              h("button", { class: "btn small", type: "button", onclick: async () => {
+                const limits = await formSheet({ title: `Concurrency for ${a.display_name}`, fields: [
+                  { name: "running", label: "Max running sessions", value: String(a.max_running), inputmode: "numeric", validate: sheets.wholeNumber(0) },
+                  { name: "queued", label: "Max queued sessions", value: String(a.max_queued), inputmode: "numeric", validate: sheets.wholeNumber(0) },
+                ] });
+                if (limits) void patch({ max_running: Number(limits.running), max_queued: Number(limits.queued) });
               } }, "Concurrency"),
               h("button", { class: "btn small", type: "button", onclick: () => patch(
                 { enabled: !a.enabled },
-                a.enabled ? `Disable ${a.display_name}? Running work will be cancelled.` : `Re-enable ${a.display_name}?`,
+                a.enabled
+                  ? { title: `Disable ${a.display_name}?`, message: "Running work will be cancelled.", confirmLabel: "Disable", destructive: true }
+                  : { title: `Re-enable ${a.display_name}?`, confirmLabel: "Re-enable" },
               ) }, a.enabled ? "Disable" : "Re-enable"),
               gh && github?.configured && gh.status !== "disconnected"
                 ? h("button", { class: "btn small", type: "button", onclick: resetGithub }, "Erase GitHub credential") : null,
@@ -148,8 +156,8 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
   function googleMemberButtons(a, google, rerender, wrap) {
     const g = a.google;
     if (!g || !google?.enabled) return [];
-    const call = async (path, method, body, confirmText, done) => {
-      if (confirmText && !confirm(confirmText)) return;
+    const call = async (path, method, body, ask, done) => {
+      if (ask && !(await confirmSheet(ask))) return;
       try {
         const out = await api(`/accounts/${a.user_id}/google${path}`, { method, surface: "admin", body });
         if (done) done(out);
@@ -165,7 +173,8 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
     const buttons = [];
     if (!g.linked && a.enabled) {
       buttons.push(h("button", { class: "btn small", type: "button", onclick: () => call("/invitation", "POST", undefined,
-        g.invitation_expires_at ? "Replace the pending link code? The old code stops working." : null, showCode) },
+        g.invitation_expires_at ? { title: "Replace the pending link code?", message: "The old code stops working.", confirmLabel: "Replace" } : null,
+        showCode) },
       "Google link code"));
     }
     if (g.invitation_expires_at) {
@@ -173,11 +182,13 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
     }
     if (g.active_web_sessions) {
       buttons.push(h("button", { class: "btn small", type: "button", onclick: () => call("/revoke-sessions", "POST", undefined,
-        `Sign ${a.display_name} out of every Google Web session?`) }, "Revoke Web sessions"));
+        { title: `Sign ${a.display_name} out of every Google Web session?`, confirmLabel: "Sign out", destructive: true }) },
+      "Revoke Web sessions"));
     }
     if (g.linked) {
       buttons.push(h("button", { class: "btn small", type: "button", onclick: () => call("", "DELETE", { confirm: true },
-        `Unlink Google from ${a.display_name}? Their data and Tailscale login stay; their Google Web sessions end.`) }, "Unlink Google"));
+        { title: `Unlink Google from ${a.display_name}?`, message: "Their data and Tailscale login stay; their Google Web sessions end.",
+          confirmLabel: "Unlink", destructive: true }) }, "Unlink Google"));
     }
     return buttons;
   }
@@ -234,7 +245,8 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
           const p = await api("/maintenance/image-archive/retention/preview", { method: "POST" });
           if (!p.count) { toast("No archived images are old enough to remove"); return; }
           const size = Math.round(p.bytes / 2 ** 20);
-          if (!confirm(`Permanently remove ${p.count} archived image${p.count === 1 ? "" : "s"} (${size} MB)? Live gallery images are not deleted.`)) return;
+          if (!(await confirmSheet({ title: `Permanently remove ${p.count} archived image${p.count === 1 ? "" : "s"} (${size} MB)?`,
+            message: "Live gallery images are not deleted.", confirmLabel: "Remove", destructive: true }))) return;
           const r = await api("/maintenance/image-archive/retention/apply", {
             method: "POST", body: JSON.stringify({ confirmation: p.confirmation }),
           });
@@ -307,7 +319,8 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
       } catch (e) {
         const lowMemory = /low memory/i.test(e.message);
         if (!lowMemory) toast(e.message);
-        else if (confirm(`${e.message.replace(/\. Send force.*$/, "")}.\n\nLoad the model anyway?`)) {
+        else if (await confirmSheet({ title: "Load the model anyway?", message: `${e.message.replace(/\. Send force.*$/, "")}.`,
+          confirmLabel: "Load anyway", destructive: true })) {
           try { await post("load", { ...body, force: true }); toast(LOADING); } catch (e2) { toast(e2.message); }
         }
       } finally { loadBtn.disabled = false; }
@@ -451,7 +464,9 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
       render();
     };
     const add = async (candidate, slug) => {
-      if (!confirm(`Add this owner-only folder?\n\n${candidate.path}\nMarkers: ${candidate.markers.join(", ")}\n\nMarker presence does not imply safety or trust. Adding never runs Claude or accepts trust.`)) return;
+      if (!(await confirmSheet({ title: "Add this owner-only folder?",
+        message: `${candidate.path}\nMarkers: ${candidate.markers.join(", ")}\n\nMarker presence does not imply safety or trust. Adding never runs Claude or accepts trust.`,
+        confirmLabel: "Add folder" }))) return;
       const result = await request(`/${encodeURIComponent(scan.id)}/candidates/${encodeURIComponent(candidate.id)}/promote`,
         "POST", { slug, confirmed_path: candidate.path, confirmed_markers: candidate.markers });
       if (result) { candidate.promoted = true; toast("Folder added. Trust in Claude is a separate action."); reload(); }
@@ -518,7 +533,9 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
       void load();
     };
     const trust = async (project) => {
-      if (!confirm(`Open Claude on the tower to trust “${project}”?\n\nReview the folder shown by Claude, then accept its workspace trust prompt. The harness cannot accept it for you.`)) return;
+      if (!(await confirmSheet({ title: `Open Claude on the tower to trust “${project}”?`,
+        message: "Review the folder shown by Claude, then accept its workspace trust prompt. The harness cannot accept it for you.",
+        confirmLabel: "Open Claude" }))) return;
       busy = project;
       void load();
       try {
@@ -544,7 +561,8 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
       p.running && p.pairing_url ? h("a", { class: "btn", href: p.pairing_url, target: "_blank", rel: "noopener" }, "Open in Claude") : null,
       rcButton(p),
       p.managed ? h("button", { class: "btn", disabled: !!busy || p.running || p.trust_prompt_open, onclick: async () => {
-        if (!confirm(`Remove managed folder “${p.project}”?\n\n${p.path}\n\nThis removes only the harness entry. Files and Claude trust remain.`)) return;
+        if (!(await confirmSheet({ title: `Remove managed folder “${p.project}”?`,
+          message: `${p.path}\n\nThis removes only the harness entry. Files and Claude trust remain.`, confirmLabel: "Remove", destructive: true }))) return;
         try { await api(`/remote-control/folders/${encodeURIComponent(p.project)}`, { method: "DELETE" }); toast("Folder removed"); void load(); }
         catch (e) { toast(e.message); }
       } }, "Remove folder") : null);
@@ -660,7 +678,9 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
         h("button", {
           class: "btn",
           onclick: async (ev) => {
-            if (!confirm("Remove stopped sandbox containers, expired session workspaces, and leftover workspace folders?")) return;
+            if (!(await confirmSheet({ title: "Clean up now?",
+              message: "Removes stopped sandbox containers, expired session workspaces, and leftover workspace folders.",
+              confirmLabel: "Clean up", destructive: true }))) return;
             ev.target.disabled = true;
             try {
               const r = await api("/maintenance/cleanup", { method: "POST" });

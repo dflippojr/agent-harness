@@ -369,6 +369,34 @@ body.has-tabs .approval-sheet { padding-bottom: 12px; }
 .approval-approve { background: var(--ok); border: 1.5px solid var(--ok); color: var(--bg); }
 body:has(.approval-sheet) main { padding-bottom: calc(360px + var(--tabbar-offset)); }
 
+/* In-app confirm and prompt sheets (#513, lib/sheet.mjs): a bottom sheet on phones, a centred card on wide screens. */
+dialog.sheet {
+  width: 100%; max-width: 560px; max-height: 85vh; margin: auto auto 0; padding: 0; overflow: auto; box-sizing: border-box;
+  border: 0; border-top: 1px solid var(--line); border-radius: 20px 20px 0 0;
+  background: var(--panel); color: var(--text);
+  box-shadow: 0 -8px 32px color-mix(in srgb, var(--text) 18%, transparent);
+}
+dialog.sheet::backdrop { background: color-mix(in srgb, var(--text) 35%, transparent); }
+.sheet-body { margin: 0; padding: 8px 16px calc(16px + env(safe-area-inset-bottom, 0px)); }
+.sheet-handle { width: 36px; height: 5px; margin: 0 auto 10px; border-radius: 999px; background: var(--line); }
+.sheet-title { margin: 4px 0 6px; font-size: 1.0625rem; font-weight: 650; }
+.sheet-message { margin: 0 0 8px; color: var(--muted); font-size: 0.9375rem; white-space: pre-line; overflow-wrap: anywhere; }
+.sheet-field { margin-top: 10px; }
+.sheet-field label { display: block; margin-bottom: 4px; font-size: 0.8125rem; font-weight: 600; color: var(--muted); }
+.sheet-field input { width: 100%; min-height: 44px; box-sizing: border-box; font-size: 1rem; }
+.sheet-field input[aria-invalid="true"] { border-color: var(--bad); }
+.sheet-error { margin: 4px 0 0; font-size: 0.8125rem; color: var(--bad); }
+.sheet-error:empty { display: none; }
+.sheet-actions { display: flex; gap: 10px; margin-top: 16px; }
+.sheet-actions .btn { flex: 1; min-height: 50px; border-radius: 14px; font-weight: 650; font-size: 1rem; }
+.sheet-cancel { background: none; border: 1.5px solid var(--line); color: var(--text); }
+.sheet-danger { background: var(--bad); border: 1.5px solid var(--bad); color: var(--bg); }
+@media (min-width: 700px) {
+  dialog.sheet { margin: auto; border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 16px 48px color-mix(in srgb, var(--text) 22%, transparent); }
+  .sheet-handle { display: none; }
+  .sheet-body { padding: 20px; }
+}
+
 .note { font-size: 0.8125rem; color: var(--muted); text-align: center; margin: 12px 0; }
 .note.bad { color: var(--bad); }
 .status-line { text-align: center; font-size: 0.8125rem; margin: 14px 0; }

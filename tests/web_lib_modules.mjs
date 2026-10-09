@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 
 // ---- stub DOM (installed only after the imports below, to prove the modules need none at import time) ----
 const imports = {};
-for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "tabs", "update", "boot", "warm-model", "secret"]) {
+for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "tabs", "update", "boot", "warm-model", "secret", "sheet"]) {
   imports[name] = await import(`../harness/web/lib/${name}.mjs`);
 }
 const { h, fill, append, kids } = imports.dom;

@@ -4,11 +4,12 @@
 import { ago, pluralize } from "../lib/format.mjs";
 import { md } from "../lib/markdown.mjs";
 import { showSecretOnce as showSecret } from "../lib/secret.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
 export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, h, fill, append, api, getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route,
-  daemonSettingsCard, browser }) {
+  daemonSettingsCard, browser, confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
-const { document, window, localStorage, location, navigator, history, getComputedStyle, requestAnimationFrame, confirm, prompt, open,
+const { document, window, localStorage, location, navigator, history, getComputedStyle, requestAnimationFrame, open,
   setTimeout, clearTimeout, fetch } = browser;
 const escalateSuffix = (row) => (row.escalate_reason ? ` (${row.escalate_reason})` : "");
 const originsSuffix = (k) => (k.origins?.length ? ` · ${k.origins.join(", ")}` : "");
@@ -194,9 +195,10 @@ function googleSignInCard() {
     } }, "Log out");
     const unlink = h("button", { class: "btn small danger", type: "button", onclick: async () => {
       const warning = view.unlink_removes_this_device
-        ? " You signed in here with Google, so this device will no longer open your account. You can still use a device signed in to your own Tailscale login, or ask the owner for a new link code."
+        ? "You signed in here with Google, so this device will no longer open your account. You can still use a device signed in to your own Tailscale login, or ask the owner for a new link code. "
         : "";
-      if (!confirm(`Unlink Google from your household account?${warning} Your data stays.`)) return;
+      if (!(await confirmSheet({ title: "Unlink Google from your household account?", message: `${warning}Your data stays.`,
+        confirmLabel: "Unlink Google", destructive: true }))) return;
       try { await api("/me/google", { method: "DELETE", surface: "app", body: { confirm: true } }); }
       catch (e) { toast(e.message, 6000); return; }
       toast("Google unlinked");
@@ -262,7 +264,8 @@ function apiKeysCard() {
         h("button", { class: "btn primary small", type: "button", onclick: save }, k.configured ? "Replace" : "Save"),
         k.configured ? h("button", { class: "btn small", type: "button", onclick: test }, "Test") : null,
         k.configured ? h("button", { class: "btn bad small", type: "button", onclick: async () => {
-          if (confirm(`Delete your ${k.provider} key? Your running ${k.backend} sessions stop.`)) await call(`/me/api-keys/${k.backend}`, "DELETE")();
+          if (await confirmSheet({ title: `Delete your ${k.provider} key?`, message: `Your running ${k.backend} sessions stop.`,
+            confirmLabel: "Delete key", destructive: true })) await call(`/me/api-keys/${k.backend}`, "DELETE")();
         } }, "Delete") : null),
       result);
   };
@@ -289,8 +292,8 @@ function githubConnectionCard({ onConnected } = {}) {
     try { show(await api("/me/github-connection")); }
     catch (e) { fill(card, h("h3", {}, "GitHub"), h("p", { class: "note bad" }, e.message)); }
   };
-  const act = (path, method, confirmText) => async () => {
-    if (confirmText && !confirm(confirmText)) return;
+  const act = (path, method, ask) => async () => {
+    if (ask && !(await confirmSheet(ask))) return;
     card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
     try { show(await api(path, { method })); }
     catch (e) { toast(e.message, 6000); await render(); }
@@ -333,7 +336,8 @@ function githubConnectionCard({ onConnected } = {}) {
         h("div", { class: "row", style: "gap:8px;flex-wrap:wrap" },
           connect("Reconnect"),
           h("button", { class: "btn bad small", type: "button", onclick: act("/me/github-connection", "DELETE",
-            "Disconnect GitHub? The stored credential is erased. Your projects, workspaces, and history stay.") },
+            { title: "Disconnect GitHub?", message: "The stored credential is erased. Your projects, workspaces, and history stay.",
+              confirmLabel: "Disconnect", destructive: true }) },
             "Disconnect")));
       const done = onConnected;
       onConnected = null;
@@ -741,8 +745,8 @@ async function skillProposalView(pid) {
   const examples = (p.examples || []).map((ex) => h("div", { class: "card" },
     h("p", {}, ex.prompt), h("p", { class: "muted small" }, ex.expected || ex.expected_behavior || "")));
   const refs = (p.references || []).map((r) => h("details", {}, h("summary", {}, r.path), h("pre", {}, r.content || "")));
-  const act = async (path, body, label) => {
-    if (label && !confirm(label)) return;
+  const act = async (path, body, ask) => {
+    if (ask && !(await confirmSheet(ask))) return;
     try {
       await api(path, { method: "POST", body: body || {} });
       toast("Done");
@@ -769,11 +773,12 @@ async function skillProposalView(pid) {
       review.error ? h("p", { class: "bad" }, review.error) : null,
       h("div", { class: "row", style: "margin-top:18px;flex-wrap:wrap;gap:8px" },
         h("button", { class: "btn primary", onclick: () => act(`/skills/proposals/${p.id}/install`, { content_hash: p.content_hash },
-          `Install hash ${p.content_hash.slice(0, 12)}? It stays disabled until you enable it.`) }, "Install"),
-        h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/reject`, { reason: "rejected from Skills page" }, "Reject this hash?") }, "Reject"),
+          { title: `Install hash ${p.content_hash.slice(0, 12)}?`, message: "It stays disabled until you enable it.", confirmLabel: "Install" }) }, "Install"),
+        h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/reject`, { reason: "rejected from Skills page" },
+          { title: "Reject this hash?", confirmLabel: "Reject", destructive: true }) }, "Reject"),
         h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/review`) }, "Run hosted review"),
         h("button", { class: "btn bad", onclick: async () => {
-          if (!confirm("Delete this draft?")) return;
+          if (!(await confirmSheet({ title: "Delete this draft?", confirmLabel: "Delete draft", destructive: true }))) return;
           try { await api(`/skills/proposals/${p.id}`, { method: "DELETE" }); go("#/profile/skills", true); }
           catch (e) { toast(e.message); }
         } }, "Delete draft"))));
@@ -792,7 +797,8 @@ function installedSkillCard(sk) {
         try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); void route(); } catch (e) { toast(e.message); }
       } }, sk.enabled ? "Disable" : "Enable"),
       h("button", { class: "btn small", onclick: async () => {
-        const raw = window.prompt("Project allowlist (comma-separated names)", (sk.projects || []).join(", "));
+        const raw = await promptSheet({ title: `Projects for ${sk.slug}`, label: "Project allowlist (comma-separated names)",
+          value: (sk.projects || []).join(", "), message: "Leave it empty for no allowlist." });
         if (raw === null) return;
         try {
           await api(`/skills/${sk.slug}/projects`, { method: "PUT", body: { projects: raw.split(",").map((s) => s.trim()).filter(Boolean) } });
@@ -800,11 +806,12 @@ function installedSkillCard(sk) {
         } catch (e) { toast(e.message); }
       } }, "Projects"),
       h("button", { class: "btn small", onclick: async () => {
-        if (!confirm("Roll back to the previous version?")) return;
+        if (!(await confirmSheet({ title: `Roll ${sk.slug} back to the previous version?`, confirmLabel: "Roll back" }))) return;
         try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); void route(); } catch (e) { toast(e.message); }
       } }, "Rollback"),
       h("button", { class: "btn small bad", onclick: async () => {
-        if (!confirm(`Uninstall ${sk.slug}? Later sessions will not receive it.`)) return;
+        if (!(await confirmSheet({ title: `Uninstall ${sk.slug}?`, message: "Later sessions will not receive it.", confirmLabel: "Uninstall",
+          destructive: true }))) return;
         try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); void route(); } catch (e) { toast(e.message); }
       } }, "Uninstall")));
 }
@@ -838,7 +845,8 @@ function memoryCard() {
       const editor = h("textarea", { class: "memory-editor", rows: 24, readOnly: isGuest() || !mem.writes }, mem.profile || "");
       const save = h("button", { class: "btn primary", disabled: !mem.writes || isGuest() }, "Save");
       save.addEventListener("click", async () => {
-        if (!confirm("Save this profile to the memory library? It is given to every new session, then committed and pushed.")) return;
+        if (!(await confirmSheet({ title: "Save this profile to the memory library?",
+          message: "It is given to every new session, then committed and pushed.", confirmLabel: "Save profile" }))) return;
         save.disabled = true;
         try {
           const saved = await api("/memory/profile", { method: "PUT", body: { content: editor.value, summary: "Update agent profile from Settings" } });
@@ -906,7 +914,9 @@ function endpointCard(me) {
           h("button", {
             class: "btn small bad",
             onclick: async () => {
-              if (!confirm(`Revoke the key “${k.name}”? Tools using it stop working. Any sessions it started, and their files, are erased in ${ERASE_GRACE_DAYS} days unless you undo it under Apps.`)) return;
+              if (!(await confirmSheet({ title: `Revoke the key “${k.name}”?`,
+                message: `Tools using it stop working. Any sessions it started, and their files, are erased in ${ERASE_GRACE_DAYS} days unless you undo it under Apps.`,
+                confirmLabel: "Revoke key", destructive: true }))) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke")))) : h("p", { class: "muted small" }, "No keys yet."),
@@ -1020,7 +1030,9 @@ function appsCard(me) {
           h("button", {
             class: "btn small bad",
             onclick: async () => {
-              if (!confirm(`Revoke the app “${k.name}”? It can no longer start or read sessions, and its sessions and files are erased in ${ERASE_GRACE_DAYS} days unless you undo the revoke here.`)) return;
+              if (!(await confirmSheet({ title: `Revoke the app “${k.name}”?`,
+                message: `It can no longer start or read sessions, and its sessions and files are erased in ${ERASE_GRACE_DAYS} days unless you undo the revoke here.`,
+                confirmLabel: "Revoke app", destructive: true }))) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             },
           }, "Revoke"),
@@ -1029,7 +1041,8 @@ function appsCard(me) {
           h("ul", { class: "small" }, erasing.map((k) => h("li", {},
             h("strong", {}, k.name), ` · its sessions and files are erased on ${eraseDate(k)} `,
             h("button", { class: "btn small", type: "button", onclick: async () => {
-              if (!confirm(`Undo revoking “${k.name}”? Its sessions and files are kept, and it gets a new token.`)) return;
+              if (!(await confirmSheet({ title: `Undo revoking “${k.name}”?`, message: "Its sessions and files are kept, and it gets a new token.",
+                confirmLabel: "Undo revoke" }))) return;
               try {
                 const r = await api(`/apps/${k.id}/restore`, { method: "POST" });
                 showSecretOnce(form, load, `New token for ${r.name}. Copy it now; it isn't shown again. The old token stays revoked.`, r.key, "Copy");
@@ -1039,14 +1052,16 @@ function appsCard(me) {
           h("ul", { class: "small" }, webConnections.map((k) => h("li", {},
             h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${usedSuffix(k)} `,
             h("button", { class: "btn small bad", onclick: async () => {
-              if (!confirm(`Revoke “${k.name}”? That Agent Harness Web connection will stop working.`)) return;
+              if (!(await confirmSheet({ title: `Revoke “${k.name}”?`, message: "That Agent Harness Web connection will stop working.",
+                confirmLabel: "Revoke", destructive: true }))) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             } }, "Revoke"))))] : null,
         cliConnections.length ? [h("p", { class: "section-label" }, "CLI connections"),
           h("ul", { class: "small" }, cliConnections.map((k) => h("li", {},
             h("strong", {}, k.name), ` ${k.prefix}… · non-browser${usedSuffix(k)} `,
             h("button", { class: "btn small bad", onclick: async () => {
-              if (!confirm(`Revoke “${k.name}”? That Agent Harness CLI connection will stop working.`)) return;
+              if (!(await confirmSheet({ title: `Revoke “${k.name}”?`, message: "That Agent Harness CLI connection will stop working.",
+                confirmLabel: "Revoke", destructive: true }))) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             } }, "Revoke"))))] : null,
         pending.length ? h("ul", { class: "small" }, pending.map((p) => h("li", {},

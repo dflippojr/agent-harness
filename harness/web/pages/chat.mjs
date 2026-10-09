@@ -4,11 +4,12 @@
 import { SNIPPET_LANGUAGES, snippetLanguage } from "../lib/snippets.mjs";
 import { md } from "../lib/markdown.mjs";
 import { staleNote } from "../lib/widgets.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
 export function mountChat({ $app, h, fill, append, api, setHeader, toast, go, validId, canChat, onLeave, openStream, ownerSurface, badge,
-  TERMINAL, agentHarnessWeb, browser }) {
+  TERMINAL, agentHarnessWeb, browser, confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
-const { window, document, localStorage, confirm, prompt } = browser;
+const { window, document, localStorage } = browser;
 
 // ---------- chat snippets (#85) ----------
 const SNIPPET_STATUS = {
@@ -335,13 +336,14 @@ async function viewChat(id) {
     h("span", { class: "muted" }, `${session.backend || "local"} · ${session.model}${effortSuffix}`),
     editorToggle,
     h("button", { class: "btn small", type: "button", onclick: async () => {
-      const title = prompt("Rename chat", session.title);
+      const title = await promptSheet({ title: "Rename chat", label: "Title", value: session.title, confirmLabel: "Rename",
+        validate: sheets.required("a title") });
       if (!title?.trim()) return;
       try { session = await api(`/chats/${id}`, { method: "PATCH", body: { title } }); setHeader("chat", session.title); }
       catch (e) { toast(e.message); }
     } }, "Rename"),
     h("button", { class: "btn small bad", type: "button", onclick: async () => {
-      if (!confirm("Delete this chat?")) return;
+      if (!(await confirmSheet({ title: "Delete this chat?", confirmLabel: "Delete chat", destructive: true }))) return;
       try { await api(`/chats/${id}`, { method: "DELETE" }); go("#/chat", true); } catch (e) { toast(e.message); }
     } }, "Delete")), editor.el);
 

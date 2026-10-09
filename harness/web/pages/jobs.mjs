@@ -3,8 +3,10 @@
 import { JOB_NOTIFY, CRON_PRESETS, JOB_GROUPS, fmtWhen, whenText, cronLabel, newJobDefaults, jobGroup, shortWhen, lastRunPill,
   lastRunText, jobBody } from "../lib/jobs.mjs";
 import { ago } from "../lib/format.mjs";
+import * as sheets from "../lib/sheet.mjs";
 
-export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toast, go, route, isGuest, confirmGpuQueue, badge, jobStatusBadge, location, confirm }) {
+export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toast, go, route, isGuest, confirmGpuQueue, badge, jobStatusBadge, location,
+  confirmSheet = sheets.confirmSheet }) {
   async function viewJobs() {
     setHeader("jobs", "Jobs");
     showFab("#/jobs/new", "+ New job");
@@ -155,7 +157,8 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toas
       !isGuest() && !isNew ? h("button", {
         class: "btn bad", type: "button",
         onclick: async () => {
-          if (!confirm(`Delete the job “${j.name}”? Its past sessions stay.`)) return;
+          if (!(await confirmSheet({ title: `Delete the job “${j.name}”?`, message: "Its past sessions stay.", confirmLabel: "Delete job",
+            destructive: true }))) return;
           try { await api(`/jobs/${id}`, { method: "DELETE" }); go("#/jobs", true); } catch (err) { toast(err.message); }
         },
       }, "Delete") : null,

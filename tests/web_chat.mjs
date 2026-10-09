@@ -19,7 +19,6 @@ const browser = {
   window: { innerHeight: 800, visualViewport: null, scrollTo() {} },
   document: { body: { scrollHeight: 1, append: (...n) => bodyKids.push(...n), classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c) } } },
   localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)) },
-  confirm: () => true, prompt: () => "",
 };
 const api = async (path) => {
   if (path === "/chats/options") return { default_backend: "local", backends: [{ name: "local", models: ["m1"], model: "m1", efforts: [] }] };
