@@ -36,7 +36,7 @@ add a Web session to a member who already authenticates with their own Tailscale
 
 | Tailscale login on the request | No Google session | Valid Google session for member M |
 | --- | --- | --- |
-| absent (localhost) | owner | **refused** (a cookie without Serve's login never becomes the localhost owner) |
+| absent (localhost) | owner with the local owner token, else refused | **refused** (a cookie without Serve's login never becomes the localhost owner) |
 | in `allowed_logins` (owner) | owner | owner (session ignored) |
 | mapped to member A | member A | member A if A = M; otherwise member A (session ignored, never switches) |
 | mapped to a disabled member | refused | refused |

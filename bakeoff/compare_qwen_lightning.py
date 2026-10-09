@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -116,6 +117,19 @@ def daemon_url(base: str, *segments: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
+def local_owner_token() -> str:
+    """The daemon's local owner token (docs/INSTALL.md, Local callers): HARNESS_LOCAL_TOKEN, else its data_dir file."""
+    token = os.environ.get("HARNESS_LOCAL_TOKEN", "").strip()
+    if token:
+        return token
+    try:
+        from harness.config import resolve_data_dir
+        from harness.local_owner import read_token
+        return read_token(resolve_data_dir())
+    except (ImportError, OSError, ValueError):
+        return ""
+
+
 def request(url: str, method: str = "GET", body: dict | None = None) -> dict:
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "http" or parsed.hostname not in LOCAL_HOSTS:
@@ -123,7 +137,11 @@ def request(url: str, method: str = "GET", body: dict | None = None) -> dict:
     if ".." in parsed.path.split("/"):
         raise ValueError(f"refusing URL path: {url}")
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    token = local_owner_token()
+    if token:
+        headers["X-Agent-Harness-Local-Token"] = token
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as response:
         return json.load(response)
 
