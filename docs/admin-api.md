@@ -98,7 +98,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | POST | `/api/admin/v1/github/sessions` | owner (`admin` scope) | TODO | `harness/api.py` `create_github_session` |
 | GET | `/api/admin/v1/google-signin` | owner | TODO | `harness/google_signin_api.py` `google_status` |
 | GET | `/api/admin/v1/gpu` | owner (`admin` scope) | TODO | `harness_modules/local_model/routes.py` `gpu` |
-| POST | `/api/admin/v1/gpu/{action}` | owner (`admin` scope) | pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the | `harness_modules/local_model/routes.py` `gpu_action` |
+| POST | `/api/admin/v1/gpu/{action}` | owner (`admin` scope) | pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the model stays unloaded until something needs it). load: load the model now and keep it loaded for duration_seconds. unload: unload it now without holding the queue. | `harness_modules/local_model/routes.py` `gpu_action` |
 | GET | `/api/admin/v1/images` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `list_images` |
 | POST | `/api/admin/v1/images` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `create_image` |
 | POST | `/api/admin/v1/images/cooldown` | owner (`admin` scope) | Drop an unused Images-tab warmup so the language model can come back. | `harness_modules/images/routes.py` `cooldown_images` |
@@ -153,7 +153,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | POST | `/api/admin/v1/remote-control/{project}/trust` | owner (`admin` scope) | TODO | `harness_modules/remote_control/routes.py` `rc_trust` |
 | GET | `/api/admin/v1/resources` | owner (`admin` scope) | TODO | `harness_modules/local_model/routes.py` `gpu` |
 | GET | `/api/admin/v1/resources/diagnostics` | owner (`admin` scope) | One reading for Actions -> Resources (VRAM, RAM, GPU/CPU load, model and guard state). Not polled. | `harness_modules/local_model/routes.py` `resources_diagnostics` |
-| POST | `/api/admin/v1/resources/{action}` | owner (`admin` scope) | pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the | `harness_modules/local_model/routes.py` `gpu_action` |
+| POST | `/api/admin/v1/resources/{action}` | owner (`admin` scope) | pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the model stays unloaded until something needs it). load: load the model now and keep it loaded for duration_seconds. unload: unload it now without holding the queue. | `harness_modules/local_model/routes.py` `gpu_action` |
 | GET | `/api/admin/v1/runner-pairing-codes` | owner (`admin` scope) | Owner view. Native pairing codes and runner tokens are never included. | `harness_modules/runners/routes.py` `runner_pairing_codes` |
 | POST | `/api/admin/v1/runner-pairing-codes` | owner (`admin` scope) | TODO | `harness_modules/runners/routes.py` `create_runner_pairing_code` |
 | DELETE | `/api/admin/v1/runner-pairing-codes/{pid}` | owner (`admin` scope) | TODO | `harness_modules/runners/routes.py` `revoke_runner_pairing_code` |
@@ -172,7 +172,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/sessions/{ref}/checkpoints` | owner (`admin` scope) | TODO | `harness/api.py` `session_checkpoints` |
 | POST | `/api/admin/v1/sessions/{ref}/checkpoints/{turn}/fork` | owner (`admin` scope) | TODO | `harness/api.py` `fork_checkpoint` |
 | POST | `/api/admin/v1/sessions/{ref}/checkpoints/{turn}/rewind` | owner (`admin` scope) | TODO | `harness/api.py` `rewind_checkpoint` |
-| GET | `/api/admin/v1/sessions/{ref}/events` | owner (`admin` scope) | Server-sent events: replays persisted events after `after`, then streams live ones. | `harness/api.py` `events` |
+| GET | `/api/admin/v1/sessions/{ref}/events` | owner (`admin` scope) | Server-sent events: replays persisted events after `after`, then streams live ones. Ephemeral events (token deltas, queue moves) have `seq: null` and are never replayed. | `harness/api.py` `events` |
 | POST | `/api/admin/v1/sessions/{ref}/messages` | owner (`admin` scope) | TODO | `harness/api.py` `send_message` |
 | GET | `/api/admin/v1/sessions/{ref}/metrics` | owner (`admin` scope) | Owner-only per-turn context-efficiency metrics for one agent session (#159). | `harness/api.py` `session_metrics` |
 | POST | `/api/admin/v1/sessions/{ref}/rerun` | owner (`admin` scope) | TODO | `harness/api.py` `rerun` |

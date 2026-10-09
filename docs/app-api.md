@@ -377,8 +377,8 @@ Generated from the route registrations (`scripts/docs/build.py`; do not edit bet
 | GET | `/api/v1/config/schema` | see source | TODO | `harness/config_api.py` `app_schema` |
 | DELETE | `/api/v1/end-users/{end_user}/logins/{backend}` | scope `sessions` | TODO | `harness/apps.py` `unlink_end_user_login` |
 | GET | `/api/v1/end-users/{end_user}/logins/{backend}` | see source | TODO | `harness/apps.py` `end_user_login_status` |
-| POST | `/api/v1/end-users/{end_user}/logins/{backend}` | scope `sessions` | Start the CLI's own sign-in for one of the App's end users (#365): `{verification_url, user_code?, needs_code, | `harness/apps.py` `start_end_user_login` |
-| POST | `/api/v1/end-users/{end_user}/logins/{backend}/{attempt_id}/code` | scope `sessions` | Pass the one-time code the person pasted into the popup (Claude) straight to the waiting login. The body is | `harness/apps.py` `submit_end_user_login_code` |
+| POST | `/api/v1/end-users/{end_user}/logins/{backend}` | scope `sessions` | Start the CLI's own sign-in for one of the App's end users (#365): `{verification_url, user_code?, needs_code, attempt_id, ...}`. The App shows the URL (and the user code) in a popup. | `harness/apps.py` `start_end_user_login` |
+| POST | `/api/v1/end-users/{end_user}/logins/{backend}/{attempt_id}/code` | scope `sessions` | Pass the one-time code the person pasted into the popup (Claude) straight to the waiting login. The body is read by hand, so a validation error can never echo the code back. | `harness/apps.py` `submit_end_user_login_code` |
 | GET | `/api/v1/events` | scope `sessions` | TODO | `harness/apps.py` `api_events` |
 | POST | `/api/v1/images` | scope `images` | TODO | `harness_modules/images/routes.py` `app_image` |
 | GET | `/api/v1/images/{iid}` | scope `images` | TODO | `harness_modules/images/routes.py` `app_image_status` |
@@ -409,7 +409,7 @@ Generated from the route registrations (`scripts/docs/build.py`; do not edit bet
 | GET | `/api/v1/search` | scope `sessions` | TODO | `harness_modules/search/routes.py` `api_search` |
 | GET | `/api/v1/sessions` | scope `sessions` | TODO | `harness/apps.py` `list_sessions` |
 | POST | `/api/v1/sessions` | scope `sessions` | TODO | `harness/apps.py` `create_session` |
-| DELETE | `/api/v1/sessions/{ref}` | scope `sessions` | Erase one of the calling App's sessions and everything tied to it (#330 decision 5). Only the App that started | `harness/apps.py` `delete_session` |
+| DELETE | `/api/v1/sessions/{ref}` | scope `sessions` | Erase one of the calling App's sessions and everything tied to it (#330 decision 5). Only the App that started it may: the owner, members and other Apps get a 404. Erasing a session that is already gone succeeds again. | `harness/apps.py` `delete_session` |
 | GET | `/api/v1/sessions/{ref}` | scope `sessions` | TODO | `harness/apps.py` `get_session` |
 | PATCH | `/api/v1/sessions/{ref}` | scope `sessions` | TODO | `harness/apps.py` `patch_session` |
 | PUT | `/api/v1/sessions/{ref}` | scope `sessions` | TODO | `harness/apps.py` `patch_session` |

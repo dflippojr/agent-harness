@@ -35,6 +35,15 @@ async def list_gadgets(request):
     auth(request, "sessions")
 
 
+@app_routes.put("/api/v1/gadgets/{gid}")
+async def wrapped(request, gid):
+    """Replace one gadget, and say so
+    over two source lines.
+
+    Detail.
+    """
+
+
 @app_routes.post("/api/v1/gadgets", summary="Create | a gadget")
 async def create_gadget(request):
     auth(request, "gadgets")
@@ -90,6 +99,7 @@ def test_app_table_lists_methods_paths_auth_summary_and_source(repo):
     assert rows[0].startswith("| Method | Path | Auth | Summary | Source |")
     assert "| GET | `/api/v1/gadgets` | scope `sessions` | List the caller's gadgets. | " \
            "`harness/fixture_routes.py` `list_gadgets` |" in rows
+    assert any("Replace one gadget, and say so over two source lines. |" in r for r in rows)
     assert any(r.startswith(r"| POST | `/api/v1/gadgets` | scope `gadgets` | Create \| a gadget |") for r in rows)
     assert any(r.startswith("| DELETE | `/api/v1/gadgets/{gid}` | owner | TODO |") for r in rows)
     assert "/widgets" not in "".join(rows)

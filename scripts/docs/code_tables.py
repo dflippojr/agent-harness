@@ -125,12 +125,14 @@ class _Consts:
         return None
 
 
-def _first_line(text: str | None) -> str:
+def _first_paragraph(text: str | None) -> str:
+    """The docstring's opening paragraph on one line, so a sentence wrapped over several lines is not cut short."""
+    lines = []
     for line in (text or "").strip().splitlines():
-        line = line.strip()
-        if line:
-            return line
-    return ""
+        if not line.strip():
+            break
+        lines.append(line.strip())
+    return " ".join(lines)
 
 
 def _summary(fn: ast.FunctionDef | ast.AsyncFunctionDef, kwargs: list[ast.keyword]) -> str:
@@ -138,7 +140,7 @@ def _summary(fn: ast.FunctionDef | ast.AsyncFunctionDef, kwargs: list[ast.keywor
         if kw.arg == "summary" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
             if kw.value.value.strip():
                 return kw.value.value.strip()
-    return _first_line(ast.get_docstring(fn)) or TODO
+    return _first_paragraph(ast.get_docstring(fn)) or TODO
 
 
 def _call_name(call: ast.Call) -> str:
