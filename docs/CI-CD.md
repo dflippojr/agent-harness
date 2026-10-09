@@ -35,6 +35,24 @@ The GHCR packages are public (this repository is public), so the tower pulls the
 anonymously and does not sign in. The first production deployment showed why: `docker login ghcr.io` with the job's
 `GITHUB_TOKEN` was rejected (`denied: denied`) on the tower, which failed the deployment before anything was changed.
 
+## Docs regeneration on main
+
+`.github/workflows/docs-regen.yml` runs on a push to `main` that touches `docs/fragments/**` or `scripts/docs/**`
+(and on `workflow_dispatch`). It runs `python scripts/docs/build.py` and, only if a generated region changed, commits
+`Docs: regenerate fragment regions [skip ci]` to `main` as `github-actions[bot]`. It is the single writer of generated
+regions; PRs add fragments only. It uses the default `GITHUB_TOKEN` with `contents: write` on that one job.
+
+- **No deploy, no loop.** A push made with `GITHUB_TOKEN` starts no workflow runs, so the bot commit starts neither
+  `docs-regen`, `CI`, nor (through `CI`) `deploy-tower`. The `[skip ci]` marker repeats that explicitly, and the job
+  skips any head commit carrying it. `tests/test_ci_cd_workflow.py` pins both.
+- **Bursts.** The `docs-regen` concurrency group cancels an older run, so close-together merges produce one commit.
+  If `main` moves during a run, the push is retried from the new tip, up to three times.
+- **Main CI.** After a fragment PR merges, the region lags until the bot commit lands, so the `Check docs fragments`
+  step on main runs `--check --fragments-only` (schema only). PRs still compare regions against the base.
+- **Nothing changed** means no commit (`tests/test_docs_build.py::test_build_twice_changes_nothing_the_second_time`).
+- `main` has no branch protection today. If a ruleset ever blocks the bot push, the owner must allow
+  `github-actions[bot]` to bypass it for this workflow.
+
 ## Deployment boundary
 
 The daemon itself is deliberately not containerized. It is a host Python process because it coordinates Windows

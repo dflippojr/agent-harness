@@ -101,7 +101,8 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "git fetch of the PR base failed" }
             python scripts/docs/build.py --check --base FETCH_HEAD
           } else {
-            python scripts/docs/build.py --check
+            # On main the docs-regen workflow rewrites regions after a merge, so only the fragments are validated.
+            python scripts/docs/build.py --check --fragments-only
           }
 
       # pytest-cov and pytest-xdist are CI extras (not in requirements.txt).

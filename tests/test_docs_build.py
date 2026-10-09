@@ -145,9 +145,23 @@ def test_missing_or_duplicate_markers_fail(repo):
         build.build(repo)
 
 
-def test_repo_fragments_and_readme_are_in_sync():
-    assert build.check(ROOT) == []
-    assert len(list((ROOT / "docs" / "fragments").glob("*.yaml"))) == 7
+def test_repo_fragments_are_valid():
+    # Regions are not compared here: after a fragment PR merges, main's region lags until docs-regen.yml runs.
+    assert build.check(ROOT, fragments_only=True) == []
+    assert len(list((ROOT / "docs" / "fragments").glob("*.yaml"))) >= 7
+
+
+def test_fragments_only_ignores_stale_region_but_still_rejects_bad_fragments(repo):
+    add(repo, "1-a.yaml", frag("Alpha"))
+    assert build.main(["--root", str(repo), "--check", "--fragments-only"]) == 0
+    add(repo, "2-b.yaml", "schema_version: 1\n")
+    assert build.main(["--root", str(repo), "--check", "--fragments-only"]) == 1
+
+
+def test_build_twice_changes_nothing_the_second_time(repo):
+    add(repo, "1-a.yaml", frag("Alpha"))
+    assert build.build(repo) == ["README.md"]
+    assert build.build(repo) == []
 
 
 def test_option_like_ref_is_never_passed_to_git(repo):
