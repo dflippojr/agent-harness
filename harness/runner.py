@@ -33,7 +33,8 @@ from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKEN
                      AppToolsPolicy, ChatPolicy, Decision, Policy, mcp_harness_tool)
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .runner_contract import RemoteWorkspace, RunnerError, NoRunnerHub
-from .sandbox import AccountLimit, DiskLimits, Sandbox, SandboxUnavailable
+from .disk_watch import AccountLimit, DiskLimits
+from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
