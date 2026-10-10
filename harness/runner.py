@@ -556,11 +556,7 @@ class Runner:
     async def _resume_from_app(self, sid: str) -> None:
         """A hosted session the App answered runs again once nothing else parks it (another call waiting on the App, a
         pending approval), unless it ended meanwhile (a cancel while it waited)."""
-        waits = self._app_waits.get(sid, 1) - 1
-        if waits > 0:
-            self._app_waits[sid] = waits
-        else:
-            self._app_waits.pop(sid, None)
+        self._drop_app_wait(sid)
 
         def resume() -> None:
             status = self._hosted_status(sid)
@@ -568,19 +564,35 @@ class Runner:
                 self._status_writer(sid, status, {})()
         await self.db.for_session(sid).awrite(resume)
 
+    def _drop_app_wait(self, sid: str) -> None:
+        waits = self._app_waits.get(sid, 1) - 1
+        if waits > 0:
+            self._app_waits[sid] = waits
+        else:
+            self._app_waits.pop(sid, None)
+
     async def _dispatch_mcp(self, s: dict, call_id: str, name: str, args: dict):
         if name in SPLIT_TOOLS and self.split_mode(s):
             return await self._split_call(s, name, args)
         if self.app_tools is not None and name in self.app_tools.names(s):
             sid = s["id"]
+            parked = {"waiting": False}
 
             def wait() -> None:
+                parked["waiting"] = True
                 self._app_waits[sid] = self._app_waits.get(sid, 0) + 1
                 if self.db.get_session(sid)["status"] == "running":
                     self.set_status(sid, self._hosted_status(sid))
+
+            async def resume() -> None:
+                parked["waiting"] = False
+                await self._resume_from_app(sid)
             # Parked on the App's reply: its time does not count toward the run's budget (#524).
-            return await self.app_tools.call(s, call_id, name, args, on_wait=wait,
-                                             on_resume=lambda: self._resume_from_app(sid))
+            try:
+                return await self.app_tools.call(s, call_id, name, args, on_wait=wait, on_resume=resume)
+            finally:
+                if parked["waiting"]:  # cancelled while it waited (a provider limit, a deadline): no reply to resume
+                    self._drop_app_wait(sid)
         kit = next(k for k in self.daemon_toolkits(s) if name in k.tool_names)
         gate = self._module_gate(kit)
         if gate is not None and gate.workspace:
@@ -683,11 +695,11 @@ class Runner:
                                                                  if k in ("stop_reason", "answer")}})
             # A status change can free room under a cap (a run ending, a session given its place) or change what
             # counts: let ineligible waiters try again.
-            self.db.after_commit(lambda: self._tick_clock(sid, status))
+            self.db.after_commit(lambda: self._tick_clock(sid))
             self.db.after_commit(self.scheduler.recheck)
         return set_status
 
-    def _tick_clock(self, sid: str, _status: str = "") -> None:
+    def _tick_clock(self, sid: str) -> None:
         """Count the live run's time in `running` only: queue, approval, Mac and App waits are not its time (#524).
         Called after each status commit; it follows the status committed last, not the one that write set, since
         commits' callbacks can run out of order (an awaited write's after a later blocking one's)."""

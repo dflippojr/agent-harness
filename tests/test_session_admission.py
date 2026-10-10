@@ -1258,7 +1258,7 @@ def test_the_clock_follows_the_status_committed_last_not_a_late_callbacks(tmp_pa
     app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
     _insert(m, "lateclk001", "waiting_app", app_id=app_id)
     m.runner._clocks["lateclk001"] = RunClock(spent=10)
-    m.runner._tick_clock("lateclk001", "running")  # the late callback of the earlier `running` commit
+    m.runner._tick_clock("lateclk001")  # the late callback of the earlier `running` commit
     assert m.runner._clocks["lateclk001"].since is None
 
 
@@ -1278,6 +1278,40 @@ def test_a_deadline_watch_leaves_the_next_run_alone(tmp_path):
         await m.runner._end_on_deadline("nextrun002", "budget_time", 1000.0)
         assert m.db.get_session("nextrun002")["status"] == "queued"
         old.cancel()
+    asyncio.run(body())
+
+
+def test_a_cancelled_hosted_app_call_leaves_no_wait_counted(tmp_path):
+    """A provider limit (or a deadline) cancels a hosted call parked on the App: the next call's reply then finds no
+    other wait and the session runs again, its clock with it."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "hosted0005", "running", app_id=app_id)
+        m.db.update_session("hosted0005", backend="claude")
+        parked = asyncio.Event()
+
+        class Lookup:
+            def names(self, s):
+                return {"lookup"}
+
+            async def call(self, s, call_id, name, args, on_wait=None, on_resume=None):
+                on_wait()
+                if call_id == "c1":
+                    parked.set()
+                    await asyncio.sleep(60)  # cancelled before the App replies
+                await on_resume()
+                return "answer"
+        m.runner.app_tools = Lookup()
+        s = m.db.get_session("hosted0005")
+        first = asyncio.create_task(m.runner._dispatch_mcp(s, "c1", "lookup", {}))
+        await parked.wait()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        assert m.runner._app_waits.get("hosted0005") is None
+        m.db.update_session("hosted0005", status="running")  # the retried CLI runs on
+        assert await m.runner._dispatch_mcp(m.db.get_session("hosted0005"), "c2", "lookup", {}) == "answer"
+        assert m.db.get_session("hosted0005")["status"] == "running"
     asyncio.run(body())
 
 
