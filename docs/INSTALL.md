@@ -403,6 +403,10 @@ login from tailscaled reached the daemon's loopback listener directly, so it mus
   route checks it as before.
 - `/health` and `/metrics` answer without a credential, so Prometheus and the restart scripts keep working.
 
+Approving, denying or releasing the standalone Hub's claim needs one more secret: the daemon writes a new
+`data_dir/hub-approval.secret` at every start, and `harness hub approve`, `deny` and `release` read it, so they work only
+on the daemon host as the daemon's account ([admin-api.md](admin-api.md#hub-claim)).
+
 Everything else gets **401**. A browser on the server itself should use the tailnet URL rather than
 `http://127.0.0.1:8100`.
 

@@ -15,7 +15,8 @@
 `run` creates a session, answers the agent's calls to your tools as they arrive, and returns when the session ends.
 An App pairs without the owner ever handling its token (#519): `Harness.request_pairing(...)` (or `claim_pairing` for
 a slot armed from the Hub) holds the PKCE verifier, the App shows its `match_code`, and `Harness.redeem_pairing(...)`
-waits for the owner's approval and returns a client with the token. Everything else (pair, capabilities, backends, create_session, events, send, add_context, approvals, cancel,
+waits for the owner's approval and returns a client with the token. The standalone Hub claims the daemon the same way
+with `Harness.request_hub_claim(...)` (#543); the owner approves it on the daemon host with `harness hub approve`. Everything else (pair, capabilities, backends, create_session, events, send, add_context, approvals, cancel,
 submit_tool_result, generate_image, upscale_image) is a thin wrapper over the HTTP API described in docs/app-api.md. Run
 `Harness.validate_openapi()` in an integration check to detect client/server contract drift.
 """
@@ -59,7 +60,8 @@ SDK_OPERATIONS = {
 # Keyed off SDK_OPERATIONS so a path only ever spells itself once, in the table above.
 SDK_REQUEST_FIELDS = {
     SDK_OPERATIONS["pair"]: {"code"},
-    SDK_OPERATIONS["request_pairing"]: {"name", "scopes", "catalog_app_id", "code_challenge", "code_challenge_method"},
+    SDK_OPERATIONS["request_pairing"]: {"name", "kind", "scopes", "catalog_app_id", "code_challenge",
+                                        "code_challenge_method"},
     SDK_OPERATIONS["claim_pairing"]: {"code_challenge", "code_challenge_method"},
     SDK_OPERATIONS["redeem_pairing"]: {"code_verifier"},
     SDK_OPERATIONS["create_session"]: {"prompt", "project", "backend", "model", "title", "context", "tools",
@@ -82,6 +84,7 @@ class PairedApp(TypedDict, total=False):
     kind: str
     origins: list[str]
     catalog_app_id: str
+    role: str
 
 
 class PairingRequestStatus(TypedDict, total=False):
@@ -317,10 +320,28 @@ class Harness:
             return resp.json()
 
     @classmethod
+    def _require_feature(cls, base_url: str, feature: str, origin: str, timeout: float) -> None:
+        """Refuse up front, with a clear error, when the Server predates `features[feature]` (GET /api/v1). A Server
+        that wants credentials to read its root (an App on the daemon's own machine has none yet) is not refused: the
+        pairing request itself is open, and its answer decides."""
+        headers = {"Origin": origin} if origin else {}
+        with httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout, headers=headers) as client:
+            resp = client.get("/api/v1")
+            if resp.status_code in (401, 403):
+                return
+            if resp.status_code >= 400:
+                cls._raise_response(resp)
+            features = resp.json().get("features") or {}
+        if not features.get(feature):
+            raise HarnessError(501, f"this Server does not support {feature}; update it, or pair with an "
+                                    "owner-made pairing code", "feature_unsupported")
+
+    @classmethod
     def request_pairing(cls, base_url: str, name: str, scopes: tuple[str, ...] | list[str] = ("sessions",),
                         catalog_app_id: str = "", origin: str = "", timeout: float = 60) -> PairingRequest:
         """Ask the owner to pair this App. A browser App passes its exact `origin`; a native App leaves it empty.
         Show the result's `match_code`; the owner approves with it."""
+        cls._require_feature(base_url, "pairing_requests", origin, timeout)
         verifier, challenge = cls._pkce()
         out = cls._pairing_post(base_url, "/api/v1/pair/requests", {
             "name": name, "scopes": list(scopes), "catalog_app_id": catalog_app_id, "code_challenge": challenge,
@@ -332,9 +353,24 @@ class Harness:
     def claim_pairing(cls, base_url: str, request_id: str, origin: str = "", timeout: float = 60) -> PairingRequest:
         """Claim a slot the owner armed from the Hub (they hand the App its id). A native claim returns a
         `match_code` for the owner to confirm; a browser claim from the armed origin is approved at once."""
+        cls._require_feature(base_url, "pairing_requests", origin, timeout)
         verifier, challenge = cls._pkce()
         out = cls._pairing_post(base_url, f"/api/v1/pair/requests/{request_id}/claim", {
             "code_challenge": challenge, "code_challenge_method": "S256"}, origin, timeout)
+        return PairingRequest(base_url, out["id"], out["state"], out.get("match_code") or "", out["expires_at"],
+                              origin, verifier)
+
+    @classmethod
+    def request_hub_claim(cls, base_url: str, name: str, catalog_app_id: str = "", origin: str = "",
+                          timeout: float = 60) -> PairingRequest:
+        """Ask to become this daemon's one Hub (#543). Show the result's `match_code`; the owner approves it on the
+        daemon host (`harness hub approve <id> --match <code>`). `redeem_pairing` then returns a client holding the
+        Hub key. A Server that already has a Hub refuses with 409 `hub_claimed`."""
+        cls._require_feature(base_url, "hub_claim", origin, timeout)
+        verifier, challenge = cls._pkce()
+        out = cls._pairing_post(base_url, "/api/v1/pair/requests", {
+            "name": name, "kind": "hub", "catalog_app_id": catalog_app_id, "code_challenge": challenge,
+            "code_challenge_method": "S256"}, origin, timeout)
         return PairingRequest(base_url, out["id"], out["state"], out.get("match_code") or "", out["expires_at"],
                               origin, verifier)
 

@@ -121,6 +121,7 @@ _PUBLIC = {
     "require_readable_file": ("harness.settings_keys", "_require_readable_file"),
     "migrations": ("harness.migrations", None),
     "credential_audit": ("harness.credential_audit", None),
+    "refuse_hub_owner_key": ("harness.hub_claim", "refuse_owner_key"),
     "storage": ("harness.storage", None),
     "APP_STORE_FILE": ("harness.app_stores", "APP_STORE_FILE"),
     "WEB_APP_ID": ("harness.app_stores", "WEB_APP_ID"),

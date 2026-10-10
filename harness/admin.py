@@ -6,7 +6,8 @@ stable prefix. Bundled and separately hosted Agent Harness Web both use this con
 
 Auth is an explicit owner credential:
 - Tailscale/localhost owner identity (no bearer token), same as bundled Agent Harness Web; or
-- a bearer token of kind ``owner`` holding the ``admin`` scope (prefix ``ho-``).
+- a bearer token of kind ``owner`` holding the ``admin`` scope (prefix ``ho-``). The Hub's key (#543, role ``hub``)
+  is one of these, except on the host-only Hub claim routes (harness/hub_claim.py).
 
 App and device tokens are refused even when the request also has owner Tailscale identity, so a
 third-party app cannot reach this surface by presenting its own key.
@@ -31,7 +32,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.22"
+API_VERSION = "1.23"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
@@ -110,6 +111,9 @@ def parse_key_spec(body: dict | None) -> tuple[str, str, str]:
         raise HarnessError(400, "name is required")
     scopes = _validated_scopes(body.get("scopes") or ["inference"])
     kind_in = body.get("kind") or ""
+    if kind_in == "hub" or body.get("role"):
+        raise HarnessError(400, "a Hub key comes only from a Hub claim approved on the daemon host "
+                                "(`harness hub approve`); no key can be made with a role")
     wants_admin = ADMIN_SCOPE in scopes or kind_in == OWNER_KIND
     if wants_admin:
         if kind_in == "app":
@@ -248,9 +252,10 @@ def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS, 
         {"method": "POST", "path": PREFIX + "/apps/{app_id}/restore"},
         {"method": "PUT", "path": PREFIX + "/apps/{app_id}/retention"},
     ])
-    from . import config_api, pairing_requests
+    from . import config_api, hub_claim, pairing_requests
     operations.extend(config_api.register_admin(app, mgr, require_admin))
     operations.extend(pairing_requests.register_admin(app, mgr, require_admin))
+    operations.extend(hub_claim.register_admin(app, mgr, require_admin))
     from .modules import present
     for module in present(cfg) if cfg is not None else ():
         if module.register_admin:
@@ -292,6 +297,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             "server": "agent-harness",
             **compat.metadata(mgr(request).cfg.capabilities()),
             "scopes": {ADMIN_SCOPE: ADMIN_SCOPE_HELP},
+            "hub": {"claimed": mgr(request).db.main.hub_claim() is not None},
             "auth": {
                 "tailscale_owner": True,
                 "bearer": f"{OWNER_KIND} token with {ADMIN_SCOPE} scope",
