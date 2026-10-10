@@ -249,8 +249,9 @@ async function viewChat(id) {
   // Paint the page shell before the data fetch below so the route feels instant; the
   // composer and header title are filled in once /chats/<id> or /chats/options resolves (#152).
   setHeader("chat", id ? "" : "Chat");
+  let active = true;
   document.body.classList.add("chat-page");
-  onLeave(() => document.body.classList.remove("chat-page"));
+  onLeave(() => { active = false; document.body.classList.remove("chat-page"); });
 
   let ui = null;
   const feed = h("div", { class: "chat-feed", "aria-live": "polite" });
@@ -273,6 +274,7 @@ async function viewChat(id) {
   let options = { backends: [] };
   if (id) session = await api(`/chats/${id}`);
   else options = await api("/chats/options");
+  if (!active) return;
   if (session) id = session.id;
   setHeader("chat", session ? session.title : "Chat");
   ui = chatComposer(options, session);
@@ -339,7 +341,7 @@ async function viewChat(id) {
       const title = await promptSheet({ title: "Rename chat", label: "Title", value: session.title, confirmLabel: "Rename",
         validate: sheets.required("a title") });
       if (!title?.trim()) return;
-      try { session = await api(`/chats/${id}`, { method: "PATCH", body: { title } }); setHeader("chat", session.title); }
+      try { session = await api(`/chats/${id}`, { method: "PATCH", body: { title } }); if (active) setHeader("chat", session.title); }
       catch (e) { toast(e.message); }
     } }, "Rename"),
     h("button", { class: "btn small bad", type: "button", onclick: async () => {

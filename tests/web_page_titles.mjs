@@ -91,6 +91,7 @@ const sessionDetail = {
 };
 
 let pendingRenameGate = null;
+let pendingChatOptionsGate = null;
 let meRole = "owner";
 let gpuPayload = { manual: false, state: "clear" };
 const fetched = [];
@@ -127,6 +128,10 @@ const fakeFetch = async (url, opts = {}) => {
     });
   }
   if (path === "/models") return jsonResp([]);
+  if (path === "/chats/options") {
+    if (pendingChatOptionsGate) await pendingChatOptionsGate;
+    return jsonResp({ backends: [] });
+  }
   if (path.startsWith("/chats")) return jsonResp([]);
   if (path.startsWith("/backends")) return jsonResp([{ name: "local", available: true }]);
   return jsonResp({});
@@ -524,5 +529,19 @@ for (const [role, hash, href, label] of [["member", "#/agents", "#/new", "+ New 
 meRole = "owner";
 await go("#/agents");
 assertNewAction("#/new", "+ New task");
+
+let releaseChatOptions;
+pendingChatOptionsGate = new Promise((resolve) => { releaseChatOptions = resolve; });
+await go("#/chat");
+await waitFor(() => byId.title.textContent === "Chat", "pending Chat shell");
+await go("#/agents");
+assertNewAction("#/new", "+ New task");
+releaseChatOptions();
+pendingChatOptionsGate = null;
+await sleep(80);
+assertTitle("#/agents", "Agents");
+assertNewAction("#/new", "+ New task");
+if (byId["fab-host"].hidden) throw new Error("late Chat loading must not hide the Agents FAB");
+if (findByClass(doc.body, "chat-composer")) throw new Error("an abandoned Chat must not append a composer");
 
 console.log("ok");

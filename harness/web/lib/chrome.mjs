@@ -101,7 +101,6 @@ export function mountChrome({ els, browser, session }) {
   // A section's own screen (no Back) gets the large title; until a page knows its title (a chat still loading) the
   // section's name stands in.
   function setHeader(feature, pageTitle = "", { page = false } = {}) {
-    hideListAction();
     const top = $back.hidden;
     const title = pageTitle || (top ? SECTION_TITLES[feature] || "" : "");
     $title.textContent = title;
