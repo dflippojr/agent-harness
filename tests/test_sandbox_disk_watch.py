@@ -4,6 +4,7 @@ into the data drive's free-space floor, and leaves commands under the quota alon
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -132,7 +133,7 @@ def test_concurrent_member_commands_share_the_account_quota(monkeypatch, tmp_pat
     fakes = {}
     for name, root in zip("ab", roots):
         root.mkdir()
-        fakes[f"harness-{name}"] = FakeDocker(root, chunks=150)
+        fakes[f"harness-{name}"] = FakeDocker(root, chunks=150, pace=0.02)
 
     async def docker(args, timeout=60, input_=None, env=None):
         return await next(f for n, f in fakes.items() if n in args)(args, timeout, input_, env)
@@ -160,7 +161,7 @@ def test_floor_starts_below_free_space_when_the_drive_is_already_low(tmp_path, m
     monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: 500 * MB)
     watch.start()
     assert watch.floor == 500 * MB - sandbox.FREE_SLACK_BYTES
-    assert watch.check() == ""
+    assert watch._floor_reason(500 * MB) == ""
 
 
 def test_failed_setup_from_the_watchdog_is_reported_not_raised(monkeypatch, tmp_path):
@@ -197,9 +198,15 @@ def test_watchdog_error_stops_the_command_in_the_container(monkeypatch, tmp_path
     # Cancelling the docker exec client alone would leave the writer running in the container with nothing watching.
     box, fake, events = make(monkeypatch, tmp_path, sandbox.DiskLimits(500 * MB, 100 * MB), chunks=200)
 
+    free = sandbox.DiskWatch._free
+    calls = []
+
     def broken(self):
-        raise OSError("drive gone")
-    monkeypatch.setattr(sandbox.DiskWatch, "check", broken)
+        calls.append(1)
+        if len(calls) > 2:     # measures the start, then fails mid-run
+            raise OSError("drive gone")
+        return free(self)
+    monkeypatch.setattr(sandbox.DiskWatch, "_free", broken)
     with pytest.raises(sandbox.DiskLimitExceeded, match=r"disk watchdog failed \(OSError: drive gone\)"):
         asyncio.run(box.exec("make huge"))
     assert "restart" in fake.calls and fake.written < 20 and events[0][1]["stopped"]
@@ -236,3 +243,32 @@ def test_container_already_stopped_counts_as_stopped(monkeypatch, tmp_path):
     with pytest.raises(sandbox.DiskLimitExceeded, match="was stopped because"):
         asyncio.run(box.exec("make huge"))
     assert events[0][1]["stopped"]
+
+
+def test_free_space_is_polled_while_a_slow_scan_runs(monkeypatch, tmp_path):
+    monkeypatch.setattr(sandbox, "MIN_SCAN_SECONDS", 0.05)    # a scan starts early in the run
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(900 * MB, 950 * MB), chunks=200)
+    measure = sandbox.dir_size
+    scans = []
+
+    def slow(root):
+        scans.append(root)
+        if len(scans) > 1:      # every scan after the starting one takes longer than the whole command would
+            time.sleep(1.5)
+        return measure(root)
+    monkeypatch.setattr(sandbox, "dir_size", slow)
+    with pytest.raises(sandbox.DiskLimitExceeded, match="data drive"):
+        asyncio.run(box.exec("make huge"))
+    assert len(scans) > 1 and fake.written < 80   # the floor stopped it while the scan was still running
+
+
+def test_limit_seen_as_the_command_ends_still_stops_the_container(monkeypatch, tmp_path):
+    # The shell exits while a background writer crosses the quota: both tasks finish before the wait resumes.
+    box, fake, events = make(monkeypatch, tmp_path, sandbox.DiskLimits(10 * MB, 100 * MB), chunks=0)
+
+    async def at_once(self):
+        return "the workspace grew to 11 MB, past its 10 MB quota"
+    monkeypatch.setattr(sandbox.DiskWatch, "run", at_once)
+    with pytest.raises(sandbox.DiskLimitExceeded, match="past its 10 MB quota"):
+        asyncio.run(box.exec("make & exit"))
+    assert "restart" in fake.calls and events[0][0] == "sandbox_disk_limit"

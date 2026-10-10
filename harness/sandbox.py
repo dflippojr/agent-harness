@@ -90,31 +90,51 @@ class DiskWatch:
         floor, free = self.limits.min_free_bytes, self._free_at_scan
         self.floor = floor if free >= floor else max(0, free - FREE_SLACK_BYTES)
 
-    def check(self) -> str:
-        """'' while within limits, else why the command must stop. Blocking: run it in a thread."""
-        free = self._free()
+    def _floor_reason(self, free: int) -> str:
         if free < self.floor:
             return (f"the data drive is down to {free / 2**30:.1f} GB free, under its "
                     f"{self.limits.min_free_bytes / 2**30:.1f} GB minimum")
+        return ""
+
+    def _scan_due(self, free: int) -> bool:
         lost = max(0, self._free_at_scan - free)
-        if (self._size + lost > self.cap or (self.account and self._account_used + lost > self.account_cap)
-                or time.monotonic() - self._scanned >= max(MIN_SCAN_SECONDS, SCAN_DUTY * self._scan_cost)):
-            self._scan()
-            if self._size > self.cap:
-                return (f"the workspace grew to {self._size / 2**20:.0f} MB, past its "
-                        f"{self.limits.quota_bytes / 2**20:.0f} MB quota")
-            if self.account and self._account_used > self.account_cap:
-                return (f"the account grew to {self._account_used / 2**20:.0f} MB, past its "
-                        f"{self.limits.account_quota_bytes / 2**20:.0f} MB disk quota")
+        return (self._size + lost > self.cap or (self.account and self._account_used + lost > self.account_cap)
+                or time.monotonic() - self._scanned >= max(MIN_SCAN_SECONDS, SCAN_DUTY * self._scan_cost))
+
+    def _scan_reason(self) -> str:
+        """Scan, then '' while within the quotas, else why the command must stop. Blocking: run it in a thread."""
+        self._scan()
+        if self._size > self.cap:
+            return (f"the workspace grew to {self._size / 2**20:.0f} MB, past its "
+                    f"{self.limits.quota_bytes / 2**20:.0f} MB quota")
+        if self.account and self._account_used > self.account_cap:
+            return (f"the account grew to {self._account_used / 2**20:.0f} MB, past its "
+                    f"{self.limits.account_quota_bytes / 2**20:.0f} MB disk quota")
         return ""
 
     async def run(self) -> str:
-        """Poll until a limit is passed and return why. The caller cancels it when the command ends first."""
-        while True:
-            await asyncio.sleep(FREE_POLL_SECONDS)
-            reason = await asyncio.to_thread(self.check)
-            if reason:
-                return reason
+        """Poll until a limit is passed and return why. The caller cancels it when the command ends first. A scan runs
+        in its own thread, so free space is still polled while a big tree is being measured."""
+        scan: asyncio.Future | None = None
+        try:
+            while True:
+                if scan is None:
+                    await asyncio.sleep(FREE_POLL_SECONDS)
+                else:   # wakes as soon as the scan finishes
+                    await asyncio.wait({scan}, timeout=FREE_POLL_SECONDS)
+                if scan is not None and scan.done():
+                    reason, scan = scan.result(), None
+                    if reason:
+                        return reason
+                free = await asyncio.to_thread(self._free)
+                reason = self._floor_reason(free)
+                if reason:
+                    return reason
+                if scan is None and self._scan_due(free):
+                    scan = asyncio.ensure_future(asyncio.to_thread(self._scan_reason))
+        finally:
+            if scan is not None:
+                scan.cancel()
 
 
 if os.name == "nt":
@@ -471,7 +491,7 @@ class Sandbox:
             raise
         finally:
             watcher.cancel()
-        if command.done():
+        if not watcher.done():  # a limit seen as the command ended still counts: it may have left a writer behind
             return command.result()
         try:
             reason = watcher.result()
