@@ -5,11 +5,30 @@ Removes an agent harness install's logon tasks and processes. Keeps data, models
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'agent-harness'),
     [string]$Instance = 'Main',
-    [switch]$RemoveFiles
+    [switch]$RemoveFiles,
+    [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
 $settingsPath = Join-Path $InstallDir 'settings.json'
 $s = if (Test-Path $settingsPath) { Get-Content $settingsPath -Raw | ConvertFrom-Json } else { $null }
+
+if ($DryRun) {
+    Write-Host '[dry run] check harness hub status; harness hub release --confirm before removing daemon'
+    Write-Host '[dry run] remove the recorded Hub service/container and its dedicated venv/state; preserve other Hubs'
+    Write-Host "[dry run] remove daemon tasks; remove files: $RemoveFiles"
+    exit 0
+}
+$python = Join-Path $InstallDir 'venv\Scripts\python.exe'
+if (Test-Path -LiteralPath $python) {
+    $appDir = Split-Path $PSScriptRoot -Parent
+    Push-Location $appDir
+    try {
+        & $python -m harness.install_hub uninstall --install-dir $InstallDir --config-dir (Join-Path $InstallDir 'config')
+        if ($LASTEXITCODE -ne 0) { throw 'Hub release/removal failed; daemon kept running' }
+    } finally { Pop-Location }
+} elseif (Test-Path (Join-Path $InstallDir 'hub-install.json')) {
+    throw 'Restore the daemon Python environment to release and remove the installed Hub first'
+}
 
 foreach ($suffix in 'Daemon', 'LlamaServer') {
     $name = "AgentHarness-$Instance-$suffix"

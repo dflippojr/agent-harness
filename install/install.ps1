@@ -60,10 +60,16 @@ param(
     [int]$ServerPort = 8090,
     [switch]$NoTasks,
     [switch]$DryRun,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$WithHub,
+    [switch]$NoHub,
+    [ValidateSet('auto', 'pip', 'docker')][string]$HubMethod = 'auto',
+    [string]$HubPackage = $env:HARNESS_HUB_PACKAGE,
+    [string]$HubImage = $env:HARNESS_HUB_IMAGE
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+if ($WithHub -and $NoHub) { throw '-WithHub and -NoHub are mutually exclusive' }
 
 $AppDir = Split-Path $PSScriptRoot -Parent
 if (-not $DataDir) { $DataDir = Join-Path $InstallDir 'data' }
@@ -120,7 +126,7 @@ if ([Environment]::OSVersion.Version.Major -lt 10 -or -not [Environment]::Is64Bi
     Die 'Windows 10 or 11, 64-bit, is required.'
 }
 $m = $null
-if ($NeedsLocalModel) {
+if ($NeedsLocalModel -and -not $DryRun) {
     $gpu = & nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $gpu) { Die 'The local_model module needs an NVIDIA GPU and driver (nvidia-smi failed).' }
     $gpuName, $driver, $vramMiB = ($gpu | Select-Object -First 1).Split(',') | ForEach-Object { $_.Trim() }
@@ -134,6 +140,10 @@ if ($NeedsLocalModel) {
     if ($Model -eq 'qwen' -and ($vramGB -lt 15.5 -or $ramGB -lt 30)) { Warn 'Qwen3.6-35B-A3B was tested with 16 GB VRAM and 32 GB RAM; expect slowdowns or failures.' }
     $m = $Models[$Model]
     Info "model: $($m.name)"
+} elseif ($NeedsLocalModel) {
+    if ($Model -eq 'auto') { $Model = 'qwen' }
+    $vramGB = 16; $ramGB = 32; $m = $Models[$Model]
+    Info "[dry run] local model: $($m.name)"
 } else {
     if ($Model -eq 'auto') { $Model = 'gpt-oss' } # setup_config requires a preset but omits it from service config
     Info 'local model: disabled (hosted-provider service profile)'
@@ -141,11 +151,13 @@ if ($NeedsLocalModel) {
 
 $git = Get-Command git -ErrorAction SilentlyContinue
 if (-not $git) { Die 'Git is required: winget install Git.Git (then open a new terminal).' }
+if (-not $DryRun) {
 $dockerVersion = & docker version --format '{{.Server.Version}}' 2>$null
 if ($LASTEXITCODE -ne 0 -or -not $dockerVersion) {
     Die 'Docker Desktop must be installed and running (agents run commands in containers): winget install Docker.DockerDesktop'
 }
 Info "Docker engine $dockerVersion"
+}
 
 $freeGB = [math]::Round((Get-PSDrive (Split-Path $InstallDir -Qualifier).TrimEnd(":")).Free / 1GB)
 $needGB = if (-not $NeedsLocalModel -or $ModelPath -or $ExistingServer) { 5 } else { [math]::Ceiling($m.gb) + 5 }
@@ -269,7 +281,7 @@ Act "write $settingsPath" {
 # ---------------------------------------------------------------- autostart
 if (-not $NoTasks) {
     Step 'Logon tasks'
-    if (-not $NeedsLocalModel) {
+    if (-not $NeedsLocalModel -and -not $DryRun) {
         $oldModelTask = "AgentHarness-$Instance-LlamaServer"
         if (Get-ScheduledTask -TaskName $oldModelTask -ErrorAction SilentlyContinue) {
             Act "stop and unregister disabled $oldModelTask" {
@@ -279,8 +291,8 @@ if (-not $NoTasks) {
         }
     }
     $user = "$env:USERDOMAIN\$env:USERNAME"
-    $taskSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
-        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
+    $taskSettings = if (-not $DryRun) { New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden }
     $tasks = @(@{ name = "AgentHarness-$Instance-Daemon"; script = 'run-daemon.ps1'; desc = "Agent harness daemon (127.0.0.1:$Port)" })
     if ($NeedsLocalModel -and -not $ExistingServer) {
         $tasks = @(@{ name = "AgentHarness-$Instance-LlamaServer"; script = 'run-server.ps1'; desc = "Agent harness model server (127.0.0.1:$ServerPort)" }) + $tasks
@@ -341,7 +353,37 @@ if ($DryRun) { Info '[dry run] skipped' } else {
     Push-Location $AppDir
     $doctorArgs = @('-m', 'harness.doctor', '--config-dir', $configDir, '--instance', $(if ($NoTasks) { '' } else { $Instance }))
     if ($ExistingServer -or -not $NeedsLocalModel) { $doctorArgs += '--existing-server' }
-    try { & $python @doctorArgs } finally { Pop-Location }
+    try {
+        & $python @doctorArgs
+        if ($LASTEXITCODE -ne 0) { Die 'doctor failed; fix the daemon before installing the Hub' }
+    } finally { Pop-Location }
+}
+
+# Only the daemon installer offers the Hub, and only after doctor succeeds.
+Step 'Optional Hub admin console'
+if ($DryRun) {
+    if ($WithHub) {
+        Info '[dry run] after doctor passes: check harness hub status; if already claimed show harness hub release --confirm'
+        Info "[dry run] Hub distribution: $HubMethod; pip package: $(if ($HubPackage) { $HubPackage } else { 'set HARNESS_HUB_PACKAGE (#546)' }); Docker image: $(if ($HubImage) { $HubImage } else { 'set HARNESS_HUB_IMAGE (#546)' })"
+        Info '[dry run] install Hub in a separate venv (pip) or docker run --network host --restart unless-stopped (docker)'
+        Info '[dry run] start Hub; show its claim match code; harness hub approve <request_id> --match <code>; wait for redemption'
+        Info '[dry run] record installed Hub for uninstall; harness hub release --confirm before removing daemon'
+    } else {
+        Info 'Every Hub action is available from the CLI: harness --help; docs/management-parity.md.'
+        Info 'Add the Hub later: rerun install/install.ps1 -WithHub.'
+    }
+} else {
+    $hubArgs = @('-m', 'harness.install_hub', 'install', '--install-dir', $InstallDir, '--config-dir', $configDir,
+        '--port', "$Port", '--uv', $uv, '--hub-method', $HubMethod)
+    if ($HubPackage) { $hubArgs += @('--hub-package', $HubPackage) }
+    if ($HubImage) { $hubArgs += @('--hub-image', $HubImage) }
+    if ($WithHub) { $hubArgs += '--with-hub' }
+    if ($NoHub) { $hubArgs += '--no-hub' }
+    Push-Location $AppDir
+    try {
+        & $python @hubArgs
+        if ($LASTEXITCODE -ne 0) { Die 'Hub setup failed; the daemon is installed; see the message above' }
+    } finally { Pop-Location }
 }
 
 Write-Host "`nDone." -ForegroundColor Green

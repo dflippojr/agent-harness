@@ -5,17 +5,36 @@ set -euo pipefail
 install_dir=${XDG_DATA_HOME:-"$HOME/.local/share"}/agent-harness
 instance=Main
 remove_files=0
+dry_run=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --install-dir) [[ $# -ge 2 ]] || exit 64; install_dir=$2; shift 2 ;;
         --instance) [[ $# -ge 2 ]] || exit 64; instance=$2; shift 2 ;;
         --remove-files) remove_files=1; shift ;;
-        -h|--help) echo "usage: $0 [--install-dir DIR] [--instance NAME] [--remove-files]"; exit 0 ;;
+        --dry-run) dry_run=1; shift ;;
+        -h|--help) echo "usage: $0 [--install-dir DIR] [--instance NAME] [--remove-files] [--dry-run]"; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 64 ;;
     esac
 done
 [[ $instance =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "invalid instance" >&2; exit 64; }
 safe_instance=$(printf '%s' "$instance" | tr '[:upper:]' '[:lower:]')
+
+# Keep the daemon available for host-only release; remove only an installer-owned Hub.
+if [[ $dry_run -eq 1 ]]; then
+    echo "[dry run] check harness hub status; harness hub release --confirm before removing daemon"
+    echo "[dry run] remove the recorded Hub service/container and its dedicated venv/state; preserve other Hubs"
+    echo "[dry run] remove daemon services; remove files: $remove_files"
+    exit 0
+fi
+python="$install_dir/venv/bin/python"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+app_dir=$(dirname "$script_dir")
+if [[ -x $python ]]; then
+    (cd "$app_dir" && "$python" -m harness.install_hub uninstall --install-dir "$install_dir" --config-dir "$install_dir/config")
+elif [[ -f $install_dir/hub-install.json ]]; then
+    echo "restore the daemon Python environment to release and remove the installed Hub first" >&2
+    exit 1
+fi
 
 case $(uname -s) in
     Linux)

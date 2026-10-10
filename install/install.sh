@@ -25,6 +25,10 @@ server_port=8090
 no_start=0
 dry_run=0
 force=0
+hub_choice=
+hub_method=auto
+hub_package=${HARNESS_HUB_PACKAGE:-}
+hub_image=${HARNESS_HUB_IMAGE:-}
 
 usage() {
     cat <<'EOF'
@@ -44,6 +48,11 @@ usage: install/install.sh [options]
   --no-start              do not install or start systemd/launchd services
   --dry-run               validate choices and print actions only
   --force                 rewrite base config files
+  --with-hub              install and link the Hub after doctor passes
+  --no-hub                keep management in the CLI
+  --hub-method auto|pip|docker
+  --hub-package PACKAGE   released pip distribution (HARNESS_HUB_PACKAGE)
+  --hub-image IMAGE       released Docker image (HARNESS_HUB_IMAGE)
 EOF
 }
 
@@ -63,11 +72,18 @@ while [[ $# -gt 0 ]]; do
         --no-start) no_start=1; shift ;;
         --dry-run) dry_run=1; shift ;;
         --force) force=1; shift ;;
+        --with-hub|--no-hub)
+            [[ -z $hub_choice || $hub_choice == "$1" ]] || { echo "--with-hub and --no-hub are mutually exclusive" >&2; exit 64; }
+            hub_choice=$1; shift ;;
+        --hub-method) need_value "$@"; hub_method=$2; shift 2 ;;
+        --hub-package) need_value "$@"; hub_package=$2; shift 2 ;;
+        --hub-image) need_value "$@"; hub_image=$2; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage >&2; exit 64 ;;
     esac
 done
 
+case "$hub_method" in auto|pip|docker) ;; *) echo "invalid hub method: $hub_method" >&2; exit 64 ;; esac
 os=${HARNESS_INSTALLER_OS:-$(uname -s)}
 arch=${HARNESS_INSTALLER_ARCH:-$(uname -m)}
 case "$profile" in auto|full|service) ;; *) echo "invalid profile: $profile" >&2; exit 64 ;; esac
@@ -434,6 +450,25 @@ else
     [[ $no_start -eq 0 ]] && doctor_args+=(--instance "$instance")
     [[ -n $existing_server || $needs_local -eq 0 ]] && doctor_args+=(--existing-server)
     (cd "$app_dir" && "$python" "${doctor_args[@]}")
+fi
+
+step "Optional Hub admin console"
+if [[ $dry_run -eq 1 ]]; then
+    if [[ $hub_choice == --with-hub ]]; then
+        info "[dry run] after doctor passes: check harness hub status; if already claimed show harness hub release --confirm"
+        info "[dry run] Hub distribution: $hub_method; pip package: ${hub_package:-set HARNESS_HUB_PACKAGE (#546)}; Docker image: ${hub_image:-set HARNESS_HUB_IMAGE (#546)}"
+        info "[dry run] install Hub in a separate venv (pip) or docker run --network host --restart unless-stopped (docker)"
+        info "[dry run] start Hub; show its claim match code; harness hub approve <request_id> --match <code>; wait for redemption"
+        info "[dry run] record installed Hub for uninstall; harness hub release --confirm before removing daemon"
+    else
+        info "Every Hub action is available from the CLI: harness --help; docs/management-parity.md."
+        info "Add the Hub later: rerun install/install.sh --with-hub."
+    fi
+else
+    hub_args=(-m harness.install_hub install --install-dir "$install_dir" --config-dir "$config_dir" --port "$port"
+        --uv "$uv" --hub-method "$hub_method" --hub-package "$hub_package" --hub-image "$hub_image")
+    [[ -n $hub_choice ]] && hub_args+=("$hub_choice")
+    (cd "$app_dir" && "$python" "${hub_args[@]}")
 fi
 
 printf '\nDone.\n  Web app: http://127.0.0.1:%s\n  Config:  %s\n  Logs:    %s\n' "$port" "$config_dir" "$log_dir"
