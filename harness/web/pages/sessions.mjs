@@ -157,7 +157,8 @@ async function viewList(pane = null) {
     renderSessions();
     stale.ok();
   };
-  const refreshNow = () => render().catch((e) => {
+  // Shown search results are part of the list too: a refresh (a rename, a status change) re-runs the query.
+  const refreshNow = () => render().then(() => { if (search.value.trim()) void runSearch(); }).catch((e) => {
     console.error("session list refresh failed", e);
     stale.failed(e);
   });

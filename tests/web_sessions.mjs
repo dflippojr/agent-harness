@@ -117,4 +117,46 @@ for (const guest of [false, true]) {
   for (const fn of paneLeft) fn();
   assert.equal(changeHooks.length + stateHooks.length, 0);
 }
+
+// Shown search results refresh with the list (review on #578): a rename announced while a query is showing re-runs it, so
+// the pane beside the session shows the new title.
+{
+  const searches = [];
+  let title = "Fix the bug";
+  const searchApi = async (path) => {
+    if (!path.startsWith("/search")) return api(path);
+    searches.push(path);
+    return { mode: "all", results: [{ id: "s1", title, status: "done", project: "scratch", created_at: new Date().toISOString(), hits: 1, passages: [] }] };
+  };
+  let box = null;
+  const lel = (tag, attrs, ...kids) => {
+    const n = el(tag, attrs, ...kids);
+    if (attrs?.type === "search") {
+      box = n;
+      n.addEventListener = (type, fn) => { n[`on_${type}`] = fn; };
+    }
+    return n;
+  };
+  const filledResults = [];
+  const searchPage = mountSessions({
+    $app: "APP", h: lel, fill: (_t, ...n) => filledResults.push(...n.flat(Infinity)), append() {}, api: searchApi, setHeader() {}, showListAction() {},
+    onLeave() {}, isMember: () => false, isGuest: () => false, badge: (st) => el("badge", {}, st), reviewBadge: () => el("rb"), REVIEW_LABEL: {},
+    jobStatusBadge: () => el("jb"), onDaemonChange: subscribe(changeHooks), onDaemonState: subscribe(stateHooks), browser,
+  });
+  const hook = changeHooks.length;
+  await searchPage.viewList();
+  box.value = "bug";
+  box.on_input();
+  await sleep(300);
+  assert.equal(searches.length, 1, "typing searches once the debounce settles");
+  title = "Renamed";
+  changeHooks[hook]();
+  await sleep(350);
+  assert.equal(searches.length, 2, "a change re-runs the showing query");
+  assert.match(filledResults.map(text).join(" "), /Renamed/);
+  box.value = "";
+  changeHooks[hook]();
+  await sleep(350);
+  assert.equal(searches.length, 2, "no query, no search");
+}
 console.log("ok");

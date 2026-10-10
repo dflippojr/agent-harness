@@ -19,13 +19,16 @@ export function sessionJumpHidden(y, viewH, pageH) {
 // pages with Back.
 //
 // Adding a split (Jobs, Settings):
-//   1. Add an entry to SPLITS: `key`, `list` (the router's view name), `match(parts)` and the `empty` text.
+//   1. Add an entry to SPLITS: `key`, `list` (the router's view name), `label` (the pane's name), `match(parts)` and the
+//      `empty` state (`icon`, an inline SVG string, plus `title` and `text`).
 //   2. Let that list view take an optional pane: `viewX(pane)`. With a pane it renders into `pane.body`, registers its
 //      teardown with `pane.onLeave` (run when the split closes, not on every row change), puts its title and New action
 //      in `pane.header(title, action)` instead of the bar, gives each row `data-split-key="<the key match() returns>"`,
 //      and calls `pane.paint()` after it re-renders rows so the open row stays highlighted.
 //   3. Style the open row with `#split-list [aria-current="page"]` (or a narrower selector) in that page's CSS section.
 export const SPLIT_MIN_WIDTH = 1280;
+
+const AGENT_ICON = '<svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="7" width="16" height="12" rx="3"/><circle cx="9" cy="13" r="1.5"/><circle cx="15" cy="13" r="1.5"/><path d="M12 7V4"/></svg>';
 
 // match(parts) returns undefined when the route is not part of the split, null for the list route (nothing open) and the
 // open row's key for a detail route.
@@ -39,7 +42,7 @@ export const SPLITS = [
       if (parts[0] === "s" && validId(parts[1])) return parts[1];
       return undefined;
     },
-    empty: { title: "No session open", text: "Pick one from the list, or start a new task." },
+    empty: { icon: AGENT_ICON, title: "No session open", text: "Pick one from the list, or start a new task." },
   },
 ];
 
@@ -61,7 +64,6 @@ export function isListToggleKey(e) {
 }
 
 const SIDEBAR_SVG = '<svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>';
-const AGENT_SVG = '<svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="7" width="16" height="12" rx="3"/><circle cx="9" cy="13" r="1.5"/><circle cx="15" cy="13" r="1.5"/><path d="M12 7V4"/></svg>';
 
 // The router calls sync(parts) on every route and gets back the active split ({ split, selected, pane }) or null; it
 // renders the list once per open with renderList(view) and, when nothing is open, the detail's empty state with empty().
@@ -200,7 +202,7 @@ export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange
   function empty() {
     const { empty: text } = current.split;
     fill($app, h("section", { class: "split-empty" },
-      h("span", { class: "split-empty-icon", html: AGENT_SVG }),
+      text.icon ? h("span", { class: "split-empty-icon", html: text.icon }) : null,
       h("h2", {}, text.title),
       h("p", {}, text.text)));
   }
