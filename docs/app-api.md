@@ -593,7 +593,7 @@ Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token to
   owner sets both per App (`PUT /api/admin/v1/apps/{id}/limits`); unset, the daemon defaults
   (`budgets.app_max_running` 2, `budgets.app_max_queued` 4) apply. An App cannot change its own caps.
 - **Run time.** An App's run ends after `budgets.max_run_seconds` (default one hour) spent running, with status
-  `done` and `stop_reason` `budget_time`, even in the middle of a model call; time queued or parked does not count. A pending approval nobody decides
+  `done` and `stop_reason` `budget_time`, wherever it is (a model call, a tool); time queued or parked does not count. A pending approval nobody decides
   within `budgets.approval_timeout_seconds` (default 24 hours) is denied with an `approval_decided` event carrying
   `expired: true`, and the run ends with `stop_reason` `approval_expired`. Send a message to continue either one.
 

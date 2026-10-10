@@ -17,6 +17,7 @@ from harness.config import BackendConfig
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.principal import OWNER_USER_ID
+from harness.runner import RunClock
 from harness.storage import workspaces_dir
 
 from test_app_stores import _key
@@ -281,9 +282,9 @@ def test_time_budget_counts_only_time_running(tmp_path):
     app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
     app_session = {"id": "s1", "owner_id": OWNER_USER_ID, "app_id": app_id}
     runner = m.runner
-    runner._clocks["s1"] = [0.0, None]
+    runner._clocks["s1"] = RunClock()
     runner._tick_clock("s1", "running")
-    runner._clocks["s1"][1] -= 30           # thirty seconds running
+    runner._clocks["s1"].since -= 30        # thirty seconds running
     runner._tick_clock("s1", "waiting_approval")
     paused = runner._time_left(app_session)
     assert paused is not None and 69 < paused <= 70
@@ -336,7 +337,7 @@ def test_owner_device_token_sessions_have_no_time_budget(tmp_path):
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
     device = m.db.create_api_key("phone", "sessions", kind="device")[0]["id"]
     app = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-    m.runner._clocks["s1"] = [0.0, None]
+    m.runner._clocks["s1"] = RunClock()
     assert m.runner._time_left({"id": "s1", "owner_id": OWNER_USER_ID, "app_id": device}) is None
     assert m.runner._time_left({"id": "s1", "owner_id": OWNER_USER_ID, "app_id": app}) == m.cfg.max_run_seconds
 
@@ -477,4 +478,98 @@ def test_an_approved_session_waiting_for_its_backend_slot_keeps_its_place_under_
         await wait_status(m, local, "done")
         assert m.runner.admitted == {}
         await m.stop()
+    asyncio.run(body())
+
+
+# third review follow-ups ----------------------------------------------------------------------------------------------
+def test_parked_sessions_over_a_lowered_cap_can_still_come_back(tmp_path):
+    """Two hosted sessions parked on approvals, then the owner lowers the App's cap to one (and the daemon restarts):
+    each already counts, so each may come back to reach its approval; a new one still waits."""
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+    assert m.db.set_app_limits(app_id, {"max_running": 1})
+    _insert(m, "parked0003", "waiting_approval", app_id=app_id)
+    _insert(m, "parked0004", "waiting_approval", app_id=app_id)
+    _insert(m, "queued0003", "queued", app_id=app_id)
+    assert m._scheduler_eligible("parked0003") and m._scheduler_eligible("parked0004")
+    assert not m._scheduler_eligible("queued0003")
+
+
+def test_the_time_budget_ends_a_run_stuck_outside_a_model_call(tmp_path):
+    """Compaction (or a tool, or a delegated call) that outlasts the budget is stopped too, not only a model call."""
+    cfg = make_cfg(tmp_path)
+    cfg.max_run_seconds = 1
+
+    async def body():
+        m = Manager(cfg, chat=Script([Completion(content="never asked")]))
+
+        async def slow_compaction(s):
+            await asyncio.sleep(10)
+            return s
+        m.runner._maybe_compact = slow_compaction
+        await m.start()
+        app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
+        started = time.monotonic()
+        sid = m.create("slow", app=app)["id"]
+        s = await wait_status(m, sid, "done", "failed", "cancelled", timeout=8)
+        assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
+        assert time.monotonic() - started < 8
+        assert m.scheduler.holder is None
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_time_parked_during_a_model_call_does_not_count(tmp_path):
+    """The GPU guard parks a session mid-call (it is queued meanwhile): the budget follows the running clock, so a
+    call parked past the budget's wall-clock length still finishes."""
+    cfg = make_cfg(tmp_path)
+    cfg.max_run_seconds = 1.5
+    box: dict = {}
+
+    async def parked_model(model, messages, tools, on_delta=None, max_tokens=None, extra=None, timeout=0,
+                           on_progress=None):
+        runner, sid = box["runner"], box["sid"]
+        await runner.aset_status(sid, "queued")  # stepped aside for the GPU guard
+        await asyncio.sleep(2.5)
+        await runner.aset_status(sid, "running")
+        return Completion(content="done after the pause", prompt_tokens=10, completion_tokens=1)
+
+    async def body():
+        m = Manager(cfg, chat=parked_model)
+        box["runner"] = m.runner
+        await m.start()
+        app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
+        box["sid"] = sid = m.create("pause", app=app)["id"]
+        s = await wait_status(m, sid, "done", "failed", timeout=15)
+        assert (s["status"], s["stop_reason"], s["answer"]) == ("done", "final_message", "done after the pause")
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_a_hosted_sessions_wait_on_an_app_tool_reply_stops_its_clock(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "hosted0001", "running", app_id=app_id)
+        m.db.update_session("hosted0001", backend="claude")
+        runner = m.runner
+        runner._clocks["hosted0001"] = RunClock(since=time.monotonic())
+        seen = {}
+
+        class SlowApp:
+            def names(self, s):
+                return {"lookup"}
+
+            async def call(self, s, call_id, name, args, on_wait=None, on_resume=None):
+                on_wait()
+                seen["status"] = m.db.get_session(s["id"])["status"]
+                before = runner._time_left(s)
+                await asyncio.sleep(0.3)
+                seen["paused"] = runner._time_left(s) == before
+                await on_resume()
+                return "answer"
+        runner.app_tools = SlowApp()
+        assert await runner._dispatch_mcp(m.db.get_session("hosted0001"), "c1", "lookup", {}) == "answer"
+        assert seen == {"status": "waiting_app", "paused": True}
+        assert m.db.get_session("hosted0001")["status"] == "running"
     asyncio.run(body())

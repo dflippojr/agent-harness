@@ -2049,8 +2049,8 @@ class Manager:
         account = self.db.account_by_id(user_id) if user_id != OWNER_USER_ID else None
         if user_id != OWNER_USER_ID and (account is None or not account.get("enabled", 1)):
             return False
-        if s.get("status") == "running":
-            return True
+        if s.get("status") in ("running", *WAITING):
+            return True  # it counts against the cap already, and coming back adds nothing (even over a lowered cap)
         if account is not None:
             occupied, cap = self.db.count_sessions(user_id, "running", *WAITING), int(account["max_running"])
         elif capped_app(self.db, s.get("app_id") or ""):
@@ -2058,8 +2058,6 @@ class Manager:
             cap = self.app_limits(s["app_id"])["max_running"]
         else:
             return True
-        if s.get("status") in WAITING:
-            occupied -= 1  # its own slot in the cap
         return occupied + self._about_to_run(sid, admission_key(self.db, s)) < cap
 
     def _about_to_run(self, sid: str, key: str) -> int:

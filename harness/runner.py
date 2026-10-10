@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import contextlib
+import dataclasses
 import json
 import logging
 import math
@@ -50,10 +51,6 @@ class ToolsOnlyUnsupported(CliBackendError):
 
 class ApprovalExpired(Exception):
     """A pending approval passed `approval_timeout_seconds`: it was denied and the run ends (#524)."""
-
-
-class TimeBudgetSpent(Exception):
-    """A member's or an App's run reached `max_run_seconds` during a model call (#524)."""
 
 
 class CliLimitError(Exception):
@@ -134,6 +131,13 @@ def admission_key(db, s: dict) -> str:
     if user_id != OWNER_USER_ID:
         return "member:" + user_id
     return "app:" + s["app_id"] if capped_app(db, s.get("app_id") or "") else ""
+
+
+@dataclasses.dataclass
+class RunClock:
+    """A live run's time spent running (#524): `spent` seconds so far, and `since` (monotonic) while it runs."""
+    spent: float = 0.0
+    since: float | None = None
 
 
 class _HeldSlot:
@@ -246,7 +250,8 @@ class Runner:
         # Hosted sessions admitted under their member's or App's running cap whose status does not count yet: waiting
         # for the credential or a backend slot (#524). sid -> admission key; Manager._scheduler_eligible counts them.
         self.admitted: dict[str, str] = {}
-        self._clocks: dict[str, list] = {}             # live run -> [seconds spent running, running since or None]
+        self._clocks: dict[str, RunClock] = {}         # live run -> its time spent running
+        self._out_of_time: set[str] = set()            # runs their time-budget watch cancelled
         self._locks = credential_sources.KeyedLocks()
         self.cli_factory = ClaudeSession
         self.codex_factory = CodexSession
@@ -494,7 +499,11 @@ class Runner:
         if name in SPLIT_TOOLS and self.split_mode(s):
             return await self._split_call(s, name, args)
         if self.app_tools is not None and name in self.app_tools.names(s):
-            return await self.app_tools.call(s, call_id, name, args)
+            sid = s["id"]
+            # Parked on the App's reply: its time does not count toward the run's budget (#524).
+            return await self.app_tools.call(s, call_id, name, args,
+                                             on_wait=lambda: self.set_status(sid, "waiting_app"),
+                                             on_resume=lambda: self.aset_status(sid, "running"))
         kit = next(k for k in self.daemon_toolkits(s) if name in k.tool_names)
         gate = self._module_gate(kit)
         if gate is not None and gate.workspace:
@@ -600,15 +609,15 @@ class Runner:
         if clock is None:
             return
         now = time.monotonic()
-        if clock[1] is not None:
-            clock[0] += now - clock[1]
-        clock[1] = now if status == "running" else None
+        if clock.since is not None:
+            clock.spent += now - clock.since
+        clock.since = now if status == "running" else None
 
     def _run_seconds(self, sid: str) -> float:
         clock = self._clocks.get(sid)
         if clock is None:
             return 0.0
-        return clock[0] + (time.monotonic() - clock[1] if clock[1] is not None else 0.0)
+        return clock.spent + (time.monotonic() - clock.since if clock.since is not None else 0.0)
 
     def _time_left(self, s: dict) -> float | None:
         """Seconds a member's or an App's run has left (`max_run_seconds`); None for the owner's or without a cap."""
@@ -863,9 +872,12 @@ class Runner:
 
     async def _run(self, sid: str, recovered: bool = False) -> None:
         self._unended.add(sid)
-        self._clocks[sid] = [0.0, None]  # a restart starts the clock again
+        self._clocks[sid] = RunClock()  # a restart starts the clock again
+        watch = None
         try:
             s = self.db.get_session(sid)
+            if self._time_left(s) is not None:
+                watch = asyncio.create_task(self._watch_time_budget(sid, asyncio.current_task()))
             if s.get("kind") == TOOLS_ONLY and s.get("backend", "local") not in TOOLS_ONLY_BACKENDS:
                 raise ToolsOnlyUnsupported(f"backend {s['backend']!r} can't run App-tools-only sessions")
             if s.get("backend", "local") != "local":
@@ -875,6 +887,11 @@ class Runner:
                 raise CliBackendError("the local model is disabled in this service profile")
             await self._run_local(sid, s, recovered)
         except asyncio.CancelledError:
+            if sid in self._out_of_time and sid not in self.user_cancelled:
+                uncancel = getattr(asyncio.current_task(), "uncancel", None)
+                if uncancel is None or uncancel() == 0:  # no other cancel (a daemon stop) came with it
+                    await self._end_out_of_time(sid)
+                    return
             await self._take_pending_cancel(sid, cancelled=True)
             raise
         except ApprovalExpired:
@@ -905,6 +922,9 @@ class Runner:
                                  f"internal_error: {type(e).__name__}: {e}")
             await self._end_run(sid)
         finally:
+            if watch is not None:
+                watch.cancel()
+            self._out_of_time.discard(sid)
             await asyncio.shield(self._stop_cli(sid))
             if self.modules is not None:
                 await asyncio.shield(self.modules.end_session(sid))
@@ -916,6 +936,29 @@ class Runner:
             self.user_cancelled.discard(sid)
             self._unended.discard(sid)
             self._clocks.pop(sid, None)
+
+    async def _watch_time_budget(self, sid: str, run: asyncio.Task) -> None:
+        """Stop a member's or an App's run once its time running reaches `max_run_seconds` (#524), wherever it is: a
+        model call, compaction, a tool or a delegated call. The clock stops while the run is parked (queued for the
+        GPU, on an approval, the Mac or the App), so this follows the clock rather than a fixed deadline."""
+        while True:
+            s = self.db.get_session(sid)
+            left = self._time_left(s) if s is not None else None
+            if left is None or s["status"] not in ACTIVE:
+                return
+            if left <= 0:
+                break
+            await asyncio.sleep(min(left, 5.0))
+        if sid not in self.user_cancelled:
+            self._out_of_time.add(sid)
+            run.cancel()  # like a cancel, but the run ends `done` with budget_time
+
+    async def _end_out_of_time(self, sid: str) -> None:
+        s = self.db.get_session(sid)
+        if s is not None and s["status"] in ACTIVE:
+            await self.aset_status(sid, "done", stop_reason="budget_time")
+        if sid in self._unended:
+            await self._end_run(sid)
 
     async def _run_local(self, sid: str, s: dict, recovered: bool) -> None:
         if recovered:
@@ -987,13 +1030,9 @@ class Runner:
 
                 self._close_span(turn)
                 turn = tracer.start("turn", {"harness.turn": int(s["run"].get("turns", 0)) + 1})
-                try:
-                    with tracer.activate(turn):
-                        s = await self._maybe_compact(s)
-                        ended = await self._generate(s)
-                except TimeBudgetSpent:  # mid-call: the reply, if one was coming, is dropped
-                    await self.aset_status(sid, "done", stop_reason="budget_time")
-                    ended = True
+                with tracer.activate(turn):
+                    s = await self._maybe_compact(s)
+                    ended = await self._generate(s)
                 if ended:
                     turn = self._close_span(turn)
                     await self._end_run(sid)
@@ -1189,13 +1228,7 @@ class Runner:
     async def _pump_cli(self, sid: str, cli, credential: dict, use_api_key: bool, recovered: bool) -> None:
         """Feed the CLI's events to the handlers until the run is complete."""
         tool_names: dict[str, str] = {}
-        s = self.db.get_session(sid)
         while True:
-            left = self._time_left(s)
-            if left is not None and left <= 0:
-                await self.aset_status(sid, "done", stop_reason="budget_time")
-                await self._end_run(sid)
-                return
             self._check_cli_credential(credential, use_api_key)
             await self._send_cli_inbox(sid, cli)
             event = await cli.receive(timeout=0.05)
@@ -1882,18 +1915,7 @@ class Runner:
 
         run = s["run"]
         tools = self.tool_schemas(s, ws)
-        left = self._time_left(s)
-        try:
-            # A member's or an App's run ends at its time budget even mid-call: one slow reply must not hold the GPU
-            # past it (#524).
-            completion = await asyncio.wait_for(
-                self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache, run),
-                None if left is None else max(0.0, left))
-        except asyncio.TimeoutError:
-            if left is None or (self._time_left(s) or 0) > 0:
-                raise  # the call's own timeout, not the budget's
-            stream.flush()
-            raise TimeBudgetSpent() from None
+        completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache, run)
         stream.flush()
         if completion.cache_tokens is None and cache_box["seen"]:
             completion.cache_tokens = cache_box["tokens"]
