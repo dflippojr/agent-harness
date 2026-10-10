@@ -402,6 +402,8 @@ const PROFILE_CARDS = {
 if (!SPLITS.some((split) => split.key === "settings")) SPLITS.push({
   key: "settings", list: "viewProfile", label: "Settings menu",
   match: (parts) => {
+    // An unknown offline identity uses the router's single-pane recovery path, including on resize.
+    if (!isOwner() && !isMember() && !isGuest()) return undefined;
     if (["profile", "settings"].includes(parts[0])) {
       if (parts.length === 1) return null;
       if (parts[1] === "account" || Object.hasOwn(PROFILE_PAGES, parts[1])) return parts[1];
@@ -515,10 +517,15 @@ async function settingsMenu(pane = null, me = null, profile = null) {
     versionRow());
   if (pane) menuValues = values;
   if (pane) {
+    const readMe = () => api("/me").catch((err) => {
+      // The router may still be adopting a new member identity when this hash-change listener runs.
+      if (err.status === 403) return api("/me", { surface: "app" });
+      throw err;
+    });
     const refresh = () => {
       const next = ++generation;
       const current = () => active && next === generation;
-      Promise.all([api("/me"), api("/profile").catch(() => null)]).then(([latest, icon]) => {
+      Promise.all([readMe(), api("/profile").catch(() => null)]).then(([latest, icon]) => {
         if (!current()) return;
         if (errorNote) errorNote.hidden = true;
         const latestRole = latest.role || currentRole();
