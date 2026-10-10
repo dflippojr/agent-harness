@@ -11,6 +11,54 @@ The installer sets up **Agent Harness Server**, which hosts the APIs and normall
 The full local-model profile supports Windows 10/11 and x86-64 Linux with an NVIDIA GPU. Apple Silicon macOS uses
 the hosted-provider service profile (Claude, Codex, or Cursor) and does not download a local model.
 
+## Optional Hub at daemon setup
+
+After doctor passes, the daemon installer asks `Install the Hub admin console and link it to this daemon? [Y/n]`
+when stdin is a terminal and no Hub flag was supplied. `--with-hub` / `--no-hub` (PowerShell: `-WithHub` / `-NoHub`)
+decide without prompting. With redirected stdin, the default is no Hub. Every Hub action is also available through
+`harness --help`; see [management-parity.md](management-parity.md). Add the Hub later by rerunning the daemon installer
+with `--with-hub` / `-WithHub`. Web and other Apps keep their normal App pairing flow and never make this offer.
+
+The Hub distribution is pending #546. Until a release exists, set `HARNESS_HUB_PACKAGE` to the released pip
+distribution or `HARNESS_HUB_IMAGE` to the released image; there is no default placeholder package or image.
+Use `--hub-package` / `--hub-image` (PowerShell: `-HubPackage` / `-HubImage`) to override those settings.
+`--hub-method pip|docker` (`-HubMethod pip|docker`) selects the distribution. Auto uses pip and offers Docker when
+running interactively with Docker and an image configured. Pip installs into a separate venv, leaving daemon
+dependencies intact. Docker uses host networking to reach the loopback daemon; Docker Desktop must have host
+networking enabled. On Unix, rootful Docker uses the installing user's UID/GID; rootless Docker uses container
+UID/GID 0, which maps to that host owner, so the private state stays accessible and removable. Rootless Docker
+requires Engine 29.5+ for host networking. Older rootless engines and rootful `userns-remap` configurations are
+rejected before Hub state is created; use the pip method instead.
+The Hub persists its credentials in its own state directory, with no daemon secrets mounted.
+That directory is owner-only (including inherited Windows ACLs) before the Hub starts.
+
+The installer registers a per-user Hub service (systemd, launchd, or a Windows logon task), or a Docker container with
+a restart policy. It shows the Hub's request ID and match code, runs `harness hub approve <request_id> --match <code>`
+on this host, and waits for the Hub to redeem its claim. An existing claim is reported with `harness hub release
+--confirm`; the installer never releases it automatically. Missing distributions, launch errors, and claim timeouts
+fail the Hub step while leaving the daemon installed. A partially installed Hub remains recorded for cleanup.
+`--no-start` / `-NoTasks` defers Hub setup too; start the daemon and rerun without that flag to install and link the Hub.
+With startup disabled, doctor uses `--not-started` to check configuration, files, and Docker images while reporting
+that live daemon and optional service probes remain to be run after startup. Adding the Hub later uses the preserved
+daemon configuration's port.
+GPU prerequisites, image files, and model checksums remain checked even when startup is disabled.
+
+`--dry-run` / `-DryRun` prints these steps without prompting, installing, starting services, or approving claims.
+Uninstall checks status and runs `harness hub release --confirm` before stopping the daemon. It removes only the Hub
+service/container and dedicated venv/state recorded by this installer in `<InstallDir>/hub-install.json`; unrelated
+Hub installs remain. A failed release stops uninstall. Uninstall also accepts `--dry-run` / `-DryRun`.
+If the daemon is stopped and no installer-owned Hub is recorded, daemon uninstall can continue. A recorded Hub
+requires starting the daemon first so its host-only release can complete.
+An early failed install with no configuration and no installed Hub can also be cleaned up; an installed Hub still
+requires restoring its daemon configuration before release.
+
+**Distribution adapter contract for #546:** the pip module defaults to `harness_hub` (override with
+`HARNESS_HUB_MODULE`); the image entrypoint and module accept `--daemon-url`, `--state-dir`, and `--claim-file`.
+The Hub itself creates a PKCE claim, atomically publishes only `{"id":"pr-...","match_code":"123456"}` to the fresh
+claim file, then redeems the approval and persists its credentials in `--state-dir`. It must reuse those credentials
+on service restart. The file must contain no verifier, token, or host approval secret. This adapter is covered with
+stub launches; the end-to-end installation test waits on the real release in #546.
+
 ## Requirements
 
 | | Minimum | Tested |

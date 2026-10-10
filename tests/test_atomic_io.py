@@ -1,5 +1,7 @@
 import os
+import json
 import stat
+import subprocess
 
 import pytest
 
@@ -33,3 +35,30 @@ def test_failed_replace_removes_temp_and_keeps_old(tmp_path, monkeypatch):
         write_atomic(target, "new")
     assert target.read_text(encoding="utf-8") == "old"
     assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows inherited ACLs")
+def test_owner_only_directory_protects_future_children(tmp_path):
+    from harness.atomic_io import owner_only_acl
+    directory = tmp_path / "hub-state"
+    directory.mkdir()
+    owner_only_acl(directory, inherit=True)
+    child = directory / "claim.json"
+    child.write_text("{}")
+    quote = lambda path: "'" + str(path).replace("'", "''") + "'"
+    # Inspect the real ACL through .NET, independently of Security-module autoload.
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$parentAcl = [IO.Directory]::GetAccessControl({quote(directory)}); "
+        f"$childAcl = [IO.File]::GetAccessControl({quote(child)}); "
+        "$rules = $childAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]); "
+        "$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+        "[ordered]@{ protected=$parentAcl.AreAccessRulesProtected; current=$currentSid; "
+        "childSids=@(foreach ($rule in $rules) { $rule.IdentityReference.Value }); "
+        "inherited=@(foreach ($rule in $rules) { if ($rule.IsInherited) { $rule } }).Count } | ConvertTo-Json"
+    )
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                            capture_output=True, text=True, check=True, timeout=30)
+    acl = json.loads(result.stdout)
+    assert acl["protected"] and acl["inherited"] == 1
+    assert acl["childSids"] == [acl["current"]]

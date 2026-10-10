@@ -2,38 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import shutil
+import shlex
 import subprocess
 
 import pytest
 
-
-ROOT = Path(__file__).parents[1]
-GIT_BASH = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
-BASH = str(GIT_BASH) if os.name == "nt" and GIT_BASH.exists() else shutil.which("bash")
-
-
-def run_installer(tmp_path: Path, platform: str, arch: str, *args: str) -> subprocess.CompletedProcess[str]:
-    if not BASH:
-        pytest.skip("bash is not installed")
-    env = {
-        **os.environ,
-        "HARNESS_INSTALLER_OS": platform,
-        "HARNESS_INSTALLER_ARCH": arch,
-        # Exercise compatibility mode in CI; the live exit test uses Apple's Bash 3.2.
-        "BASH_COMPAT": "3.2" if platform == "Darwin" else os.environ.get("BASH_COMPAT", ""),
-    }
-    return subprocess.run(
-        [BASH, "install/install.sh", "--install-dir", str(tmp_path / "install"), "--dry-run", *args],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+from tests.installer_support import BASH, ROOT, run_installer
 
 
 def test_linux_nvidia_full_profile_dry_run(tmp_path):
@@ -154,3 +129,102 @@ def test_macos_launchd_has_docker_path_and_installer_waits_for_daemon():
     assert 'curl -fsS "http://127.0.0.1:$port/health"' in installer
     assert "daemon did not become ready within 60 seconds" in installer
     assert "HARNESS_SUPERVISED=1" in (ROOT / "install/run-daemon.sh").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("args", [("--with-hub",), ("--with-hub", "--hub-method", "docker", "--hub-image", "stub:1"), ("--no-hub",), ()])
+def test_unix_hub_dry_run(tmp_path, args):
+    result = run_installer(tmp_path, "Linux", "x86_64", "--profile", "service", *args)
+    assert result.returncode == 0, result.stderr
+    if "--with-hub" in args:
+        assert "harness hub approve <request_id> --match <code>" in result.stdout
+        assert result.stdout.index("Checking the install") < result.stdout.index("Optional Hub")
+    else:
+        assert "docs/management-parity.md" in result.stdout and "Add the Hub later" in result.stdout
+    assert not (tmp_path / "install").exists()
+
+
+def test_unix_conflicting_flags(tmp_path):
+    result = run_installer(tmp_path, "Linux", "x86_64", "--with-hub", "--no-hub")
+    assert result.returncode != 0 and "mutually exclusive" in result.stderr
+
+
+
+def test_relative_uninstall_from_outside_checkout_keeps_daemon_on_hub_failure(tmp_path):
+    if not BASH:
+        pytest.skip("bash is not installed")
+    python = tmp_path / "runtime/venv/bin/python"
+    python.parent.mkdir(parents=True)
+    args_file = tmp_path / "hub-uninstall-args"
+    python.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > ' + shlex.quote(args_file.as_posix()) + '\nexit 23\n')
+    python.chmod(0o755)
+    result = subprocess.run([BASH, str(ROOT / "install/uninstall.sh"), "--install-dir", "./runtime"],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 23, result.stderr
+    # The stub runs in the checkout; arguments must still name the caller's install.
+    args = args_file.read_text().splitlines()
+    directory = args[args.index("--install-dir") + 1]
+    assert directory.startswith("/") and directory.endswith("/runtime")
+    assert args[args.index("--config-dir") + 1] == directory + "/config"
+
+
+@pytest.mark.parametrize("directory", ["", "/", "$HOME", "$HOME/.", "."])
+def test_uninstall_refuses_unsafe_directories_before_cleanup(tmp_path, directory):
+    if not BASH:
+        pytest.skip("bash is not installed")
+    installer = shlex.quote((ROOT / "install/uninstall.sh").as_posix())
+    target = '"' + directory + '"'
+    script = (
+        'mkdir -p home; cd home; export HOME="$(pwd -P)"; '
+        'systemctl() { echo unexpected-service-cleanup >&2; return 99; }; export -f systemctl; '
+        + f'{shlex.quote(BASH)} {installer} --install-dir {target} --remove-files'
+    )
+    result = subprocess.run([BASH, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert "install directory" in result.stderr
+    assert "unexpected-service-cleanup" not in result.stderr
+    assert (tmp_path / "home").is_dir()
+
+
+@pytest.mark.parametrize("directory", ["$HOME", "$PWD/real-home", ".", "$PWD/alias-home"])
+def test_uninstall_refuses_physical_and_symlinked_home(tmp_path, directory):
+    if not BASH:
+        pytest.skip("bash is not installed")
+    installer = shlex.quote((ROOT / "install/uninstall.sh").as_posix())
+    # nativestrict prevents Git Bash from emulating a symlink by copying its target.
+    script = (
+        'export MSYS=winsymlinks:nativestrict; mkdir real-home; '
+        'ln -s real-home logical-home && ln -s real-home alias-home || exit 77; '
+        '[[ -L logical-home && -L alias-home ]] || exit 77; '
+        'export HOME="$PWD/logical-home"; '
+        'systemctl() { echo unexpected-service-cleanup >&2; return 99; }; export -f systemctl; '
+    )
+    if directory == ".":
+        script += 'cd real-home; '
+    script += f'{shlex.quote(BASH)} {installer} --install-dir "{directory}" --remove-files'
+    result = subprocess.run([BASH, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    if result.returncode == 77:
+        pytest.skip("native directory symlinks are unavailable")
+    assert result.returncode != 0 and "refusing unsafe install directory" in result.stderr
+    assert "unexpected-service-cleanup" not in result.stderr
+    assert (tmp_path / "real-home").is_dir()
+
+
+@pytest.mark.parametrize("physical", [False, True])
+def test_uninstall_removes_install_symlink_without_deleting_target(tmp_path, physical):
+    if not BASH:
+        pytest.skip("bash is not installed")
+    installer = shlex.quote((ROOT / "install/uninstall.sh").as_posix())
+    script = (
+        'export MSYS=winsymlinks:nativestrict; mkdir home real-install; '
+        'echo keep > real-install/models; ln -s real-install runtime || exit 77; '
+        '[[ -L runtime ]] || exit 77; export HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/home/config"; '
+        'uname() { echo Linux; }; systemctl() { return 0; }; export -f uname systemctl; '
+        + ('set -o physical; export SHELLOPTS; ' if physical else '')
+        + f'{shlex.quote(BASH)} {installer} --install-dir ./runtime --remove-files'
+    )
+    result = subprocess.run([BASH, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    if result.returncode == 77:
+        pytest.skip("native directory symlinks are unavailable")
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "runtime").exists()
+    assert (tmp_path / "real-install/models").read_text().strip() == "keep"

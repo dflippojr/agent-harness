@@ -29,10 +29,11 @@ def write_atomic(path: Path, text: str, *, private: bool = False, prepare=None) 
         raise
 
 
-def owner_only_acl(path: Path) -> None:
+def owner_only_acl(path: Path, *, inherit: bool = False) -> None:
     """On Windows, replace `path`'s DACL with one protected entry: full control for this process's user. Mode bits
     (0o600) mean nothing there, and a file otherwise inherits its folder's ACL, which on a non-system drive often lets
-    every signed-in user read it. Elsewhere it does nothing: `private` already made the file owner-only."""
+    every signed-in user read it. `inherit` also protects a directory's future children. Elsewhere it does nothing:
+    `private` already made the file owner-only."""
     if sys.platform != "win32":
         return
     import ctypes
@@ -71,7 +72,8 @@ def owner_only_acl(path: Path) -> None:
     finally:
         kernel32.CloseHandle(token)
     descriptor = ctypes.c_void_p()
-    check(advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(f"D:P(A;;FA;;;{sid})", 1,
+    ace_flags = "OICI" if inherit else ""
+    check(advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(f"D:P(A;{ace_flags};FA;;;{sid})", 1,
                                                                        ctypes.byref(descriptor), None))
     try:
         # DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION: nothing inherited from the folder
