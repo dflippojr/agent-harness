@@ -120,7 +120,10 @@ class Service:
             path.parent.mkdir(parents=True, exist_ok=True)
             def escape(value):
                 return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("\n", "\\n")
-            executable = " ".join('"' + escape(a).replace("$", "$$") + '"' for a in argv)
+            # systemd resolves the executable before expanding argument variables.
+            words = ['"' + escape(argv[0]) + '"']
+            words.extend('"' + escape(a).replace("$", "$$") + '"' for a in argv[1:])
+            executable = " ".join(words)
             # WorkingDirectory is a raw path, unlike ExecStart's quoted arguments.
             directory = str(workdir).replace("%", "%%")
             if "\n" in directory or "\r" in directory:

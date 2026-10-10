@@ -648,3 +648,29 @@ def test_installer_lifecycle_dispatches_to_claim_api(tmp_path, monkeypatch, phas
         hub.approve_and_wait(claim, hub.cli_env(args.config_dir, 8199))
         assert requests == [("POST", "/hub-claim/requests/pr-stub/approve"), ("GET", "/hub-claim")]
         assert not claim.exists()
+
+
+@pytest.mark.parametrize("name", ["$HOME", "$" + "{HOME}", "$$cash"])
+def test_systemd_executable_keeps_literal_dollar_path(tmp_path, monkeypatch, name):
+    import shlex
+
+    workdir = tmp_path / ("Hub path with spaces%" + name)
+    workdir.mkdir()
+    python = workdir / "python"
+    python.write_text("#!/bin/sh\nprintf 'stub Hub starts\\n'\n")
+    python.chmod(0o755)
+    monkeypatch.setattr(hub.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(hub, "command", lambda *_args, **_kwargs: None)
+    service = hub.Service("a" * 32)
+    service.start([str(python), "--state-dir", str(workdir)], workdir, workdir / "hub.log")
+    unit = service.definition_path.read_text()
+    line = next(line.removeprefix("ExecStart=") for line in unit.splitlines() if line.startswith("ExecStart="))
+    words = shlex.split(line)
+    # Resolve the executable after unit specifiers, before argument-variable expansion.
+    executable = Path(words[0].replace("%%", "%"))
+    assert executable == python and executable.is_file()
+    assert words[2].replace("%%", "%").replace("$$", "$") == str(workdir)
+    if os.name != "nt":
+        result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0 and result.stdout == "stub Hub starts\n"
