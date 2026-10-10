@@ -101,8 +101,7 @@ export function mountChrome({ els, browser, session }) {
   // A section's own screen (no Back) gets the large title; until a page knows its title (a chat still loading) the
   // section's name stands in.
   function setHeader(feature, pageTitle = "", { page = false } = {}) {
-    listNew?.remove();
-    listNew = null;
+    hideListAction();
     const top = $back.hidden;
     const title = pageTitle || (top ? SECTION_TITLES[feature] || "" : "");
     $title.textContent = title;
@@ -113,14 +112,20 @@ export function mountChrome({ els, browser, session }) {
     repaintBar();
   }
 
-  function showFab(href, label) {
+  function hideListAction() {
+    listNew?.remove();
+    listNew = null;
+    $fabHost.hidden = true;
+  }
+
+  function showListAction(href, label) {
+    hideListAction();
     if (isGuest()) return;
     $fab.href = href;
     $fab.textContent = label;
     $fabHost.hidden = false;
     // The list's New action shares its route and label with the phone FAB. CSS selects the presentation at 768 px,
-    // so resizing needs no route refresh. setHeader removes it when leaving a list (including role changes).
-    listNew?.remove();
+    // so resizing needs no route refresh. Route teardown clears both presentations, including entry into sign-in.
     listNew = document.createElement("a");
     listNew.className = "btn primary list-new";
     listNew.href = href;
@@ -200,5 +205,5 @@ export function mountChrome({ els, browser, session }) {
   window.addEventListener("pageshow", repaintPage);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintPage(); });
 
-  return { layoutBar, repaintBar, repaintPage, setHeader, showFab, toast, setConnState, onConnState, paintGuestChrome, watchNeedsYou };
+  return { layoutBar, repaintBar, repaintPage, setHeader, showListAction, hideListAction, toast, setConnState, onConnState, paintGuestChrome, watchNeedsYou };
 }

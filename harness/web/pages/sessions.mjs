@@ -13,7 +13,7 @@ export { FAILED_NEEDS_YOU_SECONDS, SESSION_GROUPS, sessionGroup, groupSessions }
 const LAPTOP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M2 19h20"/></svg>';
 const CHEVRON_SVG = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
 
-export function mountSessions({ $app, h, fill, append, api, setHeader, showFab, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
+export function mountSessions({ $app, h, fill, append, api, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, openStream, ownerSurface, agentHarnessWeb, browser }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, localStorage } = browser;
@@ -36,7 +36,7 @@ async function viewList() {
   // #510: a failed refresh says so (when the list last updated, and why) instead of silently keeping the old list.
   const stale = staleNote({ make: h, place: (el) => targetSwitch.after(el), onRetry: () => refreshNow() });
   append($app, h("div", { class: "search-wrap" }, search), targetSwitch, queueNote, results, list);
-  showFab("#/new", "+ New task");
+  showListAction("#/new", "+ New task");
 
   let sessions = [];
   let targets = [];

@@ -509,4 +509,20 @@ await waitFor(() => loc.hash === "#/profile", "guest blocked from actions");
 await go("#/profile/remote-control");
 await waitFor(() => loc.hash === "#/profile", "guest remote-control bookmark stays off actions");
 
+// Expired identity enters sign-in directly, without setHeader. Teardown must clear both New presentations.
+for (const [role, hash, href, label] of [["member", "#/agents", "#/new", "+ New task"],
+  ["owner", "#/jobs", "#/jobs/new", "+ New job"]]) {
+  meRole = role;
+  await go(hash);
+  assertNewAction(href, label);
+  meRole = "signin";
+  await go("#/profile");
+  await waitFor(() => byId.title.textContent === "Sign in", "expired login sign-in");
+  assertNewAction();
+  if (!byId["fab-host"].hidden) throw new Error("sign-in must clear the FAB");
+}
+meRole = "owner";
+await go("#/agents");
+assertNewAction("#/new", "+ New task");
+
 console.log("ok");
