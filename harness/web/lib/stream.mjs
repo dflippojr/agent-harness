@@ -39,6 +39,12 @@ export const OFFLINE_AFTER = 4;
 export const GRACE_AFTER_MS = 5000;
 
 export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSurface, isGuest, browser }) {
+  const daemonListeners = new Set();
+  const notifyDaemonChange = () => { for (const fn of daemonListeners) fn(); };
+  const onDaemonChange = (fn) => {
+    daemonListeners.add(fn);
+    return () => daemonListeners.delete(fn);
+  };
   // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
   // Connection state ("live", "reconnecting", "offline") goes to `onState`; the header chip follows it only for the stream
   // opened with `indicate`, so page streams can close without a false offline state.
@@ -180,11 +186,14 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
   let daemon = null;
   function watchDaemonConnection() {
     if (daemon) { daemon.nudge(); return; }
-    daemon = openStream(() => agentHarnessWeb.url("/events", ownerSurface()), {}, {
+    const handlers = Object.fromEntries(["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]
+      .map((type) => [type, notifyDaemonChange]));
+    daemon = openStream(() => agentHarnessWeb.url("/events", ownerSurface()), handlers, {
       authorized: !(isGuest() && !agentHarnessWeb.token),
       indicate: true,
+      onState: (state) => { if (state === "live") notifyDaemonChange(); },
     });
   }
 
-  return { openStream, watchDaemonConnection };
+  return { openStream, watchDaemonConnection, onDaemonChange };
 }

@@ -2,7 +2,7 @@
 // /chats/options (or /chats/<id>) fetch resolves, so the route feels instant (#152).
 import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
-import { El, Emitter, Node, createDocument, storage } from "./web_stub_dom.mjs";
+import { El, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
 const { byId, make, doc } = createDocument();
 doc.addEventListener = () => {};
@@ -56,7 +56,7 @@ Object.assign(win, {
   innerHeight: 800,
   scrollY: 0,
   caches: undefined,
-  EventSource: class { constructor() { this.readyState = 1; } close() {} },
+  EventSource: fakeEventSource(),
   fetch: fakeFetch,
   requestAnimationFrame: (fn) => setTimeout(fn, 0),
   cancelAnimationFrame: (id) => clearTimeout(id),

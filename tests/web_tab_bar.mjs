@@ -22,9 +22,12 @@ for (const tab of ["Chat", "Agents", "Jobs", "Images", "Profile"]) {
   assert(new RegExp(`<span>${tab}</span>`).test(indexHtml), `tab bar is missing ${tab}`);
 }
 assert(/id="settings-btn"[^>]*aria-label="Settings"/.test(indexHtml), "the header has a labelled Settings gear");
+assert(/id="agents-needs-you"[^>]*role="status"/.test(indexHtml), "the live count exposes its spoken status label");
 assert(/#tab-bar \{[^}]*env\(safe-area-inset-bottom/.test(cssSrc), "the tab bar pads for the home indicator in standalone mode");
 assert(/--tabbar-h: (4[4-9]|[5-9]\d)px/.test(cssSrc), "tabs are at least 44 px tall");
-assert(/@media \(min-width: 960px\)[\s\S]*?#tab-bar \{[^}]*width: var\(--rail-w\)/.test(cssSrc), "wide screens get a left rail");
+assert(/@media \(min-width: 768px\)[\s\S]*?#tab-bar \{[^}]*width: var\(--rail-w\)/.test(cssSrc), "the desktop rail starts at 768 px");
+assert(/body\.has-tabs \.composer, body\.has-tabs \.approval-sheet \{ left: var\(--rail-w\)/.test(cssSrc),
+  "fixed session controls clear the rail at narrow desktop widths");
 assert(/@media \(max-width: 420px\)/.test(cssSrc) && /#bar \{ gap: 6px; \}/.test(cssSrc),
   "phone-width bar gap stays tight so the gear does not crowd the title");
 
@@ -64,6 +67,9 @@ const jsonResp = (body, status = 200) => ({
 });
 
 let meRole = "owner";
+let sessionPayload = [];
+let holdSessions = null;
+let sessionsOffline = false;
 const imagePayload = {
   images: [],
   status: {
@@ -96,7 +102,7 @@ const fakeFetch = async (url) => {
   }
   if (path === "/me") return jsonResp({ role: meRole, name: "Owner", login: "owner", public_url: "http://localhost" });
   if (path === "/profile") return jsonResp({ emoji: "🙂", choices: ["🙂"] });
-  if (path === "/sessions" || path.startsWith("/sessions?")) return jsonResp([]);
+  if (path === "/sessions" || path.startsWith("/sessions?")) return holdSessions ? await holdSessions : sessionsOffline ? jsonResp({error:"offline"}, 503) : jsonResp(sessionPayload);
   if (path === "/sessions/sess1") return jsonResp(sessionDetail);
   if (path === "/queue") return jsonResp([]);
   if (path === "/gpu") return jsonResp({ manual: false, state: "clear" });
@@ -117,7 +123,8 @@ const fakeFetch = async (url) => {
   return jsonResp({});
 };
 
-const FakeEventSource = fakeEventSource();
+const sources = [];
+const FakeEventSource = fakeEventSource(sources);
 
 const win = new Emitter();
 Object.assign(win, {
@@ -295,4 +302,76 @@ await waitFor(() => /Jobs/.test(byId.title.textContent), "guest jobs");
 assertNav("#/jobs (guest)", "jobs");
 assert(tab("chat").hidden && !tab("jobs").hidden, "guests look around Jobs but cannot chat");
 
+// Desktop keeps the same sections on detail routes, including the approval deep link.
+meRole = "owner";
+const count = byId["agents-needs-you"];
+const now = Date.now() / 1000;
+sessionPayload = [
+  { id: "a", status: "waiting_approval", updated_at: now },
+  { id: "b", status: "running", pending_approvals: [{ id: "approval" }], updated_at: now },
+  { id: "c", status: "failed", updated_at: now - 60 },
+  { id: "d", status: "failed", updated_at: now - 86401 },
+  { id: "e", status: "done", updated_at: now },
+];
+await go("#/s/sess1");
+win.innerWidth = 767;
+win.dispatchEvent({ type: "resize" });
+assertNav("767 px session", null);
+for (const width of [768, 959, 1024, 1280, 1440]) {
+  win.innerWidth = width;
+  win.dispatchEvent({ type: "resize" });
+  assertNav(width + " px session", "agents", { settings: false });
+}
+await waitFor(() => !count.hidden && count.textContent === "3", "Needs you includes approvals and fresh failures");
+assert(count.attributes["aria-label"] === "3 agents need you", "count has a spoken label");
+for (const [route, section] of [["#/new", "agents"], ["#/jobs/job1", "jobs"], ["#/jobs/new", "jobs"],
+  ["#/images/img1", "images"], ["#/s/sess1/approval/a", "agents"], ["#/profile/appearance", "profile"]]) {
+  await go(route);
+  assertNav(route + " desktop", section, { settings: false });
+}
+const daemon = sources[0];
+sessionPayload = [{ id: "a", status: "waiting_approval", updated_at: now }];
+daemon.emit("approval_decided", {});
+await waitFor(() => count.textContent === "1", "badge refresh on daemon event while off the Agents page");
+assert(count.attributes["aria-label"] === "1 agent needs you", "singular spoken label");
+sessionPayload = [];
+daemon.emit("run_finished", {});
+await waitFor(() => count.hidden, "zero count hidden");
+sessionPayload = [{ id: "a", status: "waiting_approval", updated_at: now }];
+daemon.emit("approval_requested", {});
+await waitFor(() => !count.hidden, "count restored before failed refresh");
+sessionsOffline = true;
+daemon.emit("status", {});
+await sleep(350);
+assert(count.hidden, "an unavailable count stays hidden");
+sessionsOffline = false;
+sessionPayload = [{ id: "a", status: "waiting_approval", updated_at: now }];
+doc.dispatchEvent({ type: "visibilitychange" });
+await waitFor(() => !count.hidden, "foreground refresh recovers the count");
+
+// A response from a previous desktop/identity scope cannot repaint a phone or sign-in screen.
+let releaseSessions;
+holdSessions = new Promise((resolve) => { releaseSessions = resolve; });
+doc.dispatchEvent({ type: "visibilitychange" });
+await sleep(20);
+win.innerWidth = 390;
+win.dispatchEvent({ type: "resize" });
+releaseSessions(jsonResp(sessionPayload));
+holdSessions = null;
+await sleep(20);
+assert(count.hidden, "late desktop response is discarded after resize");
+await go("#/s/sess1");
+assertNav("session after resizing to phone", null);
+meRole = "member";
+win.innerWidth = 1024;
+await go("#/s/sess1");
+assertNav("member desktop session", "agents", { settings: false });
+assert(tab("chat").hidden && tab("jobs").hidden && tab("images").hidden, "desktop preserves member restrictions");
+meRole = "signin";
+await go("#/agents");
+assertNav("desktop sign-in", null);
+win.innerWidth = 1440;
+win.dispatchEvent({ type: "resize" });
+assertNav("resized sign-in", null);
+assert(count.hidden, "sign-in stops and clears the count");
 console.log("ok");
