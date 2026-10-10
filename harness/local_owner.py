@@ -23,6 +23,9 @@ API_PREFIXES = ("/api/v1", "/api/admin/v1")  # routes that check a bearer token'
 # Zero-touch pairing (#519): an App has no token yet; the owner's approval and its PKCE verifier decide.
 PAIRING_REQUESTS = re.compile(r"/api/v1/pair/requests(/[^/]+/(claim|token))?")
 REFUSED = "requests from this machine need the local owner token (see docs/INSTALL.md)"
+# The host-only Hub approval secret (#543, harness/hub_claim.py): new at every daemon start, read by `harness hub`.
+HUB_SECRET_FILE = "hub-approval.secret"
+HUB_HEADER = "X-Agent-Harness-Hub-Approval"
 
 
 def token_path(data_dir: Path | str) -> Path:
@@ -46,6 +49,23 @@ def ensure_token(data_dir: Path | str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_atomic(path, token + "\n", private=True)
     return token
+
+
+def read_hub_secret(data_dir: Path | str) -> str:
+    try:
+        return (Path(data_dir) / HUB_SECRET_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def rotate_hub_secret(data_dir: Path | str) -> str:
+    """A new host-only Hub approval secret, written owner-only. Called once per daemon start; the old one stops
+    working."""
+    secret = secrets.token_urlsafe(32)
+    path = Path(data_dir) / HUB_SECRET_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(path, secret + "\n", private=True)
+    return secret
 
 
 def _bearer(request) -> str:

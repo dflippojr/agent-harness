@@ -44,7 +44,9 @@ CREDENTIAL_REASONS = frozenset({"invalid_request", "not_found", "already_revoked
                                 # pairing requests (#519)
                                 "rate_limited", "too_many_pending", "match_mismatch", "acknowledgement_required",
                                 "invalid_verifier", "not_claimable", "not_approvable", "request_used",
-                                "request_expired", "request_denied", "native_only", "expired"})
+                                "request_expired", "request_denied", "native_only", "expired",
+                                # the exclusive Hub claim (#543)
+                                "host_proof_required", "hub_key", "hub_claimed", "no_hub"})
 KEY_KINDS = frozenset({"owner", "app", "device", "web", "member"})
 POLICIES = frozenset({"subscription", "api_key", "subscription_then_api_key"})
 MEMBER_KEY_OUTCOMES = frozenset({"ok", "rejected", "unavailable", "noop"})
@@ -68,6 +70,14 @@ METADATA_ALLOWLIST.update({
     "pairing_request.deny": _CRED_COMMON,
     "pairing_request.redeem": _CRED_COMMON | {"kind", "scopes", "catalog_app_id", "browser"},
     "pairing_request.expire": _CRED_COMMON,
+    # Exclusive Hub claim (#543): request and key ids and the browser/native flag only; never the secret or a code.
+    "hub.claim.request": _CRED_COMMON | {"scopes", "catalog_app_id", "armed", "browser"},
+    "hub.claim.approve": _CRED_COMMON,
+    "hub.claim.deny": _CRED_COMMON,
+    "hub.claim.redeem": _CRED_COMMON | {"catalog_app_id", "browser"},
+    "hub.claim.refused": _CRED_COMMON | {"browser"},
+    "hub.claim.expire": _CRED_COMMON,
+    "hub.release": _CRED_COMMON,
     "runner_pairing.create": _CRED_COMMON,
     "runner_pairing.revoke": _CRED_COMMON,
     "runner_pairing.redeem": _CRED_COMMON | {"kind"},
@@ -98,7 +108,10 @@ SYSTEM = AuditContext("system", "system", "", "system")
 
 def owner_context(key: dict | None, source: str = "admin_api") -> AuditContext:
     """The owner behind an authenticated admin request: a validated owner bearer key (which wins over any
-    ambient identity) or the ambient localhost/Tailscale owner. `key` is the row `require_admin` returned."""
+    ambient identity) or the ambient localhost/Tailscale owner. `key` is the row `require_admin` returned. The Hub's
+    key (#543) acts for the owner but is attributed as `hub`."""
+    if key is not None and key.get("role") == "hub":
+        return AuditContext(OWNER_USER_ID, "hub", str(key.get("id") or ""), source)
     if key is not None:
         return AuditContext(OWNER_USER_ID, "owner_key", str(key.get("id") or ""), source)
     return AuditContext(OWNER_USER_ID, "owner", "", source)

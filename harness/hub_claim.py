@@ -18,43 +18,19 @@ The secret is never logged, audited or returned by any route; audit rows carry i
 from __future__ import annotations
 
 import hmac
-import secrets
-from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import audit_context, credential_audit
-from .atomic_io import write_atomic
+from .local_owner import HUB_HEADER as HEADER
 from .manager import HarnessError
 
-SECRET_FILE = "hub-approval.secret"
-HEADER = "X-Agent-Harness-Hub-Approval"
 ROLE = "hub"
 RELEASE_COMMAND = "harness hub release --confirm"
 HOST_ONLY = ("approve, deny and release of a Hub claim run on the daemon host: use `harness hub approve`, "
              "`harness hub deny` or `harness hub release --confirm` there")
-
-
-def secret_path(data_dir: Path | str) -> Path:
-    return Path(data_dir) / SECRET_FILE
-
-
-def read_secret(data_dir: Path | str) -> str:
-    try:
-        return secret_path(data_dir).read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
-def rotate_secret(data_dir: Path | str) -> str:
-    """A new host-only approval secret, written owner-only. Called once per daemon start; the old one stops working."""
-    secret = secrets.token_urlsafe(32)
-    path = secret_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_atomic(path, secret + "\n", private=True)
-    return secret
 
 
 def is_hub_key(key: dict | None) -> bool:
@@ -112,7 +88,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
             db, now = m.db.main, pr.clock()
             pr.sweep(db, now)
             row = db.get_pairing_request(rid)
-            refusal = None
+            refusal: tuple[int, str, str] | None = None
             if row is None or row["kind"] != ROLE:
                 refusal = (404, "no Hub claim request has that id", "not_found")
             elif row["state"] not in states:

@@ -41,7 +41,7 @@ NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.23"
+API_VERSION = "1.24"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
@@ -671,6 +671,7 @@ async def api_root(request: Request):
                 **m.modules.features(),
                 "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
                 "browser_pairing": True, "pairing_requests": True,
+                "hub_claim": True, "hub_claimed": m.db.main.hub_claim() is not None,
                 "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
             **await m.modules.app_root()}
 

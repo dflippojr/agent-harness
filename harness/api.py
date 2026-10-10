@@ -1177,8 +1177,12 @@ async def revoke_key(kid: str, request: Request):
     m = mgr(request)
     ctx = credential_audit.request_context(request, m)
 
-    def commit() -> bool:
+    def commit() -> bool | None:
         before = m.db.main.get_api_key(kid)
+        if before is not None and before.get("role") == "hub" and before.get("revoked_at") is None:
+            credential_audit.record(m.db, ctx, "key.revoke", kid, "denied", "api_key",
+                                    {"key_id": kid, "kind": before["kind"], "reason": "hub_key"})
+            return None
         if m.db.main.revoke_api_key(kid):
             credential_audit.record(m.db, ctx, "key.revoke", kid, "ok", "api_key",
                                     {"key_id": kid, "kind": before["kind"] if before else None})
@@ -1189,7 +1193,12 @@ async def revoke_key(kid: str, request: Request):
                                 {"reason": "already_revoked" if known else "not_found",
                                  **({"key_id": kid, "kind": before["kind"]} if known else {})})
         return False
-    if not await m.db.main.awrite(commit):
+    revoked = await m.db.main.awrite(commit)
+    if revoked is None:
+        from .hub_claim import RELEASE_COMMAND
+        raise HarnessError(409, f"this is the Hub's key; release the Hub on the daemon host with `{RELEASE_COMMAND}`",
+                           code="hub_key")
+    if not revoked:
         raise HarnessError(404, "no such active key")
     return Response(status_code=204)
 

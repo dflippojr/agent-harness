@@ -162,6 +162,8 @@ class Manager:
         self.db = db if isinstance(db, SessionStores) else SessionStores(db, Path(cfg.data_dir) / "apps")
         require_owner_allowlist(cfg, self.db.member_count())
         self.local_owner_token = local_owner.ensure_token(cfg.data_dir)
+        # Host-only proof for approving or releasing a Hub claim (#543): new at every start, never logged or served.
+        self.hub_approval_secret = local_owner.rotate_hub_secret(cfg.data_dir)
         self.tailscale_peer = tailscale_peer.default_check()
         self.bus = EventBus(self.db)
         self.scheduler = GpuScheduler(self._queue_changed, eligible=self._scheduler_eligible)

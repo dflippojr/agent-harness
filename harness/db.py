@@ -1576,8 +1576,8 @@ class Database:
         """Mint the request's `ha-` App key and mark it redeemed, if it is still approved. Returns (key row, secret)."""
         import hashlib
         with self._tx():
-            req = self.conn.execute("SELECT * FROM pairing_requests WHERE id = ? AND state = 'approved' "
-                                    "AND expires_at > ?", (rid, now)).fetchone()
+            req = self.conn.execute("SELECT * FROM pairing_requests WHERE id = ? AND kind = 'app' "
+                                    "AND state = 'approved' AND expires_at > ?", (rid, now)).fetchone()
             if req is None:
                 return None, ""
             secret = "ha-" + secrets.token_urlsafe(32)

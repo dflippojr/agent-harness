@@ -15,6 +15,9 @@ One request model for browser and native Apps (docs/app-api.md#zero-touch-pairin
    (`POST /api/v1/pair/requests/{id}/claim`). A browser claim must come from the armed origin and is approved at
    once; a native claim gets a match code the owner confirms (`/confirm`) before the token is released.
 
+A Hub claim (#543, harness/hub_claim.py) is the same request with `kind: "hub"`: it asks for no scopes, is refused
+while a Hub is recorded, is approved or denied only on the daemon host, and redeems to the one `hub` key.
+
 A request has 10 minutes to be approved (or claimed, or confirmed) and 5 minutes after approval to be redeemed. A
 redeemed, denied or expired request is never reused. Rows keep the hash of the challenge, never a token or the
 verifier, and owner responses carry request metadata only.
@@ -71,7 +74,11 @@ DISCLOSURES = {
                       "every change.",
     "homelab": "This app's tasks can **read your homelab services' logs, config and metrics** and ask to restart or "
                "rebuild them.",
+    # A Hub claim's one scope (#543): never an App's.
+    "admin": "This is a **Hub claim**: the app becomes this harness's one admin console, with every owner power except "
+             "approving, denying or releasing a Hub. Approve it only on the daemon host with `harness hub approve`.",
 }
+HUB = "hub"
 
 # Read on every decision, so a test can move time forward.
 clock = time.time
@@ -79,6 +86,8 @@ clock = time.time
 
 class CreatePairingRequest(BaseModel):
     name: str = Field(min_length=1, max_length=60)
+    kind: str = Field(default="app", description='"app", or "hub" for an exclusive Hub claim (#543); a Hub claim '
+                                                 'takes no scopes')
     scopes: list[str] = Field(default_factory=lambda: ["sessions"])
     catalog_app_id: str = Field(default="", description="Optional catalog app id (a label, never part of a token)")
     code_challenge: str = Field(description="base64url(sha256(code_verifier)), unpadded (PKCE S256)")
@@ -119,7 +128,7 @@ class ConfirmPairingRequest(BaseModel):
 def disclosures(scopes: list[str], cfg=None) -> list[dict]:
     from .apps import all_scopes
     known = all_scopes(cfg)
-    return [{"scope": s, "tier": "elevated" if s in ELEVATED else "standard",
+    return [{"scope": s, "tier": "elevated" if s in ELEVATED or s == "admin" else "standard",
              "text": DISCLOSURES.get(s) or known.get(s, "")} for s in scopes]
 
 
@@ -151,7 +160,7 @@ def owner_view(row: dict, cfg=None) -> dict:
             "needs": {PENDING: "approve", ARMED: "claim", CLAIMED: "confirm", APPROVED: "redeem"}.get(state, ""),
             "created_at": row["created_at"], "expires_at": row["expires_at"], "approved_at": row["approved_at"],
             "finished_at": row["finished_at"], "key_id": row["key_id"],
-            "elevated": [s for s in scopes if s in ELEVATED], "disclosures": disclosures(scopes, cfg)}
+            "elevated": [s for s in scopes if s in ELEVATED or s == "admin"], "disclosures": disclosures(scopes, cfg)}
 
 
 def app_view(row: dict) -> dict:
@@ -163,7 +172,8 @@ def app_view(row: dict) -> dict:
 def sweep(db, now: float) -> None:
     """Expire what ran out of time, one `pairing_request.expire` row each. Runs inside the caller's write."""
     for row in db.expire_pairing_requests(now, ACTIVE, KEEP_SECONDS):
-        credential_audit.record(db, audit_context.SYSTEM, "pairing_request.expire", row["id"], "ok",
+        action = "hub.claim.expire" if row["kind"] == HUB else "pairing_request.expire"
+        credential_audit.record(db, audit_context.SYSTEM, action, row["id"], "ok",
                                 "pairing_request", {"request_id": row["id"], "reason": "expired"})
 
 
@@ -231,33 +241,43 @@ def register_app(app: FastAPI) -> None:
         origin = _request_origin(request)
         source = _caller(request)
         unknown = credential_audit.unknown_context()
+        hub = body.kind == HUB
+        action = "hub.claim.request" if hub else "pairing_request.create"
         try:
             name = body.name.strip()
             if not name:
                 raise ValueError("name is required")
-            scopes = _scopes(body.scopes, m.cfg)
+            if body.kind not in ("app", HUB):
+                raise ValueError('kind must be "app" or "hub"')
+            if hub and "scopes" in body.model_fields_set:
+                raise ValueError("a Hub claim takes no scopes: the Hub key's powers are fixed")
+            scopes = "admin" if hub else _scopes(body.scopes, m.cfg)
             catalog_app_id = catalog_ids.normalize(body.catalog_app_id)
             challenge = _challenge(body.code_challenge, body.code_challenge_method)
         except ValueError as e:
-            await m.db.main.awrite(credential_audit.record, m.db, unknown, "pairing_request.create", "", "denied",
+            await m.db.main.awrite(credential_audit.record, m.db, unknown, action, "", "denied",
                                    "pairing_request", {"reason": "invalid_request"})
             raise HarnessError(400, str(e))
 
         def commit():
             db, now = m.db.main, clock()
             sweep(db, now)
+            if hub and db.hub_claim() is not None:  # exclusive (#543): no API path replaces the Hub
+                credential_audit.record(db, unknown, "hub.claim.refused", "", "denied", "pairing_request",
+                                        {"reason": "hub_claimed", "browser": bool(origin)})
+                return _refuse(409, "this harness already has a Hub; the owner releases it on the daemon host with "
+                                    "`harness hub release --confirm`", "hub_claimed")
             recent, mine, total = db.pairing_request_load(source, now - SOURCE_RATE[1], (PENDING,))
             if recent >= SOURCE_RATE[0] or mine >= SOURCE_PENDING_CAP or total >= PENDING_CAP:
                 reason = "rate_limited" if recent >= SOURCE_RATE[0] else "too_many_pending"
-                credential_audit.record(db, unknown, "pairing_request.create", "", "denied", "pairing_request",
-                                        {"reason": reason})
+                credential_audit.record(db, unknown, action, "", "denied", "pairing_request", {"reason": reason})
                 return _refuse(429, "too many pairing requests; wait for the owner or try again later", reason)
-            row = {"id": "pr-" + secrets.token_hex(12), "kind": "app", "name": name, "scopes": scopes,
+            row = {"id": "pr-" + secrets.token_hex(12), "kind": body.kind, "name": name, "scopes": scopes,
                    "catalog_app_id": catalog_app_id, "origin": origin, "source": source, "challenge_hash": challenge,
                    "match_code": _match_code(), "state": PENDING, "armed": 0, "created_at": now,
                    "expires_at": now + APPROVE_TTL_SECONDS, "approved_at": None, "finished_at": None, "key_id": ""}
             db.insert_pairing_request(row)
-            credential_audit.record(db, unknown, "pairing_request.create", row["id"], "ok", "pairing_request",
+            credential_audit.record(db, unknown, action, row["id"], "ok", "pairing_request",
                                     {"request_id": row["id"], "scopes": scopes.split(), "catalog_app_id": catalog_app_id,
                                      "browser": bool(origin), "armed": False})
             return {"row": row}
@@ -325,13 +345,17 @@ def register_app(app: FastAPI) -> None:
             db, now = m.db.main, clock()
             sweep(db, now)
             row = db.get_pairing_request(rid)
+            hub = row is not None and row["kind"] == HUB
             refusal = _redeem_refusal(row, origin, verifier)
             if refusal:
                 status, detail, reason = refusal
                 if status != 409:  # waiting is not a refusal
-                    credential_audit.record(db, credential_audit.unknown_context(), "pairing_request.redeem", "",
+                    credential_audit.record(db, credential_audit.unknown_context(),
+                                            "hub.claim.redeem" if hub else "pairing_request.redeem", "",
                                             "denied", "pairing_request", {"reason": reason})
                 return _refuse(status, detail, "pairing_pending" if status == 409 else "")
+            if hub:
+                return _redeem_hub(db, row, now)
             key, secret = db.redeem_pairing_request(rid, now)
             if key is None:
                 return _refuse(400, "this pairing request was already redeemed")
@@ -345,6 +369,23 @@ def register_app(app: FastAPI) -> None:
         _raise_refusal(out)
         return JSONResponse({"token": out["secret"], "app": out["key"], "api_version": API_VERSION},
                             status_code=201, headers=NO_STORE)
+
+
+def _redeem_hub(db, row: dict, now: float) -> dict:
+    """Mint the one Hub key (#543), or refuse when a Hub was recorded since this claim was approved."""
+    key, secret, error = db.redeem_hub_claim(row["id"], now)
+    if error == "claimed":
+        db.update_pairing_request(row["id"], (APPROVED,), state=DENIED, finished_at=now)
+        credential_audit.record(db, credential_audit.unknown_context(), "hub.claim.refused", row["id"], "denied",
+                                "pairing_request", {"request_id": row["id"], "reason": "hub_claimed"})
+        return _refuse(409, "this harness already has a Hub", "hub_claimed")
+    if key is None:
+        return _refuse(400, "this pairing request was already redeemed")
+    ctx = audit_context.AuditContext(key["id"], HUB, key["id"], "app_api")
+    credential_audit.record(db, ctx, "hub.claim.redeem", key["id"], "ok", "api_key",
+                            {"key_id": key["id"], "request_id": row["id"], "catalog_app_id": key["catalog_app_id"],
+                             "browser": bool(row["origin"])})
+    return {"key": key, "secret": secret}
 
 
 def _redeem_refusal(row: dict | None, origin: str, verifier: str) -> tuple[int, str, str] | None:
@@ -388,6 +429,9 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
             refusal = None
             if row is None:
                 refusal = (404, "no pairing request has that id", "not_found")
+            elif row["kind"] == HUB:  # a Hub claim is decided on the daemon host only (#543)
+                from .hub_claim import HOST_ONLY
+                refusal = (403, HOST_ONLY, "host_proof_required")
             elif row["state"] not in states:
                 refusal = (409, f"this pairing request is {row['state']}", "not_approvable")
             else:
