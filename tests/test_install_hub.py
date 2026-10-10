@@ -166,6 +166,18 @@ def test_existing_install_not_overwritten(tmp_path, monkeypatch):
         hub.install(options(tmp_path))
 
 
+def test_state_directory_modified_before_acl_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub, "hub_cli", lambda *_: {"claimed": False})
+    def secure(path, *, inherit=False):
+        assert inherit
+        (path / "claim.json").write_text('{"id":"pr-other","match_code":"123456"}')
+    monkeypatch.setattr(hub, "owner_only_acl", secure)
+    monkeypatch.setattr(hub, "start_hub", lambda *_: pytest.fail("must not start or approve an altered directory"))
+    with pytest.raises(ValueError, match="before it could be secured"):
+        hub.install(options(tmp_path))
+    assert not (tmp_path / "hub-install.json").exists()
+
+
 def test_auto_distribution_and_module_validation(tmp_path, monkeypatch):
     monkeypatch.setattr(hub.sys, "stdin", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr(hub.shutil, "which", lambda _: "docker")

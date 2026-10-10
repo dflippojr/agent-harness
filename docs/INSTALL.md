@@ -27,6 +27,7 @@ running interactively with Docker and an image configured. Pip installs into a s
 dependencies intact. Docker uses host networking to reach the loopback daemon; Docker Desktop must have host
 networking enabled. On Unix the container runs as the installing user's UID/GID so its state remains removable.
 The Hub persists its credentials in its own state directory, with no daemon secrets mounted.
+That directory is owner-only (including inherited Windows ACLs) before the Hub starts.
 
 The installer registers a per-user Hub service (systemd, launchd, or a Windows logon task), or a Docker container with
 a restart policy. It shows the Hub's request ID and match code, runs `harness hub approve <request_id> --match <code>`

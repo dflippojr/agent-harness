@@ -18,6 +18,8 @@ import sys
 import time
 import uuid
 
+from .atomic_io import owner_only_acl, write_atomic
+
 DOCKER = "docker"
 SYSTEMCTL = "systemctl"
 LAUNCHCTL = "launchctl"
@@ -229,9 +231,13 @@ def install(args) -> int:
     service_id = uuid.uuid4().hex
     hub_dir = args.install_dir / ("hub-" + service_id)
     hub_dir.mkdir(mode=0o700)
+    owner_only_acl(hub_dir, inherit=True)
+    if any(hub_dir.iterdir()):
+        raise ValueError("Hub state directory was modified before it could be secured")
     claim_file = hub_dir / "claim.json"
     # Record ownership before starting: a failed/partial install remains removable.
-    state.write_text(json.dumps({"id": service_id, "method": method, "port": args.port}) + "\n", encoding="utf-8")
+    write_atomic(state, json.dumps({"id": service_id, "method": method, "port": args.port}) + "\n",
+                 private=True, prepare=owner_only_acl)
     start_hub(args, method, distribution, service_id, hub_dir, claim_file)
     approve_and_wait(claim_file, env)
     return 0
