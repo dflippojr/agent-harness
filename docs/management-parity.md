@@ -219,7 +219,8 @@ Page: `pages/daemon-settings.mjs`.
 | Hub: approve an App's pairing request | POST | `/pairing-requests/{rid}/approve` | `harness pairing-requests approve <rid> --match <code>` |
 | Hub: confirm a native App's claim on an armed slot | POST | `/pairing-requests/{rid}/confirm` | `harness pairing-requests confirm <rid> --match <code>` |
 | Hub: deny or withdraw a pairing request | POST | `/pairing-requests/{rid}/deny` | `harness pairing-requests deny <rid>` |
-| Hub claim: whether a Hub is claimed, its record and open claim requests | GET | `/hub-claim` | `harness hub status` |
+| Hub inventory: modules, paired apps and local unsigned entries | GET | `/hub` | `harness hub status` |
+| Hub claim: whether a Hub is claimed, its record and open claim requests | GET | `/hub-claim` | `harness hub claim-status` |
 | Hub claim: approve on the daemon host (host-only approval secret) | POST | `/hub-claim/requests/{rid}/approve` | `harness hub approve <rid> --match <code>` |
 | Hub claim: deny on the daemon host (host-only approval secret) | POST | `/hub-claim/requests/{rid}/deny` | `harness hub deny <rid>` |
 | Hub claim: release the Hub and revoke its key, on the daemon host | POST | `/hub-claim/release` | `harness hub release --confirm` |

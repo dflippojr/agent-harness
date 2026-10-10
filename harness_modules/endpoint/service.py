@@ -106,7 +106,10 @@ def authenticate(m, request: Request) -> dict | None:
     auth = request.headers.get("authorization", "")
     key = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "").strip()
     row = m.db.api_key_by_secret(key)
-    return row if row and "inference" in (row.get("scopes") or "").split() else None
+    if row is None or "inference" not in (row.get("scopes") or "").split():
+        return None
+    request.state.authenticated_key_id = row["id"]
+    return row
 
 
 def flavor_of(request: Request) -> str:
@@ -234,6 +237,8 @@ async def proxy(m, request: Request, path: str) -> Response:
         body.pop("stream", None)
     stream = bool(body.get("stream"))
     started = time.monotonic()
+    # Accounting already updates last_used_at, including after a streaming response completes.
+    request.state.key_activity_in_endpoint_log = True
     finish = _request_log(m, {"key_id": key["id"], "route": path, "model": model.name,
                               "stream": stream, "status": 0}, started)
 

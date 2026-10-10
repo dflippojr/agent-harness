@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_FILE = "projects.yaml"
 MODULE_NAMES = (
     "local_model", "homelab", "memory_library", "images", "image_edit", "jobs", "gpu_guard", "runners",
-    "remote_control", "web", "search", "endpoint", "notifications", "backup", "skills", "mcp_client",
+    "remote_control", "web", "search", "endpoint", "notifications", "backup", "skills", "mcp_client", "hub",
 )
 # Opt-in even on a full profile: the Qwen-Image-Edit weights are ~20 GB and must not arrive with an ordinary install.
 OPT_IN_MODULES = frozenset({"image_edit", "mcp_client"})
@@ -403,7 +403,13 @@ class ModulesConfig:
     notifications: bool = True
     backup: bool = True
     skills: bool = True
+    hub: bool = True
     mcp_client: bool = False
+
+
+@dataclass
+class HubConfig:
+    enabled: bool = True
 
 
 @dataclass
@@ -490,6 +496,7 @@ class Config:
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     runners: dict[str, RunnerConfig] = field(default_factory=dict)
     gpu_guard: GpuGuardConfig = field(default_factory=GpuGuardConfig)
+    hub: HubConfig = field(default_factory=HubConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     memory_library: MemoryLibraryConfig = field(default_factory=MemoryLibraryConfig)
@@ -857,6 +864,8 @@ def _module_enabled(profile: str, raw_modules: dict, selected, name: str, config
 
 def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) -> dict:
     """Build the per-module config sections, apply module enablement, and derive ModulesConfig."""
+    hub = HubConfig(**(raw.get("hub") or {}))
+    hub.enabled = hub.enabled and selected.hub
     notify = NotifyConfig(**(raw.get("notify") or {}))
     gpu_guard = GpuGuardConfig(**(raw.get("gpu_guard") or {}))
     backup = BackupConfig(**(raw.get("backup") or {}))
@@ -883,6 +892,7 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
     skills.enabled = module_enabled("skills", skills.enabled)
     remote_control.enabled = module_enabled("remote_control", remote_control.enabled)
     modules = ModulesConfig(
+        hub=hub.enabled,
         local_model=selected.local_model,
         homelab=selected.homelab,
         memory_library=memory_library.enabled,
@@ -900,7 +910,7 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
         skills=skills.enabled,
     )
     return {
-        "notify": notify, "gpu_guard": gpu_guard, "backup": backup, "memory_library": memory_library,
+        "hub": hub, "notify": notify, "gpu_guard": gpu_guard, "backup": backup, "memory_library": memory_library,
         "web": web, "endpoint": endpoint, "images": images, "search": search, "jobs": jobs,
         "skills": skills, "remote_control": remote_control, "modules": modules,
     }
@@ -953,6 +963,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         models=models,
         sandbox=SandboxConfig(**(raw.get("sandbox") or {})),
         projects=projects,
+        hub=sections["hub"],
         module_packages=_module_packages(raw.get("module_packages")),
         profile=profile,
         modules=modules,

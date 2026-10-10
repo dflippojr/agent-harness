@@ -191,6 +191,7 @@ class Module:
     # CLI: rows in the harness.cli OPERATIONS format, and group help for their first word.
     cli: tuple[tuple, ...] = ()
     cli_groups: dict[str, str] = field(default_factory=dict)
+    local_cli: Callable[[Any], None] | None = None  # offline parsers with a local_handler(args) default
     # /me and /api/v1/me capabilities: (owner, scopes) -> {name: bool}.
     principal_capabilities: Callable[[bool, frozenset], dict] | None = None
     # `python -m harness.doctor`: (report, cfg) -> None, reporting through report.ok / warn / fail.
@@ -294,6 +295,13 @@ class ModuleRuntime:
         """Extra top-level /api/v1 keys."""
         return {}
 
+    def status(self) -> dict | None:
+        """Optional read-only, secret-free Hub scalars (up to 8 fields, strings <= 200 chars).
+
+        May also be async; Hub probes concurrently with a six-second timeout. No detail by default.
+        """
+        return None
+
     def metrics(self, out, db) -> None:
         """Prometheus lines for /metrics (out.metric(name, type, help, rows))."""
 
@@ -375,6 +383,24 @@ def cli_rows(cfg=None) -> tuple[tuple, ...]:
 def cli_groups(cfg=None) -> dict[str, str]:
     modules = discovered(cfg) if cfg is not None else discover()
     return {group: text for module in modules for group, text in module.cli_groups.items()}
+
+
+def normalize_origin(value: str) -> str:
+    """Canonical browser origin shared with key creation and pairing."""
+    from .apps import normalize_origin as normalize
+    return normalize(value)
+
+
+def normalize_catalog_app_id(value) -> str:
+    """The core key/pairing label contract, also used by local module catalogs."""
+    from .catalog_ids import normalize
+    return normalize(value)
+
+
+def local_cli(groups) -> None:
+    for module in discover():
+        if module.local_cli is not None:
+            module.local_cli(groups)
 
 
 def app_scopes(cfg) -> dict[str, str]:

@@ -1,0 +1,9 @@
+schema_version: 1
+kind: module
+target: modules-list
+title: Hub inventory
+summary: read-only module, paired-app and local-entry inventory for the standalone Hub and CLI
+links:
+  - text: docs/hub.md
+    href: hub.md
+order: 520

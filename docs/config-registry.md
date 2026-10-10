@@ -211,6 +211,7 @@ Every key of the registry with all modules present, read from `harness/settings_
 | `gpu_guard.enabled` | bool | `false` | admin | Runtime enable for pausing the model while a game or Plex transcode needs the GPU. |
 | `gpu_guard.poll_seconds` | float | `10` | admin | How often the GPU guard looks for games or Plex transcodes. |
 | `gpu_guard.resume_after_seconds` | float | `180` | admin | The GPU must stay clear this long before the model is reloaded. |
+| `hub.enabled` | bool | `true` | admin | Read-only inventory for the standalone Hub app. |
 | `images.edit_enabled` | bool | `false` | admin | Runtime enable for the installed Qwen-Image-Edit component. Does not download model weights. |
 | `images.enabled` | bool | `false` | admin | Runtime enable for local image generation. |
 | `images.job_timeout_seconds` | float | `1200` | admin | How long a single image job may run. |
@@ -227,6 +228,7 @@ Every key of the registry with all modules present, read from `harness/settings_
 | `modules.endpoint` | string | — | admin | endpoint installation/profile selection. Change this with the installer, not this registry. |
 | `modules.gpu_guard` | string | — | admin | gpu_guard installation/profile selection. Change this with the installer, not this registry. |
 | `modules.homelab` | string | — | admin | homelab installation/profile selection. Change this with the installer, not this registry. |
+| `modules.hub` | string | — | admin | hub installation/profile selection. Change this with the installer, not this registry. |
 | `modules.image_edit` | string | — | admin | image_edit installation/profile selection. Change this with the installer, not this registry. |
 | `modules.images` | string | — | admin | images installation/profile selection. Change this with the installer, not this registry. |
 | `modules.jobs` | string | — | admin | jobs installation/profile selection. Change this with the installer, not this registry. |

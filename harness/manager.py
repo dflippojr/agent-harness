@@ -179,6 +179,8 @@ class Manager:
         self.hub = NoRunnerHub()
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
+        self._key_activity_last_touch: dict[str, float] = {}
+        self._key_activity_tasks: dict[str, asyncio.Task] = {}
         # Active context managers/waiters retain their lock; idle erased namespaces retain no cache entry.
         self.erase_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         # Operations that need an idle session throughout (rewind, fork, review), by session: claimed in one write
@@ -325,12 +327,32 @@ class Manager:
             from .snippets import remove_orphans
             self._snippet_cleanup = asyncio.create_task(remove_orphans(orphans), name="snippet-cleanup")
 
+    def record_key_activity(self, key_id: str) -> None:
+        """Best-effort metadata: at most one queued write per key per minute, off the response path."""
+        now = time.monotonic()
+        last = self._key_activity_last_touch.get(key_id)
+        if key_id in self._key_activity_tasks or (last is not None and now - last < 60):
+            return
+        # Reserve the window before scheduling: concurrent requests and failures cannot flood the writer.
+        self._key_activity_last_touch[key_id] = now
+        self._key_activity_tasks[key_id] = asyncio.create_task(self._touch_key_activity(key_id))
+
+    async def _touch_key_activity(self, key_id: str) -> None:
+        try:
+            await self.db.main.awrite(self.db.main.touch_api_key, key_id)
+        except Exception:
+            # Neither credential data nor exception text belongs in the log.
+            log.warning("key activity metadata could not be recorded")
+        finally:
+            self._key_activity_tasks.pop(key_id, None)
+
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
         await asyncio.to_thread(self.github_auth.shutdown)  # prompts and credentialed Git end with the daemon
         await asyncio.to_thread(self.end_user_logins.close)  # a sign-in in flight ends with the daemon
         if self.canary is not None:
             await self.canary.stop()
+        await asyncio.gather(*list(self._key_activity_tasks.values()), return_exceptions=True)
         tasks = list(self.tasks.values())
         for task in tasks:
             task.cancel()
