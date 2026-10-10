@@ -671,7 +671,8 @@ class Runner:
             self._flag_end_pending(sid, status)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
-            # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
+            # A status change can free room under a cap (a run ending, a session given its place) or change what
+            # counts: let ineligible waiters try again.
             self.db.after_commit(lambda: self._tick_clock(sid, status))
             self.db.after_commit(self.scheduler.recheck)
         return set_status
@@ -991,7 +992,7 @@ class Runner:
         finally:
             if watch is not None:
                 watch.cancel()
-            await asyncio.shield(self._keep_run_seconds(sid))
+            await asyncio.shield(self._keep_run_seconds(sid, ((s or {}).get("run") or {}).get("started_at")))
             self._deadline_hit.pop(sid, None)
             await asyncio.shield(self._stop_cli(sid))
             if self.modules is not None:
@@ -1044,15 +1045,17 @@ class Runner:
         changed, self._deadlines_changed = self._deadlines_changed, asyncio.Event()
         changed.set()
 
-    async def _keep_run_seconds(self, sid: str) -> None:
-        """A run left active (the daemon stopping) keeps the time it spent running for when it resumes."""
+    async def _keep_run_seconds(self, sid: str, started_at) -> None:
+        """A run left active (the daemon stopping) keeps the time it spent running for when it resumes; not on a new
+        run a message queued meanwhile (its own `started_at`), which starts at 0."""
         if sid not in self._clocks:
             return
         seconds = self._run_seconds(sid)
 
         def keep() -> None:
             current = self.db.get_session(sid)
-            if current is not None and current["status"] in ACTIVE:
+            if (current is not None and current["status"] in ACTIVE
+                    and current["run"].get("started_at") == started_at):
                 self.db.update_session(sid, run={**current["run"], RUN_SECONDS: seconds})
         try:
             await self.db.for_session(sid).awrite(keep)

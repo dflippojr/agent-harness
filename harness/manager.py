@@ -173,6 +173,7 @@ class Manager:
         self.hub = NoRunnerHub()
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
+        self._stopping = False
         # Active context managers/waiters retain their lock; idle erased namespaces retain no cache entry.
         self.erase_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         # Operations that need an idle session throughout (rewind, fork, review), by session: claimed in one write
@@ -321,6 +322,7 @@ class Manager:
 
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
+        self._stopping = True  # a run that ends now hands over to no queued one (the next start resumes it)
         await asyncio.to_thread(self.github_auth.shutdown)  # prompts and credentialed Git end with the daemon
         await asyncio.to_thread(self.end_user_logins.close)  # a sign-in in flight ends with the daemon
         if self.canary is not None:
@@ -942,10 +944,11 @@ class Manager:
             self._spawn(sid)
             return
 
-        def hand_over(ended: asyncio.Task) -> None:
-            # Nobody ran it: the task ended on its own (not a cancel, not the daemon stopping) and left it queued.
+        def hand_over(_ended: asyncio.Task) -> None:
+            # Nobody ran it: the old task ended (on its own, or cancelled by its deadline) and left it queued. A user's
+            # cancel leaves it cancelled; the daemon stopping leaves it for the next start.
             s = self.db.get_session(sid)
-            if not ended.cancelled() and sid not in self.tasks and s is not None and s["status"] == "queued":
+            if not self._stopping and sid not in self.tasks and s is not None and s["status"] == "queued":
                 self._spawn(sid)
         task.add_done_callback(hand_over)
 

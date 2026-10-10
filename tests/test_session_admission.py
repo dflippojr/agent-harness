@@ -472,6 +472,33 @@ def test_a_message_that_restarts_a_run_still_winding_down_gets_its_run(tmp_path)
         await m.stop()
     asyncio.run(body())
 
+def test_a_message_that_restarts_a_run_ended_on_its_deadline_gets_its_run(tmp_path):
+    """As above, but the old run's task ends cancelled, as a deadline ends it: the queued run still starts."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        await m.start()
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "winding002", "running", app_id=app_id)
+
+        async def old_run():
+            await asyncio.sleep(60)
+        m._spawn_task("winding002", old_run())
+        old = m.tasks["winding002"]
+        real, raced = m._refuse_unsettled, []
+
+        def run_ends_on_its_budget(s):
+            if not raced:
+                raced.append(True)
+                m.db.update_session("winding002", status="done", stop_reason="budget_time")
+            return real(s)
+        m._refuse_unsettled = run_ends_on_its_budget
+        await m.send("winding002", "one more thing")
+        old.cancel()
+        s = await wait_status(m, "winding002", "done", "failed", timeout=10)
+        assert (s["status"], s["answer"]) == ("done", "ok")
+        await m.stop()
+    asyncio.run(body())
+
 
 # members --------------------------------------------------------------------------------------------------------------
 def test_a_member_at_max_queued_with_parked_sessions_is_refused(tmp_path):
@@ -1170,6 +1197,18 @@ def test_a_cancelled_app_tool_wait_does_not_wait_for_the_gpu_again(tmp_path, mon
         call_.cancel()
         await asyncio.gather(call_, return_exceptions=True)
         assert resumed == []
+    asyncio.run(body())
+
+
+def test_a_finishing_runs_time_is_not_kept_on_the_next_run_a_message_queued(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "nextrun001", "queued", app_id=app_id)
+        m.db.update_session("nextrun001", run={"started_at": 2000.0})   # the new run a follow-up queued
+        m.runner._clocks["nextrun001"] = RunClock(spent=3500)          # the old run's clock, as it ends
+        await m.runner._keep_run_seconds("nextrun001", 1000.0)         # the old run's started_at
+        assert RUN_SECONDS not in m.db.get_session("nextrun001")["run"]
     asyncio.run(body())
 
 
