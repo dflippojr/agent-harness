@@ -114,6 +114,8 @@ def test_stub_distribution_installs_approves_and_uninstalls(tmp_path, monkeypatc
         (directory / "claim.json").write_text(json.dumps(claim), encoding="utf-8")
     def command(args, **_kwargs):
         commands.append([str(a) for a in args])
+        if args[:2] == ["docker", "info"]:
+            return SimpleNamespace(stdout=json.dumps({"security_options": [], "server_version": "29.5.0"}), stderr="")
         if args[:2] == ["docker", "run"]:
             mount = args[args.index("--mount") + 1]
             publish(Path(mount.split("src=", 1)[1].split(",dst=", 1)[0]))
@@ -139,9 +141,10 @@ def test_stub_distribution_installs_approves_and_uninstalls(tmp_path, monkeypatc
         assert commands[1][-1] == "stub-hub==1"
         assert str(directory / "venv") in commands[0]
     else:
-        assert "host" in commands[0] and "--restart" in commands[0]
-        assert "example.invalid/stub-hub:1" in commands[0]
-        assert "--state-dir" in commands[0]
+        launch = next(cmd for cmd in commands if cmd[:2] == ["docker", "run"])
+        assert "host" in launch and "--restart" in launch
+        assert "example.invalid/stub-hub:1" in launch
+        assert "--state-dir" in launch
     assert hub.uninstall(args) == 0
     assert events.index(["hub", "release", "--confirm"]) > events.index(["hub", "approve", "pr-stub", "--match", "123456"])
     if method == "pip":
@@ -424,15 +427,34 @@ def test_partial_docker_install_is_removable(tmp_path, monkeypatch):
     assert not (tmp_path / "hub-install.json").exists()
 
 
-def test_docker_state_uses_host_user_on_unix(tmp_path, monkeypatch):
-    monkeypatch.setattr(hub.sys, "platform", "linux")
+@pytest.mark.parametrize("platform,security,identity", [
+    ("linux", [], "1001:1002"),
+    ("linux", None, "1001:1002"),
+    ("linux", ["name=seccomp,profile=builtin", "name=rootless"], "0:0"),
+    ("darwin", [], "1001:1002"),
+    ("win32", [], None),
+])
+def test_docker_state_uses_host_owner_identity(tmp_path, monkeypatch, platform, security, identity):
+    monkeypatch.setattr(hub.sys, "platform", platform)
     monkeypatch.setattr(hub.os, "getuid", lambda: 1001, raising=False)
     monkeypatch.setattr(hub.os, "getgid", lambda: 1002, raising=False)
     monkeypatch.setattr(hub.shutil, "which", lambda _: "docker")
     calls = []
-    monkeypatch.setattr(hub, "command", lambda args, **_: calls.append(args))
+    def command(args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["docker", "info"]:
+            assert kwargs["capture_output"]
+            return SimpleNamespace(stdout=json.dumps({"security_options": security, "server_version": "29.5.0"}))
+        return SimpleNamespace(stdout="")
+    monkeypatch.setattr(hub, "command", command)
     hub.start_hub(options(tmp_path), "docker", "stub:1", "a" * 32, tmp_path, tmp_path / "claim.json", port=8199)
-    assert calls[0][calls[0].index("--user") + 1] == "1001:1002"
+    launch = calls[-1]
+    assert launch[:2] == ["docker", "run"]
+    if identity is None:
+        assert "--user" not in launch and len(calls) == 1
+    else:
+        assert launch[launch.index("--user") + 1] == identity
+        assert len(calls) == 2
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
@@ -721,3 +743,36 @@ def test_windows_hub_dry_run_hides_distribution_values(tmp_path, monkeypatch, so
     assert package not in output and "private-token" not in output and image not in output
     assert "HARNESS_HUB_PACKAGE" in output and "HARNESS_HUB_IMAGE" in output and "value hidden" in output
     assert "harness hub approve <request_id> --match <code>" in output
+
+
+@pytest.mark.parametrize("security,version", [
+    (["name=rootless"], "29.4.0"),
+    (["name=rootless"], "unknown"),
+    (["name=userns"], "29.5.0"),
+])
+def test_incompatible_docker_mode_fails_before_hub_state(tmp_path, monkeypatch, security, version):
+    monkeypatch.setattr(hub.sys, "platform", "linux")
+    monkeypatch.setattr(hub.shutil, "which", lambda _: "docker")
+    monkeypatch.setattr(hub, "hub_cli", lambda *_: {"claimed": False})
+    calls = []
+    def command(args, **kwargs):
+        calls.append(args)
+        assert args[:2] == ["docker", "info"] and kwargs["capture_output"]
+        return SimpleNamespace(stdout=json.dumps({"security_options": security, "server_version": version}))
+    monkeypatch.setattr(hub, "command", command)
+    monkeypatch.setattr(hub, "owner_only_acl", lambda *_args, **_kwargs: pytest.fail("must validate Docker before mutation"))
+    with pytest.raises(ValueError, match="use --hub-method pip"):
+        hub.install(options(tmp_path, hub_method="docker"))
+    assert len(calls) == 1
+    assert not (tmp_path / "hub-install.json").exists()
+    assert not list(tmp_path.glob("hub-*"))
+
+
+@pytest.mark.parametrize("info", [[], {}, {"security_options": "name=rootless"},
+                                  {"security_options": False}, {"security_options": ""}])
+def test_invalid_docker_info_never_launches_a_container(monkeypatch, info):
+    monkeypatch.setattr(hub.sys, "platform", "linux")
+    monkeypatch.setattr(hub.shutil, "which", lambda _: "docker")
+    monkeypatch.setattr(hub, "command", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps(info)))
+    with pytest.raises(ValueError, match="Cannot determine Docker security options"):
+        hub.docker_identity()

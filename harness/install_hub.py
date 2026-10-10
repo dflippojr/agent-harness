@@ -187,14 +187,38 @@ def distribution_choice(args) -> tuple[str, str]:
     return method, distribution
 
 
-def start_hub(args, method, distribution, service_id, hub_dir, claim_file, *, port: int):
+def docker_identity() -> list[str]:
+    if not shutil.which(DOCKER):
+        raise ValueError("Docker is required for --hub-method docker")
+    if sys.platform == "win32":
+        return []
+    info = json.loads(command([DOCKER, "info", "--format",
+        '{"security_options":{{json .SecurityOptions}},"server_version":{{json .ServerVersion}}}'],
+        capture_output=True).stdout)
+    if not isinstance(info, dict) or "security_options" not in info:
+        raise ValueError("Cannot determine Docker security options; use --hub-method pip")
+    security = info["security_options"]
+    if security is None:
+        security = []
+    if not isinstance(security, list) or not all(isinstance(option, str) for option in security):
+        raise ValueError("Cannot determine Docker security options; use --hub-method pip")
+    if "name=rootless" in security:
+        version = re.match(r"^([0-9]+)\.([0-9]+)(?:[.+-]|$)", str(info.get("server_version", "")))
+        if not version or tuple(map(int, version.groups())) < (29, 5):
+            raise ValueError("Rootless Docker needs Engine 29.5+ for host networking; upgrade or use --hub-method pip")
+        # Container root maps to the rootless daemon owner's host UID/GID.
+        return ["--user", "0:0"]
+    if "name=userns" in security:
+        raise ValueError("Docker userns-remap cannot access owner-only Hub state; use --hub-method pip")
+    return ["--user", f"{os.getuid()}:{os.getgid()}"]
+
+
+def start_hub(args, method, distribution, service_id, hub_dir, claim_file, *, port: int, docker_user=None):
     launch = ["--daemon-url", f"http://127.0.0.1:{port}", "--claim-file"]
     if method == DOCKER:
         if any(char in str(hub_dir) for char in (',', '"')):
             raise ValueError("Docker Hub directory cannot contain commas or double quotes")
-        if not shutil.which(DOCKER):
-            raise ValueError("Docker is required for --hub-method docker")
-        identity = ["--user", f"{os.getuid()}:{os.getgid()}"] if sys.platform != "win32" else []
+        identity = docker_identity() if docker_user is None else docker_user
         command([DOCKER, "run", "-d", "--restart", "unless-stopped", *identity, "--name", Service(service_id).name,
                  "--network", "host", "--mount", f"type=bind,src={hub_dir},dst=/hub-state",
                  distribution, *launch, "/hub-state/claim.json", "--state-dir", "/hub-state"])
@@ -244,6 +268,7 @@ def install(args) -> int:
     if state.exists():
         raise ValueError("This install already has a Hub service; remove it with harness.install_hub uninstall first")
     method, distribution = distribution_choice(args)
+    docker_user = docker_identity() if method == DOCKER else None
     service_id = uuid.uuid4().hex
     hub_dir = args.install_dir / ("hub-" + service_id)
     hub_dir.mkdir(mode=0o700)
@@ -254,7 +279,7 @@ def install(args) -> int:
     # Record ownership before starting: a failed/partial install remains removable.
     write_atomic(state, json.dumps({"id": service_id, "method": method, "port": port}) + "\n",
                  private=True, prepare=owner_only_acl)
-    start_hub(args, method, distribution, service_id, hub_dir, claim_file, port=port)
+    start_hub(args, method, distribution, service_id, hub_dir, claim_file, port=port, docker_user=docker_user)
     approve_and_wait(claim_file, env)
     return 0
 

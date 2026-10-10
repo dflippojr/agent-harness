@@ -25,7 +25,10 @@ Use `--hub-package` / `--hub-image` (PowerShell: `-HubPackage` / `-HubImage`) to
 `--hub-method pip|docker` (`-HubMethod pip|docker`) selects the distribution. Auto uses pip and offers Docker when
 running interactively with Docker and an image configured. Pip installs into a separate venv, leaving daemon
 dependencies intact. Docker uses host networking to reach the loopback daemon; Docker Desktop must have host
-networking enabled. On Unix the container runs as the installing user's UID/GID so its state remains removable.
+networking enabled. On Unix, rootful Docker uses the installing user's UID/GID; rootless Docker uses container
+UID/GID 0, which maps to that host owner, so the private state stays accessible and removable. Rootless Docker
+requires Engine 29.5+ for host networking. Older rootless engines and rootful `userns-remap` configurations are
+rejected before Hub state is created; use the pip method instead.
 The Hub persists its credentials in its own state directory, with no daemon secrets mounted.
 That directory is owner-only (including inherited Windows ACLs) before the Hub starts.
 
