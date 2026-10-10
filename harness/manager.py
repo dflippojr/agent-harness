@@ -927,12 +927,27 @@ class Manager:
                 self.db.update_session(sid, context=context_, run=run, status="queued", stop_reason="", answer="")
                 self.bus.emit(sid, "status", {"status": "queued"})
             # With the commit, not after the await: a request cancelled mid-write still gets its run.
-            self.db.after_commit(lambda: sid in self.tasks or self._spawn(sid))
+            self.db.after_commit(lambda: self._run_queued(sid))
             namespace_audit.record(self.db, s, context,
                                    "session.context" if kind == "app_context" else "session.message",
                                    metadata={"fields": ["context" if kind == "app_context" else "content"]})
         await self.db.for_session(sid).awrite(deliver)
         return self.db.get_session(sid)
+
+    def _run_queued(self, sid: str) -> None:
+        """Give session `sid` its run unless one is going. A run still winding down (its status already final, as when
+        a message restarted the session meanwhile) hands over to the new one when its task ends (#524)."""
+        task = self.tasks.get(sid)
+        if task is None:
+            self._spawn(sid)
+            return
+
+        def hand_over(ended: asyncio.Task) -> None:
+            # Nobody ran it: the task ended on its own (not a cancel, not the daemon stopping) and left it queued.
+            s = self.db.get_session(sid)
+            if not ended.cancelled() and sid not in self.tasks and s is not None and s["status"] == "queued":
+                self._spawn(sid)
+        task.add_done_callback(hand_over)
 
     def original_prompt(self, sid: str) -> str:
         for e in self.db.events(sid):

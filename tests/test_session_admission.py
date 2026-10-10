@@ -443,6 +443,35 @@ def test_a_message_racing_a_restart_of_the_same_session_joins_its_run(tmp_path):
         await m.stop()
     asyncio.run(body())
 
+def test_a_message_that_restarts_a_run_still_winding_down_gets_its_run(tmp_path):
+    """The request read the session running; its run reached its final status before the message's write, which then
+    restarts it while the old run's task is still ending: the new run starts when that task ends."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        await m.start()
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "winding001", "running", app_id=app_id)
+        ending = asyncio.Event()
+
+        async def old_run():  # the previous run's task, finishing its end (branch save, transcript)
+            await ending.wait()
+        m._spawn_task("winding001", old_run())
+        real, raced = m._refuse_unsettled, []
+
+        def run_reaches_its_final_status(s):  # after this request read it running, before its write
+            if not raced:
+                raced.append(True)
+                m.db.update_session("winding001", status="done")
+            return real(s)
+        m._refuse_unsettled = run_reaches_its_final_status
+        await m.send("winding001", "one more thing")
+        assert m.db.get_session("winding001")["status"] == "queued"
+        ending.set()
+        s = await wait_status(m, "winding001", "done", "failed", timeout=10)
+        assert (s["status"], s["answer"]) == ("done", "ok")
+        await m.stop()
+    asyncio.run(body())
+
 
 # members --------------------------------------------------------------------------------------------------------------
 def test_a_member_at_max_queued_with_parked_sessions_is_refused(tmp_path):
@@ -1096,7 +1125,7 @@ def test_a_hosted_run_falling_back_to_an_api_key_waits_for_its_slot_queued(tmp_p
 
 def test_a_runs_time_spent_running_survives_a_daemon_restart(tmp_path):
     cfg = make_cfg(tmp_path)
-    cfg.max_run_seconds = 1.5
+    cfg.max_run_seconds = 3
 
     async def body():
         m = Manager(cfg, chat=SleepyModel(0.1))
@@ -1104,16 +1133,17 @@ def test_a_runs_time_spent_running_survives_a_daemon_restart(tmp_path):
         app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
         sid = m.create("loop", app=app)["id"]
         await wait_status(m, sid, "running")
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(2.2)
         await m.stop()                       # the daemon stops mid-run
         kept = m.db.get_session(sid)["run"].get(RUN_SECONDS) or 0
-        assert kept >= 0.8
+        assert kept >= 2.0
         restarted = Manager(cfg, chat=SleepyModel(0.1))
-        started = time.monotonic()
         await restarted.start()
-        s = await wait_status(restarted, sid, "done", "failed", timeout=10)
+        s = await wait_status(restarted, sid, "done", "failed", timeout=15)
         assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
-        assert time.monotonic() - started < 1.2  # what was left of its budget, not a fresh one
+        # Its clock went on from what it had spent: after the restart it ran for what was left (under 1 s), not a
+        # fresh 3 s. Measured on its own running clock, so the restart's own overhead does not count.
+        assert s["run"][RUN_SECONDS] - kept < 2.0
         await restarted.stop()
     asyncio.run(body())
 
