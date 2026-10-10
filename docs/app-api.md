@@ -602,6 +602,7 @@ instead, and send the same one on the retry:
   with the session as it is now (its status may have moved on) and the header `Idempotency-Replayed: true`. Nothing new
   starts: no second session, `session_created` event, run or workspace. A retry while the first request is still in
   flight gets the same session once that request commits.
+  Approved browser Apps can include `Idempotency-Key` in CORS preflight; `Idempotency-Replayed` is exposed to JavaScript.
 - **Same request only.** The key is bound to every body field (`prompt`, `end_user`, `tools`, `context`, `metadata`,
   `retention_days`, ...; key order in JSON doesn't matter). Another body under that key is `409
   idempotency_conflict`, which names neither request's contents nor the session.
@@ -637,7 +638,9 @@ else:
     raise RuntimeError("the daemon is unreachable; retry later with the same key")
 ```
 
-`h.run(prompt, tools=..., idempotency_key=key)` forwards the key the same way.
+`h.run(prompt, tools=..., idempotency_key=key)` forwards the key the same way and checks that replayed tool calls are
+still pending before serving them, so completed tool calls are not executed again. Only one driver should own a
+session; the key protects session creation, not a tool's external side effects before its result reaches the daemon.
 
 ### End users' own logins
 

@@ -290,7 +290,7 @@ def test_the_sdk_forwards_the_key_and_a_lost_response_is_recovered_by_retrying(t
         with pytest.raises(SdkError) as e:
             sdk.create_session("plan lunch", idempotency_key="order-7")
         assert e.value.status == 409 and e.value.code == idempotency.CONFLICT
-        monkeypatch.setattr(sdk, "_drive", lambda sid, tools, result, on_event: result)  # no event stream here
+        monkeypatch.setattr(sdk, "_drive", lambda sid, tools, result, on_event, **options: result)  # no event stream here
         result = sdk.run("plan lunch", idempotency_key="order-8")
         assert isinstance(result, RunResult)
         assert sdk.run("plan lunch", idempotency_key="order-8").session["id"] == result.session["id"]
@@ -305,9 +305,16 @@ def test_a_key_that_expires_while_the_request_is_checked_is_reused_not_a_500(tmp
         app_id, auth = _key(client, "shop", "sessions")
         first = _post(client, auth, "k").json()["id"]
         expiry = clock[0] + idempotency.WINDOW_SECONDS
-        # The retry's record is made a second before the key expires; the looks that follow run after it has.
-        ticks = iter([expiry - 1])
-        monkeypatch.setattr(idempotency, "clock", lambda: next(ticks, expiry))
+        # The key expires between preparing the retry's record and looking it up.
+        clock[0] = expiry - 1
+        new_record = idempotency.new_record
+
+        def prepare(*args):
+            record = new_record(*args)
+            clock[0] = expiry
+            return record
+
+        monkeypatch.setattr(idempotency, "new_record", prepare)
         r = _post(client, auth, "k")
         assert r.status_code == 201 and r.json()["id"] != first
         assert len(m.db.app_session_ids(app_id)) == 2
@@ -335,3 +342,25 @@ def test_insert_uses_the_current_clock_for_cleanup_and_the_new_protection_window
         assert kept["expires_at"] == clock[0] + idempotency.WINDOW_SECONDS
         assert set(m.db.app_session_ids(app_id)) == {first, fresh["id"]}
         assert _spawned(m) == [first, fresh["id"]]
+
+
+def test_browser_apps_can_preflight_idempotent_creates_and_read_the_replay_header(tmp_path):
+    from test_browser_pairing import ORIGIN, OTHER, pair
+
+    m = _manager(make_cfg(tmp_path))
+    with TestClient(create_app(m)) as client:
+        paired = pair(client)
+        preflight_headers = {"Origin": ORIGIN, "Access-Control-Request-Method": "POST",
+                             "Access-Control-Request-Headers": "authorization, content-type, Idempotency-Key"}
+        preflight = client.options("/api/v1/sessions", headers=preflight_headers)
+        assert preflight.status_code == 204
+        assert "idempotency-key" in preflight.headers["access-control-allow-headers"].lower()
+        assert client.options("/api/v1/sessions", headers={**preflight_headers, "Origin": OTHER}).status_code == 403
+        auth = {"Authorization": f"Bearer {paired['token']}", "Origin": ORIGIN}
+        first = _post(client, auth, "browser-order")
+        replay = _post(client, auth, "browser-order")
+        assert first.status_code == 201 and replay.status_code == 200
+        assert replay.json()["id"] == first.json()["id"]
+        assert replay.headers[idempotency.REPLAYED_HEADER] == "true"
+        assert replay.headers["access-control-allow-origin"] == ORIGIN
+        assert idempotency.REPLAYED_HEADER.lower() in replay.headers["access-control-expose-headers"].lower()

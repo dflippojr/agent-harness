@@ -45,10 +45,8 @@ def request_digest(body: dict) -> str:
 
 
 def new_record(app_id: str, key: str, body: dict) -> dict:
-    """The row to write with the session (`session_id` is filled in by the manager)."""
-    now = clock()
-    return {"key_hash": key_hash(app_id, key), "request_digest": request_digest(body), "session_id": "",
-            "created_at": now, "expires_at": now + WINDOW_SECONDS}
+    """The row to write with the session; the manager fills `session_id` and the insert sets the timestamps."""
+    return {"key_hash": key_hash(app_id, key), "request_digest": request_digest(body), "session_id": ""}
 
 
 def replayed_session(store, record: dict) -> str | None:
