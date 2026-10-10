@@ -20,6 +20,7 @@ export function mountChrome({ els, browser, session }) {
   let barPaintPhase = false;
   let pagePaintFrame = 0;
   let pagePaintPhase = false;
+  let listNew = null;
 
   // Desktop's count uses the same Needs you rule as the Agents list, independent of list filters.
   // Reuse the connection stream; do not open another EventSource for persistent chrome.
@@ -100,6 +101,8 @@ export function mountChrome({ els, browser, session }) {
   // A section's own screen (no Back) gets the large title; until a page knows its title (a chat still loading) the
   // section's name stands in.
   function setHeader(feature, pageTitle = "", { page = false } = {}) {
+    listNew?.remove();
+    listNew = null;
     const top = $back.hidden;
     const title = pageTitle || (top ? SECTION_TITLES[feature] || "" : "");
     $title.textContent = title;
@@ -115,6 +118,15 @@ export function mountChrome({ els, browser, session }) {
     $fab.href = href;
     $fab.textContent = label;
     $fabHost.hidden = false;
+    // The list's New action shares its route and label with the phone FAB. CSS selects the presentation at 768 px,
+    // so resizing needs no route refresh. setHeader removes it when leaving a list (including role changes).
+    listNew?.remove();
+    listNew = document.createElement("a");
+    listNew.className = "btn primary list-new";
+    listNew.href = href;
+    listNew.textContent = label;
+    $title.after(listNew);
+    repaintBar();
   }
 
   // `action` ({ label, onClick }) adds a button such as Undo (#511); tapping it runs onClick and dismisses the toast.
