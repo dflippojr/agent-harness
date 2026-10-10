@@ -62,6 +62,11 @@ Allowlist: plex-webhook, prometheus, grafana, cadvisor, ntfy, harness-demo. Port
 - Workspace quota 5 GB (per-project `quota_mb`): checked after `run_shell`, `git_clone`, and `write_file`, at most
   every 30 s until the workspace is past 80% of quota. Growing past the quota stops the run (`quota_exceeded`);
   shrinking is always allowed, so a follow-up "delete the build artifacts" works.
+- While a sandbox command (or the project setup) runs, a disk watchdog (#525) polls the data drive's free space
+  and rescans the workspace as soon as the space lost could have taken it past its quota (otherwise at least every
+  second, slower for big trees). A command that grows the workspace past its quota (or a member's remaining account
+  quota), or takes the drive under `cleanup.min_free_gb`, is stopped by restarting the container and fails with a
+  tool error; the quota check after the call then stops the run as above.
 - New sessions are refused (HTTP 507) when the data drive has under 20 GB free.
 - Not covered: the container's writable layer (e.g. packages installed outside /workspace). Docker Desktop's overlay
   storage has no per-container size limit; `GET /maintenance` reports each container's size instead.

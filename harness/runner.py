@@ -225,8 +225,29 @@ class Runner:
                 sid, Path(s["workspace"]), sb_cfg, project=project.name if project else "",
                 user_id=session_user_id(s),
                 setup=project.setup if project else "", known=self.db.has_tool_result(sid),
-                on_event=lambda type_, data: self.bus.emit(sid, type_, data))
+                on_event=lambda type_, data: self._sandbox_event(sid, type_, data),
+                disk_limits=lambda: self._disk_limits(sid))
         return self._sandboxes[s["id"]]
+
+    def _sandbox_event(self, sid: str, type_: str, data: dict) -> None:
+        if type_ == "sandbox_disk_limit":
+            self._quota_checked.pop(sid, None)  # the quota check after this call must not be throttled
+        self.bus.emit(sid, type_, data)
+
+    async def _disk_limits(self, sid: str):
+        """The disk watchdog's limits for one sandbox command (#525): the workspace quota, a member's remaining
+        account quota, and the data drive's free-space floor."""
+        from .sandbox import DiskLimits
+        s = self.db.get_session(sid)
+        user_id = session_user_id(s)
+        growth = None
+        if user_id != OWNER_USER_ID:
+            from .storage import account_usage_bytes
+            account = self.db.account_by_id(user_id)
+            limit = int(account["disk_quota_bytes"]) if account is not None else 0
+            growth = max(0, limit - await asyncio.to_thread(account_usage_bytes, self.cfg, user_id))
+        return DiskLimits(quota_bytes=self.quota_mb(s) * 2**20,
+                          min_free_bytes=int(self.cfg.cleanup.min_free_gb * 2**30), growth_bytes=growth)
 
     async def _park_sandbox(self, sid: str) -> None:
         """The session is about to wait on the owner or the GPU guard: stop its idle container (#428). Best effort;

@@ -11,12 +11,16 @@ import asyncio
 import codecs
 import hashlib
 import os
+import shutil
 import subprocess
 import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from .config import SandboxConfig
-from .fileops import CappedStream
+from .fileops import CappedStream, ToolError, dir_size
 from .principal import OWNER_USER_ID
 
 
@@ -25,6 +29,85 @@ SETUP_TIMEOUT = 600
 
 class SandboxUnavailable(Exception):
     """Docker isn't reachable or the container can't be started."""
+
+
+@dataclass(frozen=True)
+class DiskLimits:
+    """What a command may write (#525). `quota_bytes` caps the workspace; `growth_bytes`, when set, caps how much it
+    may grow during one command (a member's remaining account quota); `min_free_bytes` is kept free on its drive."""
+    quota_bytes: int
+    min_free_bytes: int
+    growth_bytes: int | None = None
+
+
+class DiskLimitExceeded(ToolError):
+    """The disk watchdog stopped a command that wrote past the workspace quota or the data drive's free-space floor."""
+
+
+FREE_POLL_SECONDS = 0.25         # free space is one cheap syscall, so it is polled often
+MIN_SCAN_SECONDS = 1.0           # a full workspace scan runs at least this far apart...
+SCAN_DUTY = 4                    # ...and at least this many times its own duration apart, so big trees cost little
+FREE_SLACK_BYTES = 256 * 2**20   # a command that starts under the free-space floor may still use this much
+
+
+class DiskWatch:
+    """Watch one running command's workspace and say when it passes its limits (#525).
+
+    Free space on the workspace drive is polled every FREE_POLL_SECONDS. Whatever the workspace grows also comes off
+    that free space, so the size at the last scan plus the free space lost since bounds the size now: a full scan runs
+    as soon as that bound passes the cap, and on an adaptive interval otherwise (sparse files, writes the drive does
+    not see). Shrinking is always allowed, so a workspace already over its quota can still be cleaned up."""
+
+    def __init__(self, root: Path, limits: DiskLimits):
+        self.root = root
+        self.limits = limits
+        self.cap = 0
+        self.floor = 0
+        self.reason = ""
+        self._size = self._free_at_scan = 0
+        self._scanned = self._scan_cost = 0.0
+
+    def _free(self) -> int:
+        return shutil.disk_usage(self.root).free
+
+    def start(self) -> None:
+        """Measure the starting point. Blocking: run it in a thread."""
+        size, free = dir_size(self.root), self._free()
+        cap = max(self.limits.quota_bytes, size)
+        if self.limits.growth_bytes is not None:
+            cap = min(cap, size + max(0, self.limits.growth_bytes))
+        self.cap = cap
+        floor = self.limits.min_free_bytes
+        self.floor = floor if free >= floor else max(0, free - FREE_SLACK_BYTES)
+        self._size, self._free_at_scan, self._scanned = size, free, time.monotonic()
+
+    def check(self) -> str:
+        """'' while within limits, else why the command must stop. Blocking: run it in a thread."""
+        free = self._free()
+        if free < self.floor:
+            return (f"the data drive is down to {free / 2**30:.1f} GB free, under its "
+                    f"{self.limits.min_free_bytes / 2**30:.1f} GB minimum")
+        estimate = self._size + max(0, self._free_at_scan - free)
+        if estimate > self.cap or time.monotonic() - self._scanned >= max(MIN_SCAN_SECONDS,
+                                                                          SCAN_DUTY * self._scan_cost):
+            began = time.monotonic()
+            self._size, self._free_at_scan = dir_size(self.root), self._free()
+            self._scanned = time.monotonic()
+            self._scan_cost = self._scanned - began
+            if self._size > self.cap:
+                limit = (f"its {self.limits.quota_bytes / 2**20:.0f} MB quota" if self.cap >= self.limits.quota_bytes
+                         else "the account's remaining disk quota")
+                return f"the workspace grew to {self._size / 2**20:.0f} MB, past {limit}"
+        return ""
+
+    async def run(self) -> str:
+        """Poll until a limit is passed and return why. The caller cancels it when the command ends first."""
+        while True:
+            await asyncio.sleep(FREE_POLL_SECONDS)
+            reason = await asyncio.to_thread(self.check)
+            if reason:
+                self.reason = reason
+                return reason
 
 
 if os.name == "nt":
@@ -182,13 +265,15 @@ async def ensure_networks(cfg: SandboxConfig) -> None:
 
 class Sandbox:
     def __init__(self, session_id: str, workspace: Path, cfg: SandboxConfig, *, project: str = "", setup: str = "",
-                 known: bool = False, on_event=None, user_id: str = OWNER_USER_ID):
+                 known: bool = False, on_event=None, user_id: str = OWNER_USER_ID,
+                 disk_limits: Callable[[], Awaitable[DiskLimits | None]] | None = None):
         self.session_id = session_id
         self.project = project      # names the per-project pip/npm cache volumes (#429)
         self.user_id = user_id      # with the project, so principals never share a writable cache (#529)
         self.setup = setup.strip()  # run (with network) each time a container is created
         self.known = known          # the session has run tools before, so a "created" container is a recreation
-        self.on_event = on_event    # on_event(type, data): session events from here (setup result)
+        self.on_event = on_event    # on_event(type, data): session events from here (setup result, disk limit)
+        self.disk_limits = disk_limits  # async () -> DiskLimits or None: each command's disk watchdog limits (#525)
         self.workspace = workspace.resolve()
         self.cfg = cfg
         self.name = f"harness-{session_id}"
@@ -280,13 +365,13 @@ class Sandbox:
         try:
             await self._network(True)
             try:
-                code, out, err = await run_cmd(
+                code, out, err = await self._watched(
                     ["docker", "exec", "-w", "/workspace", self.name,
                      "timeout", "-k", "5", str(SETUP_TIMEOUT), "sh", "-c", self.setup], timeout=SETUP_TIMEOUT + 30)
             finally:
                 await self._network(False)
             detail = "" if code == 0 else f"exit {code}: {(err or out).strip()[-500:]}"
-        except SandboxUnavailable as e:
+        except (SandboxUnavailable, DiskLimitExceeded) as e:
             code, detail = 1, str(e)
         if self.on_event:
             self.on_event("sandbox_setup", {"command": self.setup, "ok": code == 0, "detail": detail})
@@ -348,7 +433,7 @@ class Sandbox:
                 await self._network(True)
             try:
                 # `timeout` inside the container stops the command; the host timeout is only a backstop.
-                code, out, err = await run_cmd(
+                code, out, err = await self._watched(
                     ["docker", "exec", "-w", "/workspace", self.name,
                      "timeout", "-k", "5", str(timeout), "sh", "-c", command],
                     timeout=timeout + 30,
@@ -360,6 +445,37 @@ class Sandbox:
         if code == 124:
             output += f"\n[command timed out after {timeout}s]"
         return code, output
+
+    async def _watched(self, args: list[str], timeout: float) -> tuple[int, str, str]:
+        """run_cmd under the disk watchdog (#525). Once the command passes a limit the container is restarted, which
+        stops it and anything it left running in the background, and DiskLimitExceeded is raised."""
+        limits = await self.disk_limits() if self.disk_limits is not None else None
+        if limits is None:
+            return await run_cmd(args, timeout=timeout)
+        watch = DiskWatch(self.workspace, limits)
+        await asyncio.to_thread(watch.start)
+        command = asyncio.ensure_future(run_cmd(args, timeout=timeout))
+        watcher = asyncio.ensure_future(watch.run())
+        try:
+            await asyncio.wait({command, watcher}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            command.cancel()
+            raise
+        finally:
+            watcher.cancel()
+        if command.done():
+            return command.result()
+        await run_cmd(["docker", "restart", "-t", "0", self.name], timeout=60)
+        try:
+            await asyncio.wait_for(command, timeout=30)
+        except Exception:
+            pass    # the restart ended it, or the timeout cancelled (killed) a docker client that hung
+        if self.on_event:
+            self.on_event("sandbox_disk_limit", {"reason": watch.reason})
+        raise DiskLimitExceeded(
+            f"the command was stopped because {watch.reason}. The sandbox was restarted, so background processes "
+            "are gone; /workspace keeps what was written. Delete build artifacts or other large files before "
+            "running it again.")
 
     async def stop(self) -> None:
         self._cancel_idle_timer()
