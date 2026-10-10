@@ -27,6 +27,8 @@ Contracts this design is written against (shipped on `main` as of 2026-09-17):
 A later public launch must repeat the [provider-policy review](#13-provider-policy-matrix) against live official
 sources. The 2026-09-17 matrix is evidence for this design, not permission to ship.
 
+The daemon-side `hub` module reads local full manifests for inventory only ([Hub](hub.md)); entries grant nothing.
+
 ## 1. Product boundary
 
 The catalog is a **curated discovery and review index**.

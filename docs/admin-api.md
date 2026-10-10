@@ -531,6 +531,13 @@ answers 409, and an unknown id 404. Approval is a state change only: the key exi
 then appears in `GET /keys` with the request's name, scopes, origin and `catalog_app_id`. Requests expire 10 minutes
 after they are made, armed or claimed, and 5 minutes after approval.
 
+## Hub inventory
+
+`GET /api/admin/v1/hub` (`harness hub status`; SDK `Harness.hub_status()`) is the optional
+[Hub inventory](hub.md): modules, safe paired-key/store metrics and local unsigned full-manifest entries.
+Owner and exclusive Hub keys only. Disabled answers 400; absent answers 404. No tokens, hashes or pairing codes.
+The generated endpoint table is regenerated from the module's route after merge.
+
 ## Hub claim
 
 The standalone Hub (#546) is the owner's admin console. It pairs by itself and then **claims the daemon exclusively**
@@ -541,7 +548,7 @@ The standalone Hub (#546) is the owner's admin console. It pairs by itself and t
    with the same PKCE S256 check, match code and limits: 10 minutes to approve, then 5 minutes to redeem, and the token
    is fetched exactly once. While a Hub is recorded the request is refused at once with 409 `hub_claimed` and a
    `hub.claim.refused` audit row.
-2. **The owner approves on the daemon host.** `harness hub status` lists the open claim requests with each one's
+2. **The owner approves on the daemon host.** `harness hub claim-status` lists the open claim requests with each one's
    origin, or that it is a native Hub, but never its match code: read the code off the Hub's own screen.
    `harness hub approve <id> --match <code>` approves one (and warns when more than one Hub claim is pending) and
    `harness hub deny <id>` denies it.
@@ -565,7 +572,7 @@ with 403. The secret is never logged, audited or returned by any route.
 
 | Route | CLI | What it does |
 | --- | --- | --- |
-| `GET /hub-claim` | `harness hub status` | `{claimed, hub, requests}`: the record and the Hub claim requests of the last day (`match_code` is always empty) |
+| `GET /hub-claim` | `harness hub claim-status` | `{claimed, hub, requests}`: the record and the Hub claim requests of the last day (`match_code` is always empty) |
 | `POST /hub-claim/requests/{id}/approve` `{match}` + host secret | `harness hub approve <id> --match <code>` | approve a Hub claim |
 | `POST /hub-claim/requests/{id}/deny` + host secret | `harness hub deny <id>` | deny a claim, or withdraw an unredeemed approval |
 | `POST /hub-claim/release` `{confirm: true}` + host secret | `harness hub release --confirm` | revoke the Hub's key and clear the record (404 when no Hub is claimed); lists `hub_minted_owner_keys` |
@@ -663,7 +670,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
-| 1.23 | 2026-10-09 | Exclusive Hub claim (#543, see [Hub claim](#hub-claim)): `GET /hub-claim`, and the host-only `POST /hub-claim/requests/{id}/approve`, `/deny` and `POST /hub-claim/release` (owner credentials plus the `X-Agent-Harness-Hub-Approval` secret from `<data_dir>/hub-approval.secret`). The Hub's key is an owner token with role `hub`; `GET /keys` adds `role`; `DELETE /keys/{id}` on it answers 409; `POST /keys` refuses `kind: "hub"` and `role`. `GET /api/admin/v1` adds `hub.claimed`. Audit `hub.claim.*` and `hub.release` rows, `actor_kind` `hub`. CLI `harness hub status`, `approve`, `deny` and `release` |
+| 1.23 | 2026-10-09 | Exclusive Hub claim (#543, see [Hub claim](#hub-claim)): `GET /hub-claim`, and the host-only `POST /hub-claim/requests/{id}/approve`, `/deny` and `POST /hub-claim/release` (owner credentials plus the `X-Agent-Harness-Hub-Approval` secret from `<data_dir>/hub-approval.secret`). The Hub's key is an owner token with role `hub`; `GET /keys` adds `role`; `DELETE /keys/{id}` on it answers 409; `POST /keys` refuses `kind: "hub"` and `role`. `GET /api/admin/v1` adds `hub.claimed`. Audit `hub.claim.*` and `hub.release` rows, `actor_kind` `hub`. CLI `harness hub claim-status`, `approve`, `deny` and `release` |
 | 1.22 | 2026-10-09 | Zero-touch pairing requests (#519, see [Zero-touch pairing requests](#zero-touch-pairing-requests)): `GET` and `POST /pairing-requests`, `POST /pairing-requests/{id}/approve`, `/confirm` and `/deny`. They carry request metadata, match codes and the section 5.2 disclosure copy, never a token or verifier. `pairing_request.*` audit rows record them. CLI `harness pairing-requests list`, `arm`, `approve`, `confirm` and `deny` |
 | 1.21 | 2026-10-09 | Optional `catalog_app_id` on `POST /keys` and `POST /pairing-codes` (#518, see [App API](app-api.md#catalog-app-id)): a lowercase reverse-DNS label, at most 120 characters, reported by `GET /keys` and `GET /pairing-codes` (`""` when absent) and in the `key.create`, `pairing.create` and `pairing.redeem` audit metadata. An invalid value is refused with 400 and a `denied` audit row. It grants nothing and is never part of a token |
 | 1.20 | 2026-10-04 | Nightly backups include known members' and Apps' transcript archives; backup results add `transcript_archives` and `warnings` (#378) |

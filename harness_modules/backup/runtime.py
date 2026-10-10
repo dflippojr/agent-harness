@@ -24,6 +24,10 @@ class BackupRuntime(ModuleRuntime):
     async def stop(self) -> None:
         await self.service.stop()
 
+    def status(self) -> dict:
+        backup = self.service.last_backup
+        return {"last_success_at": backup.get("ok_at"), "bytes": backup.get("bytes", 0)}
+
     def metrics(self, out, db) -> None:
         backup = self.service.last_backup
         if backup.get("ok_at"):

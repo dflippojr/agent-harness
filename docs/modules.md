@@ -20,6 +20,8 @@ order they were extracted (the other optional features move one module per PR in
 - **MCP client** ([`harness_modules/mcp_client/`](../harness_modules/mcp_client/)): owner-pinned stdio MCP tools for the native loop (#260)
 <!-- generated:end modules-list -->
 
+The optional [Hub inventory](hub.md) is read by the standalone Hub app and the CLI.
+
 ## Rules
 
 - **One registration point.** A module is a package whose `MODULE` attribute is a `harness.modules.Module`. Everything
@@ -117,12 +119,21 @@ local-model module supplies that control. Images requires it when actually takin
 | `app_scopes`, `app_capabilities` | App token scopes it adds, and `app.capabilities` values (`{capability: scope}`). |
 | `tools` (`ToolGate`), `tool_names` | When the runtime's `toolkit()` is offered to a session: project flag, App capability, members, MCP for hosted sessions, whether it writes into the workspace (`workspace_root` / runner `put_bytes`), which tools mutate files (quota and checkpoints), the telemetry span, the system-prompt section (`prompt`) a session gets with it. `tool_names` are reserved against App tools. |
 | `settings()` | `SettingSpec`s with defaults, bounds, `enable_check`s and named getters/setters, merged into the registry. |
+| `local_cli(groups)` | Adds offline parsers to existing CLI groups, with a `local_handler(args)` default; these run before client configuration and make no daemon request. |
 | `cli`, `cli_groups` | Rows in `harness.cli` `ADMIN_COMMANDS` format (`harness images …`); the stage (a) parity rows. The Mac client bundle carries a JSON copy (`mac_client.py`). |
 | `principal_capabilities(owner, scopes)` | Entries for `/me` and `/api/v1/me` `capabilities`. |
 | `doctor(report, cfg)` | Checks for `python -m harness.doctor`. |
 | `docs` | Pointers to the module's documentation. |
 
 `ModuleRuntime` hooks, all optional:
+
+`status()` returns a secret-free, read-only detail dictionary, or `None` (the default) for presence
+only. It may be synchronous or async. Synchronous hooks run off the event loop; async hooks have a six-second
+budget. Hub inventory skips switched-off modules and catches hook failures as `status: {state: error}` without
+logging exception contents. Hooks must not wake models, mutate daemon state, or expose tokens, paths to secrets,
+payloads, or other app data. Local model reports loaded/warming state, runners online count, backup last success,
+and notifications enabled/queued counts. No module imports another module; `_PUBLIC` is unchanged.
+
 
 | Hook | When |
 | --- | --- |

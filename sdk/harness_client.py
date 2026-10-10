@@ -39,6 +39,7 @@ JSON_MEDIA_TYPE = "application/json"
 
 # Used by validate_openapi() and CI. Paths use the server's OpenAPI templates, not formatted runtime ids.
 SDK_OPERATIONS = {
+    "hub_status": ("get", "/api/admin/v1/hub"),
     "audit": ("get", "/api/v1/audit"),
     "info": ("get", "/api/v1"), "pair": ("post", "/api/v1/pair"),
     "request_pairing": ("post", "/api/v1/pair/requests"),
@@ -163,7 +164,14 @@ class Approval(TypedDict, total=False):
     status: str
 
 
+class HubInventory(TypedDict):
+    modules: list[dict]
+    apps: list[dict]
+    entries: list[dict]
+
+
 SDK_RESPONSE_TYPES = {
+    SDK_OPERATIONS["hub_status"]: ("200", HubInventory, False),
     SDK_OPERATIONS["backends"]: ("200", BackendStatus, True),
     SDK_OPERATIONS["create_session"]: ("201", Session, False),
     SDK_OPERATIONS["sessions"]: ("200", Session, True),
@@ -417,6 +425,13 @@ class Harness:
         if resp.status_code >= 400:
             self._raise_response(resp)
         return resp.json() if resp.headers.get("content-type", "").startswith(JSON_MEDIA_TYPE) else resp.content
+
+    def hub_status(self) -> dict:
+        """Owner/Hub-key read-only inventory. An absent Hub module answers 404."""
+        resp = self.client.get("/api/admin/v1/hub")
+        if resp.status_code >= 400:
+            self._raise_response(resp)
+        return resp.json()
 
     def info(self) -> dict:
         return self._call("GET", "")

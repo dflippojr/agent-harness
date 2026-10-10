@@ -18,6 +18,10 @@ class RunnersRuntime(ModuleRuntime):
         if self.service is not None:
             self.service.close()
 
+    def status(self):
+        return {"online_count": sum(self.service.online(name) for name in self.cfg.runners)
+                if self.service is not None else 0}
+
     def features(self):
         return {"runner_pairing": bool(self.service and self.cfg.runners)}
 

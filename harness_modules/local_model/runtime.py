@@ -70,6 +70,13 @@ class LocalModelRuntime(ModuleRuntime):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
+    async def status(self):
+        model = self.cfg.models.get(self.cfg.default_model)
+        if model is None or self.service is None:
+            return {"state": "unloaded", "loaded": False, "warming": False}
+        state = await self.service.state(model)
+        return {"state": state, "loaded": state == "ready", "warming": state == "waking"}
+
     def metrics(self, out, db):
         from .metrics import _guard_metrics
         _guard_metrics(self.manager, out)
