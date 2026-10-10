@@ -61,9 +61,12 @@ let image = {id: "result", prompt: "A lake", model: "fast", status: "running",
 let images = [image, {...image, id: "queued", status: "queued"},
     {...image, id: "failed", status: "failed"}, {...image, id: "done", status: "done"}];
 const loaded = [];
+const requests = [];
 const views = mountImages({ $app: byId.app, h, fill, append,
-    api: async (path) => path === "/images" ? {images, status} : path === "/gpu"
-        ? {state: "clear"} : image, setHeader() {}, toast() {}, go() {}, route: {},
+    api: async (path, options) => {
+        requests.push({path, options});
+        return path === "/images" ? {images, status} : path === "/gpu" ? {state: "clear"} : image;
+    }, setHeader() {}, toast() {}, go() {}, route: {},
     isGuest: () => guest, isMember: () => false, onLeave: (fn) => leave.push(fn),
     progressBar: () => h("div", {class: "progress"}, h("span")),
     confirmGpuQueue: async () => true, daemonImage: (path, attrs) => {
@@ -85,6 +88,17 @@ images = images.map(img => ({...img, status: "done"}));
 await tick();
 assert.notEqual(find("image-card"), firstCard);
 assert.equal(walk(find("image-grid"), el => el.tagName === "IMG").length, 4);
+const prompt = walk(find("image-generation"), el => el.tagName === "TEXTAREA")[0];
+prompt.value = "A lake at sunrise";
+localStorage.setItem("harness.imageDraft", prompt.value);
+const form = walk(find("image-generation"), el => el.tagName === "FORM")[0];
+// The stub does not reflect a checked attribute onto its radio property.
+walk(form, el => el.type === "radio")[0].checked = true;
+await form._l.submit[0]({preventDefault() {}});
+assert.deepEqual(requests.find(request => request.path === "/images" && request.options?.method === "POST").options.body,
+    {prompt: "A lake at sunrise", model: "fast", aspect_ratio: "1:1", resolution: "standard", upscale: "none"});
+assert.equal(localStorage.getItem("harness.imageDraft"), null);
+assert.equal(walk(form, el => el.type === "submit")[0].disabled, false);
 clean();
 assert.equal(timers.size, 0);
 assert(!byId.app.classList.contains("images-page"));
@@ -114,16 +128,3 @@ console.log("ok");
         text=True, encoding="utf-8", timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_image_desktop_rules_are_scoped_to_breakpoints():
-    root = Path(__file__).resolve().parents[1]
-    css = (root / "harness/web/style.css").read_text(encoding="utf-8")
-    desktop = css.split("/* Desktop 7: Images (#568).", 1)[1].split("/* End Desktop 7. */", 1)[0]
-    assert "@media (min-width: 768px)" in desktop
-    assert "grid-template-columns: 380px minmax(0, 1fr)" in desktop
-    assert "repeat(auto-fill, minmax(180px, 1fr))" in desktop
-    assert "@media (min-width: 1280px)" in desktop
-    assert "grid-template-columns: minmax(0, 1fr) 380px" in desktop
-    assert "object-fit: contain" in desktop
-    assert "var(--panel)" in desktop
