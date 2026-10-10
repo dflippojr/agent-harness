@@ -385,7 +385,29 @@ h = Harness.redeem_pairing(pending)   # waits up to 10 minutes for the approval;
 ```
 
 `Harness.claim_pairing(url, request_id, origin=...)` claims a Hub-armed slot instead. A browser App passes its
-`origin` to both.
+`origin` to both. Both check `features.pairing_requests` in `GET /api/v1` first and raise `feature_unsupported`
+against an older Server.
+
+## Hub claim
+
+The standalone Hub claims the daemon with the same request (#543, App API 1.24): `POST /api/v1/pair/requests` with
+`"kind": "hub"` and no `scopes`. Everything else is as above (PKCE, match code, 10 and 5 minutes, one redemption),
+except:
+
+- while the daemon already has a Hub, the request is refused at once with 409 `hub_claimed`;
+- the owner approves or denies it only on the daemon host (`harness hub approve <id> --match <code>`; see
+  [admin-api.md](admin-api.md#hub-claim)), never from the Hub, Web or an owner token alone;
+- the redeem returns an owner token (`ho-`) with the `admin` scope and `role: "hub"` in `app`, bound to the Hub's
+  origin for a browser Hub. If another Hub claimed the daemon after the approval, it answers 409 `hub_claimed`.
+
+`GET /api/v1` reports `features.hub_claim: true` (the Server supports it) and `features.hub_claimed`, a boolean saying
+whether a Hub is claimed now. In Python:
+
+```python
+pending = Harness.request_hub_claim("https://tower.example.ts.net", "My Hub", origin="https://hub.example")
+print("On the daemon host run: harness hub approve", pending.id, "--match", pending.match_code)
+hub = Harness.redeem_pairing(pending)   # hub.token is the Hub's ho- token
+```
 
 ## Quick start (Python)
 
@@ -919,6 +941,7 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
 | 1.17 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions live in `<data_dir>/apps/app-web/harness.sqlite3`. An App without `sessions:all` never reads it: `/api/v1/queue` and the live session list no longer include the owner's sessions for it, and its id lookups cover its own sessions only |
+| 1.24 | 2026-10-09 | Exclusive Hub claim (#543, see [Hub claim](#hub-claim)): `kind: "hub"` on `POST /api/v1/pair/requests` (no scopes; refused with 409 `hub_claimed` while a Hub is recorded), redeemed to the Hub's owner token with `role: "hub"`. `features.hub_claim` and `features.hub_claimed`. SDK `Harness.request_hub_claim`; `request_pairing` and `claim_pairing` check `features.pairing_requests` first |
 | 1.23 | 2026-10-09 | Zero-touch pairing requests (#519): `POST /api/v1/pair/requests`, `POST /api/v1/pair/requests/{id}/claim` and `POST /api/v1/pair/requests/{id}/token` (PKCE S256; the daemon mints the `ha-` key at redemption and returns it once). `features.pairing_requests` is `true`. SDK `Harness.request_pairing`, `claim_pairing` and `redeem_pairing`. Existing pairing codes and keys are unchanged |
 | 1.22 | 2026-10-09 | Optional `catalog_app_id` on keys and pairing codes (#518): set on `POST /pairing-codes` and `POST /keys`, copied to the key a pairing code mints, and reported by `GET /keys`, `GET /pairing-codes` and the `app` object of `POST /api/v1/pair` (now a typed `PairedAppResponse`). A label only; it grants nothing and is never in a token |
 | 1.21 | 2026-10-09 | `memory_library` and `homelab` scopes: an App session gets those tools only when its token holds the scope, and an unset `app.capabilities` means what the token's scopes allow. App sessions on a local project clone only its base branch, and erasing one deletes its `agent/<session id>` branch from a local project |

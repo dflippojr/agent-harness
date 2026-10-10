@@ -162,6 +162,8 @@ class Manager:
         self.db = db if isinstance(db, SessionStores) else SessionStores(db, Path(cfg.data_dir) / "apps")
         require_owner_allowlist(cfg, self.db.member_count())
         self.local_owner_token = local_owner.ensure_token(cfg.data_dir)
+        # Host-only proof for approving or releasing a Hub claim (#543): new at every start, never logged or served.
+        self.hub_approval_secret = local_owner.rotate_hub_secret(cfg.data_dir)
         self.tailscale_peer = tailscale_peer.default_check()
         self.bus = EventBus(self.db)
         self.scheduler = GpuScheduler(self._queue_changed, eligible=self._scheduler_eligible)
@@ -1096,7 +1098,7 @@ class Manager:
 
     @namespace_audit.failures("session.rerun")
     def rerun(self, ref: str, *, context=None) -> dict:
-        """Start a fresh session with the same task, project, and model."""
+        """Start a fresh session with the same task, project, model, and starting taint."""
         from .apps import AppTool
         s = self.get(ref)
         if s.get("kind") == TOOLS_ONLY:  # its tools live in the App, which has to send them again
@@ -1110,7 +1112,8 @@ class Manager:
                            app=self.db.get_api_key(s["app_id"]) if s.get("app_id") else None,
                            app_tools=[AppTool.model_validate(tool) for tool in (s.get("app_tools") or [])],
                            app_context="", app_metadata=s.get("app_metadata"),
-                           retention_days=s.get("retention_days"), end_user=s.get("end_user", ""))
+                           retention_days=s.get("retention_days"), end_user=s.get("end_user", ""),
+                           taint=list(s.get("taint") or []))  # the replayed prompt carries the same untrusted input
         namespace_audit.record(self.db, s, context, "session.rerun")
         return result
 

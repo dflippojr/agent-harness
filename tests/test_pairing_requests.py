@@ -439,6 +439,9 @@ def test_sdk_requests_and_redeems_against_the_daemon(hh, monkeypatch):
         def post(self, path, json):
             return client.post(path, json=json, headers=self.headers)
 
+        def get(self, path):
+            return client.get(path, headers=self.headers)
+
     real = httpx.Client
     monkeypatch.setattr(sdk_module.httpx, "Client", Bridge)
     pending = Harness.request_pairing("http://testserver", "SDK app", scopes=["sessions"], origin=ORIGIN,

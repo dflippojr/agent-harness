@@ -20,6 +20,7 @@ from . import claude_token, cli_domains, credential_sources, end_users, member_k
 from .config import BackendConfig, SandboxConfig
 from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides, mcp_config
 from .sandbox import run_cmd
+from .storage import is_reparse_point
 
 # The bind-mount target every provider CLI runs in, and the proxy env every container needs.
 WORKSPACE = "/workspace"
@@ -36,6 +37,34 @@ CLAUDE_SPLIT_TOOLS = "Task,TodoWrite"
 SPLIT_NOTE = ("\n\nYour shell and file tools are the harness tools mcp__harness__run_shell, read_file, write_file, "
               "edit_file, search and list_files. They act on the project workspace; this container has no "
               "workspace of its own.")
+
+
+# Project instructions Claude Code would load from the workspace itself. `--setting-sources user` drops them along with
+# the project settings (#531), so the session's system prompt carries them instead.
+PROJECT_MEMORY_FILES = ("CLAUDE.md", ".claude/CLAUDE.md")
+PROJECT_MEMORY_LIMIT = 16_000  # characters: the prompt travels on the docker command line
+
+
+def project_memory(workspace: Path) -> str:
+    """The workspace's CLAUDE.md files as a system prompt section, or "". A file reached through a link is skipped:
+    it is read on the host, where a link could point anywhere."""
+    sections = []
+    for name in PROJECT_MEMORY_FILES:
+        parts = name.split("/")
+        path = workspace.joinpath(*parts)
+        try:
+            if any(is_reparse_point(workspace.joinpath(*parts[:i + 1])) for i in range(len(parts))) \
+                    or not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if text:
+            sections.append(f"Contents of {WORKSPACE}/{name} (project instructions):\n\n{text}")
+    body = "\n\n".join(sections)
+    if len(body) > PROJECT_MEMORY_LIMIT:
+        body = body[:PROJECT_MEMORY_LIMIT] + f"\n\n[truncated: read the files in {WORKSPACE} for the rest]"
+    return "\n\n" + body if body else ""
 
 
 def workspace_args(workspace: Path, split: bool) -> list[str]:
@@ -139,8 +168,11 @@ class ClaudeSession:
             "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
             "--permission-mode", "default" if self.tools_only else self.backend.permission_mode, "--model", self.model,
+            # User settings only (#531): the read-only state files and the managed settings. Project and local
+            # settings in the workspace's .claude/ could set env, helpers or permissions the session never asked for.
+            "--setting-sources", "user",
             "--system-prompt" if self.tools_only else "--append-system-prompt",
-            self.system_prompt + (SPLIT_NOTE if self.split else ""),
+            self.system_prompt + (SPLIT_NOTE if self.split else project_memory(self.workspace)),
         ]
         if self.tools_only:
             # "" turns off every built-in tool (Bash, Read, Edit, WebFetch, Task...); MCP tools stay. Skills and slash
