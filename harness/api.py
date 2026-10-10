@@ -27,6 +27,7 @@ from . import credential_audit
 from . import config as config_mod
 from . import efficiency
 from . import google_signin
+from . import idempotency
 from . import local_owner
 from . import tailscale_peer
 from . import taint
@@ -298,12 +299,13 @@ def _cors_preflight(request: Request, info: _OriginInfo) -> Response:
                          request.headers.get("access-control-request-headers", "").split(",") if h.strip()}
     if (not info.cross_origin_api or requested_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
             or not requested_headers <= {"authorization", "content-type", "last-event-id",
-                                          "x-agent-harness-client"}):
+                                          "x-agent-harness-client", idempotency.HEADER.lower()}):
         return JSONResponse({"detail": "cross-origin request refused"}, status_code=403,
                             headers=info.cors_headers)
     return Response(status_code=204, headers={**info.cors_headers,
                     "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-                    "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID, X-Agent-Harness-Client",
+                    "Access-Control-Allow-Headers": "Authorization, Content-Type, Last-Event-ID, X-Agent-Harness-Client, "
+                                                    + idempotency.HEADER,
                     "Access-Control-Max-Age": "600"})
 
 
@@ -386,6 +388,10 @@ async def _access_guard(request: Request, call_next):
     if warnings:
         response.headers["X-Agent-Harness-Audit-Warning"] = "audit_gap"
         response.headers["Access-Control-Expose-Headers"] = "X-Agent-Harness-Audit-Warning"
+    if info.cross_origin_api and idempotency.REPLAYED_HEADER in response.headers:
+        exposed = response.headers.get("Access-Control-Expose-Headers", "")
+        response.headers["Access-Control-Expose-Headers"] = ", ".join(
+            header for header in (exposed, idempotency.REPLAYED_HEADER) if header)
     if compatibility and compatibility["state"] == "transition":
         response.headers["X-Agent-Harness-Deprecation"] = "missing_client_version"
         response.headers["Warning"] = '299 agent-harness "client version header will be required after this transition release"'

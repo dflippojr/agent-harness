@@ -496,18 +496,25 @@ class Harness:
     def create_session(self, prompt: str, project: str | None = None, context: dict[str, str] | None = None,
                        tools: list[Tool] | None = None, metadata: dict | None = None, title: str | None = None,
                        model: str | None = None, backend: str = "local", tools_only: bool = False,
-                       retention_days: float | None = None, end_user: str | None = None) -> Session:
+                       retention_days: float | None = None, end_user: str | None = None,
+                       idempotency_key: str | None = None) -> Session:
         """`tools_only=True` starts an App-tools-only session: the model gets only `tools` (no workspace, project,
         built-in or CLI tools). It takes no project; backends that can't do it refuse with
         app_tools_only_unsupported. `retention_days` erases the session once it has been idle that long. `end_user`
         runs the session on that person's own Claude or Codex login (see `start_end_user_login`), or is refused with
-        end_user_login_required."""
+        end_user_login_required.
+
+        `idempotency_key` (App tokens, 1-128 letters, digits, '-' or '_') makes the create safe to retry after a lost
+        response: the same key and arguments within 24 hours return the first call's session instead of starting
+        another. A different request under the key raises HarnessError `idempotency_conflict` (409); a retry after you
+        deleted that session raises `idempotency_session_erased` (410). Nothing is retried for you."""
         body = {"prompt": prompt, "project": project if project is not None or tools_only else "scratch",
                 "backend": backend, "metadata": metadata or {}, "title": title, "model": model,
                 "context": [{"title": k, "content": v} for k, v in (context or {}).items()],
                 "tools": [t.spec() for t in tools or []], "tools_only": tools_only, "retention_days": retention_days,
                 "end_user": end_user}
-        return self._call("POST", "/sessions", json=body)
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key is not None else None
+        return self._call("POST", "/sessions", json=body, headers=headers)
 
     # end users' own subscription logins (#365)
     def start_end_user_login(self, end_user: str, backend: str) -> dict:
@@ -622,22 +629,36 @@ class Harness:
 
     def run(self, prompt: str, tools: list[Tool] | None = None, on_event: Callable[[dict], None] | None = None,
             **create_args) -> RunResult:
-        """Create a session and serve its tool calls until it ends."""
+        """Create a session and serve its tool calls until it ends. With an idempotency key, attach to its current
+        run so a retry skips completed runs and answered tool calls."""
         by_name = {t.name: t for t in tools or []}
         s = self.create_session(prompt, tools=tools, **create_args)
+        if create_args.get("idempotency_key") is not None:
+            return self.attach(s["id"], tools=tools, on_event=on_event)
         return self._drive(s["id"], by_name, RunResult(session=s), on_event)
 
     def attach(self, sid: str, tools: list[Tool] | None = None,
                on_event: Callable[[dict], None] | None = None) -> RunResult:
         """Attach to an existing session's current run: serve its pending App tool calls and return the result.
+        Deliver already-requested pending approvals to `on_event` before following new events.
 
         Sends and creates nothing. A finished session is returned as is. Only one driver should own a session."""
         s = self.session(sid)
         result = RunResult(session=s)
         if s.get("status") in ("done", "failed", "cancelled"):
             return result
+        after = s.get("last_event_seq") or 0
+        if on_event:
+            pending = {a["id"] for a in self.pending_approvals(sid)}
+            if pending:
+                for event in self.events(sid, follow=False):
+                    if event["seq"] > after:
+                        break  # newer approvals arrive through the following stream
+                    if event["type"] == "approval_requested" and event["data"]["id"] in pending:
+                        result.events.append(event)
+                        on_event(event)
         return self._drive(sid, {t.name: t for t in tools or []}, result, on_event,
-                           after=s.get("last_event_seq") or 0, confirm_replays=True)
+                           after=after, confirm_replays=True)
 
     # images
     def generate_image(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", wait: bool = True,

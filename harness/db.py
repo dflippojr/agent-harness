@@ -886,6 +886,8 @@ class Database:
                 self.conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM search_index WHERE session_id = ?", (sid,))
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+            # a retried create with the key that made it gets 410 until the key expires (#462)
+            self.conn.execute("UPDATE idempotency_keys SET session_id = '' WHERE session_id = ?", (sid,))
 
     @_writes
     def put_artifact(self, sid: str, hash_: str, content: str) -> None:
@@ -1516,6 +1518,36 @@ class Database:
             self.conn.execute("UPDATE pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
                               (now, key["id"], pairing["id"]))
         return key, secret, ""
+
+    # idempotent App session creation (#462, harness/idempotency.py): the hash of the key and a digest of the
+    # request, never the request itself
+    @_writes
+    def insert_idempotency_key(self, row: dict) -> None:
+        """Record a key in the transaction creating its session; a key still protected raises IntegrityError and the
+        session's insert rolls back with it. Start the protection window at this successful insert."""
+        from . import idempotency
+
+        now = idempotency.clock()
+        self.drop_expired_idempotency_keys(now)
+        with self.lock:
+            self.conn.execute("INSERT INTO idempotency_keys (key_hash, request_digest, session_id, created_at, "
+                              "expires_at) VALUES (?, ?, ?, ?, ?)",
+                              (row["key_hash"], row["request_digest"], row["session_id"], now,
+                               now + idempotency.WINDOW_SECONDS))
+
+    @_writes
+    def drop_expired_idempotency_keys(self, now: float) -> None:
+        """Expired keys (tombstones included) are free again: their rows go."""
+        with self.lock:
+            self.conn.execute("DELETE FROM idempotency_keys WHERE expires_at <= ?", (now,))
+
+    @_reads
+    def find_idempotency_key(self, key_hash: str, now: float) -> dict | None:
+        """The key's row while it is protected; None once it has expired or was never used."""
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM idempotency_keys WHERE key_hash = ? AND expires_at > ?",
+                                    (key_hash, now)).fetchone()
+        return dict(row) if row else None
 
     # zero-touch App pairing requests (#519, harness/pairing_requests.py): the row holds the hash of the App's
     # code_challenge, never a token or the verifier

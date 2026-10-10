@@ -125,6 +125,8 @@ class FakeAttachServer:
         path = request.url.path
         if path == "/api/v1/sessions/s1" and request.method == "GET":
             return httpx.Response(200, json=self.session)
+        if path.endswith("/approvals") and request.method == "GET":
+            return httpx.Response(200, json=[])
         if path.endswith("/tool_calls") and request.method == "GET":
             return httpx.Response(200, json=self.pending)
         if "/tool_calls/" in path and request.method == "POST":
@@ -210,6 +212,103 @@ def test_attach_skips_replayed_call_that_is_no_longer_pending_and_reports_unknow
     assert log == []
     assert [(r[0], r[1]["ok"]) for r in server.results] == [("c2", False)]
     assert "unknown tool missing" in server.results[0][1]["output"]
+
+
+def test_keyed_run_retries_do_not_execute_completed_tool_calls_again():
+    log = []
+    done = {"id": "s1", "status": "done", "last_event_seq": 2, "answer": "purchased"}
+    server = FakeAttachServer(_active(0), [_call("c1", text="purchase")], [
+        {"seq": 1, "type": "app_tool_call", "data": _call("c1", text="purchase")},
+        {"seq": 2, "type": "run_finished", "data": {}},
+    ])
+    creates = []
+
+    def handler(request):
+        if request.url.path == "/api/v1/sessions" and request.method == "POST":
+            assert request.headers["Idempotency-Key"] == "order-7"
+            creates.append(json.loads(request.content))
+            return httpx.Response(201 if len(creates) == 1 else 200, json=server.session)
+        if request.url.path.endswith("/events"):
+            server.session = done
+        return server.handler(request)
+
+    with server.sdk() as sdk:
+        sdk.client.close()
+        sdk.client = httpx.Client(base_url=sdk.base, transport=httpx.MockTransport(handler))
+        tools = _attach_tools(log)
+        first = sdk.run("buy once", tools=tools, idempotency_key="order-7")
+        replay = sdk.run("buy once", tools=tools, idempotency_key="order-7")
+    assert first.session == replay.session == done
+    assert creates[0] == creates[1]
+    assert log == ["purchase"]
+    assert [call_id for call_id, _ in server.results] == ["c1"]
+
+
+def test_keyed_run_retry_drives_the_current_followup_past_an_earlier_finish():
+    log = []
+    done = {"id": "s1", "status": "done", "last_event_seq": 7, "answer": "follow-up done"}
+    current = _call("c2", text="follow-up")
+    server = FakeAttachServer(_active(5), [], [
+        {"seq": 2, "type": "run_finished", "data": {}},
+        {"seq": 6, "type": "app_tool_call", "data": current},
+        {"seq": 7, "type": "run_finished", "data": {}},
+    ])
+
+    def handler(request):
+        if request.url.path == "/api/v1/sessions" and request.method == "POST":
+            return httpx.Response(200, json=server.session)
+        if request.url.path.endswith("/events"):
+            server.pending.append(current)
+            server.session = done
+        return server.handler(request)
+
+    with server.sdk() as sdk:
+        sdk.client.close()
+        sdk.client = httpx.Client(base_url=sdk.base, transport=httpx.MockTransport(handler))
+        result = sdk.run("buy once", tools=_attach_tools(log), idempotency_key="order-7")
+    assert result.session == done
+    assert [e["seq"] for e in result.events] == [6, 7]
+    assert log == ["follow-up"]
+    assert [call_id for call_id, _ in server.results] == ["c2"]
+
+
+def test_keyed_run_delivers_an_approval_requested_before_attachment():
+    pending = {"id": "a1", "tool": "read_file", "args": {}, "status": "pending"}
+    server = FakeAttachServer({**_active(5), "status": "waiting_approval"}, [], [
+        {"seq": 1, "type": "approval_requested", "data": {**pending, "id": "old"}},
+        {"seq": 2, "type": "run_finished", "data": {}},
+        {"seq": 4, "type": "approval_requested", "data": pending},
+    ])
+    decided = []
+    seen = []
+
+    def handler(request):
+        if request.url.path == "/api/v1/sessions" and request.method == "POST":
+            return httpx.Response(200, json=server.session)
+        if request.url.path.endswith("/approvals"):
+            return httpx.Response(200, json=[] if decided else [pending])
+        if request.url.path.endswith("/approvals/a1"):
+            decided.append(json.loads(request.content)["decision"])
+            server.session = {**_active(6), "status": "done"}
+            server.events.append({"seq": 6, "type": "run_finished", "data": {}})
+            return httpx.Response(200, json={**pending, "status": "approved"})
+        if request.url.path.endswith("/events") and request.url.params["follow"] == "true":
+            assert decided == ["approve"], "the pending approval must reach on_event before following"
+        return server.handler(request)
+
+    with server.sdk() as sdk:
+        sdk.client.close()
+        sdk.client = httpx.Client(base_url=sdk.base, transport=httpx.MockTransport(handler))
+
+        def on_event(event):
+            seen.append(event)
+            if event["type"] == "approval_requested":
+                sdk.decide_approval("s1", event["data"]["id"], True)
+
+        result = sdk.run("work", idempotency_key="order-7", on_event=on_event)
+    assert result.status == "done" and decided == ["approve"]
+    assert [e["seq"] for e in seen] == [4, 6]
+    assert result.events == seen
 
 
 def test_attach_ignores_earlier_run_finish_and_returns_on_terminal_status_without_tools():
