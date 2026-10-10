@@ -20,6 +20,7 @@ Describe 'Review publication safety' {
         @{ Payload = 'Bearer synthetic-value-1' }
         @{ Payload = ('Bearer ' + ('a' * 24)) }
         @{ Payload = ('`Bearer` ' + ('a' * 24)) }
+        @{ Payload = ('_Bearer_ ' + ('a' * 24)) }
         @{ Payload = ('https://example.invalid/download/' + ('A' * 24) + '%2F' + ('B' * 24) + '/file') }
         @{ Payload = 'password=synthetic-value' }
         @{ Payload = ('{"api_key":"' + ('A' * 32) + '"}') }
@@ -121,8 +122,9 @@ Describe 'Review publication safety' {
     }
 
     It 'publishes known citations in code spans, before a period and with underscores' {
-        $known = @('src/__tests__/home/nav.test.ts', 'harness_modules/remote_control/folder_discovery.py')
-        foreach ($text in @("See ``$($known[0])``.", "Fix ``$($known[1])``.", "Fix $($known[1]).")) {
+        $known = @('src/__tests__/home/nav.test.ts', 'harness_modules/remote_control/folder_discovery.py', 'app/[locale]/home/components/Nav.tsx')
+        $windows = $known[2].Replace('/', '\')
+        foreach ($text in @("See ``$($known[0])``.", "Fix ``$($known[1])``.", "Fix $($known[1]).", "See ``$windows``.", "See $windows.")) {
             $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $text }
             Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -DiffPaths $known
             if (-not (Get-Content -Raw -LiteralPath $script:reviewOutputPath).Contains($text)) { throw "Known citation was rejected: $text" }

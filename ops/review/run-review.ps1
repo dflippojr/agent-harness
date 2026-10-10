@@ -367,9 +367,10 @@ function ConvertTo-ReviewRenderedText {
 
     # Keep link labels and drop their targets, then drop every bracket (shortcut and reference
     # links), inline HTML tags, and emphasis or code markers, so markup cannot split a value.
-    # Intraword underscores never render as emphasis, so __tests__-style names are left intact.
+    # Underscores count as emphasis only at a word edge; intraword ones (ghp_, snake_case) stay.
     $rendered = $Text -replace '\[([^\[\]]*)\](?:\([^()]*\)|\[[^\[\]]*\])', '$1'
-    return $rendered -replace '<[^<>]*>|[*`\[\]]|~~', ''
+    $rendered = $rendered -replace '<[^<>]*>|[*`\[\]]|~~', ''
+    return $rendered -replace '(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])', ''
 }
 
 function Get-ReviewOrdinalUnique {
@@ -422,15 +423,16 @@ function Get-ReviewRepositoryPaths {
         } catch { $paths = @() }
         $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
     }
-    $paths = @($paths + $DiffPaths)
     # Decoded scan forms are NFKC-normalized and rendered, so citations must match those names too.
-    # They pass the same relative-path filter: a fullwidth slash or stripped markup can expose a root.
-    $normalized = @($paths | Where-Object { $_ } | ForEach-Object { $_.Normalize([Text.NormalizationForm]::FormKC) })
-    $paths = @($paths + $normalized + @($normalized | ForEach-Object { ConvertTo-ReviewRenderedText -Text $_ }))
-    return @(Get-ReviewOrdinalUnique -Values @($paths | Where-Object {
-        # Formatting characters must not disguise an absolute-looking name as a relative citation.
-        $_ -and $_ -notmatch '(^[\s`"''()\[\]{}*<>=:]*[/\\]|:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
-    }))
+    # A name is known only if every spelling is relative: formatting characters, a fullwidth slash
+    # or stripped markup must not disguise an absolute-looking name as a relative citation.
+    $relative = '(^[\s`"''()\[\]{}*<>=:]*[/\\]|:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
+    $known = foreach ($path in @($paths + $DiffPaths | Where-Object { $_ })) {
+        $normalized = $path.Normalize([Text.NormalizationForm]::FormKC)
+        $spellings = @($path, $normalized, (ConvertTo-ReviewRenderedText -Text $normalized))
+        if (@($spellings | Where-Object { -not $_ -or $_ -match $relative }).Count -eq 0) { $spellings }
+    }
+    return @(Get-ReviewOrdinalUnique -Values @($known))
 }
 
 function Remove-ReviewRepositoryCitations {
@@ -460,19 +462,23 @@ function Assert-ReviewOutputSafe {
     $mask = { param($form) if ($knownPaths.Count -gt 0) { Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths } else { $form } }
     $rules = @(Get-ReviewRedactionRules)
     $unsafe = $false
+    # Known relative citations are masked only for the profile-segment and long-token checks, first in
+    # the raw text (so decoding cannot break a citation) and again in each decoded form.
+    # Absolute roots and credential patterns always scan the unmasked text.
+    $maskedText = & $mask $Text
     foreach ($form in (Get-ReviewScanForms -Text $Text)) {
-        # Known relative citations are masked only for the profile-segment and long-token checks.
-        # Absolute roots and credential patterns always scan the unmasked text.
         if ($form -match $script:ReviewAbsoluteRootPattern) { $unsafe = $true }
-        if ((& $mask $form) -match $script:ReviewProfileSegmentPattern) { $unsafe = $true }
         foreach ($rule in @($rules | Where-Object { -not $_.PSObject.Properties['RepositoryPathsAllowed'] })) {
             if ($form -match $rule.Pattern) { $unsafe = $true }
         }
     }
+    foreach ($form in (Get-ReviewScanForms -Text $maskedText)) {
+        if ((& $mask $form) -match $script:ReviewProfileSegmentPattern) { $unsafe = $true }
+    }
     # A web link's path is checked segment by segment, so a long documentation URL is not one token.
     # Only slashes present before decoding split it, so an encoded slash cannot divide a token, and
     # the query and fragment stay whole: signatures there may contain Base64 slashes.
-    $segmented = [regex]::Replace($Text, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
+    $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
     foreach ($form in (Get-ReviewScanForms -Text $segmented)) {
         foreach ($rule in @($rules | Where-Object { $_.PSObject.Properties['RepositoryPathsAllowed'] })) {
             if ((& $mask $form) -match $rule.Pattern) { $unsafe = $true }

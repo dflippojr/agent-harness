@@ -243,7 +243,8 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
 The rules run on the raw body and on what a reader would see: percent escapes, HTML entities, invisible format
 characters, Unicode compatibility forms and Markdown backslash escapes are decoded first, and an approximate rendered
 form also drops link targets, brackets, inline HTML tags and emphasis or code markers that could split a value. Known
-paths are matched in their normalized and rendered spellings too, after the same relative-path filter. This is intentionally
+citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and
+rendered spellings; a name counts as known only if every one of those spellings is relative. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
 tells the backend to cite only repository-relative paths and describe credentials in words. The bearer rule only
 matches a token-like value (one containing a digit, or 20 or more token characters), so prose such as "a Bearer token"
