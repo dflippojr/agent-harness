@@ -56,6 +56,7 @@ let backendEffort = "high";
 let backendGate = null;
 let profileEmoji = "🙂";
 const fetched = [];
+const sources = [];
 const response = body => ({ ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => body });
 const fetch = async (url, options = {}) => {
   const p = String(url).replace(/^https?:\/\/[^/]+/, "").replace(/^\/api\/(?:admin\/)?v1/, "").split("?")[0];
@@ -85,7 +86,7 @@ Object.assign(win, { location: loc, navigator: {}, localStorage: storage(), sess
   history: { back() {} }, innerWidth: 1440, innerHeight: 900, scrollY: 0, scrollTo() {},
   matchMedia: q => q === "(min-width: 1280px)" ? wide : { matches: false, addEventListener() {} },
   requestAnimationFrame: f => setTimeout(f, 0), cancelAnimationFrame: clearTimeout,
-  EventSource: fakeEventSource([]), fetch });
+  EventSource: fakeEventSource(sources), fetch });
 await runApp({ window: win, document: doc, location: loc, navigator: win.navigator, history: win.history,
   localStorage: win.localStorage, sessionStorage: win.sessionStorage, fetch, EventSource: win.EventSource,
   getComputedStyle: el => el.style, requestAnimationFrame: win.requestAnimationFrame,
@@ -172,9 +173,23 @@ assert.match(pane().textContent, /Can't reach|offline/);
 await go("#/profile/connection");
 assert.ok(walk(byId.app, n => n.tagName === "INPUT").length, "offline Connection settings still open");
 offline = false;
-await go("#/profile/appearance");
+const offlineMenu = pane();
+win.dispatchEvent({ type: "online" });
+await sleep();
+assert.equal(loc.hash, "#/profile/connection", "reconnection requires no navigation");
+assert.equal(pane(), offlineMenu);
 assert.ok(walk(pane(), n => n.className === "note bad")[0].hidden, "reconnection clears the initial error");
+assert.match(rows().find(n => n.dataset.splitKey === "backends").textContent, /Claude · high/);
+sources.at(-1).fail();
+backendEffort = "low";
+sources.at(-1).onopen();
+await sleep();
+assert.match(rows().find(n => n.dataset.splitKey === "backends").textContent, /Claude · low/, "live stream recovery refreshes without a browser online event");
 await go("#/agents");
+fetched.length = 0;
+win.dispatchEvent({ type: "online" });
+await sleep();
+assert.ok(!fetched.includes("/backends"), "closing the menu removes its connection refresh listeners");
 role = "member"; fetched.length = 0;
 await go("#/settings");
 assert.ok(!rows().some(n => ["resources", "apps", "backends"].includes(n.dataset.splitKey)));

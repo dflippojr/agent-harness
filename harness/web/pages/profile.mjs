@@ -510,9 +510,13 @@ async function settingsMenu(pane = null, me = null, profile = null) {
     };
     settingsRefreshes.add(refresh);
     window.addEventListener("hashchange", refresh);
+    window.addEventListener("online", refresh);
+    const stopConnectionRefresh = onConnState((state) => { if (state === "live") refresh(); });
     pane.onLeave(() => {
       settingsRefreshes.delete(refresh);
       window.removeEventListener("hashchange", refresh);
+      window.removeEventListener("online", refresh);
+      stopConnectionRefresh();
     });
   }
   fillSettingValues(values, me, () => active && generation === 0);
