@@ -209,7 +209,8 @@ def test_uninstall_refuses_physical_and_symlinked_home(tmp_path, directory):
     assert (tmp_path / "real-home").is_dir()
 
 
-def test_uninstall_removes_install_symlink_without_deleting_target(tmp_path):
+@pytest.mark.parametrize("physical", [False, True])
+def test_uninstall_removes_install_symlink_without_deleting_target(tmp_path, physical):
     if not BASH:
         pytest.skip("bash is not installed")
     installer = shlex.quote((ROOT / "install/uninstall.sh").as_posix())
@@ -218,6 +219,7 @@ def test_uninstall_removes_install_symlink_without_deleting_target(tmp_path):
         'echo keep > real-install/models; ln -s real-install runtime || exit 77; '
         '[[ -L runtime ]] || exit 77; export HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/home/config"; '
         'uname() { echo Linux; }; systemctl() { return 0; }; export -f uname systemctl; '
+        + ('set -o physical; export SHELLOPTS; ' if physical else '')
         + f'{shlex.quote(BASH)} {installer} --install-dir ./runtime --remove-files'
     )
     result = subprocess.run([BASH, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)

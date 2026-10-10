@@ -28,7 +28,7 @@ if [[ $dry_run -eq 1 ]]; then
 fi
 [[ -n $install_dir ]] || { echo "empty install directory" >&2; exit 64; }
 if [[ -d $install_dir ]]; then
-    install_dir=$(CDPATH= cd -- "$install_dir" && pwd -L)
+    install_dir=$(CDPATH= cd -L -- "$install_dir" && pwd -L)
 elif [[ $install_dir != /* ]]; then
     install_dir="$PWD/$install_dir"
 fi
