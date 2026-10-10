@@ -247,8 +247,9 @@ class Runner:
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
                                for name, backend in cfg.backends.items()}
         self._held_slots: dict[str, _HeldSlot] = {}   # a hosted run's backend slot, released around approvals
-        # Hosted sessions admitted under their member's or App's running cap whose status does not count yet: waiting
-        # for the credential or a backend slot (#524). sid -> admission key; Manager._scheduler_eligible counts them.
+        # Sessions holding a place under their member's or App's running cap whose status does not show it: a hosted
+        # one admitted and waiting for a backend slot, or one that was running or parked and waits for its GPU or
+        # backend slot back (#524). sid -> admission key; Manager._scheduler_eligible counts them, and lets them run.
         self.admitted: dict[str, str] = {}
         self._clocks: dict[str, RunClock] = {}         # live run -> its time spent running
         self._out_of_time: set[str] = set()            # runs their time-budget watch cancelled
@@ -495,6 +496,13 @@ class Runner:
                 self.db.update_session(s["id"], run=run)
         return output
 
+    async def _resume_from_app(self, sid: str) -> None:
+        """A hosted session the App answered runs again, unless it ended meanwhile (a cancel while it waited)."""
+        def resume() -> None:
+            if self.db.get_session(sid)["status"] == "waiting_app":
+                self._status_writer(sid, "running", {})()
+        await self.db.for_session(sid).awrite(resume)
+
     async def _dispatch_mcp(self, s: dict, call_id: str, name: str, args: dict):
         if name in SPLIT_TOOLS and self.split_mode(s):
             return await self._split_call(s, name, args)
@@ -503,7 +511,7 @@ class Runner:
             # Parked on the App's reply: its time does not count toward the run's budget (#524).
             return await self.app_tools.call(s, call_id, name, args,
                                              on_wait=lambda: self.set_status(sid, "waiting_app"),
-                                             on_resume=lambda: self.aset_status(sid, "running"))
+                                             on_resume=lambda: self._resume_from_app(sid))
         kit = next(k for k in self.daemon_toolkits(s) if name in k.tool_names)
         gate = self._module_gate(kit)
         if gate is not None and gate.workspace:
@@ -646,13 +654,21 @@ class Runner:
         if self.scheduler.holder == sid:
             return
         s = self.db.get_session(sid)
-        if s["status"] != "queued":
-            await self.aset_status(sid, "queued")
-        if self.guard is not None and self.guard.active:
-            self.note_gpu_pause(sid)
-        with telemetry.span("gpu_slot_wait", {"harness.queue_front": front}):
-            await self.scheduler.acquire(sid, front=front)
-        await self.aset_status(sid, "running")
+        key = admission_key(self.db, s)
+        if key and s["status"] in ("running", *WAITING):
+            # It held its place under its member's or App's running cap (parked, or stepping aside for the GPU
+            # guard): it keeps it while it waits for the GPU, even over a cap lowered meanwhile (#524).
+            self.admitted[sid] = key
+        try:
+            if s["status"] != "queued":
+                await self.aset_status(sid, "queued")
+            if self.guard is not None and self.guard.active:
+                self.note_gpu_pause(sid)
+            with telemetry.span("gpu_slot_wait", {"harness.queue_front": front}):
+                await self.scheduler.acquire(sid, front=front)
+            await self.aset_status(sid, "running")
+        finally:
+            self._unreserve(sid)
 
     # GPU contention (gpu_guard.py)
     def note_gpu_pause(self, sid: str) -> None:
@@ -888,15 +904,14 @@ class Runner:
             await self._run_local(sid, s, recovered)
         except asyncio.CancelledError:
             if sid in self._out_of_time and sid not in self.user_cancelled:
-                uncancel = getattr(asyncio.current_task(), "uncancel", None)
-                if uncancel is None or uncancel() == 0:  # no other cancel (a daemon stop) came with it
-                    await self._end_out_of_time(sid)
-                    return
-            await self._take_pending_cancel(sid, cancelled=True)
+                await finish_then_cancel(self._end_out_of_time(sid))
+            else:
+                await self._take_pending_cancel(sid, cancelled=True)
             raise
         except ApprovalExpired:
             if await self._take_pending_cancel(sid):
                 return
+            await self._close_unresolved(sid, "Not run: nobody decided its approval in time.")
             await self.aset_status(sid, "done", stop_reason="approval_expired")
             await self._end_run(sid)
         except CliBackendError as e:
@@ -956,6 +971,8 @@ class Runner:
     async def _end_out_of_time(self, sid: str) -> None:
         s = self.db.get_session(sid)
         if s is not None and s["status"] in ACTIVE:
+            await self._close_unresolved(sid, "Not run: the task reached its time budget.",
+                                         "Stopped: the task reached its time budget while this ran.")
             await self.aset_status(sid, "done", stop_reason="budget_time")
         if sid in self._unended:
             await self._end_run(sid)
@@ -3053,13 +3070,17 @@ class Runner:
         """At daemon start: end a run whose final status committed but whose _end_run never finished."""
         await self._end_run(sid)
 
-    async def _record_cancel(self, sid: str) -> None:
+    async def _close_unresolved(self, sid: str, not_run: str, while_running: str = "") -> None:
+        """Give each tool call the run ends without a result one, so the next run's context answers every call."""
         s = self.db.get_session(sid)
         executing = (s["run"].get("executing") or {}).get("id")
         for call in unresolved_calls(s["context"]):
-            text = ("Cancelled by the user while running." if call["id"] == executing
-                    else "Not run: the user cancelled the task.")
+            text = while_running if while_running and call["id"] == executing else not_run
             await self._record_result(sid, call, call["function"].get("name", ""), text, ok=False)
+
+    async def _record_cancel(self, sid: str) -> None:
+        await self._close_unresolved(sid, "Not run: the user cancelled the task.",
+                                     "Cancelled by the user while running.")
         for approval in self.db.pending_approvals(sid):
             self.db.decide_approval(approval["id"], "cancelled")
         await self.aset_status(sid, "cancelled", stop_reason="cancelled")
