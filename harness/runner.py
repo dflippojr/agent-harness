@@ -475,9 +475,22 @@ class Runner:
         self._taint_from_result(s, name, args)  # MCP results are untrusted content like the native tools' (#262)
         return (output.text if isinstance(output, ToolOutput) else str(output)), True
 
+    def _shell_within_budget(self, s: dict, args: dict) -> dict:
+        """`run_shell` args whose timeout does not outlast a member's or an App's run budget (#524)."""
+        left = self._time_left(s)
+        if left is None:
+            return args
+        try:
+            asked = int(args.get("timeout") or 120)
+        except (TypeError, ValueError):
+            asked = 120
+        return {**args, "timeout": max(1, min(asked, math.ceil(left)))}
+
     async def _split_call(self, s: dict, name: str, args: dict) -> str:
         """A split-mode shell or file call: the same Workspace tools and Sandbox.exec the native loop runs, with the
         same argument checks and output bound."""
+        if name == "run_shell":
+            args = self._shell_within_budget(s, args)
         ws = self.split_workspace(s)
         schema = next(t for t in ws.schemas() if t["function"]["name"] == name)
         try:
@@ -1133,7 +1146,7 @@ class Runner:
                 delay = max(0, float(s["run"].get("limit_resets_at") or 0) - time.time())
                 if delay:
                     await asyncio.sleep(delay)
-                await self.aset_status(sid, "queued")
+                await self._requeue_keeping_place(sid, s)
             backend_session_id = str(s["run"].get("backend_session_id") or "")
             credential, use_api_key, api_key = self._cli_credentials(sid, s, backend_name)
             await self._memory_gate(sid, f"{backend_name} worker container")
@@ -1839,7 +1852,7 @@ class Runner:
             held = self._held_slots.get(sid)
             # Another session gets the backend slot while this one waits on a person (#524).
             try:
-                async with (held.released(lambda: self._queue_for_slot(sid, s)) if held is not None
+                async with (held.released(lambda: self._requeue_keeping_place(sid, s)) if held is not None
                             else contextlib.nullcontext()):
                     existing = await self._wait_approval(existing["id"])
             except BaseException:
@@ -1853,9 +1866,10 @@ class Runner:
         note = f" User note: {existing['note']}" if existing.get("note") else ""
         await cli.respond_permission(request_id, "deny", args, f"The user denied this {name} call.{note}")
 
-    async def _queue_for_slot(self, sid: str, s: dict) -> None:
-        """A decided session whose backend slot was taken meanwhile waits for one as `queued`, still holding its place
-        under its member's or App's running cap: it held it while parked, and nobody may take it in between (#524)."""
+    async def _requeue_keeping_place(self, sid: str, s: dict) -> None:
+        """A parked session that waits again as `queued` (decided, but its backend slot was taken meanwhile; back from
+        a provider limit) still holds its place under its member's or App's running cap: it held it while parked,
+        and nobody may take it in between, even over a cap lowered meanwhile (#524)."""
         key = admission_key(self.db, s)
         if key:
             self.admitted[sid] = key
@@ -2578,13 +2592,8 @@ class Runner:
                        max_chars: int = 10**9) -> str:
         await self._acquire(sid)  # e.g. resumed after a restart with the approval already granted
         s = self.db.get_session(sid)
-        left = self._time_left(s) if name == "run_shell" else None
-        if left is not None:  # one long command must not outlast a member's or an App's run budget (#524)
-            try:
-                asked = int(args.get("timeout") or 120)
-            except (TypeError, ValueError):
-                asked = 120
-            args = {**args, "timeout": max(1, min(asked, math.ceil(left)))}
+        if name == "run_shell":
+            args = self._shell_within_budget(s, args)
         run = s["run"]
         run["executing"] = {"id": call["id"], "name": name}
         self.db.update_session(sid, run=run)
@@ -3145,6 +3154,8 @@ class Runner:
             await asyncio.shield(self.sandbox(s).stop())
         else:
             await asyncio.shield(self._stop_cli(sid))
+            if sid in self._sandboxes:  # split mode: its shell and file tools ran there, maybe still running
+                await asyncio.shield(self._sandboxes[sid].stop())
         await asyncio.shield(self.save_branch(sid))
         if s.get("kind") == TOOLS_ONLY:
             await asyncio.to_thread(self._clear_tools_only_workspace, s)

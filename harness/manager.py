@@ -2074,16 +2074,18 @@ class Manager:
                 n += 1
         return n
 
-    def app_limits(self, app_id: str) -> dict:
-        """App `app_id`'s effective session caps: what the owner set, else the daemon's `app_max_*` defaults."""
-        stored = self.db.app_limits(app_id)
+    def app_limits(self, app_id: str, stored: dict | None = None) -> dict:
+        """App `app_id`'s effective session caps: what the owner set (`stored`, read when not given), else the
+        daemon's `app_max_*` defaults."""
+        stored = self.db.app_limits(app_id) if stored is None else stored
         defaults = {"max_running": self.cfg.app_max_running, "max_queued": self.cfg.app_max_queued}
         return {k: int(stored[k]) if stored.get(k) is not None else int(defaults[k]) for k in defaults}
 
     def app_limits_view(self, app_id: str) -> dict:
         """The owner's view: what is set for the App, what applies, and how much of it is in use."""
         count = self.db.count_app_sessions
-        return {"app_id": app_id, "configured": self.db.app_limits(app_id), "effective": self.app_limits(app_id),
+        stored = self.db.app_limits(app_id)
+        return {"app_id": app_id, "configured": stored, "effective": self.app_limits(app_id, stored),
                 "running": count(app_id, "running"), "queued": count(app_id, "queued"),
                 "parked": count(app_id, *WAITING)}
 

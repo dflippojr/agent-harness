@@ -252,6 +252,23 @@ def test_a_mac_session_recovered_after_a_restart_keeps_its_place_under_a_lowered
         assert m.scheduler.holder == "macsess002" and m.runner.admitted == {}
     asyncio.run(body())
 
+def test_a_run_back_from_a_provider_limit_keeps_its_place_under_a_lowered_cap(tmp_path):
+    """Two of an App's hosted runs are parked (one on a provider limit, one on an approval) and the owner lowers
+    the cap to one: when the limit resets, that run goes on, with a backend slot free."""
+    async def body():
+        m, modes, key = _mixed_manager(tmp_path, max_sessions=2)
+        await m.start()
+        _insert(m, "parked0006", "waiting_approval", app_id=key["id"])
+        _insert(m, "limited001", "waiting_limit", app_id=key["id"])
+        m.db.update_session("limited001", backend="claude", run={"limit_resets_at": 0})
+        modes["limited001"] = "echo"
+        m._spawn("limited001", recovered=True)
+        s = await wait_status(m, "limited001", "done", "failed", timeout=15)
+        assert (s["status"], s["stop_reason"]) == ("done", "final_message")
+        assert m.runner.admitted == {}
+        await m.stop()
+    asyncio.run(body())
+
 # members --------------------------------------------------------------------------------------------------------------
 def test_a_member_at_max_queued_with_parked_sessions_is_refused(tmp_path):
     client, m = household(tmp_path)
@@ -763,6 +780,47 @@ def test_a_hosted_session_resumes_only_when_its_last_app_call_is_answered(tmp_pa
         replies["c2"].set()
         await calls[1]
         assert m.db.get_session("hosted0003")["status"] == "running"
+    asyncio.run(body())
+
+
+def test_a_split_mode_shell_command_is_held_to_the_runs_time_budget(tmp_path):
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    m.cfg.max_run_seconds = 100
+    app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+    _insert(m, "split00001", "running", app_id=app_id)
+    m.db.update_session("split00001", backend="claude")
+    m.runner._clocks["split00001"] = RunClock(spent=95)
+    asked = {}
+
+    class Shell:
+        def schemas(self):
+            return [{"function": {"name": "run_shell", "parameters": {"type": "object", "required": ["command"],
+                     "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}}}}}]
+
+        async def call(self, name, args):
+            asked.update(args)
+            return "ok"
+    m.runner.split_workspace = lambda s: Shell()
+    asyncio.run(m.runner._split_call(m.db.get_session("split00001"), "run_shell", {"command": "sleep 60",
+                                                                                     "timeout": 600}))
+    assert asked["timeout"] == 5
+
+
+def test_a_split_mode_runs_end_stops_its_sandbox(tmp_path):
+    """A hosted split-mode run's shell commands run in its sandbox: ending the run (a deadline, a cancel) stops it,
+    so nothing keeps changing the workspace after the session reports it ended."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        _insert(m, "split00002", "done")
+        m.db.update_session("split00002", backend="claude")
+        stopped = []
+
+        class Box:
+            async def stop(self):
+                stopped.append(True)
+        m.runner._sandboxes["split00002"] = Box()
+        await m.runner._end_run("split00002")
+        assert stopped == [True]
     asyncio.run(body())
 
 
