@@ -428,6 +428,9 @@ ADMIN_COMMANDS = (
     ("apps restore", "POST", "/apps/{app_id}/restore", "cancel a revoked App's pending erasure", ()),
     ("apps retention", "PUT", "/apps/{app_id}/retention", "set how many days an App's sessions are kept",
      ("--retention_days:float",)),
+    ("apps limits", "GET", "/apps/{app_id}/limits", "show an App's session caps and what counts against them", ()),
+    ("apps set-limits", "PUT", "/apps/{app_id}/limits", "set how many sessions an App may run and queue",
+     ("--max_running:int", "--max_queued:int")),
     ("provider-credentials list", "GET", "/provider-credentials", "list per-App provider credentials", ()),
     ("provider-credentials set", "POST", "/provider-credentials", "set an App's provider credential policy",
      ("app_id", "backend", "--secret_ref", "--policy", "--models:list")),
@@ -508,7 +511,7 @@ ADMIN_COMMANDS = (
 )
 _GROUP_HELP = {
     "profile": "server profile", "accounts": "household members", "github-member-auth": "members' GitHub access",
-    "google-signin": "members' Google sign-in", "keys": "App, device and owner keys", "apps": "App data retention",
+    "google-signin": "members' Google sign-in", "keys": "App, device and owner keys", "apps": "App data retention and session caps",
     "provider-credentials": "per-App provider credentials", "pairing-codes": "App pairing codes",
     "pairing-requests": "zero-touch App pairing requests",
     "models": "local models", "backends": "model backends",

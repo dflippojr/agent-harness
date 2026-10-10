@@ -439,6 +439,7 @@ class Manager:
             model, effort = self._hosted_choice(backend, model, effort, target, app)
         remote = target != "tower"
         app_id = app["id"] if app else ""
+        self._enforce_app_caps(app_id)
         self._check_free_space(remote, member, target, owner_id, app_id)
 
         sid = uuid.uuid4().hex[:10]
@@ -882,6 +883,7 @@ class Manager:
             user_id = session_user_id(s)
             if user_id != OWNER_USER_ID:
                 self._require_member_start(self.db.account_by_id(user_id), "session")
+            self._enforce_app_caps(s.get("app_id") or "")
         # Chat: snippets the user ran since their last message reach the model with this one (the transcript keeps
         # the message as typed).
         model_content = self.snippets.context_for(sid) + content if s.get("kind") == "chat" else content
@@ -1040,6 +1042,7 @@ class Manager:
         if owner_id != OWNER_USER_ID:
             self._require_member_start(self.db.account_by_id(owner_id), "session")
         app_id = parent.get("app_id") or ""
+        self._enforce_app_caps(app_id)
         self._check_free_space(False, owner_id != OWNER_USER_ID, "tower", owner_id, app_id)
         cp = self.runner.checkpointer
         new_sid = uuid.uuid4().hex[:10]
@@ -2026,20 +2029,49 @@ class Manager:
         return self.db.revoke_app_provider_credential(cid)
 
     def _scheduler_eligible(self, sid: str) -> bool:
+        """May `sid` take the GPU slot (or, hosted, a backend slot) under its member's or App's `max_running`? A
+        session parked on an approval, the Mac, the App or a provider limit still counts against that cap (#524)."""
+        from .runner import WAITING
         s = self.db.get_session(sid)
         if not s:
             # Image/device/test holders are not household sessions; do not park them forever.
             return True
-        user_id = s.get("owner_id") or OWNER_USER_ID
-        if user_id == OWNER_USER_ID:
-            return True
-        account = self.db.account_by_id(user_id)
-        if account is None or not account.get("enabled", 1):
-            return False
         if s.get("status") == "running":
             return True
-        running = self.db.count_sessions(user_id, "running")
-        return running < int(account["max_running"])
+        user_id = s.get("owner_id") or OWNER_USER_ID
+        if user_id != OWNER_USER_ID:
+            account = self.db.account_by_id(user_id)
+            if account is None or not account.get("enabled", 1):
+                return False
+            occupied, cap = self.db.count_sessions(user_id, "running", *WAITING), int(account["max_running"])
+        elif self._capped_app(s.get("app_id") or ""):
+            occupied = self.db.count_app_sessions(s["app_id"], "running", *WAITING)
+            cap = self.app_limits(s["app_id"])["max_running"]
+        else:
+            return True
+        if s.get("status") in WAITING:
+            occupied -= 1  # its own slot in the cap
+        return occupied < cap
+
+    def _capped_app(self, app_id: str) -> bool:
+        """Only third-party Apps have session caps; Agent Harness Web and the owner's own tokens do not."""
+        if not app_id:
+            return False
+        key = self.db.get_api_key(app_id)
+        return key is not None and key.get("kind") == "app"
+
+    def app_limits(self, app_id: str) -> dict:
+        """App `app_id`'s effective session caps: what the owner set, else the daemon's `app_max_*` defaults."""
+        stored = self.db.app_limits(app_id)
+        defaults = {"max_running": self.cfg.app_max_running, "max_queued": self.cfg.app_max_queued}
+        return {k: int(stored[k]) if stored.get(k) is not None else int(defaults[k]) for k in defaults}
+
+    def app_limits_view(self, app_id: str) -> dict:
+        """The owner's view: what is set for the App, what applies, and how much of it is in use."""
+        from .runner import WAITING
+        return {"app_id": app_id, "configured": self.db.app_limits(app_id), "effective": self.app_limits(app_id),
+                "running": self.db.count_app_sessions(app_id, "running", *WAITING),
+                "queued": self.db.count_app_sessions(app_id, "queued", *WAITING)}
 
     def project_for_session(self, s: dict):
         from . import catalog
@@ -2052,11 +2084,24 @@ class Manager:
         self._enforce_member_quota(account, action)
 
     def _enforce_member_caps(self, account: dict) -> None:
+        from .runner import WAITING
         user_id = account["user_id"]
-        queued = self.db.count_sessions(user_id, "queued")
+        queued = self.db.count_sessions(user_id, "queued", *WAITING)
         max_q = int(account["max_queued"])
         if queued >= max_q:
-            raise HarnessError(429, f"this account already has {queued} queued local sessions (limit {max_q})")
+            raise HarnessError(429, f"this account already has {queued} queued or waiting sessions (limit {max_q})")
+
+    def _enforce_app_caps(self, app_id: str) -> None:
+        """An App's next session (or a finished one it restarts) waits in the shared queue: refuse past `max_queued`
+        (#524). Sessions parked on an approval or a reply count as queued."""
+        from .runner import WAITING
+        if not self._capped_app(app_id):
+            return
+        queued = self.db.count_app_sessions(app_id, "queued", *WAITING)
+        max_q = self.app_limits(app_id)["max_queued"]
+        if queued >= max_q:
+            raise HarnessError(429, f"this App already has {queued} queued or waiting sessions (limit {max_q})",
+                               "app_queue_full")
 
     def _enforce_member_quota(self, account: dict, action: str) -> None:
         from .storage import account_usage_bytes, quota_message

@@ -47,6 +47,10 @@ class ToolsOnlyUnsupported(CliBackendError):
     """This backend can't be limited to an App's tools, so an App-tools-only session refuses to run on it (#329)."""
 
 
+class ApprovalExpired(Exception):
+    """A pending approval passed `approval_timeout_seconds`: it was denied and the run ends (#524)."""
+
+
 class CliLimitError(Exception):
     def __init__(self, reset_at: float = 0):
         self.reset_at = reset_at
@@ -69,6 +73,7 @@ When the task is complete, reply with your final answer (or call `finish`). Don'
 MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the workspace (a separate clone of the user's repository, so their own checkout is never touched) on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches, don't change git config, and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
 
 ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit")
+WAITING = ("waiting_approval", "waiting_target", "waiting_app", "waiting_limit")  # parked: count toward caps (#524)
 # Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
 # cleared after its branch save and transcript: a daemon stopped in between leaves it set, and the next start finishes
 # that run's end from where it stopped (Manager.start).
@@ -107,6 +112,36 @@ def unresolved_calls(context: list[dict]) -> list[dict]:
         return []
     done = {m.get("tool_call_id") for m in context[i + 1:]}
     return [c for c in context[i]["tool_calls"] if c["id"] not in done]
+
+
+class _HeldSlot:
+    """A hosted backend slot held for one run, which can give it up while the run waits on an approval (#524)."""
+
+    def __init__(self, sem: asyncio.Semaphore):
+        self.sem, self.held = sem, False
+
+    async def __aenter__(self):
+        await self.sem.acquire()
+        self.held = True
+        return self
+
+    async def __aexit__(self, *exc):
+        if self.held:
+            self.held = False
+            self.sem.release()
+
+    @contextlib.asynccontextmanager
+    async def released(self, on_wait=None):
+        """Release the slot for the body; take it back after, awaiting `on_wait()` first if it is taken. A body that
+        raises leaves it released (and the exit above does not release it twice)."""
+        if self.held:
+            self.held = False
+            self.sem.release()
+        yield
+        if self.sem.locked() and on_wait is not None:
+            await on_wait()
+        await self.sem.acquire()
+        self.held = True
 
 
 async def ride_out(task: asyncio.Future) -> None:
@@ -185,6 +220,8 @@ class Runner:
         self._cli_sessions: dict[str, ClaudeSession | CodexSession | CursorSession] = {}
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
                                for name, backend in cfg.backends.items()}
+        self._held_slots: dict[str, _HeldSlot] = {}   # a hosted run's backend slot, released around approvals
+        self._clocks: dict[str, list] = {}             # live run -> [seconds spent running, running since or None]
         self._locks = credential_sources.KeyedLocks()
         self.cli_factory = ClaudeSession
         self.codex_factory = CodexSession
@@ -528,8 +565,32 @@ class Runner:
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
             # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
+            self.db.after_commit(lambda: self._tick_clock(sid, status))
             self.db.after_commit(self.scheduler.recheck)
         return set_status
+
+    def _tick_clock(self, sid: str, status: str) -> None:
+        """Count the live run's time in `running` only: queue, approval, Mac and App waits are not its time (#524)."""
+        clock = self._clocks.get(sid)
+        if clock is None:
+            return
+        now = time.monotonic()
+        if clock[1] is not None:
+            clock[0] += now - clock[1]
+        clock[1] = now if status == "running" else None
+
+    def _run_seconds(self, sid: str) -> float:
+        clock = self._clocks.get(sid)
+        if clock is None:
+            return 0.0
+        return clock[0] + (time.monotonic() - clock[1] if clock[1] is not None else 0.0)
+
+    def _time_left(self, s: dict) -> float | None:
+        """Seconds a member's or an App's run has left (`max_run_seconds`); None for the owner's or without a cap."""
+        limit = float(self.cfg.max_run_seconds or 0)
+        if limit <= 0 or (session_user_id(s) == OWNER_USER_ID and not s.get("app_id")):
+            return None
+        return limit - self._run_seconds(s["id"])
 
     def _flag_end_pending(self, sid: str, status: str) -> None:
         """Inside the write that sets `status`: mark a live run's final status as awaiting its _end_run."""
@@ -775,6 +836,7 @@ class Runner:
 
     async def _run(self, sid: str, recovered: bool = False) -> None:
         self._unended.add(sid)
+        self._clocks[sid] = [0.0, None]  # a restart starts the clock again
         try:
             s = self.db.get_session(sid)
             if s.get("kind") == TOOLS_ONLY and s.get("backend", "local") not in TOOLS_ONLY_BACKENDS:
@@ -788,6 +850,11 @@ class Runner:
         except asyncio.CancelledError:
             await self._take_pending_cancel(sid, cancelled=True)
             raise
+        except ApprovalExpired:
+            if await self._take_pending_cancel(sid):
+                return
+            await self.aset_status(sid, "done", stop_reason="approval_expired")
+            await self._end_run(sid)
         except CliBackendError as e:
             if await self._take_pending_cancel(sid):
                 return
@@ -817,6 +884,7 @@ class Runner:
             self.scheduler.release(sid)
             self.user_cancelled.discard(sid)
             self._unended.discard(sid)
+            self._clocks.pop(sid, None)
 
     async def _run_local(self, sid: str, s: dict, recovered: bool) -> None:
         if recovered:
@@ -879,7 +947,7 @@ class Runner:
                     self.db.update_session(sid, context=context, inbox=[])
                     continue
 
-                reason = self._budget_reason(s["run"])
+                reason = self._budget_reason(s["run"], s)
                 if reason:
                     turn = self._close_span(turn)
                     await self.aset_status(sid, "done", stop_reason=reason)
@@ -906,7 +974,7 @@ class Runner:
         span.end()
         return telemetry.NOOP_SPAN
 
-    def _budget_reason(self, run: dict) -> str:
+    def _budget_reason(self, run: dict, s: dict | None = None) -> str:
         """Why the run is out of budget ("" while it has some left)."""
         max_turns = int(run.get("max_turns") or self.cfg.max_turns)
         max_tokens = int(run.get("max_completion_tokens") or self.cfg.max_completion_tokens)
@@ -914,6 +982,9 @@ class Runner:
             return "budget_turns"
         if run["completion_tokens"] >= max_tokens:
             return "budget_tokens"
+        left = self._time_left(s) if s is not None else None
+        if left is not None and left <= 0:
+            return "budget_time"
         return ""
 
     # hosted CLI backends
@@ -937,8 +1008,11 @@ class Runner:
             backend_session_id = str(s["run"].get("backend_session_id") or "")
             credential, use_api_key, api_key = self._cli_credentials(sid, s, backend_name)
             await self._memory_gate(sid, f"{backend_name} worker container")
+            await self.scheduler.wait_eligible(sid)  # a member or an App at its running cap holds no slot (#524)
+            held = _HeldSlot(slot)
             try:
-                async with self._credential_lock(s), slot:
+                async with self._credential_lock(s), held:
+                    self._held_slots[sid] = held
                     with telemetry.span("hosted_cli_turn", {"harness.backend": backend_name,
                                                             "gen_ai.request.model": backend.model}):
                         cli = await self._start_cli(sid, backend_name, backend, credential, use_api_key, api_key,
@@ -948,6 +1022,8 @@ class Runner:
             except CliLimitError as limit:
                 await self._cli_limit_reached(sid, backend_name, limit, use_api_key)
                 recovered = True
+            finally:
+                self._held_slots.pop(sid, None)
 
     def _credential_lock(self, s: dict):
         """Held for a CLI attempt on a credential that two sessions must not use at once (#365 decision 5: one end
@@ -1048,7 +1124,13 @@ class Runner:
     async def _pump_cli(self, sid: str, cli, credential: dict, use_api_key: bool, recovered: bool) -> None:
         """Feed the CLI's events to the handlers until the run is complete."""
         tool_names: dict[str, str] = {}
+        s = self.db.get_session(sid)
         while True:
+            left = self._time_left(s)
+            if left is not None and left <= 0:
+                await self.aset_status(sid, "done", stop_reason="budget_time")
+                await self._end_run(sid)
+                return
             self._check_cli_credential(credential, use_api_key)
             await self._send_cli_inbox(sid, cli)
             event = await cli.receive(timeout=0.05)
@@ -1601,7 +1683,11 @@ class Runner:
                 return
         if existing["status"] == "pending":
             await self.aset_status(sid, "waiting_approval")
-            existing = await self._wait_approval(existing["id"])
+            held = self._held_slots.get(sid)
+            # Another session gets the backend slot while this one waits on a person (#524).
+            async with (held.released(lambda: self.aset_status(sid, "queued")) if held is not None
+                        else contextlib.nullcontext()):
+                existing = await self._wait_approval(existing["id"])
         if existing["status"] == "approved":
             await self.aset_status(sid, "running")
             await self._allow_cli(sid, cli, request_id, name, args, call_id, existing.get("tool_call_id") or "")
@@ -2281,19 +2367,43 @@ class Runner:
         return detail, f"{reason} {warning}".strip(), None
 
     async def _wait_approval(self, aid: str) -> dict:
+        """Wait for the decision. Past `approval_timeout_seconds` the approval is denied and ApprovalExpired raised."""
         event = self.approval_events.setdefault(aid, asyncio.Event())
         try:
             while True:
                 approval = self.db.get_approval(aid)
                 if approval["status"] != "pending":
                     return approval
+                left = self._approval_time_left(approval)
+                if left is not None and left <= 0:
+                    await self._expire_approval(approval)
+                    continue
                 try:
-                    await asyncio.wait_for(event.wait(), timeout=30)
+                    await asyncio.wait_for(event.wait(), timeout=30 if left is None else min(30, left))
                 except asyncio.TimeoutError:
                     pass
                 event.clear()
         finally:
             self.approval_events.pop(aid, None)
+
+    def _approval_time_left(self, approval: dict) -> float | None:
+        limit = float(self.cfg.approval_timeout_seconds or 0)
+        if limit <= 0:
+            return None
+        return float(approval["created_at"]) + limit - time.time()
+
+    async def _expire_approval(self, approval: dict) -> None:
+        """Deny an approval nobody decided in time and end its run; a decision that landed first stands."""
+        sid, aid = approval["session_id"], approval["id"]
+        note = "Expired: nobody decided it in time."
+
+        def expire() -> bool:
+            if not self.db.decide_approval(aid, "denied", note):
+                return False
+            self.bus.emit(sid, "approval_decided", {"id": aid, "status": "denied", "note": note, "expired": True})
+            return True
+        if await self.db.for_session(sid).awrite(expire):
+            raise ApprovalExpired(aid)
 
     async def _execute(self, sid: str, call: dict, name: str, args: dict, ws: Workspace,
                        max_chars: int = 10**9) -> str:

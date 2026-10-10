@@ -647,6 +647,9 @@ class SessionStores:
         return self.web.count_sessions(user_id, *statuses) + len(
             self._indexed(lambda e: e["owner_id"] == user_id and e["status"] in statuses))
 
+    def count_app_sessions(self, app_id: str, *statuses: str) -> int:
+        return len(self._indexed(lambda e: e["app_id"] == app_id and e["status"] in statuses))
+
     def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent",
                       with_app: str | None = None) -> list[dict]:
         rows = self.web.list_sessions(limit, owner_id=owner_id, kind=kind)

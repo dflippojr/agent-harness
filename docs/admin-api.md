@@ -68,6 +68,8 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | POST | `/api/admin/v1/accounts/{user_id}/google/invitation` | owner | TODO | `harness/google_signin_api.py` `google_invite` |
 | POST | `/api/admin/v1/accounts/{user_id}/google/revoke-sessions` | owner | TODO | `harness/google_signin_api.py` `google_revoke` |
 | GET | `/api/admin/v1/apps/erasures` | owner | TODO | `harness/admin.py` `app_erasures` |
+| GET | `/api/admin/v1/apps/{app_id}/limits` | owner | An App's session caps: what the owner set, what applies, and its sessions that count against them. | `harness/admin.py` `get_app_limits` |
+| PUT | `/api/admin/v1/apps/{app_id}/limits` | owner | Set how many sessions an App may have running and queued (#524); a field left out keeps its value and null restores the default. Only the owner can; an App cannot. | `harness/admin.py` `set_app_limits` |
 | POST | `/api/admin/v1/apps/{app_id}/restore` | owner | TODO | `harness/admin.py` `restore_app` |
 | PUT | `/api/admin/v1/apps/{app_id}/retention` | owner | TODO | `harness/admin.py` `set_app_retention` |
 | GET | `/api/admin/v1/audit` | owner | Owner-only review of every retained audit row, newest first, with a cursor (#467). | `harness/admin.py` `audit_review` |

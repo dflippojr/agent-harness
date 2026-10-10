@@ -177,6 +177,16 @@ def _set_max_turns(cfg: Config, value):
     cfg.max_turns = int(value)
 
 
+def _cfg_attr(name: str, cast):
+    """Getter and setter for a top-level Config field."""
+    def getter(cfg: Config):
+        return getattr(cfg, name)
+
+    def setter(cfg: Config, value):
+        setattr(cfg, name, cast(value))
+    return getter, setter
+
+
 def _get_max_tokens(cfg: Config):
     return cfg.max_completion_tokens
 
@@ -465,6 +475,21 @@ STATIC_ADMIN: list[SettingSpec] = [
          "Per-run completion-token cap for new sessions. Changing this does not raise an active run's budget.",
          "Sessions", 200000, _get_max_tokens, _set_max_tokens, 1000, 2_000_000,
          ("budgets", "max_completion_tokens")),
+    _float("sessions.approval_timeout_seconds", "Approval deadline (seconds)",
+           "Deny a pending approval nobody decided after this long and end its run. 0 never expires one.",
+           "Sessions", 86400, *_cfg_attr("approval_timeout_seconds", float), 0, 30 * 86400,
+           ("budgets", "approval_timeout_seconds")),
+    _float("sessions.max_run_seconds", "Member and App run time (seconds)",
+           "End a member's or an App's run after this long running (approval, queue and reply waits do not count). "
+           "0 is no limit. The owner's own runs have none.",
+           "Sessions", 3600, *_cfg_attr("max_run_seconds", float), 0, 7 * 86400, ("budgets", "max_run_seconds")),
+    _int("sessions.app_max_running", "App running sessions",
+         "How many sessions an App may have running or parked at once, unless the owner set its own cap.",
+         "Sessions", 2, *_cfg_attr("app_max_running", int), 1, 100, ("budgets", "app_max_running")),
+    _int("sessions.app_max_queued", "App queued sessions",
+         "How many sessions an App may have queued or parked before new ones are refused (429), unless the owner "
+         "set its own cap.",
+         "Sessions", 4, *_cfg_attr("app_max_queued", int), 1, 1000, ("budgets", "app_max_queued")),
     _float("compaction.elide_at", "Elide at",
            "Fraction of context at which old tool outputs are shortened.",
            "Compaction", 0.55, _get_elide, _set_elide, 0.10, 0.90, ("compaction", "elide_at")),

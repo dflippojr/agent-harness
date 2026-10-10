@@ -76,7 +76,7 @@ sandbox:
   pids: 512
   network: harness-sandbox        # internal: no route out, no container-to-container traffic
   egress_network: harness-egress  # attached only while an approved network command runs
-  idle_stop_seconds: 0            # >0: stop an idle container after this many seconds (and while a session waits on an approval or the GPU guard); the next command restarts it (#428)
+  idle_stop_seconds: 900          # >0: stop an idle container after this many seconds (and while a session waits on an approval or the GPU guard); the next command restarts it (#428)
 
 # Hosted CLI session backends (Phase 8a). Credentials remain in provider Docker volumes and are never read by the
 # daemon. Run `ops/backends/login.ps1 <backend>` yourself before enabling one.
@@ -160,6 +160,10 @@ cleanup:
 budgets:
   max_turns: 80
   max_completion_tokens: 200000
+  approval_timeout_seconds: 86400  # deny an approval nobody decided after this long, and end its run (0 = never)
+  max_run_seconds: 3600            # a member's or an App's run ends after this long running (0 = no limit)
+  app_max_running: 2               # per App, unless the owner set its own caps (PUT /apps/{id}/limits)
+  app_max_queued: 4                # queued or parked; past it the App gets 429 app_queue_full
 
 compaction:
   mask_min_chars: 2000  # replace used successful tool results with recoverable receipts
