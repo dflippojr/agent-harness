@@ -50,6 +50,8 @@ Describe 'Review publication safety' {
         @{ Payload = 'file:///h%6fme/reviewer/.codex/auth.json' }
         @{ Payload = 'C:/public/config.py followed by file:///h%6fme/reviewer/.codex/auth.json' }
         @{ Payload = 'C:/public/config.py followed by file:///C:/%55sers/reviewer/.codex/auth.json' }
+        @{ Payload = 'C:/public/config.py followed by C:/temp/../../Users/reviewer/.codex/auth.json' }
+        @{ Payload = 'C:/public/config.py followed by /tmp/../../home/reviewer/.codex/auth.json' }
         @{ Payload = 'file:///C:/Users/reviewer/.codex/auth.json' }
         @{ Payload = '\\?\C:\Users\reviewer\.codex\auth.json' }
         @{ Payload = '\\.\C:\Users\reviewer\.codex\auth.json' }

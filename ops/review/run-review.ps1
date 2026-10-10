@@ -363,48 +363,57 @@ function Convert-ReviewProfilePathForms {
         return ' '
     }
     $normalized = [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)(?:(?=[A-Z]:/+)|UNC/+)', $namespace)
+    $rootPattern = '(?:[A-Z]:/+|/+)'
+    $nextRoot = '(?i)(?<![\p{L}\p{N}\p{M}_./:-])' + $rootPattern
     # Canonicalize absolute path spellings as strings, without touching the filesystem.
     $canonicalize = {
         param($match)
         $path = $match.Groups['Path'].Value
         $quote = $match.Groups['Quote'].Value
-        $prefix = '/'
-        $rootDepths = @(0)
-        $windowsPath = $false
-        if ($path -match '^([A-Za-z]:)/+') {
-            $windowsPath = $true
-            $prefix = $Matches[1] + '/'
-            $path = $path.Substring($Matches[0].Length)
-        } else {
-            if ($path.StartsWith('//')) { $prefix = '//'; $rootDepths = @(2, 0); $windowsPath = $true }
-            $path = $path.TrimStart('/')
+        if (-not $quote) { $quote = '"' }
+        $candidates = @($path)
+        # Check every root independently, while retaining the full candidate for spaced directory names.
+        foreach ($root in [regex]::Matches($path, $nextRoot)) {
+            if ($root.Index -gt 0) { $candidates += $path.Substring($root.Index) }
         }
         $preferred = $null
-        # Double-leading slashes can be UNC or POSIX. Reject a profile under either interpretation.
-        foreach ($minimum in $rootDepths) {
-            $parts = New-Object System.Collections.Generic.List[string]
-            foreach ($part in ($path -split '/+')) {
-                if ($windowsPath) { $part = $part.TrimEnd(' ') }
-                if (-not $part -or $part -eq '.') { continue }
-                if ($part -eq '..') {
-                    if ($parts.Count -gt $minimum) { $parts.RemoveAt($parts.Count - 1) }
-                    continue
+        foreach ($path in $candidates) {
+            $prefix = '/'
+            $rootDepths = @(0)
+            $windowsPath = $false
+            if ($path -match '^([A-Za-z]:)/+') {
+                $windowsPath = $true
+                $prefix = $Matches[1] + '/'
+                $path = $path.Substring($Matches[0].Length)
+            } else {
+                if ($path.StartsWith('//')) { $prefix = '//'; $rootDepths = @(2, 0); $windowsPath = $true }
+                $path = $path.TrimStart('/')
+            }
+            # Double-leading slashes can be UNC or POSIX. Reject a profile under either interpretation.
+            foreach ($minimum in $rootDepths) {
+                $parts = New-Object System.Collections.Generic.List[string]
+                foreach ($part in ($path -split '/+')) {
+                    if ($windowsPath) { $part = $part.TrimEnd(' ') }
+                    if (-not $part -or $part -eq '.') { continue }
+                    if ($part -eq '..') {
+                        if ($parts.Count -gt $minimum) { $parts.RemoveAt($parts.Count - 1) }
+                        continue
+                    }
+                    if ($windowsPath) { $part = $part.TrimEnd('.') }
+                    if (-not $part) { continue }
+                    $parts.Add($part)
+                    # Once a protected prefix appears, later prose or another path must not erase it.
+                    $candidate = $prefix + ($parts -join '/')
+                    if ($candidate -match $Pattern) { return $quote + $candidate + $quote }
                 }
-                if ($windowsPath) { $part = $part.TrimEnd('.') }
-                if (-not $part) { continue }
-                $parts.Add($part)
-                # Once a protected prefix appears, later prose or another path must not erase it.
                 $candidate = $prefix + ($parts -join '/')
+                if ($null -eq $preferred) { $preferred = $candidate }
                 if ($candidate -match $Pattern) { return $quote + $candidate + $quote }
             }
-            $candidate = $prefix + ($parts -join '/')
-            if ($null -eq $preferred) { $preferred = $candidate }
-            if ($candidate -match $Pattern) { return $quote + $candidate + $quote }
         }
         return $quote + $preferred + $quote
     }.GetNewClosure()
-    $rootPattern = '(?:[A-Z]:/+|/+)'
-    $pathForms = '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:(?<Quote>[`"''])\s*(?<Path>' + $rootPattern + '[^\r\n]*?)\k<Quote>|(?<Path>' + $rootPattern + '[^\r\n<>`"''(),;]*))'
+    $pathForms = '(?i)(?<![\p{L}\p{N}\p{M}_./:-])(?:(?<Quote>[`"''])\s*(?<Path>' + $rootPattern + '[^\r\n]*?)\k<Quote>|(?<Path>' + $rootPattern + '[^\r\n<>`"''(),;]*))'
     return [regex]::Replace($normalized, $pathForms, $canonicalize)
 }
 

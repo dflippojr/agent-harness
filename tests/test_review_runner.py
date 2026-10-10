@@ -313,6 +313,8 @@ $tail = Get-ReviewDiagnosticTail -Stderr 'profile file:///h%6fme/reviewer/.codex
 if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Encoded profile URL was not redacted' }}
 $tail = Get-ReviewDiagnosticTail -Stderr 'C:/public/config.py followed by file:///h%6fme/reviewer/.codex/auth.json'
 if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'A preceding path hid the decoded profile URL' }}
+$tail = Get-ReviewDiagnosticTail -Stderr 'C:/public/config.py followed by C:/temp/../../Users/reviewer/.codex/auth.json'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'A preceding path hid another absolute root' }}
 $tail = Get-ReviewDiagnosticTail -Stderr '\\?\C:\Users\reviewer\.codex\auth.json'
 if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Extended profile path was not redacted' }}
 $tail = Get-ReviewDiagnosticTail -Stderr '"C:\Program Files\..\Users\reviewer\.codex\auth.json"'
