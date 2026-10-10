@@ -23,8 +23,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     let gone = false;
     const leave = pane ? pane.onLeave : onLeave;
     leave(() => { gone = true; if (refreshList === refresh) refreshList = null; });
-    let jobs = await api("/jobs");
-    if (gone) return;
+    let jobs = [];
     const list = h("div", { class: "job-groups" });
     // Job id -> the enabled state being saved. Repaints retain every in-flight switch.
     const saving = new Map();
@@ -41,7 +40,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       pane?.paint();
     };
     // Detail routes keep the split list mounted; successful edits refresh it explicitly.
-    async function refresh() {
+    async function refresh({ initial = false } = {}) {
       const version = ++refreshVersion;
       const toggles = new Map(toggleVersions);
       try {
@@ -55,7 +54,11 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
           return Object.assign(old || {}, j);
         });
         paint();
-      } catch (err) { if (!gone && version === refreshVersion) toast(`Couldn't refresh jobs: ${err.message}`, 5000); }
+      } catch (err) {
+        if (gone || version !== refreshVersion) return;
+        if (initial) throw err;
+        toast(`Couldn't refresh jobs: ${err.message}`, 5000);
+      }
     }
     refreshList = refresh;
 
@@ -80,6 +83,8 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     // PUT replaces the whole job, so re-read it first: an edit made elsewhere since the list loaded is kept.
     async function setEnabled(j, enabled, undoable = false) {
       if (saving.has(j.id)) return;
+      const form = openForm?.id === j.id ? openForm : null;
+      const formRevision = form?.revision();
       toggleVersions.set(j.id, (toggleVersions.get(j.id) || 0) + 1);
       saving.set(j.id, enabled);
       paint();
@@ -88,7 +93,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
           const fresh = await api(`/jobs/${j.id}`);
           if (fresh.enabled !== enabled) Object.assign(j, await api(`/jobs/${j.id}`, { method: "PUT", body: jobBody(fresh, { enabled }) }));
           else Object.assign(j, fresh);
-          if (openForm?.id === j.id) openForm.syncEnabled(j.enabled);
+          if (openForm?.id === j.id) openForm.syncEnabled(j.enabled, openForm === form ? formRevision : 0);
         });
       } catch (err) {
         toast(err.message, 5000);
@@ -103,8 +108,8 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       if (undoable) toast(said, 5000, { label: "Undo", onClick: () => setEnabled(j, !enabled) });
       else toast(said);
     }
-    paint();
     append(target, list);
+    await refresh({ initial: true });
   }
 
   async function viewJob(id) {
@@ -149,8 +154,13 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     const notify = h("select", {}, Object.entries(JOB_NOTIFY).map(([k, label]) => h("option", { value: k, selected: k === j.notify }, label)));
     const enabled = h("input", { type: "checkbox", checked: j.enabled, "aria-label": "Job enabled" });
     let enabledEdited = false;
-    enabled.addEventListener("change", () => { enabledEdited = true; });
-    const state = { id, syncEnabled: (next) => { enabled.checked = next; enabledEdited = false; } };
+    let enabledRevision = 0;
+    enabled.addEventListener("change", () => { enabledEdited = true; enabledRevision++; });
+    const state = { id, revision: () => enabledRevision, syncEnabled: (next, expected) => {
+      if (enabledRevision !== expected) return; // a later editor choice wins over the pending list switch
+      enabled.checked = next;
+      enabledEdited = false;
+    } };
     openForm = state;
     onLeave(() => { if (openForm === state) openForm = null; });
     let previewTimer = null;

@@ -254,6 +254,30 @@ walk(desktop.$app, (e) => e.tagName === "FORM")[0].dispatchEvent({ type: "submit
 await flush(); await flush(); await flush();
 assert.equal(jobs.find((j) => j.id === "j1").enabled, false, "a late persisted pause survives a stale form save");
 
+
+// A later editor Enabled choice wins when Save queues behind a pending list pause.
+jobs.find((j) => j.id === "j1").enabled = true;
+fill(paneBody);
+await desktop.page.viewJobs(pane);
+fill(desktop.$app);
+await desktop.page.viewJob("j1");
+let finishPause;
+gate = new Promise((resolve) => { finishPause = resolve; });
+const pendingPause = walk(paneBody, (e) => e.attributes["aria-label"] === "Edited report enabled")[0];
+pendingPause.checked = false;
+pendingPause.dispatchEvent({ type: "change" });
+await flush(); await flush();
+const newerEnabled = controls().find((e) => e.attributes["aria-label"] === "Job enabled");
+newerEnabled.checked = true;
+newerEnabled.dispatchEvent({ type: "change" });
+walk(desktop.$app, (e) => e.tagName === "FORM")[0].dispatchEvent({ type: "submit" });
+await flush();
+gate = null;
+finishPause();
+await flush(); await flush(); await flush(); await flush();
+assert.equal(newerEnabled.checked, true, "a list response cannot overwrite a newer editor choice");
+assert.equal(jobs.find((j) => j.id === "j1").enabled, true, "queued Save persists the later editor choice");
+
 // Backend/model switching and Run now still work from the new toolbar.
 control("job-model").value = "local-model";
 control("job-model").dispatchEvent({ type: "change" });
@@ -290,6 +314,24 @@ await guest.page.viewJob("j2");
 for (const c of walk(guest.$app, (e) => ["INPUT", "SELECT", "TEXTAREA"].includes(e.tagName))) assert.equal(c.disabled, true);
 assert.equal(walk(guest.$app, (e) => e.tagName === "BUTTON").length, 0);
 
+
+
+// Deleting through a deep link before the initial list GET completes cannot leave a phantom row.
+const late = mount(false);
+const latePane = new StrictEl("section");
+let finishInitialList;
+listGate = new Promise((resolve) => { finishInitialList = resolve; });
+const opening = late.page.viewJobs({ ...pane, body: latePane });
+await flush();
+listGate = null; // later refreshes can answer before the initial snapshot
+await late.page.viewJob("j3");
+walk(late.$app, (e) => e.tagName === "BUTTON" && e.textContent === "Delete")[0].click();
+await flush(); await flush(); await flush();
+finishInitialList();
+await opening;
+assert.doesNotMatch(latePane.textContent, /Backup verification/, "the late initial snapshot cannot restore a deleted job");
+assert.equal(walk(latePane, (e) => e.attributes["data-job"] === "j3").length, 0);
+late.leaves.forEach((fn) => fn());
 
 // Creating the first job refreshes an already-mounted empty split list.
 const previousJobs = jobs.splice(0);
