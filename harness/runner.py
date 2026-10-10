@@ -945,8 +945,6 @@ class Runner:
             s = self.db.get_session(sid)
             # Every run: both deadlines are live settings, so one turned on mid-run applies to it too.
             watch = asyncio.create_task(self._watch_deadlines(sid, asyncio.current_task()))
-            if recovered:
-                await self._mark_parked_place(sid, s)
             if s.get("kind") == TOOLS_ONLY and s.get("backend", "local") not in TOOLS_ONLY_BACKENDS:
                 raise ToolsOnlyUnsupported(f"backend {s['backend']!r} can't run App-tools-only sessions")
             if s.get("backend", "local") != "local":
@@ -1042,10 +1040,12 @@ class Runner:
         changed, self._deadlines_changed = self._deadlines_changed, asyncio.Event()
         changed.set()
 
-    async def _mark_parked_place(self, sid: str, s: dict) -> None:
-        """A run recovered running, or parked on an approval, an App's reply or a provider limit, had run before (only
-        a running run parks on those), so it holds its place under its cap; one saved before HOLDS_PLACE existed gets
-        it now, before anything changes its status (an offline Mac, the GPU queue)."""
+    async def mark_recovered_place(self, s: dict) -> None:
+        """At daemon start, before any run resumes: a run recovered running, or parked on an approval, an App's reply
+        or a provider limit, had run before (only a running run parks on those), so it holds its place under its cap;
+        one saved before HOLDS_PLACE existed gets it now, before anything changes its status (an offline Mac, the GPU
+        queue) and before another run's admission counts the cap."""
+        sid = s["id"]
         ran = ("running", "waiting_approval", "waiting_app", "waiting_limit")
         if s["status"] not in ran or s["run"].get(HOLDS_PLACE):
             return

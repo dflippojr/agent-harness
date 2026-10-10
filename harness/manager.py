@@ -295,7 +295,12 @@ class Manager:
             if s["status"] not in ACTIVE:
                 log.info("ending session %s (%s): the daemon stopped before its run ended", s["id"], s["status"])
                 self._spawn_task(s["id"], self.runner.end_pending_run(s["id"]))
-        for s in self.db.sessions_with_status(*ACTIVE):
+        recovering = self.db.sessions_with_status(*ACTIVE)
+        # Before any of them runs: a run saved before places were recorded gets its place first, so no other run's
+        # admission can count without it (#524).
+        for s in recovering:
+            await self.runner.mark_recovered_place(s)
+        for s in recovering:
             log.info("resuming session %s (%s)", s["id"], s["status"])
             self._spawn(s["id"], recovered=True)
         if self.canary is not None:
@@ -898,21 +903,26 @@ class Manager:
 
         def deliver() -> None:
             self._refuse_during_operation(sid)      # in the write: a rewind claims the session in one too
-            self._refuse_unsettled(self.db.get_session(sid))
+            # The session as it is now, not as the request first read it: another message may have restarted it
+            # meanwhile (this one then joins that run), or its run ended (this one restarts it).
+            current = self.db.get_session(sid)
+            self._refuse_unsettled(current)
             self.bus.emit(sid, kind, {"content": content})
-            if s["status"] in ACTIVE:
+            if current["status"] in ACTIVE:
                 # Delivered before the agent's next model call.
-                self.db.update_session(sid, inbox=s["inbox"] + [model_content])
+                self.db.update_session(sid, inbox=current["inbox"] + [model_content])
             else:
-                self._enforce_queue_caps(s)
-                run = new_run(carry=s["run"])
-                app_key = self.db.get_api_key(s["app_id"]) if s.get("app_id") else None
+                if s["status"] in ACTIVE and session_user_id(current) != OWNER_USER_ID:
+                    self._require_member_start(self.db.account_by_id(session_user_id(current)), "session")
+                self._enforce_queue_caps(current)
+                run = new_run(carry=current["run"])
+                app_key = self.db.get_api_key(current["app_id"]) if current.get("app_id") else None
                 if getattr(self, "settings", None):
-                    turns, tokens = self.settings.session_budgets(app_key, session=s)
+                    turns, tokens = self.settings.session_budgets(app_key, session=current)
                     run["max_turns"] = turns
                     run["max_completion_tokens"] = tokens
-                self.db.update_session(sid, context=s["context"] + [{"role": "user", "content": model_content}],
-                                       run=run, status="queued", stop_reason="", answer="")
+                context_ = current["context"] + [{"role": "user", "content": model_content}]
+                self.db.update_session(sid, context=context_, run=run, status="queued", stop_reason="", answer="")
                 self.bus.emit(sid, "status", {"status": "queued"})
             # With the commit, not after the await: a request cancelled mid-write still gets its run.
             self.db.after_commit(lambda: sid in self.tasks or self._spawn(sid))

@@ -346,6 +346,7 @@ def test_a_parked_hosted_run_saved_before_places_were_recorded_recovers_parked(t
         m.db.update_session("oldpark001", backend="claude")
         m.db.insert_approval({"id": "a-oldpark1", "session_id": "oldpark001", "tool_call_id": "old-call",
                               "tool": "Bash", "args": {"command": "python build.py"}, "reason": "test"})
+        await m.runner.mark_recovered_place(m.db.get_session("oldpark001"))  # as the daemon's start does
         m._spawn("oldpark001", recovered=True)
         await _until(lambda: "oldpark001" in m.runner._cli_sessions)
         await asyncio.sleep(0.5)
@@ -368,13 +369,54 @@ def test_a_running_session_saved_before_places_were_recorded_keeps_its_place_onc
         _insert(m, "parked0009", "waiting_approval", app_id=app_id)
         _insert(m, "parked0010", "waiting_approval", app_id=app_id)
         mac = m.runner.hub = OfflineMac()
-        await m.runner._mark_parked_place("oldrun0001", m.db.get_session("oldrun0001"))  # as _run recovers it
+        await m.runner.mark_recovered_place(m.db.get_session("oldrun0001"))  # as the daemon's start does
         waiting = asyncio.create_task(m.runner._wait_for_target("oldrun0001"))
         await _until(lambda: m.db.get_session("oldrun0001")["status"] == "waiting_target")
         mac.back()
         await asyncio.wait_for(waiting, 5)
         await asyncio.wait_for(m.runner._acquire("oldrun0001"), 5)
         assert m.scheduler.holder == "oldrun0001"
+    asyncio.run(body())
+
+def test_two_messages_at_once_to_a_finished_app_session_both_reach_its_run(tmp_path):
+    """The second message finds the session restarted by the first: it joins that run, not a 429 for the queue the
+    first one filled."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        await m.start()
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        assert m.db.set_app_limits(app_id, {"max_queued": 1})
+        m.scheduler.set_paused(True)
+        _insert(m, "finished03", "done", app_id=app_id)
+        results = await asyncio.gather(m.send("finished03", "first"), m.send("finished03", "second"),
+                                       return_exceptions=True)
+        assert not [r for r in results if isinstance(r, Exception)], results
+        s = m.db.get_session("finished03")
+        assert s["status"] == "queued" and len(s["inbox"]) == 1
+        m.scheduler.set_paused(False)
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_runs_saved_before_places_were_recorded_get_them_before_any_run_resumes(tmp_path):
+    """Upgraded with an App's run parked on an approval and another queued under a cap of one: the parked run's place
+    is recorded at start, before the queued one's admission can count the cap without it."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        assert m.db.set_app_limits(app_id, {"max_running": 1})
+        _insert(m, "oldpark002", "waiting_approval", app_id=app_id, holds=False)
+        pending = call("write_file", 0, path="a.txt", content="x")
+        m.db.update_session("oldpark002", context=[
+            {"role": "user", "content": "write it"}, {"role": "assistant", "content": "", "tool_calls": [pending]}])
+        m.db.insert_approval({"id": "a-oldpark2", "session_id": "oldpark002", "tool_call_id": pending["id"],
+                              "tool": "write_file", "args": {"path": "a.txt", "content": "x"}, "reason": "test"})
+        _insert(m, "queued0006", "queued", app_id=app_id)
+        await m.start(maintenance=False)
+        assert m.db.get_session("oldpark002")["run"].get(HOLDS_PLACE)  # recorded before the runs were spawned
+        await asyncio.sleep(0.5)
+        assert m.get("queued0006")["status"] == "queued"
+        await m.stop()
     asyncio.run(body())
 
 
