@@ -17,7 +17,7 @@ from tests.test_unix_installers import BASH, ROOT, run_installer
 def options(tmp_path, **changes):
     values = dict(install_dir=tmp_path, config_dir=tmp_path / "config", port=8199,
                   with_hub=True, no_hub=False, hub_method="pip", hub_package="stub-hub==1",
-                  hub_image="example.invalid/stub-hub:1", hub_module="stub_hub", uv="uv")
+                  hub_image="example.invalid/stub-hub:1", hub_module="stub_hub", uv="uv", no_start=False)
     values.update(changes)
     return SimpleNamespace(**values)
 
@@ -66,6 +66,20 @@ def test_already_claimed_never_installs_or_releases(tmp_path, monkeypatch, capsy
     assert calls == [["hub", "status"]]
     assert "harness hub release --confirm" in capsys.readouterr().out
     assert not (tmp_path / "hub-install.json").exists()
+
+
+def test_disabled_startup_defers_hub(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(hub, "hub_cli", lambda *_: pytest.fail("startup disabled"))
+    assert hub.install(options(tmp_path, no_start=True)) == 0
+    assert "Hub setup deferred" in capsys.readouterr().out
+    result = run_installer(tmp_path, "Linux", "x86_64", "--with-hub", "--no-start")
+    assert result.returncode == 0 and "Hub setup deferred" in result.stdout
+    assert "harness hub approve" not in result.stdout
+    if os.name == "nt":
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-File", str(ROOT / "install/install.ps1"),
+                                 "-DryRun", "-NoTasks", "-WithHub", "-Profile", "Service"],
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0 and "Hub setup deferred" in result.stdout
 
 
 @pytest.mark.parametrize("method", ["pip", "docker"])

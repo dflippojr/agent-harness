@@ -204,6 +204,10 @@ def install(args) -> int:
         print(PARITY)
         print(LATER)
         return 0
+    if args.no_start:
+        print("Hub setup deferred: startup services are disabled. Start the daemon and rerun without --no-start / -NoTasks.")
+        print(LATER)
+        return 0
     env = cli_env(args.config_dir, args.port)
     if hub_cli(["hub", "status"], env)["claimed"]:
         print("A Hub is already claimed. Release it explicitly with harness hub release --confirm.")
@@ -263,6 +267,7 @@ def main(argv=None) -> int:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--with-hub", action="store_true")
     group.add_argument("--no-hub", action="store_true")
+    parser.add_argument("--no-start", action="store_true")
     parser.add_argument("--hub-method", choices=("auto", "pip", "docker"), default="auto")
     parser.add_argument("--hub-package", default=os.environ.get("HARNESS_HUB_PACKAGE", ""))
     parser.add_argument("--hub-image", default=os.environ.get("HARNESS_HUB_IMAGE", ""))

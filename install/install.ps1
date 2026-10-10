@@ -362,7 +362,9 @@ if ($DryRun) { Info '[dry run] skipped' } else {
 # Only the daemon installer offers the Hub, and only after doctor succeeds.
 Step 'Optional Hub admin console'
 if ($DryRun) {
-    if ($WithHub) {
+    if ($WithHub -and $NoTasks) {
+        Info '[dry run] Hub setup deferred: rerun with -WithHub without -NoTasks after starting the daemon'
+    } elseif ($WithHub) {
         Info '[dry run] after doctor passes: check harness hub status; if already claimed show harness hub release --confirm'
         Info "[dry run] Hub distribution: $HubMethod; pip package: $(if ($HubPackage) { $HubPackage } else { 'set HARNESS_HUB_PACKAGE (#546)' }); Docker image: $(if ($HubImage) { $HubImage } else { 'set HARNESS_HUB_IMAGE (#546)' })"
         Info '[dry run] install Hub in a separate venv (pip) or docker run --network host --restart unless-stopped (docker)'
@@ -379,6 +381,7 @@ if ($DryRun) {
     if ($HubImage) { $hubArgs += @('--hub-image', $HubImage) }
     if ($WithHub) { $hubArgs += '--with-hub' }
     if ($NoHub) { $hubArgs += '--no-hub' }
+    if ($NoTasks) { $hubArgs += '--no-start' }
     Push-Location $AppDir
     try {
         & $python @hubArgs

@@ -32,6 +32,7 @@ a restart policy. It shows the Hub's request ID and match code, runs `harness hu
 on this host, and waits for the Hub to redeem its claim. An existing claim is reported with `harness hub release
 --confirm`; the installer never releases it automatically. Missing distributions, launch errors, and claim timeouts
 fail the Hub step while leaving the daemon installed. A partially installed Hub remains recorded for cleanup.
+`--no-start` / `-NoTasks` defers Hub setup too; start the daemon and rerun without that flag to install and link the Hub.
 
 `--dry-run` / `-DryRun` prints these steps without prompting, installing, starting services, or approving claims.
 Uninstall checks status and runs `harness hub release --confirm` before stopping the daemon. It removes only the Hub
