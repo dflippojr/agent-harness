@@ -804,6 +804,34 @@ def test_an_approval_expires_while_its_recovered_run_waits_for_an_offline_mac(tm
         await m.stop()
     asyncio.run(body())
 
+def test_an_expired_approvals_run_ends_even_if_cancelled_while_it_ends(tmp_path):
+    """A daemon stop arriving while an expired approval's run closes its tool calls still leaves it ended with
+    approval_expired, not active to resume after the restart."""
+    cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "action": "ask", "reason": "test"}])
+    cfg.approval_timeout_seconds = 0.5
+    script = Script([Completion(tool_calls=[call("write_file", 0, path="a.txt", content="x")]),
+                     Completion(content="never reached")])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        closing = asyncio.Event()
+        real_close = m.runner._close_unresolved
+
+        async def slow_close(*args, **kwargs):
+            closing.set()
+            await asyncio.sleep(0.3)
+            return await real_close(*args, **kwargs)
+        m.runner._close_unresolved = slow_close
+        await m.start()
+        sid = m.create("try", project="guarded")["id"]
+        await asyncio.wait_for(closing.wait(), 10)
+        m.tasks[sid].cancel()  # as the daemon stopping does
+        await asyncio.gather(*m.tasks.values(), return_exceptions=True)
+        s = m.db.get_session(sid)
+        assert (s["status"], s["stop_reason"]) == ("done", "approval_expired")
+        await m.stop()
+    asyncio.run(body())
+
 
 # wall-clock budget ----------------------------------------------------------------------------------------------------
 class SleepyModel:

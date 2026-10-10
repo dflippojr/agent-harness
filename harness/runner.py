@@ -150,6 +150,16 @@ class RunClock:
     spent: float = 0.0
     since: float | None = None
 
+    def set_running(self, running: bool) -> None:
+        """Bank the time since it last started running, and run on (or stop) from now."""
+        now = time.monotonic()
+        if self.since is not None:
+            self.spent += now - self.since
+        self.since = now if running else None
+
+    def seconds(self) -> float:
+        return self.spent + (time.monotonic() - self.since if self.since is not None else 0.0)
+
 
 class _HeldSlot:
     """A hosted backend slot held for one run, which can give it up while the run waits on an approval (#524)."""
@@ -685,17 +695,11 @@ class Runner:
         if clock is None:
             return
         s = self.db.get_session(sid)
-        status = s["status"] if s is not None else ""
-        now = time.monotonic()
-        if clock.since is not None:
-            clock.spent += now - clock.since
-        clock.since = now if status == "running" else None
+        clock.set_running(s is not None and s["status"] == "running")
 
     def _run_seconds(self, sid: str) -> float:
         clock = self._clocks.get(sid)
-        if clock is None:
-            return 0.0
-        return clock.spent + (time.monotonic() - clock.since if clock.since is not None else 0.0)
+        return clock.seconds() if clock is not None else 0.0
 
     def _time_left(self, s: dict) -> float | None:
         """Seconds a member's or an App's run has left (`max_run_seconds`); None for the owner's or without a cap."""
@@ -971,7 +975,8 @@ class Runner:
         except ApprovalExpired:
             if await self._take_pending_cancel(sid):
                 return
-            await self._end_on_deadline(sid, "approval_expired", started_at)
+            # One unit, as on the time budget: a daemon stop meanwhile must not leave the run active.
+            await finish_then_cancel(self._end_on_deadline(sid, "approval_expired", started_at))
         except CliBackendError as e:
             if await self._take_pending_cancel(sid):
                 return
