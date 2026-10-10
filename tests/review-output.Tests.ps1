@@ -108,6 +108,18 @@ Describe 'Review publication safety' {
         }
     }
 
+    It 'does not let a name that normalizes to an absolute path exempt a profile path' {
+        $slash = [string][char]0xFF0F
+        $disguised = $slash + 'home' + $slash + 'reviewer/auth.json'
+        foreach ($text in @('/home/reviewer/auth.json', $disguised)) {
+            $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $text }
+            $failure = ''
+            try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -DiffPaths @($disguised) }
+            catch { $failure = $_.Exception.Message }
+            if ($failure -notlike 'Review did not complete*') { throw 'A normalized diff name exempted a profile path' }
+        }
+    }
+
     It 'publishes a safe review and its validated coverage marker' {
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = 'No significant findings.' }
         Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40)
@@ -132,5 +144,8 @@ Describe 'Review publication safety' {
         if ($lines[0] -ne 'error: open [REDACTED PATH]' -or $lines[1] -ne 'plain line') { throw "Unexpected redaction: $tail" }
         if ($lines[3] -ne 'profile [REDACTED PATH]') { throw "Unexpected URL redaction: $tail" }
         if ((Get-ReviewDiagnosticTail -Stderr '&#47;home&#47;reviewer') -ne '[REDACTED LINE]') { throw 'Encoded profile path survived' }
+        if ((Get-ReviewDiagnosticTail -Stderr 'open %2Fhome%2Freviewer then C:\temp\x') -ne '[REDACTED LINE]') { throw 'Encoded prefix survived truncation' }
+        if ((Get-ReviewDiagnosticTail -Stderr 'value ghp%5Fsynthetic12345678') -ne '[REDACTED LINE]') { throw 'Encoded token survived' }
+        if ((Get-ReviewDiagnosticTail -Stderr 'token=synthetic-value') -ne 'token=[REDACTED]') { throw 'Redaction marker was re-redacted' }
     }
 }

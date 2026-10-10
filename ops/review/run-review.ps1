@@ -398,7 +398,11 @@ function Get-ReviewRepositoryPaths {
         } catch { $paths = @() }
         $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
     }
-    return @($paths + $DiffPaths | Where-Object {
+    $paths = @($paths + $DiffPaths)
+    # The decoded scan form is NFKC-normalized, so citations must match normalized names too.
+    # Normalized names pass the same relative-path filter: a fullwidth slash can become a root.
+    $paths = @($paths + @($paths | Where-Object { $_ } | ForEach-Object { $_.Normalize([Text.NormalizationForm]::FormKC) }))
+    return @($paths | Where-Object {
         # Formatting characters must not disguise an absolute-looking name as a relative citation.
         $_ -and $_ -notmatch '(^[\s`"''()\[\]{}*<>=:]*[/\\]|:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
     } | Select-Object -Unique)
@@ -426,8 +430,6 @@ function Assert-ReviewOutputSafe {
     $knownPaths = @()
     if ($Workspace -or $DiffPaths.Count -gt 0) {
         $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
-        # The decoded scan form is NFKC-normalized, so its citations must match normalized names too.
-        $knownPaths = @($knownPaths + @($knownPaths | ForEach-Object { $_.Normalize([Text.NormalizationForm]::FormKC) }) | Select-Object -Unique)
     }
     foreach ($form in (Get-ReviewScanForms -Text $Text)) {
         # Known relative citations are masked only for the profile-segment and long-token checks.
@@ -462,15 +464,14 @@ function Get-ReviewDiagnosticTail {
             $match = [regex]::Match($line, $pattern)
             if ($match.Success -and ($cut -lt 0 -or $match.Index -lt $cut)) { $cut = $match.Index }
         }
-        if ($cut -ge 0) {
-            $line.Substring(0, $cut) + '[REDACTED PATH]'
-        } elseif (@(Get-ReviewScanForms -Text $line | Where-Object {
-            $_ -match $script:ReviewAbsoluteRootPattern -or $_ -match $script:ReviewProfileSegmentPattern
-        }).Count -gt 0) {
-            '[REDACTED LINE]'
-        } else {
-            $line
-        }
+        if ($cut -ge 0) { $line = $line.Substring(0, $cut) + '[REDACTED PATH]' }
+        # Whatever remains must also be clean once decoded; redaction above is idempotent on its markers.
+        $encoded = @(Get-ReviewScanForms -Text $line | Where-Object {
+            $form = $_
+            foreach ($rule in (Get-ReviewRedactionRules)) { $form = $form -replace $rule.Pattern, $rule.Replacement }
+            ($form -cne $_) -or ($_ -match $script:ReviewAbsoluteRootPattern) -or ($_ -match $script:ReviewProfileSegmentPattern)
+        }).Count -gt 0
+        if ($encoded) { '[REDACTED LINE]' } else { $line }
     }
     $redacted = @($lines) -join [Environment]::NewLine
     if ($redacted.Length -gt $MaxCharacters) {
