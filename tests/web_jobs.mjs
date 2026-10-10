@@ -446,8 +446,13 @@ stableLeaves.forEach((fn) => fn());
 
 
 // These race scenarios own their data, requests, events, and both pane/form cleanups.
-async function jobFixture(seed, readList = async (data) => structuredClone(data), readJob = async (item) => structuredClone(item),
-  putJob = async (item, body) => { Object.assign(item, body); return structuredClone(item); }) {
+async function jobFixture(seed, {
+  readList = async (data) => structuredClone(data),
+  readJob = async (item) => structuredClone(item),
+  putJob = async (item, body) => { Object.assign(item, body); return structuredClone(item); },
+  runJob = async () => ({ id: "fixture-run" }),
+  confirmGpuQueue = async () => true,
+} = {}) {
   const data = structuredClone(seed);
   const requests = [];
   const notices = [];
@@ -459,6 +464,7 @@ async function jobFixture(seed, readList = async (data) => structuredClone(data)
   let listReads = 0;
   const fixture = mount(false, {
     browser: { window, document, location: { hash: "#/jobs" } },
+    confirmGpuQueue,
     onDaemonChange: (fn) => { notify = fn; return () => {}; },
     toast: (message) => notices.push(message),
     api: async (path, opts = {}) => {
@@ -468,6 +474,7 @@ async function jobFixture(seed, readList = async (data) => structuredClone(data)
       if (path === "/models") return [];
       if (path === "/backends?auth=skip") return [{ name: "local", available: true }];
       if (path.startsWith("/jobs/preview")) return { ok: true, next: [] };
+      if (path.endsWith("/run")) return runJob();
       const item = data.find((j) => path === "/jobs/" + j.id);
       assert.ok(item, path);
       if (opts.method === "PUT") return putJob(item, opts.body);
@@ -483,14 +490,59 @@ async function jobFixture(seed, readList = async (data) => structuredClone(data)
 
 
 
+
+// Header and phone-footer Run now share one pending action across confirmation and the request.
+let approveRun;
+let finishRun;
+let allowed = true;
+let runFails = false;
+let confirmations = 0;
+const confirmReply = new Promise((resolve) => { approveRun = resolve; });
+const runReply = new Promise((resolve) => { finishRun = resolve; });
+const runningJob = await jobFixture([job("run-job", "Run job")], {
+  confirmGpuQueue: async () => { confirmations++; await confirmReply; return allowed; },
+  runJob: async () => { await runReply; if (runFails) throw new Error("Run unavailable"); return { id: "new-run" }; },
+});
+try {
+  await runningJob.page.viewJob("run-job");
+  const buttons = walk(runningJob.$app, (e) => e.classList.contains("job-run-header") || e.classList.contains("job-run-footer"));
+  const runRequests = () => runningJob.requests.filter((r) => r.path.endsWith("/run"));
+  buttons[0].click();
+  assert.ok(buttons.every((b) => b.disabled), "both responsive buttons lock before GPU confirmation");
+  buttons[1].click();
+  assert.equal(confirmations, 1);
+  approveRun();
+  await flush(); await flush();
+  assert.equal(runRequests().length, 1);
+  assert.ok(buttons.every((b) => b.disabled), "both buttons stay locked during the request");
+  buttons[1].click();
+  await flush();
+  assert.equal(runRequests().length, 1, "resizing cannot enqueue another run");
+  finishRun();
+  await flush(); await flush();
+  assert.equal(runningJob.location.hash, "#/s/new-run");
+  assert.ok(buttons.every((b) => !b.disabled));
+  allowed = false;
+  buttons[1].click();
+  await flush(); await flush();
+  assert.equal(runRequests().length, 1, "cancelled GPU confirmation starts no run");
+  assert.ok(buttons.every((b) => !b.disabled), "cancellation releases both buttons");
+  allowed = true;
+  runFails = true;
+  buttons[1].click();
+  await flush(); await flush();
+  assert.match(runningJob.notices.at(-1), /Run unavailable/);
+  assert.ok(buttons.every((b) => !b.disabled), "a failed run releases both buttons");
+} finally { approveRun(); finishRun(); runningJob.cleanup(); }
+
 // A switch started in a disposed narrow list refreshes its replacement after resizing to split view.
 let finishResizedToggle;
 const resizedReply = new Promise((resolve) => { finishResizedToggle = resolve; });
-const replacingList = await jobFixture([job("resized", "Resize job")], undefined, undefined, async (item, body) => {
+const replacingList = await jobFixture([job("resized", "Resize job")], { putJob: async (item, body) => {
   await resizedReply;
   Object.assign(item, body);
   return structuredClone(item);
-});
+} });
 const replacementBody = new StrictEl("section");
 const replacementLeaves = [];
 try {
@@ -512,14 +564,14 @@ try {
 let releaseDetail;
 const detailReply = new Promise((resolve) => { releaseDetail = resolve; });
 let detailReads = 0;
-const mountingForm = await jobFixture([job("mounting", "Loading job")], undefined, async (item) => {
+const mountingForm = await jobFixture([job("mounting", "Loading job")], { readJob: async (item) => {
   if (++detailReads === 1) {
     const snapshot = structuredClone(item);
     await detailReply;
     return snapshot;
   }
   return structuredClone(item);
-});
+} });
 try {
   const openingDetail = mountingForm.page.viewJob("mounting");
   await flush();
@@ -538,7 +590,7 @@ try {
 let failBackground;
 const backgroundReply = new Promise((resolve, reject) => { failBackground = reject; });
 const queuedSave = await jobFixture([job("queued", "Before save")],
-  async (data, count) => count === 2 ? backgroundReply : structuredClone(data));
+  { readList: async (data, count) => count === 2 ? backgroundReply : structuredClone(data) });
 try {
   await queuedSave.page.viewJob("queued");
   queuedSave.notify();

@@ -292,17 +292,28 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       backend: backend.value, model: backend.value === "local" ? model.value : "", notify: notify.value, enabled: enabled.checked,
       ...(j.catch_up_minutes == null ? {} : { catch_up_minutes: j.catch_up_minutes }) });
     const save = h("button", { class: "btn primary", type: "submit" }, isNew ? "Create" : "Save");
-    const runNow = (className) => !isGuest() && !isNew ? h("button", {
-      class: `btn ${className}`, type: "button",
-      onclick: async (e) => {
-        const button = e.currentTarget;
+    const runButtons = [];
+    let running = false;
+    const startRun = async () => {
+      if (running) return;
+      running = true;
+      runButtons.forEach((button) => { button.disabled = true; });
+      try {
         if (backend.value === "local" && !(await confirmGpuQueue("This job run"))) return;
-        button.disabled = true;
-        try { const s = await api(`/jobs/${id}/run`, { method: "POST" }); location.hash = `#/s/${s.id}`; }
-        catch (err) { toast(err.message); }
-        finally { button.disabled = false; }
-      },
-    }, "Run now") : null;
+        const session = await api(`/jobs/${id}/run`, { method: "POST" });
+        location.hash = `#/s/${session.id}`;
+      } catch (err) { toast(err.message); }
+      finally {
+        running = false;
+        runButtons.forEach((button) => { button.disabled = false; });
+      }
+    };
+    const runNow = (className) => {
+      if (isGuest() || isNew) return null;
+      const button = h("button", { class: `btn ${className}`, type: "button", onclick: startRun }, "Run now");
+      runButtons.push(button);
+      return button;
+    };
     const field = (id, label, control, ...notes) => {
       control.setAttribute("id", id);
       return h("div", { class: "job-field" }, h("label", { for: id }, label), control, ...notes);
