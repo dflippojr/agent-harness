@@ -97,7 +97,7 @@ const { viewNew, confirmGpuQueue } = mountNewTask({ $app, h, fill, append, api, 
 const { viewImages, viewImage, viewImageEdit, viewImageFull } = mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave,
   progressBar, confirmGpuQueue, daemonImage, downloadDaemonFile, location });
 const { viewJobs, viewJob } = mountJobs({ $app, h, fill, append, api, setHeader, showListAction, toast, go, route, isGuest,
-  confirmGpuQueue, badge, jobStatusBadge, location });
+  confirmGpuQueue, badge, jobStatusBadge, location, onLeave });
 const { viewList } = mountSessions({ $app, h, fill, append, api, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, onDaemonChange: stream.onDaemonChange, onDaemonState: stream.onDaemonState, browser });
 const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar });

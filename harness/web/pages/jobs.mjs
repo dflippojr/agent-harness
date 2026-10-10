@@ -6,25 +6,43 @@ import { ago } from "../lib/format.mjs";
 import * as sheets from "../lib/sheet.mjs";
 
 export function mountJobs({ $app, h, fill, append, api, setHeader, showListAction, toast, go, route, isGuest, confirmGpuQueue, badge, jobStatusBadge, location,
-  confirmSheet = sheets.confirmSheet }) {
-  async function viewJobs() {
-    setHeader("jobs", "Jobs");
-    showListAction("#/jobs/new", "+ New job");
-    const jobs = await api("/jobs");
-    if (!jobs.length) {
-      append($app, h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));
-      return;
-    }
+  confirmSheet = sheets.confirmSheet, onLeave = () => {} }) {
+  let refreshList = null;
+  async function viewJobs(pane = null) {
+    const target = pane?.body || $app;
+    if (pane) pane.header("Jobs", isGuest() ? null : { href: "#/jobs/new", label: "+ New job" });
+    else { setHeader("jobs", "Jobs"); showListAction("#/jobs/new", "+ New job"); }
+    let gone = false;
+    const leave = pane ? pane.onLeave : onLeave;
+    leave(() => { gone = true; if (refreshList === refresh) refreshList = null; });
+    let jobs = await api("/jobs");
+    if (gone) return;
     const list = h("div", { class: "job-groups" });
-    // Job id -> the enabled state being saved. paint() rebuilds every row, so a row mid-save takes its state from here.
+    // Job id -> the enabled state being saved. Repaints retain every in-flight switch.
     const saving = new Map();
-    // #511: grouped by attention, each row with an inline Enabled switch; the row body still opens the full form.
-    const paint = () => fill(list, JOB_GROUPS.flatMap(([key, label]) => {
-      const rows = jobs.filter((j) => jobGroup(j) === key);
-      if (!rows.length) return [];
-      return [h("p", { class: "section-label job-section" }, label, h("span", { class: `count${key === "attention" ? " warn" : ""}` }, String(rows.length))),
-        h("div", { class: "card job-list" }, rows.map(jobRow))];
-    }));
+    let refreshVersion = 0;
+    const paint = () => {
+      if (gone) return;
+      fill(list, jobs.length ? JOB_GROUPS.flatMap(([key, label]) => {
+        const rows = jobs.filter((j) => jobGroup(j) === key);
+        if (!rows.length) return [];
+        return [h("p", { class: "section-label job-section" }, label, h("span", { class: `count${key === "attention" ? " warn" : ""}` }, String(rows.length))),
+          h("div", { class: "card job-list" }, rows.map(jobRow))];
+      }) : h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));
+      pane?.paint();
+    };
+    // Detail routes keep the split list mounted; successful edits refresh it explicitly.
+    async function refresh() {
+      const version = ++refreshVersion;
+      try {
+        const fresh = await api("/jobs");
+        if (gone || version !== refreshVersion) return;
+        const existing = new Map(jobs.map((j) => [j.id, j]));
+        jobs = fresh.map((j) => Object.assign(existing.get(j.id) || {}, j));
+        paint();
+      } catch (err) { if (!gone && version === refreshVersion) toast(`Couldn't refresh jobs: ${err.message}`, 5000); }
+    }
+    refreshList = refresh;
 
     function jobRow(j) {
       const last = j.recent?.[0];
@@ -34,7 +52,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
         disabled: isGuest() || saving.has(j.id) });
       toggle.checked = saving.has(j.id) ? saving.get(j.id) : !!j.enabled;
       toggle.addEventListener("change", () => setEnabled(j, toggle.checked, true));
-      return h("div", { class: `job-row${j.enabled ? "" : " paused"}`, "data-job": j.id },
+      return h("div", { class: `job-row${j.enabled ? "" : " paused"}`, "data-job": j.id, "data-split-key": j.id },
         h("a", { class: "job-main", href: `#/jobs/${j.id}` },
           h("h3", {}, j.name),
           h("div", { class: "meta" }, h("span", {}, cronLabel(j.cron)), h("span", { "aria-hidden": "true" }, "·"), h("span", {}, j.project)),
@@ -47,6 +65,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     // PUT replaces the whole job, so re-read it first: an edit made elsewhere since the list loaded is kept.
     async function setEnabled(j, enabled, undoable = false) {
       if (saving.has(j.id)) return;
+      refreshVersion++;
       saving.set(j.id, enabled);
       paint();
       try {
@@ -57,6 +76,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
         toast(err.message, 5000);
         return;
       } finally {
+        refreshVersion++;
         saving.delete(j.id);
         paint();
       }
@@ -66,7 +86,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       else toast(said);
     }
     paint();
-    append($app, list);
+    append(target, list);
   }
 
   async function viewJob(id) {
@@ -81,7 +101,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     const custom = !CRON_PRESETS.some(([c]) => c === j.cron);
     const preset = h("select", {}, CRON_PRESETS.map(([c, label]) => h("option", { value: c, selected: c === j.cron }, label)),
       h("option", { value: "", selected: custom }, "Custom (cron)"));
-    const cron = h("input", { type: "text", value: j.cron, placeholder: "minute hour day month weekday", style: "font-family:var(--mono)" });
+    const cron = h("input", { type: "text", value: j.cron, id: "job-cron", placeholder: "minute hour day month weekday", style: "font-family:var(--mono)" });
     const cronNote = h("div", { class: "muted small", style: "margin-top:6px" });
     const project = h("select", {}, projects.filter((p) => p.target === "tower" || p.name === j.project)
       .map((p) => h("option", { value: p.name, selected: p.name === j.project }, p.description ? `${p.name} — ${p.description}` : p.name)));
@@ -109,7 +129,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     backend.addEventListener("change", showBackend);
     showBackend();
     const notify = h("select", {}, Object.entries(JOB_NOTIFY).map(([k, label]) => h("option", { value: k, selected: k === j.notify }, label)));
-    const enabled = h("input", { type: "checkbox", checked: j.enabled });
+    const enabled = h("input", { type: "checkbox", checked: j.enabled, "aria-label": "Job enabled" });
     let previewTimer = null;
     const preview = () => {
       clearTimeout(previewTimer);
@@ -124,6 +144,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       preview();
     });
     preview();
+    onLeave(() => clearTimeout(previewTimer));
     if (isGuest()) {
       [name, prompt, cron, preset, project, backend, model, notify, enabled].forEach((el) => { el.disabled = true; });
     }
@@ -131,7 +152,23 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       backend: backend.value, model: backend.value === "local" ? model.value : "", notify: notify.value, enabled: enabled.checked,
       ...(j.catch_up_minutes == null ? {} : { catch_up_minutes: j.catch_up_minutes }) });
     const save = h("button", { class: "btn primary", type: "submit" }, isNew ? "Create" : "Save");
-    append($app, h("form", {
+    const runNow = (className) => !isGuest() && !isNew ? h("button", {
+      class: `btn ${className}`, type: "button",
+      onclick: async (e) => {
+        const button = e.currentTarget;
+        if (backend.value === "local" && !(await confirmGpuQueue("This job run"))) return;
+        button.disabled = true;
+        try { const s = await api(`/jobs/${id}/run`, { method: "POST" }); location.hash = `#/s/${s.id}`; }
+        catch (err) { toast(err.message); }
+        finally { button.disabled = false; }
+      },
+    }, "Run now") : null;
+    const field = (label, control, ...notes) => {
+      const id = `job-${label.split(" ")[0].toLowerCase()}`;
+      control.setAttribute("id", id);
+      return h("div", { class: "job-field" }, h("label", { for: id }, label), control, ...notes);
+    };
+    const form = h("form", { class: "job-form",
       onsubmit: async (e) => {
         e.preventDefault();
         if (isNew && backend.value === "local" && !(await confirmGpuQueue("This scheduled job"))) return;
@@ -139,39 +176,41 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
         try {
           const saved = await api(isNew ? "/jobs" : `/jobs/${id}`, { method: isNew ? "POST" : "PUT", body: body() });
           toast(`Saved · next run ${whenText(saved.next_run_at)}`, 3500);
+          await refreshList?.();
           if (isNew) location.hash = `#/jobs/${saved.id}`; else void route();
         } catch (err) { toast(err.message, 5000); }
         save.disabled = false;
       },
     },
-    h("label", {}, "Name"), name,
-    h("label", {}, "Task"), prompt,
-    h("p", { class: "muted small" }, "The agent is asked to end with STATUS: OK or STATUS: ATTENTION, which decides how loudly you're notified. Approvals always notify."),
-    h("label", {}, "Schedule (tower time)"), preset, h("div", { style: "margin-top:8px" }, cron), cronNote,
-    h("label", {}, "Project"), project,
-    h("label", {}, "Backend"), backend, backendNote,
-    h("label", {}, "Model"), model,
-    h("label", {}, "Notify me"), notify,
-    h("label", { class: "row", style: "font-weight:500" }, enabled, "Enabled"),
-    h("div", { class: "row", style: "margin-top:18px" },
+    h("div", { class: "job-fields" },
+      field("Name", name),
+      field("Task", prompt),
+      h("p", { class: "muted small" }, "The agent is asked to end with STATUS: OK or STATUS: ATTENTION, which decides how loudly you're notified. Approvals always notify."),
+      h("div", { class: "job-schedule-grid" },
+        field("Schedule (tower time)", preset),
+        h("div", { class: "job-field job-cron" }, h("label", { class: "job-cron-label", for: "job-cron" }, "Cron"), cron, cronNote)),
+      h("div", { class: "job-model-grid" }, field("Project", project), field("Backend", backend, backendNote), field("Model", model)),
+      field("Notify me", notify)),
+    h("div", { class: "job-toolbar" },
+      h("h2", { class: "job-heading" }, isNew ? "New job" : j.name),
+      h("label", { class: "row job-enabled", style: "font-weight:500" }, enabled, "Enabled"),
+      runNow("job-run-header")),
+    h("div", { class: "row job-footer", style: "margin-top:18px" },
       !isGuest() && !isNew ? h("button", {
         class: "btn bad", type: "button",
         onclick: async () => {
           if (!(await confirmSheet({ title: `Delete the job “${j.name}”?`, message: "Its past sessions stay.", confirmLabel: "Delete job",
             destructive: true }))) return;
-          try { await api(`/jobs/${id}`, { method: "DELETE" }); go("#/jobs", true); } catch (err) { toast(err.message); }
+          try { await api(`/jobs/${id}`, { method: "DELETE" }); await refreshList?.(); go("#/jobs", true); } catch (err) { toast(err.message); }
         },
       }, "Delete") : null,
       h("span", { class: "spacer" }),
-      !isGuest() && !isNew ? h("button", {
-        class: "btn", type: "button",
-        onclick: async () => {
-          if (backend.value === "local" && !(await confirmGpuQueue("This job run"))) return;
-          try { const s = await api(`/jobs/${id}/run`, { method: "POST" }); location.hash = `#/s/${s.id}`; } catch (err) { toast(err.message); }
-        },
-      }, "Run now") : null,
-      isGuest() ? null : save)));
-    if (job) append($app, ...recentRunsView(job));
+      runNow("job-run-footer"),
+      isGuest() ? null : save));
+    append($app, h("section", { class: "job-detail", "aria-label": isNew ? "New job" : j.name },
+      h("div", { class: "job-layout" }, form,
+        job ? h("section", { class: "job-runs", "aria-label": "Recent runs" }, ...recentRunsView(job)) : null)));
+
   }
 
   async function previewCron(cronValue, cronNote) {
@@ -183,7 +222,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
   }
 
   function recentRunsView(job) {
-    return [h("h3", { style: "margin-top:28px" }, "Recent runs"),
+    return [h("h3", { class: "job-runs-heading" }, "Recent runs"),
       job.last_skip ? h("p", { class: "muted small" }, `Last skipped: ${job.last_skip}`) : null,
       job.last_error ? h("p", { class: "small bad" }, `Last start failed: ${job.last_error}`) : null,
       job.recent.length ? job.recent.map((s) => h("a", { class: "card", href: `#/s/${s.id}` },
