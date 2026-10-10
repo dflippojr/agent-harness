@@ -12,6 +12,8 @@ owner allowlist; startup fails closed if member records exist while open-owner m
 
 from __future__ import annotations
 
+import re
+
 from .principal import (  # re-exported for existing imports
     OWNER_USER_ID,
     Principal,
@@ -34,7 +36,19 @@ TEMPLATES = "/templates"
 SMART_APPROVALS = "/smart-approvals"
 ADMIN_API = "/api/admin"
 
-OWNER_GET_PREFIXES = (KEYS, METRICS, MAINTENANCE, SKILLS, CHATS)
+# Only reviewed demo reads belong here. Exact routes keep new status/admin subroutes closed by default.
+GUEST_GET_PATHS = frozenset({
+    "/", "/index.html", "/sw.js", "/manifest.webmanifest", "/app.js", "/client.mjs", "/style.css",
+    "/icon-180.png", "/icon-192.png", "/icon-512.png", "/health", "/me", "/profile", "/projects",
+    "/models", "/sessions", "/events", "/queue", "/search", "/templates", "/jobs", "/images", "/api/v1",
+})
+GUEST_GET_PATTERNS = (
+    r"/(?:static|lib|pages)/[^?]+",
+    r"/sessions/[^/]+(?:/(?:checkpoints|changes|review-comments|approvals|transcript|metrics|events))?",
+    r"/compare/[^/]+",
+    r"/jobs/[^/]+",
+    r"/images/[^/]+",
+)
 RUNNER_PREFIX = "/runners/"
 MEMBER_FORBIDDEN_PREFIXES = (
     KEYS, METRICS, MAINTENANCE, JOBS,
@@ -87,9 +101,9 @@ def guest_forbidden(access: Access, method: str, path: str) -> str | None:
     if path == ADMIN_API or path.startswith(ADMIN_API + "/"):
         return "demo access cannot use the owner API"
     if method in SAFE_METHODS:
-        if _under_any_prefix(path, OWNER_GET_PREFIXES):
-            return "demo access cannot view owner credentials"
-        return None
+        if path in GUEST_GET_PATHS or any(re.fullmatch(pattern, path) for pattern in GUEST_GET_PATTERNS):
+            return None
+        return "demo access cannot view owner credentials"
     if path.startswith(RUNNER_PREFIX):
         return None
     return "demo access is read-only"

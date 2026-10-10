@@ -107,6 +107,7 @@ _PUBLIC = {
     "require_owner": ("harness.api", "require_owner"),
     "app_auth": ("harness.apps", "auth"),
     "calling_app": ("harness.apps", "calling_app"),
+    "reaches_web": ("harness.apps", "reaches_web"),
     "SESSIONS_ALL": ("harness.apps", "SESSIONS_ALL"),
     "owner_id": ("harness.api", "owner_id"),
     "SettingSpec": ("harness.settings", "SettingSpec"),
