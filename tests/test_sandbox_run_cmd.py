@@ -126,6 +126,35 @@ def test_cancelling_while_the_process_is_still_being_spawned_still_kills_it(spaw
     assert _wait_until(lambda: spawned[0].poll() is not None), "a command cancelled mid-spawn was left running"
 
 
+def test_drain_returns_only_once_a_process_cancelled_mid_spawn_is_gone(spawned, monkeypatch):
+    """#525: the disk watchdog resets the container right after cancelling the exec client, so with `drain` the
+    cancelled task must not finish while a client still being spawned could act."""
+    real = sandbox._spawn
+
+    def slow_spawn(*args, **kwargs):
+        time.sleep(0.5)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sandbox, "_spawn", slow_spawn)
+
+    async def scenario(drain):
+        finished = asyncio.Event()
+        task = asyncio.ensure_future(sandbox.run_cmd(SLEEPER, drain=drain, finished=finished))
+        await asyncio.sleep(0.15)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return [proc.poll() for proc in spawned], finished.is_set()
+
+    exits, finished = asyncio.run(scenario(30))
+    assert exits and exits[0] is not None, "the cancelled task finished before its process was gone"
+    assert finished
+    spawned.clear()
+    exits, finished = asyncio.run(scenario(0.05))    # gave up waiting while the spawn was still blocked
+    assert not finished, "a drain that timed out must not report the process gone"
+    assert _wait_until(lambda: bool(spawned) and spawned[0].poll() is not None)
+
+
 def test_run_cmd_returns_when_detached_child_holds_the_pipe(tmp_path, monkeypatch):
     """Parent exits while a grandchild still holds stdout; pumps must not wait out the join timeout."""
     sh = shutil.which("sh")

@@ -217,10 +217,56 @@ has no effort variable: choose effort through the model id (for example `cursor-
 Optional `REVIEW_MAX_DIFF_BYTES` sets how many bytes of PR diff are embedded in the review prompt (default `204800`; accepted range `20480` to `2097152`, digits only). A larger cap covers more of a big PR but grows the prompt, so each review costs more tokens and risks exceeding the model's context; a smaller cap is cheaper but omits more. An invalid value fails closed before a backend runs. When the diff exceeds the cap, whole files are dropped by a fixed rule: source files are kept first, then tests, then docs, then lockfiles and generated or vendored output, in diff order within each tier; a file that does not fit is omitted even if a smaller later file still fits. The comment then opens with `PARTIAL REVIEW: reviewed N of M files (X of Y KB of diff). Not reviewed: <files>` instead of `Reviewed the full diff`, and the `<!-- agent-review: ... -->` marker is withheld so the next run reviews the whole PR instead of treating it as covered. A single file larger than the cap is always listed as not reviewed. Omitted files are not reviewed in additional passes; raise the cap to cover them.
 
 All three CLIs run under the review runner service user and must be logged in for that same user. Cursor uses ask mode
-with its sandbox enabled. Codex ignores the service user's configuration, restores only the required unelevated Windows
+with its sandbox enabled on non-Windows hosts; the flag is skipped on Windows because that CLI does not support it.
+Windows ask mode is not an OS sandbox; keep Cursor opt-in rather than adding it to the default Windows pool. Codex ignores the service user's configuration, restores only the required unelevated Windows
 sandbox setting, disables apps and plugins, and supplies an empty MCP server table before entering its read-only sandbox.
-Claude exposes only Read/Grep/Glob. The wrapper, rather than a model, writes the final comment file. It fetches the pull
-request diff before starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review
+Claude exposes only Read/Grep/Glob, with `--allowedTools Read(./**)` anchored to the PR workspace as its working
+directory. No bare Read, Grep or Glob allow is passed, and `--setting-sources=` disables inherited settings that could
+add broader permissions or additional directories. `--restricted` explicitly fences built-in file tools to working
+directories, including otherwise implicitly permitted profile-side transcripts and memory; `--safe-mode` disables
+customizations and automatic memory, and `--no-session-persistence` avoids saving this review as a runner session.
+The CLI must support these flags (restricted mode requires v2.1.248 or later); an unsupported flag fails closed.
+See [Claude permission rules](https://code.claude.com/docs/en/permissions) and the [CLI flag reference](https://code.claude.com/docs/en/cli-reference).
+The wrapper, rather than a model, writes the final comment file. Before writing `review-output.md`, it scans the
+public review body using the diagnostic redaction patterns (bearer values, named credentials, provider tokens and
+long tokens) plus two path rules. A match discards the whole body, removes any stale output and fails closed with
+`Review did not complete`; nothing is posted or copied into the check summary. The path rules never parse or
+canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot hide one:
+
+- Any Windows absolute root is rejected, whatever follows it: a drive root (`C:\` or `C:/`), a UNC or extended
+  prefix (`\\server\`, `//server/`, `\\?\`, `\\.\`), or a `file:` URL.
+- Any separator followed by a profile directory name (`Users`, `home`, `root` or `Documents and Settings`, including
+  Windows trailing-period, trailing-space and short-name spellings) is rejected unless it is part of a known
+  repository path. `docs/users.md` and `root-ca.md` are not profile directories; an unknown `examples/home/x.py` is
+  rejected even though it is relative.
+
+The rules run on the raw body and on what a reader would see: percent escapes, HTML entities, invisible format
+characters, Unicode compatibility forms and Markdown backslash escapes are decoded first, and an approximate rendered
+form also drops link targets, brackets, inline HTML tags and emphasis or code markers that could split a value. Known
+citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and
+rendered spellings; a name counts as known only if every one of those spellings is relative. This is intentionally
+conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
+tells the backend to cite only repository-relative paths and describe credentials in words. A run of 40 or more token characters is not
+treated as a token when it reads as an identifier (only letters, slashes, underscores and hyphens, with at least one
+underscore or hyphen and no digits), so long test and function names stay publishable. The base ref in the coverage
+marker is already validated as a branch name and is checked against the credential patterns only. For publication, the bearer
+and named-credential rules (`token`, `secret`, `password`, `api_key` and similar followed by `:` or `=`) match only a
+value that looks like a credential: a non-empty quoted literal that is not a reference (`$VAR`, `${{ ... }}`, `%VAR%`,
+`{x}`, `<x>`), or a token-like value (6 or more characters including a digit, or 20 or more token characters). Prose
+such as "a Bearer token" and quoted code such as `token: str`, `self.token = token` or
+`password: ${{ secrets.X }}` are publishable. Job-log diagnostics keep the broader original patterns. Git-quoted names
+that are malformed or not valid UTF-8 never block a review; they simply do not match a citation.
+
+Known repository paths come from the Git index and every diff file, including deletions and both rename/copy sides.
+Git-quoted paths are decoded as UTF-8 bytes, and patch and rename/copy metadata disambiguate filenames containing the
+diff header's ` b/` separator. Exact citations of known paths (including `./` prefixes and Windows separators) are
+masked for the profile-directory and long-token rules only; a known path never exempts an absolute root, a profile
+prefix in front of it, or a credential pattern. For the long-token rule, a web link's path is split at each literal `/`
+(before decoding, so `%2F` never splits), and a long documentation URL is not one token; its query and fragment stay whole, so a signature there is still caught. Validated Git metadata in the coverage marker is added only after the scan.
+Stderr shown in job-log warnings keeps the message before a path and replaces the rest of that line with
+`[REDACTED PATH]`.
+
+The wrapper fetches the pull request diff before starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review
 sandboxes do not need GitHub network access. Larger diffs identify every omitted file in the prompt. After installing or
 changing a CLI, verify each backend explicitly against a disposable pull request:
 
@@ -245,8 +291,9 @@ accepts deployments from `main` only.
 
 Other projects call this repository's `review.yml` as a reusable workflow (`on: workflow_call`) instead of carrying a
 copy, so a fix here reaches every project. The job checks out `ops/review/run-review.ps1` from
-`dflippojr/agent-harness` at the `tooling_ref` input (default `review-v1`) into `.review-tooling`; the consumer repo
-needs no `ops/review` directory.
+`dflippojr/agent-harness` at the `tooling_ref` input (default `main`, the trusted default branch) into `.review-tooling`; the consumer repo
+needs no `ops/review` directory. This repository also checks out tooling from the trusted default branch, never
+from the triggering commit; the PR head is checked out separately in `pr` for review context only.
 
 **Caller file.** Add `.github/workflows/review.yml` to the consumer repo, with that repo's runner label in `runs_on`:
 
@@ -288,17 +335,23 @@ jobs:
       backend: ${{ inputs.backend }}
       mode: ${{ inputs.mode }}
       runs_on: '["self-hosted","Windows","X64","financial-planner-review"]'
+      tooling_ref: review-v1
     secrets: inherit
 ```
 
 Do not add a workflow-level `concurrency` group to the caller; the shared job already serializes per repository and
 PR. Optional inputs: `max_diff_bytes` (otherwise the consumer's `REVIEW_MAX_DIFF_BYTES` variable, then `204800`) and
-`tooling_ref` (keep it equal to the `@ref` in `uses:`). The `REVIEW_*` repository variables are read from the consumer
+`tooling_ref` (use the trusted default branch or a maintainer-pinned tag, never a PR ref). The `REVIEW_*` repository variables are read from the consumer
 repository.
 
 **Runner label.** Register a self-hosted Windows runner for the consumer repo with
 `ops/github/install-runner.ps1 -Labels <project>-review` under a service user whose Codex, Claude, and Cursor CLIs are
 logged in, and pass that label in `runs_on`.
+
+**Runner access (owner step).** Create a self-hosted runner group in GitHub and restrict it to the specific trusted
+review/deploy workflows that need those runners, with workflow refs on the default branch or trusted tags. Labels
+select runners but do not restrict who may schedule them. Keep fork-PR approval required for all outside contributors.
+This GitHub administration step cannot be enforced by this repository change; the owner must configure it.
 
 **Permissions.** The caller's `permissions` block must grant `contents: read`, `pull-requests: write` (PR comment), and
 `checks: write` (the `Automated Code Review` check). A called workflow can only narrow these.
@@ -307,8 +360,10 @@ logged in, and pass that label in `runs_on`.
 `SonarSource/sonarqube-scan-action@*`) must also allow `dflippojr/agent-harness/.github/workflows/review.yml@*`
 (Settings -> Actions -> General -> "Allow or block specified actions and reusable workflows").
 
-**Version pin.** Consumers pin the moving tag `review-v1`, so a change on `main` does not reach every project at once.
-After a change has been verified here, the owner moves the tag deliberately:
+**Version pin.** The `@review-v1` reference selects the workflow definition. The script follows trusted `main` by
+default; pinning only the workflow does not stage script changes. For staged rollout, set `tooling_ref: review-v1`
+as in the caller above so both workflow and script follow the same maintainer-controlled tag. After a change has
+been verified here, the owner moves that tag deliberately:
 
 ```powershell
 git tag -f review-v1 <verified commit on main>

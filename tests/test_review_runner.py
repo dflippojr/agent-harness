@@ -70,6 +70,291 @@ $value | ConvertTo-Json -Compress
     assert "unsupported review backend 'unknown'" in output(invalid)
 
 
+def test_publication_safety_pester_regressions(tmp_path):
+    pester_path = str(ROOT / "tests" / "review-output.Tests.ps1").replace("'", "''")
+    result = run_powershell(
+        tmp_path,
+        f"""
+Import-Module Pester -ErrorAction Stop
+$r = Invoke-Pester '{pester_path}' -PassThru
+if ($r.FailedCount -ne 0 -or $r.PassedCount -eq 0 -or $r.PassedCount -ne $r.TotalCount) {{ exit 1 }}
+""",
+    )
+    assert result.returncode == 0, output(result)
+
+
+def test_rejected_output_fails_the_check_without_posting(tmp_path):
+    output_path = str(tmp_path / "review-output.md").replace("'", "''")
+    github_output = str(tmp_path / "github-output.txt").replace("'", "''")
+    result = run_powershell(
+        tmp_path,
+        f"""
+$env:GITHUB_OUTPUT = '{github_output}'
+function Get-ReviewCoverage {{
+    [pscustomobject]@{{ Mode = 'full'; Diff = 'synthetic diff'; HeadSha = '{HEAD_SHA}'; BaseRef = 'main'; CoverageLine = 'Reviewed the full diff' }}
+}}
+function Remove-UntrustedReviewAgentConfiguration {{ return 0 }}
+function Invoke-ReviewBackendProcess {{
+    param($Command, $ScratchDirectory)
+    [pscustomobject]@{{ ExitCode = 0; Stdout = "No significant findings. ghp_synthetic12345678`nREVIEW_VERDICT: CLEAN`nREVIEW_STATUS: COMPLETE"; Stderr = ''; Model = $null }}
+}}
+try {{
+    Invoke-ReviewMain -Backend claude -Workspace '{tmp_path}' -PrNumber 7 -Prompt 'synthetic review' -OutputPath '{output_path}' -ScratchDirectory '{tmp_path}'
+    throw 'Expected publication rejection'
+}} catch {{
+    if ($_.Exception.Message -notlike 'Review did not complete*') {{ throw }}
+}}
+[ordered]@{{ bodyExists = (Test-Path -LiteralPath '{output_path}'); outputsExist = (Test-Path -LiteralPath '{github_output}') }} | ConvertTo-Json -Compress
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert json.loads(result.stdout.strip()) == {"bodyExists": False, "outputsExist": False}
+    fields = _complete_check(tmp_path, {"AGENT_CONCLUSION": "failure", "POST_CONCLUSION": "skipped"})
+    assert fields["conclusion"] == "failure"
+    assert fields["output[title]"] == "Review did not complete"
+    assert "synthetic12345678" not in fields["output[summary]"]
+    assert "a.py:1" not in fields["output[summary]"]
+    assert "if" not in _workflow_step("Post review as PR comment")  # default success() gates posting
+
+
+def test_ci_docs_describe_review_safety_boundaries():
+    docs = CI_DOCS.read_text(encoding="utf-8")
+    assert "flag is skipped on Windows" in docs
+    assert "Read(./**)" in docs
+    assert "--restricted" in docs
+    assert "--setting-sources=" in docs
+    assert "Review did not complete" in docs
+    assert "runner group" in docs
+    assert "fork-PR approval required for all outside contributors" in docs
+
+
+def test_publication_allows_known_paths_but_still_rejects_tokens(tmp_path):
+    known_path = "harness_modules/remote_control/folder_discovery.py"
+    target = tmp_path / known_path
+    target.parent.mkdir(parents=True)
+    target.write_text("# synthetic repository context\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", known_path], check=True, capture_output=True)
+    result = run_powershell(
+        tmp_path,
+        rf"""
+$result = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = '- {known_path}:12: synthetic finding' }}
+$out = Join-Path '{tmp_path}' 'review-output.md'
+Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
+$body = Get-Content -Raw -LiteralPath $out
+if ($body -notlike '*{known_path}:12*') {{ throw 'Known repository citation was lost' }}
+foreach ($citation in @('./{known_path}', '././{known_path}', ('.\' + '{known_path}'.Replace('/', '\')))) {{
+    $result.Output = "$citation`:12: finding"
+    Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
+}}
+$result.Output = '- {known_path}:12: synthetic finding'
+Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -CoverageLine 'PARTIAL REVIEW: Not reviewed: deleted/remote_control/folder_discovery.py' -DiffPaths @('deleted/remote_control/folder_discovery.py')
+git -C '{tmp_path}' rm --cached --quiet -- '{known_path}'
+if ($LASTEXITCODE -ne 0) {{ throw 'Synthetic deletion failed' }}
+$embedding = Get-ReviewDiffEmbedding -Diff "diff --git a/{known_path} b/{known_path}`ndeleted file mode 100644`n-old content"
+if (@($embedding.OmittedFiles).Count -ne 0) {{ throw 'The deletion should be reviewed, not omitted' }}
+Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
+$rename = Get-ReviewDiffEmbedding -Diff "diff --git a/{known_path} b/short.py`nsimilarity index 100%`nrename from {known_path}`nrename to short.py"
+if (@($rename.FilePaths).Count -ne 2) {{ throw 'Both rename paths must be retained' }}
+Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -DiffPaths @($rename.FilePaths)
+foreach ($relative in @('docs/root-ca.md', 'docs/users.md', 'src/rooted/homepage.py')) {{
+    $result.Output = $relative
+    Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
+}}
+# Unknown paths with a profile directory segment fail closed, even when relative.
+$profileLike = @('docs/root/code.md', 'examples/home/reviewer/file.py', 'examples/Users/reviewer/file.py')
+# A long word-like name is an identifier, not a token, even when it is not a known path.
+foreach ($identifier in @('outside/{known_path}', '/{known_path}')) {{
+    $result.Output = $identifier
+    Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
+}}
+foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), ('./' + ('T' * 48) + '/unknown.py'), ('./' + ('T1' * 24) + '/unknown.py'), 'sk-synthetic12345678') + $profileLike) {{
+    $result.Output = $unsafe
+    $failure = ''
+    try {{ Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' }}
+    catch {{ $failure = $_.Exception.Message }}
+    if ($failure -notlike 'Review did not complete*' -or (Test-Path $out)) {{ throw 'Token was published' }}
+}}
+'safe paths, unsafe tokens'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "safe paths, unsafe tokens" in result.stdout
+
+
+def test_longer_known_citation_is_masked_before_its_shorter_prefix(tmp_path):
+    paths = ["src/docs", "src/docs archive/" + "a" * 48 + ".py"]
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# synthetic context\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    result = run_powershell(
+        tmp_path,
+        f"""
+$review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = '{paths[1]}:12: synthetic finding' }}
+$out = Join-Path '{tmp_path}' 'review-output.md'
+Write-ReviewResult -Result $review -OutputPath $out -Workspace '{tmp_path}'
+if ((Get-Content -Raw -LiteralPath $out) -notlike '*{paths[1]}:12*') {{ throw 'Longer citation was lost' }}
+Write-ReviewResult -Result $review -OutputPath $out -DiffPaths @('{paths[0]}', '{paths[1]}')
+""",
+    )
+    assert result.returncode == 0, output(result)
+
+
+def test_known_bracketed_paths_cannot_hide_absolute_profile_paths(tmp_path):
+    paths = ["app/[locale]/home/components/Nav.tsx", "app/[locale]/Users/reviewer/config.py",
+             "app/{locale}/root/settings.py", "\U0001f43e/home/reviewer/config.py"]
+    ambiguous = ["(/home/reviewer/config.py", "`/home/reviewer/config.py"]
+    for path in paths + ambiguous:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True)
+        target.write_text("# synthetic file\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    result = run_powershell(
+        tmp_path,
+        f"""
+$paths = '{json.dumps(paths, ensure_ascii=True)}' | ConvertFrom-Json
+$out = Join-Path '{tmp_path}' 'review-output.md'
+foreach ($path in $paths) {{
+    $review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = "$path`:12: finding" }}
+    Write-ReviewResult -Result $review -OutputPath $out -Workspace '{tmp_path}'
+}}
+$review.Output = $paths[0]
+Write-ReviewResult -Result $review -OutputPath $out -DiffPaths @($paths[0])
+foreach ($absolute in @('C:/Users/reviewer/', '/home/reviewer/', 'C:/temp/../Users/reviewer/')) {{
+    $review.Output = $absolute + $paths[0]
+    $failure = ''
+    try {{ Write-ReviewResult -Result $review -OutputPath $out -Workspace '{tmp_path}' -DiffPaths $paths }}
+    catch {{ $failure = $_.Exception.Message }}
+    if ($failure -notlike 'Review did not complete*' -or (Test-Path $out)) {{ throw 'Absolute profile reference was exempted' }}
+}}
+foreach ($formatted in @('(/home/reviewer/config.py)', '`/home/reviewer/config.py`')) {{
+    $review.Output = $formatted
+    $failure = ''
+    try {{ Write-ReviewResult -Result $review -OutputPath $out -Workspace '{tmp_path}' }}
+    catch {{ $failure = $_.Exception.Message }}
+    if ($failure -notlike 'Review did not complete*' -or (Test-Path $out)) {{ throw 'Ambiguous filename exempted an absolute profile' }}
+}}
+'known relative paths and absolute profiles verified'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "known relative paths and absolute profiles verified" in result.stdout
+
+
+def test_known_unicode_paths_publish_and_diagnostics_redact_profile_segments(tmp_path):
+    paths = ["caf\u00e9/home/reviewer/config.py", "cafe\u0301/Users/reviewer/config.py",
+             "\u8cc7\u6599/root/config.py", "\u00e9/Device/Volume1/Users/reviewer/config.py"]
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True)
+        target.write_text("# synthetic file\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    result = run_powershell(
+        tmp_path,
+        f"""
+$paths = '{json.dumps(paths, ensure_ascii=True)}' | ConvertFrom-Json
+foreach ($path in $paths) {{
+    $review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = "$path`:12: finding" }}
+    Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}'
+    # Diagnostics have no repository context, so any profile segment is redacted.
+    $tail = Get-ReviewDiagnosticTail -Stderr $path
+    if ($tail -like '*reviewer*' -or $tail -notlike '*[[]REDACTED PATH]') {{ throw 'Profile segment was not redacted' }}
+}}
+'Unicode relative paths verified'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "Unicode relative paths verified" in result.stdout
+
+
+def test_git_diff_path_with_embedded_header_separator(tmp_path):
+    path = "examples b/" + "a" * 48 + ".py"
+    target = tmp_path / path
+    target.parent.mkdir()
+    target.write_text("# synthetic file\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", path], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
+         "commit", "--quiet", "-m", "synthetic fixture"], check=True, capture_output=True,
+    )
+    target.unlink()
+    diff = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "diff", "--no-ext-diff", "--no-textconv"], text=True,
+    )
+    # Remove the deleted file from the index too, so only parsed diff paths can exempt its citation.
+    subprocess.run(["git", "-C", str(tmp_path), "rm", "--cached", "--quiet", "--", path], check=True, capture_output=True)
+    diff_path = tmp_path / "synthetic.diff"
+    diff_path.write_text(diff, encoding="utf-8")
+    result = run_powershell(
+        tmp_path,
+        f"""
+$diff = Get-Content -Raw -LiteralPath '{diff_path}'
+$embedding = Get-ReviewDiffEmbedding -Diff $diff
+if (@($embedding.FilePaths).Count -ne 1 -or $embedding.FilePaths[0] -ne '{path}') {{ throw 'Ambiguous deletion path was split' }}
+$review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = '{path}:12: deletion finding' }}
+Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
+$rename = Get-ReviewDiffEmbedding -Diff "diff --git a/{path} b/other b/new.py`nsimilarity index 100%`nrename from {path}`nrename to other b/new.py"
+if ($rename.FilePaths[0] -ne '{path}' -or $rename.FilePaths[1] -ne 'other b/new.py') {{ throw 'Ambiguous rename path was split' }}
+$copy = Get-ReviewDiffEmbedding -Diff "diff --git a/{path} b/other b/new.py`nsimilarity index 100%`ncopy from {path}`ncopy to other b/new.py"
+if ($copy.FilePaths[0] -ne '{path}' -or $copy.FilePaths[1] -ne 'other b/new.py') {{ throw 'Ambiguous copy path was split' }}
+$modeEmbedding = Get-ReviewDiffEmbedding -Diff "diff --git a/{path} b/{path}`nold mode 100644`nnew mode 100755"
+if (@($modeEmbedding.FilePaths).Count -ne 1 -or $modeEmbedding.FilePaths[0] -ne '{path}') {{ throw 'Mode-only path was split' }}
+$tail = Get-ReviewDiagnosticTail -Stderr 'C:/temp/../Users/reviewer/.codex/auth.json /home//reviewer/.codex/auth.json'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'Canonical profile path was not redacted' }}
+'ambiguous paths verified'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "ambiguous paths verified" in result.stdout
+
+
+def test_git_quoted_unicode_deletion_and_profile_url_redaction(tmp_path):
+    unicode_path = "caf\u00e9/" + "a" * 40 + ".py"
+    target = tmp_path / unicode_path
+    target.parent.mkdir(parents=True)
+    target.write_text("# synthetic context\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", unicode_path], check=True, capture_output=True)
+    result = run_powershell(
+        tmp_path,
+        rf"""
+$path = 'caf' + [char]0xe9 + '/' + ('a' * 40) + '.py'
+$quoted = '"a/caf\303\251/' + ('a' * 40) + '.py"'
+$target = '"b/caf\303\251/' + ('a' * 40) + '.py"'
+$embedding = Get-ReviewDiffEmbedding -Diff ("diff --git $quoted $target`ndeleted file mode 100644`n-old content")
+if (@($embedding.FilePaths).Count -ne 1 -or $embedding.FilePaths[0] -ne $path) {{ throw 'Git UTF-8 octal path was not decoded' }}
+$review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = "$path`:12: deletion finding" }}
+$previousEncoding = [Console]::OutputEncoding
+try {{
+    [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(437)
+    Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}'
+}} finally {{ [Console]::OutputEncoding = $previousEncoding }}
+git -C '{tmp_path}' rm --cached --quiet -- $path
+if ($LASTEXITCODE -ne 0) {{ throw 'Synthetic Unicode deletion failed' }}
+Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
+$tail = Get-ReviewDiagnosticTail -Stderr 'profile file:///h%6fme/reviewer/.codex/auth.json'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'Encoded profile URL was not redacted' }}
+$tail = Get-ReviewDiagnosticTail -Stderr 'C:/public/config.py followed by file:///h%6fme/reviewer/.codex/auth.json'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'A preceding path hid the decoded profile URL' }}
+$tail = Get-ReviewDiagnosticTail -Stderr 'C:/public/config.py followed by C:/temp/../../Users/reviewer/.codex/auth.json'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'A preceding path hid another absolute root' }}
+$tail = Get-ReviewDiagnosticTail -Stderr '\\?\C:\Users\reviewer\.codex\auth.json'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'Extended profile path was not redacted' }}
+$tail = Get-ReviewDiagnosticTail -Stderr '"C:\Program Files\..\Users\reviewer\.codex\auth.json"'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'Quoted profile path was not redacted' }}
+'quoted deletion and profile URL verified'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "quoted deletion and profile URL verified" in result.stdout
+
+
 LAST_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 HEAD_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 OTHER_SHA = "cccccccccccccccccccccccccccccccccccccccc"
@@ -421,7 +706,7 @@ $commands = @(
     Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
     Get-ReviewBackendCommand -Backend claude -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
 )
-$commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | ConvertTo-Json -Depth 4 -Compress
+$commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath,WorkingDirectory | ConvertTo-Json -Depth 4 -Compress
 """,
     )
     assert result.returncode == 0, output(result)
@@ -473,7 +758,13 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath | Conv
     assert all("Bash" not in arg for arg in claude_args)
     assert not {"Edit", "Write", "NotebookEdit"}.intersection(claude_args)
     assert "--strict-mcp-config" in claude_args
-    assert claude_args[claude_args.index("--setting-sources") + 1] == "user"
+    assert claude_args[claude_args.index("--allowedTools") + 1] == "Read(./**)"
+    assert "--setting-sources=" in claude_args
+    assert "--restricted" in claude_args
+    assert "--safe-mode" in claude_args
+    assert "--no-session-persistence" in claude_args
+    assert "--setting-sources" not in claude_args
+    assert commands["claude"]["WorkingDirectory"] == str(workspace)
     assert commands["claude"]["InputText"] == "prompt"
 
 
@@ -1746,7 +2037,7 @@ def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     call_inputs = triggers["workflow_call"]["inputs"]
     assert set(call_inputs) == {"pr_number", "backend", "mode", "runs_on", "max_diff_bytes", "tooling_ref"}
     assert call_inputs["runs_on"]["required"] is True
-    assert call_inputs["tooling_ref"]["default"] == "review-v1"
+    assert call_inputs["tooling_ref"]["default"] == "main"
     assert "push" not in triggers
     assert triggers["pull_request"] == {"types": ["opened"]}
     job = workflow["jobs"]["review"]
@@ -1754,7 +2045,9 @@ def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     tooling = _workflow_step("Check out review tooling")["with"]
     assert tooling["repository"] == "dflippojr/agent-harness"
     assert tooling["path"] == ".review-tooling"
-    assert "inputs.tooling_ref" in tooling["ref"]
+    assert tooling["ref"] == "${{ inputs.tooling_ref || 'main' }}"
+    assert "github.sha" not in tooling["ref"]
+    assert "pull_request.head" not in tooling["ref"]
     resolve = _workflow_step("Resolve PR number")["run"]
     assert "isCrossRepository" in resolve
     assert "Refusing to review PR" in resolve

@@ -14,8 +14,10 @@ import os
 import subprocess
 import threading
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from .config import SandboxConfig
+from .disk_watch import DiskLimitExceeded, DiskLimits, DiskWatch
 from .fileops import CappedStream
 from .principal import OWNER_USER_ID
 
@@ -152,20 +154,30 @@ def _run_blocking(args: list[str], input_: str | None, timeout: float, env: dict
 
 
 async def run_cmd(args: list[str], timeout: float = 60, input_: str | None = None,
-                  env: dict | None = None) -> tuple[int, str, str]:
+                  env: dict | None = None, drain: float = 0,
+                  finished: asyncio.Event | None = None) -> tuple[int, str, str]:
     """subprocess.run that can be cancelled: cancelling the awaiting task kills the process, including one that is
-    still being spawned. `env` is merged over the daemon's environment. Deliberately thread-based rather than
-    asyncio subprocesses: on Python 3.12 the asyncio subprocess machinery left a cancelled call hanging when the loop
-    shut down (#207)."""
+    still being spawned. With `drain`, the cancelled task also waits (up to that many seconds) until the process is
+    gone, so a client still starting up cannot act after the cancel, and `finished` is set once it really is gone.
+    `env` is merged over the daemon's environment. Deliberately thread-based rather than asyncio subprocesses: on
+    Python 3.12 the asyncio subprocess machinery left a cancelled call hanging when the loop shut down (#207)."""
     started: list = []
     cancelled = threading.Event()
+    work = asyncio.ensure_future(asyncio.to_thread(_run_blocking, args, input_, timeout, env, started, cancelled))
     try:
-        return await asyncio.to_thread(_run_blocking, args, input_, timeout, env, started, cancelled)
+        return await (asyncio.shield(work) if drain else work)
     except asyncio.CancelledError:
         cancelled.set()
         for proc in started.copy():
             proc.kill()
+        if drain:
+            await asyncio.wait({work}, timeout=drain)
+            if work.done():
+                work.exception()    # retrieved, so a failure here is not logged as unhandled
         raise
+    finally:
+        if finished is not None and work.done() and not work.cancelled():  # the worker thread has returned
+            finished.set()
 
 
 async def ensure_networks(cfg: SandboxConfig) -> None:
@@ -182,13 +194,15 @@ async def ensure_networks(cfg: SandboxConfig) -> None:
 
 class Sandbox:
     def __init__(self, session_id: str, workspace: Path, cfg: SandboxConfig, *, project: str = "", setup: str = "",
-                 known: bool = False, on_event=None, user_id: str = OWNER_USER_ID):
+                 known: bool = False, on_event=None, user_id: str = OWNER_USER_ID,
+                 disk_limits: Callable[[], Awaitable[DiskLimits | None]] | None = None):
         self.session_id = session_id
         self.project = project      # names the per-project pip/npm cache volumes (#429)
         self.user_id = user_id      # with the project, so principals never share a writable cache (#529)
         self.setup = setup.strip()  # run (with network) each time a container is created
         self.known = known          # the session has run tools before, so a "created" container is a recreation
-        self.on_event = on_event    # on_event(type, data): session events from here (setup result)
+        self.on_event = on_event    # on_event(type, data): session events from here (setup result, disk limit)
+        self.disk_limits = disk_limits  # async () -> DiskLimits or None: each command's disk watchdog limits (#525)
         self.workspace = workspace.resolve()
         self.cfg = cfg
         self.name = f"harness-{session_id}"
@@ -280,13 +294,13 @@ class Sandbox:
         try:
             await self._network(True)
             try:
-                code, out, err = await run_cmd(
+                code, out, err = await self._watched(
                     ["docker", "exec", "-w", "/workspace", self.name,
                      "timeout", "-k", "5", str(SETUP_TIMEOUT), "sh", "-c", self.setup], timeout=SETUP_TIMEOUT + 30)
             finally:
                 await self._network(False)
             detail = "" if code == 0 else f"exit {code}: {(err or out).strip()[-500:]}"
-        except SandboxUnavailable as e:
+        except (SandboxUnavailable, DiskLimitExceeded) as e:
             code, detail = 1, str(e)
         if self.on_event:
             self.on_event("sandbox_setup", {"command": self.setup, "ok": code == 0, "detail": detail})
@@ -348,7 +362,7 @@ class Sandbox:
                 await self._network(True)
             try:
                 # `timeout` inside the container stops the command; the host timeout is only a backstop.
-                code, out, err = await run_cmd(
+                code, out, err = await self._watched(
                     ["docker", "exec", "-w", "/workspace", self.name,
                      "timeout", "-k", "5", str(timeout), "sh", "-c", command],
                     timeout=timeout + 30,
@@ -360,6 +374,62 @@ class Sandbox:
         if code == 124:
             output += f"\n[command timed out after {timeout}s]"
         return code, output
+
+    async def _watched(self, args: list[str], timeout: float) -> tuple[int, str, str]:
+        """run_cmd under the disk watchdog (#525). Once the command passes a limit, or the watchdog itself fails, the
+        container is stopped, which ends the command and anything it left running in the background, and
+        DiskLimitExceeded is raised."""
+        limits = await self.disk_limits() if self.disk_limits is not None else None
+        if limits is None:
+            return await run_cmd(args, timeout=timeout)
+        watch = DiskWatch(self.workspace, limits)
+        await asyncio.to_thread(watch.start)
+        finished = asyncio.Event()
+        command = asyncio.ensure_future(run_cmd(args, timeout=timeout, drain=30, finished=finished))
+        watcher = asyncio.ensure_future(watch.run())
+        try:
+            await asyncio.wait({command, watcher}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            command.cancel()    # the run's end stops the container, which ends the command inside it
+            raise
+        finally:
+            watcher.cancel()
+        try:    # a limit passed as the command ended still counts: it may have left a writer behind
+            reason = watcher.result() if watcher.done() else await watch.final()
+        except Exception as e:  # fail closed: a command nothing watches could fill the drive
+            reason = f"the disk watchdog failed ({type(e).__name__}: {e})"
+        if not reason:
+            return command.result()
+        # Kill the docker exec client and wait until it is gone, so an exec still starting up cannot land in the reset
+        # container. A client that outlives the wait could, so the container is then killed and left stopped.
+        command.cancel()
+        await asyncio.wait({command})
+        stopped, detail = await self._halt(restart=finished.is_set())
+        if self.on_event:
+            self.on_event("sandbox_disk_limit", {"reason": reason, "stopped": stopped})
+        if not stopped:
+            raise DiskLimitExceeded(
+                f"the command had to be stopped because {reason}, but the sandbox could not be stopped "
+                f"({detail}), so it may still be running.")
+        raise DiskLimitExceeded(
+            f"the command was stopped because {reason}. The sandbox was reset, so background processes "
+            "are gone; /workspace keeps what was written. Delete build artifacts or other large files before "
+            "running it again.")
+
+    async def _halt(self, restart: bool = True) -> tuple[bool, str]:
+        """Stop everything running in the container: (stopped, why not). A restart leaves it ready for the next
+        command; a kill is the fallback (or the only try), and a container that is no longer running counts as
+        stopped."""
+        detail = ""
+        if restart:
+            code, out, err = await run_cmd(["docker", "restart", "-t", "0", self.name], timeout=60)
+            if code == 0:
+                return True, ""
+            detail = ((err or out).strip()[-300:] or f"docker restart exit {code}") + "; "
+        code, out, err = await run_cmd(["docker", "kill", self.name], timeout=30)
+        if code == 0 or await self._state() in ("exited", "dead", "created"):
+            return True, ""
+        return False, detail + ((err or out).strip()[-300:] or f"docker kill exit {code}")
 
     async def stop(self) -> None:
         self._cancel_idle_timer()
