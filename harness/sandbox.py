@@ -49,7 +49,7 @@ class DiskLimitExceeded(ToolError):
 FREE_POLL_SECONDS = 0.25         # free space is one cheap syscall, so it is polled often
 MIN_SCAN_SECONDS = 1.0           # a full workspace scan runs at least this far apart...
 SCAN_DUTY = 4                    # ...and at least this many times its own duration apart, so big trees cost little
-FREE_SLACK_BYTES = 256 * 2**20   # a command that starts under the free-space floor may still use this much
+FREE_SLACK_BYTES = 256 * 2**20   # a command that starts under the free-space floor may still use this much (or half)
 
 
 class DiskWatch:
@@ -74,10 +74,11 @@ class DiskWatch:
 
     def _scan(self) -> None:
         began = time.monotonic()
+        free = self._free()     # before the walk, so what is written during it counts as space lost since the scan
         self._size = dir_size(self.root)
         if self.account:
             self._account_used = self.limits.account_usage()
-        self._free_at_scan = self._free()
+        self._free_at_scan = free
         self._scanned = time.monotonic()
         self._scan_cost = self._scanned - began
 
@@ -88,7 +89,7 @@ class DiskWatch:
         if self.account:
             self.account_cap = max(self.limits.account_quota_bytes, self._account_used)
         floor, free = self.limits.min_free_bytes, self._free_at_scan
-        self.floor = floor if free >= floor else max(0, free - FREE_SLACK_BYTES)
+        self.floor = floor if free >= floor else free - min(FREE_SLACK_BYTES, free // 2)
 
     def _floor_reason(self, free: int) -> str:
         if free < self.floor:

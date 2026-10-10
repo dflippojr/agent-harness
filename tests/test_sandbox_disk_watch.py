@@ -157,11 +157,36 @@ def test_concurrent_member_commands_share_the_account_quota(monkeypatch, tmp_pat
 
 def test_floor_starts_below_free_space_when_the_drive_is_already_low(tmp_path, monkeypatch):
     # Already under the minimum: a cleanup command still runs, and the watchdog only allows a little more use.
-    watch = sandbox.DiskWatch(tmp_path, sandbox.DiskLimits(10 * MB, 900 * MB))
-    monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: 500 * MB)
+    watch = sandbox.DiskWatch(tmp_path, sandbox.DiskLimits(10 * MB, 2000 * MB))
+    monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: 1000 * MB)
     watch.start()
-    assert watch.floor == 500 * MB - sandbox.FREE_SLACK_BYTES
-    assert watch._floor_reason(500 * MB) == ""
+    assert watch.floor == 1000 * MB - sandbox.FREE_SLACK_BYTES
+    assert watch._floor_reason(1000 * MB) == ""
+
+
+def test_floor_stays_above_zero_when_the_drive_is_nearly_full(tmp_path, monkeypatch):
+    watch = sandbox.DiskWatch(tmp_path, sandbox.DiskLimits(10 * MB, 900 * MB))
+    monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: 100 * MB)
+    watch.start()
+    assert watch.floor == 50 * MB                       # half of what is left, not all of it
+    assert "data drive" in watch._floor_reason(40 * MB)
+
+
+def test_growth_during_a_scan_counts_as_lost_space(tmp_path, monkeypatch):
+    # The walk measures the workspace, then the command writes 20 MB before the scan ends. That growth must show up
+    # as free space lost since the scan, or the next scan waits for the timer.
+    monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: TOTAL - sum(p.stat().st_size
+                                                                             for p in tmp_path.iterdir()))
+    measure = sandbox.dir_size
+
+    def grows_after_measuring(root):
+        size = measure(root)
+        (tmp_path / "late").write_bytes(b"\0" * 20 * MB)
+        return size
+    monkeypatch.setattr(sandbox, "dir_size", grows_after_measuring)
+    watch = sandbox.DiskWatch(tmp_path, sandbox.DiskLimits(10 * MB, 100 * MB))
+    watch.start()
+    assert watch._scan_due(watch._free())
 
 
 def test_failed_setup_from_the_watchdog_is_reported_not_raised(monkeypatch, tmp_path):
@@ -171,15 +196,20 @@ def test_failed_setup_from_the_watchdog_is_reported_not_raised(monkeypatch, tmp_
     assert [t for t, _ in events].count("sandbox_setup") == 1
 
 
-def test_runner_limits_and_unthrottled_quota_check(monkeypatch):
+def test_disk_limit_event_unthrottles_the_quota_check():
     from types import SimpleNamespace
 
-    from harness import runner, storage
+    from harness import runner
     emitted = []
     fake = SimpleNamespace(_quota_checked={"s1": 1.0}, bus=SimpleNamespace(emit=lambda *a: emitted.append(a)))
     runner.Runner._sandbox_event(fake, "s1", "sandbox_disk_limit", {"reason": "x"})
     assert "s1" not in fake._quota_checked and emitted == [("s1", "sandbox_disk_limit", {"reason": "x"})]
 
+
+def test_runner_disk_limits(monkeypatch):
+    from types import SimpleNamespace
+
+    from harness import runner, storage
     monkeypatch.setattr(storage, "account_usage_bytes", lambda cfg, uid: 70 * MB if uid == "u1" else 0)
     sessions = {"own": {"id": "own", "owner_id": None}, "mem": {"id": "mem", "owner_id": "u1"},
                 "gone": {"id": "gone", "owner_id": "u2"}}
