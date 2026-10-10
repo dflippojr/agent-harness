@@ -126,22 +126,31 @@ for (const guest of [false, true]) {
   const searchApi = async (path) => {
     if (!path.startsWith("/search")) return api(path);
     searches.push(path);
-    return { mode: "all", results: [{ id: "s1", title, status: "done", project: "scratch", created_at: new Date().toISOString(), hits: 1, passages: [] }] };
+    return { mode: "all", results: [{ id: "s1", title, status: "done", project: "scratch", created_at: "2026-10-10T12:00:00Z", hits: 1, passages: [] }] };
   };
   let box = null;
+  let resultsBox = null;
+  let gate = null;  // holds /sessions open, for a refresh still in flight when the page leaves
   const lel = (tag, attrs, ...kids) => {
     const n = el(tag, attrs, ...kids);
-    if (attrs?.type === "search") {
-      box = n;
-      n.addEventListener = (type, fn) => { n[`on_${type}`] = fn; };
-    }
+    n.addEventListener = (type, fn) => { n[`on_${type}`] = fn; };
+    if (attrs?.type === "search") box = n;
+    if (tag === "div" && attrs?.hidden === true && !attrs.class) resultsBox ||= n;  // the results host
     return n;
   };
   const filledResults = [];
+  let resultFills = 0;
+  const searchLeft = [];
+  const windowListeners = {};
+  const searchBrowser = { ...browser, window: { addEventListener: (t, fn) => { windowListeners[t] = fn; }, removeEventListener() {} } };
+  const gatedApi = async (path) => {
+    if (path === "/sessions" && gate) await gate;
+    return searchApi(path);
+  };
   const searchPage = mountSessions({
-    $app: "APP", h: lel, fill: (_t, ...n) => filledResults.push(...n.flat(Infinity)), append() {}, api: searchApi, setHeader() {}, showListAction() {},
-    onLeave() {}, isMember: () => false, isGuest: () => false, badge: (st) => el("badge", {}, st), reviewBadge: () => el("rb"), REVIEW_LABEL: {},
-    jobStatusBadge: () => el("jb"), onDaemonChange: subscribe(changeHooks), onDaemonState: subscribe(stateHooks), browser,
+    $app: "APP", h: lel, fill: (t, ...n) => { if (t === resultsBox) resultFills++; filledResults.push(...n.flat(Infinity)); }, append() {}, api: gatedApi,
+    setHeader() {}, showListAction() {}, onLeave: (fn) => searchLeft.push(fn), isMember: () => false, isGuest: () => false, badge: (st) => el("badge", {}, st), reviewBadge: () => el("rb"), REVIEW_LABEL: {},
+    jobStatusBadge: () => el("jb"), onDaemonChange: subscribe(changeHooks), onDaemonState: subscribe(stateHooks), browser: searchBrowser,
   });
   const hook = changeHooks.length;
   await searchPage.viewList();
@@ -154,9 +163,30 @@ for (const guest of [false, true]) {
   await sleep(350);
   assert.equal(searches.length, 2, "a change re-runs the showing query");
   assert.match(filledResults.map(text).join(" "), /Renamed/);
-  box.value = "";
+  // The same results again keep their links (a press or focus on one survives the refresh).
+  const fills = resultFills;
   changeHooks[hook]();
   await sleep(350);
-  assert.equal(searches.length, 2, "no query, no search");
+  assert.equal(searches.length, 3);
+  assert.equal(resultFills, fills, "unchanged results are not rebuilt");
+  // A press on a result holds refreshes like a press on a row.
+  resultsBox.on_pointerdown();
+  changeHooks[hook]();
+  await sleep(350);
+  assert.equal(searches.length, 3, "no refresh while a result is pressed");
+  windowListeners.pointerup();
+  await sleep(20);
+  assert.equal(searches.length, 4, "releasing the press runs the held refresh");
+  // A refresh in flight when the page leaves neither searches nor changes the remembered query.
+  let open;
+  gate = new Promise((r) => { open = r; });
+  changeHooks[hook]();
+  await sleep(320);  // the refresh has started and waits on /sessions
+  for (const fn of searchLeft) fn();
+  open();
+  await sleep(20);
+  assert.equal(searches.length, 4, "a refresh finishing after the page left runs no search");
+  gate = null;
+  box.value = "";
 }
 console.log("ok");

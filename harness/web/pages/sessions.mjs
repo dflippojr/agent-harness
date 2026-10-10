@@ -115,7 +115,10 @@ async function viewList(pane = null) {
     }, target === "all" ? "All" : targetName(target))));
   };
 
+  let gone = false;  // the page left: a late search or refresh changes nothing, not even the remembered query
+  leave(() => { gone = true; });
   const runSearch = async () => {
+    if (gone) return;
     const q = search.value.trim();
     searchQuery = search.value;
     results.hidden = !q;
@@ -125,7 +128,11 @@ async function viewList(pane = null) {
     if (!q) return;
     try {
       const data = await api(`/search?q=${encodeURIComponent(q)}`);
-      if (search.value.trim() !== q) return;  // a newer query is on its way
+      if (gone || search.value.trim() !== q) return;  // left, or a newer query is on its way
+      // A refresh that finds the same results keeps the links, so a press or keyboard focus on one survives it.
+      const keys = JSON.stringify([q, data]);
+      if (results.dataset.keys === keys) return;
+      results.dataset.keys = keys;
       fill(results,
         data.mode === "any" && data.results.length ? h("p", { class: "muted small" }, "No session matches every word; showing partial matches.") : null,
         data.results.length ? data.results.map((r) => h("a", { class: "card", href: `#/s/${r.id}`, "data-split-key": r.id },
@@ -135,7 +142,11 @@ async function viewList(pane = null) {
           r.passages.map((p) => h("div", { class: "passage small" }, h("span", { class: "muted" }, `${PASSAGE_KIND[p.kind] || p.kind}: `),
             h("span", { html: markPassage(p.text) }))))) : h("p", { class: "empty" }, `Nothing matches “${q}”.`));
       pane?.paint();
-    } catch (e) { fill(results, h("p", { class: "note bad" }, e.message)); }
+    } catch (e) {
+      if (gone) return;
+      delete results.dataset.keys;
+      fill(results, h("p", { class: "note bad" }, e.message));
+    }
   };
   let searchTimer = null;
   search.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
@@ -158,7 +169,7 @@ async function viewList(pane = null) {
     stale.ok();
   };
   // Shown search results are part of the list too: a refresh (a rename, a status change) re-runs the query.
-  const refreshNow = () => render().then(() => { if (search.value.trim()) void runSearch(); }).catch((e) => {
+  const refreshNow = () => render().then(() => { if (!gone && search.value.trim()) void runSearch(); }).catch((e) => {
     console.error("session list refresh failed", e);
     stale.failed(e);
   });
@@ -174,9 +185,11 @@ async function viewList(pane = null) {
     }
   };
   list.addEventListener("pointerdown", () => { holding = true; });
+  results.addEventListener("pointerdown", () => { holding = true; });
   window.addEventListener("pointerup", releaseHold);
   window.addEventListener("pointercancel", releaseHold);
   leave(() => {
+    clearTimeout(searchTimer);
     window.removeEventListener("pointerup", releaseHold);
     window.removeEventListener("pointercancel", releaseHold);
   });
