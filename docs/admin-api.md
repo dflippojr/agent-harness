@@ -274,6 +274,16 @@ identity. `PATCH /api/admin/v1/accounts/{user_id}` can rename, rebind the login 
 immediately), disable/re-enable, or change quota and concurrency. Disable cancels that member's running and queued
 work and revokes their live streams; data stays. There is no Delete in v1.
 
+Session admission (#524). A member's sessions parked on an approval, the Mac, an App tool reply or a provider limit
+count toward both `max_queued` (new sessions past it get `429`) and `max_running` (a queued session waits for the GPU
+or a hosted backend slot until one ends). Apps have the same two caps: `GET /api/admin/v1/apps/{app_id}/limits`
+shows what is set, what applies and what counts against it; `PUT` with `max_running` and/or `max_queued` sets them
+(a field left out keeps its value, `null` restores the `budgets.app_max_*` default). A session waiting on an approval
+gives its hosted backend slot (and the GPU) to others and takes it back after the decision. Pending approvals are
+denied after `budgets.approval_timeout_seconds` and their run ends (`stop_reason` `approval_expired`); members' and
+Apps' runs end after `budgets.max_run_seconds` spent running (`budget_time`). The owner's own runs have no time
+budget.
+
 Member GitHub sign-in ([`member-github-auth.md`](member-github-auth.md)): `GET /api/admin/v1/github-member-auth`
 returns `configured`, `enabled`, the last preflight result, and each member's coarse `status` and `last_used_at`
 only (no URLs, usernames, or codes; `?refresh=true` reruns preflight). `PUT /api/admin/v1/github-member-auth`
