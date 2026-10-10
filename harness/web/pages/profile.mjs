@@ -417,6 +417,24 @@ function refreshAppearanceValue() {
   if (value) value.textContent = `${THEMES[readTheme()]?.label || "System"} · ${TEXT_SIZES[readTextSize()].label} text`;
 }
 
+function settingsGroupRows(values, isOwner, hidden) {
+  const shown = (id) => (Object.hasOwn(ACTION_PAGES, id) ? isOwner()
+    : (id !== "install" || !isStandalone()) && !hidden.has(id));
+  return SETTINGS_GROUPS.map(([label, ids]) => {
+    const rows = ids.filter(shown).map((id) => {
+      values[id] = h("span", { class: "set-value" });
+      const href = Object.hasOwn(ACTION_PAGES, id) ? `#/actions/${id}` : `#/profile/${id}`;
+      return h("a", { class: "set-row", href, "data-setting": id, "data-split-key": id },
+        h("span", { class: `set-icon ic-${id}`, "aria-hidden": "true" }),
+        h("span", { class: "set-label" }, ACTION_PAGES[id] || PROFILE_PAGES[id]),
+        values[id],
+        h("span", { class: "chevron", "aria-hidden": "true" }, "›"));
+    });
+    // A group whose rows are all hidden for this role (a member's Agents, say) gets no header either.
+    return rows.length ? [h("p", { class: "section-label" }, label), h("div", { class: "card settings-group" }, rows)] : null;
+  }).flat();
+}
+
 async function viewProfile(page, extra) {
   // With a pane, the router is asking for the persistent menu rather than a detail page.
   if (page?.body) return settingsMenu(page);
@@ -450,35 +468,38 @@ async function settingsMenu(pane = null, me = null, profile = null) {
     api("/profile").catch(() => ({ emoji: "🙂", choices: [] })),
   ]);
   if (!active) return;
-  let hidden = new Set();
-  if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
-  else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
-  const shown = (id) => (Object.hasOwn(ACTION_PAGES, id) ? isOwner()
-    : (id !== "install" || !isStandalone()) && !hidden.has(id));
-  const groups = SETTINGS_GROUPS.map(([label, ids]) => {
-    const rows = ids.filter(shown).map((id) => {
-      values[id] = h("span", { class: "set-value" });
-      const href = Object.hasOwn(ACTION_PAGES, id) ? `#/actions/${id}` : `#/profile/${id}`;
-      return h("a", { class: "set-row", href, "data-setting": id, "data-split-key": id },
-        h("span", { class: `set-icon ic-${id}`, "aria-hidden": "true" }),
-        h("span", { class: "set-label" }, ACTION_PAGES[id] || PROFILE_PAGES[id]),
-        values[id],
-        h("span", { class: "chevron", "aria-hidden": "true" }, "›"));
-    });
-    // A group whose rows are all hidden for this role (a member's Agents, say) gets no header either.
-    return rows.length ? [h("p", { class: "section-label" }, label), h("div", { class: "card settings-group" }, rows)] : null;
-  });
-  const identityNote = h("div", { class: "muted small" }, isMember() ? "Household member" : serverNote());
-  if (!isMember()) {
+  const currentRole = () => isGuest() ? "guest" : isMember() ? "member" : isOwner() ? "owner" : "offline";
+  let menuRole = currentRole();
+  const groups = pane ? h("div") : null;
+  let groupNodes;
+  const renderGroups = () => {
+    for (const id of Object.keys(values)) delete values[id];
+    const hidden = menuRole === "guest" ? GUEST_HIDDEN_PAGES : menuRole === "member" ? MEMBER_HIDDEN_PAGES : new Set();
+    groupNodes = settingsGroupRows(values, () => menuRole === "owner", hidden);
+    if (groups) fill(groups, groupNodes);
+  };
+  renderGroups();
+  const identityNote = h("div", { class: "muted small" }, menuRole === "member" ? "Household member" : serverNote());
+  {
     // Follows the header chip while Settings is open; the first change after the page is gone unsubscribes.
     const stop = onConnState(() => {
-      if (identityNote.isConnected) identityNote.textContent = serverNote();
+      if (identityNote.isConnected) identityNote.textContent = menuRole === "member" ? "Household member" : serverNote();
       else stop();
     });
     pane?.onLeave(stop);
   }
   const identityEmoji = h("span", { class: "identity-emoji" }, profile.emoji || "🙂");
   const identityName = h("h3", {}, me.name || "You");
+  const usage = pane ? h("div") : null;
+  let usageCard;
+  const renderUsage = (latest) => {
+    usageCard = menuRole === "member" && latest.usage ? h("div", { class: "card" },
+      h("h3", {}, "Usage"),
+      h("p", { class: "muted small" }, latest.usage.disk_note || ""),
+      h("p", { class: "muted small" }, `${latest.usage.running || 0} running · ${latest.usage.queued || 0} queued`)) : null;
+    if (usage) fill(usage, usageCard);
+  };
+  renderUsage(me);
   const errorNote = menuError ? h("p", { class: "note bad" }, menuError.message) : null;
   append(target,
     errorNote,
@@ -489,11 +510,8 @@ async function settingsMenu(pane = null, me = null, profile = null) {
           identityName,
           identityNote),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
-    isMember() && me.usage ? h("div", { class: "card" },
-      h("h3", {}, "Usage"),
-      h("p", { class: "muted small" }, me.usage.disk_note || ""),
-      h("p", { class: "muted small" }, `${me.usage.running || 0} running · ${me.usage.queued || 0} queued`)) : null,
-    groups.flat(),
+    pane ? usage : usageCard,
+    pane ? groups : groupNodes,
     versionRow());
   if (pane) menuValues = values;
   if (pane) {
@@ -503,8 +521,16 @@ async function settingsMenu(pane = null, me = null, profile = null) {
       Promise.all([api("/me"), api("/profile").catch(() => null)]).then(([latest, icon]) => {
         if (!current()) return;
         if (errorNote) errorNote.hidden = true;
-        fillSettingValues(values, latest, current);
+        const latestRole = latest.role || currentRole();
+        if (menuRole !== latestRole) {
+          menuRole = latestRole;
+          renderGroups();
+          pane.paint();
+        }
+        fillSettingValues(values, latest, current, menuRole === "owner");
         identityName.textContent = latest.name || "You";
+        identityNote.textContent = menuRole === "member" ? "Household member" : serverNote();
+        renderUsage(latest);
         if (icon) identityEmoji.textContent = icon.emoji || "🙂";
       }).catch((err) => console.debug("settings menu refresh", err));
     };
@@ -519,7 +545,7 @@ async function settingsMenu(pane = null, me = null, profile = null) {
       stopConnectionRefresh();
     });
   }
-  fillSettingValues(values, me, () => active && generation === 0);
+  fillSettingValues(values, me, () => active && generation === 0, menuRole === "owner");
   pane?.paint();
 }
 
@@ -537,7 +563,7 @@ function serverNote() {
 
 // Paints the menu first, then each row's value as its own request answers. A failed or slow request leaves that
 // row's value blank; it never toasts or holds up the others. Only the owner's rows read the owner API.
-function fillSettingValues(values, me, current = () => true) {
+function fillSettingValues(values, me, current = () => true, owner = isOwner()) {
   const paint = (id, value) => {
     const el = values[id];
     if (!current() || !el || !value) return;
@@ -549,7 +575,7 @@ function fillSettingValues(values, me, current = () => true) {
   paint("connection", { text: serverLabel() });
   paint("notifications", notificationsValue(me.notify));
   paint("install", { text: "Add to Home Screen" });
-  if (!isOwner()) return;
+  if (!owner) return;
   let keys = null;
   const readKeys = () => (keys ||= api("/keys"));
   const loaders = {
