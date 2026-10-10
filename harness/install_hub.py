@@ -120,9 +120,13 @@ class Service:
             def escape(value):
                 return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("\n", "\\n")
             executable = " ".join('"' + escape(a).replace("$", "$$") + '"' for a in argv)
+            # WorkingDirectory is a raw path, unlike ExecStart's quoted arguments.
+            directory = str(workdir).replace("%", "%%")
+            if "\n" in directory or "\r" in directory:
+                raise ValueError("Hub working directory cannot contain line breaks")
             path.write_text(
                 "[Unit]\nDescription=Agent harness Hub\n[Service]\nType=simple\n"
-                f'WorkingDirectory="{escape(workdir)}"\nExecStart={executable}\n'
+                f"WorkingDirectory={directory}\nExecStart={executable}\n"
                 "Restart=on-failure\nRestartSec=10\n[Install]\nWantedBy=default.target\n", encoding="utf-8")
             command([SYSTEMCTL, "--user", "daemon-reload"])
             command([SYSTEMCTL, "--user", "enable", "--now", self.name + ".service"])

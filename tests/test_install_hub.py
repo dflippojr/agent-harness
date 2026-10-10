@@ -447,10 +447,14 @@ def test_per_user_service_registration_and_removal(tmp_path, monkeypatch, platfo
         return SimpleNamespace(stdout="- 0 agent-harness-hub-" + "a" * 32, stderr="")
     monkeypatch.setattr(hub, "command", command)
     service = hub.Service("a" * 32)
-    service.start([str(tmp_path / "path with spaces/python"), "-m", "stub_hub", "--state-dir", "a'%b$HOME"], tmp_path, tmp_path / "hub.log")
+    workdir = tmp_path / "path with spaces%$HOME"
+    service.start([str(tmp_path / "path with spaces/python"), "-m", "stub_hub", "--state-dir", "a'%b$HOME"], workdir, tmp_path / "hub.log")
     if platform == "linux":
         unit = (tmp_path / "config/systemd/user" / (service.name + ".service")).read_text()
         assert "path with spaces" in unit and "a'%%b$$HOME" in unit
+        directory = next(line.removeprefix("WorkingDirectory=") for line in unit.splitlines() if line.startswith("WorkingDirectory="))
+        assert directory == str(workdir).replace("%", "%%")
+        assert not directory.startswith('"')
     elif platform == "darwin":
         import plistlib
         plist = plistlib.loads((tmp_path / "Library/LaunchAgents" / (service.name + ".plist")).read_bytes())
@@ -488,23 +492,6 @@ def test_relative_installer_paths_are_resolved_before_launch(tmp_path, monkeypat
     assert seen[0].install_dir == tmp_path / "runtime"
     assert seen[0].config_dir == tmp_path / "runtime/config"
     assert seen[0].install_dir.is_absolute() and seen[0].config_dir.is_absolute()
-
-
-@pytest.mark.parametrize("args", [("--with-hub",), ("--with-hub", "--hub-method", "docker", "--hub-image", "stub:1"), ("--no-hub",), ()])
-def test_unix_hub_dry_run(tmp_path, args):
-    result = run_installer(tmp_path, "Linux", "x86_64", "--profile", "service", *args)
-    assert result.returncode == 0, result.stderr
-    if "--with-hub" in args:
-        assert "harness hub approve <request_id> --match <code>" in result.stdout
-        assert result.stdout.index("Checking the install") < result.stdout.index("Optional Hub")
-    else:
-        assert "docs/management-parity.md" in result.stdout and "Add the Hub later" in result.stdout
-    assert not (tmp_path / "install").exists()
-
-
-def test_unix_conflicting_flags(tmp_path):
-    result = run_installer(tmp_path, "Linux", "x86_64", "--with-hub", "--no-hub")
-    assert result.returncode != 0 and "mutually exclusive" in result.stderr
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows installer")

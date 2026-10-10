@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
+import pytest
+
 from tests.installer_support import BASH, ROOT, run_installer
 
 
@@ -126,3 +128,20 @@ def test_macos_launchd_has_docker_path_and_installer_waits_for_daemon():
     assert 'curl -fsS "http://127.0.0.1:$port/health"' in installer
     assert "daemon did not become ready within 60 seconds" in installer
     assert "HARNESS_SUPERVISED=1" in (ROOT / "install/run-daemon.sh").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("args", [("--with-hub",), ("--with-hub", "--hub-method", "docker", "--hub-image", "stub:1"), ("--no-hub",), ()])
+def test_unix_hub_dry_run(tmp_path, args):
+    result = run_installer(tmp_path, "Linux", "x86_64", "--profile", "service", *args)
+    assert result.returncode == 0, result.stderr
+    if "--with-hub" in args:
+        assert "harness hub approve <request_id> --match <code>" in result.stdout
+        assert result.stdout.index("Checking the install") < result.stdout.index("Optional Hub")
+    else:
+        assert "docs/management-parity.md" in result.stdout and "Add the Hub later" in result.stdout
+    assert not (tmp_path / "install").exists()
+
+
+def test_unix_conflicting_flags(tmp_path):
+    result = run_installer(tmp_path, "Linux", "x86_64", "--with-hub", "--no-hub")
+    assert result.returncode != 0 and "mutually exclusive" in result.stderr
