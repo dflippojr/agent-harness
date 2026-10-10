@@ -396,7 +396,7 @@ function Convert-ReviewProfilePathForms {
         return $quote + $preferred + $quote
     }.GetNewClosure()
     $rootPattern = '(?:[A-Z]:/+|/+)'
-    $pathForms = '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:(?<Quote>[`"''])\s*(?<Path>' + $rootPattern + '[^\r\n]*?)\k<Quote>|(?<Path>' + $rootPattern + '[^\s<>`"''(),;]*))'
+    $pathForms = '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:(?<Quote>[`"''])\s*(?<Path>' + $rootPattern + '[^\r\n]*?)\k<Quote>|(?<Path>' + $rootPattern + '[^\r\n<>`"''(),;]*))'
     return [regex]::Replace($normalized, $pathForms, $canonicalize)
 }
 
@@ -440,6 +440,8 @@ function Assert-ReviewOutputSafe {
     foreach ($rule in (Get-ReviewRedactionRules)) {
         $scanText = $Text
         if ($rule.PSObject.Properties['NormalizeProfilePaths']) {
+            # Canonicalization must not weaken a profile-path match already present in the original body.
+            if ($Text -match $rule.Pattern) { throw 'Review did not complete: output failed the publication safety scan.' }
             $scanText = Convert-ReviewProfilePathForms -Text $scanText -Pattern $rule.Pattern
         }
         if ($rule.PSObject.Properties['RepositoryPathsAllowed'] -and $Text -match $rule.Pattern -and $Workspace) {

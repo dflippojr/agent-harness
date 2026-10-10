@@ -20,6 +20,8 @@ Describe 'Review publication safety' {
         @{ Payload = 'C:/./Users/reviewer/.codex/auth.json' }
         @{ Payload = 'C:/temp/../Users/reviewer/.codex/auth.json' }
         @{ Payload = '"C:\Program Files\..\Users\reviewer\.codex\auth.json"' }
+        @{ Payload = 'C:\Program Files\..\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '"file at C:\Program Files\..\Users\reviewer\.codex\auth.json"' }
         @{ Payload = "'C:\Program Files\..\Users\reviewer\.codex\auth.json'" }
         @{ Payload = '`C:\Program Files\..\Users\reviewer\.codex\auth.json`' }
         @{ Payload = '"\\?\C:\Program Files\..\Users\reviewer\.codex\auth.json"' }
@@ -38,6 +40,7 @@ Describe 'Review publication safety' {
         @{ Payload = '/home/reviewer/.codex/auth.json' }
         @{ Payload = '/root/.codex/auth.json' }
         @{ Payload = '/root' }
+        @{ Payload = '/root/../public/config.py' }
         @{ Payload = '[profile](file:///home/reviewer/.codex/auth.json)' }
         @{ Payload = 'file:///h%6fme/reviewer/.codex/auth.json' }
         @{ Payload = 'file:///C:/Users/reviewer/.codex/auth.json' }
