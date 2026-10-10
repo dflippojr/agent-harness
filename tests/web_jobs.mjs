@@ -393,6 +393,12 @@ await focusPage.page.viewJobs();
 await focusPage.page.viewJob("j2");
 const focusSwitch = walk(focusPage.$app, (e) => e.attributes["aria-label"] === "Morning homelab check enabled")[0];
 const taskEditor = walk(focusPage.$app, (e) => e.id === "job-task")[0];
+const focusedList = walk(focusPage.$app, (e) => e.classList.contains("job-groups"))[0];
+focusedList.querySelector = (selector) => {
+  const id = selector.split('"')[1];
+  const row = walk(focusedList, (e) => e.attributes["data-job"] === id)[0];
+  return walk(row, (e) => e.classList.contains("switch"))[0] || null;
+};
 let releaseFocusSave;
 gate = new Promise((resolve) => { releaseFocusSave = resolve; });
 focusSwitch.focus();
