@@ -954,6 +954,26 @@ body.has-tabs .composer { bottom: var(--tabbar-offset); padding-bottom: 8px; }
   .chat-welcome-content > p { max-width: 52ch; margin-inline: auto; }
 }
 /* End Desktop 11. */
+/* Desktop 8: Settings and Profile (#569). Shared layout owns pane width, scroll and collapse. */
+@media (min-width: 768px) {
+  .theme-grid, .app-icon-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .resources-tabs { flex-wrap: nowrap; overflow-x: auto; }
+  .resources-tabs button { flex: 1 0 auto; white-space: nowrap; overflow-wrap: normal; }
+  .daemon-settings .config-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 260px); align-items: center; gap: 24px; }
+  .daemon-settings .config-copy { min-width: 0; }
+  .daemon-settings .config-actions { justify-content: flex-end; }
+}
+@media (min-width: 1280px) {
+  #split-list .set-row[aria-current="page"] { background: var(--info-bg); }
+  #split-list .set-row { gap: 8px; padding-inline: 12px; }
+  #split-list .set-icon { width: 28px; height: 28px; }
+  #split-list .set-label { font-size: 0.875rem; }
+  #split-list .set-value { max-width: 42%; font-size: 0.75rem; }
+  #split-list .identity:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #split-list .version-row { text-align: left; }
+}
+/* End Desktop 8. */
+
 /* Desktop 7: Images (#568). Page-local columns; the shell's split list is for list/detail routes.
    Below 768 px the generation form, gallery and image details retain their phone flow. */
 @media (min-width: 768px) {

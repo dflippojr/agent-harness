@@ -4,8 +4,10 @@
 import { settingValueText, settingMeta, recoveryNote } from "../lib/settings-text.mjs";
 import { settingInput } from "../lib/setting-input.mjs";
 import * as sheets from "../lib/sheet.mjs";
+import { refreshingSettingsApi } from "./profile.mjs";
 
 export function mountDaemonSettings({ h, fill, append, api, toast, isGuest, location, confirmSheet = sheets.confirmSheet }) {
+  api = refreshingSettingsApi(api);
   async function daemonSettingsCard() {
     let view;
     try { view = await api("/config"); }
@@ -62,7 +64,7 @@ export function mountDaemonSettings({ h, fill, append, api, toast, isGuest, loca
       }
     };
 
-    return h("div", {},
+    return h("div", { class: "daemon-settings" },
       h("div", { class: "card" },
         h("p", { class: "muted small" }, "Operational settings for this daemon. Paths, secrets, modules, and network policy stay in local configuration."),
         status),
