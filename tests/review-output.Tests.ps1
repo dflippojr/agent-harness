@@ -17,8 +17,10 @@ Describe 'Review publication safety' {
         @{ Payload = '[gh](https://example.invalid)p_synthetic12345678' }
         @{ Payload = '[/ho][ref]me/reviewer/auth.json' }
         @{ Payload = "[gh]p_synthetic12345678`n`n[gh]: https://example.invalid" }
-        @{ Payload = 'Bearer synthetic-value' }
-        @{ Payload = 'Bearer followed by a value' }
+        @{ Payload = 'Bearer synthetic-value-1' }
+        @{ Payload = ('Bearer ' + ('a' * 24)) }
+        @{ Payload = ('`Bearer` ' + ('a' * 24)) }
+        @{ Payload = ('https://example.invalid/download/' + ('A' * 24) + '%2F' + ('B' * 24) + '/file') }
         @{ Payload = 'password=synthetic-value' }
         @{ Payload = ('{"api_key":"' + ('A' * 32) + '"}') }
         @{ Payload = '{"password":"short"}' }
@@ -94,6 +96,8 @@ Describe 'Review publication safety' {
         @{ Payload = 'Call 127.0.0.1:8100/gpu or localhost:8100/gpu.' }
         @{ Payload = 'See https://github.com/dflippojr/agent-harness/pull/549 and // a code comment.' }
         @{ Payload = '**Structure** `harness/__init__.py`: keep the `<n>` placeholder.' }
+        @{ Payload = 'Send a Bearer token in the header; the `Bearer` scheme is case-insensitive.' }
+        @{ Payload = 'The header is built as `f"Bearer {token}"`.' }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }

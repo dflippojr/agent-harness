@@ -245,15 +245,16 @@ characters, Unicode compatibility forms and Markdown backslash escapes are decod
 form also drops link targets, brackets, inline HTML tags and emphasis or code markers that could split a value. Known
 paths are matched in their normalized and rendered spellings too, after the same relative-path filter. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
-tells the backend to cite only repository-relative paths and describe credentials in words. Quote authentication
-scheme names in backticks (for example, `Bearer`) rather than printing a value-like sequence.
+tells the backend to cite only repository-relative paths and describe credentials in words. The bearer rule only
+matches a token-like value (one containing a digit, or 20 or more token characters), so prose such as "a Bearer token"
+is publishable.
 
 Known repository paths come from the Git index and every diff file, including deletions and both rename/copy sides.
 Git-quoted paths are decoded as UTF-8 bytes, and patch and rename/copy metadata disambiguate filenames containing the
 diff header's ` b/` separator. Exact citations of known paths (including `./` prefixes and Windows separators) are
 masked for the profile-directory and long-token rules only; a known path never exempts an absolute root, a profile
-prefix in front of it, or a credential pattern. For the long-token rule, a web link's path is split at `/`, so a long
-documentation URL is not one token; its query and fragment stay whole, so a signature there is still caught. Validated Git metadata in the coverage marker is added only after the scan.
+prefix in front of it, or a credential pattern. For the long-token rule, a web link's path is split at each literal `/`
+(before decoding, so `%2F` never splits), and a long documentation URL is not one token; its query and fragment stay whole, so a signature there is still caught. Validated Git metadata in the coverage marker is added only after the scan.
 Stderr shown in job-log warnings keeps the message before a path and replaces the rest of that line with
 `[REDACTED PATH]`.
 

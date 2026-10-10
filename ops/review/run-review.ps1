@@ -330,7 +330,9 @@ function Get-ReviewRedactionRules {
     # Shared by diagnostics and the publication gate. Never print a matching value.
     # Publication deliberately rejects even benign examples matching these credential shapes.
     return @(
-        [pscustomobject]@{ Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+'; Replacement = 'Bearer [REDACTED]' }
+        # A bearer value must look like a token (a digit, or 20+ token characters), so prose such as
+        # "a Bearer token" stays publishable while real credentials are caught.
+        [pscustomobject]@{ Pattern = '(?i)\bBearer\s+(?=[A-Za-z0-9._~+/=-]*[0-9]|[A-Za-z0-9._~+/=-]{20})[A-Za-z0-9._~+/=-]+'; Replacement = 'Bearer [REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(["'']?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
@@ -455,20 +457,28 @@ function Assert-ReviewOutputSafe {
     if ($Workspace -or $DiffPaths.Count -gt 0) {
         $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
     }
+    $mask = { param($form) if ($knownPaths.Count -gt 0) { Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths } else { $form } }
+    $rules = @(Get-ReviewRedactionRules)
+    $unsafe = $false
     foreach ($form in (Get-ReviewScanForms -Text $Text)) {
         # Known relative citations are masked only for the profile-segment and long-token checks.
         # Absolute roots and credential patterns always scan the unmasked text.
-        $masked = if ($knownPaths.Count -gt 0) { Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths } else { $form }
-        $unsafe = ($form -match $script:ReviewAbsoluteRootPattern) -or ($masked -match $script:ReviewProfileSegmentPattern)
-        # A web link's path is checked segment by segment, so a long documentation URL is not one token.
-        # The query and fragment stay whole: signatures there may contain Base64 slashes.
-        $segmented = [regex]::Replace($masked, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
-        foreach ($rule in (Get-ReviewRedactionRules)) {
-            $scanText = if ($rule.PSObject.Properties['RepositoryPathsAllowed']) { $segmented } else { $form }
-            if ($scanText -match $rule.Pattern) { $unsafe = $true }
+        if ($form -match $script:ReviewAbsoluteRootPattern) { $unsafe = $true }
+        if ((& $mask $form) -match $script:ReviewProfileSegmentPattern) { $unsafe = $true }
+        foreach ($rule in @($rules | Where-Object { -not $_.PSObject.Properties['RepositoryPathsAllowed'] })) {
+            if ($form -match $rule.Pattern) { $unsafe = $true }
         }
-        if ($unsafe) { throw 'Review did not complete: output failed the publication safety scan.' }
     }
+    # A web link's path is checked segment by segment, so a long documentation URL is not one token.
+    # Only slashes present before decoding split it, so an encoded slash cannot divide a token, and
+    # the query and fragment stay whole: signatures there may contain Base64 slashes.
+    $segmented = [regex]::Replace($Text, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
+    foreach ($form in (Get-ReviewScanForms -Text $segmented)) {
+        foreach ($rule in @($rules | Where-Object { $_.PSObject.Properties['RepositoryPathsAllowed'] })) {
+            if ((& $mask $form) -match $rule.Pattern) { $unsafe = $true }
+        }
+    }
+    if ($unsafe) { throw 'Review did not complete: output failed the publication safety scan.' }
 }
 
 function Get-ReviewDiagnosticTail {
