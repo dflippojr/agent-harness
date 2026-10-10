@@ -10,6 +10,12 @@ import { jobGroup, jobBody, lastRunPill, lastRunText, shortWhen, JOB_FIELDS } fr
 // Browsers stringify an array passed to append(), so this stub refuses one rather than flattening it.
 class StrictEl extends El {
   focus() { doc.activeElement = this; }
+  closest(selector) {
+    if (selector === ".job-row") {
+      for (let el = this; el; el = el.parentNode) if (el.classList?.contains("job-row")) return el;
+    }
+    return null;
+  }
   append(...nodes) {
     assert.ok(!nodes.some(Array.isArray), "append() got a nested array; a browser would print it as text");
     super.append(...nodes);
@@ -386,6 +392,53 @@ freshWindow.dispatchEvent({ type: "hashchange" });
 await new Promise((resolve) => setTimeout(resolve, 350));
 assert.equal(calls.length, 0, "a disposed pane does not fetch or repaint");
 changedJob.recent = beforeRun;
+
+
+// Fresh fixture: a failed notification read cannot erase a successful initial load, and background paints keep focus.
+const stableJob = job("stable", "Stable job", { recent: [], next_run_at: null });
+let reads = 0;
+let resolveInitial;
+let notifyStable;
+const initialReply = new Promise((resolve) => { resolveInitial = resolve; });
+const stable = mount(false, {
+  api: async (path) => {
+    assert.equal(path, "/jobs");
+    reads++;
+    if (reads === 1) return initialReply;
+    if (reads === 2) throw new Error("Offline");
+    return structuredClone([stableJob]);
+  },
+  onDaemonChange: (fn) => { notifyStable = fn; return () => {}; },
+});
+const stableBody = new StrictEl("section");
+const stableLeaves = [];
+const stableOpening = stable.page.viewJobs({ body: stableBody, header() {}, paint() {}, onLeave: (fn) => stableLeaves.push(fn) });
+notifyStable();
+await new Promise((resolve) => setTimeout(resolve, 350));
+assert.equal(reads, 1, "a notification queues behind the initial request");
+resolveInitial(structuredClone([stableJob]));
+await stableOpening;
+assert.match(stableBody.textContent, /Stable job/, "the initial success remains visible when the queued background read fails");
+const stableList = walk(stableBody, (e) => e.classList.contains("job-groups"))[0];
+stableList.querySelector = (selector) => {
+  const id = selector.split('"')[1];
+  const row = walk(stableBody, (e) => e.attributes["data-job"] === id)[0];
+  const kind = selector.endsWith(".switch") ? "switch" : "job-main";
+  return walk(row, (e) => e.classList.contains(kind))[0] || null;
+};
+const stableSwitch = walk(stableBody, (e) => e.classList.contains("switch"))[0];
+stableSwitch.focus();
+notifyStable();
+await new Promise((resolve) => setTimeout(resolve, 350));
+assert.equal(walk(stableBody, (e) => e.classList.contains("switch"))[0], stableSwitch, "unchanged data keeps native row elements");
+assert.equal(doc.activeElement, stableSwitch);
+stableJob.name = "Renamed stable job";
+notifyStable();
+await new Promise((resolve) => setTimeout(resolve, 350));
+const newStableSwitch = walk(stableBody, (e) => e.classList.contains("switch"))[0];
+assert.notEqual(newStableSwitch, stableSwitch);
+assert.equal(doc.activeElement, newStableSwitch, "a changed row restores focus to the same job control");
+stableLeaves.forEach((fn) => fn());
 
 // Fresh fixture: completing a toggle must not take focus away from a neighbouring editor.
 const focusPage = mount(false);

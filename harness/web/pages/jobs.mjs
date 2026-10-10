@@ -27,10 +27,24 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     const list = h("div", { class: "job-groups" });
     // Job id -> the enabled state being saved. Repaints retain every in-flight switch.
     const saving = new Map();
-    let refreshVersion = 0;
     const toggleVersions = new Map();
+    let paintKey = null;
+    let loaded = false;
+    let refreshing = null;
+    let refreshAgain = false;
+    let holdPaint = false;
+    let nextNoisy = false;
     const paint = () => {
       if (gone) return;
+      const key = JSON.stringify(jobs.map((j) => [j.id, j.name, j.cron, j.project, j.enabled, j.next_run_at, j.last_error,
+        j.recent?.[0], saving.has(j.id), saving.get(j.id), j.recent?.[0] ? lastRunText(j.recent[0].created_at) : null,
+        j.next_run_at ? shortWhen(j.next_run_at) : null]));
+      if (key === paintKey) { pane?.paint(); return; }
+      paintKey = key;
+      const active = browser.document?.activeElement;
+      const row = active?.closest?.(".job-row");
+      const focusedId = row?.getAttribute("data-job");
+      const focusedControl = active?.classList?.contains("switch") ? ".switch" : active?.classList?.contains("job-main") ? ".job-main" : null;
       fill(list, jobs.length ? JOB_GROUPS.flatMap(([key, label]) => {
         const rows = jobs.filter((j) => jobGroup(j) === key);
         if (!rows.length) return [];
@@ -38,28 +52,57 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
           h("div", { class: "card job-list" }, rows.map(jobRow))];
       }) : h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));
       pane?.paint();
+      if (focusedId && focusedControl) {
+        const control = list.querySelector(`[data-job="${focusedId}"] ${focusedControl}`);
+        if (control && !control.disabled) control.focus();
+      }
     };
     // Detail routes keep the split list mounted; successful edits refresh it explicitly.
+    // Coalesce concurrent reads. A background notification cannot supersede the initial success, and an edit/delete
+    // waits for a read made after that mutation instead of painting an obsolete response.
     async function refresh({ initial = false, quiet = false } = {}) {
       if (gone) return;
-      const version = ++refreshVersion;
-      const toggles = new Map(toggleVersions);
-      try {
-        const fresh = await api("/jobs");
-        if (gone || version !== refreshVersion) return;
-        const existing = new Map(jobs.map((j) => [j.id, j]));
-        jobs = fresh.map((j) => {
-          const old = existing.get(j.id);
-          // Preserve a switch that changed during this read, while adopting membership changes (create/delete).
-          if (old && (saving.has(j.id) || toggles.get(j.id) !== toggleVersions.get(j.id))) return old;
-          return Object.assign(old || {}, j);
-        });
-        paint();
-      } catch (err) {
-        if (gone || version !== refreshVersion) return;
-        if (initial) throw err;
+      if (refreshing) {
+        refreshAgain = true;
+        holdPaint ||= !quiet;
+        nextNoisy ||= !quiet;
+      } else refreshing = load(!quiet).finally(() => { refreshing = null; });
+      try { await refreshing; }
+      catch (err) {
+        if (gone) return;
+        if (initial) throw err; // the split framework supplies its load error and Retry action
         if (!quiet) toast(`Couldn't refresh jobs: ${err.message}`, 5000);
       }
+    }
+
+    async function load(noisy) {
+      do {
+        refreshAgain = false;
+        holdPaint = false;
+        nextNoisy = false;
+        const toggles = new Map(toggleVersions);
+        try {
+          const fresh = await api("/jobs");
+          if (gone) return;
+          if (!holdPaint) {
+            const existing = new Map(jobs.map((j) => [j.id, j]));
+            jobs = fresh.map((j) => {
+              const old = existing.get(j.id);
+              // Preserve a switch changed during the read, while adopting create/delete membership changes.
+              if (old && (saving.has(j.id) || toggles.get(j.id) !== toggleVersions.get(j.id))) return old;
+              return Object.assign(old || {}, j);
+            });
+            paint();
+            loaded = true;
+          }
+        } catch (err) {
+          if (gone) return;
+          if (!loaded) throw err;
+          if (noisy) toast(`Couldn't refresh jobs: ${err.message}`, 5000);
+          return; // a failed background read retains the last successful list
+        }
+        noisy = nextNoisy;
+      } while (refreshAgain && !gone);
     }
     refreshList = refresh;
     if (pane) {
