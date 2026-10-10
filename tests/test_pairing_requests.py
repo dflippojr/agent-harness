@@ -179,7 +179,9 @@ def test_denied_request_mints_nothing(hh):
     assert client.post(f"{BASE}/{rid}/deny", headers=H(OWNER)).status_code == 409
     assert client.post(f"{BASE}/{rid}/approve", json={"match": asked.json()["match_code"]},
                        headers=H(OWNER)).status_code == 409
-    assert _redeem(client, rid, verifier, ORIGIN).status_code == 403
+    refused = _redeem(client, rid, verifier, ORIGIN)
+    assert refused.status_code == 403 and "denied" in refused.json()["detail"]
+    assert refused.headers["access-control-allow-origin"] == ORIGIN  # the browser App can read why
     assert client.post(f"{BASE}/pr-nope/deny", headers=H(OWNER)).status_code == 404
     assert _redeem(client, "pr-nope", verifier).status_code == 404
     assert _app_keys(m) == []
@@ -203,9 +205,13 @@ def test_unapproved_and_unredeemed_requests_expire(hh, clock):
     clock[0] += pr.REDEEM_TTL_SECONDS + 1
     gone = _redeem(client, rid2, verifier)
     assert gone.status_code == 400 and "expired" in gone.json()["detail"]
+    browser, browser_verifier = _ask(client, ORIGIN)
+    clock[0] += pr.APPROVE_TTL_SECONDS + 1
+    late_browser = _redeem(client, browser.json()["id"], browser_verifier, ORIGIN)
+    assert late_browser.status_code == 400 and late_browser.headers["access-control-allow-origin"] == ORIGIN
     assert _app_keys(m) == []
     expired = _audit(client, "pairing_request.expire")
-    assert {r["target_id"] for r in expired} == {rid, rid2}
+    assert {r["target_id"] for r in expired} == {rid, rid2, browser.json()["id"]}
     assert all(r["actor_kind"] == "system" and r["outcome"] == "ok" for r in expired)
 
 

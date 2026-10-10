@@ -408,6 +408,9 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         _raise_refusal(out)
         return JSONResponse(owner_view(out["row"], m.cfg), headers=NO_STORE)
 
+    def approved(now: float) -> dict:
+        return {"state": APPROVED, "approved_at": now, "expires_at": now + REDEEM_TTL_SECONDS}
+
     def _elevated_unacknowledged(scopes: list[str], acknowledged: bool) -> bool:
         return bool(ELEVATED.intersection(scopes)) and not acknowledged
 
@@ -473,7 +476,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                 return 400, "the match code does not match the one the App shows", "match_mismatch"
             return None
         return await decide(request, key, rid, "pairing_request.approve", (PENDING,), check,
-                            lambda now: {"state": APPROVED, "approved_at": now, "expires_at": now + REDEEM_TTL_SECONDS},
+                            approved,
                             lambda row: {"scopes": row["scopes"].split(),
                                          "acknowledged": bool(ELEVATED.intersection(row["scopes"].split()))})
 
@@ -487,7 +490,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                 return 400, "the match code does not match the one the App shows", "match_mismatch"
             return None
         return await decide(request, key, rid, "pairing_request.approve", (CLAIMED,), check,
-                            lambda now: {"state": APPROVED, "approved_at": now, "expires_at": now + REDEEM_TTL_SECONDS},
+                            approved,
                             lambda row: {"scopes": row["scopes"].split(), "confirmed": True})
 
     @app.post(base + "/{rid}/deny")

@@ -1565,11 +1565,10 @@ class Database:
         return rows
 
     @_reads
-    def pairing_request_origin_active(self, origin: str, active: tuple[str, ...]) -> bool:
-        marks = ", ".join("?" * len(active))
+    def pairing_request_origin_known(self, origin: str) -> bool:
+        """Whether a pairing request (in any state, until it is forgotten) belongs to this browser origin."""
         with self.lock:
-            row = self.conn.execute(f"SELECT 1 FROM pairing_requests WHERE origin = ? AND state IN ({marks}) "
-                                    "AND expires_at > ? LIMIT 1", (origin, *active, time.time())).fetchone()
+            row = self.conn.execute("SELECT 1 FROM pairing_requests WHERE origin = ? LIMIT 1", (origin,)).fetchone()
         return row is not None
 
     @_writes

@@ -106,8 +106,8 @@ def cors_origin_allowed(m, request: Request, origin: str) -> bool:
     if path == "/api/v1/pair/requests":
         return True  # any exact origin may ask to pair (#519): the owner approves, and the request stays bound to it
     if path.startswith("/api/v1/pair/requests/"):
-        from .pairing_requests import ACTIVE
-        return m.db.pairing_request_origin_active(origin, ACTIVE)
+        # Any origin with a request on record, finished ones included, so a browser App can read a denial or expiry.
+        return m.db.pairing_request_origin_known(origin)
     ticket = request.query_params.get("ticket", "")
     if ticket and m.db.stream_ticket_origin_active(ticket, origin):
         return True
