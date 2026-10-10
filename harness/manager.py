@@ -2036,13 +2036,13 @@ class Manager:
         if not s:
             # Image/device/test holders are not household sessions; do not park them forever.
             return True
+        user_id = s.get("owner_id") or OWNER_USER_ID
+        account = self.db.account_by_id(user_id) if user_id != OWNER_USER_ID else None
+        if user_id != OWNER_USER_ID and (account is None or not account.get("enabled", 1)):
+            return False
         if s.get("status") == "running":
             return True
-        user_id = s.get("owner_id") or OWNER_USER_ID
-        if user_id != OWNER_USER_ID:
-            account = self.db.account_by_id(user_id)
-            if account is None or not account.get("enabled", 1):
-                return False
+        if account is not None:
             occupied, cap = self.db.count_sessions(user_id, "running", *WAITING), int(account["max_running"])
         elif self._capped_app(s.get("app_id") or ""):
             occupied = self.db.count_app_sessions(s["app_id"], "running", *WAITING)

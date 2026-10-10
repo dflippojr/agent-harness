@@ -12,6 +12,7 @@ import hashlib
 import contextlib
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -2409,6 +2410,13 @@ class Runner:
                        max_chars: int = 10**9) -> str:
         await self._acquire(sid)  # e.g. resumed after a restart with the approval already granted
         s = self.db.get_session(sid)
+        left = self._time_left(s) if name == "run_shell" else None
+        if left is not None:  # one long command must not outlast a member's or an App's run budget (#524)
+            try:
+                asked = int(args.get("timeout") or 120)
+            except (TypeError, ValueError):
+                asked = 120
+            args = {**args, "timeout": max(1, min(asked, math.ceil(left)))}
         run = s["run"]
         run["executing"] = {"id": call["id"], "name": name}
         self.db.update_session(sid, run=run)
