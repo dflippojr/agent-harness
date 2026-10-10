@@ -205,7 +205,7 @@ export function createDocument({ ElClass = El } = {}) {
   doc.addEventListener = (...a) => Emitter.prototype.addEventListener.call(doc, ...a);
 
   for (const [tag, id] of [["main", "app"], ["h1", "title"], ["button", "back"], ["span", "conn"], ["a", "settings-btn"],
-    ["nav", "tab-bar"], ["span", "profile-icon"], ["div", "fab-host"], ["a", "fab"], ["header", "bar"], ["div", "guest-banner"],
+    ["nav", "tab-bar"], ["span", "profile-icon"], ["span", "agents-needs-you"], ["div", "fab-host"], ["a", "fab"], ["header", "bar"], ["div", "guest-banner"],
     ["div", "toast"]]) make(tag, id);
   byId.bar.append(byId.back, byId.title, byId.conn, byId["settings-btn"]); // as in index.html, so in-place title edits work
   const tabLinks = TABS.map((tab) => {
