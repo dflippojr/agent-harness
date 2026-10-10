@@ -62,6 +62,7 @@ def test_device_search_queue_and_global_events_require_read_all(tmp_path, monkey
     client, m = make_client(tmp_path)
     m.cfg.search.enabled = True
     key, token = m.db.create_api_key("device", "sessions" + (" sessions:all" if read_all else ""), "device")
+    key = m.db.api_key_by_secret(token)
     key["scope_set"] = set(key["scopes"].split())
     with client:
         seed(m.db, "owner00001", "scratch", "owner secret", [("user_message", {"content": "boundarymarker"})])
@@ -101,16 +102,17 @@ def test_device_search_queue_and_global_events_require_read_all(tmp_path, monkey
         asyncio.run(consume())
 
 
-@pytest.mark.parametrize("kind", ["owner", "app", "device"])
-@pytest.mark.parametrize("surface", ["global", "session", "ticket"])
-@pytest.mark.parametrize("tick", ["event", "keepalive", "replay"])
+@pytest.mark.parametrize("kind,restore", [("owner", False), ("app", False), ("device", False),
+                                         ("app", True), ("device", True)])
+@pytest.mark.parametrize("surface,tick", [(surface, tick) for surface in ("global", "session", "ticket")
+                                         for tick in ("event", "keepalive", "replay")
+                                         if (surface, tick) != ("global", "replay")])
 def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
-        tmp_path, monkeypatch, kind, surface, tick):
-    if surface == "global" and tick == "replay":
-        pytest.skip("global streams are live-only")
+        tmp_path, monkeypatch, kind, restore, surface, tick):
     client, m = make_client(tmp_path)
     key, token = m.db.create_api_key("reader", "admin" if kind == "owner" else "sessions sessions:all", kind,
                                      origins=[ORIGIN])
+    key = m.db.api_key_by_secret(token)
     key["scope_set"] = set(key["scopes"].split())
     with client:
         seed(m.db, "owner00001", "scratch", "stream", [("status", {"status": "done"})])
@@ -128,8 +130,17 @@ def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
         async def disconnected():
             return False
 
-        async def revoke_during_wait(awaitable, timeout):
+        restored = []
+
+        def revoke():
             assert m.db.revoke_api_key(key["id"])
+            if restore:
+                fresh_key, fresh_token = m.db.restore_api_key(key["id"])
+                assert fresh_key["id"] == key["id"]
+                restored.append(fresh_token)
+
+        async def revoke_during_wait(awaitable, timeout):
+            revoke()
             if tick == "keepalive":
                 awaitable.close()
                 raise asyncio.TimeoutError
@@ -149,10 +160,16 @@ def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
                 subscription = "owner00001"
             assert await anext(stream) == ": connected\n\n"
             if tick == "replay":
-                assert m.db.revoke_api_key(key["id"])
+                revoke()
             with pytest.raises(StopAsyncIteration):
                 await anext(stream)
             assert not m.bus._subs[subscription]
 
         asyncio.run(consume())
         assert client.get(reconnect_path, headers=reconnect_headers).status_code == 401
+
+        if restore:
+            new_headers = {"Authorization": f"Bearer {restored[0]}", "Origin": ORIGIN}
+            new_stream = client.get("/api/v1/sessions/owner00001/events?follow=false", headers=new_headers)
+            assert new_stream.status_code == 200
+            assert '"status": "done"' in new_stream.text

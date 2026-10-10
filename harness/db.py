@@ -1879,6 +1879,7 @@ class Database:
                                    "AND role != 'hub'",
                                    (now, now + APP_ERASE_GRACE_SECONDS, kid)).rowcount == 1
             if ok:  # an owner key has no erasure to take its settings later
+                self.conn.execute("DELETE FROM stream_tickets WHERE key_id = ?", (kid,))
                 self.conn.execute("DELETE FROM app_settings WHERE app_id = ? AND app_id IN "
                                   "(SELECT id FROM api_keys WHERE kind = 'owner')", (kid,))
             return ok

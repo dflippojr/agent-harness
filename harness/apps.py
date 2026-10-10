@@ -908,12 +908,15 @@ def _global_event_visible(e: dict, session: dict | None, user_id: str, key: dict
     return reaches_web(key)
 
 
-def _stream_key_active(m, key: dict) -> bool:
-    """Bundled human identities have no API key; bearer and ticket streams retain their key id."""
+def _stream_active(m, key: dict, user_id: str, epoch: int) -> bool:
+    """Check account epoch and the authenticated key generation, so restoring a key cannot revive old streams."""
+    if m.stream_epoch.get(user_id, 0) != epoch:
+        return False
     if key.get("bundled"):
         return True
     current = m.db.get_api_key(key["id"])
-    return current is not None and current.get("revoked_at") is None
+    return (current is not None and current.get("revoked_at") is None
+            and current["hash"] == key["hash"])
 
 
 async def _global_events_stream(request: Request, m, user_id: str, key: dict, epoch: int, global_types):
@@ -922,17 +925,16 @@ async def _global_events_stream(request: Request, m, user_id: str, key: dict, ep
     try:
         yield ": connected\n\n"
         while True:
-            if m.stream_epoch.get(user_id, 0) != epoch or not _stream_key_active(m, key):
+            if not _stream_active(m, key, user_id, epoch):
                 return
             try:
                 e = await asyncio.wait_for(sub.queue.get(), timeout=15)
             except asyncio.TimeoutError:
-                if (m.stream_epoch.get(user_id, 0) != epoch or not _stream_key_active(m, key)
-                        or await request.is_disconnected()):
+                if not _stream_active(m, key, user_id, epoch) or await request.is_disconnected():
                     return
                 yield ": keepalive\n\n"
                 continue
-            if m.stream_epoch.get(user_id, 0) != epoch or not _stream_key_active(m, key):
+            if not _stream_active(m, key, user_id, epoch):
                 return
             if m.db.app_of(e["session_id"]) not in ("", calling_app(key)):  # another App's: its store stays unread
                 continue
@@ -1360,24 +1362,23 @@ async def _session_events_stream(request: Request, m, sid: str, owner: str, afte
     try:
         yield ": connected\n\n"
         for e in m.db.events(sid, after):
-            if m.stream_epoch.get(owner, 0) != epoch or not _stream_key_active(m, key):
+            if not _stream_active(m, key, owner, epoch):
                 return
             last = e["seq"]
             yield sse(e)
         if not follow:
             return
         while True:
-            if m.stream_epoch.get(owner, 0) != epoch or not _stream_key_active(m, key):
+            if not _stream_active(m, key, owner, epoch):
                 return
             try:
                 e = await asyncio.wait_for(sub.queue.get(), timeout=15)
             except asyncio.TimeoutError:
-                if (m.stream_epoch.get(owner, 0) != epoch or not _stream_key_active(m, key)
-                        or await request.is_disconnected()):
+                if not _stream_active(m, key, owner, epoch) or await request.is_disconnected():
                     return
                 yield ": keepalive\n\n"
                 continue
-            if m.stream_epoch.get(owner, 0) != epoch or not _stream_key_active(m, key):
+            if not _stream_active(m, key, owner, epoch):
                 return
             if e["seq"] is not None:
                 if e["seq"] <= last:
