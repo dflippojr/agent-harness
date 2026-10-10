@@ -20,9 +20,10 @@ GREEN, YELLOW, RED, RESET = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 
 
 class Report:
-    def __init__(self):
+    def __init__(self, *, not_started: bool = False):
         self.failed = 0
         self.warned = 0
+        self.not_started = not_started
 
     def ok(self, name: str, detail: str = "") -> None:
         print(f"{GREEN}[ OK ]{RESET} {name}  {detail}")
@@ -252,7 +253,7 @@ def check_secret_scanner(r: Report, cfg) -> None:
 
 
 def check_optional(r: Report, cfg) -> None:
-    if cfg.web.enabled:
+    if cfg.web.enabled and not getattr(r, "not_started", False):
         try:
             n = len(httpx.get(f"{cfg.web.searxng_url}/search", params={"q": "test", "format": "json"},
                               timeout=15).json().get("results", []))
@@ -284,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--not-started", action="store_true",
                     help="check an install whose startup was disabled; skip live daemon and optional service probes")
     args = ap.parse_args(argv)
-    r = Report()
+    r = Report(not_started=args.not_started)
 
     from . import config as config_mod
     try:
@@ -307,8 +308,7 @@ def main(argv: list[str] | None = None) -> int:
         check_daemon(r, cfg)
         check_autostart(r, cfg, args)
     check_secret_scanner(r, cfg)
-    if not args.not_started:
-        check_optional(r, cfg)
+    check_optional(r, cfg)
 
     print(f"\n{r.failed} failed, {r.warned} warnings")
     return 1 if r.failed else 0

@@ -468,7 +468,7 @@ if [[ $dry_run -eq 1 ]]; then
         info "Add the Hub later: rerun install/install.sh --with-hub."
     fi
 else
-    hub_args=(-m harness.install_hub install --install-dir "$install_dir" --config-dir "$config_dir" --port "$port"
+    hub_args=(-m harness.install_hub install --install-dir "$install_dir" --config-dir "$config_dir"
         --uv "$uv" --hub-method "$hub_method" --hub-package "$hub_package" --hub-image "$hub_image")
     [[ -n $hub_choice ]] && hub_args+=("$hub_choice")
     [[ $no_start -eq 1 ]] && hub_args+=(--no-start)

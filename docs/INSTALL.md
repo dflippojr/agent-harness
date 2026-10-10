@@ -37,6 +37,7 @@ fail the Hub step while leaving the daemon installed. A partially installed Hub 
 With startup disabled, doctor uses `--not-started` to check configuration, files, and Docker images while reporting
 that live daemon and optional service probes remain to be run after startup. Adding the Hub later uses the preserved
 daemon configuration's port.
+GPU prerequisites, image files, and model checksums remain checked even when startup is disabled.
 
 `--dry-run` / `-DryRun` prints these steps without prompting, installing, starting services, or approving claims.
 Uninstall checks status and runs `harness hub release --confirm` before stopping the daemon. It removes only the Hub
@@ -44,6 +45,8 @@ service/container and dedicated venv/state recorded by this installer in `<Insta
 Hub installs remain. A failed release stops uninstall. Uninstall also accepts `--dry-run` / `-DryRun`.
 If the daemon is stopped and no installer-owned Hub is recorded, daemon uninstall can continue. A recorded Hub
 requires starting the daemon first so its host-only release can complete.
+An early failed install with no configuration and no installed Hub can also be cleaned up; an installed Hub still
+requires restoring its daemon configuration before release.
 
 **Distribution adapter contract for #546:** the pip module defaults to `harness_hub` (override with
 `HARNESS_HUB_MODULE`); the image entrypoint and module accept `--daemon-url`, `--state-dir`, and `--claim-file`.

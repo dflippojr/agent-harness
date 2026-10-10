@@ -377,7 +377,7 @@ if ($DryRun) {
     }
 } else {
     $hubArgs = @('-m', 'harness.install_hub', 'install', '--install-dir', $InstallDir, '--config-dir', $configDir,
-        '--port', "$Port", '--uv', $uv, '--hub-method', $HubMethod)
+        '--uv', $uv, '--hub-method', $HubMethod)
     if ($HubPackage) { $hubArgs += @('--hub-package', $HubPackage) }
     if ($HubImage) { $hubArgs += @('--hub-image', $HubImage) }
     if ($WithHub) { $hubArgs += '--with-hub' }

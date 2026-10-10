@@ -35,6 +35,8 @@ class BackupRuntime(ModuleRuntime):
 
 def doctor(report, cfg) -> None:
     """Called by `python -m harness.doctor` once the daemon is known to answer."""
+    if getattr(report, "not_started", False):
+        return
     import httpx
     try:
         backup = httpx.get(f"http://127.0.0.1:{cfg.port}/maintenance", timeout=60).json().get("backup") or {}

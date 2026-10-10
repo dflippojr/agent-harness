@@ -310,17 +310,61 @@ def test_doctor_not_started_preserves_config_and_image_checks(monkeypatch, tmp_p
         if name.startswith("check_"):
             def check(*args, _name=name):
                 seen.append(_name)
-                if _name in ("check_daemon", "check_optional"):
+                if _name == "check_daemon":
                     args[0].fail("Stopped service", "not running")
             monkeypatch.setattr(doctor, name, check)
     assert doctor.main(["--not-started"]) == 0
     assert "check_data_dir" in seen and "check_docker" in seen
-    assert "check_daemon" not in seen and "check_optional" not in seen
+    assert "check_daemon" not in seen and "check_optional" in seen
     assert doctor.main([]) == 1
     monkeypatch.setattr(doctor, "check_docker", lambda report, cfg: report.fail("Docker image", "missing"))
     assert doctor.main(["--not-started"]) == 1
     assert "[[ $no_start -eq 1 ]] && doctor_args+=(--not-started)" in (ROOT / "install/install.sh").read_text()
     assert "if ($NoTasks) { $doctorArgs += '--not-started' }" in (ROOT / "install/install.ps1").read_text()
+
+
+def test_partial_install_without_config_is_removable(tmp_path, monkeypatch, capsys):
+    args = options(tmp_path)
+    (args.config_dir / "harness.yaml").unlink()
+    monkeypatch.setattr(hub, "hub_cli", lambda *_: pytest.fail("no daemon or Hub was installed"))
+    assert hub.uninstall(args) == 0
+    assert "continuing partial daemon uninstall" in capsys.readouterr().out
+    (tmp_path / "hub-install.json").write_text(json.dumps({"id": "a" * 32, "method": "pip", "port": 8199}))
+    with pytest.raises(ValueError, match="Restore daemon configuration"):
+        hub.uninstall(args)
+
+
+def test_not_started_keeps_image_files_and_defers_live_probes(tmp_path, monkeypatch):
+    from harness import config, doctor, modules, setup_config
+    from harness_modules.local_model import doctor as model_doctor
+    from harness_modules.images import doctor as image_doctor
+    from harness_modules.backup import runtime as backup_runtime
+    args = options(tmp_path)
+    assert setup_config.main(["--config-dir", str(args.config_dir), "--data-dir", str(tmp_path / "data"),
+                              "--pause-flag", str(tmp_path / "paused"), "--profile", "service",
+                              "--enable-module", "images", "--force"]) == 0
+    cfg = config.load(args.config_dir)
+    cfg.images.enabled = True
+    cfg.images.comfy_dir = str(tmp_path / "missing-comfy")
+    cfg.images.models_dir = str(tmp_path / "missing-weights")
+    cfg.web.enabled = True
+    hash_checks = []
+    assets_status = image_doctor.image_edit.assets_status
+    def checked_assets(*args, **kwargs):
+        hash_checks.append(kwargs.get("verify_hash"))
+        return assets_status(*args, **kwargs)
+    monkeypatch.setattr(image_doctor.image_edit, "assets_status", checked_assets)
+    monkeypatch.setattr(model_doctor, "check_gpu", lambda *_: None)
+    monkeypatch.setattr(model_doctor, "check_model_server", lambda *_: pytest.fail("live model probe"))
+    monkeypatch.setattr(model_doctor, "check_guard", lambda *_: pytest.fail("live guard probe"))
+    monkeypatch.setattr(doctor.httpx, "get", lambda *_args, **_kwargs: pytest.fail("live HTTP probe"))
+    hooks = [model_doctor.run, image_doctor.run, backup_runtime.doctor]
+    monkeypatch.setattr(modules, "present", lambda _: [SimpleNamespace(doctor=hook) for hook in hooks])
+    monkeypatch.setattr(doctor, "run", lambda *_: (1, ""))
+    report = doctor.Report(not_started=True)
+    doctor.check_optional(report, cfg)
+    assert report.failed >= 1  # Missing ComfyUI is still an installation failure.
+    assert hash_checks == [True]
 
 
 def test_partial_docker_install_is_removable(tmp_path, monkeypatch):
@@ -371,6 +415,7 @@ def test_per_user_service_registration_and_removal(tmp_path, monkeypatch, platfo
         import base64
         script = base64.b64decode(calls[0][-1]).decode("utf-16le")
         assert "a''%b" in script and "Register-ScheduledTask" in script
+        assert "-AllowStartIfOnBatteries" in script and "-DontStopIfGoingOnBatteries" in script
     service.stop()
     assert len(calls) >= 2
     with pytest.raises(ValueError, match="service id"):

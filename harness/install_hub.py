@@ -18,6 +18,11 @@ import sys
 import time
 import uuid
 
+DOCKER = "docker"
+SYSTEMCTL = "systemctl"
+LAUNCHCTL = "launchctl"
+INSTALL_RECORD = "hub-install.json"
+
 PROMPT = "Install the Hub admin console and link it to this daemon? [Y/n] "
 LATER = "Add the Hub later: rerun the daemon installer with --with-hub (PowerShell: -WithHub)."
 PARITY = "Every Hub action is available from the CLI: harness --help; docs/management-parity.md."
@@ -84,7 +89,8 @@ class Service:
                 f"$a = New-ScheduledTaskAction -Execute {ps_quote(argv[0])} "
                 f"-Argument {ps_quote(arguments)} -WorkingDirectory {ps_quote(str(workdir))}; "
                 "$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) "
-                "-MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval ([TimeSpan]::FromMinutes(1)); "
+                "-MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
+                "-RestartCount 3 -RestartInterval ([TimeSpan]::FromMinutes(1)); "
                 f"Register-ScheduledTask -TaskName {ps_quote(self.name)} -Action $a "
                 "-Trigger (New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)) "
                 "-Settings $s -ErrorAction Stop | Out-Null; "
@@ -98,7 +104,7 @@ class Service:
             path.write_bytes(plistlib.dumps({"Label": self.name, "ProgramArguments": argv,
                 "WorkingDirectory": str(workdir), "RunAtLoad": True, "KeepAlive": True,
                 "StandardOutPath": str(log), "StandardErrorPath": str(log)}))
-            command(["launchctl", "bootstrap", f"gui/{os.getuid()}", path])
+            command([LAUNCHCTL, "bootstrap", f"gui/{os.getuid()}", path])
         else:
             path = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "systemd/user"
             path.mkdir(parents=True, exist_ok=True)
@@ -109,8 +115,8 @@ class Service:
                 "[Unit]\nDescription=Agent harness Hub\n[Service]\nType=simple\n"
                 f'WorkingDirectory="{escape(workdir)}"\nExecStart={executable}\n'
                 "Restart=on-failure\nRestartSec=10\n[Install]\nWantedBy=default.target\n", encoding="utf-8")
-            command(["systemctl", "--user", "daemon-reload"])
-            command(["systemctl", "--user", "enable", "--now", self.name + ".service"])
+            command([SYSTEMCTL, "--user", "daemon-reload"])
+            command([SYSTEMCTL, "--user", "enable", "--now", self.name + ".service"])
 
     def stop(self):
         if sys.platform == "win32":
@@ -121,16 +127,16 @@ class Service:
         elif sys.platform == "darwin":
             path = Path.home() / "Library/LaunchAgents" / (self.name + ".plist")
             if path.exists():
-                loaded = command(["launchctl", "list"], capture_output=True).stdout
+                loaded = command([LAUNCHCTL, "list"], capture_output=True).stdout
                 if any(line.split()[-1:] == [self.name] for line in loaded.splitlines()):
-                    command(["launchctl", "bootout", f"gui/{os.getuid()}", path])
+                    command([LAUNCHCTL, "bootout", f"gui/{os.getuid()}", path])
                 path.unlink()
         else:
             path = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "systemd/user" / (self.name + ".service")
             if path.exists():
-                command(["systemctl", "--user", "disable", "--now", self.name + ".service"])
+                command([SYSTEMCTL, "--user", "disable", "--now", self.name + ".service"])
                 path.unlink()
-                command(["systemctl", "--user", "daemon-reload"])
+                command([SYSTEMCTL, "--user", "daemon-reload"])
 
 
 def wait_for_claim(path: Path, timeout: float = 60) -> dict:
@@ -154,8 +160,8 @@ def distribution_choice(args) -> tuple[str, str]:
     method = args.hub_method
     if method == "auto":
         method = "pip"
-        if sys.stdin.isatty() and shutil.which("docker") and args.hub_image:
-            method = "docker" if input("Hub distribution: pip or docker? [pip] ").strip().lower() == "docker" else "pip"
+        if sys.stdin.isatty() and shutil.which(DOCKER) and args.hub_image:
+            method = DOCKER if input("Hub distribution: pip or docker? [pip] ").strip().lower() == DOCKER else "pip"
     distribution = args.hub_package if method == "pip" else args.hub_image
     setting = "HARNESS_HUB_PACKAGE" if method == "pip" else "HARNESS_HUB_IMAGE"
     if not distribution or distribution.startswith("-"):
@@ -167,11 +173,11 @@ def distribution_choice(args) -> tuple[str, str]:
 
 def start_hub(args, method, distribution, service_id, hub_dir, claim_file):
     launch = ["--daemon-url", f"http://127.0.0.1:{args.port}", "--claim-file"]
-    if method == "docker":
-        if not shutil.which("docker"):
+    if method == DOCKER:
+        if not shutil.which(DOCKER):
             raise ValueError("Docker is required for --hub-method docker")
         identity = ["--user", f"{os.getuid()}:{os.getgid()}"] if sys.platform != "win32" else []
-        command(["docker", "run", "-d", "--restart", "unless-stopped", *identity, "--name", Service(service_id).name,
+        command([DOCKER, "run", "-d", "--restart", "unless-stopped", *identity, "--name", Service(service_id).name,
                  "--network", "host", "--mount", f"type=bind,src={hub_dir},dst=/hub-state",
                  distribution, *launch, "/hub-state/claim.json", "--state-dir", "/hub-state"])
     else:
@@ -216,7 +222,7 @@ def install(args) -> int:
     if hub_cli(["hub", "status"], env)["claimed"]:
         print("A Hub is already claimed. Release it explicitly with harness hub release --confirm.")
         return 0
-    state = args.install_dir / "hub-install.json"
+    state = args.install_dir / INSTALL_RECORD
     if state.exists():
         raise ValueError("This install already has a Hub service; remove it with harness.install_hub uninstall first")
     method, distribution = distribution_choice(args)
@@ -233,10 +239,10 @@ def install(args) -> int:
 
 def remove_owned_hub(record, install_dir):
     service = Service(record["id"])
-    if record["method"] == "docker":
-        containers = command(["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True).stdout
+    if record["method"] == DOCKER:
+        containers = command([DOCKER, "ps", "-a", "--format", "{{.Names}}"], capture_output=True).stdout
         if service.name in containers.splitlines():
-            command(["docker", "rm", "-f", service.name])
+            command([DOCKER, "rm", "-f", service.name])
     else:
         service.stop()
     directory = install_dir / ("hub-" + record["id"])
@@ -244,7 +250,7 @@ def remove_owned_hub(record, install_dir):
         raise ValueError("refusing to remove a linked Hub directory")
     if directory.exists():
         shutil.rmtree(directory)
-    (install_dir / "hub-install.json").unlink()
+    (install_dir / INSTALL_RECORD).unlink()
     print("Removed the Hub installed by this daemon installer.")
 
 
@@ -257,13 +263,19 @@ def daemon_available(port: int) -> bool:
 
 
 def uninstall(args) -> int:
-    state = args.install_dir / "hub-install.json"
+    state = args.install_dir / INSTALL_RECORD
     record = json.loads(state.read_text(encoding="utf-8")) if state.exists() else None
     from .config import resolve_port
-    port = resolve_port(args.config_dir)
+    try:
+        port = resolve_port(args.config_dir)
+    except FileNotFoundError:
+        if record:
+            raise ValueError("Restore daemon configuration to release the installer-owned Hub before uninstalling") from None
+        print("No daemon configuration or installer-owned Hub; continuing partial daemon uninstall.")
+        return 0
     if record:
         Service(record["id"])
-        if record["method"] not in ("pip", "docker"):
+        if record["method"] not in ("pip", DOCKER):
             raise ValueError("invalid Hub install record")
     if not daemon_available(port):
         if record:
@@ -285,12 +297,11 @@ def main(argv=None) -> int:
     parser.add_argument("action", choices=("install", "uninstall"))
     parser.add_argument("--install-dir", type=Path, required=True)
     parser.add_argument("--config-dir", type=Path, required=True)
-    parser.add_argument("--port", type=int, default=8100)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--with-hub", action="store_true")
     group.add_argument("--no-hub", action="store_true")
     parser.add_argument("--no-start", action="store_true")
-    parser.add_argument("--hub-method", choices=("auto", "pip", "docker"), default="auto")
+    parser.add_argument("--hub-method", choices=("auto", "pip", DOCKER), default="auto")
     parser.add_argument("--hub-package", default=os.environ.get("HARNESS_HUB_PACKAGE", ""))
     parser.add_argument("--hub-image", default=os.environ.get("HARNESS_HUB_IMAGE", ""))
     parser.add_argument("--hub-module", default=os.environ.get("HARNESS_HUB_MODULE", "harness_hub"))

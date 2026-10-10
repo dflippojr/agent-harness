@@ -63,5 +63,8 @@ def check_guard(r, cfg):
 
 def run(report, cfg):
     check_gpu(report, cfg)
-    check_model_server(report, cfg)
-    check_guard(report, cfg)
+    if getattr(report, "not_started", False):
+        report.warn("Local model services", "not checked: startup was disabled; run doctor after starting services")
+    else:
+        check_model_server(report, cfg)
+        check_guard(report, cfg)
