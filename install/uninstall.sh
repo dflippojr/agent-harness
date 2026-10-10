@@ -21,7 +21,7 @@ safe_instance=$(printf '%s' "$instance" | tr '[:upper:]' '[:lower:]')
 
 # Keep the daemon available for host-only release; remove only an installer-owned Hub.
 if [[ $dry_run -eq 1 ]]; then
-    echo "[dry run] check harness hub status; harness hub release --confirm before removing daemon"
+    echo "[dry run] check harness hub claim-status; harness hub release --confirm before removing daemon"
     echo "[dry run] remove the recorded Hub service/container and its dedicated venv/state; preserve other Hubs"
     echo "[dry run] remove daemon services; remove files: $remove_files"
     exit 0

@@ -15,7 +15,7 @@ $settingsPath = Join-Path $InstallDir 'settings.json'
 $s = if (Test-Path $settingsPath) { Get-Content $settingsPath -Raw | ConvertFrom-Json } else { $null }
 
 if ($DryRun) {
-    Write-Host '[dry run] check harness hub status; harness hub release --confirm before removing daemon'
+    Write-Host '[dry run] check harness hub claim-status; harness hub release --confirm before removing daemon'
     Write-Host '[dry run] remove the recorded Hub service/container and its dedicated venv/state; preserve other Hubs'
     Write-Host "[dry run] remove daemon tasks; remove files: $RemoveFiles"
     exit 0

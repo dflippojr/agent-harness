@@ -73,7 +73,7 @@ def test_already_claimed_never_installs_or_releases(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(hub, "hub_cli", cli)
     monkeypatch.setattr(hub, "command", lambda *_: pytest.fail("already claimed must not install"))
     assert hub.install(options(tmp_path)) == 0
-    assert calls == [["hub", "status"]]
+    assert calls == [["hub", "claim-status"]]
     assert "harness hub release --confirm" in capsys.readouterr().out
     assert not (tmp_path / "hub-install.json").exists()
 
@@ -236,7 +236,7 @@ def test_cli_uses_this_install_not_paired_credentials(tmp_path, monkeypatch):
         calls.append((args, kwargs))
         return SimpleNamespace(stdout='{"claimed": false}', stderr="host warning\n")
     monkeypatch.setattr(hub, "command", command)
-    assert hub.hub_cli(["hub", "status"], env) == {"claimed": False}
+    assert hub.hub_cli(["hub", "claim-status"], env) == {"claimed": False}
     assert "--config" in calls[0][0]
     assert not Path(calls[0][0][calls[0][0].index("--config") + 1]).exists()
 
@@ -613,3 +613,38 @@ def test_main_subprocess_failure_does_not_log_credentials(tmp_path, monkeypatch,
     output = capsys.readouterr()
     assert output.err == "Hub setup failed: uv.exe exited with return code 23\n" + hub.LATER + "\n"
     assert "private-token" not in output.out + output.err
+
+
+@pytest.mark.parametrize("phase", ["install", "poll", "uninstall"])
+def test_installer_lifecycle_dispatches_to_claim_api(tmp_path, monkeypatch, phase):
+    from harness import cli
+
+    parser = cli._build_parser()
+    requests = []
+    def command(argv, **kwargs):
+        # Keep the real installer command construction and CLI routing together.
+        cli_args = [str(arg) for arg in argv[argv.index("harness.cli") + 1:]]
+        method, path, fields = cli.admin_request(parser.parse_args(cli_args))
+        requests.append((method, path))
+        if method == "GET":
+            assert path == "/hub-claim"  # Inventory status does not return claim state.
+            response = {"claimed": phase != "uninstall", "hub": {"request_id": "pr-stub"}}
+        else:
+            assert path == "/hub-claim/requests/pr-stub/approve"
+            assert fields["json"]["match"] == "123456"
+            response = {"approved": True}
+        return SimpleNamespace(stdout=json.dumps(response), stderr="")
+    monkeypatch.setattr(hub, "command", command)
+    args = options(tmp_path)
+    if phase == "install":
+        assert hub.install(args) == 0
+        assert requests == [("GET", "/hub-claim")]
+    elif phase == "uninstall":
+        assert hub.uninstall(args) == 0
+        assert requests == [("GET", "/hub-claim")]
+    else:
+        claim = tmp_path / "claim.json"
+        claim.write_text(json.dumps({"id": "pr-stub", "match_code": "123456"}))
+        hub.approve_and_wait(claim, hub.cli_env(args.config_dir, 8199))
+        assert requests == [("POST", "/hub-claim/requests/pr-stub/approve"), ("GET", "/hub-claim")]
+        assert not claim.exists()

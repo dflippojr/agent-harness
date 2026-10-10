@@ -368,7 +368,7 @@ if ($DryRun) {
     if ($WithHub -and $NoTasks) {
         Info '[dry run] Hub setup deferred: rerun with -WithHub without -NoTasks after starting the daemon'
     } elseif ($WithHub) {
-        Info '[dry run] after doctor passes: check harness hub status; if already claimed show harness hub release --confirm'
+        Info '[dry run] after doctor passes: check harness hub claim-status; if already claimed show harness hub release --confirm'
         Info "[dry run] Hub distribution: $HubMethod; pip package: $(if ($HubPackage) { $HubPackage } else { 'set HARNESS_HUB_PACKAGE (#546)' }); Docker image: $(if ($HubImage) { $HubImage } else { 'set HARNESS_HUB_IMAGE (#546)' })"
         Info '[dry run] install Hub in a separate venv (pip) or docker run --network host --restart unless-stopped (docker)'
         Info '[dry run] start Hub; show its claim match code; harness hub approve <request_id> --match <code>; wait for redemption'

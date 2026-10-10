@@ -167,7 +167,7 @@ def wait_for_claim(path: Path, timeout: float = 60) -> dict:
                 raise ValueError("Hub claim file must contain only id and a six-digit match_code")
             return claim
         time.sleep(0.5)
-    raise TimeoutError("Hub did not publish its claim; check the Hub service and harness hub status")
+    raise TimeoutError("Hub did not publish its claim; check the Hub service and harness hub claim-status")
 
 
 def distribution_choice(args) -> tuple[str, str]:
@@ -212,15 +212,15 @@ def approve_and_wait(claim_file, env):
     hub_cli(["hub", "approve", claim["id"], "--match", claim["match_code"]], env)
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
-        status = hub_cli(["hub", "status"], env)
+        status = hub_cli(["hub", "claim-status"], env)
         if status["claimed"]:
             if status["hub"]["request_id"] != claim["id"]:
-                raise ValueError("Another Hub claimed the daemon; use harness hub status")
+                raise ValueError("Another Hub claimed the daemon; use harness hub claim-status")
             claim_file.unlink(missing_ok=True)
             print("Hub installed and linked.")
             return
         time.sleep(1)
-    raise TimeoutError("Hub did not redeem its approved claim; check harness hub status")
+    raise TimeoutError("Hub did not redeem its approved claim; check harness hub claim-status")
 
 
 def install(args) -> int:
@@ -235,7 +235,7 @@ def install(args) -> int:
     from .config import resolve_port
     port = resolve_port(args.config_dir)
     env = cli_env(args.config_dir, port)
-    if hub_cli(["hub", "status"], env)["claimed"]:
+    if hub_cli(["hub", "claim-status"], env)["claimed"]:
         print("A Hub is already claimed. Release it explicitly with harness hub release --confirm.")
         return 0
     state = args.install_dir / INSTALL_RECORD
@@ -304,7 +304,7 @@ def uninstall(args) -> int:
         print("Daemon is stopped; no installer-owned Hub to remove. Continuing daemon uninstall.")
         return 0
     env = cli_env(args.config_dir, port)
-    status = hub_cli(["hub", "status"], env)
+    status = hub_cli(["hub", "claim-status"], env)
     if status["claimed"]:
         print("harness hub release --confirm (before removing the daemon)")
         hub_cli(["hub", "release", "--confirm"], env)
