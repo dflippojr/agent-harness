@@ -103,6 +103,7 @@ function sessionMenu({ items, run }) {
     h("span", { class: "menu-dots", "aria-hidden": "true" }));
   const menu = h("div", { class: "session-menu", role: "menu", "aria-label": "Session", hidden: true });
   const wrap = h("div", { class: "session-menu-wrap" }, button, menu);
+  let entries = [];
   const close = () => {
     menu.hidden = true;
     button.setAttribute("aria-expanded", "false");
@@ -110,18 +111,29 @@ function sessionMenu({ items, run }) {
   };
   const onOutside = (e) => { if (!wrap.contains(e.target)) close(); };
   const open = () => {
-    menu.replaceChildren(...items().map((id) => h("button", {
+    entries = items().map((id) => h("button", {
       class: `session-menu-item${id === "cancel" ? " bad" : ""}`, type: "button", role: "menuitem",
       onclick: () => { close(); button.focus(); run(id); },
-    }, SESSION_MENU_LABELS[id])));
+    }, SESSION_MENU_LABELS[id]));
+    menu.replaceChildren(...entries);
     menu.hidden = false;
     button.setAttribute("aria-expanded", "true");
     document.addEventListener("pointerdown", onOutside, true);
-    menu.querySelector("button")?.focus();
+    entries[0]?.focus();
   };
   button.addEventListener("click", () => (menu.hidden ? open() : close()));
+  // The menu's keys (#564): arrows move and wrap, Home and End jump, Escape closes back to ⋯, Tab closes and moves on.
   menu.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { e.preventDefault(); close(); button.focus(); }
+    const at = entries.indexOf(document.activeElement);
+    const step = { ArrowDown: at + 1, ArrowUp: at < 0 ? entries.length - 1 : at - 1, Home: 0, End: entries.length - 1 }[e.key];
+    if (step !== undefined && entries.length) {
+      e.preventDefault();
+      entries[(step + entries.length) % entries.length].focus();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+      button.focus();
+    } else if (e.key === "Tab") close();
   });
   bar?.append(wrap);
   onLeave(() => { close(); wrap.remove(); });
