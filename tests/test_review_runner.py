@@ -170,6 +170,32 @@ foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), 'sk-synthetic123
     assert "safe paths, unsafe tokens" in result.stdout
 
 
+def test_unicode_relative_paths_are_not_absolute_profiles(tmp_path):
+    paths = ["caf\u00e9/home/reviewer/config.py", "cafe\u0301/Users/reviewer/config.py",
+             "\u8cc7\u6599/root/config.py", "\u00e9/Device/Volume1/Users/reviewer/config.py"]
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True)
+        target.write_text("# synthetic file\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    result = run_powershell(
+        tmp_path,
+        f"""
+$paths = '{json.dumps(paths, ensure_ascii=True)}' | ConvertFrom-Json
+foreach ($path in $paths) {{
+    $review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = "$path`:12: finding" }}
+    Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}'
+    $tail = Get-ReviewDiagnosticTail -Stderr $path
+    if ($tail -ne $path) {{ throw 'Relative Unicode path was redacted or normalized' }}
+}}
+'Unicode relative paths verified'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "Unicode relative paths verified" in result.stdout
+
+
 def test_git_diff_path_with_embedded_header_separator(tmp_path):
     path = "examples b/" + "a" * 48 + ".py"
     target = tmp_path / path

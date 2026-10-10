@@ -334,7 +334,7 @@ function Get-ReviewRedactionRules {
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(["'']?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
         [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
-        [pscustomobject]@{ Pattern = '(?i)(?<![A-Za-z0-9_./\\-])(?:file:/+)?(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|//[^/\s]+/+(?:[^/\s]+/+)*Users/+[^/\s]+|/+(?:Users|home)/+[^/\s]+|/+root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]'; NormalizeProfilePaths = $true }
+        [pscustomobject]@{ Pattern = '(?i)(?<![\p{L}\p{N}\p{M}_./\\-])(?:file:/+)?(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|//[^/\s]+/+(?:[^/\s]+/+)*Users/+[^/\s]+|/+(?:Users|home)/+[^/\s]+|/+root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]'; NormalizeProfilePaths = $true }
     )
 }
 
@@ -355,7 +355,7 @@ function Convert-ReviewProfilePathForms {
     $normalized = $normalized.Replace('\', '/')
     # Resolve namespace roots before dot segments so UNC paths keep their server/share boundary.
     $normalized = [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)Volume\{[0-9a-f-]+\}/+', ' C:/')
-    $normalized = [regex]::Replace($normalized, '(?i)(?<![A-Za-z0-9_./-])(?:/{2,}[?.]/+GLOBALROOT)?/+Device/[^/\s]+/+', ' C:/')
+    $normalized = [regex]::Replace($normalized, '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:/{2,}[?.]/+GLOBALROOT)?/+Device/[^/\s]+/+', ' C:/')
     $namespace = {
         param($match)
         if ($match.Value -match '(?i)UNC/+$') { return ' //' }
@@ -393,7 +393,7 @@ function Convert-ReviewProfilePathForms {
         }
         return $preferred
     }.GetNewClosure()
-    return [regex]::Replace($normalized, '(?i)(?<![A-Za-z0-9_./-])(?:[A-Z]:/+|/+)[^\s<>`"''(),;]*', $canonicalize)
+    return [regex]::Replace($normalized, '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:[A-Z]:/+|/+)[^\s<>`"''(),;]*', $canonicalize)
 }
 
 function ConvertFrom-ReviewGitQuotedPath {
