@@ -268,3 +268,16 @@ def test_fills_use_the_primary_token():
         decls = _rule(selector)
         assert decls["background"] == "var(--primary)", selector
         assert decls["color"] == "var(--on-primary)", selector
+
+
+def test_modal_backdrops_darken_in_both_themes():
+    themes = _themes()
+    for name in ("system light", "system dark", "light", "dark"):
+        value = _resolve(themes[name], themes[name]["--backdrop"])
+        match = re.fullmatch(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*([.\d]+)\)", value)
+        assert match, f"{name}: translucent backdrop missing"
+        assert max(map(int, match.groups()[:3])) <= 40, f"{name}: backdrop must darken, not lighten"
+        assert 0.3 <= float(match.group(4)) <= 0.7
+    assert themes["light"]["--backdrop"] != themes["dark"]["--backdrop"]
+    for selector in ("dialog.sheet::backdrop", ".tool-viewer::backdrop"):
+        assert _rule(selector)["background"] == "var(--backdrop)"

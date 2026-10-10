@@ -1,6 +1,6 @@
 // Tool-call rows in the session transcript (#508): a 48 px summary (icon, name, argument summary, status pill) whose
 // output and arguments are only built when the row first opens, each behind a line count with Copy and Open. Open shows
-// the full text in a full-screen viewer with wrap and monospace, so the transcript never nests a scroll box.
+// the full text in a viewer (full-screen on phones, centred on desktop) with wrap and monospace.
 // The DOM builder and browser globals are injected, so this imports under plain Node.
 import { lineCount, previewText } from "./tools.mjs";
 import { fmtTokens, pluralize } from "./format.mjs";
@@ -8,6 +8,7 @@ import { fmtTokens, pluralize } from "./format.mjs";
 export function createToolRows({ h, fill, toast, browser }) {
   const { document } = browser;
   let viewer = null;
+  let returnFocus = null;
 
   const selectText = (node) => {
     const selection = browser.window?.getSelection?.();
@@ -24,11 +25,14 @@ export function createToolRows({ h, fill, toast, browser }) {
     if (!open) return;
     if (open.close) open.close();
     open.remove();
+    returnFocus?.focus?.();
+    returnFocus = null;
   };
 
-  // Full-screen viewer: a modal <dialog> on the body (Escape and focus come from the browser), the one scroller.
+  // Modal viewer: Escape and Close dismiss and return focus to the opener; the text is the one scroller.
   function openViewer(title, text) {
     closeViewer();
+    returnFocus = document.activeElement;
     let wrapped = true;
     const pre = h("pre", { class: "tool-viewer-text wrap", tabindex: "0" }, text);
     const wrapBtn = h("button", { class: "tool-btn", type: "button", "aria-pressed": "true" }, "Wrap");
@@ -37,20 +41,23 @@ export function createToolRows({ h, fill, toast, browser }) {
       wrapBtn.setAttribute("aria-pressed", String(wrapped));
       pre.className = wrapped ? "tool-viewer-text wrap" : "tool-viewer-text";
     });
+    const closeBtn = h("button", { class: "tool-btn", type: "button", onclick: closeViewer }, "Close");
     const dialog = h("dialog", { class: "tool-viewer", "aria-label": title },
       h("header", { class: "tool-viewer-head" },
         h("h2", {}, title),
         wrapBtn,
         h("button", { class: "tool-btn", type: "button", onclick: () => copy(text, () => selectText(pre)) }, "Copy"),
-        h("button", { class: "tool-btn", type: "button", onclick: closeViewer }, "Close")),
+        closeBtn),
       pre);
-    dialog.addEventListener("close", () => {
-      dialog.remove();
-      if (viewer === dialog) viewer = null;
-    });
+    dialog.addEventListener("cancel", (ev) => { ev.preventDefault?.(); closeViewer(); });
+    dialog.addEventListener("close", () => { if (viewer === dialog) closeViewer(); });
+    let pressedBackdrop = false;
+    dialog.addEventListener("pointerdown", (ev) => { pressedBackdrop = ev.target === dialog; });
+    dialog.addEventListener("click", (ev) => { if (ev.target === dialog && pressedBackdrop) closeViewer(); });
     viewer = dialog;
     document.body.append(dialog);
     if (dialog.showModal) dialog.showModal(); else dialog.setAttribute("open", "");
+    closeBtn.focus?.();
     return { dialog, pre };
   }
 

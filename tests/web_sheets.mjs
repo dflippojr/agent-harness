@@ -47,7 +47,7 @@ const text = (n) => n.textContent;
   const answer = confirmSheet({ title: "Merge?", confirmLabel: "Merge" });
   const dialog = only();
   assert.ok(pick(dialog, "confirm").classList.contains("primary"), "a plain action is the primary button");
-  assert.equal(focused, pick(dialog, "confirm"));
+  assert.equal(focused, pick(dialog, "cancel"), "every confirmation starts on the safe choice");
   pick(dialog, "cancel").click();
   assert.equal(await answer, false);
   assert.equal(sheets().length, 0);

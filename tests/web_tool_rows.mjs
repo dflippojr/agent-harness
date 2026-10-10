@@ -8,7 +8,8 @@ const el = (tag, attrs, ...kids) => {
   const node = { tag, attrs: { ...attrs }, className: attrs?.class || "", textContent: "", open: false, listeners: {}, removed: false };
   node.kids = kids.flat(Infinity).filter((k) => k !== null && k !== undefined);
   node.addEventListener = (type, fn) => { (node.listeners[type] ||= []).push(fn); };
-  node.fire = (type) => (node.listeners[type] || []).forEach((fn) => fn({}));
+  node.fire = (type, event = {}) => (node.listeners[type] || []).forEach((fn) => fn(event));
+  node.focus = () => { browser.document.activeElement = node; };
   node.setAttribute = (k, v) => { node.attrs[k] = v; };
   node.append = (...more) => node.kids.push(...more.flat(Infinity));
   node.remove = () => { node.removed = true; };
@@ -88,10 +89,13 @@ assert.equal(clipboard, output);
 assert.equal(toasts.at(-1), "Copied");
 
 // Open shows the whole text full screen; Close removes it.
-click(button(row.body, "Open"));
+const opener = button(row.body, "Open");
+opener.focus();
+click(opener);
 const viewer = body.at(-1);
 assert.equal(viewer.tag, "dialog");
 assert.equal(viewer.attrs.class, "tool-viewer");
+assert.equal(browser.document.activeElement, button(viewer, "Close"), "viewer starts on Close");
 assert.equal(viewer.attrs.open, "", "without showModal the dialog is opened by attribute");
 assert.match(text(viewer), /line 40/);
 const wrap = button(viewer, "Wrap");
@@ -101,6 +105,19 @@ assert.equal(wrap.attrs["aria-pressed"], "false");
 assert.equal(find(viewer, (x) => x.tag === "pre").className, "tool-viewer-text");
 click(button(viewer, "Close"));
 assert.ok(viewer.removed, "Close removes the viewer");
+assert.equal(browser.document.activeElement, opener, "Close returns focus to Open");
+click(opener);
+let prevented = false;
+body.at(-1).fire("cancel", { preventDefault() { prevented = true; } });
+assert.ok(prevented && body.at(-1).removed, "Escape dismisses and removes the viewer");
+assert.equal(browser.document.activeElement, opener);
+click(opener);
+const backdropViewer = body.at(-1);
+backdropViewer.fire("click", { target: backdropViewer });
+assert.equal(backdropViewer.removed, false, "dragging text onto the backdrop does not dismiss");
+backdropViewer.fire("pointerdown", { target: backdropViewer });
+backdropViewer.fire("click", { target: backdropViewer });
+assert.ok(backdropViewer.removed, "a backdrop press dismisses");
 
 // Without clipboard access, Copy opens the viewer so the text can be copied by hand.
 clipboardFails = true;

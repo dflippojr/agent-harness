@@ -55,3 +55,17 @@ def test_sheets_behave():
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok: in-app sheets confirm, prompt, validate and dismiss" in result.stdout
+
+
+def test_desktop_sheet_actions_and_output_modal():
+    css = (WEB / "style.css").read_text(encoding="utf-8")
+    desktop = css.split("/* Desktop 9:", 1)[1].split("\n.note", 1)[0]
+    assert "@media (min-width: 768px)" in desktop
+    assert "justify-content: flex-end" in _rule(desktop, ".sheet-actions")
+    buttons = _rule(desktop, ".sheet-actions .btn")
+    assert "flex: 0 1 auto" in buttons
+    assert "min-height: var(--tap)" in buttons
+    viewer = _rule(desktop, ".tool-viewer")
+    assert "margin: auto" in viewer
+    assert "max-width: 960px" in viewer
+    assert "100dvh - 64px" in viewer

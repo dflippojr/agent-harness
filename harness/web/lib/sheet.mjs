@@ -73,8 +73,8 @@ function openSheet({ title, message, fields = [], confirmLabel, cancelLabel = "C
 
     doc.body.append(dialog);
     if (dialog.showModal) dialog.showModal(); else dialog.setAttribute("open", "");
-    // A destructive sheet starts on the safe choice; an input sheet on its first field.
-    (inputs[0] || (destructive ? cancel : ok)).focus?.();
+    // Confirmations start on the safe choice; input sheets start on their first field.
+    (inputs[0] || cancel).focus?.();
   });
 }
 
