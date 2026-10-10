@@ -238,3 +238,40 @@ def test_attach_propagates_not_found_without_creating_anything():
         with pytest.raises(HarnessError) as exc:
             sdk.attach("s1")
     assert exc.value.status == 404
+
+
+def test_sdk_pair_keeps_the_minted_app_and_its_catalog_app_id(tmp_path):
+    """Synthetic round trip: the pairing response's typed `app` object reaches `Harness.paired_app`."""
+    app = {"id": "k-1234abcd", "name": "shop", "prefix": "ha-abcdefg", "created_at": 1.0, "scopes": "sessions",
+           "kind": "app", "origins": ["https://shop.example"], "catalog_app_id": "com.example.shop"}
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(201, json={"token": "ha-" + "x" * 43, "app": app, "api_version": "1.22"})
+
+    real_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+    sdk_module.httpx.Client = lambda **kw: real_client(transport=transport, **kw)
+    try:
+        paired = Harness.pair("https://daemon.example", "hp-code", "https://shop.example")
+    finally:
+        sdk_module.httpx.Client = real_client
+    try:
+        assert paired.paired_app == app
+        assert seen[0].headers["Origin"] == "https://shop.example"
+        assert json.loads(seen[0].content) == {"code": "hp-code"}
+    finally:
+        paired.close()
+
+    manager = Manager(make_cfg(tmp_path))
+    with TestClient(create_app(manager)) as client:
+        schema = client.get("/openapi.json").json()
+    sdk = Harness("http://unused.invalid")
+    try:
+        drifted = copy.deepcopy(schema)
+        drifted["components"]["schemas"]["PairedAppResponse"]["properties"].pop("catalog_app_id")
+        with pytest.raises(ContractError, match="catalog_app_id"):
+            sdk.validate_openapi(drifted)
+    finally:
+        sdk.close()

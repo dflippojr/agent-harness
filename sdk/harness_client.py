@@ -62,6 +62,17 @@ SDK_REQUEST_FIELDS = {
 }
 
 
+class PairedApp(TypedDict, total=False):
+    id: str
+    name: str
+    prefix: str
+    created_at: float
+    scopes: str
+    kind: str
+    origins: list[str]
+    catalog_app_id: str
+
+
 class Capabilities(TypedDict, total=False):
     profile: str
     required: dict[str, bool]
@@ -140,6 +151,10 @@ SDK_RESPONSE_TYPES = {
     SDK_OPERATIONS["cancel"]: ("200", Session, False),
     SDK_OPERATIONS["pending_approvals"]: ("200", Approval, True),
     SDK_OPERATIONS["decide_approval"]: ("200", Approval, False),
+}
+# Objects nested in a response: (operation, property) -> (status, TypedDict).
+SDK_NESTED_RESPONSE_TYPES = {
+    (SDK_OPERATIONS["pair"], "app"): ("201", PairedApp),
 }
 
 
@@ -223,6 +238,7 @@ class Harness:
         self.token = token
         self.origin = origin
         self.audit_warning = ""
+        self.paired_app: PairedApp | None = None  # set by pair(): the key it minted, without the secret
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         if origin:
             headers["Origin"] = origin
@@ -239,13 +255,16 @@ class Harness:
 
     @classmethod
     def pair(cls, base_url: str, code: str, origin: str, timeout: float = 60) -> "Harness":
-        """Redeem a one-time browser pairing code and return an origin-bound client."""
+        """Redeem a one-time browser pairing code and return an origin-bound client. Its `paired_app` is the key
+        the code minted (name, scopes, `catalog_app_id`, ...), without the secret."""
         with httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout, headers={"Origin": origin}) as client:
             resp = client.post("/api/v1/pair", json={"code": code})
             if resp.status_code >= 400:
                 cls._raise_response(resp)
             paired = resp.json()
-        return cls(base_url, paired["token"], timeout=timeout, origin=origin)
+        harness = cls(base_url, paired["token"], timeout=timeout, origin=origin)
+        harness.paired_app = paired.get("app") or {}
+        return harness
 
     # plumbing
     @staticmethod
@@ -312,7 +331,7 @@ class Harness:
         return None
 
     def _check_response_fields(self, schema: dict, method: str, path: str, status: str, response_type: type,
-                               is_list: bool) -> str | None:
+                               is_list: bool, nested: str = "") -> str | None:
         operation = (schema.get("paths", {}).get(path) or {}).get(method) or {}
         response = (((operation.get("responses") or {}).get(status) or {}).get("content") or {}).get(
             JSON_MEDIA_TYPE, {}).get("schema")
@@ -321,6 +340,8 @@ class Harness:
         if is_list:
             response = response.get("items") or {}
         response = self._resolve_schema(schema, response)
+        if nested:
+            response = self._resolve_schema(schema, (response.get("properties") or {}).get(nested) or {})
         missing = set(response_type.__annotations__) - set((response.get("properties") or {}).keys())
         if missing:
             return f"{method.upper()} {path}: SDK response fields missing from OpenAPI: {sorted(missing)}"
@@ -334,6 +355,8 @@ class Harness:
                  for name, (method, path) in SDK_OPERATIONS.items()]
         found += [self._check_response_fields(schema, method, path, status, response_type, is_list)
                   for (method, path), (status, response_type, is_list) in SDK_RESPONSE_TYPES.items()]
+        found += [self._check_response_fields(schema, method, path, status, response_type, False, prop)
+                  for ((method, path), prop), (status, response_type) in SDK_NESTED_RESPONSE_TYPES.items()]
         errors = [e for e in found if e]
         version = str((self.info() if fetched else {}).get("api_version") or "")
         major, _, _ = version.partition(".")

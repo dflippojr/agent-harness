@@ -292,6 +292,20 @@ const paired = await fetch(`${daemon}/api/v1/pair`, {
 const token = paired.token;
 ```
 
+The response's `app` object describes the key the code minted (`id`, `name`, `prefix`, `scopes`, `kind`, `origins`,
+`catalog_app_id`), never its secret beyond the one-time `token`.
+
+### Catalog app id
+
+A key or pairing code can carry an optional `catalog_app_id` (#518): a stable label naming the listing or Hub entry
+the App belongs to, so the Hub matches on it instead of on the free-text name. It is a lowercase reverse-DNS id
+(`docs/marketplace-design.md` section 4.2, for example `com.example.shopping`), at most 120 characters. Set it on
+`POST /pairing-codes` or `POST /keys` (`--catalog-app-id` on `harness pairing-codes create` and `harness keys create`);
+a pairing code copies it to the key it mints. Absent means empty, and `GET /keys`, `GET /pairing-codes` and the pairing
+response report `""`. It grants nothing and is never part of a token: a minted token has the same shape with or
+without it. Uppercase, spaces, more than 120 characters or a token-looking `ha-`, `ho-`, `hp-`, `hk-` or `hrp-`
+prefix is refused with 400.
+
 The resulting `ha-...` credential is scoped, revocable, and bound to the approved origin. It is an Agent Harness App
 credential, never a Claude, Codex, Cursor, or other provider credential. Keep it out of URLs and logs; send it in
 `Authorization: Bearer ...`. Agent Harness Server emits `Access-Control-Allow-Origin` only for the exact paired origin, never
@@ -842,6 +856,7 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
 | 1.17 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions live in `<data_dir>/apps/app-web/harness.sqlite3`. An App without `sessions:all` never reads it: `/api/v1/queue` and the live session list no longer include the owner's sessions for it, and its id lookups cover its own sessions only |
+| 1.22 | 2026-10-09 | Optional `catalog_app_id` on keys and pairing codes (#518): set on `POST /pairing-codes` and `POST /keys`, copied to the key a pairing code mints, and reported by `GET /keys`, `GET /pairing-codes` and the `app` object of `POST /api/v1/pair` (now a typed `PairedAppResponse`). A label only; it grants nothing and is never in a token |
 | 1.21 | 2026-10-09 | `memory_library` and `homelab` scopes: an App session gets those tools only when its token holds the scope, and an unset `app.capabilities` means what the token's scopes allow. App sessions on a local project clone only its base branch, and erasing one deletes its `agent/<session id>` branch from a local project |
 | 1.19 | 2026-10-05 | End users' own subscription logins (#365): `end_user` on session create and `/api/v1/end-users/{id}/logins/{backend}` (start, code, status, unlink), for `claude` and `codex`. Members' own API keys (#393): `/api/v1/me/api-keys`, and a member's `backend` `claude` or `codex` runs on their own key; `member:` is reserved in `end_user` |
 | 1.18 | 2026-10-05 | `codex` runs App-tools-only sessions and is listed in `app_tools_only_backends`; hosted Codex sessions get the harness tools over MCP (#373) |

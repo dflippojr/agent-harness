@@ -347,8 +347,8 @@ the compatibility routes share one handler, so a change is never logged twice.
 
 | Action | Written by | Target and metadata |
 | --- | --- | --- |
-| `key.create`, `key.revoke` | `POST /keys`, `DELETE /keys/{kid}` | opaque key id; `kind`, scope names |
-| `pairing.create`, `pairing.revoke`, `pairing.redeem` | `/pairing-codes`, `POST /api/v1/pair` | pairing and key ids; scope names |
+| `key.create`, `key.revoke` | `POST /keys`, `DELETE /keys/{kid}` | opaque key id; `kind`, scope names; `catalog_app_id` on create |
+| `pairing.create`, `pairing.revoke`, `pairing.redeem` | `/pairing-codes`, `POST /api/v1/pair` | pairing and key ids; scope names; `catalog_app_id` on create and redeem |
 | `runner_pairing.create`, `.revoke`, `.redeem` | `/runner-pairing-codes`, `POST /api/v1/runner-pair` | pairing and key ids |
 | `app.restore`, `app.retention` | `POST .../apps/{id}/restore`, `PUT .../apps/{id}/retention` | App id; old/new retention days (or null) |
 | `provider_grant.set`, `provider_grant.revoke` | `.../provider-credentials` | grant, previous grant and App ids; backend, policy, changed field names |
@@ -565,6 +565,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.21 | 2026-10-09 | Optional `catalog_app_id` on `POST /keys` and `POST /pairing-codes` (#518, see [App API](app-api.md#catalog-app-id)): a lowercase reverse-DNS label, at most 120 characters, reported by `GET /keys` and `GET /pairing-codes` (`""` when absent) and in the `key.create`, `pairing.create` and `pairing.redeem` audit metadata. An invalid value is refused with 400 and a `denied` audit row. It grants nothing and is never part of a token |
 | 1.20 | 2026-10-04 | Nightly backups include known members' and Apps' transcript archives; backup results add `transcript_archives` and `warnings` (#378) |
 | 1.19 | 2026-10-04 | Management parity (#334): checkpoints (list, rewind, fork), secret-finding fix and dismiss, taint clear, and GitHub tasks (items, item, `POST /github/sessions`) answer under `/api/admin/v1`, where Agent Harness Web already called them. Every owner setting and action Web offers has an Agent Harness CLI command ([management-parity.md](management-parity.md)) |
 | 1.18 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions move into `<data_dir>/apps/app-web/harness.sqlite3` at startup (`HARNESS_WEB_STORE_MIGRATION=dry-run` only logs what would move). `/metrics`, smart-approval stats and Control Center counts read it. Web is registered as `app-web` (kind `web`, no key): not in `GET /keys`, `404` from `DELETE /keys/app-web` and its retention route. Backups add `apps/app-web.sqlite3` |

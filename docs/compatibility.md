@@ -20,6 +20,10 @@ reload; unsaved form input blocks the reload. An unsupported shell shows a block
 purges only the static shell cache, asks the service worker to update, and uses a session guard to prevent reload
 loops. API responses, event streams, images, and transcripts are never cached.
 
+Example of an additive field: `catalog_app_id` (App API 1.22, owner API 1.21, #518) appears on keys, pairing codes and
+the pairing response. Older clients ignore it, an older Server ignores it in a create request (the key or code is
+made without it), and the Python SDK exposes it as `Harness.pair(...).paired_app["catalog_app_id"]`.
+
 ## Agent Harness for Mac
 
 ```sh
