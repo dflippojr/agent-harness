@@ -42,6 +42,8 @@ class FakeDocker:
         if verb in ("restart", "kill"):
             self.restarted.set()
         elif verb == "exec":
+            for name in args[-1].split()[2:] if args[-1].startswith("rm -f ") else ():
+                (self.workspace / name).unlink()
             for _ in range(self.chunks):
                 if self.restarted.is_set():
                     return 137, "", ""
@@ -110,11 +112,12 @@ def test_workspace_already_over_quota_may_shrink_but_not_grow(monkeypatch, tmp_p
     for i in range(30):
         (tmp_path / f"old{i}").write_bytes(b"\0" * MB)
     box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(10 * MB, 100 * MB))
-    assert asyncio.run(box.exec("rm -rf build"))[0] == 0     # no growth: runs
+    assert asyncio.run(box.exec("rm -f " + " ".join(f"old{i}" for i in range(10))))[0] == 0   # shrinking runs
+    assert len(list(tmp_path.iterdir())) == 20
     fake.chunks = 200
     with pytest.raises(sandbox.DiskLimitExceeded):
         asyncio.run(box.exec("make huge"))
-    assert fake.written < 10
+    assert fake.written < 10                                  # still over quota at 20 MB: no growth
 
 
 def test_member_growth_is_capped_by_the_account_quota(monkeypatch, tmp_path):
