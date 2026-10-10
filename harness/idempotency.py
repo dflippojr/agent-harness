@@ -53,8 +53,11 @@ def new_record(app_id: str, key: str, body: dict) -> dict:
 
 def replayed_session(store, record: dict) -> str | None:
     """The id of the session this key already created, or None when the key is free. Raises 409 for a different
-    request and 410 when that session was erased."""
-    row = store.find_idempotency_key(record["key_hash"], clock())
+    request and 410 when that session was erased. Restamps `record` with the time of this look, so the insert that
+    follows clears an expired row by the same clock that found the key free."""
+    now = clock()
+    record.update(created_at=now, expires_at=now + WINDOW_SECONDS)
+    row = store.find_idempotency_key(record["key_hash"], now)
     if row is None:
         return None
     if row["request_digest"] != record["request_digest"]:

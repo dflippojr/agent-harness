@@ -296,3 +296,18 @@ def test_the_sdk_forwards_the_key_and_a_lost_response_is_recovered_by_retrying(t
         assert sdk.run("plan lunch", idempotency_key="order-8").session["id"] == result.session["id"]
         assert sdk.create_session("plan dinner")["id"] != first["id"]  # no key: a new session, nothing retried
         assert len(m.db.app_session_ids(app_id)) == 3
+
+
+def test_a_key_that_expires_while_the_request_is_checked_is_reused_not_a_500(tmp_path, clock, monkeypatch):
+    m = _manager(make_cfg(tmp_path))
+    client = TestClient(create_app(m))
+    with client:
+        app_id, auth = _key(client, "shop", "sessions")
+        first = _post(client, auth, "k").json()["id"]
+        expiry = clock[0] + idempotency.WINDOW_SECONDS
+        # The retry's record is made a second before the key expires; the looks that follow run after it has.
+        ticks = iter([expiry - 1])
+        monkeypatch.setattr(idempotency, "clock", lambda: next(ticks, expiry))
+        r = _post(client, auth, "k")
+        assert r.status_code == 201 and r.json()["id"] != first
+        assert len(m.db.app_session_ids(app_id)) == 2

@@ -1022,7 +1022,7 @@ async def api_review(ref: str, action: str, request: Request):
     return m.summary(await m.review(s["id"], action, context=audit_context.owner_context(key, "app_api") if owner_key(key) else None))
 
 
-def _idempotent_create(key: dict, body: CreateAppSession, idempotency_key: str | None) -> dict | None:
+def _idempotency_record(key: dict, body: CreateAppSession, idempotency_key: str | None) -> dict | None:
     """The row an App's `Idempotency-Key` would record (#462), or None for an unkeyed request."""
     if idempotency_key is None:
         return None
@@ -1046,8 +1046,8 @@ _CREATE_RESPONSES = {
           "first request created, as it is now, with `Idempotency-Replayed: true`. Nothing new starts.",
           "headers": {idempotency.REPLAYED_HEADER: {"description": "`true` on a replay", "schema": {"type": "string"}}}},
     201: {"description": "A new session."},
-    409: {"description": "`idempotency_conflict`: the Idempotency-Key was used for a different request in the last "
-          "24 hours (or another conflict, such as `end_user_login_required`)."},
+    409: {"description": "A conflict, named by `error.code`. `idempotency_conflict`: the Idempotency-Key was used for "
+          "a different request in the last 24 hours."},
     410: {"description": "`idempotency_session_erased`: the session this Idempotency-Key created was erased; it is "
           "not created again until the key expires."},
 }
@@ -1061,7 +1061,7 @@ async def create_session(body: CreateAppSession, request: Request,
                              "starting another."))):
     m = mgr(request)
     key = auth(request, "sessions")
-    record = _idempotent_create(key, body, idempotency_key)
+    record = _idempotency_record(key, body, idempotency_key)
     if (replay := _replay(m, key, record)) is not None:
         return replay
     user_id = "owner"

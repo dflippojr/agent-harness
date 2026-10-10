@@ -611,6 +611,8 @@ for attempt in range(3):
         break
     except httpx.TransportError:  # the response was lost: the session may exist; the same key finds it
         continue
+else:
+    raise RuntimeError("the daemon is unreachable; retry later with the same key")
 ```
 
 `h.run(prompt, tools=..., idempotency_key=key)` forwards the key the same way.
