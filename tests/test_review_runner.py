@@ -175,6 +175,40 @@ foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), ('./' + ('T' * 4
     assert "safe paths, unsafe tokens" in result.stdout
 
 
+def test_known_bracketed_paths_cannot_hide_absolute_profile_paths(tmp_path):
+    paths = ["app/[locale]/home/components/Nav.tsx", "app/[locale]/Users/reviewer/config.py",
+             "app/{locale}/root/settings.py", "\U0001f43e/home/reviewer/config.py"]
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True)
+        target.write_text("# synthetic file\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    result = run_powershell(
+        tmp_path,
+        f"""
+$paths = '{json.dumps(paths, ensure_ascii=True)}' | ConvertFrom-Json
+$out = Join-Path '{tmp_path}' 'review-output.md'
+foreach ($path in $paths) {{
+    $review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = "$path`:12: finding" }}
+    Write-ReviewResult -Result $review -OutputPath $out -Workspace '{tmp_path}'
+}}
+$review.Output = $paths[0]
+Write-ReviewResult -Result $review -OutputPath $out -DiffPaths @($paths[0])
+foreach ($absolute in @('C:/Users/reviewer/', '/home/reviewer/', 'C:/temp/../Users/reviewer/')) {{
+    $review.Output = $absolute + $paths[0]
+    $failure = ''
+    try {{ Write-ReviewResult -Result $review -OutputPath $out -Workspace '{tmp_path}' -DiffPaths $paths }}
+    catch {{ $failure = $_.Exception.Message }}
+    if ($failure -notlike 'Review did not complete*' -or (Test-Path $out)) {{ throw 'Absolute profile reference was exempted' }}
+}}
+'known relative paths and absolute profiles verified'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "known relative paths and absolute profiles verified" in result.stdout
+
+
 def test_unicode_relative_paths_are_not_absolute_profiles(tmp_path):
     paths = ["caf\u00e9/home/reviewer/config.py", "cafe\u0301/Users/reviewer/config.py",
              "\u8cc7\u6599/root/config.py", "\u00e9/Device/Volume1/Users/reviewer/config.py"]

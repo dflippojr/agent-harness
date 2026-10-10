@@ -233,15 +233,18 @@ long tokens), plus Windows/macOS/Linux user-profile absolute paths. A match disc
 stale output and fails closed with `Review did not complete`; nothing is posted or copied into the check summary.
 Profile checks also normalize file URLs and their percent escapes, Windows extended/device and NT DOS-device prefixes,
 UNC paths, dot segments and repeated separators, including quoted paths with spaces, without filesystem access.
+The conservative scan includes Windows trailing-period/space aliases; see
+[Microsoft's path normalization rules](https://learn.microsoft.com/en-us/dotnet/standard/io/file-path-formats#trim-characters).
 Git-quoted paths are decoded as UTF-8 bytes
 before matching repository citations, including deleted or renamed non-ASCII filenames. Patch and rename/copy metadata
 disambiguate filenames containing the diff header's ` b/` separator.
 This is intentionally conservative: benign prose and examples matching a credential pattern are also rejected.
 Quote authentication scheme names in backticks (for example, `Bearer`) rather than printing a value-like sequence.
-Known repository paths (from the Git index or all diff files, including deletions and both rename sides) are exempt only from the generic long-token
-heuristic, so ordinary long file citations (including `./` prefixes and Windows separators) and partial-coverage lists
-remain publishable. The credential, provider-token
-and profile-path patterns still check the original text. Validated Git metadata in the coverage marker is added only
+Known relative repository citations (from the Git index or all diff files, including deletions and both rename sides)
+are exempt from the generic long-token heuristic and recognized before absolute-profile-path matching. Ordinary long
+citations (including `./` prefixes, Windows separators and bracketed directories) and partial-coverage lists remain
+publishable. Absolute drive/root prefixes cannot use this citation exemption. Credential and provider-token patterns
+still check the original text. Validated Git metadata in the coverage marker is added only
 after the scan. It fetches the pull
 request diff before starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review
 sandboxes do not need GitHub network access. Larger diffs identify every omitted file in the prompt. After installing or

@@ -370,11 +370,13 @@ function Convert-ReviewProfilePathForms {
         $quote = $match.Groups['Quote'].Value
         $prefix = '/'
         $rootDepths = @(0)
+        $windowsPath = $false
         if ($path -match '^([A-Za-z]:)/+') {
+            $windowsPath = $true
             $prefix = $Matches[1] + '/'
             $path = $path.Substring($Matches[0].Length)
         } else {
-            if ($path.StartsWith('//')) { $prefix = '//'; $rootDepths = @(2, 0) }
+            if ($path.StartsWith('//')) { $prefix = '//'; $rootDepths = @(2, 0); $windowsPath = $true }
             $path = $path.TrimStart('/')
         }
         $preferred = $null
@@ -382,12 +384,18 @@ function Convert-ReviewProfilePathForms {
         foreach ($minimum in $rootDepths) {
             $parts = New-Object System.Collections.Generic.List[string]
             foreach ($part in ($path -split '/+')) {
+                if ($windowsPath) { $part = $part.TrimEnd(' ') }
                 if (-not $part -or $part -eq '.') { continue }
                 if ($part -eq '..') {
                     if ($parts.Count -gt $minimum) { $parts.RemoveAt($parts.Count - 1) }
                     continue
                 }
+                if ($windowsPath) { $part = $part.TrimEnd('.') }
+                if (-not $part) { continue }
                 $parts.Add($part)
+                # Once a protected prefix appears, later prose or another path must not erase it.
+                $candidate = $prefix + ($parts -join '/')
+                if ($candidate -match $Pattern) { return $quote + $candidate + $quote }
             }
             $candidate = $prefix + ($parts -join '/')
             if ($null -eq $preferred) { $preferred = $candidate }
@@ -429,6 +437,34 @@ function ConvertFrom-ReviewGitQuotedPath {
     return $utf8.GetString($decoded.ToArray())
 }
 
+function Get-ReviewRepositoryPaths {
+    param([string]$Workspace, [string[]]$DiffPaths = @())
+
+    $paths = @()
+    if ($Workspace) {
+        try {
+            # Reading the index must not launch fsmonitor; ASCII quoting survives Windows code pages.
+            $paths = @(& git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=true -C $Workspace ls-files --cached 2>$null)
+            if ($LASTEXITCODE -ne 0) { $paths = @() }
+        } catch { $paths = @() }
+        $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
+    }
+    return @($paths + $DiffPaths | Where-Object {
+        $_ -and $_ -notmatch '(^[/\\]|^[A-Za-z]:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
+    } | Select-Object -Unique)
+}
+
+function Remove-ReviewRepositoryCitations {
+    param([string]$Text, [string[]]$Paths)
+
+    foreach ($path in $Paths) {
+        $pathPattern = [regex]::Escape($path).Replace('/', '[/\\](?:\.[/\\])*')
+        $pattern = '(?<![\p{L}\p{N}\p{M}_./\\-])(?:\.[/\\])*' + $pathPattern + '(?![\p{L}\p{N}\p{M}_./\\-])'
+        $Text = [regex]::Replace($Text, $pattern, '[REPOSITORY PATH]')
+    }
+    return $Text
+}
+
 function Assert-ReviewOutputSafe {
     [CmdletBinding()]
     param(
@@ -437,31 +473,21 @@ function Assert-ReviewOutputSafe {
         [string[]]$DiffPaths = @()
     )
 
+    $knownPaths = $null
     foreach ($rule in (Get-ReviewRedactionRules)) {
         $scanText = $Text
+        $profileRule = [bool]$rule.PSObject.Properties['NormalizeProfilePaths']
+        $repositoryRule = [bool]$rule.PSObject.Properties['RepositoryPathsAllowed']
+        if (($profileRule -or $repositoryRule) -and ($Workspace -or $DiffPaths.Count -gt 0)) {
+            if ($null -eq $knownPaths) { $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths) }
+            # Exact known relative citations cannot be absolute profile paths. Drive/root prefixes never match.
+            # Credential and provider-token patterns always scan the original body.
+            $scanText = Remove-ReviewRepositoryCitations -Text $scanText -Paths $knownPaths
+        }
         if ($rule.PSObject.Properties['NormalizeProfilePaths']) {
             # Canonicalization must not weaken a profile-path match already present in the original body.
-            if ($Text -match $rule.Pattern) { throw 'Review did not complete: output failed the publication safety scan.' }
+            if ($scanText -match $rule.Pattern) { throw 'Review did not complete: output failed the publication safety scan.' }
             $scanText = Convert-ReviewProfilePathForms -Text $scanText -Pattern $rule.Pattern
-        }
-        if ($rule.PSObject.Properties['RepositoryPathsAllowed'] -and $Text -match $rule.Pattern -and $Workspace) {
-            # Only the generic long-token heuristic exempts known repository paths.
-            # Provider-token, credential and profile-path rules still scan the original text.
-            # Disable fsmonitor so reading the index cannot launch a configured hook.
-            $paths = @()
-            try {
-                # ASCII C-style quoting survives the original Windows console code page.
-                $paths = @(& git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=true -C $Workspace ls-files --cached 2>$null)
-                if ($LASTEXITCODE -ne 0) { $paths = @() }
-            } catch { $paths = @() }
-            $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
-            $paths += $DiffPaths
-            foreach ($path in $paths) {
-                if (-not $path -or $path -match '(^[/\\]|^[A-Za-z]:|[\r\n]|(^|/)\.\.(/|$))') { continue }
-                $pathPattern = [regex]::Escape($path).Replace('/', '[/\\]')
-                $pattern = '(?<![\p{L}\p{N}\p{M}_./\\-])(?:\.[/\\])*' + $pathPattern + '(?![\p{L}\p{N}\p{M}_./\\-])'
-                $scanText = [regex]::Replace($scanText, $pattern, '[REPOSITORY PATH]')
-            }
         }
         if ($scanText -match $rule.Pattern) {
             throw 'Review did not complete: output failed the publication safety scan.'
