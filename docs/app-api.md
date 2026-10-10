@@ -365,11 +365,12 @@ The App then redeems as in step 3.
 **Lifetimes and refusals.** A request has 10 minutes to be approved (or claimed, or confirmed) and 5 minutes after
 approval to be redeemed. A redeemed, denied or expired request is never reused. The redeem refuses a wrong verifier
 (400), the wrong origin or a browser redeeming a native request (403), a denied request (403), and an expired or
-already redeemed one (400). None of these mint anything. One origin, tailnet login or address may make 10 requests in
-10 minutes and keep 3 waiting for the owner, and the daemon holds at most 50 waiting requests from all callers; past
-that it answers 429 (`rate_limited` or `too_many_pending`). `admin` is never an App scope and is refused when the
-request is made. Scopes are only what the owner approved, never what a listing claims. Nothing secret goes in a URL:
-the request id is not a credential, and the token is released only to the holder of the verifier.
+already redeemed one (400). None of these mint anything. One caller (its tailnet login, or its address for a request
+straight to the daemon, whatever Origin it sends) may make 10 requests in 10 minutes and keep 3 waiting for the owner,
+and the daemon holds at most 50 waiting requests from all callers; past that it answers 429 (`rate_limited` or
+`too_many_pending`). `admin` is never an App scope and is refused when the request is made. Scopes are only what the
+owner approved, never what a listing claims. Nothing secret goes in a URL: the request id is not a credential, and the
+token is released only to the holder of the verifier.
 
 These routes take no token. They also answer an App on the daemon's own machine that has no local owner token, since
 the owner's approval and the verifier are the checks. The Python SDK holds the verifier for you:

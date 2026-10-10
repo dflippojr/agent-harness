@@ -41,8 +41,9 @@ ACTIVE = (PENDING, ARMED, CLAIMED, APPROVED)
 APPROVE_TTL_SECONDS = 10 * 60   # to approve, claim or confirm (decision 3)
 REDEEM_TTL_SECONDS = 5 * 60     # to fetch the token once approved
 KEEP_SECONDS = 24 * 3600        # finished requests stay listed this long
-# One source (an origin, tailnet login or address) may ask this often and keep this many requests waiting; past the
-# global cap nobody can add another until the owner decides or they expire.
+# One caller (the tailnet login tailscaled vouched for, else the connection's address) may ask this often and keep this
+# many requests waiting, whatever Origin it sends; past the global cap nobody can add another until the owner decides or
+# they expire.
 SOURCE_RATE = (10, 10 * 60)
 SOURCE_PENDING_CAP = 3
 PENDING_CAP = 50
@@ -197,14 +198,11 @@ def _request_origin(request: Request) -> str:
         raise HarnessError(403, str(e))
 
 
-def _source(request: Request, origin: str) -> str:
-    """Who asked, hashed: a browser App's origin, else the tailnet login tailscaled vouched for, else the address."""
-    if origin:
-        raw = "origin:" + origin
-    elif request.headers.get("tailscale-user-login"):
-        raw = "login:" + request.headers["tailscale-user-login"]
-    else:
-        raw = "addr:" + (request.client.host if request.client else "")
+def _caller(request: Request) -> str:
+    """Who asked, hashed: the tailnet login tailscaled vouched for, else the connection's address. Never the Origin,
+    which any native client can set to anything, so one caller cannot spend another's allowance by naming its App."""
+    login = request.headers.get("tailscale-user-login")
+    raw = "login:" + login if login else "addr:" + (request.client.host if request.client else "")
     return _digest(raw)
 
 
@@ -231,7 +229,7 @@ def register_app(app: FastAPI) -> None:
         """Ask the owner to pair this App (#519). Returns the request id and a match code to show the user."""
         m = mgr(request)
         origin = _request_origin(request)
-        source = _source(request, origin)
+        source = _caller(request)
         unknown = credential_audit.unknown_context()
         try:
             name = body.name.strip()

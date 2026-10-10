@@ -60,9 +60,9 @@ class Recorder:
         return r
 
 
-def _ask(client, origin="", scopes=("sessions",), name="Shopping list", **extra):
+def _ask(client, origin="", scopes=("sessions",), name="Shopping list", headers=None, **extra):
     verifier, challenge = _pkce()
-    headers = {"Origin": origin} if origin else {}
+    headers = {**(headers or {}), **({"Origin": origin} if origin else {})}
     r = client.post("/api/v1/pair/requests", headers=headers, json={
         "name": name, "scopes": list(scopes), "code_challenge": challenge, **extra})
     return r, verifier
@@ -315,13 +315,13 @@ def test_concurrent_redeems_mint_one_key(hh):
     assert len(_app_keys(m)) == 1
 
 
-def test_cap_and_rate_limit_per_source(hh, clock):
+def test_cap_and_rate_limit_per_caller(hh, clock):
     client, _ = hh
     for _ in range(pr.SOURCE_PENDING_CAP):
         assert _ask(client, ORIGIN)[0].status_code == 201
     capped = _ask(client, ORIGIN)[0]
     assert capped.status_code == 429 and capped.json()["error"]["code"] == "too_many_pending"
-    assert _ask(client, OTHER)[0].status_code == 201  # another source is unaffected
+    assert _ask(client, ORIGIN, headers=H(OWNER))[0].status_code == 201  # another caller is unaffected
     for row in client.get(BASE, headers=H(OWNER)).json():
         client.post(f"{BASE}/{row['id']}/deny", headers=H(OWNER))
     for _ in range(pr.SOURCE_RATE[0] - pr.SOURCE_PENDING_CAP):
@@ -333,6 +333,33 @@ def test_cap_and_rate_limit_per_source(hh, clock):
     assert _ask(client, ORIGIN)[0].status_code == 201
     reasons = {r["metadata"]["reason"] for r in _audit(client, "pairing_request.create", outcome="denied")}
     assert reasons == {"too_many_pending", "rate_limited"}
+
+
+def test_a_caller_varying_its_origin_stays_under_its_own_cap(hh, clock):
+    """The Origin header is the caller's to choose, so inventing origins earns no more requests (#553 review)."""
+    client, _ = hh
+    for i in range(pr.SOURCE_PENDING_CAP):
+        assert _ask(client, f"https://app{i}.example")[0].status_code == 201
+    for origin in ("https://fresh.example", ""):
+        capped = _ask(client, origin)[0]
+        assert capped.status_code == 429 and capped.json()["error"]["code"] == "too_many_pending"
+    for row in client.get(BASE, headers=H(OWNER)).json():
+        client.post(f"{BASE}/{row['id']}/deny", headers=H(OWNER))
+    for i in range(pr.SOURCE_RATE[0] - pr.SOURCE_PENDING_CAP):
+        rid = _ask(client, f"https://more{i}.example")[0].json()["id"]
+        client.post(f"{BASE}/{rid}/deny", headers=H(OWNER))
+    limited = _ask(client, "https://yet-another.example")[0]
+    assert limited.status_code == 429 and limited.json()["error"]["code"] == "rate_limited"
+    assert _ask(client, ORIGIN, headers=H(OWNER))[0].status_code == 201  # the queue is still open to others
+
+
+def test_spoofing_an_apps_origin_does_not_spend_its_callers_allowance(hh):
+    client, _ = hh
+    for _ in range(pr.SOURCE_PENDING_CAP):  # a local caller claims to be the browser App
+        assert _ask(client, ORIGIN)[0].status_code == 201
+    assert _ask(client, ORIGIN)[0].status_code == 429
+    for _ in range(pr.SOURCE_PENDING_CAP):  # the real App, reached over the tailnet, still has its whole allowance
+        assert _ask(client, ORIGIN, headers=H(OWNER))[0].status_code == 201
 
 
 def test_an_app_on_this_machine_pairs_without_the_local_owner_token(hh):
