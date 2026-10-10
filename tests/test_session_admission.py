@@ -443,9 +443,10 @@ def test_a_message_racing_a_restart_of_the_same_session_joins_its_run(tmp_path):
         await m.stop()
     asyncio.run(body())
 
-def test_a_message_that_restarts_a_run_still_winding_down_gets_its_run(tmp_path):
-    """The request read the session running; its run reached its final status before the message's write, which then
-    restarts it while the old run's task is still ending: the new run starts when that task ends."""
+def test_a_message_waits_for_a_run_still_ending_before_it_restarts_the_session(tmp_path):
+    """The request read the session running; its run reached its final status before the message's write, but its
+    task is still ending it (run_finished, branch save): the message waits, so the ended run's answer and counters
+    are what that end records, then it restarts the session."""
     async def body():
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         await m.start()
@@ -453,7 +454,7 @@ def test_a_message_that_restarts_a_run_still_winding_down_gets_its_run(tmp_path)
         _insert(m, "winding001", "running", app_id=app_id)
         ending = asyncio.Event()
 
-        async def old_run():  # the previous run's task, finishing its end (branch save, transcript)
+        async def old_run():  # the previous run's task, finishing its end
             await ending.wait()
         m._spawn_task("winding001", old_run())
         real, raced = m._refuse_unsettled, []
@@ -461,19 +462,24 @@ def test_a_message_that_restarts_a_run_still_winding_down_gets_its_run(tmp_path)
         def run_reaches_its_final_status(s):  # after this request read it running, before its write
             if not raced:
                 raced.append(True)
-                m.db.update_session("winding001", status="done")
+                m.db.update_session("winding001", status="done", answer="the old answer", stop_reason="final_message")
             return real(s)
         m._refuse_unsettled = run_reaches_its_final_status
-        await m.send("winding001", "one more thing")
-        assert m.db.get_session("winding001")["status"] == "queued"
+        sending = asyncio.create_task(m.send("winding001", "one more thing"))
+        await asyncio.sleep(0.3)
+        assert not sending.done()
+        assert (m.get("winding001")["status"], m.get("winding001")["answer"]) == ("done", "the old answer")
         ending.set()
+        await asyncio.wait_for(sending, 5)
         s = await wait_status(m, "winding001", "done", "failed", timeout=10)
         assert (s["status"], s["answer"]) == ("done", "ok")
         await m.stop()
     asyncio.run(body())
 
-def test_a_message_that_restarts_a_run_ended_on_its_deadline_gets_its_run(tmp_path):
-    """As above, but the old run's task ends cancelled, as a deadline ends it: the queued run still starts."""
+
+def test_a_message_waits_for_a_run_its_deadline_is_ending(tmp_path):
+    """As above, but the old run's task ends cancelled, as a deadline ends it: the message still restarts the session
+    once it is over."""
     async def body():
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         await m.start()
@@ -492,8 +498,11 @@ def test_a_message_that_restarts_a_run_ended_on_its_deadline_gets_its_run(tmp_pa
                 m.db.update_session("winding002", status="done", stop_reason="budget_time")
             return real(s)
         m._refuse_unsettled = run_ends_on_its_budget
-        await m.send("winding002", "one more thing")
+        sending = asyncio.create_task(m.send("winding002", "one more thing"))
+        await asyncio.sleep(0.3)
+        assert not sending.done()
         old.cancel()
+        await asyncio.wait_for(sending, 5)
         s = await wait_status(m, "winding002", "done", "failed", timeout=10)
         assert (s["status"], s["answer"]) == ("done", "ok")
         await m.stop()

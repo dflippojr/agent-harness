@@ -122,6 +122,11 @@ def _secret_fix_summary(drafted: int, already: int, rewrite: int, pushed: int) -
     return " ".join(parts) or "There are no open findings to fix."
 
 
+class _RunStillEnding(Exception):
+    """In a message's write: the run it found active has reached its final status, but its task has not finished
+    ending it (run_finished, branch save). The message waits for that, then restarts the session (#524)."""
+
+
 class HarnessError(Exception):
     def __init__(self, status: int, message: str, code: str = "", keys: dict | None = None,
                  details: dict | None = None):
@@ -174,7 +179,6 @@ class Manager:
         self.hub = NoRunnerHub()
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
-        self._stopping = False
         # Active context managers/waiters retain their lock; idle erased namespaces retain no cache entry.
         self.erase_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         # Operations that need an idle session throughout (rewind, fork, review), by session: claimed in one write
@@ -323,7 +327,6 @@ class Manager:
 
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
-        self._stopping = True  # a run that ends now hands over to no queued one (the next start resumes it)
         await asyncio.to_thread(self.github_auth.shutdown)  # prompts and credentialed Git end with the daemon
         await asyncio.to_thread(self.end_user_logins.close)  # a sign-in in flight ends with the daemon
         if self.canary is not None:
@@ -914,6 +917,9 @@ class Manager:
             # The session as it is now, not as the request first read it: another message may have restarted it
             # meanwhile (this one then joins that run), or its run ended (this one restarts it).
             current = self.db.get_session(sid)
+            ending = self.tasks.get(sid)
+            if current["status"] not in ACTIVE and ending is not None and not ending.done():
+                raise _RunStillEnding()  # nothing written: the ended run's results stay as they are until it is over
             self._refuse_unsettled(current)
             self.bus.emit(sid, kind, {"content": content})
             if current["status"] in ACTIVE:
@@ -934,28 +940,19 @@ class Manager:
                 self.db.update_session(sid, context=context_, run=run, status="queued", stop_reason="", answer="")
                 self.bus.emit(sid, "status", {"status": "queued"})
             # With the commit, not after the await: a request cancelled mid-write still gets its run.
-            self.db.after_commit(lambda: self._run_queued(sid))
+            self.db.after_commit(lambda: sid in self.tasks or self._spawn(sid))
             namespace_audit.record(self.db, s, context,
                                    "session.context" if kind == "app_context" else "session.message",
                                    metadata={"fields": ["context" if kind == "app_context" else "content"]})
-        await self.db.for_session(sid).awrite(deliver)
+        while True:
+            try:
+                await self.db.for_session(sid).awrite(deliver)
+                break
+            except _RunStillEnding:
+                ending = self.tasks.get(sid)
+                if ending is not None:
+                    await asyncio.gather(ending, return_exceptions=True)
         return self.db.get_session(sid)
-
-    def _run_queued(self, sid: str) -> None:
-        """Give session `sid` its run unless one is going. A run still winding down (its status already final, as when
-        a message restarted the session meanwhile) hands over to the new one when its task ends (#524)."""
-        task = self.tasks.get(sid)
-        if task is None:
-            self._spawn(sid)
-            return
-
-        def hand_over(_ended: asyncio.Task) -> None:
-            # Nobody ran it: the old task ended (on its own, or cancelled by its deadline) and left it queued. A user's
-            # cancel leaves it cancelled; the daemon stopping leaves it for the next start.
-            s = self.db.get_session(sid)
-            if not self._stopping and sid not in self.tasks and s is not None and s["status"] == "queued":
-                self._spawn(sid)
-        task.add_done_callback(hand_over)
 
     def original_prompt(self, sid: str) -> str:
         for e in self.db.events(sid):
