@@ -895,8 +895,9 @@ class Manager:
         if s["status"] not in ACTIVE:
             user_id = session_user_id(s)
             if user_id != OWNER_USER_ID:
-                self._require_member_start(self.db.account_by_id(user_id), "session")
-            self._enforce_app_caps(s.get("app_id") or "")
+                # Its queue caps are counted in the write: by then another message may have restarted the session,
+                # and this one joins that run instead (#524).
+                self._require_member_start(self.db.account_by_id(user_id), "session", caps=False)
         # Chat: snippets the user ran since their last message reach the model with this one (the transcript keeps
         # the message as typed).
         model_content = self.snippets.context_for(sid) + content if s.get("kind") == "chat" else content
@@ -913,7 +914,8 @@ class Manager:
                 self.db.update_session(sid, inbox=current["inbox"] + [model_content])
             else:
                 if s["status"] in ACTIVE and session_user_id(current) != OWNER_USER_ID:
-                    self._require_member_start(self.db.account_by_id(session_user_id(current)), "session")
+                    self._require_member_start(self.db.account_by_id(session_user_id(current)), "session",
+                                               caps=False)
                 self._enforce_queue_caps(current)
                 run = new_run(carry=current["run"])
                 app_key = self.db.get_api_key(current["app_id"]) if current.get("app_id") else None
@@ -2104,10 +2106,11 @@ class Manager:
         from . import catalog
         return catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
 
-    def _require_member_start(self, account: dict | None, action: str) -> None:
+    def _require_member_start(self, account: dict | None, action: str, caps: bool = True) -> None:
         if account is None or not account.get("enabled", 1):
             raise HarnessError(403, ACCOUNT_DISABLED)
-        self._enforce_member_caps(account)
+        if caps:
+            self._enforce_member_caps(account)
         self._enforce_member_quota(account, action)
 
     def _enforce_member_caps(self, account: dict) -> None:

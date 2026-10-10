@@ -17,7 +17,7 @@ from harness.config import BackendConfig
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.principal import OWNER_USER_ID
-from harness.runner import HOLDS_PLACE, WAITING, CliLimitError, RunClock, unresolved_calls
+from harness.runner import HOLDS_PLACE, RUN_SECONDS, WAITING, CliLimitError, RunClock, unresolved_calls
 from harness.storage import workspaces_dir
 
 from test_app_stores import _key
@@ -416,6 +416,30 @@ def test_runs_saved_before_places_were_recorded_get_them_before_any_run_resumes(
         assert m.db.get_session("oldpark002")["run"].get(HOLDS_PLACE)  # recorded before the runs were spawned
         await asyncio.sleep(0.5)
         assert m.get("queued0006")["status"] == "queued"
+        await m.stop()
+    asyncio.run(body())
+
+def test_a_message_racing_a_restart_of_the_same_session_joins_its_run(tmp_path):
+    """The request read the session as finished, then another message restarted it before this one checked the queue
+    cap: it is not refused for the session it is about to join."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        await m.start()
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        assert m.db.set_app_limits(app_id, {"max_queued": 1})
+        m.scheduler.set_paused(True)
+        _insert(m, "finished04", "done", app_id=app_id)
+        real, raced = m._refuse_unsettled, []
+
+        def other_message_restarts_it(s):  # runs after this request read the session, before its checks
+            if not raced:
+                raced.append(True)
+                m.db.update_session("finished04", status="queued")
+            return real(s)
+        m._refuse_unsettled = other_message_restarts_it
+        await m.send("finished04", "second")
+        assert m.db.get_session("finished04")["inbox"] and raced
+        m.scheduler.set_paused(False)
         await m.stop()
     asyncio.run(body())
 
@@ -1067,6 +1091,55 @@ def test_a_hosted_run_falling_back_to_an_api_key_waits_for_its_slot_queued(tmp_p
         assert s["status"] == "queued" and s["run"]["backend_auth"] == "api_key" and s["run"].get(HOLDS_PLACE)
         assert m.runner._clocks["fallback01"].since is None  # its clock stopped
         assert m._scheduler_eligible("fallback01")
+    asyncio.run(body())
+
+
+def test_a_runs_time_spent_running_survives_a_daemon_restart(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.max_run_seconds = 1.5
+
+    async def body():
+        m = Manager(cfg, chat=SleepyModel(0.1))
+        await m.start()
+        app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
+        sid = m.create("loop", app=app)["id"]
+        await wait_status(m, sid, "running")
+        await asyncio.sleep(1.0)
+        await m.stop()                       # the daemon stops mid-run
+        kept = m.db.get_session(sid)["run"].get(RUN_SECONDS) or 0
+        assert kept >= 0.8
+        restarted = Manager(cfg, chat=SleepyModel(0.1))
+        started = time.monotonic()
+        await restarted.start()
+        s = await wait_status(restarted, sid, "done", "failed", timeout=10)
+        assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
+        assert time.monotonic() - started < 1.2  # what was left of its budget, not a fresh one
+        await restarted.stop()
+    asyncio.run(body())
+
+
+def test_a_cancelled_app_tool_wait_does_not_wait_for_the_gpu_again(tmp_path, monkeypatch):
+    """A local run ending (a deadline, a cancel) while it waits on an App's reply ends at once: it does not first
+    queue for the GPU it gave up, which another session may hold for a long time."""
+    import harness.apps as apps_mod
+    monkeypatch.setattr(apps_mod, "HOLD_SLOT_SECONDS", 0.05)
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "apptool001", "running", app_id=app_id)
+        m.db.update_session("apptool001", app_tools=[{"name": "lookup", "description": "d", "parameters": {},
+                                                      "timeout_seconds": 60}])
+        parked, resumed = asyncio.Event(), []
+
+        async def resume():
+            resumed.append(True)
+        call_ = asyncio.create_task(m.app_tools.call(m.db.get_session("apptool001"), "c1", "lookup", {},
+                                                     on_wait=parked.set, on_resume=resume))
+        await asyncio.wait_for(parked.wait(), 5)
+        call_.cancel()
+        await asyncio.gather(call_, return_exceptions=True)
+        assert resumed == []
     asyncio.run(body())
 
 

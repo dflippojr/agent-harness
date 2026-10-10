@@ -81,6 +81,7 @@ ACTIVE = ("queued", "running", *WAITING)
 # Set on `run` when the run first goes `running`: it holds a place under its member's or App's running cap until the
 # run ends, parked or queued again meanwhile (and across a daemon restart). new_run() does not carry it (#524).
 HOLDS_PLACE = "holds_place"
+RUN_SECONDS = "run_seconds"  # on `run`: its time spent running so far, kept for a restart (#524)
 # Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
 # cleared after its branch save and transcript: a daemon stopped in between leaves it set, and the next start finishes
 # that run's end from where it stopped (Manager.start).
@@ -661,10 +662,11 @@ class Runner:
     def _status_writer(self, sid: str, status: str, fields: dict):
         def set_status() -> None:
             marked = fields
-            if status == "running" and "run" not in fields:
+            clock = self._clocks.get(sid)
+            if "run" not in fields and (status == "running" or (clock is not None and clock.since is not None)):
                 run = (self.db.get_session(sid) or {}).get("run") or {}
-                if not run.get(HOLDS_PLACE):
-                    marked = {**fields, "run": {**run, HOLDS_PLACE: True}}
+                # Its first `running` marks its place; leaving `running` records the time it has spent (#524).
+                marked = {**fields, "run": {**run, HOLDS_PLACE: True, RUN_SECONDS: self._run_seconds(sid)}}
             self.db.update_session(sid, status=status, **marked)
             self._flag_end_pending(sid, status)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
@@ -939,10 +941,11 @@ class Runner:
 
     async def _run(self, sid: str, recovered: bool = False) -> None:
         self._unended.add(sid)
-        self._clocks[sid] = RunClock()  # a restart starts the clock again
+        s = self.db.get_session(sid)
+        # A recovered run goes on from the time it had spent running (a new run starts at 0: new_run() drops it).
+        self._clocks[sid] = RunClock(spent=float(((s or {}).get("run") or {}).get(RUN_SECONDS) or 0))
         watch = None
         try:
-            s = self.db.get_session(sid)
             # Every run: both deadlines are live settings, so one turned on mid-run applies to it too.
             watch = asyncio.create_task(self._watch_deadlines(sid, asyncio.current_task()))
             if s.get("kind") == TOOLS_ONLY and s.get("backend", "local") not in TOOLS_ONLY_BACKENDS:
@@ -988,6 +991,7 @@ class Runner:
         finally:
             if watch is not None:
                 watch.cancel()
+            await asyncio.shield(self._keep_run_seconds(sid))
             self._deadline_hit.pop(sid, None)
             await asyncio.shield(self._stop_cli(sid))
             if self.modules is not None:
@@ -1039,6 +1043,21 @@ class Runner:
         """`max_run_seconds` or `approval_timeout_seconds` changed: every run's deadline watch looks again now."""
         changed, self._deadlines_changed = self._deadlines_changed, asyncio.Event()
         changed.set()
+
+    async def _keep_run_seconds(self, sid: str) -> None:
+        """A run left active (the daemon stopping) keeps the time it spent running for when it resumes."""
+        if sid not in self._clocks:
+            return
+        seconds = self._run_seconds(sid)
+
+        def keep() -> None:
+            current = self.db.get_session(sid)
+            if current is not None and current["status"] in ACTIVE:
+                self.db.update_session(sid, run={**current["run"], RUN_SECONDS: seconds})
+        try:
+            await self.db.for_session(sid).awrite(keep)
+        except Exception:  # noqa: BLE001 - an erased session, a closing store: nothing to keep
+            log.debug("could not keep run seconds for %s", sid, exc_info=True)
 
     async def mark_recovered_place(self, s: dict) -> None:
         """At daemon start, before any run resumes: a run recovered running, or parked on an approval, an App's reply
