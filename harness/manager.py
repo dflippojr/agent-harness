@@ -1098,7 +1098,7 @@ class Manager:
 
     @namespace_audit.failures("session.rerun")
     def rerun(self, ref: str, *, context=None) -> dict:
-        """Start a fresh session with the same task, project, and model."""
+        """Start a fresh session with the same task, project, model, and starting taint."""
         from .apps import AppTool
         s = self.get(ref)
         if s.get("kind") == TOOLS_ONLY:  # its tools live in the App, which has to send them again
@@ -1112,7 +1112,8 @@ class Manager:
                            app=self.db.get_api_key(s["app_id"]) if s.get("app_id") else None,
                            app_tools=[AppTool.model_validate(tool) for tool in (s.get("app_tools") or [])],
                            app_context="", app_metadata=s.get("app_metadata"),
-                           retention_days=s.get("retention_days"), end_user=s.get("end_user", ""))
+                           retention_days=s.get("retention_days"), end_user=s.get("end_user", ""),
+                           taint=list(s.get("taint") or []))  # the replayed prompt carries the same untrusted input
         namespace_audit.record(self.db, s, context, "session.rerun")
         return result
 
