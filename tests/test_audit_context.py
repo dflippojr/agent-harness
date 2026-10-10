@@ -41,6 +41,7 @@ def test_legacy_rows_survive_migration(tmp_path):
     db.conn.execute("DROP TABLE namespace_audit")  # recreate an actual v52 schema, before private trails
     db.conn.execute("ALTER TABLE api_keys DROP COLUMN catalog_app_id")  # and before catalog app ids (#518)
     db.conn.execute("ALTER TABLE pairing_codes DROP COLUMN catalog_app_id")
+    db.conn.execute("DROP TABLE pairing_requests")  # and before pairing requests (#519)
     db.conn.execute("DROP TABLE account_audit")
     db.conn.execute("CREATE TABLE account_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL,"
                     " actor_id TEXT NOT NULL, target_id TEXT NOT NULL, action TEXT NOT NULL,"

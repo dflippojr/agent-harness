@@ -40,13 +40,17 @@ METADATA_ALLOWLIST: dict[str, frozenset[str]] = {
 # names: never a secret, code, origin, URL, secret reference, path or model list.
 CREDENTIAL_REASONS = frozenset({"invalid_request", "not_found", "already_revoked", "unknown_code", "code_used",
                                 "code_expired", "origin_mismatch", "runner_unavailable", "unsupported_backend",
-                                "invalid_key", "no_key", "grace_over", "audit_unavailable"})
+                                "invalid_key", "no_key", "grace_over", "audit_unavailable",
+                                # pairing requests (#519)
+                                "rate_limited", "too_many_pending", "match_mismatch", "acknowledgement_required",
+                                "invalid_verifier", "not_claimable", "not_approvable", "request_used",
+                                "request_expired", "request_denied", "native_only", "expired"})
 KEY_KINDS = frozenset({"owner", "app", "device", "web", "member"})
 POLICIES = frozenset({"subscription", "api_key", "subscription_then_api_key"})
 MEMBER_KEY_OUTCOMES = frozenset({"ok", "rejected", "unavailable", "noop"})
 GRANT_FIELDS = frozenset({"backend", "policy", "models", "secret_ref"})
-_CRED_ID_KEYS = ("key_id", "pairing_id", "app_id", "grant_id", "previous_grant_id")
-_CRED_BOOL_KEYS = ("configured", "replaced")
+_CRED_ID_KEYS = ("key_id", "pairing_id", "request_id", "app_id", "grant_id", "previous_grant_id")
+_CRED_BOOL_KEYS = ("configured", "replaced", "armed", "browser", "acknowledged", "confirmed")
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _NAME = re.compile(r"[a-z][a-z0-9_:.-]{0,39}")
 _BACKEND = re.compile(r"[a-z][a-z0-9_-]{0,31}")
@@ -57,6 +61,13 @@ METADATA_ALLOWLIST.update({
     "pairing.create": _CRED_COMMON | {"scopes", "catalog_app_id"},
     "pairing.revoke": _CRED_COMMON,
     "pairing.redeem": _CRED_COMMON | {"kind", "scopes", "catalog_app_id"},
+    # Zero-touch pairing requests (#519): request and key ids, scope names, browser/native and armed flags only.
+    "pairing_request.create": _CRED_COMMON | {"scopes", "catalog_app_id", "armed", "browser", "acknowledged"},
+    "pairing_request.claim": _CRED_COMMON | {"browser"},
+    "pairing_request.approve": _CRED_COMMON | {"scopes", "acknowledged", "confirmed"},
+    "pairing_request.deny": _CRED_COMMON,
+    "pairing_request.redeem": _CRED_COMMON | {"kind", "scopes", "catalog_app_id", "browser"},
+    "pairing_request.expire": _CRED_COMMON,
     "runner_pairing.create": _CRED_COMMON,
     "runner_pairing.revoke": _CRED_COMMON,
     "runner_pairing.redeem": _CRED_COMMON | {"kind"},

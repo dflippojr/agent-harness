@@ -24,6 +24,11 @@ Example of an additive field: `catalog_app_id` (App API 1.22, owner API 1.21, #5
 the pairing response. Older clients ignore it, an older Server ignores it in a create request (the key or code is
 made without it), and the Python SDK exposes it as `Harness.pair(...).paired_app["catalog_app_id"]`.
 
+Zero-touch pairing requests (App API 1.23, owner API 1.22, #519) are additive too. These are the new routes under
+`/api/v1/pair/requests` and `/api/admin/v1/pairing-requests`, and `features.pairing_requests` in `GET /api/v1`. An App
+checks that feature before it asks. Against an older Server it falls back to an owner-made pairing code, whose routes
+are unchanged. The new routes return the same `{token, app, api_version}` shape as `POST /api/v1/pair`.
+
 ## Agent Harness for Mac
 
 ```sh

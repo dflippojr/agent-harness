@@ -327,6 +327,65 @@ and origin. It contains no bearer/provider credential, is stored only as a hash,
 app is revoked. Track the latest event `seq`. After a long iOS suspension, close the old `EventSource`, mint a fresh
 ticket, and reconnect with `&after=<last-seq>`; normal short reconnects also resume via `Last-Event-ID`.
 
+## Zero-touch pairing
+
+With a pairing request (#519, App API 1.23) the owner never copies, sees or stores the App's token: the daemon hands
+it straight to the App. One model serves browser and native Apps. A browser App is one whose requests carry an
+`Origin`; the request, and the key it mints, are bound to that exact origin. A native App sends no `Origin`, and its
+request can never be claimed or redeemed by a browser. The existing pairing codes, `POST /api/v1/pair` and `POST /keys`
+keep working unchanged.
+
+The App makes a PKCE pair (RFC 7636, S256): a random `code_verifier` of 43 to 128 unreserved characters, and
+`code_challenge = base64url(sha256(code_verifier))` without padding. It keeps the verifier to itself until it redeems.
+
+**App-initiated.**
+
+1. `POST /api/v1/pair/requests` with `{"name", "scopes", "catalog_app_id"?, "code_challenge",
+   "code_challenge_method": "S256"}`. No token is needed. The answer (201) is `{id, state: "pending", match_code,
+   expires_at, browser}`. Show the 6-digit `match_code` to the user.
+2. The owner approves it with that match code from the standalone Hub or `harness pairing-requests approve <id>
+   --match <code>` (see [admin-api.md](admin-api.md#zero-touch-pairing-requests)), or denies it.
+3. `POST /api/v1/pair/requests/{id}/token` with `{"code_verifier"}`. Until the owner approves it answers 409 with
+   error code `pairing_pending`, so poll every few seconds. Once approved it mints the `ha-` key and answers (201)
+   `{token, app, api_version}`, the same shape as `POST /api/v1/pair`, with `Cache-Control: no-store`. It does so
+   exactly once.
+
+**Hub-initiated.** The owner chooses Set up on a Hub entry, sees the consent screen and arms a pre-approved slot for the
+entry's `catalog_app_id`, scopes and (for a browser App) origin. The Hub gives the App only the slot's id and the daemon
+URL, as a deep link or text to paste. The App claims the slot with `POST /api/v1/pair/requests/{id}/claim`
+`{"code_challenge", "code_challenge_method": "S256"}`:
+
+- a browser claim must come from the armed origin and is approved at once (`state: "approved"`): the exact-origin
+  binding is the check;
+- a native claim answers `state: "claimed"` with a `match_code` to show. The owner confirms it (`harness
+  pairing-requests confirm <id> --match <code>`) before the token is released.
+
+The App then redeems as in step 3.
+
+**Lifetimes and refusals.** A request has 10 minutes to be approved (or claimed, or confirmed) and 5 minutes after
+approval to be redeemed. A redeemed, denied or expired request is never reused. The redeem refuses a wrong verifier
+(400), the wrong origin or a browser redeeming a native request (403), a denied request (403), and an expired or
+already redeemed one (400). None of these mint anything. One origin, tailnet login or address may make 10 requests in
+10 minutes and keep 3 waiting for the owner, and the daemon holds at most 50 waiting requests from all callers; past
+that it answers 429 (`rate_limited` or `too_many_pending`). `admin` is never an App scope and is refused when the
+request is made. Scopes are only what the owner approved, never what a listing claims. Nothing secret goes in a URL:
+the request id is not a credential, and the token is released only to the holder of the verifier.
+
+These routes take no token. They also answer an App on the daemon's own machine that has no local owner token, since
+the owner's approval and the verifier are the checks. The Python SDK holds the verifier for you:
+
+```python
+from harness_client import Harness
+
+pending = Harness.request_pairing("https://tower.example.ts.net", "Shopping list", scopes=["sessions"],
+                                  catalog_app_id="com.example.shopping")
+print("Approve this App in the Hub. Match code:", pending.match_code)
+h = Harness.redeem_pairing(pending)   # waits up to 10 minutes for the approval; h.token is the App's ha- token
+```
+
+`Harness.claim_pairing(url, request_id, origin=...)` claims a Hub-armed slot instead. A browser App passes its
+`origin` to both.
+
 ## Quick start (Python)
 
 ```python
@@ -415,6 +474,9 @@ Generated from the route registrations (`scripts/docs/build.py`; do not edit bet
 | GET | `/api/v1/models/status` | scope `sessions` | TODO | `harness_modules/local_model/routes.py` `api_models_status` |
 | POST | `/api/v1/models/warm` | scope `sessions` | TODO | `harness_modules/local_model/routes.py` `api_models_warm` |
 | POST | `/api/v1/pair` | see source | TODO | `harness/apps.py` `pair_browser` |
+| POST | `/api/v1/pair/requests` | see source | Ask the owner to pair this App (#519). Returns the request id and a match code to show the user. | `harness/pairing_requests.py` `create_pairing_request` |
+| POST | `/api/v1/pair/requests/{rid}/claim` | see source | Attach this App's code_challenge to a slot the owner armed from the Hub (#519). | `harness/pairing_requests.py` `claim_pairing_request` |
+| POST | `/api/v1/pair/requests/{rid}/token` | see source | Fetch the App's token once the owner approved (#519): minted now, returned once, to the verifier's holder. Until then it answers 409 `pairing_pending`. The body is read by hand, so a validation error can never echo the verifier back. | `harness/pairing_requests.py` `redeem_pairing_request` |
 | GET | `/api/v1/profile` | scope `sessions` | TODO | `harness/apps.py` `api_profile` |
 | GET | `/api/v1/projects` | scope `sessions` | TODO | `harness/apps.py` `api_projects` |
 | POST | `/api/v1/projects` | scope `sessions` | TODO | `harness/apps.py` `api_create_project` |
@@ -856,6 +918,7 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
 | 1.17 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions live in `<data_dir>/apps/app-web/harness.sqlite3`. An App without `sessions:all` never reads it: `/api/v1/queue` and the live session list no longer include the owner's sessions for it, and its id lookups cover its own sessions only |
+| 1.23 | 2026-10-09 | Zero-touch pairing requests (#519): `POST /api/v1/pair/requests`, `POST /api/v1/pair/requests/{id}/claim` and `POST /api/v1/pair/requests/{id}/token` (PKCE S256; the daemon mints the `ha-` key at redemption and returns it once). `features.pairing_requests` is `true`. SDK `Harness.request_pairing`, `claim_pairing` and `redeem_pairing`. Existing pairing codes and keys are unchanged |
 | 1.22 | 2026-10-09 | Optional `catalog_app_id` on keys and pairing codes (#518): set on `POST /pairing-codes` and `POST /keys`, copied to the key a pairing code mints, and reported by `GET /keys`, `GET /pairing-codes` and the `app` object of `POST /api/v1/pair` (now a typed `PairedAppResponse`). A label only; it grants nothing and is never in a token |
 | 1.21 | 2026-10-09 | `memory_library` and `homelab` scopes: an App session gets those tools only when its token holds the scope, and an unset `app.capabilities` means what the token's scopes allow. App sessions on a local project clone only its base branch, and erasing one deletes its `agent/<session id>` branch from a local project |
 | 1.19 | 2026-10-05 | End users' own subscription logins (#365): `end_user` on session create and `/api/v1/end-users/{id}/logins/{backend}` (start, code, status, unlink), for `claude` and `codex`. Members' own API keys (#393): `/api/v1/me/api-keys`, and a member's `backend` `claude` or `codex` runs on their own key; `member:` is reserved in `end_user` |

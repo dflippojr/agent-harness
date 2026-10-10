@@ -13,14 +13,19 @@
     print(result.answer)
 
 `run` creates a session, answers the agent's calls to your tools as they arrive, and returns when the session ends.
-Everything else (pair, capabilities, backends, create_session, events, send, add_context, approvals, cancel,
+An App pairs without the owner ever handling its token (#519): `Harness.request_pairing(...)` (or `claim_pairing` for
+a slot armed from the Hub) holds the PKCE verifier, the App shows its `match_code`, and `Harness.redeem_pairing(...)`
+waits for the owner's approval and returns a client with the token. Everything else (pair, capabilities, backends, create_session, events, send, add_context, approvals, cancel,
 submit_tool_result, generate_image, upscale_image) is a thin wrapper over the HTTP API described in docs/app-api.md. Run
 `Harness.validate_openapi()` in an integration check to detect client/server contract drift.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, TypedDict
@@ -35,6 +40,9 @@ JSON_MEDIA_TYPE = "application/json"
 SDK_OPERATIONS = {
     "audit": ("get", "/api/v1/audit"),
     "info": ("get", "/api/v1"), "pair": ("post", "/api/v1/pair"),
+    "request_pairing": ("post", "/api/v1/pair/requests"),
+    "claim_pairing": ("post", "/api/v1/pair/requests/{rid}/claim"),
+    "redeem_pairing": ("post", "/api/v1/pair/requests/{rid}/token"),
     "backends": ("get", "/api/v1/backends"), "create_session": ("post", "/api/v1/sessions"),
     "sessions": ("get", "/api/v1/sessions"), "session": ("get", "/api/v1/sessions/{ref}"),
     "send": ("post", "/api/v1/sessions/{ref}/messages"),
@@ -51,6 +59,9 @@ SDK_OPERATIONS = {
 # Keyed off SDK_OPERATIONS so a path only ever spells itself once, in the table above.
 SDK_REQUEST_FIELDS = {
     SDK_OPERATIONS["pair"]: {"code"},
+    SDK_OPERATIONS["request_pairing"]: {"name", "scopes", "catalog_app_id", "code_challenge", "code_challenge_method"},
+    SDK_OPERATIONS["claim_pairing"]: {"code_challenge", "code_challenge_method"},
+    SDK_OPERATIONS["redeem_pairing"]: {"code_verifier"},
     SDK_OPERATIONS["create_session"]: {"prompt", "project", "backend", "model", "title", "context", "tools",
                                        "metadata", "tools_only", "retention_days", "end_user"},
     SDK_OPERATIONS["send"]: {"content"},
@@ -71,6 +82,14 @@ class PairedApp(TypedDict, total=False):
     kind: str
     origins: list[str]
     catalog_app_id: str
+
+
+class PairingRequestStatus(TypedDict, total=False):
+    id: str
+    state: str
+    match_code: str
+    expires_at: float
+    browser: bool
 
 
 class Capabilities(TypedDict, total=False):
@@ -151,11 +170,27 @@ SDK_RESPONSE_TYPES = {
     SDK_OPERATIONS["cancel"]: ("200", Session, False),
     SDK_OPERATIONS["pending_approvals"]: ("200", Approval, True),
     SDK_OPERATIONS["decide_approval"]: ("200", Approval, False),
+    SDK_OPERATIONS["request_pairing"]: ("201", PairingRequestStatus, False),
+    SDK_OPERATIONS["claim_pairing"]: ("200", PairingRequestStatus, False),
 }
 # Objects nested in a response: (operation, property) -> (status, TypedDict).
 SDK_NESTED_RESPONSE_TYPES = {
     (SDK_OPERATIONS["pair"], "app"): ("201", PairedApp),
+    (SDK_OPERATIONS["redeem_pairing"], "app"): ("201", PairedApp),
 }
+
+
+@dataclass
+class PairingRequest:
+    """A zero-touch pairing in progress (#519). Show `match_code` to the user, then pass it to
+    `Harness.redeem_pairing`. It holds the PKCE verifier, which is sent only to redeem the token."""
+    base_url: str
+    id: str
+    state: str
+    match_code: str
+    expires_at: float
+    origin: str = ""
+    code_verifier: str = field(default="", repr=False)
 
 
 @dataclass
@@ -263,6 +298,62 @@ class Harness:
                 cls._raise_response(resp)
             paired = resp.json()
         harness = cls(base_url, paired["token"], timeout=timeout, origin=origin)
+        harness.paired_app = paired.get("app") or {}
+        return harness
+
+    @staticmethod
+    def _pkce() -> tuple[str, str]:
+        verifier = secrets.token_urlsafe(48)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        return verifier, challenge
+
+    @classmethod
+    def _pairing_post(cls, base_url: str, path: str, body: dict, origin: str, timeout: float) -> dict:
+        headers = {"Origin": origin} if origin else {}
+        with httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout, headers=headers) as client:
+            resp = client.post(path, json=body)
+            if resp.status_code >= 400:
+                cls._raise_response(resp)
+            return resp.json()
+
+    @classmethod
+    def request_pairing(cls, base_url: str, name: str, scopes: tuple[str, ...] | list[str] = ("sessions",),
+                        catalog_app_id: str = "", origin: str = "", timeout: float = 60) -> PairingRequest:
+        """Ask the owner to pair this App. A browser App passes its exact `origin`; a native App leaves it empty.
+        Show the result's `match_code`; the owner approves with it."""
+        verifier, challenge = cls._pkce()
+        out = cls._pairing_post(base_url, "/api/v1/pair/requests", {
+            "name": name, "scopes": list(scopes), "catalog_app_id": catalog_app_id, "code_challenge": challenge,
+            "code_challenge_method": "S256"}, origin, timeout)
+        return PairingRequest(base_url, out["id"], out["state"], out.get("match_code") or "", out["expires_at"],
+                              origin, verifier)
+
+    @classmethod
+    def claim_pairing(cls, base_url: str, request_id: str, origin: str = "", timeout: float = 60) -> PairingRequest:
+        """Claim a slot the owner armed from the Hub (they hand the App its id). A native claim returns a
+        `match_code` for the owner to confirm; a browser claim from the armed origin is approved at once."""
+        verifier, challenge = cls._pkce()
+        out = cls._pairing_post(base_url, f"/api/v1/pair/requests/{request_id}/claim", {
+            "code_challenge": challenge, "code_challenge_method": "S256"}, origin, timeout)
+        return PairingRequest(base_url, out["id"], out["state"], out.get("match_code") or "", out["expires_at"],
+                              origin, verifier)
+
+    @classmethod
+    def redeem_pairing(cls, pairing: PairingRequest, wait: float = 600, poll_interval: float = 2,
+                       timeout: float = 60) -> "Harness":
+        """Wait up to `wait` seconds for the owner's approval, then fetch the token (once) and return a client
+        using it. Its `paired_app` is the key that was minted, without the secret."""
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                paired = cls._pairing_post(pairing.base_url, f"/api/v1/pair/requests/{pairing.id}/token",
+                                           {"code_verifier": pairing.code_verifier}, pairing.origin, timeout)
+                break
+            except HarnessError as e:
+                if e.code != "pairing_pending" or time.monotonic() + poll_interval > deadline:
+                    raise
+            time.sleep(poll_interval)
+        harness = cls(pairing.base_url, paired["token"], timeout=timeout, origin=pairing.origin)
         harness.paired_app = paired.get("app") or {}
         return harness
 

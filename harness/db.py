@@ -1501,6 +1501,98 @@ class Database:
                               (now, key["id"], pairing["id"]))
         return key, secret, ""
 
+    # zero-touch App pairing requests (#519, harness/pairing_requests.py): the row holds the hash of the App's
+    # code_challenge, never a token or the verifier
+    _PAIRING_REQUEST_FIELDS = ("id", "kind", "name", "scopes", "catalog_app_id", "origin", "source", "challenge_hash",
+                               "match_code", "state", "armed", "created_at", "expires_at", "approved_at",
+                               "finished_at", "key_id")
+
+    @_writes
+    def insert_pairing_request(self, row: dict) -> None:
+        fields = [f for f in self._PAIRING_REQUEST_FIELDS if f in row]
+        with self.lock:
+            self.conn.execute(f"INSERT INTO pairing_requests ({', '.join(fields)}) "
+                              f"VALUES ({', '.join('?' * len(fields))})", [row[f] for f in fields])
+
+    @_reads
+    def get_pairing_request(self, rid: str) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM pairing_requests WHERE id = ?", (rid,)).fetchone()
+        return dict(row) if row else None
+
+    @_reads
+    def list_pairing_requests(self) -> list[dict]:
+        with self.lock:
+            rows = self.conn.execute("SELECT * FROM pairing_requests ORDER BY created_at DESC LIMIT 100").fetchall()
+        return [dict(r) for r in rows]
+
+    @_reads
+    def pairing_request_load(self, source: str, since: float, active: tuple[str, ...]) -> tuple[int, int, int]:
+        """(requests `source` made since `since`, its unapproved active requests, every unapproved active request)."""
+        marks = ", ".join("?" * len(active))
+        with self.lock:
+            recent = self.conn.execute("SELECT COUNT(*) FROM pairing_requests WHERE source = ? AND created_at >= ?",
+                                       (source, since)).fetchone()[0]
+            mine, total = self.conn.execute(
+                f"SELECT COALESCE(SUM(source = ?), 0), COUNT(*) FROM pairing_requests WHERE state IN ({marks})",
+                (source, *active)).fetchone()
+        return recent, mine, total
+
+    @_writes
+    def update_pairing_request(self, rid: str, states: tuple[str, ...], **fields) -> bool:
+        """Set `fields` on the request if it is still in one of `states` (a compare-and-set)."""
+        if not fields or not set(fields) <= set(self._PAIRING_REQUEST_FIELDS):
+            raise ValueError(f"unknown pairing request fields: {sorted(fields)}")
+        assigns = ", ".join(f"{name} = ?" for name in fields)
+        marks = ", ".join("?" * len(states))
+        with self.lock:
+            return self.conn.execute(f"UPDATE pairing_requests SET {assigns} WHERE id = ? AND state IN ({marks})",
+                                     (*fields.values(), rid, *states)).rowcount == 1
+
+    @_writes
+    def expire_pairing_requests(self, now: float, active: tuple[str, ...], keep_seconds: float) -> list[dict]:
+        """Mark active requests past their deadline expired and return them; forget finished ones older than
+        `keep_seconds`."""
+        marks = ", ".join("?" * len(active))
+        with self.lock:
+            rows = [dict(r) for r in self.conn.execute(
+                f"SELECT * FROM pairing_requests WHERE state IN ({marks}) AND expires_at <= ?", (*active, now))]
+            for row in rows:
+                self.conn.execute("UPDATE pairing_requests SET state = 'expired', finished_at = ? WHERE id = ?",
+                                  (now, row["id"]))
+            self.conn.execute(f"DELETE FROM pairing_requests WHERE state NOT IN ({marks}) AND created_at < ?",
+                              (*active, now - keep_seconds))
+        return rows
+
+    @_reads
+    def pairing_request_origin_active(self, origin: str, active: tuple[str, ...]) -> bool:
+        marks = ", ".join("?" * len(active))
+        with self.lock:
+            row = self.conn.execute(f"SELECT 1 FROM pairing_requests WHERE origin = ? AND state IN ({marks}) "
+                                    "AND expires_at > ? LIMIT 1", (origin, *active, time.time())).fetchone()
+        return row is not None
+
+    @_writes
+    def redeem_pairing_request(self, rid: str, now: float) -> tuple[dict | None, str]:
+        """Mint the request's `ha-` App key and mark it redeemed, if it is still approved. Returns (key row, secret)."""
+        import hashlib
+        with self._tx():
+            req = self.conn.execute("SELECT * FROM pairing_requests WHERE id = ? AND state = 'approved' "
+                                    "AND expires_at > ?", (rid, now)).fetchone()
+            if req is None:
+                return None, ""
+            secret = "ha-" + secrets.token_urlsafe(32)
+            key = {"id": "k-" + secrets.token_hex(4), "name": req["name"], "prefix": secret[:10], "created_at": now,
+                   "scopes": req["scopes"], "kind": "app", "origins": [req["origin"]] if req["origin"] else [],
+                   "catalog_app_id": req["catalog_app_id"] or ""}
+            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
+                              "catalog_app_id) VALUES (?, ?, ?, ?, ?, ?, 'app', ?, ?)",
+                              (key["id"], key["name"], key["prefix"], hashlib.sha256(secret.encode()).hexdigest(),
+                               now, key["scopes"], json.dumps(key["origins"]), key["catalog_app_id"]))
+            self.conn.execute("UPDATE pairing_requests SET state = 'redeemed', finished_at = ?, key_id = ? "
+                              "WHERE id = ?", (now, key["id"], rid))
+        return key, secret
+
     # Agent Harness for Mac pairing is separate from browser-origin pairing. It authorizes one owner CLI token;
     # the runner token remains in its configured owner file and never enters SQLite.
     @_writes
