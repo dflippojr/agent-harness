@@ -32,14 +32,20 @@ class SandboxUnavailable(Exception):
 
 
 @dataclass(frozen=True)
+class AccountLimit:
+    """A member's account quota, and how to measure the whole account now (#525)."""
+    quota_bytes: int
+    usage: Callable[[], int]
+
+
+@dataclass(frozen=True)
 class DiskLimits:
     """What a command may write (#525). `quota_bytes` caps the workspace; `min_free_bytes` is kept free on its drive.
-    For a member, `account_quota_bytes` caps the whole account as `account_usage()` measures it, so commands running
-    at once in several of its sessions share one budget instead of each getting all of what is left."""
+    For a member, `account` caps the whole account as measured while the command runs, so commands running at once in
+    several of its sessions share one budget instead of each getting all of what is left."""
     quota_bytes: int
     min_free_bytes: int
-    account_quota_bytes: int | None = None
-    account_usage: Callable[[], int] | None = None
+    account: AccountLimit | None = None
 
 
 class DiskLimitExceeded(ToolError):
@@ -64,7 +70,7 @@ class DiskWatch:
     def __init__(self, root: Path, limits: DiskLimits):
         self.root = root
         self.limits = limits
-        self.account = limits.account_quota_bytes is not None and limits.account_usage is not None
+        self.account = limits.account
         self.cap = self.account_cap = 0
         self.floor = 0
         self._size = self._account_used = self._free_at_scan = 0
@@ -78,7 +84,7 @@ class DiskWatch:
         began = time.monotonic()
         free = self._free()     # before the walk, so what is written during it counts as space lost since the scan
         size = dir_size(self.root)
-        used = self.limits.account_usage() if self.account else 0
+        used = self.account.usage() if self.account else 0
         self._size, self._account_used, self._free_at_scan = size, used, free
         self._scanned = time.monotonic()
         self._scan_cost = self._scanned - began
@@ -89,7 +95,7 @@ class DiskWatch:
         self._scan()
         self.cap = max(self.limits.quota_bytes, self._size)
         if self.account:
-            self.account_cap = max(self.limits.account_quota_bytes, self._account_used)
+            self.account_cap = max(self.account.quota_bytes, self._account_used)
         floor, free = self.limits.min_free_bytes, self._free_at_scan
         self.floor = floor if free >= floor else free - min(FREE_SLACK_BYTES, free // 2)
 
@@ -111,7 +117,7 @@ class DiskWatch:
                     f"{self.limits.quota_bytes / 2**20:.0f} MB quota")
         if self.account and used > self.account_cap:
             return (f"the account grew to {used / 2**20:.0f} MB, past its "
-                    f"{self.limits.account_quota_bytes / 2**20:.0f} MB disk quota")
+                    f"{self.account.quota_bytes / 2**20:.0f} MB disk quota")
         return ""
 
     async def _scan_polling(self) -> str:
@@ -140,8 +146,10 @@ class DiskWatch:
 
     async def final(self) -> str:
         """One last look once the command has ended, so a burst between two polls is still caught. The scan keeps the
-        run's duty cycle without its minimum interval, so it is skipped only after a short command in a big tree,
-        where the runner's quota check after the call remains."""
+        run's duty cycle without its minimum interval, so a short command in a big tree is not slowed by a full walk.
+        It is then skipped only when free space shows no growth past a quota: on the tower's NTFS data drive a file
+        extended from the container takes its space at once (it cannot be made sparse through the bind mount), and
+        the runner's quota check after the call still measures the workspace."""
         free = await asyncio.to_thread(self._free)
         due = self._may_be_over(free) or time.monotonic() - self._scanned >= SCAN_DUTY * self._scan_cost
         return self._floor_reason(free) or (await self._scan_polling() if due else "")
@@ -272,19 +280,25 @@ def _run_blocking(args: list[str], input_: str | None, timeout: float, env: dict
 
 
 async def run_cmd(args: list[str], timeout: float = 60, input_: str | None = None,
-                  env: dict | None = None) -> tuple[int, str, str]:
+                  env: dict | None = None, drain: float = 0) -> tuple[int, str, str]:
     """subprocess.run that can be cancelled: cancelling the awaiting task kills the process, including one that is
-    still being spawned. `env` is merged over the daemon's environment. Deliberately thread-based rather than
-    asyncio subprocesses: on Python 3.12 the asyncio subprocess machinery left a cancelled call hanging when the loop
-    shut down (#207)."""
+    still being spawned. With `drain`, the cancelled task also waits (up to that many seconds) until the process is
+    gone, so a client still starting up cannot act after the cancel. `env` is merged over the daemon's environment.
+    Deliberately thread-based rather than asyncio subprocesses: on Python 3.12 the asyncio subprocess machinery left a
+    cancelled call hanging when the loop shut down (#207)."""
     started: list = []
     cancelled = threading.Event()
+    work = asyncio.ensure_future(asyncio.to_thread(_run_blocking, args, input_, timeout, env, started, cancelled))
     try:
-        return await asyncio.to_thread(_run_blocking, args, input_, timeout, env, started, cancelled)
+        return await (asyncio.shield(work) if drain else work)
     except asyncio.CancelledError:
         cancelled.set()
         for proc in started.copy():
             proc.kill()
+        if drain:
+            await asyncio.wait({work}, timeout=drain)
+            if work.done():
+                work.exception()    # retrieved, so a failure here is not logged as unhandled
         raise
 
 
@@ -492,7 +506,7 @@ class Sandbox:
             return await run_cmd(args, timeout=timeout)
         watch = DiskWatch(self.workspace, limits)
         await asyncio.to_thread(watch.start)
-        command = asyncio.ensure_future(run_cmd(args, timeout=timeout))
+        command = asyncio.ensure_future(run_cmd(args, timeout=timeout, drain=30))
         watcher = asyncio.ensure_future(watch.run())
         try:
             await asyncio.wait({command, watcher}, return_when=asyncio.FIRST_COMPLETED)
@@ -507,7 +521,8 @@ class Sandbox:
             reason = f"the disk watchdog failed ({type(e).__name__}: {e})"
         if not reason:
             return command.result()
-        # Kill the docker exec client first, so an exec still starting up cannot land in the reset container.
+        # Kill the docker exec client and wait until it is gone, so an exec still starting up cannot land in the reset
+        # container.
         command.cancel()
         await asyncio.wait({command})
         stopped, detail = await self._halt()

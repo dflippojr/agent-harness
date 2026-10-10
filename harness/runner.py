@@ -33,7 +33,7 @@ from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKEN
                      AppToolsPolicy, ChatPolicy, Decision, Policy, mcp_harness_tool)
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .runner_contract import RemoteWorkspace, RunnerError, NoRunnerHub
-from .sandbox import DiskLimits, Sandbox, SandboxUnavailable
+from .sandbox import AccountLimit, DiskLimits, Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
@@ -241,15 +241,14 @@ class Runner:
         several of a member's sessions at once share what is left rather than each getting all of it."""
         s = self.db.get_session(sid)
         user_id = session_user_id(s)
-        account_quota = account_usage = None
+        limit = None
         if user_id != OWNER_USER_ID:
             from .storage import account_usage_bytes
             account = await asyncio.to_thread(self.db.account_by_id, user_id)
-            account_quota = int(account["disk_quota_bytes"]) if account is not None else 0
-            account_usage = functools.partial(account_usage_bytes, self.cfg, user_id)
+            limit = AccountLimit(int(account["disk_quota_bytes"]) if account is not None else 0,
+                                 functools.partial(account_usage_bytes, self.cfg, user_id))
         return DiskLimits(quota_bytes=self.quota_mb(s) * 2**20,
-                          min_free_bytes=int(self.cfg.cleanup.min_free_gb * 2**30),
-                          account_quota_bytes=account_quota, account_usage=account_usage)
+                          min_free_bytes=int(self.cfg.cleanup.min_free_gb * 2**30), account=limit)
 
     async def _park_sandbox(self, sid: str) -> None:
         """The session is about to wait on the owner or the GPU guard: stop its idle container (#428). Best effort;

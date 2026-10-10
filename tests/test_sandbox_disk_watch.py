@@ -32,9 +32,10 @@ class FakeDocker:
         self.written = 0
         self.other = 0          # bytes something else used on the drive
 
-    async def __call__(self, args, timeout=60, input_=None, env=None):
+    async def __call__(self, args, timeout=60, input_=None, env=None, drain=0):
         verb = args[1]
         self.calls.append(verb)
+        self.drain = drain if verb == "exec" else getattr(self, "drain", 0)
         if verb in self.fail:
             return 1, "", f"{verb} failed"
         if verb == "inspect":
@@ -123,7 +124,8 @@ def test_workspace_already_over_quota_may_shrink_but_not_grow(monkeypatch, tmp_p
 def test_member_growth_is_capped_by_the_account_quota(monkeypatch, tmp_path):
     def usage() -> int:
         return 95 * MB + sum(p.stat().st_size for p in tmp_path.iterdir())
-    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(500 * MB, 100 * MB, 100 * MB, usage), chunks=200)
+    limits = sandbox.DiskLimits(500 * MB, 100 * MB, sandbox.AccountLimit(100 * MB, usage))
+    box, fake, _ = make(monkeypatch, tmp_path, limits, chunks=200)
     with pytest.raises(sandbox.DiskLimitExceeded, match="past its 100 MB disk quota"):
         asyncio.run(box.exec("make huge"))
     assert fake.written < 15
@@ -138,14 +140,14 @@ def test_concurrent_member_commands_share_the_account_quota(monkeypatch, tmp_pat
         root.mkdir()
         fakes[f"harness-{name}"] = FakeDocker(root, chunks=150, pace=0.02)
 
-    async def docker(args, timeout=60, input_=None, env=None):
-        return await next(f for n, f in fakes.items() if n in args)(args, timeout, input_, env)
+    async def docker(args, **kw):
+        return await next(f for n, f in fakes.items() if n in args)(args, **kw)
 
     def used() -> int:
         return sum(p.stat().st_size for r in roots for p in r.iterdir())
     monkeypatch.setattr(sandbox, "run_cmd", docker)
     monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: TOTAL - used())
-    limits = sandbox.DiskLimits(500 * MB, 100 * MB, 100 * MB, used)
+    limits = sandbox.DiskLimits(500 * MB, 100 * MB, sandbox.AccountLimit(100 * MB, used))
 
     async def disk_limits():
         return limits
@@ -223,8 +225,8 @@ def test_runner_disk_limits(monkeypatch):
     own = asyncio.run(runner.Runner._disk_limits(fake, "own"))
     assert own == sandbox.DiskLimits(300 * MB, 2 * 2**30)
     member = asyncio.run(runner.Runner._disk_limits(fake, "mem"))
-    assert member.account_quota_bytes == 100 * MB and member.account_usage() == 70 * MB   # measured live
-    assert asyncio.run(runner.Runner._disk_limits(fake, "gone")).account_quota_bytes == 0  # no account: no growth
+    assert member.account.quota_bytes == 100 * MB and member.account.usage() == 70 * MB   # measured live
+    assert asyncio.run(runner.Runner._disk_limits(fake, "gone")).account.quota_bytes == 0  # no account: no growth
 
 
 def test_watchdog_error_stops_the_command_in_the_container(monkeypatch, tmp_path):
@@ -337,7 +339,7 @@ def test_short_command_in_a_slow_tree_skips_the_final_scan(monkeypatch, tmp_path
 def test_sparse_growth_is_caught_by_the_final_scan(monkeypatch, tmp_path):
     # A sparse file grows the workspace without using the drive, so free space says nothing; the final scan does.
     monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)
-    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(10 * MB, 100 * MB), chunks=20, pace=0)
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(10 * MB, 100 * MB), chunks=20, pace=0.005)
     monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: TOTAL)
     with pytest.raises(sandbox.DiskLimitExceeded, match="past its 10 MB quota"):
         asyncio.run(box.exec("truncate -s 20M sparse"))
@@ -372,7 +374,7 @@ def test_free_space_is_polled_during_the_final_scan(monkeypatch, tmp_path):
 def test_free_space_is_checked_after_a_quick_final_scan(monkeypatch, tmp_path):
     # The scan itself finds the workspace under its quota, but a writer left behind ate the drive while it ran.
     monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)
-    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(50 * MB, 950 * MB), chunks=20, pace=0)
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(50 * MB, 950 * MB), chunks=20, pace=0.005)
     measure = sandbox.dir_size
     scans = []
 
@@ -412,3 +414,31 @@ def test_exec_still_starting_cannot_land_in_the_reset_container(monkeypatch, tmp
     with pytest.raises(sandbox.DiskLimitExceeded, match="data drive"):
         asyncio.run(box.exec("make"))
     assert restarts == ["restart"] and fake.written == 0
+
+
+def test_watched_exec_drains_its_client_on_cancel(monkeypatch, tmp_path):
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(500 * MB, 100 * MB), chunks=1)
+    asyncio.run(box.exec("true"))
+    assert fake.drain > 0
+
+
+def test_run_cmd_drain_waits_until_the_process_is_gone(monkeypatch):
+    import threading
+    import time as clock
+    gone = threading.Event()
+
+    def blocking(args, input_, timeout, env, started, cancelled):
+        clock.sleep(0.3)        # still spawning, then killed: the worker thread finishes only now
+        gone.set()
+        return 137, "", ""
+    monkeypatch.setattr(sandbox, "_run_blocking", blocking)
+
+    async def cancel_after_start(drain):
+        task = asyncio.ensure_future(sandbox.run_cmd(["docker", "exec"], drain=drain))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.wait({task})
+        return gone.is_set()
+    assert asyncio.run(cancel_after_start(5)) is True
+    gone.clear()
+    assert asyncio.run(cancel_after_start(0)) is False
