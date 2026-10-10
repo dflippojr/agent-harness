@@ -507,11 +507,10 @@ class Sandbox:
             reason = f"the disk watchdog failed ({type(e).__name__}: {e})"
         if not reason:
             return command.result()
+        # Kill the docker exec client first, so an exec still starting up cannot land in the reset container.
+        command.cancel()
+        await asyncio.wait({command})
         stopped, detail = await self._halt()
-        try:
-            await asyncio.wait_for(command, timeout=30)
-        except Exception:
-            pass    # the stop ended it, or the timeout cancelled (killed) a docker client that hung
         if self.on_event:
             self.on_event("sandbox_disk_limit", {"reason": reason, "stopped": stopped})
         if not stopped:

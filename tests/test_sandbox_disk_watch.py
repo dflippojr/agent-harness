@@ -384,3 +384,31 @@ def test_free_space_is_checked_after_a_quick_final_scan(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "dir_size", writer_runs_during_scan)
     with pytest.raises(sandbox.DiskLimitExceeded, match="data drive"):
         asyncio.run(box.exec("make & exit"))
+
+
+def test_exec_still_starting_cannot_land_in_the_reset_container(monkeypatch, tmp_path):
+    # Another session trips the free-space floor while this exec is still starting. Were its client left alive
+    # through the restart, the command would start in the fresh container with nothing watching it.
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(500 * MB, 950 * MB))
+    restarts = []
+    docker = sandbox.run_cmd
+
+    async def slow_exec(args, **kw):
+        if args[1] in ("restart", "kill"):
+            restarts.append(args[1])
+        if args[1] != "exec":
+            return await docker(args, **kw)
+        fake.other = 200 * MB           # the other session
+        await asyncio.sleep(0.3)        # exec startup
+        started = len(restarts)
+        for _ in range(50):
+            if len(restarts) != started:
+                return 137, "", ""
+            (tmp_path / f"blob{fake.written}").write_bytes(b"\0" * MB)
+            fake.written += 1
+            await asyncio.sleep(0.001)
+        return 0, "built", ""
+    monkeypatch.setattr(sandbox, "run_cmd", slow_exec)
+    with pytest.raises(sandbox.DiskLimitExceeded, match="data drive"):
+        asyncio.run(box.exec("make"))
+    assert restarts == ["restart"] and fake.written == 0
