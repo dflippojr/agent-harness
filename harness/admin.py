@@ -508,7 +508,10 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
     async def update_account(user_id: str, body: AccountUpdateRequest, request: Request):
         key = require_admin(request, mgr)
         svc = _accounts(request)
-        return await _apply_account_update(svc, _context(request, key), user_id, body)
+        row = await _apply_account_update(svc, _context(request, key), user_id, body)
+        if body.max_running is not None:
+            mgr(request).scheduler.recheck()  # a raised cap may let a waiting session run now (#524)
+        return row
 
     # Issue #63: the owner switches member GitHub sign-in on or off, sees each member's coarse state, and can
     # erase a member's credential. The owner cannot connect, test, list repositories, or use it.

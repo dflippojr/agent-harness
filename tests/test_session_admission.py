@@ -317,6 +317,46 @@ def test_an_approved_session_queued_for_its_slot_keeps_its_place_across_a_restar
         assert restarted._scheduler_eligible("parked0007")  # parked, it holds its own place too
     asyncio.run(body())
 
+def test_raising_the_default_app_running_cap_lets_a_waiting_session_run_at_once(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.app_max_running = 1
+
+    async def body():
+        m = Manager(cfg, chat=Script([Completion(content="ok")]))
+        await m.start()
+        app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
+        _insert(m, "parked0008", "waiting_approval", app_id=app["id"])
+        sid = m.create("waits", app=app)["id"]
+        await asyncio.sleep(0.5)
+        assert m.get(sid)["status"] == "queued"
+        m.settings.patch_admin({"sessions.app_max_running": 2}, m.settings.admin_view()["revision"])
+        s = await wait_status(m, sid, "done", timeout=5)
+        assert s["answer"] == "ok"
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_a_parked_hosted_run_saved_before_places_were_recorded_recovers_parked(tmp_path):
+    """A daemon upgraded with an App's Claude run parked on an approval: the run recovers still waiting on that one
+    approval (no duplicate), holding its place, and the decision resumes it."""
+    async def body():
+        m, modes, key = _mixed_manager(tmp_path)
+        await m.start()
+        _insert(m, "oldpark001", "waiting_approval", app_id=key["id"], holds=False)
+        m.db.update_session("oldpark001", backend="claude")
+        m.db.insert_approval({"id": "a-oldpark1", "session_id": "oldpark001", "tool_call_id": "old-call",
+                              "tool": "Bash", "args": {"command": "python build.py"}, "reason": "test"})
+        m._spawn("oldpark001", recovered=True)
+        await _until(lambda: "oldpark001" in m.runner._cli_sessions)
+        await asyncio.sleep(0.5)
+        s = m.get("oldpark001")
+        assert s["status"] == "waiting_approval" and s["run"].get(HOLDS_PLACE)
+        assert [a["id"] for a in m.db.approvals("oldpark001")] == ["a-oldpark1"]
+        m.decide("oldpark001", None, approve=True)
+        await wait_status(m, "oldpark001", "done", timeout=15)
+        await m.stop()
+    asyncio.run(body())
+
 
 # members --------------------------------------------------------------------------------------------------------------
 def test_a_member_at_max_queued_with_parked_sessions_is_refused(tmp_path):
@@ -897,6 +937,30 @@ def test_an_app_reply_does_not_restart_the_clock_while_an_approval_is_pending(tm
         m.db.decide_approval("a-host0004", "approved", "")
         assert m.runner._hosted_status("hosted0004") == "waiting_app"
     asyncio.run(body())
+
+
+def test_a_time_budget_turned_on_mid_run_applies_to_it(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.max_run_seconds = 0
+    cfg.approval_timeout_seconds = 0
+
+    async def body():
+        m = Manager(cfg, chat=SleepyModel(0.1))
+        await m.start()
+        app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
+        sid = m.create("loop", app=app)["id"]
+        await wait_status(m, sid, "running")
+        m.runner._maybe_compact = _slow_compaction  # the loop never reaches another turn's budget check
+        m.settings.patch_admin({"sessions.max_run_seconds": 1}, m.settings.admin_view()["revision"])
+        s = await wait_status(m, sid, "done", "failed", timeout=8)
+        assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
+        await m.stop()
+    asyncio.run(body())
+
+
+async def _slow_compaction(s):
+    await asyncio.sleep(60)
+    return s
 
 
 def test_a_run_stopped_on_its_budget_mid_tool_answers_every_tool_call(tmp_path):

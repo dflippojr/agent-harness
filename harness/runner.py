@@ -262,6 +262,7 @@ class Runner:
         self._clocks: dict[str, RunClock] = {}         # live run -> its time spent running
         self._deadline_hit: dict[str, str] = {}        # runs their deadline watch cancelled -> the stop reason
         self._app_waits: dict[str, int] = {}           # hosted session -> its MCP calls parked on the App's reply
+        self._deadlines_changed = asyncio.Event()      # replaced (and the old one set) when a deadline setting changes
         self._locks = credential_sources.KeyedLocks()
         self.cli_factory = ClaudeSession
         self.codex_factory = CodexSession
@@ -919,8 +920,10 @@ class Runner:
         watch = None
         try:
             s = self.db.get_session(sid)
-            if self._time_left(s) is not None or float(self.cfg.approval_timeout_seconds or 0) > 0:
-                watch = asyncio.create_task(self._watch_deadlines(sid, asyncio.current_task()))
+            # Every run: both deadlines are live settings, so one turned on mid-run applies to it too.
+            watch = asyncio.create_task(self._watch_deadlines(sid, asyncio.current_task()))
+            if recovered:
+                await self._mark_parked_place(sid, s)
             if s.get("kind") == TOOLS_ONLY and s.get("backend", "local") not in TOOLS_ONLY_BACKENDS:
                 raise ToolsOnlyUnsupported(f"backend {s['backend']!r} can't run App-tools-only sessions")
             if s.get("backend", "local") != "local":
@@ -1005,7 +1008,28 @@ class Runner:
                         return
                     continue
                 waits.append(approval_left)
-            await asyncio.sleep(min(waits))
+            changed = self._deadlines_changed
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=min(waits))
+            except asyncio.TimeoutError:
+                pass
+
+    def deadlines_changed(self) -> None:
+        """`max_run_seconds` or `approval_timeout_seconds` changed: every run's deadline watch looks again now."""
+        changed, self._deadlines_changed = self._deadlines_changed, asyncio.Event()
+        changed.set()
+
+    async def _mark_parked_place(self, sid: str, s: dict) -> None:
+        """A run recovered parked on an approval, an App's reply or a provider limit had run before (only a running
+        run parks on those), so it holds its place under its cap; one saved before HOLDS_PLACE existed gets it now."""
+        if s["status"] not in ("waiting_approval", "waiting_app", "waiting_limit") or s["run"].get(HOLDS_PLACE):
+            return
+
+        def mark() -> None:
+            current = self.db.get_session(sid)
+            if current is not None and current["status"] in WAITING:
+                self.db.update_session(sid, run={**current["run"], HOLDS_PLACE: True})
+        await self.db.for_session(sid).awrite(mark)
 
     def _stop_on_deadline(self, sid: str, run: asyncio.Task, reason: str) -> None:
         if sid not in self.user_cancelled:
@@ -1153,7 +1177,7 @@ class Runner:
                 async with contextlib.AsyncExitStack() as stack:
                     await self._admit_hosted(sid, s, stack)
                     await stack.enter_async_context(held)
-                    if self.admitted.get(sid) and not holds_place(self.db.get_session(sid)):
+                    if self.admitted.get(sid) and self.db.get_session(sid)["status"] == "queued":
                         await self.aset_status(sid, "running")
                     self._unreserve(sid)  # holds its place from here on
                     self._held_slots[sid] = held
