@@ -238,7 +238,8 @@ disambiguate filenames containing the diff header's ` b/` separator.
 This is intentionally conservative: benign prose and examples matching a credential pattern are also rejected.
 Quote authentication scheme names in backticks (for example, `Bearer`) rather than printing a value-like sequence.
 Known repository paths (from the Git index or all diff files, including deletions and both rename sides) are exempt only from the generic long-token
-heuristic, so ordinary long file citations and partial-coverage lists remain publishable. The credential, provider-token
+heuristic, so ordinary long file citations (including `./` prefixes and Windows separators) and partial-coverage lists
+remain publishable. The credential, provider-token
 and profile-path patterns still check the original text. Validated Git metadata in the coverage marker is added only
 after the scan. It fetches the pull
 request diff before starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review

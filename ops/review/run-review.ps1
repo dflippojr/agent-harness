@@ -452,7 +452,8 @@ function Assert-ReviewOutputSafe {
             $paths += $DiffPaths
             foreach ($path in $paths) {
                 if (-not $path -or $path -match '(^[/\\]|^[A-Za-z]:|[\r\n]|(^|/)\.\.(/|$))') { continue }
-                $pattern = '(?<![A-Za-z0-9_./\\-])' + [regex]::Escape($path) + '(?![A-Za-z0-9_./\\-])'
+                $pathPattern = [regex]::Escape($path).Replace('/', '[/\\]')
+                $pattern = '(?<![\p{L}\p{N}\p{M}_./\\-])(?:\.[/\\])*' + $pathPattern + '(?![\p{L}\p{N}\p{M}_./\\-])'
                 $scanText = [regex]::Replace($scanText, $pattern, '[REPOSITORY PATH]')
             }
         }

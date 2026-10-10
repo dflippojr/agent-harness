@@ -137,12 +137,17 @@ def test_publication_allows_known_paths_but_still_rejects_tokens(tmp_path):
     subprocess.run(["git", "-C", str(tmp_path), "add", known_path], check=True, capture_output=True)
     result = run_powershell(
         tmp_path,
-        f"""
+        rf"""
 $result = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = '- {known_path}:12: synthetic finding' }}
 $out = Join-Path '{tmp_path}' 'review-output.md'
 Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
 $body = Get-Content -Raw -LiteralPath $out
 if ($body -notlike '*{known_path}:12*') {{ throw 'Known repository citation was lost' }}
+foreach ($citation in @('./{known_path}', '././{known_path}', ('.\' + '{known_path}'.Replace('/', '\')))) {{
+    $result.Output = "$citation`:12: finding"
+    Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
+}}
+$result.Output = '- {known_path}:12: synthetic finding'
 Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -CoverageLine 'PARTIAL REVIEW: Not reviewed: deleted/remote_control/folder_discovery.py' -DiffPaths @('deleted/remote_control/folder_discovery.py')
 git -C '{tmp_path}' rm --cached --quiet -- '{known_path}'
 if ($LASTEXITCODE -ne 0) {{ throw 'Synthetic deletion failed' }}
@@ -156,7 +161,7 @@ foreach ($relative in @('docs/root-ca.md', 'docs/root/code.md', 'examples/home/r
     $result.Output = $relative
     Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
 }}
-foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), 'sk-synthetic12345678')) {{
+foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), ('./' + ('T' * 48) + '/unknown.py'), 'outside/{known_path}', '/{known_path}', 'sk-synthetic12345678')) {{
     $result.Output = $unsafe
     $failure = ''
     try {{ Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' }}
