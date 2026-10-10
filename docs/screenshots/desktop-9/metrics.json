@@ -1,0 +1,458 @@
+[
+  {
+    "stage": "before",
+    "width": 1440,
+    "theme": "light",
+    "kind": "confirm",
+    "box": {
+      "x": 440,
+      "y": 367.796875,
+      "width": 560,
+      "height": 164.390625
+    },
+    "focus": "Keep running",
+    "backdrop": "color(srgb 0.0784314 0.0941177 0.113725 / 0.35)",
+    "buttons": [
+      {
+        "text": "Keep running",
+        "width": 254,
+        "height": 50
+      },
+      {
+        "text": "Cancel task",
+        "width": 254,
+        "height": 50
+      }
+    ]
+  },
+  {
+    "stage": "before",
+    "width": 1440,
+    "theme": "light",
+    "kind": "output",
+    "box": {
+      "x": 0,
+      "y": 0,
+      "width": 1440,
+      "height": 900
+    },
+    "focus": "Wrap",
+    "backdrop": "rgb(243, 244, 246)",
+    "buttons": [
+      {
+        "text": "Wrap",
+        "width": 56,
+        "height": 44
+      },
+      {
+        "text": "Copy",
+        "width": 54.28125,
+        "height": 44
+      },
+      {
+        "text": "Close",
+        "width": 55.75,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "before",
+    "width": 1440,
+    "theme": "dark",
+    "kind": "confirm",
+    "box": {
+      "x": 440,
+      "y": 367.796875,
+      "width": 560,
+      "height": 164.390625
+    },
+    "focus": "Keep running",
+    "backdrop": "color(srgb 0.94902 0.956863 0.968627 / 0.35)",
+    "buttons": [
+      {
+        "text": "Keep running",
+        "width": 254,
+        "height": 50
+      },
+      {
+        "text": "Cancel task",
+        "width": 254,
+        "height": 50
+      }
+    ]
+  },
+  {
+    "stage": "before",
+    "width": 1440,
+    "theme": "dark",
+    "kind": "output",
+    "box": {
+      "x": 0,
+      "y": 0,
+      "width": 1440,
+      "height": 900
+    },
+    "focus": "Wrap",
+    "backdrop": "rgb(0, 0, 0)",
+    "buttons": [
+      {
+        "text": "Wrap",
+        "width": 56,
+        "height": 44
+      },
+      {
+        "text": "Copy",
+        "width": 54.28125,
+        "height": 44
+      },
+      {
+        "text": "Close",
+        "width": 55.75,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "before",
+    "width": 1024,
+    "theme": "light",
+    "kind": "confirm",
+    "box": {
+      "x": 232,
+      "y": 367.796875,
+      "width": 560,
+      "height": 164.390625
+    },
+    "focus": "Keep running",
+    "backdrop": "color(srgb 0.0784314 0.0941177 0.113725 / 0.35)",
+    "buttons": [
+      {
+        "text": "Keep running",
+        "width": 254,
+        "height": 50
+      },
+      {
+        "text": "Cancel task",
+        "width": 254,
+        "height": 50
+      }
+    ]
+  },
+  {
+    "stage": "before",
+    "width": 1024,
+    "theme": "light",
+    "kind": "output",
+    "box": {
+      "x": 0,
+      "y": 0,
+      "width": 1024,
+      "height": 900
+    },
+    "focus": "Wrap",
+    "backdrop": "rgb(243, 244, 246)",
+    "buttons": [
+      {
+        "text": "Wrap",
+        "width": 56,
+        "height": 44
+      },
+      {
+        "text": "Copy",
+        "width": 54.28125,
+        "height": 44
+      },
+      {
+        "text": "Close",
+        "width": 55.75,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "before",
+    "width": 1024,
+    "theme": "dark",
+    "kind": "confirm",
+    "box": {
+      "x": 232,
+      "y": 367.796875,
+      "width": 560,
+      "height": 164.390625
+    },
+    "focus": "Keep running",
+    "backdrop": "color(srgb 0.94902 0.956863 0.968627 / 0.35)",
+    "buttons": [
+      {
+        "text": "Keep running",
+        "width": 254,
+        "height": 50
+      },
+      {
+        "text": "Cancel task",
+        "width": 254,
+        "height": 50
+      }
+    ]
+  },
+  {
+    "stage": "before",
+    "width": 1024,
+    "theme": "dark",
+    "kind": "output",
+    "box": {
+      "x": 0,
+      "y": 0,
+      "width": 1024,
+      "height": 900
+    },
+    "focus": "Wrap",
+    "backdrop": "rgb(0, 0, 0)",
+    "buttons": [
+      {
+        "text": "Wrap",
+        "width": 56,
+        "height": 44
+      },
+      {
+        "text": "Copy",
+        "width": 54.28125,
+        "height": 44
+      },
+      {
+        "text": "Close",
+        "width": 55.75,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "after",
+    "width": 1440,
+    "theme": "light",
+    "kind": "confirm",
+    "box": {
+      "x": 440,
+      "y": 366.796875,
+      "width": 560,
+      "height": 166.390625
+    },
+    "focus": "Keep running",
+    "backdrop": "rgba(16, 24, 40, 0.35)",
+    "buttons": [
+      {
+        "text": "Keep running",
+        "width": 126.78125,
+        "height": 44
+      },
+      {
+        "text": "Cancel task",
+        "width": 111.84375,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "after",
+    "width": 1440,
+    "theme": "light",
+    "kind": "output",
+    "box": {
+      "x": 240,
+      "y": 90,
+      "width": 960,
+      "height": 720
+    },
+    "focus": "Close",
+    "backdrop": "rgba(16, 24, 40, 0.35)",
+    "buttons": [
+      {
+        "text": "Wrap",
+        "width": 56,
+        "height": 44
+      },
+      {
+        "text": "Copy",
+        "width": 54.28125,
+        "height": 44
+      },
+      {
+        "text": "Close",
+        "width": 55.75,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "after",
+    "width": 1440,
+    "theme": "dark",
+    "kind": "confirm",
+    "box": {
+      "x": 440,
+      "y": 366.796875,
+      "width": 560,
+      "height": 166.390625
+    },
+    "focus": "Keep running",
+    "backdrop": "rgba(0, 0, 0, 0.65)",
+    "buttons": [
+      {
+        "text": "Keep running",
+        "width": 126.78125,
+        "height": 44
+      },
+      {
+        "text": "Cancel task",
+        "width": 111.84375,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "after",
+    "width": 1440,
+    "theme": "dark",
+    "kind": "output",
+    "box": {
+      "x": 240,
+      "y": 90,
+      "width": 960,
+      "height": 720
+    },
+    "focus": "Close",
+    "backdrop": "rgba(0, 0, 0, 0.65)",
+    "buttons": [
+      {
+        "text": "Wrap",
+        "width": 56,
+        "height": 44
+      },
+      {
+        "text": "Copy",
+        "width": 54.28125,
+        "height": 44
+      },
+      {
+        "text": "Close",
+        "width": 55.75,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "after",
+    "width": 1024,
+    "theme": "light",
+    "kind": "confirm",
+    "box": {
+      "x": 232,
+      "y": 366.796875,
+      "width": 560,
+      "height": 166.390625
+    },
+    "focus": "Keep running",
+    "backdrop": "rgba(16, 24, 40, 0.35)",
+    "buttons": [
+      {
+        "text": "Keep running",
+        "width": 126.78125,
+        "height": 44
+      },
+      {
+        "text": "Cancel task",
+        "width": 111.84375,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "after",
+    "width": 1024,
+    "theme": "light",
+    "kind": "output",
+    "box": {
+      "x": 32,
+      "y": 90,
+      "width": 960,
+      "height": 720
+    },
+    "focus": "Close",
+    "backdrop": "rgba(16, 24, 40, 0.35)",
+    "buttons": [
+      {
+        "text": "Wrap",
+        "width": 56,
+        "height": 44
+      },
+      {
+        "text": "Copy",
+        "width": 54.28125,
+        "height": 44
+      },
+      {
+        "text": "Close",
+        "width": 55.75,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "after",
+    "width": 1024,
+    "theme": "dark",
+    "kind": "confirm",
+    "box": {
+      "x": 232,
+      "y": 366.796875,
+      "width": 560,
+      "height": 166.390625
+    },
+    "focus": "Keep running",
+    "backdrop": "rgba(0, 0, 0, 0.65)",
+    "buttons": [
+      {
+        "text": "Keep running",
+        "width": 126.78125,
+        "height": 44
+      },
+      {
+        "text": "Cancel task",
+        "width": 111.84375,
+        "height": 44
+      }
+    ]
+  },
+  {
+    "stage": "after",
+    "width": 1024,
+    "theme": "dark",
+    "kind": "output",
+    "box": {
+      "x": 32,
+      "y": 90,
+      "width": 960,
+      "height": 720
+    },
+    "focus": "Close",
+    "backdrop": "rgba(0, 0, 0, 0.65)",
+    "buttons": [
+      {
+        "text": "Wrap",
+        "width": 56,
+        "height": 44
+      },
+      {
+        "text": "Copy",
+        "width": 54.28125,
+        "height": 44
+      },
+      {
+        "text": "Close",
+        "width": 55.75,
+        "height": 44
+      }
+    ]
+  }
+]
