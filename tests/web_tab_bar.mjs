@@ -26,6 +26,8 @@ assert(/id="agents-needs-you"[^>]*role="status"/.test(indexHtml), "the live coun
 assert(/#tab-bar \{[^}]*env\(safe-area-inset-bottom/.test(cssSrc), "the tab bar pads for the home indicator in standalone mode");
 assert(/--tabbar-h: (4[4-9]|[5-9]\d)px/.test(cssSrc), "tabs are at least 44 px tall");
 assert(/@media \(min-width: 768px\)[\s\S]*?#tab-bar \{[^}]*width: var\(--rail-w\)/.test(cssSrc), "the desktop rail starts at 768 px");
+assert(/body\.has-tabs \.composer, body\.has-tabs \.approval-sheet \{ left: var\(--rail-w\)/.test(cssSrc),
+  "fixed session controls clear the rail at narrow desktop widths");
 assert(/@media \(max-width: 420px\)/.test(cssSrc) && /#bar \{ gap: 6px; \}/.test(cssSrc),
   "phone-width bar gap stays tight so the gear does not crowd the title");
 

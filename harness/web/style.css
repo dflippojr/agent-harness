@@ -182,6 +182,7 @@ body.has-tabs { --tabbar-offset: calc(var(--tabbar-h) + env(safe-area-inset-bott
 .rail-brand, .rail-count { display: none; }
 @media (min-width: 768px) {
   body.has-tabs { --tabbar-offset: 0px; padding-left: var(--rail-w); }
+  body.has-tabs .composer, body.has-tabs .approval-sheet { left: var(--rail-w); }
   #tab-bar {
     top: 0; right: auto; width: var(--rail-w); flex-direction: column; justify-content: flex-start; gap: 4px;
     padding: calc(env(safe-area-inset-top, 0px) + 16px) 8px 16px max(8px, env(safe-area-inset-left, 0px));

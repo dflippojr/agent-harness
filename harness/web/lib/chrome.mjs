@@ -2,7 +2,7 @@
 // repaint hooks for the installed iOS app. mountChrome() takes the shell elements and browser globals as arguments and
 // registers the window/document listeners when called, so importing this module touches nothing and works under plain Node.
 import { pageMetrics, scrollPage } from "./session-ui.mjs";
-import { sessionGroup } from "../pages/sessions.mjs";
+import { sessionGroup } from "./session-groups.mjs";
 
 const SECTION_TITLES = { chat: "Chat", agents: "Agents", jobs: "Jobs", images: "Images" };
 const CONN_LABEL = { live: "Live", reconnecting: "Reconnecting", offline: "Offline" };
