@@ -436,6 +436,7 @@ async function settingsMenu(pane = null, me = null, profile = null) {
   const target = pane?.body || $app;
   let active = true;
   let generation = 0;
+  let menuError = null;
   const values = {};
   if (pane) {
     pane.header("Settings");
@@ -444,7 +445,10 @@ async function settingsMenu(pane = null, me = null, profile = null) {
       if (menuValues === values) menuValues = null;
     });
   }
-  if (!me) [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
+  if (!me) [me, profile] = await Promise.all([
+    api("/me").catch((err) => { menuError = err; return {}; }),
+    api("/profile").catch(() => ({ emoji: "🙂", choices: [] })),
+  ]);
   if (!active) return;
   let hidden = new Set();
   if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
@@ -473,12 +477,16 @@ async function settingsMenu(pane = null, me = null, profile = null) {
     });
     pane?.onLeave(stop);
   }
+  const identityEmoji = h("span", { class: "identity-emoji" }, profile.emoji || "🙂");
+  const identityName = h("h3", {}, me.name || "You");
+  const errorNote = menuError ? h("p", { class: "note bad" }, menuError.message) : null;
   append(target,
+    errorNote,
     h("a", { class: "card identity", href: "#/profile/account", "data-split-key": "account" },
       h("div", { class: "row" },
-        h("span", { class: "identity-emoji" }, profile.emoji || "🙂"),
+        identityEmoji,
         h("div", { class: "spacer" },
-          h("h3", {}, me.name || "You"),
+          identityName,
           identityNote),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
     isMember() && me.usage ? h("div", { class: "card" },
@@ -492,8 +500,12 @@ async function settingsMenu(pane = null, me = null, profile = null) {
     const refresh = () => {
       const next = ++generation;
       const current = () => active && next === generation;
-      api("/me").then((latest) => {
-        if (current()) fillSettingValues(values, latest, current);
+      Promise.all([api("/me"), api("/profile").catch(() => null)]).then(([latest, icon]) => {
+        if (!current()) return;
+        if (errorNote) errorNote.hidden = true;
+        fillSettingValues(values, latest, current);
+        identityName.textContent = latest.name || "You";
+        if (icon) identityEmoji.textContent = icon.emoji || "🙂";
       }).catch((err) => console.debug("settings menu refresh", err));
     };
     settingsRefreshes.add(refresh);

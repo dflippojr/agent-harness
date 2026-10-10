@@ -34,6 +34,7 @@ import { runApp } from "./web_app_loader.mjs";
 import { El as BaseEl, Emitter, Node, createDocument, fakeEventSource, storage, walk } from "./web_stub_dom.mjs";
 
 class El extends BaseEl {
+  get children() { return this.childNodes.filter(n => n instanceof BaseEl); }
   setAttribute(k, v) {
     super.setAttribute(k, v);
     if (k.startsWith("data-")) this.dataset[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = String(v);
@@ -50,15 +51,22 @@ const loc = { origin: "http://localhost", protocol: "http:", pathname: "/", hash
   replace(hash) { this.hash = hash; win.dispatchEvent({ type: "hashchange" }); } };
 let role = "owner";
 let failMenu = false;
+let offline = false;
 let backendEffort = "high";
 let backendGate = null;
+let profileEmoji = "🙂";
 const fetched = [];
 const response = body => ({ ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => body });
 const fetch = async (url, options = {}) => {
   const p = String(url).replace(/^https?:\/\/[^/]+/, "").replace(/^\/api\/(?:admin\/)?v1/, "").split("?")[0];
   fetched.push(p);
+  if (offline && p !== "/health") throw new Error("offline");
   if (p === "/me") return response({ role, name: "Owner", notify: { enabled: false } });
-  if (p === "/profile") { if (failMenu) throw new Error("offline"); return response({ emoji: "🙂", choices: ["🙂"] }); }
+  if (p === "/profile") {
+    if (failMenu) throw new Error("offline");
+    if (options.method === "PUT") profileEmoji = JSON.parse(options.body).emoji;
+    return response({ emoji: profileEmoji, choices: ["🙂", "🤖"] });
+  }
   if (p === "/health") return response({ protocols: { admin: { min: 1, max: 99 } }, update_hint: {} });
   if (p === "/backends/claude" && options.method === "PUT") {
     backendEffort = JSON.parse(options.body).effort;
@@ -147,6 +155,9 @@ assert.equal(input.value, "https://unsaved.example");
 assert.deepEqual(marked(), ["connection"]);
 await go("#/profile/account");
 assert.deepEqual(marked(), ["account"]);
+walk(byId.app, n => n.tagName === "BUTTON" && n.getAttribute("aria-label") === "Use 🤖")[0].click();
+await sleep();
+assert.equal(walk(pane(), n => n.classList.contains("identity-emoji"))[0].textContent, "🤖");
 doc.dispatchEvent({ type: "keydown", key: "[", target: doc.body });
 assert.ok(doc.body.classList.contains("split-collapsed"));
 doc.dispatchEvent({ type: "keydown", key: "[", target: doc.body });
@@ -154,6 +165,16 @@ assert.equal(doc.body.classList.contains("split-collapsed"), false);
 await go("#/agents");
 assert.equal(pane().getAttribute("aria-label"), "Agents list");
 assert.equal(win._l.hashchange.length, 1, "closing the menu removes its refresh listener");
+offline = true;
+await go("#/settings");
+assert.ok(rows().some(n => n.dataset.splitKey === "connection"), "offline menu retains the repair link");
+assert.match(pane().textContent, /Can't reach|offline/);
+await go("#/profile/connection");
+assert.ok(walk(byId.app, n => n.tagName === "INPUT").length, "offline Connection settings still open");
+offline = false;
+await go("#/profile/appearance");
+assert.ok(walk(pane(), n => n.className === "note bad")[0].hidden, "reconnection clears the initial error");
+await go("#/agents");
 role = "member"; fetched.length = 0;
 await go("#/settings");
 assert.ok(!rows().some(n => ["resources", "apps", "backends"].includes(n.dataset.splitKey)));
