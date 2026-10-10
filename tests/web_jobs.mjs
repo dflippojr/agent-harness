@@ -9,6 +9,10 @@ import { jobGroup, jobBody, lastRunPill, lastRunText, shortWhen, JOB_FIELDS } fr
 
 // Browsers stringify an array passed to append(), so this stub refuses one rather than flattening it.
 class StrictEl extends El {
+  setAttribute(name, value) {
+    super.setAttribute(name, value);
+    if (name === "checked") { this.checked = true; this.defaultChecked = true; }
+  }
   focus() { doc.activeElement = this; }
   closest(selector) {
     if (selector === ".job-row") {
