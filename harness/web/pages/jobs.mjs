@@ -9,6 +9,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
   confirmSheet = sheets.confirmSheet, onLeave = () => {}, onDaemonChange = null, browser = globalThis }) {
   let refreshList = null;
   let openForm = null;
+  const enabledUpdates = new Map();
   // Serialize writes to one job: the list switch and its open editor must not overwrite each other.
   const writes = new Map();
   function writeJob(id, action) {
@@ -190,6 +191,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
           const fresh = await api(`/jobs/${j.id}`);
           if (fresh.enabled !== enabled) Object.assign(j, await api(`/jobs/${j.id}`, { method: "PUT", body: jobBody(fresh, { enabled }) }));
           else Object.assign(j, fresh);
+          enabledUpdates.set(j.id, { enabled: j.enabled });
           if (openForm?.id === j.id) openForm.syncEnabled(j.enabled, openForm === form ? formRevision : 0);
         });
       } catch (err) {
@@ -214,9 +216,13 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
 
   async function viewJob(id) {
     const isNew = id === "new";
+    const openingToggle = enabledUpdates.get(id);
     setHeader("jobs", isNew ? "New job" : "Job", { page: true });
     const [projects, models, backends, job] = await Promise.all([
       api("/projects"), api("/models"), api("/backends?auth=skip"), isNew ? null : api(`/jobs/${id}`)]);
+    // The detail response may predate a list toggle completed while its other dependencies were loading.
+    const latestToggle = enabledUpdates.get(id);
+    if (job && latestToggle !== openingToggle) job.enabled = latestToggle.enabled;
     const j = job || newJobDefaults(projects);
     const name = h("input", { type: "text", value: j.name, placeholder: "e.g. Morning homelab check" });
     const prompt = h("textarea", { placeholder: "e.g. Check that every homelab service is running and nothing restarted overnight. Look at the logs of anything that isn't healthy." });

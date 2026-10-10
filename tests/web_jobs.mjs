@@ -442,7 +442,7 @@ stableLeaves.forEach((fn) => fn());
 
 
 // These race scenarios own their data, requests, events, and both pane/form cleanups.
-async function jobFixture(seed, readList = async (data) => structuredClone(data)) {
+async function jobFixture(seed, readList = async (data) => structuredClone(data), readJob = async (item) => structuredClone(item)) {
   const data = structuredClone(seed);
   const requests = [];
   const notices = [];
@@ -465,8 +465,8 @@ async function jobFixture(seed, readList = async (data) => structuredClone(data)
       if (path.startsWith("/jobs/preview")) return { ok: true, next: [] };
       const item = data.find((j) => path === "/jobs/" + j.id);
       assert.ok(item, path);
-      if (opts.method === "PUT") Object.assign(item, opts.body);
-      return structuredClone(item);
+      if (opts.method === "PUT") { Object.assign(item, opts.body); return structuredClone(item); }
+      return readJob(item);
     },
   });
   const body = new StrictEl("section");
@@ -475,6 +475,33 @@ async function jobFixture(seed, readList = async (data) => structuredClone(data)
   return { ...fixture, data, body, document, requests, notices, notify: () => notify(),
     readCount: () => listReads, cleanup: () => [...leaves, ...fixture.leaves].forEach((fn) => fn()) };
 }
+
+
+// A list toggle completed during detail loading wins over the earlier detail snapshot.
+let releaseDetail;
+const detailReply = new Promise((resolve) => { releaseDetail = resolve; });
+let detailReads = 0;
+const mountingForm = await jobFixture([job("mounting", "Loading job")], undefined, async (item) => {
+  if (++detailReads === 1) {
+    const snapshot = structuredClone(item);
+    await detailReply;
+    return snapshot;
+  }
+  return structuredClone(item);
+});
+try {
+  const openingDetail = mountingForm.page.viewJob("mounting");
+  await flush();
+  const listSwitch = walk(mountingForm.body, (e) => e.classList.contains("switch"))[0];
+  listSwitch.checked = false;
+  listSwitch.dispatchEvent({ type: "change" });
+  await flush(); await flush(); await flush();
+  assert.equal(mountingForm.data[0].enabled, false);
+  releaseDetail();
+  await openingDetail;
+  const formSwitch = walk(mountingForm.$app, (e) => e.attributes["aria-label"] === "Job enabled")[0];
+  assert.equal(formSwitch.checked, false, "a newly mounted form adopts a toggle completed while loading");
+} finally { releaseDetail(); mountingForm.cleanup(); }
 
 // A failed notification request must still run the Save refresh queued behind it.
 let failBackground;
