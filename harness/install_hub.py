@@ -82,6 +82,13 @@ class Service:
             raise ValueError("invalid Hub service id")
         self.name = "agent-harness-hub-" + service_id
 
+    @property
+    def definition_path(self) -> Path:
+        if sys.platform == "darwin":
+            return Path.home() / "Library/LaunchAgents" / (self.name + ".plist")
+        config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+        return Path(config_home) / "systemd/user" / (self.name + ".service")
+
     def start(self, argv: list[str], workdir: Path, log: Path):
         if sys.platform == "win32":
             import base64
@@ -101,19 +108,19 @@ class Service:
             command(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
                      base64.b64encode(script.encode("utf-16le")).decode()])
         elif sys.platform == "darwin":
-            path = Path.home() / "Library/LaunchAgents" / (self.name + ".plist")
+            path = self.definition_path
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(plistlib.dumps({"Label": self.name, "ProgramArguments": argv,
                 "WorkingDirectory": str(workdir), "RunAtLoad": True, "KeepAlive": True,
                 "StandardOutPath": str(log), "StandardErrorPath": str(log)}))
             command([LAUNCHCTL, "bootstrap", f"gui/{os.getuid()}", path])
         else:
-            path = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "systemd/user"
-            path.mkdir(parents=True, exist_ok=True)
+            path = self.definition_path
+            path.parent.mkdir(parents=True, exist_ok=True)
             def escape(value):
                 return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("\n", "\\n")
             executable = " ".join('"' + escape(a).replace("$", "$$") + '"' for a in argv)
-            (path / (self.name + ".service")).write_text(
+            path.write_text(
                 "[Unit]\nDescription=Agent harness Hub\n[Service]\nType=simple\n"
                 f'WorkingDirectory="{escape(workdir)}"\nExecStart={executable}\n'
                 "Restart=on-failure\nRestartSec=10\n[Install]\nWantedBy=default.target\n", encoding="utf-8")
@@ -127,14 +134,14 @@ class Service:
                 "if ($t) { $t | Stop-ScheduledTask -ErrorAction Stop; "
                 "$t | Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop }"])
         elif sys.platform == "darwin":
-            path = Path.home() / "Library/LaunchAgents" / (self.name + ".plist")
+            path = self.definition_path
             if path.exists():
                 loaded = command([LAUNCHCTL, "list"], capture_output=True).stdout
                 if any(line.split()[-1:] == [self.name] for line in loaded.splitlines()):
                     command([LAUNCHCTL, "bootout", f"gui/{os.getuid()}", path])
                 path.unlink()
         else:
-            path = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "systemd/user" / (self.name + ".service")
+            path = self.definition_path
             if path.exists():
                 command([SYSTEMCTL, "--user", "disable", "--now", self.name + ".service"])
                 path.unlink()
@@ -314,6 +321,8 @@ def main(argv=None) -> int:
     parser.add_argument("--hub-module", default=os.environ.get("HARNESS_HUB_MODULE", "harness_hub"))
     parser.add_argument("--uv", default="uv")
     args = parser.parse_args(argv)
+    args.install_dir = args.install_dir.resolve()
+    args.config_dir = args.config_dir.resolve()
     try:
         return install(args) if args.action == "install" else uninstall(args)
     except (ValueError, OSError, TimeoutError, subprocess.CalledProcessError) as exc:

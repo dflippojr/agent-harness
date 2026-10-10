@@ -466,6 +466,30 @@ def test_per_user_service_registration_and_removal(tmp_path, monkeypatch, platfo
         hub.Service("../unsafe")
 
 
+def test_empty_xdg_home_uses_same_default_for_start_and_stop(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub.sys, "platform", "linux")
+    monkeypatch.setattr(hub.Path, "home", classmethod(lambda _: tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", "")
+    monkeypatch.setattr(hub, "command", lambda *_args, **_kwargs: None)
+    service = hub.Service("a" * 32)
+    expected = tmp_path / ".config/systemd/user" / (service.name + ".service")
+    assert service.definition_path == expected
+    service.start([str(tmp_path / "python"), "-m", "stub_hub"], tmp_path, tmp_path / "hub.log")
+    assert expected.exists()
+    service.stop()
+    assert not expected.exists()
+
+
+def test_relative_installer_paths_are_resolved_before_launch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    monkeypatch.setattr(hub, "install", lambda args: seen.append(args) or 0)
+    assert hub.main(["install", "--install-dir", "runtime", "--config-dir", "runtime/config", "--with-hub"]) == 0
+    assert seen[0].install_dir == tmp_path / "runtime"
+    assert seen[0].config_dir == tmp_path / "runtime/config"
+    assert seen[0].install_dir.is_absolute() and seen[0].config_dir.is_absolute()
+
+
 @pytest.mark.parametrize("args", [("--with-hub",), ("--with-hub", "--hub-method", "docker", "--hub-image", "stub:1"), ("--no-hub",), ()])
 def test_unix_hub_dry_run(tmp_path, args):
     result = run_installer(tmp_path, "Linux", "x86_64", "--profile", "service", *args)
