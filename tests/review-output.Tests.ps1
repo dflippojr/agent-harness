@@ -19,6 +19,13 @@ Describe 'Review publication safety' {
         @{ Payload = 'C:/Users/reviewer/.codex/auth.json' }
         @{ Payload = 'C:/./Users/reviewer/.codex/auth.json' }
         @{ Payload = 'C:/temp/../Users/reviewer/.codex/auth.json' }
+        @{ Payload = '"C:\Program Files\..\Users\reviewer\.codex\auth.json"' }
+        @{ Payload = "'C:\Program Files\..\Users\reviewer\.codex\auth.json'" }
+        @{ Payload = '`C:\Program Files\..\Users\reviewer\.codex\auth.json`' }
+        @{ Payload = '"\\?\C:\Program Files\..\Users\reviewer\.codex\auth.json"' }
+        @{ Payload = '"/var/data folder/../../home/reviewer/.codex/auth.json"' }
+        @{ Payload = '"\\server\share\folder name\..\Users\reviewer\.codex\auth.json"' }
+        @{ Payload = 'file:///C:/Program%20Files/%2e%2e/Users/reviewer/.codex/auth.json' }
         @{ Payload = 'C:/Users//reviewer/.codex/auth.json' }
         @{ Payload = '/home//reviewer/.codex/auth.json' }
         @{ Payload = '/tmp/../home/reviewer/.codex/auth.json' }

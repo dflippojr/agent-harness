@@ -347,6 +347,7 @@ function Convert-ReviewProfilePathForms {
         if ([Uri]::TryCreate($match.Value, [UriKind]::Absolute, [ref]$uri) -and $uri.IsFile) {
             $path = [Uri]::UnescapeDataString($uri.AbsolutePath)
             if ($uri.IsUnc -and $uri.Host -ne 'localhost') { $path = '//' + $uri.Host + $path }
+            if ($path -match '\s') { return '"' + $path + '"' }
             return $path
         }
         return $match.Value
@@ -365,7 +366,8 @@ function Convert-ReviewProfilePathForms {
     # Canonicalize absolute path spellings as strings, without touching the filesystem.
     $canonicalize = {
         param($match)
-        $path = $match.Value
+        $path = $match.Groups['Path'].Value
+        $quote = $match.Groups['Quote'].Value
         $prefix = '/'
         $rootDepths = @(0)
         if ($path -match '^([A-Za-z]:)/+') {
@@ -389,11 +391,13 @@ function Convert-ReviewProfilePathForms {
             }
             $candidate = $prefix + ($parts -join '/')
             if ($null -eq $preferred) { $preferred = $candidate }
-            if ($candidate -match $Pattern) { return $candidate }
+            if ($candidate -match $Pattern) { return $quote + $candidate + $quote }
         }
-        return $preferred
+        return $quote + $preferred + $quote
     }.GetNewClosure()
-    return [regex]::Replace($normalized, '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:[A-Z]:/+|/+)[^\s<>`"''(),;]*', $canonicalize)
+    $rootPattern = '(?:[A-Z]:/+|/+)'
+    $pathForms = '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:(?<Quote>[`"''])\s*(?<Path>' + $rootPattern + '[^\r\n]*?)\k<Quote>|(?<Path>' + $rootPattern + '[^\s<>`"''(),;]*))'
+    return [regex]::Replace($normalized, $pathForms, $canonicalize)
 }
 
 function ConvertFrom-ReviewGitQuotedPath {
