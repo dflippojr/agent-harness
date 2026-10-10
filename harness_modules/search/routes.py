@@ -6,7 +6,7 @@ import asyncio
 
 from fastapi import Request
 
-from harness.modules import HarnessError, RouteTable, SESSIONS_ALL, app_auth, calling_app, manager, owner_id
+from harness.modules import HarnessError, RouteTable, app_auth, calling_app, manager, owner_id, reaches_web
 
 from . import service as search
 
@@ -32,7 +32,7 @@ async def api_search(request: Request, q: str = "", project: str = "", limit: in
     key = app_auth(request, "sessions")
     user_id = key["user_id"] if key.get("kind") == "member" else "owner"
     app_id = None
-    if key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"]:
+    if not reaches_web(key):
         app_id = key["id"]
     if not m.cfg.search.enabled:
         raise HarnessError(400, "session search is disabled in config/harness.yaml")

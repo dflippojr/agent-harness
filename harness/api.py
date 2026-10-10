@@ -385,6 +385,9 @@ async def _access_guard(request: Request, call_next):
         response = await call_next(request)
     finally:
         namespace_audit.gap.reset(warning_token)
+    authenticated_key_id = getattr(request.state, "authenticated_key_id", None)
+    if authenticated_key_id is not None and not getattr(request.state, "key_activity_in_endpoint_log", False):
+        m.record_key_activity(authenticated_key_id)
     if warnings:
         response.headers["X-Agent-Harness-Audit-Warning"] = "audit_gap"
         response.headers["Access-Control-Expose-Headers"] = "X-Agent-Harness-Audit-Warning"

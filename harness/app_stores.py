@@ -647,6 +647,28 @@ class SessionStores:
         return self.web.count_sessions(user_id, *statuses) + len(
             self._indexed(lambda e: e["owner_id"] == user_id and e["status"] in statuses))
 
+    def count_app_sessions(self, app_id: str, *statuses: str) -> int:
+        return len(self._indexed(lambda e: e["app_id"] == app_id and e["status"] in statuses))
+
+    def count_stored_sessions(self, user_id: str, *statuses: str, holding: bool = False) -> int:
+        """`count_sessions` from the rows of each store that may hold one, not from the index, which takes a commit
+        only once its callbacks run: what admission caps count (#524). Inside a write, its store's own rows."""
+        apps = self._stores_with(lambda e: e["owner_id"] == user_id and (e["status"] in statuses
+                                                                            or e["status"] not in _ENDED))
+        return self.web.count_sessions(user_id, *statuses, holding=holding) + sum(
+            self._call(app_id, "count_sessions", user_id, *statuses, holding=holding) for app_id in apps)
+
+    def count_stored_app_sessions(self, app_id: str, *statuses: str, holding: bool = False) -> int:
+        """`count_app_sessions` from App `app_id`'s own store, as `count_stored_sessions`; 0 without one."""
+        if not self._stores_with(lambda e: e["app_id"] == app_id):
+            return 0
+        return self._call(app_id, "count_app_sessions", app_id, *statuses, holding=holding)
+
+    def _stores_with(self, pred) -> list[str]:
+        """The Apps whose stores hold a session matching `pred`, including one whose insert has not committed yet."""
+        with self._lock:
+            return sorted({e["app_id"] for e in self._sessions.values() if pred(e)})
+
     def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent",
                       with_app: str | None = None) -> list[dict]:
         rows = self.web.list_sessions(limit, owner_id=owner_id, kind=kind)

@@ -5,11 +5,11 @@ import { JOB_NOTIFY, CRON_PRESETS, JOB_GROUPS, fmtWhen, whenText, cronLabel, new
 import { ago } from "../lib/format.mjs";
 import * as sheets from "../lib/sheet.mjs";
 
-export function mountJobs({ $app, h, fill, append, api, setHeader, showFab, toast, go, route, isGuest, confirmGpuQueue, badge, jobStatusBadge, location,
+export function mountJobs({ $app, h, fill, append, api, setHeader, showListAction, toast, go, route, isGuest, confirmGpuQueue, badge, jobStatusBadge, location,
   confirmSheet = sheets.confirmSheet }) {
   async function viewJobs() {
     setHeader("jobs", "Jobs");
-    showFab("#/jobs/new", "+ New job");
+    showListAction("#/jobs/new", "+ New job");
     const jobs = await api("/jobs");
     if (!jobs.length) {
       append($app, h("p", { class: "empty" }, "No scheduled jobs yet. A job runs a task on a schedule, such as a morning homelab check, and notifies you only when something needs attention."));

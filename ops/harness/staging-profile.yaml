@@ -26,3 +26,4 @@ modules:
   backup: false
   skills: false
   mcp_client: false
+  hub: false

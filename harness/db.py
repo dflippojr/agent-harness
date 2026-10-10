@@ -459,6 +459,8 @@ READ_CONNECTIONS = 4
 # A revoked App's (or device's) store and folder are erased this long after the revoke, unless the owner undoes it
 # first (#330 decision 5). The nightly maintenance does the erasing (maintenance.py).
 APP_ERASE_GRACE_SECONDS = 7 * 86400
+APP_LIMITS_META = "app_limits:"           # meta key prefix: an App's owner-set session caps (#524)
+APP_LIMIT_KEYS = ("max_running", "max_queued")
 
 
 def _writes(fn):
@@ -981,14 +983,28 @@ class Database:
         return [_row(r) for r in rows]
 
     @_reads
-    def count_sessions(self, user_id: str, *statuses: str) -> int:
+    def count_sessions(self, user_id: str, *statuses: str, holding: bool = False) -> int:
+        """`holding`: only those running or holding a place under their running cap (`run.holds_place`, #524)."""
+        return self._count_sessions("owner_id", user_id, statuses, holding)
+
+    @_reads
+    def count_app_sessions(self, app_id: str, *statuses: str, holding: bool = False) -> int:
+        """App `app_id`'s sessions in any of `statuses` (#524), `holding` as in count_sessions."""
+        return self._count_sessions("app_id", app_id, statuses, holding)
+
+    def _count_sessions(self, column: str, value: str, statuses: tuple, holding: bool) -> int:
         marks = ",".join("?" * len(statuses))
+        held = " AND (status = 'running' OR json_extract(run, '$.holds_place') = 1)" if holding else ""
         with self.lock:
             row = self.conn.execute(
-                f"SELECT COUNT(*) AS n FROM sessions WHERE owner_id = ? AND status IN ({marks})",
-                (user_id, *statuses),
+                f"SELECT COUNT(*) AS n FROM sessions WHERE {column} = ? AND status IN ({marks}){held}",
+                (value, *statuses),
             ).fetchone()
         return int(row["n"] if row else 0)
+
+    # A lone store has no index: its rows are what SessionStores' stored counts read (#524).
+    count_stored_sessions = count_sessions
+    count_stored_app_sessions = count_app_sessions
 
     # events
     @_writes
@@ -1562,6 +1578,16 @@ class Database:
         return [dict(r) for r in rows]
 
     @_reads
+    def pending_pairing_catalog_origins(self, now: float) -> list[tuple[str, str]]:
+        """Labels and origins of unexpired open App requests; no secrets or 100-row list limit."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT DISTINCT catalog_app_id, origin FROM pairing_requests WHERE kind = 'app' "
+                "AND state IN ('pending', 'armed', 'claimed', 'approved') AND expires_at > ?",
+                (now,)).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    @_reads
     def pairing_request_load(self, source: str, since: float, active: tuple[str, ...]) -> tuple[int, int, int]:
         """(requests `source` made since `since`, its unapproved active requests, every unapproved active request)."""
         marks = ", ".join("?" * len(active))
@@ -1842,6 +1868,13 @@ class Database:
             row = self.conn.execute("SELECT * FROM api_keys WHERE id = ?", (kid,)).fetchone()
         return _row(row)
 
+    @_writes
+    def touch_api_key(self, kid: str) -> None:
+        """Record successful credential authentication without opening its App store."""
+        with self.lock:
+            self.conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL",
+                              (time.time(), kid))
+
     @_reads
     def list_api_keys(self) -> list[dict]:
         """The keys: every App's, device's and owner token's. Agent Harness Web's registry row has no key, so it is
@@ -1879,6 +1912,7 @@ class Database:
                                    "AND role != 'hub'",
                                    (now, now + APP_ERASE_GRACE_SECONDS, kid)).rowcount == 1
             if ok:  # an owner key has no erasure to take its settings later
+                self.conn.execute("DELETE FROM stream_tickets WHERE key_id = ?", (kid,))
                 self.conn.execute("DELETE FROM app_settings WHERE app_id = ? AND app_id IN "
                                   "(SELECT id FROM api_keys WHERE kind = 'owner')", (kid,))
             return ok
@@ -1921,7 +1955,7 @@ class Database:
                               "retention_days = NULL WHERE id = ?", (time.time(), kid))
             self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
             self.conn.execute("DELETE FROM app_provider_credentials WHERE app_id = ?", (kid,))
-            self.conn.execute("DELETE FROM meta WHERE key = ?", ("app_error:" + kid,))
+            self.conn.execute("DELETE FROM meta WHERE key IN (?, ?)", ("app_error:" + kid, APP_LIMITS_META + kid))
 
     @_writes
     def set_app_retention(self, kid: str, days: float | None) -> bool:
@@ -1930,6 +1964,29 @@ class Database:
             return self.conn.execute("UPDATE api_keys SET retention_days = ? WHERE id = ? "
                                      "AND kind NOT IN ('owner', 'web') "
                                      "AND erased_at IS NULL", (days, kid)).rowcount == 1
+
+    @_reads
+    def app_limits(self, kid: str) -> dict:
+        """The session caps the owner set for App `kid` (#524): `max_running` and `max_queued`, each None when unset."""
+        with self.lock:
+            row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (APP_LIMITS_META + kid,)).fetchone()
+        stored = json.loads(row["value"]) if row else {}
+        return {k: (int(stored[k]) if stored.get(k) is not None else None) for k in APP_LIMIT_KEYS}
+
+    @_writes
+    def set_app_limits(self, kid: str, limits: dict) -> bool:
+        """Replace App `kid`'s session caps (None: the daemon default). False when no live App has that id."""
+        with self.lock:
+            if self.conn.execute("SELECT 1 FROM api_keys WHERE id = ? AND kind = 'app' AND erased_at IS NULL",
+                                 (kid,)).fetchone() is None:
+                return False
+            values = {k: limits.get(k) for k in APP_LIMIT_KEYS if limits.get(k) is not None}
+            if values:
+                self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                                  (APP_LIMITS_META + kid, json.dumps(values)))
+            else:
+                self.conn.execute("DELETE FROM meta WHERE key = ?", (APP_LIMITS_META + kid,))
+            return True
 
     @_reads
     def session_activity(self) -> list[dict]:

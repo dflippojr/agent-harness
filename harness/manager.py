@@ -27,8 +27,8 @@ from .app_stores import EVERY_APP, SessionStores
 from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .runner_contract import RunnerError, NoRunnerHub, RunnerOffline
-from .runner import (ACTIVE, END_PENDING, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT,
-                     SYSTEM_PROMPT, Runner, new_run)
+from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, holds_place, MAC_REPO_PROMPT,
+                     MAC_SYSTEM_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner, new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
@@ -122,6 +122,11 @@ def _secret_fix_summary(drafted: int, already: int, rewrite: int, pushed: int) -
     return " ".join(parts) or "There are no open findings to fix."
 
 
+class _RunStillEnding(Exception):
+    """In a message's write: the run it found active has reached its final status, but its task has not finished
+    ending it (run_finished, branch save). The message waits for that, then restarts the session (#524)."""
+
+
 class HarnessError(Exception):
     def __init__(self, status: int, message: str, code: str = "", keys: dict | None = None,
                  details: dict | None = None):
@@ -174,6 +179,8 @@ class Manager:
         self.hub = NoRunnerHub()
         self.runner = Runner(cfg, self.db, self.bus, self.scheduler, chat=chat, warmer=self.warmer, hub=self.hub)
         self.tasks: dict[str, asyncio.Task] = {}
+        self._key_activity_last_touch: dict[str, float] = {}
+        self._key_activity_tasks: dict[str, asyncio.Task] = {}
         # Active context managers/waiters retain their lock; idle erased namespaces retain no cache entry.
         self.erase_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         # Operations that need an idle session throughout (rewind, fork, review), by session: claimed in one write
@@ -296,7 +303,12 @@ class Manager:
             if s["status"] not in ACTIVE:
                 log.info("ending session %s (%s): the daemon stopped before its run ended", s["id"], s["status"])
                 self._spawn_task(s["id"], self.runner.end_pending_run(s["id"]))
-        for s in self.db.sessions_with_status(*ACTIVE):
+        recovering = self.db.sessions_with_status(*ACTIVE)
+        # Before any of them runs: a run saved before places were recorded gets its place first, so no other run's
+        # admission can count without it (#524).
+        for s in recovering:
+            await self.runner.mark_recovered_place(s)
+        for s in recovering:
             log.info("resuming session %s (%s)", s["id"], s["status"])
             self._spawn(s["id"], recovered=True)
         if self.canary is not None:
@@ -315,12 +327,32 @@ class Manager:
             from .snippets import remove_orphans
             self._snippet_cleanup = asyncio.create_task(remove_orphans(orphans), name="snippet-cleanup")
 
+    def record_key_activity(self, key_id: str) -> None:
+        """Best-effort metadata: at most one queued write per key per minute, off the response path."""
+        now = time.monotonic()
+        last = self._key_activity_last_touch.get(key_id)
+        if key_id in self._key_activity_tasks or (last is not None and now - last < 60):
+            return
+        # Reserve the window before scheduling: concurrent requests and failures cannot flood the writer.
+        self._key_activity_last_touch[key_id] = now
+        self._key_activity_tasks[key_id] = asyncio.create_task(self._touch_key_activity(key_id))
+
+    async def _touch_key_activity(self, key_id: str) -> None:
+        try:
+            await self.db.main.awrite(self.db.main.touch_api_key, key_id)
+        except Exception:
+            # Neither credential data nor exception text belongs in the log.
+            log.warning("key activity metadata could not be recorded")
+        finally:
+            self._key_activity_tasks.pop(key_id, None)
+
     async def stop(self) -> None:
         """Daemon shutdown: stop tasks but leave session state as-is so the next start resumes them."""
         await asyncio.to_thread(self.github_auth.shutdown)  # prompts and credentialed Git end with the daemon
         await asyncio.to_thread(self.end_user_logins.close)  # a sign-in in flight ends with the daemon
         if self.canary is not None:
             await self.canary.stop()
+        await asyncio.gather(*list(self._key_activity_tasks.values()), return_exceptions=True)
         tasks = list(self.tasks.values())
         for task in tasks:
             task.cancel()
@@ -442,6 +474,7 @@ class Manager:
             model, effort = self._hosted_choice(backend, model, effort, target, app)
         remote = target != "tower"
         app_id = app["id"] if app else ""
+        self._enforce_app_caps(app_id)
         self._check_free_space(remote, member, target, owner_id, app_id)
 
         sid = uuid.uuid4().hex[:10]
@@ -477,7 +510,13 @@ class Manager:
             "taint": list(opts.taint or []), "end_user": end_user,
             **({"retention_days": float(opts.retention_days)} if app and opts.retention_days else {}),
         }
-        self._insert_created(session, app, tools, opts.job_id, prompt, context=context, idempotency=opts.idempotency)
+        try:
+            self._insert_created(session, app, tools, opts.job_id, prompt, context=context,
+                                 idempotency=opts.idempotency)
+        except HarnessError:  # over a cap after all: another request filled it meanwhile
+            if not remote:
+                remove_tree(workspace)
+            raise
         self._spawn(sid)
         return self.db.get_session(sid)
 
@@ -626,6 +665,7 @@ class Manager:
         store = self.db.for_app(session["app_id"])
 
         def insert_created() -> None:
+            self._enforce_queue_caps(session)
             self.db.insert_session(session)
             if idempotency:  # same commit as the session: a crash before the response still finds it on retry
                 store.insert_idempotency_key({**idempotency, "session_id": sid})
@@ -887,34 +927,53 @@ class Manager:
         if s["status"] not in ACTIVE:
             user_id = session_user_id(s)
             if user_id != OWNER_USER_ID:
-                self._require_member_start(self.db.account_by_id(user_id), "session")
+                # Its queue caps are counted in the write: by then another message may have restarted the session,
+                # and this one joins that run instead (#524).
+                self._require_member_start(self.db.account_by_id(user_id), "session", caps=False)
         # Chat: snippets the user ran since their last message reach the model with this one (the transcript keeps
         # the message as typed).
         model_content = self.snippets.context_for(sid) + content if s.get("kind") == "chat" else content
 
         def deliver() -> None:
             self._refuse_during_operation(sid)      # in the write: a rewind claims the session in one too
-            self._refuse_unsettled(self.db.get_session(sid))
+            # The session as it is now, not as the request first read it: another message may have restarted it
+            # meanwhile (this one then joins that run), or its run ended (this one restarts it).
+            current = self.db.get_session(sid)
+            ending = self.tasks.get(sid)
+            if current["status"] not in ACTIVE and ending is not None and not ending.done():
+                raise _RunStillEnding()  # nothing written: the ended run's results stay as they are until it is over
+            self._refuse_unsettled(current)
             self.bus.emit(sid, kind, {"content": content})
-            if s["status"] in ACTIVE:
+            if current["status"] in ACTIVE:
                 # Delivered before the agent's next model call.
-                self.db.update_session(sid, inbox=s["inbox"] + [model_content])
+                self.db.update_session(sid, inbox=current["inbox"] + [model_content])
             else:
-                run = new_run(carry=s["run"])
-                app_key = self.db.get_api_key(s["app_id"]) if s.get("app_id") else None
+                if s["status"] in ACTIVE and session_user_id(current) != OWNER_USER_ID:
+                    self._require_member_start(self.db.account_by_id(session_user_id(current)), "session",
+                                               caps=False)
+                self._enforce_queue_caps(current)
+                run = new_run(carry=current["run"])
+                app_key = self.db.get_api_key(current["app_id"]) if current.get("app_id") else None
                 if getattr(self, "settings", None):
-                    turns, tokens = self.settings.session_budgets(app_key, session=s)
+                    turns, tokens = self.settings.session_budgets(app_key, session=current)
                     run["max_turns"] = turns
                     run["max_completion_tokens"] = tokens
-                self.db.update_session(sid, context=s["context"] + [{"role": "user", "content": model_content}],
-                                       run=run, status="queued", stop_reason="", answer="")
+                context_ = current["context"] + [{"role": "user", "content": model_content}]
+                self.db.update_session(sid, context=context_, run=run, status="queued", stop_reason="", answer="")
                 self.bus.emit(sid, "status", {"status": "queued"})
             # With the commit, not after the await: a request cancelled mid-write still gets its run.
             self.db.after_commit(lambda: sid in self.tasks or self._spawn(sid))
             namespace_audit.record(self.db, s, context,
                                    "session.context" if kind == "app_context" else "session.message",
                                    metadata={"fields": ["context" if kind == "app_context" else "content"]})
-        await self.db.for_session(sid).awrite(deliver)
+        while True:
+            try:
+                await self.db.for_session(sid).awrite(deliver)
+                break
+            except _RunStillEnding:
+                ending = self.tasks.get(sid)
+                if ending is not None:
+                    await asyncio.gather(ending, return_exceptions=True)
         return self.db.get_session(sid)
 
     def original_prompt(self, sid: str) -> str:
@@ -1046,6 +1105,7 @@ class Manager:
         if owner_id != OWNER_USER_ID:
             self._require_member_start(self.db.account_by_id(owner_id), "session")
         app_id = parent.get("app_id") or ""
+        self._enforce_app_caps(app_id)
         self._check_free_space(False, owner_id != OWNER_USER_ID, "tower", owner_id, app_id)
         cp = self.runner.checkpointer
         new_sid = uuid.uuid4().hex[:10]
@@ -2033,37 +2093,96 @@ class Manager:
         return self.db.revoke_app_provider_credential(cid)
 
     def _scheduler_eligible(self, sid: str) -> bool:
+        """May `sid` take the GPU slot (or, hosted, a backend slot) under its member's or App's `max_running`? A
+        session parked on an approval, the Mac, the App or a provider limit still counts against that cap (#524)."""
         s = self.db.get_session(sid)
         if not s:
             # Image/device/test holders are not household sessions; do not park them forever.
             return True
         user_id = s.get("owner_id") or OWNER_USER_ID
-        if user_id == OWNER_USER_ID:
-            return True
-        account = self.db.account_by_id(user_id)
-        if account is None or not account.get("enabled", 1):
+        account = self.db.account_by_id(user_id) if user_id != OWNER_USER_ID else None
+        if user_id != OWNER_USER_ID and (account is None or not account.get("enabled", 1)):
             return False
-        if s.get("status") == "running":
+        if holds_place(s) or sid in self.runner.admitted:
+            return True  # it counts against the cap already, and coming back adds nothing (even over a lowered cap)
+        if account is not None:
+            occupied = self.db.count_stored_sessions(user_id, *ACTIVE, holding=True)
+            cap = int(account["max_running"])
+        elif capped_app(self.db, s.get("app_id") or ""):
+            occupied = self.db.count_stored_app_sessions(s["app_id"], *ACTIVE, holding=True)
+            cap = self.app_limits(s["app_id"])["max_running"]
+        else:
             return True
-        running = self.db.count_sessions(user_id, "running")
-        return running < int(account["max_running"])
+        return occupied + self._about_to_run(sid, admission_key(self.db, s)) < cap
+
+    def _about_to_run(self, sid: str, key: str) -> int:
+        """Sessions of admission `key` (other than `sid`) let past its running cap that do not hold their place yet:
+        hosted sessions admitted and waiting for a backend slot, and the GPU holder until its `running` commits."""
+        others = {other for other, k in self.runner.admitted.items() if k == key}
+        if self.scheduler.holder is not None:
+            others.add(self.scheduler.holder)
+        others.discard(sid)
+        n = 0
+        for other in others:
+            row = self.db.get_session(other)
+            if row and row["status"] in ACTIVE and not holds_place(row) and admission_key(self.db, row) == key:
+                n += 1
+        return n
+
+    def app_limits(self, app_id: str, stored: dict | None = None) -> dict:
+        """App `app_id`'s effective session caps: what the owner set (`stored`, read when not given), else the
+        daemon's `app_max_*` defaults."""
+        stored = self.db.app_limits(app_id) if stored is None else stored
+        defaults = {"max_running": self.cfg.app_max_running, "max_queued": self.cfg.app_max_queued}
+        return {k: int(stored[k]) if stored.get(k) is not None else int(defaults[k]) for k in defaults}
+
+    def app_limits_view(self, app_id: str) -> dict:
+        """The owner's view: what is set for the App, what applies, and how much of it is in use."""
+        count = self.db.count_app_sessions
+        stored = self.db.app_limits(app_id)
+        return {"app_id": app_id, "configured": stored, "effective": self.app_limits(app_id, stored),
+                "running": count(app_id, "running"), "queued": count(app_id, "queued"),
+                "parked": count(app_id, *WAITING)}
 
     def project_for_session(self, s: dict):
         from . import catalog
         return catalog.get_project(self.cfg, self.db, session_user_id(s), s.get("project") or "")
 
-    def _require_member_start(self, account: dict | None, action: str) -> None:
+    def _require_member_start(self, account: dict | None, action: str, caps: bool = True) -> None:
         if account is None or not account.get("enabled", 1):
             raise HarnessError(403, ACCOUNT_DISABLED)
-        self._enforce_member_caps(account)
+        if caps:
+            self._enforce_member_caps(account)
         self._enforce_member_quota(account, action)
 
     def _enforce_member_caps(self, account: dict) -> None:
         user_id = account["user_id"]
-        queued = self.db.count_sessions(user_id, "queued")
+        queued = self.db.count_stored_sessions(user_id, "queued", *WAITING)
         max_q = int(account["max_queued"])
         if queued >= max_q:
-            raise HarnessError(429, f"this account already has {queued} queued local sessions (limit {max_q})")
+            raise HarnessError(429, f"this account already has {queued} queued or waiting sessions (limit {max_q})")
+
+    def _enforce_queue_caps(self, s: dict) -> None:
+        """In the write that queues session `s` (a new one, or a finished one restarting): its member's and App's
+        `max_queued` once more, counted in the transaction of the store that holds the App's sessions. The early check
+        in the request reserves nothing, so two requests can both pass it; their writes run one after the other."""
+        user_id = session_user_id(s)
+        if user_id != OWNER_USER_ID:
+            account = self.db.account_by_id(user_id)
+            if account is not None:
+                self._enforce_member_caps(account)
+        self._enforce_app_caps(s.get("app_id") or "")
+
+    def _enforce_app_caps(self, app_id: str) -> None:
+        """An App's next session (or a finished one it restarts) waits in the shared queue: refuse past `max_queued`
+        (#524). Sessions parked on an approval or a reply count as queued."""
+        if not capped_app(self.db, app_id):
+            return
+        queued = self.db.count_stored_app_sessions(app_id, "queued", *WAITING)
+        max_q = self.app_limits(app_id)["max_queued"]
+        if queued >= max_q:
+            raise HarnessError(429, f"this App already has {queued} queued or waiting sessions (limit {max_q})",
+                               "app_queue_full")
 
     def _enforce_member_quota(self, account: dict, action: str) -> None:
         from .storage import account_usage_bytes, quota_message

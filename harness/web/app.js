@@ -60,7 +60,7 @@ try { storage = browser.localStorage; } catch (_) { /* storage blocked */ }
 const session = createSession({ agentHarnessWeb, storage });
 const { api, fetchMe, ownerSurface, isGuest, isMember, isOwner, canChat } = session;
 const chrome = mountChrome({ els, browser, session });
-const { layoutBar, setHeader, showFab, toast, setConnState, onConnState } = chrome;
+const { layoutBar, setHeader, showListAction, toast, setConnState, onConnState } = chrome;
 const stream = mountStream({ agentHarnessWeb, isBlocked: session.isBlocked, setConnState, ownerSurface, isGuest, browser });
 const tabs = mountTabs({ els, session, browser, chrome, stream });
 const { openStream } = stream;
@@ -95,9 +95,9 @@ const { viewNew, confirmGpuQueue } = mountNewTask({ $app, h, fill, append, api, 
   githubConnectionCard, warmModel, browser });
 const { viewImages, viewImage, viewImageEdit, viewImageFull } = mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave,
   progressBar, confirmGpuQueue, daemonImage, downloadDaemonFile, location });
-const { viewJobs, viewJob } = mountJobs({ $app, h, fill, append, api, setHeader, showFab, toast, go, route, isGuest,
+const { viewJobs, viewJob } = mountJobs({ $app, h, fill, append, api, setHeader, showListAction, toast, go, route, isGuest,
   confirmGpuQueue, badge, jobStatusBadge, location });
-const { viewList } = mountSessions({ $app, h, fill, append, api, setHeader, showFab, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
+const { viewList } = mountSessions({ $app, h, fill, append, api, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, openStream, ownerSurface, agentHarnessWeb, browser });
 const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar });
 

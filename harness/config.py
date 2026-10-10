@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_FILE = "projects.yaml"
 MODULE_NAMES = (
     "local_model", "homelab", "memory_library", "images", "image_edit", "jobs", "gpu_guard", "runners",
-    "remote_control", "web", "search", "endpoint", "notifications", "backup", "skills", "mcp_client",
+    "remote_control", "web", "search", "endpoint", "notifications", "backup", "skills", "mcp_client", "hub",
 )
 # Opt-in even on a full profile: the Qwen-Image-Edit weights are ~20 GB and must not arrive with an ordinary install.
 OPT_IN_MODULES = frozenset({"image_edit", "mcp_client"})
@@ -78,7 +78,7 @@ class SandboxConfig:
     pids: int = 512
     network: str = "harness-sandbox"
     egress_network: str = "harness-egress"
-    idle_stop_seconds: float = 0   # stop the container after this long without a command (0 = never, #428)
+    idle_stop_seconds: float = 900  # stop the container after this long without a command (0 = never, #428, #524)
 
 
 TOOL_MODES = ("builtin", "split")
@@ -403,7 +403,13 @@ class ModulesConfig:
     notifications: bool = True
     backup: bool = True
     skills: bool = True
+    hub: bool = True
     mcp_client: bool = False
+
+
+@dataclass
+class HubConfig:
+    enabled: bool = True
 
 
 @dataclass
@@ -490,6 +496,7 @@ class Config:
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     runners: dict[str, RunnerConfig] = field(default_factory=dict)
     gpu_guard: GpuGuardConfig = field(default_factory=GpuGuardConfig)
+    hub: HubConfig = field(default_factory=HubConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     memory_library: MemoryLibraryConfig = field(default_factory=MemoryLibraryConfig)
@@ -506,6 +513,13 @@ class Config:
     smart_approvals: object = field(default_factory=_smart_approvals_default)
     max_turns: int = 80
     max_completion_tokens: int = 200000
+    # Admission (#524): a pending approval is denied after this long and its run ends (0 = never); a member's or an
+    # App's run ends after this much wall-clock time outside approval waits (0 = never); an App's session caps when
+    # the owner set none of its own.
+    approval_timeout_seconds: float = 86400
+    max_run_seconds: float = 3600
+    app_max_running: int = 2
+    app_max_queued: int = 4
     elide_at: float = 0.55
     summarize_at: float = 0.65
     keep_recent: float = 0.20
@@ -850,6 +864,8 @@ def _module_enabled(profile: str, raw_modules: dict, selected, name: str, config
 
 def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) -> dict:
     """Build the per-module config sections, apply module enablement, and derive ModulesConfig."""
+    hub = HubConfig(**(raw.get("hub") or {}))
+    hub.enabled = hub.enabled and selected.hub
     notify = NotifyConfig(**(raw.get("notify") or {}))
     gpu_guard = GpuGuardConfig(**(raw.get("gpu_guard") or {}))
     backup = BackupConfig(**(raw.get("backup") or {}))
@@ -876,6 +892,7 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
     skills.enabled = module_enabled("skills", skills.enabled)
     remote_control.enabled = module_enabled("remote_control", remote_control.enabled)
     modules = ModulesConfig(
+        hub=hub.enabled,
         local_model=selected.local_model,
         homelab=selected.homelab,
         memory_library=memory_library.enabled,
@@ -893,7 +910,7 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
         skills=skills.enabled,
     )
     return {
-        "notify": notify, "gpu_guard": gpu_guard, "backup": backup, "memory_library": memory_library,
+        "hub": hub, "notify": notify, "gpu_guard": gpu_guard, "backup": backup, "memory_library": memory_library,
         "web": web, "endpoint": endpoint, "images": images, "search": search, "jobs": jobs,
         "skills": skills, "remote_control": remote_control, "modules": modules,
     }
@@ -952,6 +969,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         models=models,
         sandbox=SandboxConfig(**(raw.get("sandbox") or {})),
         projects=projects,
+        hub=sections["hub"],
         module_packages=_module_packages(raw.get("module_packages")),
         profile=profile,
         modules=modules,
@@ -986,6 +1004,10 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         smart_approvals=load_smart_config(raw.get("smart_approvals")),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
+        approval_timeout_seconds=float(budgets.get("approval_timeout_seconds", 86400)),
+        max_run_seconds=float(budgets.get("max_run_seconds", 3600)),
+        app_max_running=int(budgets.get("app_max_running", 2)),
+        app_max_queued=int(budgets.get("app_max_queued", 4)),
         elide_at=float(compaction.get("elide_at", 0.55)),
         summarize_at=float(compaction.get("summarize_at", 0.65)),
         keep_recent=float(compaction.get("keep_recent", 0.20)),

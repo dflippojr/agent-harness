@@ -74,6 +74,8 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | POST | `/api/admin/v1/accounts/{user_id}/google/invitation` | owner | TODO | `harness/google_signin_api.py` `google_invite` |
 | POST | `/api/admin/v1/accounts/{user_id}/google/revoke-sessions` | owner | TODO | `harness/google_signin_api.py` `google_revoke` |
 | GET | `/api/admin/v1/apps/erasures` | owner | TODO | `harness/admin.py` `app_erasures` |
+| GET | `/api/admin/v1/apps/{app_id}/limits` | owner | An App's session caps: what the owner set, what applies, and its sessions that count against them. | `harness/admin.py` `get_app_limits` |
+| PUT | `/api/admin/v1/apps/{app_id}/limits` | owner | Set how many sessions an App may have running and queued (#524); a field left out keeps its value and null restores the default. Only the owner can; an App cannot. | `harness/admin.py` `set_app_limits` |
 | POST | `/api/admin/v1/apps/{app_id}/restore` | owner | TODO | `harness/admin.py` `restore_app` |
 | PUT | `/api/admin/v1/apps/{app_id}/retention` | owner | TODO | `harness/admin.py` `set_app_retention` |
 | GET | `/api/admin/v1/audit` | owner | Owner-only review of every retained audit row, newest first, with a cursor (#467). | `harness/admin.py` `audit_review` |
@@ -107,6 +109,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/google-signin` | owner | TODO | `harness/google_signin_api.py` `google_status` |
 | GET | `/api/admin/v1/gpu` | owner (`admin` scope) | TODO | `harness_modules/local_model/routes.py` `gpu` |
 | POST | `/api/admin/v1/gpu/{action}` | owner (`admin` scope) | pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the model stays unloaded until something needs it). load: load the model now and keep it loaded for duration_seconds. unload: unload it now without holding the queue. | `harness_modules/local_model/routes.py` `gpu_action` |
+| GET | `/api/admin/v1/hub` | owner | Read module, paired-app and local unsigned-entry status and metadata. | `harness_modules/hub/routes.py` `hub_inventory` |
 | GET | `/api/admin/v1/hub-claim` | owner | Whether a Hub is claimed, its record (never a token or hash), and Hub claim requests still open. | `harness/hub_claim.py` `hub_claim_status` |
 | POST | `/api/admin/v1/hub-claim/release` | see source | Revoke the Hub's key and clear the record so a new Hub may claim (`{"confirm": true}`). Host only; the secret is checked before the body. | `harness/hub_claim.py` `release_hub` |
 | POST | `/api/admin/v1/hub-claim/requests/{rid}/approve` | see source | Approve a Hub claim with the match code the Hub shows (`{"match": "..."}`). Host only: needs the approval secret header, checked before the body. | `harness/hub_claim.py` `approve_hub_claim` |
@@ -281,6 +284,16 @@ is outside the member privacy guarantee.
 identity. `PATCH /api/admin/v1/accounts/{user_id}` can rename, rebind the login (same `user_id`, old login invalid
 immediately), disable/re-enable, or change quota and concurrency. Disable cancels that member's running and queued
 work and revokes their live streams; data stays. There is no Delete in v1.
+
+Session admission (#524). A member's sessions parked on an approval, the Mac, an App tool reply or a provider limit
+count toward both `max_queued` (new sessions past it get `429`) and `max_running` (a queued session waits for the GPU
+or a hosted backend slot until one ends). Apps have the same two caps: `GET /api/admin/v1/apps/{app_id}/limits`
+shows what is set, what applies and what counts against it; `PUT` with `max_running` and/or `max_queued` sets them
+(a field left out keeps its value, `null` restores the `budgets.app_max_*` default). A session waiting on an approval
+gives its hosted backend slot (and the GPU) to others and takes it back after the decision. Pending approvals are
+denied after `budgets.approval_timeout_seconds` and their run ends (`stop_reason` `approval_expired`); members' and
+Apps' runs end after `budgets.max_run_seconds` spent running (`budget_time`). The owner's own runs have no time
+budget.
 
 Member GitHub sign-in ([`member-github-auth.md`](member-github-auth.md)): `GET /api/admin/v1/github-member-auth`
 returns `configured`, `enabled`, the last preflight result, and each member's coarse `status` and `last_used_at`
@@ -531,6 +544,13 @@ answers 409, and an unknown id 404. Approval is a state change only: the key exi
 then appears in `GET /keys` with the request's name, scopes, origin and `catalog_app_id`. Requests expire 10 minutes
 after they are made, armed or claimed, and 5 minutes after approval.
 
+## Hub inventory
+
+`GET /api/admin/v1/hub` (`harness hub status`; SDK `Harness.hub_status()`) is the optional
+[Hub inventory](hub.md): modules, safe paired-key/store metrics and local unsigned full-manifest entries.
+Owner and exclusive Hub keys only. Disabled answers 400; absent answers 404. No tokens, hashes or pairing codes.
+The generated endpoint table is regenerated from the module's route after merge.
+
 ## Hub claim
 
 The standalone Hub (#546) is the owner's admin console. It pairs by itself and then **claims the daemon exclusively**
@@ -541,7 +561,7 @@ The standalone Hub (#546) is the owner's admin console. It pairs by itself and t
    with the same PKCE S256 check, match code and limits: 10 minutes to approve, then 5 minutes to redeem, and the token
    is fetched exactly once. While a Hub is recorded the request is refused at once with 409 `hub_claimed` and a
    `hub.claim.refused` audit row.
-2. **The owner approves on the daemon host.** `harness hub status` lists the open claim requests with each one's
+2. **The owner approves on the daemon host.** `harness hub claim-status` lists the open claim requests with each one's
    origin, or that it is a native Hub, but never its match code: read the code off the Hub's own screen.
    `harness hub approve <id> --match <code>` approves one (and warns when more than one Hub claim is pending) and
    `harness hub deny <id>` denies it.
@@ -565,7 +585,7 @@ with 403. The secret is never logged, audited or returned by any route.
 
 | Route | CLI | What it does |
 | --- | --- | --- |
-| `GET /hub-claim` | `harness hub status` | `{claimed, hub, requests}`: the record and the Hub claim requests of the last day (`match_code` is always empty) |
+| `GET /hub-claim` | `harness hub claim-status` | `{claimed, hub, requests}`: the record and the Hub claim requests of the last day (`match_code` is always empty) |
 | `POST /hub-claim/requests/{id}/approve` `{match}` + host secret | `harness hub approve <id> --match <code>` | approve a Hub claim |
 | `POST /hub-claim/requests/{id}/deny` + host secret | `harness hub deny <id>` | deny a claim, or withdraw an unredeemed approval |
 | `POST /hub-claim/release` `{confirm: true}` + host secret | `harness hub release --confirm` | revoke the Hub's key and clear the record (404 when no Hub is claimed); lists `hub_minted_owner_keys` |
@@ -663,7 +683,8 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
-| 1.23 | 2026-10-09 | Exclusive Hub claim (#543, see [Hub claim](#hub-claim)): `GET /hub-claim`, and the host-only `POST /hub-claim/requests/{id}/approve`, `/deny` and `POST /hub-claim/release` (owner credentials plus the `X-Agent-Harness-Hub-Approval` secret from `<data_dir>/hub-approval.secret`). The Hub's key is an owner token with role `hub`; `GET /keys` adds `role`; `DELETE /keys/{id}` on it answers 409; `POST /keys` refuses `kind: "hub"` and `role`. `GET /api/admin/v1` adds `hub.claimed`. Audit `hub.claim.*` and `hub.release` rows, `actor_kind` `hub`. CLI `harness hub status`, `approve`, `deny` and `release` |
+| 1.24 | 2026-10-10 | Optional read-only `GET /hub` inventory (#520), `harness hub status`, SDK `Harness.hub_status()`, strict local entries and state/error metrics. The claim CLI view is now `harness hub claim-status`. |
+| 1.23 | 2026-10-09 | Exclusive Hub claim (#543, see [Hub claim](#hub-claim)): `GET /hub-claim`, and the host-only `POST /hub-claim/requests/{id}/approve`, `/deny` and `POST /hub-claim/release` (owner credentials plus the `X-Agent-Harness-Hub-Approval` secret from `<data_dir>/hub-approval.secret`). The Hub's key is an owner token with role `hub`; `GET /keys` adds `role`; `DELETE /keys/{id}` on it answers 409; `POST /keys` refuses `kind: "hub"` and `role`. `GET /api/admin/v1` adds `hub.claimed`. Audit `hub.claim.*` and `hub.release` rows, `actor_kind` `hub`. CLI `harness hub claim-status`, `approve`, `deny` and `release` |
 | 1.22 | 2026-10-09 | Zero-touch pairing requests (#519, see [Zero-touch pairing requests](#zero-touch-pairing-requests)): `GET` and `POST /pairing-requests`, `POST /pairing-requests/{id}/approve`, `/confirm` and `/deny`. They carry request metadata, match codes and the section 5.2 disclosure copy, never a token or verifier. `pairing_request.*` audit rows record them. CLI `harness pairing-requests list`, `arm`, `approve`, `confirm` and `deny` |
 | 1.21 | 2026-10-09 | Optional `catalog_app_id` on `POST /keys` and `POST /pairing-codes` (#518, see [App API](app-api.md#catalog-app-id)): a lowercase reverse-DNS label, at most 120 characters, reported by `GET /keys` and `GET /pairing-codes` (`""` when absent) and in the `key.create`, `pairing.create` and `pairing.redeem` audit metadata. An invalid value is refused with 400 and a `denied` audit row. It grants nothing and is never part of a token |
 | 1.20 | 2026-10-04 | Nightly backups include known members' and Apps' transcript archives; backup results add `transcript_archives` and `warnings` (#378) |

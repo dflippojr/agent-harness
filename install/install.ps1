@@ -49,7 +49,7 @@ param(
     [string]$DataDir = '',
     [ValidateSet('Auto', 'Full', 'Service')][string]$Profile = 'Auto',
     [ValidateSet('local_model', 'homelab', 'memory_library', 'images', 'image_edit', 'jobs', 'gpu_guard', 'runners',
-                 'remote_control', 'web', 'search', 'endpoint', 'notifications', 'backup')]
+                 'remote_control', 'web', 'search', 'endpoint', 'notifications', 'backup', 'skills', 'mcp_client', 'hub')]
     [string[]]$EnableModules = @(),
     [ValidateSet('auto', 'qwen', 'gpt-oss')][string]$Model = 'auto',
     [string]$ModelPath = '',

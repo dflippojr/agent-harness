@@ -50,7 +50,7 @@ const api = async (path) => (path === "/sessions" ? sessions : path === "/projec
 const browser = { window: { addEventListener() {}, removeEventListener() {} }, document: { visibilityState: "visible", addEventListener() {}, removeEventListener() {} },
   localStorage: { getItem: () => null, setItem() {} } };
 const page = mountSessions({
-  $app: "APP", h: el, fill: (_t, ...n) => rendered.push(n.flat(Infinity)), append() {}, api, setHeader() {}, showFab() {}, onLeave() {},
+  $app: "APP", h: el, fill: (_t, ...n) => rendered.push(n.flat(Infinity)), append() {}, api, setHeader() {}, showListAction() {}, onLeave() {},
   isMember: () => false, isGuest: () => false, badge: (st) => el("badge", {}, st), reviewBadge: (_r, l) => el("rb", {}, l), REVIEW_LABEL: { merged: "merged" },
   jobStatusBadge: () => el("jb"), openStream: () => () => {}, ownerSurface: () => ({}), agentHarnessWeb: { url: (p) => p, token: "" }, browser,
 });

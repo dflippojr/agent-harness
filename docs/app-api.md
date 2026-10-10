@@ -587,6 +587,16 @@ for a retry under the same [`Idempotency-Key`](#retrying-a-create-safely-idempot
   end_user_login_required`; it never falls back to the owner's login or token, or to an App key. A request without
   `end_user` behaves as before. The session response repeats `end_user`, and the owner's usage tally is kept per
   end user.
+- **Session caps (#524).** Each App may have at most `max_queued` sessions queued or parked (waiting on an approval,
+  a Mac, an App tool reply or a provider limit) and at most `max_running` running or parked. Past `max_queued` a new
+  session, a follow-up message to a finished one, or a fork is refused with `429 app_queue_full`; finishing or
+  cancelling a session frees its place. A session over `max_running` stays `queued` until one of yours ends. The
+  owner sets both per App (`PUT /api/admin/v1/apps/{id}/limits`); unset, the daemon defaults
+  (`budgets.app_max_running` 2, `budgets.app_max_queued` 4) apply. An App cannot change its own caps.
+- **Run time.** An App's run ends after `budgets.max_run_seconds` (default one hour) spent running, with status
+  `done` and `stop_reason` `budget_time`, wherever it is (a model call, a tool); time queued or parked does not count. A pending approval nobody decides
+  within `budgets.approval_timeout_seconds` (default 24 hours) is denied with an `approval_decided` event carrying
+  `expired: true`, and the run ends with `stop_reason` `approval_expired`. Send a message to continue either one.
 
 #### Retrying a create safely (`Idempotency-Key`)
 

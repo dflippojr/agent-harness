@@ -429,6 +429,9 @@ ADMIN_COMMANDS = (
     ("apps restore", "POST", "/apps/{app_id}/restore", "cancel a revoked App's pending erasure", ()),
     ("apps retention", "PUT", "/apps/{app_id}/retention", "set how many days an App's sessions are kept",
      ("--retention_days:float",)),
+    ("apps limits", "GET", "/apps/{app_id}/limits", "show an App's session caps and what counts against them", ()),
+    ("apps set-limits", "PUT", "/apps/{app_id}/limits", "set how many sessions an App may run and queue",
+     ("--max_running:int", "--max_queued:int")),
     ("provider-credentials list", "GET", "/provider-credentials", "list per-App provider credentials", ()),
     ("provider-credentials set", "POST", "/provider-credentials", "set an App's provider credential policy",
      ("app_id", "backend", "--secret_ref", "--policy", "--models:list")),
@@ -448,7 +451,7 @@ ADMIN_COMMANDS = (
     ("pairing-requests confirm", "POST", "/pairing-requests/{rid}/confirm",
      "confirm a native App's claim on an armed slot with the match code it shows", ("--match",)),
     ("pairing-requests deny", "POST", "/pairing-requests/{rid}/deny", "deny or withdraw an App pairing request", ()),
-    ("hub status", "GET", "/hub-claim", "show whether a Hub is claimed, its record and open Hub claim requests", ()),
+    ("hub claim-status", "GET", "/hub-claim", "show whether a Hub is claimed, its record and open Hub claim requests", ()),
     ("hub approve", "POST", "/hub-claim/requests/{rid}/approve",
      "approve a Hub claim with the match code the Hub shows (on the daemon host)", ("--match",)),
     ("hub deny", "POST", "/hub-claim/requests/{rid}/deny", "deny a Hub claim request (on the daemon host)", ()),
@@ -515,9 +518,9 @@ ADMIN_COMMANDS = (
 )
 _GROUP_HELP = {
     "profile": "server profile", "accounts": "household members", "github-member-auth": "members' GitHub access",
-    "google-signin": "members' Google sign-in", "keys": "App, device and owner keys", "apps": "App data retention",
+    "google-signin": "members' Google sign-in", "keys": "App, device and owner keys", "apps": "App data retention and session caps",
     "provider-credentials": "per-App provider credentials", "pairing-codes": "App pairing codes",
-    "pairing-requests": "zero-touch App pairing requests", "hub": "the exclusive Hub claim",
+    "pairing-requests": "zero-touch App pairing requests", "hub": "Hub inventory and claim",
     "models": "local models", "backends": "model backends",
     "smart-approvals": "smart approvals",
     "config": "daemon settings", "maintenance": "disk cleanup and backups",
@@ -607,6 +610,8 @@ def _add_admin_commands(sub, groups: dict) -> None:
                        help="another field (JSON values)")
         p.add_argument("--json", dest="body", type=json.loads, help="the whole request body as JSON")
         p.set_defaults(admin=row)
+    if _modules is not None:
+        _modules.local_cli(groups)
 
 
 def admin_request(args) -> tuple[str, str, dict]:
@@ -886,6 +891,8 @@ def main() -> int:
     os.system("")  # enable ANSI colors in the Windows console
     parser = _build_parser()
     args = parser.parse_args()
+    if getattr(args, "local_handler", None) is not None:
+        return args.local_handler(args)
     args.config = _harness_file(parser, "--config", args.config)
     if getattr(args, "runner_config", None) is not None:
         args.runner_config = _harness_file(parser, "--runner-config", args.runner_config)

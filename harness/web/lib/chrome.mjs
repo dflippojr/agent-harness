@@ -20,6 +20,7 @@ export function mountChrome({ els, browser, session }) {
   let barPaintPhase = false;
   let pagePaintFrame = 0;
   let pagePaintPhase = false;
+  let listNew = null;
 
   // Desktop's count uses the same Needs you rule as the Agents list, independent of list filters.
   // Reuse the connection stream; do not open another EventSource for persistent chrome.
@@ -110,11 +111,26 @@ export function mountChrome({ els, browser, session }) {
     repaintBar();
   }
 
-  function showFab(href, label) {
+  function hideListAction() {
+    listNew?.remove();
+    listNew = null;
+    $fabHost.hidden = true;
+  }
+
+  function showListAction(href, label) {
+    hideListAction();
     if (isGuest()) return;
     $fab.href = href;
     $fab.textContent = label;
     $fabHost.hidden = false;
+    // The list's New action shares its route and label with the phone FAB. CSS selects the presentation at 768 px,
+    // so resizing needs no route refresh. Route teardown clears both presentations, including entry into sign-in.
+    listNew = document.createElement("a");
+    listNew.className = "btn primary list-new";
+    listNew.href = href;
+    listNew.textContent = label;
+    $title.after(listNew);
+    repaintBar();
   }
 
   // `action` ({ label, onClick }) adds a button such as Undo (#511); tapping it runs onClick and dismisses the toast.
@@ -188,5 +204,5 @@ export function mountChrome({ els, browser, session }) {
   window.addEventListener("pageshow", repaintPage);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintPage(); });
 
-  return { layoutBar, repaintBar, repaintPage, setHeader, showFab, toast, setConnState, onConnState, paintGuestChrome, watchNeedsYou };
+  return { layoutBar, repaintBar, repaintPage, setHeader, showListAction, hideListAction, toast, setConnState, onConnState, paintGuestChrome, watchNeedsYou };
 }

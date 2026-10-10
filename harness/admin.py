@@ -32,7 +32,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.23"
+API_VERSION = "1.24"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
@@ -171,6 +171,7 @@ def require_admin(request: Request, mgr) -> dict | None:
         if key.get("kind") != OWNER_KIND or ADMIN_SCOPE not in scopes:
             raise HarnessError(403, "app tokens cannot use the owner API")
         _check_token_origin(request, m, key)
+        request.state.authenticated_key_id = key["id"]
         return key
     _check_browser_origin(request, m)
     ident = getattr(request.state, "access", None)
@@ -218,6 +219,12 @@ class AppRetentionRequest(BaseModel):
     retention_days: float | None = Field(default=None, gt=0, le=36500)
 
 
+class AppLimitsRequest(BaseModel):
+    """An App's session caps (#524); null puts one back to the daemon default (`budgets.app_max_*`)."""
+    max_running: int | None = Field(default=None, ge=1, le=100)
+    max_queued: int | None = Field(default=None, ge=1, le=1000)
+
+
 class GitHubMemberAuthRequest(BaseModel):
     enabled: bool
 
@@ -251,6 +258,8 @@ def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS, 
         {"method": "GET", "path": PREFIX + "/apps/erasures"},
         {"method": "POST", "path": PREFIX + "/apps/{app_id}/restore"},
         {"method": "PUT", "path": PREFIX + "/apps/{app_id}/retention"},
+        {"method": "GET", "path": PREFIX + "/apps/{app_id}/limits"},
+        {"method": "PUT", "path": PREFIX + "/apps/{app_id}/limits"},
     ])
     from . import config_api, hub_claim, pairing_requests
     operations.extend(config_api.register_admin(app, mgr, require_admin))
@@ -406,6 +415,43 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             raise HarnessError(404, "no App or device key has that id")
         return next(k for k in m.db.list_api_keys() if k["id"] == app_id)
 
+    def _live_app(m, app_id: str) -> None:
+        key = m.db.main.get_api_key(app_id)
+        if key is None or key.get("kind") != "app" or key.get("erased_at") is not None:
+            raise HarnessError(404, "no App has that id")
+
+    @app.get(PREFIX + "/apps/{app_id}/limits")
+    async def get_app_limits(app_id: str, request: Request):
+        """An App's session caps: what the owner set, what applies, and its sessions that count against them."""
+        require_admin(request, mgr)
+        m = mgr(request)
+        _live_app(m, app_id)
+        return await asyncio.to_thread(m.app_limits_view, app_id)
+
+    @app.put(PREFIX + "/apps/{app_id}/limits")
+    async def set_app_limits(app_id: str, body: AppLimitsRequest, request: Request):
+        """Set how many sessions an App may have running and queued (#524); a field left out keeps its value and
+        null restores the default. Only the owner can; an App cannot."""
+        admin_key = require_admin(request, mgr)
+        m = mgr(request)
+        ctx = _context(request, admin_key)
+        sent = {k: getattr(body, k) for k in body.model_fields_set}
+
+        def commit() -> bool:
+            before = m.db.main.app_limits(app_id)
+            limits = {**before, **sent}
+            if m.db.main.set_app_limits(app_id, limits):
+                credential_audit.record(m.db, ctx, "app.limits", app_id, "ok", "api_key", {
+                    "app_id": app_id, **{f"old_{k}": v for k, v in before.items()},
+                    **{f"new_{k}": v for k, v in limits.items()}})
+                return True
+            credential_audit.record(m.db, ctx, "app.limits", "", "noop", "api_key", {"reason": "not_found"})
+            return False
+        if not await m.db.main.awrite(commit):
+            raise HarnessError(404, "no App has that id")
+        m.scheduler.recheck()  # a raised cap may admit a waiting session now
+        return await asyncio.to_thread(m.app_limits_view, app_id)
+
     def _actor(request: Request, key: dict | None) -> str:
         return _context(request, key).actor_id
 
@@ -463,7 +509,10 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
     async def update_account(user_id: str, body: AccountUpdateRequest, request: Request):
         key = require_admin(request, mgr)
         svc = _accounts(request)
-        return await _apply_account_update(svc, _context(request, key), user_id, body)
+        row = await _apply_account_update(svc, _context(request, key), user_id, body)
+        if body.max_running is not None:
+            mgr(request).scheduler.recheck()  # a raised cap may let a waiting session run now (#524)
+        return row
 
     # Issue #63: the owner switches member GitHub sign-in on or off, sees each member's coarse state, and can
     # erase a member's credential. The owner cannot connect, test, list repositories, or use it.

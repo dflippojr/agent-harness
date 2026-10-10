@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import contextlib
+import dataclasses
 import functools
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -49,6 +51,10 @@ class ToolsOnlyUnsupported(CliBackendError):
     """This backend can't be limited to an App's tools, so an App-tools-only session refuses to run on it (#329)."""
 
 
+class ApprovalExpired(Exception):
+    """A pending approval passed `approval_timeout_seconds`: it was denied and the run ends (#524)."""
+
+
 class CliLimitError(Exception):
     def __init__(self, reset_at: float = 0):
         self.reset_at = reset_at
@@ -70,7 +76,12 @@ When the task is complete, reply with your final answer (or call `finish`). Don'
 
 MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the workspace (a separate clone of the user's repository, so their own checkout is never touched) on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches, don't change git config, and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
 
-ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit")
+WAITING = ("waiting_approval", "waiting_target", "waiting_app", "waiting_limit")  # parked: count toward caps (#524)
+ACTIVE = ("queued", "running", *WAITING)
+# Set on `run` when the run first goes `running`: it holds a place under its member's or App's running cap until the
+# run ends, parked or queued again meanwhile (and across a daemon restart). new_run() does not carry it (#524).
+HOLDS_PLACE = "holds_place"
+RUN_SECONDS = "run_seconds"  # on `run`: its time spent running so far, kept for a restart (#524)
 # Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
 # cleared after its branch save and transcript: a daemon stopped in between leaves it set, and the next start finishes
 # that run's end from where it stopped (Manager.start).
@@ -109,6 +120,75 @@ def unresolved_calls(context: list[dict]) -> list[dict]:
         return []
     done = {m.get("tool_call_id") for m in context[i + 1:]}
     return [c for c in context[i]["tool_calls"] if c["id"] not in done]
+
+
+def holds_place(s: dict) -> bool:
+    """Does active session `s` hold a place under its running cap (#524)?"""
+    return s["status"] == "running" or (s["status"] in ACTIVE and bool((s.get("run") or {}).get(HOLDS_PLACE)))
+
+
+def capped_app(db, app_id: str) -> bool:
+    """Only third-party Apps have session caps and a run time budget; Agent Harness Web and the owner's own tokens
+    (device and owner keys) do not (#524)."""
+    if not app_id:
+        return False
+    key = db.get_api_key(app_id)
+    return key is not None and key.get("kind") == "app"
+
+
+def admission_key(db, s: dict) -> str:
+    """Whose caps a session counts against: its member's, its App's, or "" (the owner's, uncapped)."""
+    user_id = session_user_id(s)
+    if user_id != OWNER_USER_ID:
+        return "member:" + user_id
+    return "app:" + s["app_id"] if capped_app(db, s.get("app_id") or "") else ""
+
+
+@dataclasses.dataclass
+class RunClock:
+    """A live run's time spent running (#524): `spent` seconds so far, and `since` (monotonic) while it runs."""
+    spent: float = 0.0
+    since: float | None = None
+
+    def set_running(self, running: bool) -> None:
+        """Bank the time since it last started running, and run on (or stop) from now."""
+        now = time.monotonic()
+        if self.since is not None:
+            self.spent += now - self.since
+        self.since = now if running else None
+
+    def seconds(self) -> float:
+        return self.spent + (time.monotonic() - self.since if self.since is not None else 0.0)
+
+
+class _HeldSlot:
+    """A hosted backend slot held for one run, which can give it up while the run waits on an approval (#524)."""
+
+    def __init__(self, sem: asyncio.Semaphore):
+        self.sem, self.held = sem, False
+
+    async def __aenter__(self):
+        await self.sem.acquire()
+        self.held = True
+        return self
+
+    async def __aexit__(self, *exc):
+        if self.held:
+            self.held = False
+            self.sem.release()
+
+    @contextlib.asynccontextmanager
+    async def released(self, on_wait=None):
+        """Release the slot for the body; take it back after, awaiting `on_wait()` first if it is taken. A body that
+        raises leaves it released (and the exit above does not release it twice)."""
+        if self.held:
+            self.held = False
+            self.sem.release()
+        yield
+        if self.sem.locked() and on_wait is not None:
+            await on_wait()
+        await self.sem.acquire()
+        self.held = True
 
 
 async def ride_out(task: asyncio.Future) -> None:
@@ -187,6 +267,15 @@ class Runner:
         self._cli_sessions: dict[str, ClaudeSession | CodexSession | CursorSession] = {}
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
                                for name, backend in cfg.backends.items()}
+        self._held_slots: dict[str, _HeldSlot] = {}   # a hosted run's backend slot, released around approvals
+        # Hosted sessions admitted under their member's or App's running cap before their first `running` (which marks
+        # HOLDS_PLACE): waiting for a backend slot (#524). sid -> admission key; Manager._scheduler_eligible counts
+        # them, and lets them run.
+        self.admitted: dict[str, str] = {}
+        self._clocks: dict[str, RunClock] = {}         # live run -> its time spent running
+        self._deadline_hit: dict[str, str] = {}        # runs their deadline watch cancelled -> the stop reason
+        self._app_waits: dict[str, int] = {}           # hosted session -> its MCP calls parked on the App's reply
+        self._deadlines_changed = asyncio.Event()      # replaced (and the old one set) when a deadline setting changes
         self._locks = credential_sources.KeyedLocks()
         self.cli_factory = ClaudeSession
         self.codex_factory = CodexSession
@@ -429,9 +518,22 @@ class Runner:
         self._taint_from_result(s, name, args)  # MCP results are untrusted content like the native tools' (#262)
         return (output.text if isinstance(output, ToolOutput) else str(output)), True
 
+    def _shell_within_budget(self, s: dict, args: dict) -> dict:
+        """`run_shell` args whose timeout does not outlast a member's or an App's run budget (#524)."""
+        left = self._time_left(s)
+        if left is None:
+            return args
+        try:
+            asked = int(args.get("timeout") or 120)
+        except (TypeError, ValueError):
+            asked = 120
+        return {**args, "timeout": max(1, min(asked, math.ceil(left)))}
+
     async def _split_call(self, s: dict, name: str, args: dict) -> str:
         """A split-mode shell or file call: the same Workspace tools and Sandbox.exec the native loop runs, with the
         same argument checks and output bound."""
+        if name == "run_shell":
+            args = self._shell_within_budget(s, args)
         ws = self.split_workspace(s)
         schema = next(t for t in ws.schemas() if t["function"]["name"] == name)
         try:
@@ -451,11 +553,46 @@ class Runner:
                 self.db.update_session(s["id"], run=run)
         return output
 
+    async def _resume_from_app(self, sid: str) -> None:
+        """A hosted session the App answered runs again once nothing else parks it (another call waiting on the App, a
+        pending approval), unless it ended meanwhile (a cancel while it waited)."""
+        self._drop_app_wait(sid)
+
+        def resume() -> None:
+            status = self._hosted_status(sid)
+            if self.db.get_session(sid)["status"] == "waiting_app" and status != "waiting_app":
+                self._status_writer(sid, status, {})()
+        await self.db.for_session(sid).awrite(resume)
+
+    def _drop_app_wait(self, sid: str) -> None:
+        waits = self._app_waits.get(sid, 1) - 1
+        if waits > 0:
+            self._app_waits[sid] = waits
+        else:
+            self._app_waits.pop(sid, None)
+
     async def _dispatch_mcp(self, s: dict, call_id: str, name: str, args: dict):
         if name in SPLIT_TOOLS and self.split_mode(s):
             return await self._split_call(s, name, args)
         if self.app_tools is not None and name in self.app_tools.names(s):
-            return await self.app_tools.call(s, call_id, name, args)
+            sid = s["id"]
+            parked = {"waiting": False}
+
+            def wait() -> None:
+                parked["waiting"] = True
+                self._app_waits[sid] = self._app_waits.get(sid, 0) + 1
+                if self.db.get_session(sid)["status"] == "running":
+                    self.set_status(sid, self._hosted_status(sid))
+
+            async def resume() -> None:
+                parked["waiting"] = False
+                await self._resume_from_app(sid)
+            # Parked on the App's reply: its time does not count toward the run's budget (#524).
+            try:
+                return await self.app_tools.call(s, call_id, name, args, on_wait=wait, on_resume=resume)
+            finally:
+                if parked["waiting"]:  # cancelled while it waited (a provider limit, a deadline): no reply to resume
+                    self._drop_app_wait(sid)
         kit = next(k for k in self.daemon_toolkits(s) if name in k.tool_names)
         gate = self._module_gate(kit)
         if gate is not None and gate.workspace:
@@ -546,13 +683,42 @@ class Runner:
 
     def _status_writer(self, sid: str, status: str, fields: dict):
         def set_status() -> None:
-            self.db.update_session(sid, status=status, **fields)
+            marked = fields
+            clock = self._clocks.get(sid)
+            if "run" not in fields and (status == "running" or (clock is not None and clock.since is not None)):
+                run = (self.db.get_session(sid) or {}).get("run") or {}
+                # Its first `running` marks its place; leaving `running` records the time it has spent (#524).
+                marked = {**fields, "run": {**run, HOLDS_PLACE: True, RUN_SECONDS: self._run_seconds(sid)}}
+            self.db.update_session(sid, status=status, **marked)
             self._flag_end_pending(sid, status)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
-            # Caps key off `running`. After a session leaves that state, ineligible waiters may now be grantable.
+            # A status change can free room under a cap (a run ending, a session given its place) or change what
+            # counts: let ineligible waiters try again.
+            self.db.after_commit(lambda: self._tick_clock(sid))
             self.db.after_commit(self.scheduler.recheck)
         return set_status
+
+    def _tick_clock(self, sid: str) -> None:
+        """Count the live run's time in `running` only: queue, approval, Mac and App waits are not its time (#524).
+        Called after each status commit; it follows the status committed last, not the one that write set, since
+        commits' callbacks can run out of order (an awaited write's after a later blocking one's)."""
+        clock = self._clocks.get(sid)
+        if clock is None:
+            return
+        s = self.db.get_session(sid)
+        clock.set_running(s is not None and s["status"] == "running")
+
+    def _run_seconds(self, sid: str) -> float:
+        clock = self._clocks.get(sid)
+        return clock.seconds() if clock is not None else 0.0
+
+    def _time_left(self, s: dict) -> float | None:
+        """Seconds a member's or an App's run has left (`max_run_seconds`); None for the owner's or without a cap."""
+        limit = float(self.cfg.max_run_seconds or 0)
+        if limit <= 0 or not admission_key(self.db, s):
+            return None
+        return limit - self._run_seconds(s["id"])
 
     def _flag_end_pending(self, sid: str, status: str) -> None:
         """Inside the write that sets `status`: mark a live run's final status as awaiting its _end_run."""
@@ -705,16 +871,14 @@ class Runner:
         since = time.monotonic()
 
         def waiting() -> None:
-            self.db.update_session(sid, status="waiting_target")
-            self.bus.emit(sid, "status", {"status": "waiting_target"})
+            self._status_writer(sid, "waiting_target", {})()
             self.bus.emit(sid, "target_waiting", {"target": target})
         await self.db.for_session(sid).awrite(waiting)
         await self.hub.wait_online(target)
         status = "waiting_approval" if previous == "waiting_approval" else "queued"
 
         def online() -> None:
-            self.db.update_session(sid, status=status)
-            self.bus.emit(sid, "status", {"status": status})
+            self._status_writer(sid, status, {})()
             self.bus.emit(sid, "target_online", {"target": target, "seconds": round(time.monotonic() - since)})
         await self.db.for_session(sid).awrite(online)
         if held:
@@ -798,8 +962,14 @@ class Runner:
 
     async def _run(self, sid: str, recovered: bool = False) -> None:
         self._unended.add(sid)
+        s = self.db.get_session(sid)
+        # A recovered run goes on from the time it had spent running (a new run starts at 0: new_run() drops it).
+        self._clocks[sid] = RunClock(spent=float(((s or {}).get("run") or {}).get(RUN_SECONDS) or 0))
+        started_at = ((s or {}).get("run") or {}).get("started_at")  # tells this run from one a message queues next
+        watch = None
         try:
-            s = self.db.get_session(sid)
+            # Every run: both deadlines are live settings, so one turned on mid-run applies to it too.
+            watch = asyncio.create_task(self._watch_deadlines(sid, asyncio.current_task(), started_at))
             if s.get("kind") == TOOLS_ONLY and s.get("backend", "local") not in TOOLS_ONLY_BACKENDS:
                 raise ToolsOnlyUnsupported(f"backend {s['backend']!r} can't run App-tools-only sessions")
             if s.get("backend", "local") != "local":
@@ -809,8 +979,16 @@ class Runner:
                 raise CliBackendError("the local model is disabled in this service profile")
             await self._run_local(sid, s, recovered)
         except asyncio.CancelledError:
-            await self._take_pending_cancel(sid, cancelled=True)
+            if sid in self._deadline_hit and sid not in self.user_cancelled:
+                await finish_then_cancel(self._end_on_deadline(sid, self._deadline_hit[sid], started_at))
+            else:
+                await self._take_pending_cancel(sid, cancelled=True)
             raise
+        except ApprovalExpired:
+            if await self._take_pending_cancel(sid):
+                return
+            # One unit, as on the time budget: a daemon stop meanwhile must not leave the run active.
+            await finish_then_cancel(self._end_on_deadline(sid, "approval_expired", started_at))
         except CliBackendError as e:
             if await self._take_pending_cancel(sid):
                 return
@@ -834,12 +1012,115 @@ class Runner:
                                  f"internal_error: {type(e).__name__}: {e}")
             await self._end_run(sid)
         finally:
+            if watch is not None:
+                watch.cancel()
+            await asyncio.shield(self._keep_run_seconds(sid, started_at))
+            self._deadline_hit.pop(sid, None)
             await asyncio.shield(self._stop_cli(sid))
             if self.modules is not None:
                 await asyncio.shield(self.modules.end_session(sid))
             self.scheduler.release(sid)
+            self.admitted.pop(sid, None)
+            # Not every final status goes through set_status (a CLI's result, a final reply): a session its member's
+            # or App's cap held back may run now.
+            self.scheduler.recheck()
             self.user_cancelled.discard(sid)
             self._unended.discard(sid)
+            self._clocks.pop(sid, None)
+            self._app_waits.pop(sid, None)
+
+    async def _watch_deadlines(self, sid: str, run: asyncio.Task, started_at) -> None:
+        """Stop the run at a deadline wherever it is (#524), like a cancel but ending `done`:
+        - a member's or an App's time running reaching `max_run_seconds` (a model call, compaction, a tool, a delegated
+          call). The clock stops while the run is parked, so this follows the clock rather than a fixed deadline;
+        - an approval past `approval_timeout_seconds` that the run is not waiting on itself (e.g. a recovered run
+          held for its offline Mac first): it is denied as expired. One the run waits on, `_wait_approval` expires.
+        It watches its own run (`started_at`) only: once that has ended, a run a message queued next is not its."""
+        while True:
+            s = self.db.get_session(sid)
+            if s is None or s["status"] not in ACTIVE or s["run"].get("started_at") != started_at:
+                return
+            waits = [30.0]  # a new approval or a resumed clock is noticed within this
+            left = self._time_left(s)
+            if left is not None:
+                if left <= 0:
+                    self._stop_on_deadline(sid, run, "budget_time")
+                    return
+                waits.append(left)
+            for approval in self.db.pending_approvals(sid):
+                approval_left = self._approval_time_left(approval)
+                if approval_left is None or approval["id"] in self.approval_events:
+                    continue
+                if approval_left <= 0:
+                    if await self._decide_expired(approval):
+                        self._stop_on_deadline(sid, run, "approval_expired")
+                        return
+                    continue
+                waits.append(approval_left)
+            changed = self._deadlines_changed
+            try:
+                await asyncio.wait_for(changed.wait(), timeout=min(waits))
+            except asyncio.TimeoutError:
+                pass
+
+    def deadlines_changed(self) -> None:
+        """`max_run_seconds` or `approval_timeout_seconds` changed: every run's deadline watch looks again now."""
+        changed, self._deadlines_changed = self._deadlines_changed, asyncio.Event()
+        changed.set()
+
+    async def _keep_run_seconds(self, sid: str, started_at) -> None:
+        """A run left active (the daemon stopping) keeps the time it spent running for when it resumes; not on a new
+        run a message queued meanwhile (its own `started_at`), which starts at 0."""
+        if sid not in self._clocks:
+            return
+        seconds = self._run_seconds(sid)
+
+        def keep() -> None:
+            current = self.db.get_session(sid)
+            if (current is not None and current["status"] in ACTIVE
+                    and current["run"].get("started_at") == started_at):
+                self.db.update_session(sid, run={**current["run"], RUN_SECONDS: seconds})
+        try:
+            await self.db.for_session(sid).awrite(keep)
+        except Exception:  # noqa: BLE001 - an erased session, a closing store: nothing to keep
+            log.debug("could not keep run seconds for %s", sid, exc_info=True)
+
+    async def mark_recovered_place(self, s: dict) -> None:
+        """At daemon start, before any run resumes: a run recovered running, or parked on an approval, an App's reply
+        or a provider limit, had run before (only a running run parks on those), so it holds its place under its cap;
+        one saved before HOLDS_PLACE existed gets it now, before anything changes its status (an offline Mac, the GPU
+        queue) and before another run's admission counts the cap."""
+        sid = s["id"]
+        ran = ("running", "waiting_approval", "waiting_app", "waiting_limit")
+        if s["status"] not in ran or s["run"].get(HOLDS_PLACE):
+            return
+
+        def mark() -> None:
+            current = self.db.get_session(sid)
+            if current is not None and current["status"] in ran:
+                self.db.update_session(sid, run={**current["run"], HOLDS_PLACE: True})
+        await self.db.for_session(sid).awrite(mark)
+
+    def _stop_on_deadline(self, sid: str, run: asyncio.Task, reason: str) -> None:
+        if sid not in self.user_cancelled:
+            self._deadline_hit[sid] = reason
+            run.cancel()
+
+    async def _end_on_deadline(self, sid: str, reason: str, started_at) -> None:
+        """End a run on its time budget (`budget_time`) or an expired approval (`approval_expired`): each tool call
+        it leaves gets a result, as on a cancel. Only its own run (`started_at`), not one a message queued next."""
+        s = self.db.get_session(sid)
+        if s is not None and s["status"] in ACTIVE and s["run"].get("started_at") == started_at:
+            if reason == "budget_time":
+                await self._close_unresolved(sid, "Not run: the task reached its time budget.",
+                                             "Stopped: the task reached its time budget while this ran.")
+            else:
+                await self._close_unresolved(sid, "Not run: nobody decided its approval in time.")
+            for approval in self.db.pending_approvals(sid):  # nothing is left to decide, as on a cancel
+                self.db.decide_approval(approval["id"], "cancelled")
+            await self.aset_status(sid, "done", stop_reason=reason)
+        if sid in self._unended:
+            await self._end_run(sid)
 
     async def _run_local(self, sid: str, s: dict, recovered: bool) -> None:
         if recovered:
@@ -902,7 +1183,7 @@ class Runner:
                     self.db.update_session(sid, context=context, inbox=[])
                     continue
 
-                reason = self._budget_reason(s["run"])
+                reason = self._budget_reason(s["run"], s)
                 if reason:
                     turn = self._close_span(turn)
                     await self.aset_status(sid, "done", stop_reason=reason)
@@ -929,7 +1210,7 @@ class Runner:
         span.end()
         return telemetry.NOOP_SPAN
 
-    def _budget_reason(self, run: dict) -> str:
+    def _budget_reason(self, run: dict, s: dict | None = None) -> str:
         """Why the run is out of budget ("" while it has some left)."""
         max_turns = int(run.get("max_turns") or self.cfg.max_turns)
         max_tokens = int(run.get("max_completion_tokens") or self.cfg.max_completion_tokens)
@@ -937,6 +1218,9 @@ class Runner:
             return "budget_turns"
         if run["completion_tokens"] >= max_tokens:
             return "budget_tokens"
+        left = self._time_left(s) if s is not None else None
+        if left is not None and left <= 0:
+            return "budget_time"
         return ""
 
     # hosted CLI backends
@@ -956,12 +1240,19 @@ class Runner:
                 delay = max(0, float(s["run"].get("limit_resets_at") or 0) - time.time())
                 if delay:
                     await asyncio.sleep(delay)
-                await self.aset_status(sid, "queued")
+                await self.aset_status(sid, "queued")  # still holding its place (HOLDS_PLACE)
             backend_session_id = str(s["run"].get("backend_session_id") or "")
             credential, use_api_key, api_key = self._cli_credentials(sid, s, backend_name)
             await self._memory_gate(sid, f"{backend_name} worker container")
+            held = _HeldSlot(slot)
             try:
-                async with self._credential_lock(s), slot:
+                async with contextlib.AsyncExitStack() as stack:
+                    await self._admit_hosted(sid, s, stack)
+                    await stack.enter_async_context(held)
+                    if self.admitted.get(sid) and self.db.get_session(sid)["status"] == "queued":
+                        await self.aset_status(sid, "running")
+                    self._unreserve(sid)  # holds its place from here on
+                    self._held_slots[sid] = held
                     with telemetry.span("hosted_cli_turn", {"harness.backend": backend_name,
                                                             "gen_ai.request.model": backend.model}):
                         cli = await self._start_cli(sid, backend_name, backend, credential, use_api_key, api_key,
@@ -971,6 +1262,34 @@ class Runner:
             except CliLimitError as limit:
                 await self._cli_limit_reached(sid, backend_name, limit, use_api_key)
                 recovered = True
+            finally:
+                self._held_slots.pop(sid, None)
+                self._unreserve(sid)
+
+    async def _admit_hosted(self, sid: str, s: dict, stack: contextlib.AsyncExitStack) -> None:
+        """Take the session's credential lock (onto `stack`) once its member or App is under its running cap (#524),
+        and reserve its place under that cap: it counts against the cap while it waits for a backend slot, until its
+        `running` status counts instead. The check and the reservation happen with no await between them, so two
+        sessions of one member or App can't both pass the check while neither counts yet. Nothing is held while
+        waiting on the cap, so a parked session that holds it can still come back; and a session waiting for the
+        credential (another of the same end user's runs) holds no place under the cap."""
+        key = admission_key(self.db, s)
+        while True:
+            if key:
+                await self.scheduler.wait_eligible(sid)
+            attempt = contextlib.AsyncExitStack()
+            await attempt.enter_async_context(self._credential_lock(s))
+            if not key or self.scheduler.eligible(sid):
+                if key:
+                    self.admitted[sid] = key
+                await stack.enter_async_context(attempt)
+                return
+            await attempt.aclose()  # the cap filled while it waited for the credential
+
+    def _unreserve(self, sid: str) -> None:
+        """Drop `sid`'s reservation under its cap; a session that could not run while it held one may now."""
+        if self.admitted.pop(sid, None) is not None:
+            self.scheduler.recheck()
 
     def _credential_lock(self, s: dict):
         """Held for a CLI attempt on a credential that two sessions must not use at once (#365 decision 5: one end
@@ -1088,8 +1407,12 @@ class Runner:
         credential = self._backend_credential(s)
         if credential["policy"] == "subscription_then_api_key" and credential["key"] and not use_api_key:
             run = {**s["run"], "backend_auth": "api_key"}
-            self.db.update_session(sid, run=run)
-            await self.bus.aemit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
+
+            def fall_back() -> None:  # queued for a slot again: that wait is not its running time (#524)
+                self.db.update_session(sid, run=run)
+                self._status_writer(sid, "queued", {})()
+                self.bus.emit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
+            await self.db.for_session(sid).awrite(fall_back)
             return
         reset = limit.reset_at or time.time() + 300
         run = {**s["run"], "limit_resets_at": reset}
@@ -1624,14 +1947,25 @@ class Runner:
                 return
         if existing["status"] == "pending":
             await self.aset_status(sid, "waiting_approval")
-            existing = await self._wait_approval(existing["id"])
+            held = self._held_slots.get(sid)
+            # Another session gets the backend slot while this one waits on a person (#524).
+            # Decided while the slot is taken: it waits for one as `queued`, still holding its place (HOLDS_PLACE).
+            async with (held.released(lambda: self.aset_status(sid, "queued")) if held is not None
+                        else contextlib.nullcontext()):
+                existing = await self._wait_approval(existing["id"])
+        await self.aset_status(sid, self._hosted_status(sid))
         if existing["status"] == "approved":
-            await self.aset_status(sid, "running")
             await self._allow_cli(sid, cli, request_id, name, args, call_id, existing.get("tool_call_id") or "")
             return
         note = f" User note: {existing['note']}" if existing.get("note") else ""
-        await self.aset_status(sid, "running")
         await cli.respond_permission(request_id, "deny", args, f"The user denied this {name} call.{note}")
+
+    def _hosted_status(self, sid: str) -> str:
+        """A hosted session's status while it runs: parked on an approval or an App's reply while any is pending (its
+        clock stops), else `running`. Its MCP calls and permission requests can overlap (#524)."""
+        if self.db.pending_approvals(sid):
+            return "waiting_approval"
+        return "waiting_app" if self._app_waits.get(sid) else "running"
 
     async def _ask_cli_policy(self, s: dict, cli, request_id, request: dict, name: str, args: dict,
                               call_id: str) -> dict | None:
@@ -2304,24 +2638,54 @@ class Runner:
         return detail, f"{reason} {warning}".strip(), None
 
     async def _wait_approval(self, aid: str) -> dict:
+        """Wait for the decision. Past `approval_timeout_seconds` the approval is denied and ApprovalExpired raised."""
         event = self.approval_events.setdefault(aid, asyncio.Event())
         try:
             while True:
                 approval = self.db.get_approval(aid)
                 if approval["status"] != "pending":
                     return approval
+                left = self._approval_time_left(approval)
+                if left is not None and left <= 0:
+                    await self._expire_approval(approval)
+                    continue
                 try:
-                    await asyncio.wait_for(event.wait(), timeout=30)
+                    await asyncio.wait_for(event.wait(), timeout=30 if left is None else min(30, left))
                 except asyncio.TimeoutError:
                     pass
                 event.clear()
         finally:
             self.approval_events.pop(aid, None)
 
+    def _approval_time_left(self, approval: dict) -> float | None:
+        limit = float(self.cfg.approval_timeout_seconds or 0)
+        if limit <= 0:
+            return None
+        return float(approval["created_at"]) + limit - time.time()
+
+    async def _expire_approval(self, approval: dict) -> None:
+        """Deny an approval nobody decided in time and end its run; a decision that landed first stands."""
+        if await self._decide_expired(approval):
+            raise ApprovalExpired(approval["id"])
+
+    async def _decide_expired(self, approval: dict) -> bool:
+        """Deny `approval` as expired; False when a decision landed first."""
+        sid, aid = approval["session_id"], approval["id"]
+        note = "Expired: nobody decided it in time."
+
+        def expire() -> bool:
+            if not self.db.decide_approval(aid, "denied", note):
+                return False
+            self.bus.emit(sid, "approval_decided", {"id": aid, "status": "denied", "note": note, "expired": True})
+            return True
+        return await self.db.for_session(sid).awrite(expire)
+
     async def _execute(self, sid: str, call: dict, name: str, args: dict, ws: Workspace,
                        max_chars: int = 10**9) -> str:
         await self._acquire(sid)  # e.g. resumed after a restart with the approval already granted
         s = self.db.get_session(sid)
+        if name == "run_shell":
+            args = self._shell_within_budget(s, args)
         run = s["run"]
         run["executing"] = {"id": call["id"], "name": name}
         self.db.update_session(sid, run=run)
@@ -2849,13 +3213,17 @@ class Runner:
         """At daemon start: end a run whose final status committed but whose _end_run never finished."""
         await self._end_run(sid)
 
-    async def _record_cancel(self, sid: str) -> None:
+    async def _close_unresolved(self, sid: str, not_run: str, while_running: str = "") -> None:
+        """Give each tool call the run ends without a result one, so the next run's context answers every call."""
         s = self.db.get_session(sid)
         executing = (s["run"].get("executing") or {}).get("id")
         for call in unresolved_calls(s["context"]):
-            text = ("Cancelled by the user while running." if call["id"] == executing
-                    else "Not run: the user cancelled the task.")
+            text = while_running if while_running and call["id"] == executing else not_run
             await self._record_result(sid, call, call["function"].get("name", ""), text, ok=False)
+
+    async def _record_cancel(self, sid: str) -> None:
+        await self._close_unresolved(sid, "Not run: the user cancelled the task.",
+                                     "Cancelled by the user while running.")
         for approval in self.db.pending_approvals(sid):
             self.db.decide_approval(approval["id"], "cancelled")
         await self.aset_status(sid, "cancelled", stop_reason="cancelled")
@@ -2878,6 +3246,8 @@ class Runner:
             await asyncio.shield(self.sandbox(s).stop())
         else:
             await asyncio.shield(self._stop_cli(sid))
+            if sid in self._sandboxes:  # split mode: its shell and file tools ran there, maybe still running
+                await asyncio.shield(self._sandboxes[sid].stop())
         await asyncio.shield(self.save_branch(sid))
         if s.get("kind") == TOOLS_ONLY:
             await asyncio.to_thread(self._clear_tools_only_workspace, s)

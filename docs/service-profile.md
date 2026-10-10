@@ -36,6 +36,8 @@ GPU, jobs, image, memory, runner, or other optional routes are usable.
 
 ## Optional modules
 
+The `hub` inventory module is also optional: enable it with `modules.hub: true`.
+
 All optional modules default off in the service profile: `local_model`, `homelab`, `memory_library`, `images`,
 `image_edit`, `jobs`, `gpu_guard`, `runners`, `remote_control`, `web`, `search`, `endpoint`, `notifications`, `backup`,
 and `skills`. Opt in during install with `-EnableModules jobs,backup`. The `endpoint`, `images`, `image_edit`, and

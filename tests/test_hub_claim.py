@@ -376,14 +376,14 @@ def test_no_secret_reaches_a_response_cli_output_audit_row_or_log(hh, monkeypatc
     texts.append(asked.text)
     rid, match = asked.json()["id"], asked.json()["match_code"]
     out = []
-    for argv in (["hub", "status"], ["hub", "approve", rid, "--match", match]):
+    for argv in (["hub", "claim-status"], ["hub", "approve", rid, "--match", match]):
         monkeypatch.setattr("sys.argv", ["harness", *argv])
         assert cli.main() == 0
         out.append(capsys.readouterr().out)
     assert rid in out[0] and '"approved"' in out[1]
     paired = _redeem(client, rid, verifier, HUB_ORIGIN)
     token = paired.json()["token"]
-    for argv in (["hub", "status"], ["keys", "list"], ["hub", "release", "--confirm"]):
+    for argv in (["hub", "claim-status"], ["keys", "list"], ["hub", "release", "--confirm"]):
         monkeypatch.setattr("sys.argv", ["harness", *argv])
         assert cli.main() == 0
         out.append(capsys.readouterr().out)
@@ -412,7 +412,7 @@ def test_cli_sends_the_secret_only_to_a_daemon_on_this_machine(tmp_path, monkeyp
     assert seen[-1] == ("POST", "/hub-claim/release", {
         "json": {"confirm": True}, "headers": {cli.HUB_APPROVAL_HEADER: local_owner.read_hub_secret(tmp_path)}})
     assert cli.HUB_APPROVAL_HEADER == local_owner.HUB_HEADER
-    assert cli._cmd_admin(parser.parse_args(["hub", "status"])) == 0
+    assert cli._cmd_admin(parser.parse_args(["hub", "claim-status"])) == 0
     assert "headers" not in seen[-1][2]                        # status needs no host proof
     monkeypatch.setattr(cli, "BASE", "https://harness.example")
     with pytest.raises(SystemExit):
@@ -610,7 +610,7 @@ def test_cli_status_shows_origins_and_approve_warns_on_several_claims(hh, monkey
     real, _ = _ask(client, HUB_ORIGIN, name="Agent Harness Hub")
     rid, match = real.json()["id"], real.json()["match_code"]
 
-    assert cli._cmd_admin(parser.parse_args(["hub", "status"])) == 0
+    assert cli._cmd_admin(parser.parse_args(["hub", "claim-status"])) == 0
     out, err = capsys.readouterr()
     assert json.loads(out)["requests"][0]["match_code"] == "" and match not in out + err
     assert f"browser Hub at {HUB_ORIGIN}" in err and "not shown here" in err
@@ -621,7 +621,7 @@ def test_cli_status_shows_origins_and_approve_warns_on_several_claims(hh, monkey
     real, _ = _ask(client, HUB_ORIGIN, name="Agent Harness Hub")
     look_alike, _ = _ask(client, name="Agent Harness Hub")
     rid, match = real.json()["id"], real.json()["match_code"]
-    cli._cmd_admin(parser.parse_args(["hub", "status"]))
+    cli._cmd_admin(parser.parse_args(["hub", "claim-status"]))
     assert "native Hub (no browser origin)" in capsys.readouterr().err
     assert cli._cmd_admin(parser.parse_args(["hub", "approve", rid, "--match", match])) == 0
     err = capsys.readouterr().err

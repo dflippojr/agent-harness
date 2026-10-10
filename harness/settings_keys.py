@@ -66,6 +66,20 @@ def _get_module_enabled(cfg: Config, name: str) -> bool:
     return bool(section.enabled)
 
 
+def apply_running_cap(manager, old, new) -> None:
+    """A changed running cap may let a waiting session run now (#524)."""
+    scheduler = getattr(manager, "scheduler", None)
+    if scheduler is not None:
+        scheduler.recheck()
+
+
+def apply_deadline(manager, old, new) -> None:
+    """A changed time budget or approval deadline applies to the runs going now too (#524)."""
+    runner = getattr(manager, "runner", None)
+    if runner is not None:
+        runner.deadlines_changed()
+
+
 def apply_cleanup_interval(manager, old, new) -> None:
     manager.maintenance.reschedule()
 
@@ -169,20 +183,14 @@ def _hidden(key, label, help, category, yaml_path, modules=()):
     )
 
 
-def _get_max_turns(cfg: Config):
-    return cfg.max_turns
+def _cfg_attr(name: str, cast):
+    """Getter and setter for a top-level Config field."""
+    def getter(cfg: Config):
+        return getattr(cfg, name)
 
-
-def _set_max_turns(cfg: Config, value):
-    cfg.max_turns = int(value)
-
-
-def _get_max_tokens(cfg: Config):
-    return cfg.max_completion_tokens
-
-
-def _set_max_tokens(cfg: Config, value):
-    cfg.max_completion_tokens = int(value)
+    def setter(cfg: Config, value):
+        setattr(cfg, name, cast(value))
+    return getter, setter
 
 
 def _get_elide(cfg: Config):
@@ -460,11 +468,28 @@ def _app_set(key: str):
 STATIC_ADMIN: list[SettingSpec] = [
     _int("sessions.max_turns", "Maximum turns",
          "Per-run turn cap for new sessions. Changing this does not raise an active run's budget.",
-         "Sessions", 80, _get_max_turns, _set_max_turns, 1, 500, ("budgets", "max_turns")),
+         "Sessions", 80, *_cfg_attr("max_turns", int), 1, 500, ("budgets", "max_turns")),
     _int("sessions.max_completion_tokens", "Maximum completion tokens",
          "Per-run completion-token cap for new sessions. Changing this does not raise an active run's budget.",
-         "Sessions", 200000, _get_max_tokens, _set_max_tokens, 1000, 2_000_000,
+         "Sessions", 200000, *_cfg_attr("max_completion_tokens", int), 1000, 2_000_000,
          ("budgets", "max_completion_tokens")),
+    _float("sessions.approval_timeout_seconds", "Approval deadline (seconds)",
+           "Deny a pending approval nobody decided after this long and end its run. 0 never expires one.",
+           "Sessions", 86400, *_cfg_attr("approval_timeout_seconds", float), 0, 30 * 86400,
+           ("budgets", "approval_timeout_seconds"), live_apply=apply_deadline),
+    _float("sessions.max_run_seconds", "Member and App run time (seconds)",
+           "End a member's or an App's run after this long running (approval, queue and reply waits do not count). "
+           "0 is no limit. The owner's own runs have none.",
+           "Sessions", 3600, *_cfg_attr("max_run_seconds", float), 0, 7 * 86400, ("budgets", "max_run_seconds"),
+           live_apply=apply_deadline),
+    _int("sessions.app_max_running", "App running sessions",
+         "How many sessions an App may have running or parked at once, unless the owner set its own cap.",
+         "Sessions", 2, *_cfg_attr("app_max_running", int), 1, 100, ("budgets", "app_max_running"),
+         live_apply=apply_running_cap),
+    _int("sessions.app_max_queued", "App queued sessions",
+         "How many sessions an App may have queued or parked before new ones are refused (429), unless the owner "
+         "set its own cap.",
+         "Sessions", 4, *_cfg_attr("app_max_queued", int), 1, 1000, ("budgets", "app_max_queued")),
     _float("compaction.elide_at", "Elide at",
            "Fraction of context at which old tool outputs are shortened.",
            "Compaction", 0.55, _get_elide, _set_elide, 0.10, 0.90, ("compaction", "elide_at")),

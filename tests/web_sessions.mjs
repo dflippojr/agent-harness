@@ -27,7 +27,7 @@ const streams = [];
 const left = [];
 const headers = [];
 const page = mountSessions({
-  $app: "APP", h: el, fill: (_t, ...n) => rendered.push(...n.flat(Infinity)), append: (_t, ...n) => appended.push(...n.flat(Infinity)), api, setHeader: (...a) => headers.push(a), showFab() {}, onLeave: (fn) => left.push(fn),
+  $app: "APP", h: el, fill: (_t, ...n) => rendered.push(...n.flat(Infinity)), append: (_t, ...n) => appended.push(...n.flat(Infinity)), api, setHeader: (...a) => headers.push(a), showListAction() {}, onLeave: (fn) => left.push(fn),
   isMember: () => false, isGuest: () => false, badge: (s) => el("badge", {}, s), reviewBadge: () => el("rb"), REVIEW_LABEL: {}, jobStatusBadge: () => el("jb"),
   openStream: (_url, handlers, opts) => { streams.push({ handlers, opts }); return () => {}; }, ownerSurface: () => ({}), agentHarnessWeb: { url: (p) => p, token: "" }, browser,
 });

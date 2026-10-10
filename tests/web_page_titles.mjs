@@ -91,6 +91,7 @@ const sessionDetail = {
 };
 
 let pendingRenameGate = null;
+let pendingChatOptionsGate = null;
 let meRole = "owner";
 let gpuPayload = { manual: false, state: "clear" };
 const fetched = [];
@@ -127,6 +128,10 @@ const fakeFetch = async (url, opts = {}) => {
     });
   }
   if (path === "/models") return jsonResp([]);
+  if (path === "/chats/options") {
+    if (pendingChatOptionsGate) await pendingChatOptionsGate;
+    return jsonResp({ backends: [] });
+  }
   if (path.startsWith("/chats")) return jsonResp([]);
   if (path.startsWith("/backends")) return jsonResp([{ name: "local", available: true }]);
   return jsonResp({});
@@ -247,23 +252,43 @@ const assertTitle = (route, expected) => {
   if (!byId.conn) throw new Error(`connection dot missing on ${route}`);
 };
 
+// List actions belong to the current header, share the phone FAB's destination, and never leak onto detail pages.
+const assertNewAction = (href = null, label = "") => {
+  const actions = byId.bar.childNodes.filter((el) => el instanceof BaseEl && el.classList.contains("list-new"));
+  if (actions.length !== (href ? 1 : 0)) throw new Error(`unexpected New actions on ${loc.hash}: ${actions.length}`);
+  if (!href) return;
+  const action = actions[0];
+  if (action.href !== href || action.textContent !== label || byId.fab.href !== href || byId.fab.textContent !== label) {
+    throw new Error(`header/FAB action mismatch on ${loc.hash}`);
+  }
+  if (byId.bar.childNodes.indexOf(action) !== byId.bar.childNodes.indexOf(byId.title) + 1) {
+    throw new Error("New action must follow the list title in reading order");
+  }
+};
+
 await waitFor(() => !byId.title.hidden, "initial title");
 
 await go("#/agents");
 await waitFor(() => /Agents/.test(byId.title.textContent), "agents list title");
 assertTitle("#/agents", "Agents");
+assertNewAction("#/new", "+ New task");
+await go("#/agents");
+assertNewAction("#/new", "+ New task");
 
 await go("#/images");
 await waitFor(() => /Images/.test(byId.title.textContent), "images list title");
 assertTitle("#/images", "Images");
+assertNewAction();
 
 await go("#/jobs");
 await waitFor(() => /Jobs/.test(byId.title.textContent), "jobs list title");
 assertTitle("#/jobs", "Jobs");
+assertNewAction("#/jobs/new", "+ New job");
 
 await go("#/profile");
 await waitFor(() => /Profile/.test(byId.title.textContent), "profile title");
 assertTitle("#/profile", "Profile");
+assertNewAction();
 if (/Claude Remote Control/.test(byId.app.textContent)) {
   throw new Error("profile still lists Actions");
 }
@@ -279,6 +304,7 @@ assertTitle("#/actions/disk", "Actions");
 await go("#/jobs/job1");
 await waitFor(() => byId.title.textContent && !byId.title.hidden, "job detail title");
 assertTitle("#/jobs/job1", "Job");
+assertNewAction();
 
 await go("#/images/img1");
 await waitFor(() => byId.title.textContent && !byId.title.hidden, "image detail title");
@@ -287,6 +313,7 @@ assertTitle("#/images/img1", "Image");
 await go("#/s/sess1");
 await waitFor(() => /Demo session/.test(byId.title.textContent), "session transcript title");
 assertTitle("#/s/sess1", "Demo session");
+assertNewAction();
 
 // Renaming the session from the ⋯ menu (#514) edits the topbar title in place and must update it (#178).
 const findByClass = (root, cls) => {
@@ -382,6 +409,8 @@ gpuPayload = { manual: false, state: "clear" };
 await go("#/actions");
 await waitFor(() => loc.hash === "#/actions/resources" && /Resource guard disabled|Checking/.test(byId.app.textContent), "default resources tab");
 assertTitle("#/actions", "Actions");
+assertNewAction();
+if (!byId.bar.classList.contains("page")) throw new Error("Actions must use the shared page header");
 const gpuTabs = tabLabels(byId.app);
 if (gpuTabs.join("|") !== "Resources|Accounts|Claude Remote Control|Disk") {
   throw new Error(`tab order ${gpuTabs.join("|")}`);
@@ -464,14 +493,55 @@ await go("#/settings/disk");
 await waitFor(() => loc.hash === "#/actions/disk", "settings disk alias redirects");
 
 meRole = "member";
+await go("#/agents");
+assertNewAction("#/new", "+ New task");
+await go("#/jobs");
+await waitFor(() => loc.hash === "#/agents", "member blocked from jobs");
+assertNewAction("#/new", "+ New task");
 await go("#/actions/gpu");
 await waitFor(() => loc.hash === "#/agents", "member blocked from actions");
 await go("#/profile/disk");
 await waitFor(() => loc.hash === "#/profile", "member disk bookmark stays off actions");
 meRole = "guest";
+await go("#/agents");
+assertNewAction();
+if (!byId["fab-host"].hidden) throw new Error("guest Agents FAB must be hidden");
+await go("#/jobs");
+assertNewAction();
+if (!byId["fab-host"].hidden) throw new Error("guest Jobs FAB must be hidden");
 await go("#/actions");
 await waitFor(() => loc.hash === "#/profile", "guest blocked from actions");
 await go("#/profile/remote-control");
 await waitFor(() => loc.hash === "#/profile", "guest remote-control bookmark stays off actions");
+
+// Expired identity enters sign-in directly, without setHeader. Teardown must clear both New presentations.
+for (const [role, hash, href, label] of [["member", "#/agents", "#/new", "+ New task"],
+  ["owner", "#/jobs", "#/jobs/new", "+ New job"]]) {
+  meRole = role;
+  await go(hash);
+  assertNewAction(href, label);
+  meRole = "signin";
+  await go("#/profile");
+  await waitFor(() => byId.title.textContent === "Sign in", "expired login sign-in");
+  assertNewAction();
+  if (!byId["fab-host"].hidden) throw new Error("sign-in must clear the FAB");
+}
+meRole = "owner";
+await go("#/agents");
+assertNewAction("#/new", "+ New task");
+
+let releaseChatOptions;
+pendingChatOptionsGate = new Promise((resolve) => { releaseChatOptions = resolve; });
+await go("#/chat");
+await waitFor(() => byId.title.textContent === "Chat", "pending Chat shell");
+await go("#/agents");
+assertNewAction("#/new", "+ New task");
+releaseChatOptions();
+pendingChatOptionsGate = null;
+await sleep(80);
+assertTitle("#/agents", "Agents");
+assertNewAction("#/new", "+ New task");
+if (byId["fab-host"].hidden) throw new Error("late Chat loading must not hide the Agents FAB");
+if (findByClass(doc.body, "chat-composer")) throw new Error("an abandoned Chat must not append a composer");
 
 console.log("ok");

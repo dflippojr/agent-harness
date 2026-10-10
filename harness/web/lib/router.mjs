@@ -33,7 +33,7 @@ export function blockedRedirect(parts, role) {
 
 // `views` is a function returning the page views, read at route time because the pages are mounted after the router.
 export function mountRouter({ els, session, chrome, tabs, signin, stream, views, toast, browser }) {
-  const { $app, $back, $fabHost } = els;
+  const { $app, $back } = els;
   const { document, window } = browser;
   const { api, fetchMe, loadWebAuth, isGuest, isMember, isOwner, canChat } = session;
   let cleanup = [];
@@ -111,7 +111,7 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
     cleanup = [];
     fill($app);
     document.querySelector(".composer")?.remove();
-    $fabHost.hidden = true;
+    chrome.hideListAction();
     document.querySelectorAll(".jump").forEach((el) => el.remove());
     const prefetched = session.takeBootMe();
     const [, me] = await Promise.all([loadWebAuth(), prefetched || fetchMe()]);

@@ -211,6 +211,7 @@ Every key of the registry with all modules present, read from `harness/settings_
 | `gpu_guard.enabled` | bool | `false` | admin | Runtime enable for pausing the model while a game or Plex transcode needs the GPU. |
 | `gpu_guard.poll_seconds` | float | `10` | admin | How often the GPU guard looks for games or Plex transcodes. |
 | `gpu_guard.resume_after_seconds` | float | `180` | admin | The GPU must stay clear this long before the model is reloaded. |
+| `hub.enabled` | bool | `true` | admin | Read-only inventory for the standalone Hub app. |
 | `images.edit_enabled` | bool | `false` | admin | Runtime enable for the installed Qwen-Image-Edit component. Does not download model weights. |
 | `images.enabled` | bool | `false` | admin | Runtime enable for local image generation. |
 | `images.job_timeout_seconds` | float | `1200` | admin | How long a single image job may run. |
@@ -227,6 +228,7 @@ Every key of the registry with all modules present, read from `harness/settings_
 | `modules.endpoint` | string | — | admin | endpoint installation/profile selection. Change this with the installer, not this registry. |
 | `modules.gpu_guard` | string | — | admin | gpu_guard installation/profile selection. Change this with the installer, not this registry. |
 | `modules.homelab` | string | — | admin | homelab installation/profile selection. Change this with the installer, not this registry. |
+| `modules.hub` | string | — | admin | hub installation/profile selection. Change this with the installer, not this registry. |
 | `modules.image_edit` | string | — | admin | image_edit installation/profile selection. Change this with the installer, not this registry. |
 | `modules.images` | string | — | admin | images installation/profile selection. Change this with the installer, not this registry. |
 | `modules.jobs` | string | — | admin | jobs installation/profile selection. Change this with the installer, not this registry. |
@@ -250,7 +252,11 @@ Every key of the registry with all modules present, read from `harness/settings_
 | `remote_control.discovery.roots` | discovery_root_list | `[]` | admin | Windows owner-only, default-off metadata discovery. No file contents, trust or launch. Limits: 20,000 directories; 500 candidates; 30 seconds; 50 errors; one active scan; results expire after 15 minutes. Hidden/system entries, all reparse points (including OneDrive), credentials, caches and build folders are excluded. |
 | `remote_control.enabled` | bool | `false` | admin | Runtime enable for Remote Control. Does not install the module. |
 | `search.enabled` | bool | `false` | admin | Runtime enable for session search. Does not install the search module. |
+| `sessions.app_max_queued` | int | `4` | admin | How many sessions an App may have queued or parked before new ones are refused (429), unless the owner set its own cap. |
+| `sessions.app_max_running` | int | `2` | admin | How many sessions an App may have running or parked at once, unless the owner set its own cap. |
+| `sessions.approval_timeout_seconds` | float | `86400` | admin | Deny a pending approval nobody decided after this long and end its run. 0 never expires one. |
 | `sessions.max_completion_tokens` | int | — | admin | Per-run completion-token cap for new sessions. Changing this does not raise an active run's budget. |
+| `sessions.max_run_seconds` | float | `3600` | admin | End a member's or an App's run after this long running (approval, queue and reply waits do not count). 0 is no limit. The owner's own runs have none. |
 | `sessions.max_turns` | int | `80` | admin | Per-run turn cap for new sessions. Changing this does not raise an active run's budget. |
 | `skills.enabled` | bool | `false` | admin | Runtime enable for owner-approved instruction skills. Does not install the skills module. |
 | `smart_approvals.enabled` | bool | `false` | admin | Runtime enable for the hosted smart-approval reviewer. Does not configure a secret_ref. |

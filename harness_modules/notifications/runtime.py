@@ -15,6 +15,9 @@ class NotificationsRuntime(ModuleRuntime):
         self.service = Notifier(manager.cfg, manager.db)
         manager.bus.add_listener(self.service.listener)
 
+    def status(self) -> dict:
+        return {"enabled": self.service.enabled, "queued": self.service.queue.qsize()}
+
     def start(self) -> None:
         self.service.start()
 
