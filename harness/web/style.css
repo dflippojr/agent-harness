@@ -925,3 +925,32 @@ body.has-tabs .composer { bottom: var(--tabbar-offset); padding-bottom: 8px; }
 .discovery-path { overflow-wrap: anywhere; }
 .discovery-candidate .row { flex-wrap: wrap; }
 .discovery-candidate input { flex: 1 1 180px; min-width: 0; font-size: 1rem; }
+
+/* Desktop 11: New task and Chat (#570). Keep every layout override above the phone breakpoint. */
+@media (min-width: 768px) {
+  main:has(.new-task-page) { max-width: 1120px; padding-top: 24px; }
+  body:has(.new-task-page) #bar { padding-inline: max(16px, calc((100% - 1120px) / 2 + 16px)); }
+  .new-task-page { display: flex; flex-direction: column; gap: 24px; }
+  .new-task-page > .new-task-layout { order: -1; }
+  .new-task-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 360px); column-gap: 32px; }
+  .new-task-prompt { grid-column: 1; grid-row: 1 / 3; min-width: 0; }
+  .new-task-prompt > label { margin-top: 0; }
+  .new-task-prompt > textarea { min-height: 360px; }
+  .new-task-context, .new-task-settings { grid-column: 2; min-width: 0; padding-left: 24px; border-left: 1px solid var(--line); }
+  .new-task-context { grid-row: 1; }
+  .new-task-context > label:first-child { margin-top: 0; }
+  .new-task-settings { grid-row: 2; }
+  .new-task-page .btn:hover, .chat-page .btn:hover { filter: brightness(.96); }
+  .new-task-page :is(button, input, select, textarea, summary):focus-visible,
+  .chat-page :is(button, input, select, textarea, summary, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* The shell offsets the fixed composer past the rail; its inner width matches main's padded transcript. */
+  .chat-page .chat-composer .inner { max-width: 728px; }
+  .chat-welcome { width: 100%; padding: 0; background: none; }
+  /* A centred ellipse fades out on every edge and stays clear of the Recent chats list. */
+  .chat-welcome-content {
+    padding: 48px 24px;
+    background: radial-gradient(ellipse at center, color-mix(in srgb, var(--accent) 12%, transparent), transparent 70%);
+  }
+  .chat-welcome-content > p { max-width: 52ch; margin-inline: auto; }
+}
+/* End Desktop 11. */

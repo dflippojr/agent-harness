@@ -287,7 +287,7 @@ async function viewNew() {
     if (backend.value === "local") void warmModel(true);
   });
   showBackend();
-  const prompt = h("textarea", { placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
+  const prompt = h("textarea", { id: "new-task-prompt", form: "new-task-form", placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
   const title = h("input", { type: "text", placeholder: "Optional; defaults to the first line" });
   let selectedGitHub = null;
   const githubState = h("p", { class: "muted small" });
@@ -391,6 +391,7 @@ async function viewNew() {
   syncSkillChecks();
   project.addEventListener("change", syncSkillChecks);
   const form = h("form", {
+    id: "new-task-form", class: "new-task-settings",
     onsubmit: async (e) => {
       e.preventDefault();
       if (!prompt.value.trim()) return toast("Write a prompt first");
@@ -404,10 +405,6 @@ async function viewNew() {
       if (!started) start.disabled = false;
     },
   },
-  targetSwitch ? [h("label", {}, "Runs on"), targetSwitch] : null,
-  allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null,
-  githubPicker,
-  h("label", {}, "Prompt"), prompt,
   h("label", {}, "Project"), project, targetState, projectHint,
   isMember() && availableBackends.length < 2 ? [] : [h("label", {}, "Backend"), backend, holdNotice, backendState],
   h("label", {}, "Model"), model, modelState,
@@ -420,9 +417,15 @@ async function viewNew() {
         model: backend.value === "local" ? model.value : "" }),
     }, "Save as template"),
     h("span", { class: "spacer" }), start));
-  append($app, projectCreator, form);
-
-  if (allTemplates.length) append($app, templateManager(allTemplates));
+  const context = h("div", { class: "new-task-context" },
+    targetSwitch ? [h("label", {}, "Runs on"), targetSwitch] : null,
+    allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null, githubPicker);
+  // The prompt remains associated with the settings form even though desktop places it in its own column.
+  // DOM order keeps the phone flow: context, prompt, settings, then the submit actions.
+  const promptPane = h("div", { class: "new-task-prompt" }, h("label", { for: "new-task-prompt" }, "Prompt"), prompt);
+  append($app, h("section", { class: "new-task-page", "aria-label": "New task" }, projectCreator,
+    h("section", { class: "new-task-layout", "aria-label": "Task configuration" }, context, promptPane, form),
+    allTemplates.length ? templateManager(allTemplates) : null));
 }
 return { viewNew, confirmGpuQueue };
 }
