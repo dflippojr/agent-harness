@@ -66,7 +66,8 @@ LAYOUTS = {
         ro_files=(("settings.json", "settings.json"), ("CLAUDE.md", "CLAUDE.md")),
         ro_dirs=("agents", "commands", "skills", "plugins", "hooks", "output-styles", "rules"),
         # Managed settings outrank project settings: allowManagedHooksOnly ignores `hooks` in the workspace's
-        # .claude/settings.json and settings.local.json (#388), and the workspace CLAUDE.md still loads.
+        # .claude/settings.json and settings.local.json (#388). Sessions also run with `--setting-sources user`
+        # (#531), so the rest of those files is ignored too and the workspace CLAUDE.md comes in the system prompt.
         managed_files=(("/etc/claude-code/managed-settings.json", "managed-settings.json"),)),
     "codex": Layout(
         state_dir="/home/agent/.codex", login_dir="",

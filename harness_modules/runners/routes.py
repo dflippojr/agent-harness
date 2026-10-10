@@ -6,7 +6,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from harness.modules import (HarnessError, RouteTable, manager as mgr, runtime,
-                             require_admin, log_safe, compat, API_VERSION, ROOT, credential_audit)
+                             require_admin, log_safe, compat, API_VERSION, ROOT, credential_audit,
+                             refuse_hub_owner_key)
 
 log = logging.getLogger("harness.runners")
 RUNNER_BODY_LIMIT = 16 * 2**20
@@ -118,8 +119,10 @@ async def create_runner_pairing_code(body: RunnerPairingCodeRequest, request: Re
     if not name or not runner:
         raise HarnessError(400, "name and runner are required")
     m = mgr(request)
-    row, code = runtime(request, "runners").create_runner_pairing_code(
-        name, runner, body.ttl_seconds, credential_audit.request_context(request, m))
+    rt = runtime(request, "runners")
+    ctx = credential_audit.request_context(request, m)
+    await refuse_hub_owner_key(m, ctx, "runner_pairing.create", "pairing")  # the code redeems to an owner key
+    row, code = rt.create_runner_pairing_code(name, runner, body.ttl_seconds, ctx)
     return JSONResponse({**row, "code": code}, status_code=201,
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
