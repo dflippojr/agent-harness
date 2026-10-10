@@ -274,7 +274,8 @@ def test_the_owners_run_has_no_time_budget(tmp_path):
 def test_time_budget_counts_only_time_running(tmp_path):
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
     m.cfg.max_run_seconds = 100
-    app_session = {"id": "s1", "owner_id": OWNER_USER_ID, "app_id": "k-shop"}
+    app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+    app_session = {"id": "s1", "owner_id": OWNER_USER_ID, "app_id": app_id}
     runner = m.runner
     runner._clocks["s1"] = [0.0, None]
     runner._tick_clock("s1", "running")
@@ -298,3 +299,39 @@ def test_member_running_cap_still_refuses_with_429_message(tmp_path):
             assert e.status == 429 and "queued or waiting" in str(e)
         else:
             raise AssertionError("a parked session must count toward max_queued")
+
+
+# review follow-ups ----------------------------------------------------------------------------------------------------
+def test_an_apps_hosted_sessions_waiting_on_a_slot_cannot_both_pass_its_running_cap(tmp_path):
+    """Both App sessions wait for a busy backend while the App has nothing running: when slots free up, only one
+    may start; the cap check and counting as running happen together."""
+    async def body():
+        m, made, _ = _claude_manager(tmp_path, "cancel", max_sessions=2)
+        await m.start()
+        key = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
+        m.set_app_provider_credential(key["id"], "claude", "", "subscription", [])
+        assert m.db.set_app_limits(key["id"], {"max_running": 1})
+        owners = [m.create(p, backend="claude")["id"] for p in ("o1", "o2")]
+        for sid in owners:
+            await wait_status(m, sid, "running")
+        apps = [m.create(p, backend="claude", app=key)["id"] for p in ("a1", "a2")]
+        await asyncio.sleep(0.2)
+        for sid in owners:
+            await m.cancel(sid)
+        await _until(lambda: any(m.get(sid)["status"] == "running" for sid in apps))
+        await asyncio.sleep(0.5)
+        assert sorted(m.get(sid)["status"] for sid in apps) == ["queued", "running"]
+        assert len(made) == 3
+        for sid in apps:
+            await m.cancel(sid)
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_owner_device_token_sessions_have_no_time_budget(tmp_path):
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    device = m.db.create_api_key("phone", "sessions", kind="device")[0]["id"]
+    app = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+    m.runner._clocks["s1"] = [0.0, None]
+    assert m.runner._time_left({"id": "s1", "owner_id": OWNER_USER_ID, "app_id": device}) is None
+    assert m.runner._time_left({"id": "s1", "owner_id": OWNER_USER_ID, "app_id": app}) == m.cfg.max_run_seconds

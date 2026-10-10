@@ -115,6 +115,23 @@ def unresolved_calls(context: list[dict]) -> list[dict]:
     return [c for c in context[i]["tool_calls"] if c["id"] not in done]
 
 
+def capped_app(db, app_id: str) -> bool:
+    """Only third-party Apps have session caps and a run time budget; Agent Harness Web and the owner's own tokens
+    (device and owner keys) do not (#524)."""
+    if not app_id:
+        return False
+    key = db.get_api_key(app_id)
+    return key is not None and key.get("kind") == "app"
+
+
+def admission_key(db, s: dict) -> str:
+    """Whose caps a session counts against: its member's, its App's, or "" (the owner's, uncapped)."""
+    user_id = session_user_id(s)
+    if user_id != OWNER_USER_ID:
+        return "member:" + user_id
+    return "app:" + s["app_id"] if capped_app(db, s.get("app_id") or "") else ""
+
+
 class _HeldSlot:
     """A hosted backend slot held for one run, which can give it up while the run waits on an approval (#524)."""
 
@@ -589,7 +606,7 @@ class Runner:
     def _time_left(self, s: dict) -> float | None:
         """Seconds a member's or an App's run has left (`max_run_seconds`); None for the owner's or without a cap."""
         limit = float(self.cfg.max_run_seconds or 0)
-        if limit <= 0 or (session_user_id(s) == OWNER_USER_ID and not s.get("app_id")):
+        if limit <= 0 or not admission_key(self.db, s):
             return None
         return limit - self._run_seconds(s["id"])
 
@@ -745,6 +762,7 @@ class Runner:
 
         def waiting() -> None:
             self.db.update_session(sid, status="waiting_target")
+            self.db.after_commit(lambda: self._tick_clock(sid, "waiting_target"))
             self.bus.emit(sid, "status", {"status": "waiting_target"})
             self.bus.emit(sid, "target_waiting", {"target": target})
         await self.db.for_session(sid).awrite(waiting)
@@ -753,6 +771,7 @@ class Runner:
 
         def online() -> None:
             self.db.update_session(sid, status=status)
+            self.db.after_commit(lambda: self._tick_clock(sid, status))
             self.bus.emit(sid, "status", {"status": status})
             self.bus.emit(sid, "target_online", {"target": target, "seconds": round(time.monotonic() - since)})
         await self.db.for_session(sid).awrite(online)
@@ -1009,10 +1028,10 @@ class Runner:
             backend_session_id = str(s["run"].get("backend_session_id") or "")
             credential, use_api_key, api_key = self._cli_credentials(sid, s, backend_name)
             await self._memory_gate(sid, f"{backend_name} worker container")
-            await self.scheduler.wait_eligible(sid)  # a member or an App at its running cap holds no slot (#524)
             held = _HeldSlot(slot)
             try:
-                async with self._credential_lock(s), held:
+                async with self._credential_lock(s), contextlib.AsyncExitStack() as stack:
+                    await self._admit_hosted(sid, s, held, stack)
                     self._held_slots[sid] = held
                     with telemetry.span("hosted_cli_turn", {"harness.backend": backend_name,
                                                             "gen_ai.request.model": backend.model}):
@@ -1025,6 +1044,17 @@ class Runner:
                 recovered = True
             finally:
                 self._held_slots.pop(sid, None)
+
+    async def _admit_hosted(self, sid: str, s: dict, held: _HeldSlot, stack: contextlib.AsyncExitStack) -> None:
+        """Take a backend slot once the session's member or App is under its running cap (#524). The cap check, the
+        slot and the `running` status that makes the session count happen under one lock per member or App, so two of
+        its sessions waiting on the same slot can't both pass the check while neither counts yet."""
+        key = admission_key(self.db, s)
+        async with (self._locks.hold("admit:" + key) if key else contextlib.nullcontext()):
+            await self.scheduler.wait_eligible(sid)
+            await stack.enter_async_context(held)
+            if key and self.db.get_session(sid)["status"] not in ("running", *WAITING):
+                await self.aset_status(sid, "running")
 
     def _credential_lock(self, s: dict):
         """Held for a CLI attempt on a credential that two sessions must not use at once (#365 decision 5: one end
