@@ -33,11 +33,13 @@ class SandboxUnavailable(Exception):
 
 @dataclass(frozen=True)
 class DiskLimits:
-    """What a command may write (#525). `quota_bytes` caps the workspace; `growth_bytes`, when set, caps how much it
-    may grow during one command (a member's remaining account quota); `min_free_bytes` is kept free on its drive."""
+    """What a command may write (#525). `quota_bytes` caps the workspace; `min_free_bytes` is kept free on its drive.
+    For a member, `account_quota_bytes` caps the whole account as `account_usage()` measures it, so commands running
+    at once in several of its sessions share one budget instead of each getting all of what is left."""
     quota_bytes: int
     min_free_bytes: int
-    growth_bytes: int | None = None
+    account_quota_bytes: int | None = None
+    account_usage: Callable[[], int] | None = None
 
 
 class DiskLimitExceeded(ToolError):
@@ -61,24 +63,32 @@ class DiskWatch:
     def __init__(self, root: Path, limits: DiskLimits):
         self.root = root
         self.limits = limits
-        self.cap = 0
+        self.account = limits.account_quota_bytes is not None and limits.account_usage is not None
+        self.cap = self.account_cap = 0
         self.floor = 0
-        self._size = self._free_at_scan = 0
+        self._size = self._account_used = self._free_at_scan = 0
         self._scanned = self._scan_cost = 0.0
 
     def _free(self) -> int:
         return shutil.disk_usage(self.root).free
 
+    def _scan(self) -> None:
+        began = time.monotonic()
+        self._size = dir_size(self.root)
+        if self.account:
+            self._account_used = self.limits.account_usage()
+        self._free_at_scan = self._free()
+        self._scanned = time.monotonic()
+        self._scan_cost = self._scanned - began
+
     def start(self) -> None:
         """Measure the starting point. Blocking: run it in a thread."""
-        size, free = dir_size(self.root), self._free()
-        cap = max(self.limits.quota_bytes, size)
-        if self.limits.growth_bytes is not None:
-            cap = min(cap, size + max(0, self.limits.growth_bytes))
-        self.cap = cap
-        floor = self.limits.min_free_bytes
+        self._scan()
+        self.cap = max(self.limits.quota_bytes, self._size)
+        if self.account:
+            self.account_cap = max(self.limits.account_quota_bytes, self._account_used)
+        floor, free = self.limits.min_free_bytes, self._free_at_scan
         self.floor = floor if free >= floor else max(0, free - FREE_SLACK_BYTES)
-        self._size, self._free_at_scan, self._scanned = size, free, time.monotonic()
 
     def check(self) -> str:
         """'' while within limits, else why the command must stop. Blocking: run it in a thread."""
@@ -86,17 +96,16 @@ class DiskWatch:
         if free < self.floor:
             return (f"the data drive is down to {free / 2**30:.1f} GB free, under its "
                     f"{self.limits.min_free_bytes / 2**30:.1f} GB minimum")
-        estimate = self._size + max(0, self._free_at_scan - free)
-        if estimate > self.cap or time.monotonic() - self._scanned >= max(MIN_SCAN_SECONDS,
-                                                                          SCAN_DUTY * self._scan_cost):
-            began = time.monotonic()
-            self._size, self._free_at_scan = dir_size(self.root), self._free()
-            self._scanned = time.monotonic()
-            self._scan_cost = self._scanned - began
+        lost = max(0, self._free_at_scan - free)
+        if (self._size + lost > self.cap or (self.account and self._account_used + lost > self.account_cap)
+                or time.monotonic() - self._scanned >= max(MIN_SCAN_SECONDS, SCAN_DUTY * self._scan_cost)):
+            self._scan()
             if self._size > self.cap:
-                limit = (f"its {self.limits.quota_bytes / 2**20:.0f} MB quota" if self.cap >= self.limits.quota_bytes
-                         else "the account's remaining disk quota")
-                return f"the workspace grew to {self._size / 2**20:.0f} MB, past {limit}"
+                return (f"the workspace grew to {self._size / 2**20:.0f} MB, past its "
+                        f"{self.limits.quota_bytes / 2**20:.0f} MB quota")
+            if self.account and self._account_used > self.account_cap:
+                return (f"the account grew to {self._account_used / 2**20:.0f} MB, past its "
+                        f"{self.limits.account_quota_bytes / 2**20:.0f} MB disk quota")
         return ""
 
     async def run(self) -> str:
@@ -445,8 +454,9 @@ class Sandbox:
         return code, output
 
     async def _watched(self, args: list[str], timeout: float) -> tuple[int, str, str]:
-        """run_cmd under the disk watchdog (#525). Once the command passes a limit the container is restarted, which
-        stops it and anything it left running in the background, and DiskLimitExceeded is raised."""
+        """run_cmd under the disk watchdog (#525). Once the command passes a limit, or the watchdog itself fails, the
+        container is stopped, which ends the command and anything it left running in the background, and
+        DiskLimitExceeded is raised."""
         limits = await self.disk_limits() if self.disk_limits is not None else None
         if limits is None:
             return await run_cmd(args, timeout=timeout)
@@ -457,28 +467,43 @@ class Sandbox:
         try:
             await asyncio.wait({command, watcher}, return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
-            command.cancel()
+            command.cancel()    # the run's end stops the container, which ends the command inside it
             raise
         finally:
             watcher.cancel()
         if command.done():
             return command.result()
         try:
-            reason = watcher.result()   # an error in the watchdog itself is raised, not taken for a limit
-        except Exception:
-            command.cancel()
-            raise
-        await run_cmd(["docker", "restart", "-t", "0", self.name], timeout=60)
+            reason = watcher.result()
+        except Exception as e:  # fail closed: a command nothing watches could fill the drive
+            reason = f"the disk watchdog failed ({type(e).__name__}: {e})"
+        stopped, detail = await self._halt()
         try:
             await asyncio.wait_for(command, timeout=30)
         except Exception:
-            pass    # the restart ended it, or the timeout cancelled (killed) a docker client that hung
+            pass    # the stop ended it, or the timeout cancelled (killed) a docker client that hung
         if self.on_event:
-            self.on_event("sandbox_disk_limit", {"reason": reason})
+            self.on_event("sandbox_disk_limit", {"reason": reason, "stopped": stopped})
+        if not stopped:
+            raise DiskLimitExceeded(
+                f"the command had to be stopped because {reason}, but the sandbox could not be stopped "
+                f"({detail}), so it may still be running.")
         raise DiskLimitExceeded(
-            f"the command was stopped because {reason}. The sandbox was restarted, so background processes "
+            f"the command was stopped because {reason}. The sandbox was reset, so background processes "
             "are gone; /workspace keeps what was written. Delete build artifacts or other large files before "
             "running it again.")
+
+    async def _halt(self) -> tuple[bool, str]:
+        """Stop everything running in the container: (stopped, why not). A restart leaves it ready for the next
+        command; a kill is the fallback, and a container that is no longer running counts as stopped."""
+        code, out, err = await run_cmd(["docker", "restart", "-t", "0", self.name], timeout=60)
+        if code == 0:
+            return True, ""
+        detail = (err or out).strip()[-300:] or f"docker restart exit {code}"
+        code, out, err = await run_cmd(["docker", "kill", self.name], timeout=30)
+        if code == 0 or await self._state() in ("exited", "dead", "created"):
+            return True, ""
+        return False, f"{detail}; {(err or out).strip()[-300:] or f'docker kill exit {code}'}"
 
     async def stop(self) -> None:
         self._cancel_idle_timer()

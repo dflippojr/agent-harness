@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -235,12 +236,20 @@ class Runner:
         self.bus.emit(sid, type_, data)
 
     async def _disk_limits(self, sid: str):
-        """The disk watchdog's limits for one sandbox command (#525): the workspace quota, a member's remaining
-        account quota, and the data drive's free-space floor."""
+        """The disk watchdog's limits for one sandbox command (#525): the workspace quota, a member's account quota,
+        and the data drive's free-space floor. The account is re-measured while the command runs, so commands in
+        several of a member's sessions at once share what is left rather than each getting all of it."""
         s = self.db.get_session(sid)
-        growth = await asyncio.to_thread(self._member_clone_budget, session_user_id(s))
+        user_id = session_user_id(s)
+        account_quota = account_usage = None
+        if user_id != OWNER_USER_ID:
+            from .storage import account_usage_bytes
+            account = await asyncio.to_thread(self.db.account_by_id, user_id)
+            account_quota = int(account["disk_quota_bytes"]) if account is not None else 0
+            account_usage = functools.partial(account_usage_bytes, self.cfg, user_id)
         return DiskLimits(quota_bytes=self.quota_mb(s) * 2**20,
-                          min_free_bytes=int(self.cfg.cleanup.min_free_gb * 2**30), growth_bytes=growth)
+                          min_free_bytes=int(self.cfg.cleanup.min_free_gb * 2**30),
+                          account_quota_bytes=account_quota, account_usage=account_usage)
 
     async def _park_sandbox(self, sid: str) -> None:
         """The session is about to wait on the owner or the GPU guard: stop its idle container (#428). Best effort;
