@@ -302,6 +302,99 @@ main { max-width: 760px; margin: 0 auto; padding: 12px 16px calc(120px + var(--t
   .split-empty p { margin: 0; font-size: 0.875rem; }
 }
 /* End Desktop 3. */
+/* Desktop 4: session pane (#564, pages/session.mjs). From 768 px the session's status strip and Transcript / Changes /
+   Info control sit in the bar (body.session-page), so the header is one row: Back or the list toggle, the title over its
+   meta, the control, ⋯. The transcript is a 760 px column centred in the pane; a pending approval is a card docked at
+   the pane's foot, and Changes and Info show it as a one-line bar. */
+/* Every width: ⋯'s menu lives inside the bar's layer (z-index 10), so the jump buttons sit under it, still above the
+   composer (6) and the approval sheet (8). */
+body .jump { z-index: 9; }
+.approval-bar { display: none; }
+@media (min-width: 768px) {
+  body.session-page #bar {
+    display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
+    grid-template-areas: "back toggle title tabs conn menu" "back toggle meta tabs conn menu";
+    align-items: center; column-gap: 0; row-gap: 2px;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) max(16px, env(safe-area-inset-right, 0px)) 10px max(12px, env(safe-area-inset-left, 0px));
+  }
+  body.session-page #bar > #back { grid-area: back; margin-right: 4px; }
+  body.session-page #bar > .split-toggle { grid-area: toggle; margin-right: 4px; }
+  body.session-page #bar > h1, body.session-page #bar > .session-title-edit { grid-area: title; align-self: end; }
+  body.session-page #bar > h1 { font-size: 1.125rem; font-weight: 650; letter-spacing: -.005em; }
+  body.session-page #bar > .session-title-edit { margin: 0; }
+  body.session-page #bar > .session-strip { grid-area: meta; align-self: start; height: auto; min-height: 20px; gap: 8px; }
+  body.session-page #bar > .session-strip > .session-strip-meta { flex: 0 1 auto; }
+  body.session-page #bar > .session-tabs { grid-area: tabs; width: 300px; margin: 0 0 0 12px; }
+  body.session-page #bar > .session-tabs button:hover:not(.on) { color: var(--text); }
+  body.session-page #bar > .session-tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  body.session-page #bar > .conn { grid-area: conn; margin-left: 8px; }
+  body.session-page #bar > .conn.live { display: none; }  /* the transcript's own strip says when its stream drops */
+  body.session-page #bar > .session-menu-wrap { grid-area: menu; margin-left: 4px; }
+  body.session-page .session-menu-btn:hover, body.session-page .session-menu-btn[aria-expanded="true"] { background: var(--panel-2); border-radius: var(--radius); }
+  body.session-page .session-menu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius); }
+  body.session-page .session-menu { min-width: 248px; border-radius: 14px; }
+  /* Only the reconnecting strip is left under the bar. */
+  body.session-page .session-chrome { margin: -12px -24px 8px; padding: 0 24px; border-bottom: 0; background: none; }
+  /* The transcript column: 760 px of text inside 24 px gutters, centred in the space beside the rail (and list). */
+  body.session-page main { max-width: calc(760px + 48px); padding-inline: 24px; }
+  body.session-page .msg.user { width: fit-content; max-width: 80%; margin-left: auto; }
+  body.has-tabs.session-page .composer { left: calc(var(--rail-w) + var(--split-w, 0px)); right: 0; }
+  /* The approval card: docked at the pane's foot inside the 760 px column; the reviewer's verdict on the left, Add a note,
+     Deny and Approve right-aligned at 44 px. ⋯ carries Cancel task, so the card drops its own. */
+  body.session-page .approval-sheet, body.session-page .approval-bar {
+    left: 24px; right: 24px; bottom: 18px; max-width: 760px; margin-inline: auto;
+  }
+  body.has-tabs.session-page .approval-sheet, body.has-tabs.session-page .approval-bar {
+    left: calc(var(--rail-w) + var(--split-w, 0px) + 24px);
+  }
+  body.session-page .approval-sheet {
+    display: flex; flex-wrap: wrap; align-items: center; column-gap: 8px; padding: 14px 16px;
+    border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 10px 30px var(--shadow-soft);
+  }
+  body.session-page .approval-sheet > * { flex: 0 0 100%; min-width: 0; }
+  body.session-page .approval-head { order: 1; min-height: 0; }
+  body.session-page .approval-head h4 { font-size: 1rem; font-weight: 700; }
+  body.session-page .approval-head h4:focus { outline: none; }
+  body.session-page .approval-head h4:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  body.session-page .approval-what { order: 2; margin: 4px 0 0; }
+  body.session-page .approval-summary { order: 3; }
+  body.session-page .approval-diff, body.session-page .approval-detail { order: 4; margin: 10px 0 4px; max-height: 40vh; }
+  body.session-page .approval-tool { order: 5; margin-bottom: 6px; }
+  body.session-page .approval-sheet > input { order: 6; margin: 4px 0 8px; }
+  body.session-page .approval-show { min-height: 28px; }
+  body.session-page .smart-rec { order: 7; flex: 1 1 0; width: auto; margin: 0; }
+  body.session-page .approval-note-toggle {
+    order: 8; flex: none; width: auto; margin-left: auto; padding: 0 10px; border-radius: 12px; font-size: 0.875rem;
+  }
+  body.session-page .approval-actions { order: 9; flex: none; margin: 0 0 0 auto; gap: 8px; }
+  body.session-page .approval-note-toggle:not([hidden]) ~ .approval-actions { margin-left: 0; }
+  body.session-page .approval-actions .btn { flex: none; min-width: 124px; min-height: var(--tap); border-radius: 12px; font-size: 0.875rem; }
+  body.session-page .approval-note-toggle:hover { background: var(--panel-2); }
+  body.session-page .approval-deny:hover { background: var(--bad-bg); }
+  body.session-page .approval-approve:hover { filter: brightness(1.08); }
+  body.session-page :is(.approval-note-toggle, .approval-actions .btn, .approval-show):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  body.session-page .approval-cancel { display: none; }
+  body.session-page:has(.approval-sheet) main { padding-bottom: calc(var(--approval-h, 360px) + 36px); }
+  body.session-page:has(.approval-sheet) .jump-bottom { bottom: calc(var(--approval-h, 360px) + 30px); }
+  /* Changes and Info: the pending decision as one line with Review. */
+  body.session-page .approval-bar {
+    position: fixed; z-index: 8; display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 6px 8px 6px 14px;
+    border-radius: 14px; background: var(--warn-bg); color: var(--warn); font-size: 0.875rem; font-weight: 600;
+    box-shadow: 0 10px 30px var(--shadow-soft);
+  }
+  body.session-page .approval-bar-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  body.session-page .approval-bar-review { flex: none; }
+  body.session-page .approval-bar-review:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Tool rows: hover and focus on the summary and on Copy / Open (still 44 px targets). */
+  body.session-page details.tool > summary:hover { background: var(--panel-2); }
+  body.session-page details.tool > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  body.session-page .tool-btn:hover { background: var(--line); }
+  body.session-page .tool-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+}
+@media (min-width: 768px) and (max-width: 1023px) {
+  body.session-page #bar > .session-tabs { width: 240px; }
+}
+/* End Desktop 4. */
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;

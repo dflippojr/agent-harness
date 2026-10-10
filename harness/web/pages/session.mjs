@@ -22,10 +22,10 @@ const SESSION_EVENT_TYPES = [
 
 export function mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
   progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser, confirmSheet = sheets.confirmSheet,
-  promptSheet = sheets.promptSheet, announceChange = () => {} }) {
+  promptSheet = sheets.promptSheet, announceChange = () => {}, onDaemonChange = null }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
-const { window, document, location, setInterval, clearInterval, setTimeout } = browser;
-const { renameTitle, sessionMenu, bindSessionJumps } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser,
+const { window, document, location, setInterval, clearInterval, setTimeout, clearTimeout } = browser;
+const { renameTitle, sessionMenu, bindSessionJumps, placeSessionHeader } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser,
   onRenamed: announceChange });
 const pageMetrics = () => measurePage(browser);
 const scrollPage = (top) => scrollPageOf(top, browser);
@@ -50,6 +50,8 @@ async function viewSession(sid, tab, focusApproval) {
   const head = h("div", { class: "session-strip" });
   const sessionChrome = h("div", { class: "session-chrome" }, head, tabs);
   append($app, sessionChrome);
+  const unplace = placeSessionHeader(head, tabs, sessionChrome);
+  onLeave(unplace);
   const jumps = bindSessionJumps();
   const pages = [];
   const fetchById = new Map();
@@ -106,8 +108,12 @@ async function viewSession(sid, tab, focusApproval) {
   };
   if (!isGuest()) sessionMenu({ items: () => sessionMenuItems(session, { guest: false, terminal: TERMINAL }), run: (id) => menuActions[id]() });
 
-  if (tab === "changes") { await viewChanges(session); jumps.updateJumps(); return; }
-  if (tab === "info") { viewInfo(session); jumps.updateJumps(); return; }
+  if (tab === "changes" || tab === "info") {
+    pendingApprovalBar(session, () => !left);
+    if (tab === "changes") await viewChanges(session); else viewInfo(session);
+    jumps.updateJumps();
+    return;
+  }
 
   const feed = h("div");
   append($app, feed);
@@ -269,6 +275,16 @@ async function viewSession(sid, tab, focusApproval) {
   // A pending approval is a bottom sheet pinned over the session (#507); the transcript keeps a one-line record that the
   // decision fills in. The composer yields while any sheet is open.
   const syncComposer = () => { if (composer) composer.hidden = pendingSheets.size > 0; };
+  // The docked card's height (#564), so the transcript's end and the jump button clear it.
+  let sheetObserver = null;
+  const watchSheetHeight = (sheet) => {
+    const paint = () => document.documentElement.style?.setProperty?.("--approval-h", `${sheet.offsetHeight || 0}px`);
+    sheetObserver?.disconnect();
+    sheetObserver = browser.ResizeObserver ? new browser.ResizeObserver(paint) : null;
+    sheetObserver?.observe(sheet);
+    paint();
+  };
+  onLeave(() => sheetObserver?.disconnect());
   const pendingSheets = new Set();
   const dismissSheets = () => {
     for (const id of [...pendingSheets]) {
@@ -320,25 +336,34 @@ async function viewSession(sid, tab, focusApproval) {
     const slotState = h("div", { class: "muted small" }, "Waiting for your decision");
     const slot = h("div", { class: "approval approval-slot", id: `approval-${a.id}` },
       h("strong", {}, `Approval needed: ${a.reason || a.tool}`), slotState);
+    const heading = h("h4", { tabindex: "-1" }, "Approval needed");
+    // On desktop the sheet is a card docked at the pane's foot (#564); the classes let style.css lay its parts out in rows.
     const sheet = h("section", { class: "approval-sheet", role: "region", "aria-label": "Approval needed" },
       h("div", { class: "approval-head" },
-        h("h4", {}, "Approval needed"),
+        heading,
         h("a", { href: `#approval-${a.id}`, class: "approval-show", onclick: (ev) => {
           ev.preventDefault();
           if (slot.scrollIntoView) slot.scrollIntoView({ block: "center", behavior: "smooth" });
         } }, "Show in transcript")),
       h("p", { class: "approval-what" }, a.reason || a.tool),
       rec,
-      summary ? h("p", { style: "margin:4px 0 8px" }, summary) : null,
-      diffView || h("pre", {}, a.detail || what),
-      a.detail ? h("div", { class: "muted small" }, `${a.tool} ${a.args?.path || ""}`) : null,
+      summary ? h("p", { class: "approval-summary", style: "margin:4px 0 8px" }, summary) : null,
+      diffView || h("pre", { class: "approval-detail" }, a.detail || what),
+      a.detail ? h("div", { class: "muted small approval-tool" }, `${a.tool} ${a.args?.path || ""}`) : null,
       noteToggle, note, buttons,
       isGuest() ? null : h("button", { class: "approval-cancel", type: "button", onclick: cancelTask }, "Cancel the whole task"));
     approvals.set(a.id, { card: slot, slotState, sheet, buttons, note });
+    // Focus never jumps to Approve. It moves to the card's heading only when it was in the transcript or the composer
+    // (which hides now), so a keyboard reader lands on the decision instead of on the page body.
+    const active = document.activeElement;
+    const superseded = [...pendingSheets].map((id) => approvals.get(id)?.sheet);
+    const wasInPane = !!active && [$app, composer, ...superseded].some((el) => typeof el?.contains === "function" && el.contains(active));
     dismissSheets(); // one decision at a time: a newer request supersedes an orphaned older one, so nothing can hold the composer hidden
     pendingSheets.add(a.id);
     document.body.append(sheet);
+    watchSheetHeight(sheet);
     syncComposer();
+    if (wasInPane && focusApproval !== a.id) heading.focus?.({ preventScroll: true });
     if (focusApproval === a.id) {
       slot.classList.add("focus");
       setTimeout(() => slot.scrollIntoView({ block: "center", behavior: "smooth" }), 50);
@@ -639,6 +664,52 @@ async function viewSession(sid, tab, focusApproval) {
   if (composer) onLeave(() => composer.remove());
   onLeave(() => { for (const a of approvals.values()) a.sheet.remove(); });
   onLeave(closeViewer);
+}
+
+// Changes and Info have no transcript stream, so a pending approval shows there as a one-line bar at the pane's foot with
+// Review (#564), refreshed by the app-wide stream's events. style.css shows it from 768 px up only.
+function pendingApprovalBar(session, isActive) {
+  // Built once and updated in place, so a refresh never removes a Review link that has focus.
+  const text = h("span", { class: "approval-bar-text" });
+  const review = h("a", { class: "btn approval-bar-review" }, "Review");
+  const bar = h("div", { class: "approval-bar", role: "status", hidden: true }, text, review);
+  document.body.append(bar);
+  const paint = (s, pending) => {
+    const a = pending[0] || null;
+    bar.hidden = !a;
+    if (!a) return;
+    const label = `Approval needed · ${a.reason || a.tool}`;
+    const href = `#/s/${s.id}/approval/${a.id}`;
+    if (text.textContent !== label) text.textContent = label;
+    if (review.getAttribute("href") !== href) review.setAttribute("href", href);
+  };
+  // The summary lists pending approvals only while the status is waiting_approval, but one can outlive that status (a
+  // session resumed as waiting_target after a restart), so refreshes ask the approvals route itself.
+  const pendingOf = async (s) => {
+    if (TERMINAL.has(s.status)) return [];
+    if (isGuest()) return s.pending_approvals || [];
+    try { return await api(`/sessions/${s.id}/approvals`); } catch (_) { return s.pending_approvals || []; }
+  };
+  paint(session, session.pending_approvals || []);
+  let timer = null;
+  let latest = 0;  // only the newest refresh paints, so a slow older answer can't undo a newer one
+  const refresh = () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      timer = null;
+      const mine = ++latest;
+      try {
+        const s = await api(`/sessions/${session.id}`);
+        const pending = await pendingOf(s);
+        if (isActive() && mine === latest) paint(s, pending);
+      } catch (_) { /* keep the last state; the next event retries */ }
+    }, 300);
+  };
+  const stop = onDaemonChange?.(refresh);
+  // An approval requested while the page's first fetch was in flight raised no event this listener heard: catch up once.
+  if (stop) refresh();
+  onLeave(() => { clearTimeout(timer); stop?.(); bar.remove(); });
+  return bar;
 }
 
 function reviewCard(s) {
