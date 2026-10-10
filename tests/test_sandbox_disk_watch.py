@@ -133,7 +133,7 @@ def test_failed_setup_from_the_watchdog_is_reported_not_raised(monkeypatch, tmp_
     box, fake, events = make(monkeypatch, tmp_path, sandbox.DiskLimits(5 * MB, 100 * MB), chunks=200)
     box.setup = "npm install"
     assert asyncio.run(box._run_setup()).startswith("failed (the command was stopped")
-    assert ("sandbox_setup", ) == tuple(t for t, _ in events if t == "sandbox_setup")
+    assert [t for t, _ in events].count("sandbox_setup") == 1
 
 
 def test_runner_limits_and_unthrottled_quota_check(monkeypatch):
@@ -151,7 +151,19 @@ def test_runner_limits_and_unthrottled_quota_check(monkeypatch):
     fake = SimpleNamespace(
         db=SimpleNamespace(get_session=sessions.get, account_by_id=lambda uid: {"disk_quota_bytes": 100 * MB}),
         cfg=SimpleNamespace(cleanup=SimpleNamespace(min_free_gb=2)), quota_mb=lambda s: 300)
+    fake._member_clone_budget = lambda uid: runner.Runner._member_clone_budget(fake, uid)
     own = asyncio.run(runner.Runner._disk_limits(fake, "own"))
     assert own == sandbox.DiskLimits(300 * MB, 2 * 2**30, None)
     member = asyncio.run(runner.Runner._disk_limits(fake, "mem"))
     assert member.growth_bytes == 30 * MB
+
+
+def test_watchdog_error_is_raised_and_stops_the_command(monkeypatch, tmp_path):
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(500 * MB, 100 * MB), chunks=200)
+
+    def broken(self):
+        raise OSError("drive gone")
+    monkeypatch.setattr(sandbox.DiskWatch, "check", broken)
+    with pytest.raises(OSError, match="drive gone"):
+        asyncio.run(box.exec("make huge"))
+    assert "restart" not in fake.calls and fake.written < 20

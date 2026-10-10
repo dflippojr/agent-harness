@@ -63,7 +63,6 @@ class DiskWatch:
         self.limits = limits
         self.cap = 0
         self.floor = 0
-        self.reason = ""
         self._size = self._free_at_scan = 0
         self._scanned = self._scan_cost = 0.0
 
@@ -106,7 +105,6 @@ class DiskWatch:
             await asyncio.sleep(FREE_POLL_SECONDS)
             reason = await asyncio.to_thread(self.check)
             if reason:
-                self.reason = reason
                 return reason
 
 
@@ -465,15 +463,20 @@ class Sandbox:
             watcher.cancel()
         if command.done():
             return command.result()
+        try:
+            reason = watcher.result()   # an error in the watchdog itself is raised, not taken for a limit
+        except Exception:
+            command.cancel()
+            raise
         await run_cmd(["docker", "restart", "-t", "0", self.name], timeout=60)
         try:
             await asyncio.wait_for(command, timeout=30)
         except Exception:
             pass    # the restart ended it, or the timeout cancelled (killed) a docker client that hung
         if self.on_event:
-            self.on_event("sandbox_disk_limit", {"reason": watch.reason})
+            self.on_event("sandbox_disk_limit", {"reason": reason})
         raise DiskLimitExceeded(
-            f"the command was stopped because {watch.reason}. The sandbox was restarted, so background processes "
+            f"the command was stopped because {reason}. The sandbox was restarted, so background processes "
             "are gone; /workspace keeps what was written. Delete build artifacts or other large files before "
             "running it again.")
 

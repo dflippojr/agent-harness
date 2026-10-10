@@ -32,7 +32,7 @@ from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKEN
                      AppToolsPolicy, ChatPolicy, Decision, Policy, mcp_harness_tool)
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .runner_contract import RemoteWorkspace, RunnerError, NoRunnerHub
-from .sandbox import Sandbox, SandboxUnavailable
+from .sandbox import DiskLimits, Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
@@ -230,22 +230,15 @@ class Runner:
         return self._sandboxes[s["id"]]
 
     def _sandbox_event(self, sid: str, type_: str, data: dict) -> None:
-        if type_ == "sandbox_disk_limit":
+        if type_ == "sandbox_disk_limit":    # internal: the model sees the tool error, the UI the run's stop
             self._quota_checked.pop(sid, None)  # the quota check after this call must not be throttled
         self.bus.emit(sid, type_, data)
 
     async def _disk_limits(self, sid: str):
         """The disk watchdog's limits for one sandbox command (#525): the workspace quota, a member's remaining
         account quota, and the data drive's free-space floor."""
-        from .sandbox import DiskLimits
         s = self.db.get_session(sid)
-        user_id = session_user_id(s)
-        growth = None
-        if user_id != OWNER_USER_ID:
-            from .storage import account_usage_bytes
-            account = self.db.account_by_id(user_id)
-            limit = int(account["disk_quota_bytes"]) if account is not None else 0
-            growth = max(0, limit - await asyncio.to_thread(account_usage_bytes, self.cfg, user_id))
+        growth = await asyncio.to_thread(self._member_clone_budget, session_user_id(s))
         return DiskLimits(quota_bytes=self.quota_mb(s) * 2**20,
                           min_free_bytes=int(self.cfg.cleanup.min_free_gb * 2**30), growth_bytes=growth)
 
