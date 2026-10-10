@@ -825,15 +825,46 @@ def _hub_approval_secret() -> str:
     return secret
 
 
+def _hub_request_line(req: dict) -> str:
+    where = f"browser Hub at {req.get('origin')}" if req.get("browser") else "native Hub (no browser origin)"
+    return f"  {req.get('id')}  {req.get('name')!r}  {where}  {req.get('state')}"
+
+
+def _hub_status_notes(status) -> None:
+    """Where each open Hub claim comes from, on stderr so stdout stays JSON. The match code is not shown: read it
+    off the Hub's own screen."""
+    requests = status.get("requests") if isinstance(status, dict) else None
+    if requests:
+        print("Hub claim requests (compare the match code on the Hub's own screen; it is not shown here):",
+              file=sys.stderr)
+        for req in requests:
+            print(_hub_request_line(req), file=sys.stderr)
+
+
+def _warn_other_hub_claims(rid: str) -> None:
+    """`hub approve` warns when more than one Hub claim is pending: one of them may be a look-alike."""
+    status = api("GET", "/hub-claim")
+    pending = [r for r in (status.get("requests") or []) if r.get("state") == "pending"]         if isinstance(status, dict) else []
+    if len(pending) > 1:
+        print(f"{YELLOW}warning: {len(pending)} Hub claims are pending. Approve only the one whose name, origin "
+              f"and match code are on the Hub you are setting up; deny the others.{RESET}", file=sys.stderr)
+        for req in pending:
+            print(("* " if req.get("id") == rid else "  ") + _hub_request_line(req).lstrip(), file=sys.stderr)
+
+
 def _cmd_admin(args) -> int:
     method, path, kwargs = admin_request(args)
     if HUB_HOST_PATHS.fullmatch(path):
         kwargs["headers"] = {HUB_APPROVAL_HEADER: _hub_approval_secret()}
+        if path.endswith("/approve"):
+            _warn_other_hub_claims(path.split("/")[3])
     result = api(method, path, **kwargs)
     if isinstance(result, str):
         print(result or "ok")
     else:
         print(json.dumps(result, indent=2))
+    if path == "/hub-claim":
+        _hub_status_notes(result)
     return 0
 
 

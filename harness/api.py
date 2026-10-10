@@ -1161,6 +1161,9 @@ async def create_key(request: Request):
         await m.db.main.awrite(credential_audit.record, m.db, ctx, "key.create", "", "denied", "api_key",
                                {"reason": "invalid_request"})
         raise
+    if kind == "owner":
+        from .hub_claim import refuse_owner_key
+        await refuse_owner_key(m, ctx, "key.create", "api_key")
 
     def commit():
         row, key = m.db.main.create_api_key(name, scopes, kind, origins, catalog_app_id)

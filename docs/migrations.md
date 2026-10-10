@@ -127,6 +127,6 @@ household/security audit row records who (credential, entry point) made the chan
 `unknown`; no attribution is invented for them (#467).
 
 Step 0057 (`hub_claim`) adds `api_keys.role` (empty for every existing key) and the `hub_claim` table, which holds at
-most one row: the Hub key's id, display name, kind, origin and claim time, never a token or hash (#543). Rolling back
-to an older harness leaves the Hub key an ordinary owner key with the admin scope; revoke it with `harness keys revoke`
-there if you no longer want it.
+most one row: the Hub key's id, display name, kind, origin and claim time, never a token or hash (#543). There is no
+down-migration. Rolling back restores the pre-0057 snapshot, which has no Hub key and no `hub_claim`. Keys, settings and
+audit rows written since the upgrade are lost with it.

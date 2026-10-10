@@ -9,7 +9,9 @@
    neither is reaching the daemon on loopback. A missing or wrong secret is refused with 403 and audited.
 3. **Redeem.** The Hub fetches its token once with its verifier: an owner-kind key with the admin scope and role
    `hub`, recorded as the one Hub (`hub_claim`). It can call every owner API route except these three host routes, and
-   it can never mint another Hub key (only a claim does).
+   it can never mint another Hub key (only a claim does) nor any other owner key: `POST /keys` with the admin scope
+   and runner pairing codes (which redeem to an owner key) are refused with 403 `hub_key` and audited, so release
+   leaves the Hub no owner access behind.
 4. **Release.** `harness hub release --confirm` (same host proof) revokes the Hub key and clears the record, so a new
    Hub may claim. `DELETE /keys/{kid}` on the Hub key is refused and names that command.
 
@@ -18,10 +20,11 @@ The secret is never logged, audited or returned by any route; audit rows carry i
 from __future__ import annotations
 
 import hmac
+import json
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from . import audit_context, credential_audit
 from .local_owner import HUB_HEADER as HEADER
@@ -35,6 +38,17 @@ HOST_ONLY = ("approve, deny and release of a Hub claim run on the daemon host: u
 
 def is_hub_key(key: dict | None) -> bool:
     return bool(key and key.get("role") == ROLE)
+
+
+async def refuse_owner_key(m, ctx: audit_context.AuditContext, action: str, target_kind: str) -> None:
+    """Refuse, with a `denied` audit row, a Hub asking for a new owner credential: a key it minted would outlive
+    `harness hub release`."""
+    if ctx.actor_kind != ROLE:
+        return
+    await m.db.main.awrite(credential_audit.record, m.db, ctx, action, "", "denied", target_kind,
+                           {"reason": "hub_key"})
+    raise HarnessError(403, "the Hub cannot mint owner keys; make one on the daemon host with `harness keys create`",
+                       code="hub_key")
 
 
 def record_view(row: dict | None) -> dict | None:
@@ -51,6 +65,21 @@ class ApproveHubClaim(BaseModel):
 
 class ReleaseHub(BaseModel):
     confirm: bool = False
+
+
+_BODY = {"requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}}}
+
+
+async def _parse(request: Request, model: type[BaseModel], m, ctx, action: str):
+    """The body, validated only after `host_proof`, so a caller without the secret gets 403 and a `denied` row
+    whatever it sent. A malformed body from a proven caller is a 400, audited too."""
+    raw = await request.body()
+    try:
+        return model.model_validate(json.loads(raw) if raw.strip() else {})
+    except (ValueError, ValidationError):
+        await m.db.main.awrite(credential_audit.record, m.db, ctx, action, "", "denied", "hub_claim",
+                               {"reason": "invalid_request"})
+        raise HarnessError(400, f"the request body is not a valid {model.__name__}") from None
 
 
 def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
@@ -85,9 +114,10 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                                else HOST_ONLY, code=reason)
         return ctx
 
-    async def decide(request: Request, rid: str, action: str, states: tuple[str, ...], check, fields):
+    async def decide(request: Request, rid: str, action: str, states: tuple[str, ...], check, fields, model=None):
         ctx = await host_proof(request, action)
         m = mgr(request)
+        body = await _parse(request, model, m, ctx, action) if model else None
 
         def commit():
             db, now = m.db.main, pr.clock()
@@ -99,7 +129,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
             elif row["state"] not in states:
                 refusal = (409, f"this Hub claim request is {row['state']}", "not_approvable")
             else:
-                refusal = check(db, row)
+                refusal = check(db, row, body)
             if refusal:
                 status, detail, reason = refusal
                 known = row is not None and row["kind"] == ROLE
@@ -129,10 +159,11 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         return JSONResponse({"claimed": record is not None, "hub": record_view(record),
                              "requests": [pr.owner_view(r, m.cfg) for r in requests]}, headers=pr.NO_STORE)
 
-    @app.post(base + "/requests/{rid}/approve")
-    async def approve_hub_claim(rid: str, body: ApproveHubClaim, request: Request):
-        """Approve a Hub claim with the match code the Hub shows. Host only: needs the approval secret header."""
-        def check(db, row):
+    @app.post(base + "/requests/{rid}/approve", openapi_extra=_BODY)
+    async def approve_hub_claim(rid: str, request: Request):
+        """Approve a Hub claim with the match code the Hub shows (`{"match": "..."}`). Host only: needs the approval
+        secret header, checked before the body."""
+        def check(db, row, body):
             if db.hub_claim() is not None:
                 return 409, "a Hub is already claimed; release it first with `harness hub release --confirm`", \
                     "hub_claimed"
@@ -141,19 +172,21 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
             return None
         return await decide(request, rid, "hub.claim.approve", (pr.PENDING,), check,
                             lambda now: {"state": pr.APPROVED, "approved_at": now,
-                                         "expires_at": now + pr.REDEEM_TTL_SECONDS})
+                                         "expires_at": now + pr.REDEEM_TTL_SECONDS}, ApproveHubClaim)
 
     @app.post(base + "/requests/{rid}/deny")
     async def deny_hub_claim(rid: str, request: Request):
         """Deny a Hub claim request, or withdraw an approval the Hub has not redeemed yet. Host only."""
-        return await decide(request, rid, "hub.claim.deny", pr.ACTIVE, lambda _db, _row: None,
+        return await decide(request, rid, "hub.claim.deny", pr.ACTIVE, lambda _db, _row, _body: None,
                             lambda now: {"state": pr.DENIED, "finished_at": now})
 
-    @app.post(base + "/release")
-    async def release_hub(body: ReleaseHub, request: Request):
-        """Revoke the Hub's key and clear the record so a new Hub may claim. Host only; needs confirm."""
+    @app.post(base + "/release", openapi_extra=_BODY)
+    async def release_hub(request: Request):
+        """Revoke the Hub's key and clear the record so a new Hub may claim (`{"confirm": true}`). Host only; the
+        secret is checked before the body."""
         ctx = await host_proof(request, "hub.release")
         m = mgr(request)
+        body = await _parse(request, ReleaseHub, m, ctx, "hub.release")
         if not body.confirm:
             await m.db.main.awrite(credential_audit.record, m.db, ctx, "hub.release", "", "denied", "hub_claim",
                                    {"reason": "invalid_request"})
@@ -167,11 +200,16 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                 return None
             credential_audit.record(db, ctx, "hub.release", record["key_id"], "ok", "hub_claim",
                                     {"key_id": record["key_id"], "request_id": record["request_id"]})
-            return record
-        record = await m.db.main.awrite(commit)
-        if record is None:
+            return record, db.hub_minted_owner_keys()
+        out = await m.db.main.awrite(commit)
+        if out is None:
             raise HarnessError(404, "no Hub is claimed")
-        return JSONResponse({"claimed": False, "released": record_view(record)}, headers=pr.NO_STORE)
+        record, minted = out
+        body = {"claimed": False, "released": record_view(record), "hub_minted_owner_keys": minted}
+        if minted:
+            body["next"] = ("the Hub minted these owner keys and they are still live; revoke each with "
+                            "`harness keys revoke <id>`")
+        return JSONResponse(body, headers=pr.NO_STORE)
 
     return [{"method": "GET", "path": base}, {"method": "POST", "path": base + "/requests/{rid}/approve"},
             {"method": "POST", "path": base + "/requests/{rid}/deny"}, {"method": "POST", "path": base + "/release"}]

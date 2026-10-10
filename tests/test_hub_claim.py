@@ -16,7 +16,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import api as harness_api, cli, local_owner, migrations
+from harness import api as harness_api, audit_context, cli, local_owner, migrations
 from harness import pairing_requests as pr
 from harness.admin import PREFIX
 from harness.db import Database
@@ -29,6 +29,7 @@ from test_management_parity import _mounted_owner_routes, _owner_app
 HUB_ORIGIN = "https://hub.example"
 APP_ORIGIN = "https://shop.example"
 CLAIM = PREFIX + "/hub-claim"
+MINTS_OWNER_KEYS = {("POST", "/runner-pairing-codes")}   # its code redeems to an owner key
 
 
 @pytest.fixture
@@ -345,6 +346,9 @@ def test_hub_key_reaches_every_owner_route_the_owner_token_does(tmp_path, monkey
                 kwargs["json"] = {}
             as_owner, as_hub = (client.request(method, path, headers=_bearer(t), **kwargs).status_code
                                 for t in (owner, token))
+            if (method, template) in MINTS_OWNER_KEYS:   # refused to the Hub up front, whatever the body
+                assert as_hub == 403, (method, template, as_owner, as_hub)
+                continue
             assert as_hub == as_owner and as_hub not in (401, 403), (method, template, as_owner, as_hub)
             checked += 1
         assert checked > 100
@@ -496,3 +500,129 @@ def test_migration_adds_the_role_and_the_record(tmp_path):
         db.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, claimed_at) VALUES (2, 'k', 'n', 'native', 1)")
     assert list((tmp_path / "pre-migration").glob("harness-v56-*.sqlite3"))
     db.close()
+
+
+def test_hub_key_cannot_mint_an_owner_key_and_release_names_any_it_did(hh):
+    """A key the Hub minted would outlive `harness hub release`, so it can mint no owner key at all."""
+    client, m = hh
+    token, key, _ = _claim(client, m)
+    hub = _bearer(token, HUB_ORIGIN)
+    before = {k["id"] for k in _keys(m)}
+    for body in ({"name": "spare", "kind": "owner", "scopes": ["admin"]}, {"name": "spare", "scopes": ["admin"]},
+                 {"name": "spare", "kind": "owner"}):
+        for path, headers in ((f"{PREFIX}/keys", hub), ("/keys", _bearer(token))):
+            r = client.post(path, headers=headers, json=body)
+            assert r.status_code == 403 and "cannot mint owner keys" in r.text, (path, body, r.text)
+    assert {k["id"] for k in _keys(m)} == before
+    denied = _audit(client, "key.create", outcome="denied")
+    assert len(denied) == 6 and {(r["actor_kind"], r["key_id"], r["metadata"]["reason"]) for r in denied} == {
+        ("hub", key["id"], "hub_key")}
+    # The owner still can, and device and App keys stay the Hub's to make.
+    assert client.post(f"{PREFIX}/keys", json={"name": "owner tool", "scopes": ["admin"]}).status_code == 201
+    assert client.post(f"{PREFIX}/keys", headers=hub, json={"name": "dev", "scopes": ["inference"]}).status_code == 201
+
+    # An owner key a Hub minted before this rule existed is named by release, for the owner to revoke.
+    row, _ = m.db.main.create_api_key("legacy spare", "admin", "owner")
+    m.db.main.write(lambda: m.db.main.insert_audit(
+        "owner", row["id"], "key.create", "ok", context=audit_context.owner_context(key), target_kind="api_key"))
+    released = client.post(f"{CLAIM}/release", headers=_host(m), json={"confirm": True})
+    assert released.status_code == 200, released.text
+    assert [k["id"] for k in released.json()["hub_minted_owner_keys"]] == [row["id"]]
+    assert "harness keys revoke" in released.json()["next"]
+    assert client.get(f"{PREFIX}/keys", headers=hub).status_code == 401
+
+
+def test_release_without_hub_minted_keys_lists_none(hh):
+    client, m = hh
+    _claim(client, m)
+    released = client.post(f"{CLAIM}/release", headers=_host(m), json={"confirm": True}).json()
+    assert released["hub_minted_owner_keys"] == [] and "next" not in released
+
+
+def test_hub_key_cannot_make_a_runner_pairing_code(tmp_path):
+    """A runner pairing code redeems to an owner key, so the Hub is refused one like an admin `POST /keys`."""
+    from harness.api import create_app
+    from test_module_runners import runner_manager
+    m = runner_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        token, key, _ = _claim(client, m, origin="")
+        r = client.post(f"{PREFIX}/runner-pairing-codes", headers=_bearer(token), json={"runner": "mac"})
+        assert r.status_code == 403 and r.json()["error"]["code"] == "hub_key", r.text
+        assert m.db.list_runner_pairing_codes() == []
+        denied = _audit(client, "runner_pairing.create", outcome="denied")
+        assert [(r["actor_kind"], r["key_id"], r["metadata"]["reason"]) for r in denied] == [
+            ("hub", key["id"], "hub_key")]
+        assert client.post(f"{PREFIX}/runner-pairing-codes", json={"runner": "mac"}).status_code == 201
+
+
+def test_a_bad_body_without_the_secret_is_403_and_audited(hh):
+    """The host proof runs before the body is read: a prober without the secret leaves a trace whatever it sends."""
+    client, m = hh
+    asked, _ = _ask(client)
+    rid = asked.json()["id"]
+    bad = ({}, {"match": 123}, [], None, "not json")
+    for body in bad:
+        for path in (f"/requests/{rid}/approve", "/release"):
+            kwargs = {"content": body} if isinstance(body, str) else {"json": body}
+            r = client.post(CLAIM + path, **kwargs)
+            assert r.status_code == 403 and r.json()["error"]["code"] == "host_proof_required", (path, body, r.text)
+    for action in ("hub.claim.approve", "hub.release"):
+        rows = _audit(client, action, outcome="denied")
+        assert len(rows) == len(bad) and {r["metadata"]["reason"] for r in rows} == {"host_proof_required"}
+
+    # With the secret a bad body is a 400, audited as invalid_request, and nothing changes.
+    for path, action in ((f"/requests/{rid}/approve", "hub.claim.approve"), ("/release", "hub.release")):
+        r = client.post(CLAIM + path, headers=_host(m), content="not json")
+        assert r.status_code == 400, r.text
+        assert _audit(client, action, outcome="denied")[0]["metadata"]["reason"] == "invalid_request"
+    assert client.post(f"{CLAIM}/requests/{rid}/approve", headers=_host(m), json={}).status_code == 400
+    assert client.get(CLAIM).json()["requests"][0]["state"] == "pending"
+
+
+def _listed(response) -> list[dict]:
+    body = response.json()
+    return body if isinstance(body, list) else body.get("items", body.get("requests", []))
+
+
+def test_status_never_shows_a_hub_match_code_but_shows_where_it_comes_from(hh):
+    client, m = hh
+    browser, _ = _ask(client, HUB_ORIGIN, name="Agent Harness Hub")
+    native, _ = _ask(client, name="Agent Harness Hub")
+    assert browser.json()["match_code"] and native.json()["match_code"]    # the Hub itself still sees its code
+    for listing in (_listed(client.get(CLAIM)), _listed(client.get(f"{PREFIX}/pairing-requests"))):
+        hubs = {r["id"]: r for r in listing if r["kind"] == "hub"}
+        assert len(hubs) == 2 and {r["match_code"] for r in hubs.values()} == {""}
+        assert (hubs[browser.json()["id"]]["origin"], hubs[browser.json()["id"]]["browser"]) == (HUB_ORIGIN, True)
+        assert (hubs[native.json()["id"]]["origin"], hubs[native.json()["id"]]["browser"]) == ("", False)
+
+
+def test_cli_status_shows_origins_and_approve_warns_on_several_claims(hh, monkeypatch, capsys):
+    client, m = hh
+
+    def api(method, path, **kwargs):
+        r = client.request(method, PREFIX + path, **kwargs)
+        assert r.status_code < 400, r.text
+        return r.json()
+    monkeypatch.setattr(cli, "api", api)
+    monkeypatch.setattr(cli, "BASE", "http://127.0.0.1:8100")
+    monkeypatch.setattr("harness.config.resolve_data_dir", lambda: m.cfg.data_dir)
+    parser = cli._build_parser()
+    real, _ = _ask(client, HUB_ORIGIN, name="Agent Harness Hub")
+    rid, match = real.json()["id"], real.json()["match_code"]
+
+    assert cli._cmd_admin(parser.parse_args(["hub", "status"])) == 0
+    out, err = capsys.readouterr()
+    assert json.loads(out)["requests"][0]["match_code"] == "" and match not in out + err
+    assert f"browser Hub at {HUB_ORIGIN}" in err and "not shown here" in err
+    assert cli._cmd_admin(parser.parse_args(["hub", "approve", rid, "--match", match])) == 0
+    assert "pending" not in capsys.readouterr().err                     # one claim: no warning
+
+    client.post(f"{CLAIM}/requests/{rid}/deny", headers=_host(m))
+    real, _ = _ask(client, HUB_ORIGIN, name="Agent Harness Hub")
+    look_alike, _ = _ask(client, name="Agent Harness Hub")
+    rid, match = real.json()["id"], real.json()["match_code"]
+    cli._cmd_admin(parser.parse_args(["hub", "status"]))
+    assert "native Hub (no browser origin)" in capsys.readouterr().err
+    assert cli._cmd_admin(parser.parse_args(["hub", "approve", rid, "--match", match])) == 0
+    err = capsys.readouterr().err
+    assert "2 Hub claims are pending" in err and f"* {rid}" in err and look_alike.json()["id"] in err

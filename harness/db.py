@@ -1646,6 +1646,17 @@ class Database:
             self.conn.execute("DELETE FROM hub_claim WHERE slot = 1")
         return dict(row)
 
+    @_reads
+    def hub_minted_owner_keys(self) -> list[dict]:
+        """Live owner keys a Hub key minted through `POST /keys` (their `key.create` audit row is attributed `hub`):
+        release cannot revoke them, so it names them for the owner to revoke."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT id, name, prefix, created_at FROM api_keys WHERE kind = 'owner' AND role != 'hub' "
+                "AND revoked_at IS NULL AND id IN (SELECT target_id FROM account_audit WHERE action = 'key.create' "
+                "AND outcome = 'ok' AND actor_kind = 'hub') ORDER BY created_at").fetchall()
+        return [dict(r) for r in rows]
+
     # Agent Harness for Mac pairing is separate from browser-origin pairing. It authorizes one owner CLI token;
     # the runner token remains in its configured owner file and never enters SQLite.
     @_writes

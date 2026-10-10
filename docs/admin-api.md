@@ -32,7 +32,8 @@ Two owner credentials are accepted:
 
 3. **The Hub's key** (#543). The standalone Hub gets an owner token with the `admin` scope and role `hub` from a
    [Hub claim](#hub-claim). It can call every owner route an owner token can, except approving, denying or releasing
-   a Hub claim, and it can never mint another Hub key.
+   a Hub claim, and it can never mint another Hub key or any owner key: `POST /keys` with the admin scope and
+   `POST /runner-pairing-codes` (which redeem to an owner key) answer 403 `hub_key` with a `denied` audit row.
 
 App tokens (`ha-…`, kind `app`) and device/inference tokens (`hk-…`, kind `device`) receive **403**
 `app tokens cannot use the owner API`. The `admin` scope cannot be granted to those kinds.
@@ -107,8 +108,8 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/gpu` | owner (`admin` scope) | TODO | `harness_modules/local_model/routes.py` `gpu` |
 | POST | `/api/admin/v1/gpu/{action}` | owner (`admin` scope) | pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the model stays unloaded until something needs it). load: load the model now and keep it loaded for duration_seconds. unload: unload it now without holding the queue. | `harness_modules/local_model/routes.py` `gpu_action` |
 | GET | `/api/admin/v1/hub-claim` | owner | Whether a Hub is claimed, its record (never a token or hash), and Hub claim requests still open. | `harness/hub_claim.py` `hub_claim_status` |
-| POST | `/api/admin/v1/hub-claim/release` | see source | Revoke the Hub's key and clear the record so a new Hub may claim. Host only; needs confirm. | `harness/hub_claim.py` `release_hub` |
-| POST | `/api/admin/v1/hub-claim/requests/{rid}/approve` | see source | Approve a Hub claim with the match code the Hub shows. Host only: needs the approval secret header. | `harness/hub_claim.py` `approve_hub_claim` |
+| POST | `/api/admin/v1/hub-claim/release` | see source | Revoke the Hub's key and clear the record so a new Hub may claim (`{"confirm": true}`). Host only; the secret is checked before the body. | `harness/hub_claim.py` `release_hub` |
+| POST | `/api/admin/v1/hub-claim/requests/{rid}/approve` | see source | Approve a Hub claim with the match code the Hub shows (`{"match": "..."}`). Host only: needs the approval secret header, checked before the body. | `harness/hub_claim.py` `approve_hub_claim` |
 | POST | `/api/admin/v1/hub-claim/requests/{rid}/deny` | see source | Deny a Hub claim request, or withdraw an approval the Hub has not redeemed yet. Host only. | `harness/hub_claim.py` `deny_hub_claim` |
 | GET | `/api/admin/v1/images` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `list_images` |
 | POST | `/api/admin/v1/images` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `create_image` |
@@ -540,19 +541,23 @@ The standalone Hub (#546) is the owner's admin console. It pairs by itself and t
    with the same PKCE S256 check, match code and limits: 10 minutes to approve, then 5 minutes to redeem, and the token
    is fetched exactly once. While a Hub is recorded the request is refused at once with 409 `hub_claimed` and a
    `hub.claim.refused` audit row.
-2. **The owner approves on the daemon host.** `harness hub status` lists the open claim requests with their match
-   codes; `harness hub approve <id> --match <code>` approves one and `harness hub deny <id>` denies it.
+2. **The owner approves on the daemon host.** `harness hub status` lists the open claim requests with each one's
+   origin, or that it is a native Hub, but never its match code: read the code off the Hub's own screen.
+   `harness hub approve <id> --match <code>` approves one (and warns when more than one Hub claim is pending) and
+   `harness hub deny <id>` denies it.
 3. **The Hub redeems** with its verifier (`POST /api/v1/pair/requests/{id}/token`). The daemon mints an owner token
    (`ho-`) with the `admin` scope and role `hub`, records it as the Hub and returns it once. A browser Hub's key is bound
    to its origin. If another Hub was recorded since the approval, the redeem gets 409 `hub_claimed` and the request is
    finished.
 4. **Release.** `harness hub release --confirm` revokes the Hub's key at once and clears the record; a new Hub may then
    claim. `DELETE /keys/{id}` on the Hub's key answers 409 and names this command; no other route replaces the Hub.
+   The response lists in `hub_minted_owner_keys` any live owner key whose `key.create` audit row is attributed to the
+   Hub; revoke each with `harness keys revoke <id>`.
 
 **Host-only proof.** At every start the daemon writes a new random secret to `<data_dir>/hub-approval.secret`,
 readable by the daemon's account only. `harness hub approve`, `deny` and `release` read it and send it in the
-`X-Agent-Harness-Hub-Approval` header, only to a daemon on this machine. The routes also need owner credentials. A
-missing or wrong secret is refused with 403 and a `denied` audit row (`reason: host_proof_required`), whoever calls:
+`X-Agent-Harness-Hub-Approval` header, only to a daemon on this machine. The routes also need owner credentials. The
+secret is checked before the request body, so a missing or wrong secret is refused with 403 and a `denied` audit row (`reason: host_proof_required`), whoever calls:
 an owner token, a Web session, the tailnet owner or an App key are not enough, and reaching the daemon on loopback
 proves nothing (a container with a host gateway can). The Hub's own key is refused even with the secret
 (`reason: hub_key`). The ordinary `/pairing-requests/{id}/approve`, `/confirm` and `/deny` routes refuse a Hub claim
@@ -560,10 +565,10 @@ with 403. The secret is never logged, audited or returned by any route.
 
 | Route | CLI | What it does |
 | --- | --- | --- |
-| `GET /hub-claim` | `harness hub status` | `{claimed, hub, requests}`: the record and the Hub claim requests of the last day |
+| `GET /hub-claim` | `harness hub status` | `{claimed, hub, requests}`: the record and the Hub claim requests of the last day (`match_code` is always empty) |
 | `POST /hub-claim/requests/{id}/approve` `{match}` + host secret | `harness hub approve <id> --match <code>` | approve a Hub claim |
 | `POST /hub-claim/requests/{id}/deny` + host secret | `harness hub deny <id>` | deny a claim, or withdraw an unredeemed approval |
-| `POST /hub-claim/release` `{confirm: true}` + host secret | `harness hub release --confirm` | revoke the Hub's key and clear the record (404 when no Hub is claimed) |
+| `POST /hub-claim/release` `{confirm: true}` + host secret | `harness hub release --confirm` | revoke the Hub's key and clear the record (404 when no Hub is claimed); lists `hub_minted_owner_keys` |
 
 The record `hub` is `{key_id, name, kind, origin, request_id, claimed_at}` (`kind` is `browser` or `native`), or
 `null`. It never holds a token or hash; `GET /keys` shows the Hub's key with `role: "hub"`. The Hub key can call every

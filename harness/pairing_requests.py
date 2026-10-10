@@ -156,7 +156,9 @@ def owner_view(row: dict, cfg=None) -> dict:
     return {"id": row["id"], "kind": row["kind"], "name": row["name"], "scopes": scopes,
             "catalog_app_id": row["catalog_app_id"] or "", "origin": row["origin"], "browser": bool(row["origin"]),
             "armed": bool(row["armed"]), "state": state,
-            "match_code": row["match_code"] if state in (PENDING, CLAIMED) else "",
+            # A Hub claim's code is never shown to the owner: they must read it off the real Hub's screen, or an
+            # attacker's look-alike request could be approved by copying the code from `harness hub status`.
+            "match_code": row["match_code"] if state in (PENDING, CLAIMED) and row["kind"] != HUB else "",
             "needs": {PENDING: "approve", ARMED: "claim", CLAIMED: "confirm", APPROVED: "redeem"}.get(state, ""),
             "created_at": row["created_at"], "expires_at": row["expires_at"], "approved_at": row["approved_at"],
             "finished_at": row["finished_at"], "key_id": row["key_id"],
