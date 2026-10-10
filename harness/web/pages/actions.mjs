@@ -5,9 +5,11 @@ import { ago, pluralize, fmtBytes, gpuText } from "../lib/format.mjs";
 import { TARGET_LABEL } from "../lib/targets.mjs";
 import { lastUpdateText, compatibilityText, lastSeenText } from "../lib/settings-text.mjs";
 import * as sheets from "../lib/sheet.mjs";
+import { refreshingSettingsApi } from "./profile.mjs";
 
 export function mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar,
   confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet, formSheet = sheets.formSheet }) {
+  api = refreshingSettingsApi(api);
   // Issue #63: the owner switches member GitHub sign-in on/off and can erase a member's credential. The owner
   // never sees repository URLs, GitHub usernames, or codes, and cannot connect, test, or use the credential.
   function githubOwnerCard(view, rerender) {
@@ -204,7 +206,7 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
     const selected = ACTION_TABS.some(([id]) => id === tab) ? tab : "resources";
     if (tab !== selected) { go("#/actions/resources", true); return; }  // also old #/actions/gpu bookmarks
     setHeader("agents", "Actions", { page: true });
-    const tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Actions" },
+    const tabs = h("div", { class: "tabs resources-tabs", role: "tablist", "aria-label": "Server settings" },
       ACTION_TABS.map(([id, label]) => h("button", {
         type: "button", role: "tab", class: id === selected ? "on" : "",
         "aria-selected": id === selected ? "true" : "false",
