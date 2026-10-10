@@ -95,8 +95,8 @@ class Service:
             arguments = subprocess.list2cmdline(argv[1:])
             script = (
                 "$ErrorActionPreference = 'Stop'; "
-                f"$a = New-ScheduledTaskAction -Execute {ps_quote(argv[0])} "
-                f"-Argument {ps_quote(arguments)} -WorkingDirectory {ps_quote(str(workdir))}; "
+                "$a = New-ScheduledTaskAction -Execute $env:HUB_EXE "
+                "-Argument $env:HUB_ARGS -WorkingDirectory $env:HUB_DIR; "
                 "$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) "
                 "-MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
                 "-RestartCount 3 -RestartInterval ([TimeSpan]::FromMinutes(1)); "
@@ -106,7 +106,8 @@ class Service:
                 f"Start-ScheduledTask -TaskName {ps_quote(self.name)} -ErrorAction Stop"
             )
             command(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                     base64.b64encode(script.encode("utf-16le")).decode()])
+                     base64.b64encode(script.encode("utf-16le")).decode()],
+                    env=dict(os.environ, HUB_EXE=argv[0], HUB_ARGS=arguments, HUB_DIR=str(workdir)))
         elif sys.platform == "darwin":
             path = self.definition_path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -187,6 +188,8 @@ def distribution_choice(args) -> tuple[str, str]:
 def start_hub(args, method, distribution, service_id, hub_dir, claim_file, *, port: int):
     launch = ["--daemon-url", f"http://127.0.0.1:{port}", "--claim-file"]
     if method == DOCKER:
+        if any(char in str(hub_dir) for char in (',', '"')):
+            raise ValueError("Docker Hub directory cannot contain commas or double quotes")
         if not shutil.which(DOCKER):
             raise ValueError("Docker is required for --hub-method docker")
         identity = ["--user", f"{os.getuid()}:{os.getgid()}"] if sys.platform != "win32" else []
@@ -330,9 +333,12 @@ def main(argv=None) -> int:
     try:
         return install(args) if args.action == "install" else uninstall(args)
     except (ValueError, OSError, TimeoutError, subprocess.CalledProcessError) as exc:
-        print(f"Hub setup failed: {exc}", file=sys.stderr)
-        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
-            print(exc.stderr, file=sys.stderr)
+        if isinstance(exc, subprocess.CalledProcessError):
+            # Arguments and captured output can include private package-index credentials.
+            program = Path(str(exc.cmd[0])).name
+            print(f"Hub setup failed: {program} exited with return code {exc.returncode}", file=sys.stderr)
+        else:
+            print(f"Hub setup failed: {exc}", file=sys.stderr)
         print(LATER, file=sys.stderr)
         return 1
 

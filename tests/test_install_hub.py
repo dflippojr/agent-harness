@@ -462,7 +462,8 @@ def test_per_user_service_registration_and_removal(tmp_path, monkeypatch, platfo
     else:
         import base64
         script = base64.b64decode(calls[0][-1]).decode("utf-16le")
-        assert "a''%b" in script and "Register-ScheduledTask" in script
+        assert "a'%b$HOME" not in script and "Register-ScheduledTask" in script
+        assert "-Argument $env:HUB_ARGS -WorkingDirectory $env:HUB_DIR" in script
         assert "-AllowStartIfOnBatteries" in script and "-DontStopIfGoingOnBatteries" in script
     service.stop()
     assert len(calls) >= 2
@@ -554,3 +555,61 @@ def test_main_errors_and_decline(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(hub, "install", lambda _: (_ for _ in ()).throw(ValueError("stub failure")))
     assert hub.main(base) == 1
     assert "stub failure" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("quote", ["'", "\u2018", "\u2019", "\u201a", "\u201b"])
+def test_windows_task_paths_are_environment_data(tmp_path, monkeypatch, quote):
+    import base64
+
+    workdir = tmp_path / ("O" + quote + "Brien;Write-Output injected;" + quote)
+    argv = [str(workdir / "python.exe"), "-m", "stub_hub", "--state-dir", str(workdir)]
+    calls = []
+    monkeypatch.setenv("HUB_ENV_SENTINEL", "inherited")
+    monkeypatch.setattr(hub.sys, "platform", "win32")
+    monkeypatch.setattr(hub, "command", lambda args, **kwargs: calls.append((args, kwargs)))
+    hub.Service("a" * 32).start(argv, workdir, workdir / "hub.log")
+    args, kwargs = calls[0]
+    script = base64.b64decode(args[-1]).decode("utf-16le")
+    env = kwargs["env"]
+    assert str(workdir) not in script and "Write-Output injected" not in script
+    assert env["HUB_EXE"] == argv[0]
+    assert env["HUB_ARGS"] == subprocess.list2cmdline(argv[1:])
+    assert env["HUB_DIR"] == str(workdir)
+    assert env["HUB_ENV_SENTINEL"] == "inherited"
+    if os.name == "nt":
+        # Run the real PowerShell tokenizer with a harmless action stub.
+        action = script[:script.index("$s = New-ScheduledTaskSettingsSet")]
+        stub = (
+            "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); "
+            "function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) "
+            "@{exe=$Execute; arguments=$Argument; directory=$WorkingDirectory} }; "
+            + action + "$a | ConvertTo-Json -Compress"
+        )
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                                 base64.b64encode(stub.encode("utf-16le")).decode()],
+                                env=env, capture_output=True, encoding="utf-8", timeout=30)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"exe": argv[0], "arguments": env["HUB_ARGS"], "directory": str(workdir)}
+
+
+@pytest.mark.parametrize("suffix", [",readonly", ',dst=/other', '"quoted'])
+def test_docker_mount_rejects_csv_delimiters(tmp_path, monkeypatch, suffix):
+    monkeypatch.setattr(hub.shutil, "which", lambda _: "docker")
+    monkeypatch.setattr(hub, "command", lambda *_args, **_kwargs: pytest.fail("unsafe mount must not run"))
+    directory = tmp_path / ("hub" + suffix)
+    with pytest.raises(ValueError, match="commas or double quotes"):
+        hub.start_hub(options(tmp_path), "docker", "stub:1", "a" * 32,
+                      directory, directory / "claim.json", port=8199)
+
+
+@pytest.mark.parametrize("capture_stderr", [False, True])
+def test_main_subprocess_failure_does_not_log_credentials(tmp_path, monkeypatch, capsys, capture_stderr):
+    distribution = "https://owner:private-token@example.invalid/hub.whl"
+    def fail(_):
+        raise subprocess.CalledProcessError(23, [str(tmp_path / "uv.exe"), "pip", "install", distribution],
+                                            stderr=distribution if capture_stderr else None)
+    monkeypatch.setattr(hub, "install", fail)
+    assert hub.main(["install", "--install-dir", str(tmp_path), "--config-dir", str(tmp_path / "config")]) == 1
+    output = capsys.readouterr()
+    assert output.err == "Hub setup failed: uv.exe exited with return code 23\n" + hub.LATER + "\n"
+    assert "private-token" not in output.out + output.err

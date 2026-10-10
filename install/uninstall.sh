@@ -28,9 +28,21 @@ if [[ $dry_run -eq 1 ]]; then
 fi
 [[ -n $install_dir ]] || { echo "empty install directory" >&2; exit 64; }
 if [[ -d $install_dir ]]; then
-    install_dir=$(CDPATH= cd -- "$install_dir" && pwd -P)
+    install_dir=$(CDPATH= cd -- "$install_dir" && pwd -L)
 elif [[ $install_dir != /* ]]; then
     install_dir="$PWD/$install_dir"
+fi
+if [[ $remove_files -eq 1 ]]; then
+    home_real=$(CDPATH= cd -- "$HOME" && pwd -P)
+    case "$install_dir" in
+        ""|/|"$HOME"|"$home_real") echo "refusing unsafe install directory: $install_dir" >&2; exit 1 ;;
+    esac
+    if [[ -d $install_dir ]]; then
+        install_real=$(CDPATH= cd -- "$install_dir" && pwd -P)
+        case "$install_real" in
+            /|"$home_real") echo "refusing unsafe install directory: $install_dir" >&2; exit 1 ;;
+        esac
+    fi
 fi
 python="$install_dir/venv/bin/python"
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -59,9 +71,6 @@ case $(uname -s) in
 esac
 
 if [[ $remove_files -eq 1 ]]; then
-    case "$install_dir" in
-        ""|/|"$HOME") echo "refusing unsafe install directory: $install_dir" >&2; exit 1 ;;
-    esac
     rm -rf -- "$install_dir"
     echo "removed services and $install_dir"
 else

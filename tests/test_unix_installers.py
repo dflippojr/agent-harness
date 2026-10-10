@@ -165,3 +165,64 @@ def test_relative_uninstall_from_outside_checkout_keeps_daemon_on_hub_failure(tm
     directory = args[args.index("--install-dir") + 1]
     assert directory.startswith("/") and directory.endswith("/runtime")
     assert args[args.index("--config-dir") + 1] == directory + "/config"
+
+
+@pytest.mark.parametrize("directory", ["", "/", "$HOME", "$HOME/.", "."])
+def test_uninstall_refuses_unsafe_directories_before_cleanup(tmp_path, directory):
+    if not BASH:
+        pytest.skip("bash is not installed")
+    installer = shlex.quote((ROOT / "install/uninstall.sh").as_posix())
+    target = '"' + directory + '"'
+    script = (
+        'mkdir -p home; cd home; export HOME="$(pwd -P)"; '
+        'systemctl() { echo unexpected-service-cleanup >&2; return 99; }; export -f systemctl; '
+        + f'{shlex.quote(BASH)} {installer} --install-dir {target} --remove-files'
+    )
+    result = subprocess.run([BASH, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert "install directory" in result.stderr
+    assert "unexpected-service-cleanup" not in result.stderr
+    assert (tmp_path / "home").is_dir()
+
+
+@pytest.mark.parametrize("directory", ["$HOME", "$PWD/real-home", ".", "$PWD/alias-home"])
+def test_uninstall_refuses_physical_and_symlinked_home(tmp_path, directory):
+    if not BASH:
+        pytest.skip("bash is not installed")
+    installer = shlex.quote((ROOT / "install/uninstall.sh").as_posix())
+    # nativestrict prevents Git Bash from emulating a symlink by copying its target.
+    script = (
+        'export MSYS=winsymlinks:nativestrict; mkdir real-home; '
+        'ln -s real-home logical-home && ln -s real-home alias-home || exit 77; '
+        '[[ -L logical-home && -L alias-home ]] || exit 77; '
+        'export HOME="$PWD/logical-home"; '
+        'systemctl() { echo unexpected-service-cleanup >&2; return 99; }; export -f systemctl; '
+    )
+    if directory == ".":
+        script += 'cd real-home; '
+    script += f'{shlex.quote(BASH)} {installer} --install-dir "{directory}" --remove-files'
+    result = subprocess.run([BASH, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    if result.returncode == 77:
+        pytest.skip("native directory symlinks are unavailable")
+    assert result.returncode != 0 and "refusing unsafe install directory" in result.stderr
+    assert "unexpected-service-cleanup" not in result.stderr
+    assert (tmp_path / "real-home").is_dir()
+
+
+def test_uninstall_removes_install_symlink_without_deleting_target(tmp_path):
+    if not BASH:
+        pytest.skip("bash is not installed")
+    installer = shlex.quote((ROOT / "install/uninstall.sh").as_posix())
+    script = (
+        'export MSYS=winsymlinks:nativestrict; mkdir home real-install; '
+        'echo keep > real-install/models; ln -s real-install runtime || exit 77; '
+        '[[ -L runtime ]] || exit 77; export HOME="$PWD/home" XDG_CONFIG_HOME="$PWD/home/config"; '
+        'uname() { echo Linux; }; systemctl() { return 0; }; export -f uname systemctl; '
+        + f'{shlex.quote(BASH)} {installer} --install-dir ./runtime --remove-files'
+    )
+    result = subprocess.run([BASH, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    if result.returncode == 77:
+        pytest.skip("native directory symlinks are unavailable")
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "runtime").exists()
+    assert (tmp_path / "real-install/models").read_text().strip() == "keep"
