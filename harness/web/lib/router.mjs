@@ -4,6 +4,7 @@
 import { h, fill, append } from "./dom.mjs";
 import { validId } from "./stream.mjs";
 import { GOOGLE_FAILED } from "./signin.mjs";
+import { mountSplitView, splitRoute } from "./layout.mjs";
 
 export const hashParts = (hash) => hash.replace(/^#\/?/, "").split("/").filter(Boolean);
 // The tab bar's sections (#506). Settings and its pages, Actions included, are nested under the gear and show Back.
@@ -38,6 +39,23 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
   const { api, fetchMe, loadWebAuth, isGuest, isMember, isOwner, canChat } = session;
   let cleanup = [];
   const onLeave = (fn) => cleanup.push(fn);
+  // Split views (#563, lib/layout.mjs): at 1280 px+ a list stays mounted beside its detail routes.
+  const split = mountSplitView({ els, h, fill, browser, onChange: () => crossBreakpoint(), onDaemonChange: stream.onDaemonChange });
+
+  // The window crossed 1280 px. Only a split route changes layout, and a detail route keeps its page (an unsent message,
+  // an open sheet): the list is added beside it or closed, and Back follows. The list route itself re-routes, since its
+  // list moves between <main> and the pane.
+  function crossBreakpoint() {
+    if (session.isBlocked() || session.needsSignIn() || session.getMe()?.role === "offline") return;
+    const parts = hashParts(browser.location.hash);
+    const found = splitRoute(parts);
+    if (!found) return;
+    if (found.selected === null) { void route(); return; }
+    const open = split.sync(parts);
+    $back.hidden = !!open || isTopLevel(parts);
+    if (open) void split.renderList(views()[open.split.list]);
+    chrome.repaintBar?.();
+  }
 
   function go(hash, replace = false) {
     if (session.isBlocked()) return;
@@ -70,8 +88,16 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
     else await v.viewActions(parts[1]);
   }
 
-  async function routeView(parts) {
+  async function routeView(parts, open) {
     const v = views();
+    if (open) {
+      void split.renderList(v[open.split.list]);
+      if (open.selected === null) {
+        chrome.setHeader("", "");  // the list pane carries the section title
+        split.empty();
+        return;
+      }
+    }
     if (parts.length === 0) go(canChat() ? "#/chat" : "#/agents", true);
     else if (parts[0] === "chat") await v.viewChat(parts[1]);
     else if (parts[0] === "agents") await v.viewList();
@@ -119,6 +145,7 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
     chrome.paintGuestChrome();
     const parts = hashParts(browser.location.hash);
     if (session.needsSignIn()) {
+      split.close();
       $back.hidden = true;
       tabs.paint(parts, { hidden: true });
       signin.viewSignIn(parts[0] === "signin" && parts[1] === "failed");
@@ -127,6 +154,7 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
     }
     // Profile stays reachable so Connection settings can be fixed while offline.
     if (session.getMe().role === "offline" && !isProfileRoute(parts)) {
+      split.close();
       viewOffline();
       return;
     }
@@ -137,12 +165,13 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
       api("/images/cooldown", { method: "POST" }).catch(() => {});
     }
     route.onImages = images;
-    $back.hidden = isTopLevel(parts);
-    tabs.paint(parts);
     const redirect = blockedRedirect(parts, session.getMe().role);
+    const open = redirect ? null : split.sync(parts);
+    $back.hidden = !!open || isTopLevel(parts);  // beside its list, a detail needs no Back
+    tabs.paint(parts);
     if (redirect) { go(redirect, true); return; }
     try {
-      await routeView(parts);
+      await routeView(parts, open);
     } catch (e) {
       append($app, h("p", { class: "note bad" }, e.message),
         h("a", { class: "btn", href: "#/profile/connection" }, "Connection settings"));
@@ -162,5 +191,5 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
   // Connectivity is back: re-run the identity check if the last one could not reach the server (#368).
   window.addEventListener("online", () => { if (session.isOffline()) void route(); });
 
-  return { go, route, onLeave };
+  return { go, route, onLeave, closeSplit: split.close };
 }

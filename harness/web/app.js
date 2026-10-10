@@ -20,6 +20,7 @@
 //   #/jobs[/new|/<id>]       scheduled jobs
 //   #/tasks[/…]              redirects to #/jobs[/…] (the old label for scheduled work)
 //   #/signin[/failed]        Google sign-in for a household member on a Tailscale-admitted device (issue #64)
+// At 1280 px+ #/agents and #/s/<id>[/…] share one split view: the list beside the open session (lib/layout.mjs, #563).
 
 import { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } from "./client.mjs";
 import { h, fill, append } from "./lib/dom.mjs";
@@ -69,14 +70,14 @@ const signin = mountSignIn({ els, api, getWebAuth: session.getWebAuth, toast, br
 const { startGoogle } = signin;
 
 // Route registration: the router reads the page views lazily, because the pages below are mounted after it.
-const { go, route, onLeave } = mountRouter({ els, session, chrome, tabs, signin, stream, toast, browser,
+const { go, route, onLeave, closeSplit } = mountRouter({ els, session, chrome, tabs, signin, stream, toast, browser,
   views: () => ({ viewChat, viewList, viewNew, viewActions, viewProfile, viewImages, viewImage, viewImageEdit, viewImageFull,
     viewJobs, viewJob, viewSession }) });
 const warmModel = createWarmModel({ api, session });
 
 // Mounted before the pages so Settings' version row can reload into a newer bundle (#512).
 const build = { WEB_BUILD_ID, WEB_PROTOCOL };
-const { checkCompatibility, reloadAndUpdate } = mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build, browser });
+const { checkCompatibility, reloadAndUpdate } = mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, closeSplit, build, browser });
 
 // ---------- pages ----------
 const { daemonSettingsCard } = mountDaemonSettings({ h, fill, append, api, toast, isGuest, location });
@@ -90,7 +91,7 @@ const { viewInfo } = mountSessionInfo({ $app, h, append, copyBox, downloadDaemon
 const { viewChat } = mountChat({ $app, h, fill, append, api, setHeader, toast, go, validId, canChat, onLeave, openStream, ownerSurface, badge,
   TERMINAL, agentHarnessWeb, browser });
 const { viewSession } = mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
-  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser });
+  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser, announceChange: stream.announceChange });
 const { viewNew, confirmGpuQueue } = mountNewTask({ $app, h, fill, append, api, setHeader, toast, route, isMember, isOwner, onLeave,
   githubConnectionCard, warmModel, browser });
 const { viewImages, viewImage, viewImageEdit, viewImageFull } = mountImages({ $app, h, fill, append, api, setHeader, toast, go, route, isGuest, isMember, onLeave,
@@ -98,7 +99,7 @@ const { viewImages, viewImage, viewImageEdit, viewImageFull } = mountImages({ $a
 const { viewJobs, viewJob } = mountJobs({ $app, h, fill, append, api, setHeader, showListAction, toast, go, route, isGuest,
   confirmGpuQueue, badge, jobStatusBadge, location });
 const { viewList } = mountSessions({ $app, h, fill, append, api, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
-  jobStatusBadge, openStream, ownerSurface, agentHarnessWeb, browser });
+  jobStatusBadge, onDaemonChange: stream.onDaemonChange, onDaemonState: stream.onDaemonState, browser });
 const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar });
 
 // ---------- boot ----------

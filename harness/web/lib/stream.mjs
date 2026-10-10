@@ -45,6 +45,13 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
     daemonListeners.add(fn);
     return () => daemonListeners.delete(fn);
   };
+  // The same stream's connection state ("live", "reconnecting", "offline"), for a page that reacts to drops (the Agents
+  // list refreshes so a gone server shows as a stale list). Pages reuse this stream rather than opening another (#563).
+  const stateListeners = new Set();
+  const onDaemonState = (fn) => {
+    stateListeners.add(fn);
+    return () => stateListeners.delete(fn);
+  };
   // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
   // Connection state ("live", "reconnecting", "offline") goes to `onState`; the header chip follows it only for the stream
   // opened with `indicate`, so page streams can close without a false offline state.
@@ -191,9 +198,15 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
     daemon = openStream(() => agentHarnessWeb.url("/events", ownerSurface()), handlers, {
       authorized: !(isGuest() && !agentHarnessWeb.token),
       indicate: true,
-      onState: (state) => { if (state === "live") notifyDaemonChange(); },
+      onState: (state) => {
+        if (state === "live") notifyDaemonChange();
+        for (const fn of stateListeners) fn(state);
+      },
     });
   }
 
-  return { openStream, watchDaemonConnection, onDaemonChange };
+  // A change this app made that the server announces on no stream (a session rename): listeners refresh as for an event.
+  const announceChange = () => notifyDaemonChange();
+
+  return { openStream, watchDaemonConnection, onDaemonChange, onDaemonState, announceChange };
 }

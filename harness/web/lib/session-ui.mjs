@@ -41,7 +41,8 @@ export const SESSION_MENU_LABELS = {
   rename: "Rename", cancel: "Cancel task", rerun: "Run again as new session", "clear-taint": "Clear taint", download: "Download transcript",
 };
 
-export function mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser }) {
+// `onRenamed` tells the rest of the app (the Agents list beside the session, #563), since a rename has no server event.
+export function mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser, onRenamed = () => {} }) {
 const { window, document } = browser;
 
 // Older servers answer PATCH with 405, so a rename retries once with PUT.
@@ -61,6 +62,7 @@ async function commitSessionTitle(session, raw, isActive) {
   try {
     const updated = await putSessionTitle(session, next);
     session.title = updated.title;
+    onRenamed();
     if (isActive()) setHeader("agents", session.title || "Session", { page: true });
   } catch (e) { toast(e.message); }
 }

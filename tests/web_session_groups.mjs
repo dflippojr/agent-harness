@@ -52,7 +52,7 @@ const browser = { window: { addEventListener() {}, removeEventListener() {} }, d
 const page = mountSessions({
   $app: "APP", h: el, fill: (_t, ...n) => rendered.push(n.flat(Infinity)), append() {}, api, setHeader() {}, showListAction() {}, onLeave() {},
   isMember: () => false, isGuest: () => false, badge: (st) => el("badge", {}, st), reviewBadge: (_r, l) => el("rb", {}, l), REVIEW_LABEL: { merged: "merged" },
-  jobStatusBadge: () => el("jb"), openStream: () => () => {}, ownerSurface: () => ({}), agentHarnessWeb: { url: (p) => p, token: "" }, browser,
+  jobStatusBadge: () => el("jb"), onDaemonChange: () => () => {}, onDaemonState: () => () => {}, browser,
 });
 await page.viewList();
 const sections = rendered.flat().filter((n) => n && n.tag === "section");

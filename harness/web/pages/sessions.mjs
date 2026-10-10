@@ -14,7 +14,7 @@ const LAPTOP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5
 const CHEVRON_SVG = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
 
 export function mountSessions({ $app, h, fill, append, api, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
-  jobStatusBadge, openStream, ownerSurface, agentHarnessWeb, browser }) {
+  jobStatusBadge, onDaemonChange, onDaemonState, browser }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, localStorage } = browser;
 
@@ -26,8 +26,11 @@ try { sessionTarget = localStorage.getItem("harness.sessionTarget") || "all"; } 
 const markPassage = (text) => escapeHtml(text).replaceAll("\u0002", "<mark>").replaceAll("\u0003", "</mark>");
 const PASSAGE_KIND = { title: "title", message: "you", assistant: "agent", tool: "tool output", answer: "answer", context: "app context" };
 
-async function viewList() {
-  setHeader("agents", "Agents");
+// With a `pane` (#563, lib/layout.mjs) the list renders beside the open session at 1280 px+: into the pane, with its own
+// header, torn down when the split closes rather than on every session change.
+async function viewList(pane = null) {
+  const host = pane ? pane.body : $app;
+  const leave = pane ? pane.onLeave : onLeave;
   const list = h("div", { class: "agent-groups" });
   const results = h("div", { hidden: true });
   const queueNote = h("p", { class: "note" });
@@ -35,8 +38,12 @@ async function viewList() {
   const targetSwitch = h("div", { class: "tabs", role: "group", "aria-label": "Filter sessions by machine" });
   // #510: a failed refresh says so (when the list last updated, and why) instead of silently keeping the old list.
   const stale = staleNote({ make: h, place: (el) => targetSwitch.after(el), onRetry: () => refreshNow() });
-  append($app, h("div", { class: "search-wrap" }, search), targetSwitch, queueNote, results, list);
-  showListAction("#/new", "+ New task");
+  append(host, h("div", { class: "search-wrap" }, search), targetSwitch, queueNote, results, list);
+  if (pane) pane.header("Agents", isGuest() ? null : { href: "#/new", label: "+ New task" });
+  else {
+    setHeader("agents", "Agents");
+    showListAction("#/new", "+ New task");
+  }
 
   let sessions = [];
   let targets = [];
@@ -56,7 +63,7 @@ async function viewList() {
     const approvals = s.pending_approvals || [];
     const approvalPath = approvals.length ? `/approval/${approvals[0].id}` : "";
     const ask = approvals.length ? approvalLine(approvals[0]) + (approvals.length > 1 ? ` (+${approvals.length - 1} more)` : "") : "";
-    return h("a", { class: "agent-row", href: `#/s/${s.id}${approvalPath}` },
+    return h("a", { class: "agent-row", href: `#/s/${s.id}${approvalPath}`, "data-split-key": s.id },
       h("div", { class: "agent-body" },
         h("h3", {}, s.title),
         h("div", { class: "agent-meta" },
@@ -92,6 +99,7 @@ async function viewList() {
     fill(list, groups.map((g) => h("section", { class: `agent-group ${g.key}`, "aria-label": g.label },
       h("h2", { class: "agent-sec" }, g.label, g.key === "recent" ? null : h("span", { class: "agent-count" }, String(g.sessions.length))),
       h("div", { class: "agent-list" }, g.sessions.map(sessionRow)))));
+    pane?.paint();
   };
   const renderTargetSwitch = () => {
     if (!targets.includes(sessionTarget)) sessionTarget = "all";
@@ -107,7 +115,12 @@ async function viewList() {
     }, target === "all" ? "All" : targetName(target))));
   };
 
+  let gone = false;  // the page left: a late search or refresh changes nothing, not even the remembered query
+  leave(() => { gone = true; });
+  let searchRun = 0;  // only the latest search paints, even when an older one for the same query answers last
   const runSearch = async () => {
+    if (gone) return;
+    const run = ++searchRun;
     const q = search.value.trim();
     searchQuery = search.value;
     results.hidden = !q;
@@ -117,16 +130,25 @@ async function viewList() {
     if (!q) return;
     try {
       const data = await api(`/search?q=${encodeURIComponent(q)}`);
-      if (search.value.trim() !== q) return;  // a newer query is on its way
+      if (gone || run !== searchRun) return;  // left, or a newer search is on its way
+      // A refresh that finds the same results keeps the links, so a press or keyboard focus on one survives it.
+      const keys = JSON.stringify([q, data]);
+      if (results.dataset.keys === keys) return;
+      results.dataset.keys = keys;
       fill(results,
         data.mode === "any" && data.results.length ? h("p", { class: "muted small" }, "No session matches every word; showing partial matches.") : null,
-        data.results.length ? data.results.map((r) => h("a", { class: "card", href: `#/s/${r.id}` },
+        data.results.length ? data.results.map((r) => h("a", { class: "card", href: `#/s/${r.id}`, "data-split-key": r.id },
           h("h3", {}, r.title),
           h("div", { class: "meta" }, badge(r.status), h("span", {}, r.project), h("span", {}, ago(r.created_at)),
             h("span", {}, `${r.hits} match${r.hits === 1 ? "" : "es"}`)),
           r.passages.map((p) => h("div", { class: "passage small" }, h("span", { class: "muted" }, `${PASSAGE_KIND[p.kind] || p.kind}: `),
             h("span", { html: markPassage(p.text) }))))) : h("p", { class: "empty" }, `Nothing matches “${q}”.`));
-    } catch (e) { fill(results, h("p", { class: "note bad" }, e.message)); }
+      pane?.paint();
+    } catch (e) {
+      if (gone || run !== searchRun) return;
+      delete results.dataset.keys;
+      fill(results, h("p", { class: "note bad" }, e.message));
+    }
   };
   let searchTimer = null;
   search.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
@@ -148,7 +170,8 @@ async function viewList() {
     renderSessions();
     stale.ok();
   };
-  const refreshNow = () => render().catch((e) => {
+  // Shown search results are part of the list too: a refresh (a rename, a status change) re-runs the query.
+  const refreshNow = () => render().then(() => { if (!gone && search.value.trim()) void runSearch(); }).catch((e) => {
     console.error("session list refresh failed", e);
     stale.failed(e);
   });
@@ -164,9 +187,11 @@ async function viewList() {
     }
   };
   list.addEventListener("pointerdown", () => { holding = true; });
+  results.addEventListener("pointerdown", () => { holding = true; });
   window.addEventListener("pointerup", releaseHold);
   window.addEventListener("pointercancel", releaseHold);
-  onLeave(() => {
+  leave(() => {
+    clearTimeout(searchTimer);
     window.removeEventListener("pointerup", releaseHold);
     window.removeEventListener("pointercancel", releaseHold);
   });
@@ -177,23 +202,20 @@ async function viewList() {
       void refreshNow();
     }, 300);
   };
-  const handlers = {};
-  for (const type of ["session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"]) {
-    handlers[type] = refresh;
-  }
-  // Events missed while the stream was down are not replayed here, so reload the list when it comes back; and when it
-  // drops, refresh once so a server that is really gone shows as a stale list rather than a quiet one.
-  let streamState = "";
-  const onState = (next) => {
-    if (streamState && (next === "live" || streamState === "live")) refresh();
+  // Session events come from the app-wide stream behind the header chip (session_created, status, approvals, run_finished,
+  // queue), so the list beside an open session holds no second connection. It also fires when that stream is live again,
+  // since events missed while it was down are not replayed; and a drop refreshes once, so a server that is really gone
+  // shows as a stale list rather than a quiet one.
+  leave(onDaemonChange(refresh));
+  let streamState = "live";
+  leave(onDaemonState((next) => {
+    if (streamState === "live" && next !== "live") refresh();
     streamState = next;
-  };
-  onLeave(openStream(() => agentHarnessWeb.url("/events", ownerSurface()), handlers,
-    { authorized: !(isGuest() && !agentHarnessWeb.token), onState }));
-  onLeave(() => { clearTimeout(timer); stale.stop(); });
+  }));
+  leave(() => { clearTimeout(timer); stale.stop(); });
   const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
   document.addEventListener("visibilitychange", onVisible);
-  onLeave(() => document.removeEventListener("visibilitychange", onVisible));
+  leave(() => document.removeEventListener("visibilitychange", onVisible));
 }
 
 return { viewList };
