@@ -682,3 +682,42 @@ def test_systemd_executable_keeps_literal_dollar_path(tmp_path, monkeypatch, nam
                                 capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, result.stderr
         assert Path(result.stdout.strip()) == workdir / "venv"
+
+
+@pytest.mark.parametrize("source", ["environment", "flags"])
+def test_unix_hub_dry_run_hides_distribution_values(tmp_path, monkeypatch, source):
+    package = "https://owner:private-token@example.invalid/hub.whl"
+    image = "example.invalid/private-hub:confidential-tag"
+    flags = []
+    if source == "environment":
+        monkeypatch.setenv("HARNESS_HUB_PACKAGE", package)
+        monkeypatch.setenv("HARNESS_HUB_IMAGE", image)
+    else:
+        flags = ["--hub-package", package, "--hub-image", image]
+    result = run_installer(tmp_path, "Linux", "x86_64", "--with-hub", "--profile", "service", *flags)
+    assert result.returncode == 0, result.stderr
+    output = result.stdout + result.stderr
+    assert package not in output and "private-token" not in output and image not in output
+    assert "HARNESS_HUB_PACKAGE" in output and "HARNESS_HUB_IMAGE" in output and "value hidden" in output
+    assert "harness hub approve <request_id> --match <code>" in output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows installer")
+@pytest.mark.parametrize("source", ["environment", "flags"])
+def test_windows_hub_dry_run_hides_distribution_values(tmp_path, monkeypatch, source):
+    package = "https://owner:private-token@example.invalid/hub.whl"
+    image = "example.invalid/private-hub:confidential-tag"
+    flags = []
+    if source == "environment":
+        monkeypatch.setenv("HARNESS_HUB_PACKAGE", package)
+        monkeypatch.setenv("HARNESS_HUB_IMAGE", image)
+    else:
+        flags = ["-HubPackage", package, "-HubImage", image]
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-File", str(ROOT / "install/install.ps1"),
+                             "-InstallDir", str(tmp_path / "install"), "-Profile", "Service", "-DryRun", "-WithHub", *flags],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    output = result.stdout + result.stderr
+    assert package not in output and "private-token" not in output and image not in output
+    assert "HARNESS_HUB_PACKAGE" in output and "HARNESS_HUB_IMAGE" in output and "value hidden" in output
+    assert "harness hub approve <request_id> --match <code>" in output

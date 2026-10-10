@@ -459,7 +459,7 @@ if [[ $dry_run -eq 1 ]]; then
         info "[dry run] Hub setup deferred: rerun with --with-hub without --no-start after starting the daemon"
     elif [[ $hub_choice == --with-hub ]]; then
         info "[dry run] after doctor passes: check harness hub claim-status; if already claimed show harness hub release --confirm"
-        info "[dry run] Hub distribution: $hub_method; pip package: ${hub_package:-set HARNESS_HUB_PACKAGE (#546)}; Docker image: ${hub_image:-set HARNESS_HUB_IMAGE (#546)}"
+        info "[dry run] Hub distribution: $hub_method; pip package: --hub-package / HARNESS_HUB_PACKAGE (#546; value hidden); Docker image: --hub-image / HARNESS_HUB_IMAGE (#546; value hidden)"
         info "[dry run] install Hub in a separate venv (pip) or docker run --network host --restart unless-stopped (docker)"
         info "[dry run] start Hub; show its claim match code; harness hub approve <request_id> --match <code>; wait for redemption"
         info "[dry run] record installed Hub for uninstall; harness hub release --confirm before removing daemon"
