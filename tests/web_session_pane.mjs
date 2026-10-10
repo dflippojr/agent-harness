@@ -44,7 +44,9 @@ const approval = { id: "ap1", tool: "write_file", tool_call_id: "c1", reason: "E
   detail: "@@ -1 +1 @@\n-a\n+b", args: { path: "sw.js" }, smart: { recommendation: "approve", confidence: 0.92, reason: "routine" } };
 let session = { id: "s1", title: "Fix the bug", status: "waiting_approval", project: "p", target: "tower", backend: "claude", model: "m",
   totals: {}, context_used: 10, context_limit: 100, pending_approvals: [approval] };
+let deferSession = null;  // when set, /sessions/s1 answers with a promise the test resolves
 const api = async (path) => {
+  if (path === "/sessions/s1" && deferSession) return new Promise((resolve) => deferSession.push(resolve));
   if (path === "/sessions/s1") return session;
   if (path === "/sessions/s1/changes") return { removed: true };
   return [];
@@ -131,6 +133,24 @@ for (const tab of ["changes", "info"]) {
   assert.equal(review.textContent, "Review");
   assert.equal(review.attributes.href, "#/s/s1/approval/ap1", "Review opens the transcript on that approval");
   assert.equal(daemonListeners.size, 1, "the bar follows the app-wide stream");
+  // An unchanged approval keeps the same Review link, so one a keyboard user has focused survives the refresh.
+  [...daemonListeners][0]();
+  await timers.pop()();
+  assert.equal(walk(abar, (n) => n.tagName === "A")[0], review, "a refresh updates the bar in place");
+  // Answers that arrive out of order: only the newest refresh paints.
+  deferSession = [];
+  [...daemonListeners][0]();
+  const older = timers.pop()();
+  [...daemonListeners][0]();
+  const newer = timers.pop()();
+  await Promise.resolve();
+  const [answerOld, answerNew] = deferSession;
+  answerNew({ ...session });
+  await newer;
+  answerOld({ ...session, status: "running", pending_approvals: undefined });
+  await older;
+  assert.equal(abar.hidden, false, "a slower, older answer does not hide a still-pending approval");
+  deferSession = null;
   // Decided elsewhere: the next event refetches the session and the bar goes away.
   session = { ...session, status: "running", pending_approvals: undefined };
   [...daemonListeners][0]();

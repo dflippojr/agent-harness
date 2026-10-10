@@ -25,7 +25,7 @@ export function mountSession({ $app, h, fill, append, api, setHeader, toast, go,
   promptSheet = sheets.promptSheet, announceChange = () => {}, onDaemonChange = null }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, location, setInterval, clearInterval, setTimeout, clearTimeout } = browser;
-const { renameTitle, sessionMenu, bindSessionJumps } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser,
+const { renameTitle, sessionMenu, bindSessionJumps, placeSessionHeader } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser,
   onRenamed: announceChange });
 const pageMetrics = () => measurePage(browser);
 const scrollPage = (top) => scrollPageOf(top, browser);
@@ -666,50 +666,33 @@ async function viewSession(sid, tab, focusApproval) {
   onLeave(closeViewer);
 }
 
-// Desktop (#564): the status strip and the Transcript / Changes / Info control join the bar, so the session header is one
-// row (the title over its meta, then the control and ⋯); phones keep them in the sticky block under the bar. Crossing
-// 768 px moves them back and forth. Returns the teardown, which takes them out of the shared bar.
-function placeSessionHeader(head, tabs, sessionChrome) {
-  const query = window.matchMedia?.("(min-width: 768px)") || null;
-  const place = () => {
-    const title = document.getElementById("title");
-    if (query?.matches && title) {
-      title.after(head);
-      head.after(tabs);
-    } else sessionChrome.prepend(head, tabs);
-    layoutBar();
-  };
-  document.body.classList?.add("session-page");
-  place();
-  query?.addEventListener?.("change", place);
-  return () => {
-    query?.removeEventListener?.("change", place);
-    document.body.classList?.remove("session-page");
-    head.remove();
-    tabs.remove();
-  };
-}
-
 // Changes and Info have no transcript stream, so a pending approval shows there as a one-line bar at the pane's foot with
 // Review (#564), refreshed by the app-wide stream's events. style.css shows it from 768 px up only.
 function pendingApprovalBar(session, isActive) {
-  const bar = h("div", { class: "approval-bar", role: "status", hidden: true });
+  // Built once and updated in place, so a refresh never removes a Review link that has focus.
+  const text = h("span", { class: "approval-bar-text" });
+  const review = h("a", { class: "btn approval-bar-review" }, "Review");
+  const bar = h("div", { class: "approval-bar", role: "status", hidden: true }, text, review);
   document.body.append(bar);
   const paint = (s) => {
     const a = s.status === "waiting_approval" ? (s.pending_approvals || [])[0] : null;
     bar.hidden = !a;
-    if (!a) { fill(bar); return; }
-    fill(bar, h("span", { class: "approval-bar-text" }, `Approval needed · ${a.reason || a.tool}`),
-      h("a", { class: "btn approval-bar-review", href: `#/s/${s.id}/approval/${a.id}` }, "Review"));
+    if (!a) return;
+    const label = `Approval needed · ${a.reason || a.tool}`;
+    const href = `#/s/${s.id}/approval/${a.id}`;
+    if (text.textContent !== label) text.textContent = label;
+    if (review.getAttribute("href") !== href) review.setAttribute("href", href);
   };
   paint(session);
   let timer = null;
+  let latest = 0;  // only the newest refresh paints, so a slow older answer can't undo a newer one
   const refresh = () => {
     clearTimeout(timer);
     timer = setTimeout(async () => {
+      const mine = ++latest;
       try {
         const s = await api(`/sessions/${session.id}`);
-        if (isActive()) paint(s);
+        if (isActive() && mine === latest) paint(s);
       } catch (_) { /* keep the last state; the next event retries */ }
     }, 300);
   };

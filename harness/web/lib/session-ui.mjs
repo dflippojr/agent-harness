@@ -1,4 +1,5 @@
-// Session chrome helpers (#258): the overflow menu and its rename (#514), the scroll measurements and the jump buttons that
+// Session chrome helpers (#258): the overflow menu and its rename (#514), the desktop header placement (#564), the scroll
+// measurements and the jump buttons that
 // the session page uses and app.js's repaint hook reuses. Nothing here touches document/window at module top level, so it imports
 // under plain Node; browser globals arrive through `browser` (globalThis in the app, a stub under Node).
 import { sessionJumpHidden } from "./layout.mjs";
@@ -140,6 +141,30 @@ function sessionMenu({ items, run }) {
   return { button, menu, open, close };
 }
 
+// Desktop (#564): the status strip and the Transcript / Changes / Info control join the bar, so the session header is one
+// row (the title over its meta, then the control and ⋯); phones keep them in the sticky block under the bar. Crossing
+// 768 px moves them back and forth. Returns the teardown, which takes them out of the shared bar.
+function placeSessionHeader(head, tabs, sessionChrome) {
+  const query = window.matchMedia?.("(min-width: 768px)") || null;
+  const place = () => {
+    const title = document.getElementById("title");
+    if (query?.matches && title) {
+      title.after(head);
+      head.after(tabs);
+    } else sessionChrome.prepend(head, tabs);
+    layoutBar();
+  };
+  document.body.classList?.add("session-page");
+  place();
+  query?.addEventListener?.("change", place);
+  return () => {
+    query?.removeEventListener?.("change", place);
+    document.body.classList?.remove("session-page");
+    head.remove();
+    tabs.remove();
+  };
+}
+
 function bindSessionJumps() {
   const pageHeight = () => pageMetrics(browser).pageH;
   const jumpTop = h("button", { class: "btn small jump jump-top", type: "button", hidden: true, "aria-label": "Jump to start" }, "↑");
@@ -177,5 +202,5 @@ function bindSessionJumps() {
   return { updateJumps, pageHeight };
 }
 
-return { renameTitle, sessionMenu, bindSessionJumps };
+return { renameTitle, sessionMenu, bindSessionJumps, placeSessionHeader };
 }
