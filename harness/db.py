@@ -1508,13 +1508,16 @@ class Database:
     @_writes
     def insert_idempotency_key(self, row: dict) -> None:
         """Record a key in the transaction creating its session; a key still protected raises IntegrityError and the
-        session's insert rolls back with it. `created_at` is when the key was last found free."""
-        self.drop_expired_idempotency_keys(row["created_at"])
+        session's insert rolls back with it. Start the protection window at this successful insert."""
+        from . import idempotency
+
+        now = idempotency.clock()
+        self.drop_expired_idempotency_keys(now)
         with self.lock:
             self.conn.execute("INSERT INTO idempotency_keys (key_hash, request_digest, session_id, created_at, "
                               "expires_at) VALUES (?, ?, ?, ?, ?)",
-                              (row["key_hash"], row["request_digest"], row["session_id"], row["created_at"],
-                               row["expires_at"]))
+                              (row["key_hash"], row["request_digest"], row["session_id"], now,
+                               now + idempotency.WINDOW_SECONDS))
 
     @_writes
     def drop_expired_idempotency_keys(self, now: float) -> None:
