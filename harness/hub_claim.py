@@ -62,8 +62,13 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
     async def host_proof(request: Request, action: str) -> audit_context.AuditContext:
         """Owner auth, not the Hub's own key, and the host-only secret; or 403 with a `denied` audit row (which
         stores nothing the caller sent)."""
-        key = require_admin(request, mgr)
         m = mgr(request)
+        try:
+            key = require_admin(request, mgr)
+        except HarnessError:  # an App or device key, a member, a bad token: refused and audited all the same
+            await m.db.main.awrite(credential_audit.record, m.db, credential_audit.unknown_context("admin_api"),
+                                   action, "", "denied", "hub_claim", {"reason": "host_proof_required"})
+            raise
         ctx = audit_context.owner_context(key)
         reason = ""
         if is_hub_key(key):
@@ -96,12 +101,12 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
             else:
                 refusal = check(db, row)
             if refusal:
+                status, detail, reason = refusal
                 known = row is not None and row["kind"] == ROLE
-                outcome = "noop" if refusal[0] in (404, 409) else "denied"
+                outcome = "noop" if status in (404, 409) else "denied"
                 credential_audit.record(db, ctx, action, rid if known else "", outcome, "pairing_request",
-                                        {"request_id": rid, "reason": refusal[2]} if known else
-                                        {"reason": "not_found"})
-                return pr._refuse(*refusal)
+                                        {"request_id": rid, "reason": reason} if known else {"reason": "not_found"})
+                return pr._refuse(status, detail, reason)
             if not db.update_pairing_request(rid, states, **fields(now)):
                 return pr._refuse(409, "this Hub claim request changed; check `harness hub status`", "not_approvable")
             credential_audit.record(db, ctx, action, rid, "ok", "pairing_request", {"request_id": rid})
