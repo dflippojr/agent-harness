@@ -113,6 +113,23 @@ Describe 'Review publication safety' {
         }
     }
 
+    It 'publishes known citations in code spans, before a period and with underscores' {
+        $known = @('src/__tests__/home/nav.test.ts', 'harness_modules/remote_control/folder_discovery.py')
+        foreach ($text in @("See ``$($known[0])``.", "Fix ``$($known[1])``.", "Fix $($known[1]).")) {
+            $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $text }
+            Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -DiffPaths $known
+            if (-not (Get-Content -Raw -LiteralPath $script:reviewOutputPath).Contains($text)) { throw "Known citation was rejected: $text" }
+        }
+    }
+
+    It 'keeps composed and decomposed diff names distinct' {
+        $composed = 'home/caf' + [char]0xe9 + '.py'
+        $decomposed = 'home/cafe' + [char]0x301 + '.py'
+        $diff = "diff --git a/$composed b/$composed`ndeleted file mode 100644`n-old`ndiff --git a/$decomposed b/$decomposed`ndeleted file mode 100644`n-old"
+        $embedding = Get-ReviewDiffEmbedding -Diff $diff
+        if (@($embedding.FilePaths).Count -ne 2) { throw 'Canonically equivalent diff names were merged' }
+    }
+
     It 'does not let a name that normalizes to an absolute path exempt a profile path' {
         $slash = [string][char]0xFF0F
         $disguised = $slash + 'home' + $slash + 'reviewer/auth.json'

@@ -355,7 +355,8 @@ function Get-ReviewScanForms {
     $decoded = [System.Net.WebUtility]::HtmlDecode([Uri]::UnescapeDataString($Text))
     $decoded = ($decoded -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
     $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
-    $rendered = $unescaped -replace '<[^<>]*>|[*`]|~~|__', ''
+    # Intraword underscores never render as emphasis, so __tests__-style names are left intact.
+    $rendered = $unescaped -replace '<[^<>]*>|[*`]|~~', ''
     return @(Get-ReviewOrdinalUnique -Values @($Text, $decoded, $unescaped, $rendered))
 }
 
@@ -424,7 +425,8 @@ function Remove-ReviewRepositoryCitations {
 
     foreach ($path in ($Paths | Sort-Object { $_.Length } -Descending)) {
         $pathPattern = [regex]::Escape($path).Replace('/', '[/\\](?:\.[/\\])*')
-        $pattern = '(?<![\p{L}\p{N}\p{M}_./\\-])(?:\.[/\\])*' + $pathPattern + '(?![\p{L}\p{N}\p{M}_./\\-])'
+        # A sentence-ending period may follow a citation; any other continuation is a different name.
+        $pattern = '(?<![\p{L}\p{N}\p{M}_./\\-])(?:\.[/\\])*' + $pathPattern + '(?![\p{L}\p{N}\p{M}_/\\-])(?!\.(?!\s|$))'
         $Text = [regex]::Replace($Text, $pattern, '[REPOSITORY PATH]')
     }
     return $Text
@@ -1188,7 +1190,7 @@ function Get-ReviewDiffEmbedding {
         $paths = Get-ReviewDiffFilePaths -Section $section
         [pscustomobject]@{ OldPath = $paths.OldPath; NewPath = $paths.NewPath; Section = $section }
     })
-    $filePaths = @($fileMetadata | ForEach-Object { $_.OldPath; $_.NewPath } | Select-Object -Unique)
+    $filePaths = @(Get-ReviewOrdinalUnique -Values @($fileMetadata | ForEach-Object { $_.OldPath; $_.NewPath }))
     $embeddedFileCount = $totalFiles
     $omittedFiles = New-Object System.Collections.Generic.List[string]
     if ($totalBytes -gt $MaxDiffBytes) {
