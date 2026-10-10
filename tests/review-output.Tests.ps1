@@ -11,6 +11,9 @@ Describe 'Review publication safety' {
         @{ Payload = 'ghp_synthetic12345678' }
         @{ Payload = ('T' * 48) }
         @{ Payload = (('A' * 38) + '==') }
+        @{ Payload = ('a1' * 24) }
+        @{ Payload = (('ab_' * 15) + '9') }
+        @{ Payload = ('A' * 24 + '/' + 'B' * 24) }
         @{ Payload = 'gh**p_**synthetic12345678' }
         @{ Payload = 'gh<b>p</b>_synthetic12345678' }
         @{ Payload = 'gh`p`_synthetic12345678' }
@@ -99,6 +102,7 @@ Describe 'Review publication safety' {
         @{ Payload = '**Structure** `harness/__init__.py`: keep the `<n>` placeholder.' }
         @{ Payload = 'Send a Bearer token in the header; the `Bearer` scheme is case-insensitive.' }
         @{ Payload = 'The header is built as `f"Bearer {token}"`.' }
+        @{ Payload = '`test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal` and `Remove-UntrustedReviewAgentConfiguration`.' }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
@@ -157,6 +161,14 @@ Describe 'Review publication safety' {
         $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
         if ($body -notmatch 'No significant findings\.') { throw 'Safe review was not published' }
         if ($body -notmatch '<!-- agent-review: sha=a{40} mode=full -->') { throw 'Validated marker is missing' }
+    }
+
+    It 'publishes a valid base ref that the path or long-token rules would reject in review text' {
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = 'No significant findings.' }
+        foreach ($baseRef in @('feature/home/navigation', 'release/2026-10-stacked-feature-branch-for-callers')) {
+            Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -BaseRef $baseRef
+            if (-not (Get-Content -Raw -LiteralPath $script:reviewOutputPath).Contains("base=$baseRef -->")) { throw "Base ref was not published: $baseRef" }
+        }
     }
 
     It 'rejects a secret-shaped base ref before adding the marker' {

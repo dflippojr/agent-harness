@@ -163,7 +163,12 @@ foreach ($relative in @('docs/root-ca.md', 'docs/users.md', 'src/rooted/homepage
 }}
 # Unknown paths with a profile directory segment fail closed, even when relative.
 $profileLike = @('docs/root/code.md', 'examples/home/reviewer/file.py', 'examples/Users/reviewer/file.py')
-foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), ('./' + ('T' * 48) + '/unknown.py'), 'outside/{known_path}', '/{known_path}', 'sk-synthetic12345678') + $profileLike) {{
+# A long word-like name is an identifier, not a token, even when it is not a known path.
+foreach ($identifier in @('outside/{known_path}', '/{known_path}')) {{
+    $result.Output = $identifier
+    Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
+}}
+foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), ('./' + ('T' * 48) + '/unknown.py'), ('./' + ('T1' * 24) + '/unknown.py'), 'sk-synthetic12345678') + $profileLike) {{
     $result.Output = $unsafe
     $failure = ''
     try {{ Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' }}

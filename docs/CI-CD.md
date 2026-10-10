@@ -246,7 +246,10 @@ form also drops link targets, brackets, inline HTML tags and emphasis or code ma
 citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and
 rendered spellings; a name counts as known only if every one of those spellings is relative. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
-tells the backend to cite only repository-relative paths and describe credentials in words. The bearer rule only
+tells the backend to cite only repository-relative paths and describe credentials in words. A run of 40 or more token characters is not
+treated as a token when it reads as an identifier (only letters, slashes, underscores and hyphens, with at least one
+underscore or hyphen and no digits), so long test and function names stay publishable. The base ref in the coverage
+marker is already validated as a branch name and is checked against the credential patterns only. The bearer rule only
 matches a token-like value (one containing a digit, or 20 or more token characters), so prose such as "a Bearer token"
 is publishable.
 

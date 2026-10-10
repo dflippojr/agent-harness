@@ -335,7 +335,10 @@ function Get-ReviewRedactionRules {
         [pscustomobject]@{ Pattern = '(?i)\bBearer\s+(?=[A-Za-z0-9._~+/=-]*[0-9]|[A-Za-z0-9._~+/=-]{20})[A-Za-z0-9._~+/=-]+'; Replacement = 'Bearer [REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(["'']?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
-        [pscustomobject]@{ Pattern = '(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
+        # A long run of token characters is rejected unless it reads as an identifier: only letters,
+        # slashes, underscores and hyphens, at least one underscore or hyphen, and no digits
+        # (test_names_like_this, Verb-NounLikeThis). Random tokens of this length almost always have digits.
+        [pscustomobject]@{ Pattern = '(?<![A-Za-z0-9+/=_-])(?!(?=[A-Za-z/]*[_-])[A-Za-z/_-]+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
     )
 }
 
@@ -452,36 +455,43 @@ function Assert-ReviewOutputSafe {
     param(
         [AllowEmptyString()][string]$Text,
         [AllowEmptyString()][string]$Workspace = '',
-        [string[]]$DiffPaths = @()
+        [string[]]$DiffPaths = @(),
+        # For validated metadata such as a branch name: credential patterns only, no path or long-token rules.
+        [switch]$CredentialsOnly
     )
 
+    $rules = @(Get-ReviewRedactionRules)
+    $credentialRules = @($rules | Where-Object { -not $_.PSObject.Properties['RepositoryPathsAllowed'] })
+    $maskableRules = @($rules | Where-Object { $_.PSObject.Properties['RepositoryPathsAllowed'] })
     $knownPaths = @()
     if ($Workspace -or $DiffPaths.Count -gt 0) {
         $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
     }
-    $mask = { param($form) if ($knownPaths.Count -gt 0) { Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths } else { $form } }
-    $rules = @(Get-ReviewRedactionRules)
     $unsafe = $false
-    # Known relative citations are masked only for the profile-segment and long-token checks, first in
-    # the raw text (so decoding cannot break a citation) and again in each decoded form.
     # Absolute roots and credential patterns always scan the unmasked text.
-    $maskedText = & $mask $Text
     foreach ($form in (Get-ReviewScanForms -Text $Text)) {
-        if ($form -match $script:ReviewAbsoluteRootPattern) { $unsafe = $true }
-        foreach ($rule in @($rules | Where-Object { -not $_.PSObject.Properties['RepositoryPathsAllowed'] })) {
+        if (-not $CredentialsOnly -and $form -match $script:ReviewAbsoluteRootPattern) { $unsafe = $true }
+        foreach ($rule in $credentialRules) {
             if ($form -match $rule.Pattern) { $unsafe = $true }
         }
     }
-    foreach ($form in (Get-ReviewScanForms -Text $maskedText)) {
-        if ((& $mask $form) -match $script:ReviewProfileSegmentPattern) { $unsafe = $true }
-    }
-    # A web link's path is checked segment by segment, so a long documentation URL is not one token.
-    # Only slashes present before decoding split it, so an encoded slash cannot divide a token, and
-    # the query and fragment stay whole: signatures there may contain Base64 slashes.
-    $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
-    foreach ($form in (Get-ReviewScanForms -Text $segmented)) {
-        foreach ($rule in @($rules | Where-Object { $_.PSObject.Properties['RepositoryPathsAllowed'] })) {
-            if ((& $mask $form) -match $rule.Pattern) { $unsafe = $true }
+    if (-not $CredentialsOnly) {
+        # Known relative citations are masked only for the profile-segment and long-token checks, first in
+        # the raw text (so decoding cannot break a citation) and again in each decoded form.
+        $maskedText = Remove-ReviewRepositoryCitations -Text $Text -Paths $knownPaths
+        foreach ($form in (Get-ReviewScanForms -Text $maskedText)) {
+            $masked = Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths
+            if ($masked -match $script:ReviewProfileSegmentPattern) { $unsafe = $true }
+        }
+        # A web link's path is checked segment by segment, so a long documentation URL is not one token.
+        # Only slashes present before decoding split it, so an encoded slash cannot divide a token, and
+        # the query and fragment stay whole: signatures there may contain Base64 slashes.
+        $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
+        foreach ($form in (Get-ReviewScanForms -Text $segmented)) {
+            $masked = Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths
+            foreach ($rule in $maskableRules) {
+                if ($masked -match $rule.Pattern) { $unsafe = $true }
+            }
         }
     }
     if ($unsafe) { throw 'Review did not complete: output failed the publication safety scan.' }
@@ -497,8 +507,9 @@ function Get-ReviewDiagnosticTail {
 
     if ([string]::IsNullOrWhiteSpace($Stderr)) { return '' }
     $tail = (@($Stderr -split "`r?`n") | Select-Object -Last $MaxLines) -join "`n"
+    $rules = @(Get-ReviewRedactionRules)
     # Credentials are redacted across the whole tail first, so a quoted value spanning lines goes too.
-    foreach ($rule in (Get-ReviewRedactionRules)) { $tail = $tail -replace $rule.Pattern, $rule.Replacement }
+    foreach ($rule in $rules) { $tail = $tail -replace $rule.Pattern, $rule.Replacement }
     $lines = foreach ($line in @($tail -split "`n")) {
         # Keep the message before a path and drop the rest of the line, which may continue the path.
         $cut = -1
@@ -510,7 +521,7 @@ function Get-ReviewDiagnosticTail {
         # Whatever remains must also be clean once decoded; redaction above is idempotent on its markers.
         $encoded = @(Get-ReviewScanForms -Text $line -PlainText | Where-Object {
             $form = $_
-            foreach ($rule in (Get-ReviewRedactionRules)) { $form = $form -replace $rule.Pattern, $rule.Replacement }
+            foreach ($rule in $rules) { $form = $form -replace $rule.Pattern, $rule.Replacement }
             ($form -cne $_) -or ($_ -match $script:ReviewAbsoluteRootPattern) -or ($_ -match $script:ReviewProfileSegmentPattern)
         }).Count -gt 0
         if ($encoded) { '[REDACTED LINE]' } else { $line }
@@ -1165,9 +1176,10 @@ function Get-ReviewDiffFilePaths {
     }
     # Unquoted headers are ambiguous when a name itself contains " b/". An unchanged name has
     # an exact a/name b/name split; renames and patches provide unambiguous extended headers.
-    if ($header.StartsWith('diff --git a/')) {
+    $unquotedPrefix = 'diff --git a/'
+    if ($header.StartsWith($unquotedPrefix)) {
         foreach ($separator in [regex]::Matches($header, ' b/')) {
-            $left = $header.Substring(13, $separator.Index - 13)
+            $left = $header.Substring($unquotedPrefix.Length, $separator.Index - $unquotedPrefix.Length)
             $right = $header.Substring($separator.Index + 3)
             if ($left -ceq $right) { $oldPath = $left; $newPath = $right; break }
         }
@@ -1350,7 +1362,7 @@ function Write-ReviewResult {
     if ($PublishMarker -and (Test-GitObjectId -Sha $HeadSha.Trim())) {
         $markerText = "sha=$($HeadSha.Trim()) mode=$postedMode"
         if (Test-ReviewBaseRef -BaseRef $BaseRef) {
-            Assert-ReviewOutputSafe -Text $BaseRef
+            Assert-ReviewOutputSafe -Text $BaseRef -CredentialsOnly
             $markerText = "$markerText base=$($BaseRef.Trim())"
         }
         $marker = "`r`n`r`n<!-- agent-review: $markerText -->"
