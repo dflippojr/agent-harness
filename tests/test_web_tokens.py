@@ -1,8 +1,8 @@
 """Design tokens and touch targets in the web app's stylesheet (#515).
 
 Colours live in the token blocks at the top of style.css (:root, the dark media block and html[data-theme=…]); every
-other rule paints with var(--…). The main text and accent pairs meet WCAG AA in the light and dark themes, and
-interactive controls are at least 44 px tall.
+other rule paints with var(--…). The text, muted, accent, primary and status pairs meet WCAG AA in the light and dark
+themes, the Appearance swatches and theme-color metas follow the tokens, and interactive controls are at least 44 px tall.
 """
 import functools
 import re
@@ -167,11 +167,13 @@ def test_dark_accent_is_a_colour_not_grey():
 
 
 def test_explicit_themes_match_the_system_ones():
+    # Light is the :root palette, so its block only pins color-scheme; Dark repeats the media block's values.
+    light = _theme_blocks()[('html[data-theme="light"]', "")]
+    assert not light, f"html[data-theme=light] should declare no tokens, only color-scheme: {sorted(light)}"
     themes = _themes()
-    for name in ("light", "dark"):
-        explicit, system = themes[name], themes[f"system {name}"]
-        differ = {k for k in system if k.startswith("--") and _resolve(explicit, explicit[k]) != _resolve(system, system[k])}
-        assert not differ, f"html[data-theme={name}] differs from the system {name} tokens: {sorted(differ)}"
+    explicit, system = themes["dark"], themes["system dark"]
+    differ = {k for k in system if _resolve(explicit, explicit[k]) != _resolve(system, system[k])}
+    assert not differ, f"html[data-theme=dark] differs from the system dark tokens: {sorted(differ)}"
 
 
 def test_profile_swatches_follow_the_tokens():

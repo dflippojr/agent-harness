@@ -454,7 +454,7 @@ dialog.sheet::backdrop { background: color-mix(in srgb, var(--text) 35%, transpa
   border-top: 1px solid var(--line); padding: 8px 16px calc(env(safe-area-inset-bottom) + 8px);
 }
 .composer .inner { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; align-items: flex-end; }
-.composer textarea { min-height: var(--tap); max-height: 160px; height: 44px; padding: 10px 12px; flex: 1; }
+.composer textarea { min-height: var(--tap); max-height: 160px; height: var(--tap); padding: 10px 12px; flex: 1; }
 
 /* diff */
 .file { margin: 10px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
@@ -666,8 +666,8 @@ dialog.sheet::backdrop { background: color-mix(in srgb, var(--text) 35%, transpa
 .action-subitem.disabled { opacity: .45; }
 .switch {
   appearance: none; -webkit-appearance: none; position: relative; flex: 0 0 auto;
-  /* A 51 x 31 track inside a 44 px tall hit area: the padding is transparent because the fill stops at the content box. */
-  /* Outer radii of 15.5 / 22 px leave 15.5 px round corners on the content box, so the painted track stays a capsule. */
+  /* A 51 x 31 track inside a 44 px tall hit area: the fill stops at the content box, so the padding stays transparent,
+     and outer radii of 15.5 / 22 px leave round 15.5 px corners on that box, so the painted track stays a capsule. */
   width: 51px; height: var(--tap); padding: calc((var(--tap) - 31px) / 2) 0; margin: 0; border: 0;
   border-radius: 15.5px / calc(var(--tap) / 2);
   background: var(--switch-off) content-box; cursor: pointer; transition: background .15s ease;
