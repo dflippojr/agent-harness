@@ -677,11 +677,15 @@ class Runner:
             self.db.after_commit(self.scheduler.recheck)
         return set_status
 
-    def _tick_clock(self, sid: str, status: str) -> None:
-        """Count the live run's time in `running` only: queue, approval, Mac and App waits are not its time (#524)."""
+    def _tick_clock(self, sid: str, _status: str = "") -> None:
+        """Count the live run's time in `running` only: queue, approval, Mac and App waits are not its time (#524).
+        Called after each status commit; it follows the status committed last, not the one that write set, since
+        commits' callbacks can run out of order (an awaited write's after a later blocking one's)."""
         clock = self._clocks.get(sid)
         if clock is None:
             return
+        s = self.db.get_session(sid)
+        status = s["status"] if s is not None else ""
         now = time.monotonic()
         if clock.since is not None:
             clock.spent += now - clock.since
@@ -945,10 +949,11 @@ class Runner:
         s = self.db.get_session(sid)
         # A recovered run goes on from the time it had spent running (a new run starts at 0: new_run() drops it).
         self._clocks[sid] = RunClock(spent=float(((s or {}).get("run") or {}).get(RUN_SECONDS) or 0))
+        started_at = ((s or {}).get("run") or {}).get("started_at")  # tells this run from one a message queues next
         watch = None
         try:
             # Every run: both deadlines are live settings, so one turned on mid-run applies to it too.
-            watch = asyncio.create_task(self._watch_deadlines(sid, asyncio.current_task()))
+            watch = asyncio.create_task(self._watch_deadlines(sid, asyncio.current_task(), started_at))
             if s.get("kind") == TOOLS_ONLY and s.get("backend", "local") not in TOOLS_ONLY_BACKENDS:
                 raise ToolsOnlyUnsupported(f"backend {s['backend']!r} can't run App-tools-only sessions")
             if s.get("backend", "local") != "local":
@@ -959,14 +964,14 @@ class Runner:
             await self._run_local(sid, s, recovered)
         except asyncio.CancelledError:
             if sid in self._deadline_hit and sid not in self.user_cancelled:
-                await finish_then_cancel(self._end_on_deadline(sid, self._deadline_hit[sid]))
+                await finish_then_cancel(self._end_on_deadline(sid, self._deadline_hit[sid], started_at))
             else:
                 await self._take_pending_cancel(sid, cancelled=True)
             raise
         except ApprovalExpired:
             if await self._take_pending_cancel(sid):
                 return
-            await self._end_on_deadline(sid, "approval_expired")
+            await self._end_on_deadline(sid, "approval_expired", started_at)
         except CliBackendError as e:
             if await self._take_pending_cancel(sid):
                 return
@@ -992,7 +997,7 @@ class Runner:
         finally:
             if watch is not None:
                 watch.cancel()
-            await asyncio.shield(self._keep_run_seconds(sid, ((s or {}).get("run") or {}).get("started_at")))
+            await asyncio.shield(self._keep_run_seconds(sid, started_at))
             self._deadline_hit.pop(sid, None)
             await asyncio.shield(self._stop_cli(sid))
             if self.modules is not None:
@@ -1007,15 +1012,16 @@ class Runner:
             self._clocks.pop(sid, None)
             self._app_waits.pop(sid, None)
 
-    async def _watch_deadlines(self, sid: str, run: asyncio.Task) -> None:
+    async def _watch_deadlines(self, sid: str, run: asyncio.Task, started_at) -> None:
         """Stop the run at a deadline wherever it is (#524), like a cancel but ending `done`:
         - a member's or an App's time running reaching `max_run_seconds` (a model call, compaction, a tool, a delegated
           call). The clock stops while the run is parked, so this follows the clock rather than a fixed deadline;
         - an approval past `approval_timeout_seconds` that the run is not waiting on itself (e.g. a recovered run
-          held for its offline Mac first): it is denied as expired. One the run waits on, `_wait_approval` expires."""
+          held for its offline Mac first): it is denied as expired. One the run waits on, `_wait_approval` expires.
+        It watches its own run (`started_at`) only: once that has ended, a run a message queued next is not its."""
         while True:
             s = self.db.get_session(sid)
-            if s is None or s["status"] not in ACTIVE:
+            if s is None or s["status"] not in ACTIVE or s["run"].get("started_at") != started_at:
                 return
             waits = [30.0]  # a new approval or a resumed clock is noticed within this
             left = self._time_left(s)
@@ -1083,11 +1089,11 @@ class Runner:
             self._deadline_hit[sid] = reason
             run.cancel()
 
-    async def _end_on_deadline(self, sid: str, reason: str) -> None:
+    async def _end_on_deadline(self, sid: str, reason: str, started_at) -> None:
         """End a run on its time budget (`budget_time`) or an expired approval (`approval_expired`): each tool call
-        it leaves gets a result, as on a cancel."""
+        it leaves gets a result, as on a cancel. Only its own run (`started_at`), not one a message queued next."""
         s = self.db.get_session(sid)
-        if s is not None and s["status"] in ACTIVE:
+        if s is not None and s["status"] in ACTIVE and s["run"].get("started_at") == started_at:
             if reason == "budget_time":
                 await self._close_unresolved(sid, "Not run: the task reached its time budget.",
                                              "Stopped: the task reached its time budget while this ran.")

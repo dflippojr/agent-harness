@@ -853,11 +853,13 @@ def test_time_budget_counts_only_time_running(tmp_path):
     m.cfg.max_run_seconds = 100
     app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
     app_session = {"id": "s1", "owner_id": OWNER_USER_ID, "app_id": app_id}
+    _insert(m, "s1", "running", app_id=app_id)
     runner = m.runner
     runner._clocks["s1"] = RunClock()
-    runner._tick_clock("s1", "running")
+    runner._tick_clock("s1")                 # after the `running` commit
     runner._clocks["s1"].since -= 30        # thirty seconds running
-    runner._tick_clock("s1", "waiting_approval")
+    m.db.update_session("s1", status="waiting_approval")
+    runner._tick_clock("s1")
     paused = runner._time_left(app_session)
     assert paused is not None and 69 < paused <= 70
     time.sleep(0.2)                          # time parked does not count
@@ -1209,6 +1211,36 @@ def test_a_finishing_runs_time_is_not_kept_on_the_next_run_a_message_queued(tmp_
         m.runner._clocks["nextrun001"] = RunClock(spent=3500)          # the old run's clock, as it ends
         await m.runner._keep_run_seconds("nextrun001", 1000.0)         # the old run's started_at
         assert RUN_SECONDS not in m.db.get_session("nextrun001")["run"]
+    asyncio.run(body())
+
+
+def test_the_clock_follows_the_status_committed_last_not_a_late_callbacks(tmp_path):
+    """A `running` write's callback can run after a later write parked the session (an awaited write's callbacks run
+    after a blocking one's): the clock stays stopped while the session is parked."""
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+    _insert(m, "lateclk001", "waiting_app", app_id=app_id)
+    m.runner._clocks["lateclk001"] = RunClock(spent=10)
+    m.runner._tick_clock("lateclk001", "running")  # the late callback of the earlier `running` commit
+    assert m.runner._clocks["lateclk001"].since is None
+
+
+def test_a_deadline_watch_leaves_the_next_run_alone(tmp_path):
+    """The old run's watch outlives its final status while its task ends; a run a message queued meanwhile is not
+    its to stop, though the old clock is spent."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        m.cfg.max_run_seconds = 1
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "nextrun002", "queued", app_id=app_id)
+        m.db.update_session("nextrun002", run={"started_at": 2000.0, HOLDS_PLACE: True})
+        m.runner._clocks["nextrun002"] = RunClock(spent=5)   # the old run's, spent
+        old = asyncio.create_task(asyncio.sleep(60))
+        await asyncio.wait_for(m.runner._watch_deadlines("nextrun002", old, 1000.0), 2)
+        assert not old.cancelled() and "nextrun002" not in m.runner._deadline_hit
+        await m.runner._end_on_deadline("nextrun002", "budget_time", 1000.0)
+        assert m.db.get_session("nextrun002")["status"] == "queued"
+        old.cancel()
     asyncio.run(body())
 
 
