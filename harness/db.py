@@ -1592,6 +1592,57 @@ class Database:
                               "WHERE id = ?", (now, key["id"], rid))
         return key, secret
 
+    # the exclusive Hub claim (#543, harness/hub_claim.py): one row at most, never a token or hash
+    @_reads
+    def hub_claim(self) -> dict | None:
+        with self.lock:
+            row = self.conn.execute("SELECT key_id, name, kind, origin, request_id, claimed_at FROM hub_claim "
+                                    "WHERE slot = 1").fetchone()
+        return dict(row) if row else None
+
+    @_writes
+    def redeem_hub_claim(self, rid: str, now: float) -> tuple[dict | None, str, str]:
+        """Mint the Hub's key (owner kind, admin scope, role `hub`), record it as the one Hub and mark the request
+        redeemed, if the request is still approved and no Hub is recorded. Returns (key row, secret, error)."""
+        import hashlib
+        with self._tx():
+            req = self.conn.execute("SELECT * FROM pairing_requests WHERE id = ? AND kind = 'hub' "
+                                    "AND state = 'approved' AND expires_at > ?", (rid, now)).fetchone()
+            if req is None:
+                return None, "", "used"
+            if self.conn.execute("SELECT 1 FROM hub_claim WHERE slot = 1").fetchone():
+                return None, "", "claimed"
+            secret = "ho-" + secrets.token_urlsafe(32)
+            key = {"id": "k-" + secrets.token_hex(4), "name": req["name"], "prefix": secret[:10], "created_at": now,
+                   "scopes": "admin", "kind": "owner", "role": "hub",
+                   "origins": [req["origin"]] if req["origin"] else [], "catalog_app_id": req["catalog_app_id"] or ""}
+            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
+                              "catalog_app_id, role) VALUES (?, ?, ?, ?, ?, 'admin', 'owner', ?, ?, 'hub')",
+                              (key["id"], key["name"], key["prefix"], hashlib.sha256(secret.encode()).hexdigest(),
+                               now, json.dumps(key["origins"]), key["catalog_app_id"]))
+            self.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, origin, request_id, claimed_at) "
+                              "VALUES (1, ?, ?, ?, ?, ?, ?)",
+                              (key["id"], key["name"], "browser" if req["origin"] else "native", req["origin"], rid,
+                               now))
+            self.conn.execute("UPDATE pairing_requests SET state = 'redeemed', finished_at = ?, key_id = ? "
+                              "WHERE id = ?", (now, key["id"], rid))
+        return key, secret, ""
+
+    @_writes
+    def release_hub(self, now: float) -> dict | None:
+        """Revoke the Hub's key and clear the record, so a new Hub may claim. Returns the released record, or None
+        when no Hub is recorded."""
+        with self._tx():
+            row = self.conn.execute("SELECT key_id, name, kind, origin, request_id, claimed_at FROM hub_claim "
+                                    "WHERE slot = 1").fetchone()
+            if row is None:
+                return None
+            self.conn.execute("UPDATE api_keys SET revoked_at = ?, erase_after = NULL WHERE id = ? "
+                              "AND revoked_at IS NULL", (now, row["key_id"]))
+            self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (row["key_id"],))
+            self.conn.execute("DELETE FROM hub_claim WHERE slot = 1")
+        return dict(row)
+
     # Agent Harness for Mac pairing is separate from browser-origin pairing. It authorizes one owner CLI token;
     # the runner token remains in its configured owner file and never enters SQLite.
     @_writes
@@ -1751,8 +1802,8 @@ class Database:
         not listed (`get_api_key(WEB_APP_ID)` reads it)."""
         with self.lock:
             rows = self.conn.execute(
-                "SELECT k.id, k.name, k.prefix, k.kind, k.scopes, k.origins, COALESCE(k.catalog_app_id, '') AS catalog_app_id, "
-                "k.created_at, k.last_used_at, k.revoked_at, "
+                "SELECT k.id, k.name, k.prefix, k.kind, k.role, k.scopes, k.origins, "
+                "COALESCE(k.catalog_app_id, '') AS catalog_app_id, k.created_at, k.last_used_at, k.revoked_at, "
                 "k.retention_days, k.erase_after, k.erased_at, "
                 "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
                 "FROM api_keys k WHERE k.kind != 'web' ORDER BY k.created_at").fetchall()
@@ -1776,8 +1827,10 @@ class Database:
         until that erasure (unused while revoked), so an undone revoke gets them back."""
         now = time.time()
         with self.lock:
+            # The Hub's key is revoked only by releasing the Hub (`release_hub`, #543).
             ok = self.conn.execute("UPDATE api_keys SET revoked_at = ?, erase_after = CASE WHEN kind = 'owner' "
-                                   "THEN NULL ELSE ? END WHERE id = ? AND revoked_at IS NULL AND kind != 'web'",
+                                   "THEN NULL ELSE ? END WHERE id = ? AND revoked_at IS NULL AND kind != 'web' "
+                                   "AND role != 'hub'",
                                    (now, now + APP_ERASE_GRACE_SECONDS, kid)).rowcount == 1
             if ok:  # an owner key has no erasure to take its settings later
                 self.conn.execute("DELETE FROM app_settings WHERE app_id = ? AND app_id IN "

@@ -125,3 +125,8 @@ Step 0052 (`member_api_keys`) adds the `member_api_keys` table to the main store
 Step 0053 (`audit_context`) adds `actor_kind`, `key_id`, `source`, `target_kind` and `metadata` to `account_audit`, so each
 household/security audit row records who (credential, entry point) made the change. Rows written before it read as
 `unknown`; no attribution is invented for them (#467).
+
+Step 0057 (`hub_claim`) adds `api_keys.role` (empty for every existing key) and the `hub_claim` table, which holds at
+most one row: the Hub key's id, display name, kind, origin and claim time, never a token or hash (#543). Rolling back
+to an older harness leaves the Hub key an ordinary owner key with the admin scope; revoke it with `harness keys revoke`
+there if you no longer want it.
