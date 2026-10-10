@@ -26,7 +26,7 @@ import secrets
 import time
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -35,13 +35,13 @@ from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
 from .policy import TOOLS_ONLY
-from . import audit_context, catalog_ids, compat, credential_audit, namespace_audit
+from . import audit_context, catalog_ids, compat, credential_audit, idempotency, namespace_audit
 
 NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.23"
+API_VERSION = "1.24"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
@@ -670,7 +670,7 @@ async def api_root(request: Request):
                 "app_tools_only_backends": [b["name"] for b in (local_view(m), *backends) if b["app_tools_only"]], "context": True, "events": "sse",
                 **m.modules.features(),
                 "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
-                "browser_pairing": True, "pairing_requests": True,
+                "browser_pairing": True, "pairing_requests": True, "idempotent_create": True,
                 "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
             **await m.modules.app_root()}
 
@@ -1022,10 +1022,48 @@ async def api_review(ref: str, action: str, request: Request):
     return m.summary(await m.review(s["id"], action, context=audit_context.owner_context(key, "app_api") if owner_key(key) else None))
 
 
-@route_table.post("/api/v1/sessions", status_code=201, response_model=SessionResponse)
-async def create_session(body: CreateAppSession, request: Request):
+def _idempotent_create(key: dict, body: CreateAppSession, idempotency_key: str | None) -> dict | None:
+    """The row an App's `Idempotency-Key` would record (#462), or None for an unkeyed request."""
+    if idempotency_key is None:
+        return None
+    if key.get("kind") != "app":
+        raise HarnessError(400, f"only an App token can send {idempotency.HEADER}", "idempotency_unsupported")
+    return idempotency.new_record(key["id"], idempotency.check_key(idempotency_key), body.model_dump(mode="json"))
+
+
+def _replay(m, key: dict, record: dict | None) -> JSONResponse | None:
+    """The session an earlier request with this key created, as a 200 replay; None when the key is free."""
+    if record is None:
+        return None
+    sid = idempotency.replayed_session(m.db.for_app(key["id"]), record)
+    if sid is None:
+        return None
+    return JSONResponse(view(m, m.db.get_session(sid)), headers={idempotency.REPLAYED_HEADER: "true"})
+
+
+_CREATE_RESPONSES = {
+    200: {"model": SessionResponse, "description": "A retry with the same Idempotency-Key and body: the session the "
+          "first request created, as it is now, with `Idempotency-Replayed: true`. Nothing new starts.",
+          "headers": {idempotency.REPLAYED_HEADER: {"description": "`true` on a replay", "schema": {"type": "string"}}}},
+    201: {"description": "A new session."},
+    409: {"description": "`idempotency_conflict`: the Idempotency-Key was used for a different request in the last "
+          "24 hours (or another conflict, such as `end_user_login_required`)."},
+    410: {"description": "`idempotency_session_erased`: the session this Idempotency-Key created was erased; it is "
+          "not created again until the key expires."},
+}
+
+
+@route_table.post("/api/v1/sessions", status_code=201, response_model=SessionResponse, responses=_CREATE_RESPONSES)
+async def create_session(body: CreateAppSession, request: Request,
+                         idempotency_key: str | None = Header(default=None, alias=idempotency.HEADER, description=(
+                             "Optional, App tokens only: 1-128 letters, digits, '-' or '_'. A retry with the same "
+                             "key and body within 24 hours returns the first request's session (200) instead of "
+                             "starting another."))):
     m = mgr(request)
     key = auth(request, "sessions")
+    record = _idempotent_create(key, body, idempotency_key)
+    if (replay := _replay(m, key, record)) is not None:
+        return replay
     user_id = "owner"
     app = None if owner_key(key) else key
     backend = body.backend
@@ -1049,12 +1087,16 @@ async def create_session(body: CreateAppSession, request: Request):
             raise HarnessError(403, "only an App token can name an end user")
         m.check_end_user(end_user, app, backend)
         await m.require_end_user_login(key["id"], end_user, backend or "")
+    # No await between this second look and the create: a concurrent request with the same key, which got past the
+    # first look while this one awaited the end user's login check, cannot slip in and create a second session.
+    if (replay := _replay(m, key, record)) is not None:
+        return replay
     s = m.create(body.prompt, project=body.project or "scratch", backend=backend, model=body.model,
                  title=body.title, app=app, app_context=context_text(key["name"], blocks) if blocks else "",
                  app_tools=body.tools, app_metadata=body.metadata, owner_id=user_id,
                  kind=TOOLS_ONLY if body.tools_only else "agent",
                  retention_days=body.retention_days if app is not None else None, end_user=end_user,
-                 context=namespace_audit.key_context(key))
+                 context=namespace_audit.key_context(key), idempotency=record)
     return view(m, s)
 
 

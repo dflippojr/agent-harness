@@ -542,7 +542,8 @@ plus first-party release/protocol compatibility and update hints; see [`compatib
 }
 ```
 
-Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token totals, ...).
+Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token totals, ...) with `201`, or with `200`
+for a retry under the same [`Idempotency-Key`](#retrying-a-create-safely-idempotency-key).
 
 - **Context** blocks are added to the session's system prompt under a note that they come from your app and are
   information, not instructions from the user. At most 60,000 characters in total.
@@ -564,6 +565,55 @@ Returns the session (`id`, `status`, `app_tools`, `metadata`, `answer`, token to
   end_user_login_required`; it never falls back to the owner's login or token, or to an App key. A request without
   `end_user` behaves as before. The session response repeats `end_user`, and the owner's usage tally is kept per
   end user.
+
+#### Retrying a create safely (`Idempotency-Key`)
+
+A create whose response never arrives (a timeout, a dropped connection, a crash on your side) may still have started
+a session. Retrying it blindly starts a second run, workspace and provider spend. Send an `Idempotency-Key` header
+instead, and send the same one on the retry:
+
+- **Opt in, App tokens only.** The key is 1-128 ASCII letters, digits, `-` or `_`; anything else is `400
+  invalid_idempotency_key`. Choose one per logical request (an order id, a UUID) and keep it with the request until you
+  have the session id. Owner, device and member tokens get `400 idempotency_unsupported`. Without the header a create
+  behaves as before; neither the daemon nor the SDK ever retries a create for you.
+- **Replay.** The first successful create returns `201`. A retry with the same key and the same body returns `200`
+  with the session as it is now (its status may have moved on) and the header `Idempotency-Replayed: true`. Nothing new
+  starts: no second session, `session_created` event, run or workspace. A retry while the first request is still in
+  flight gets the same session once that request commits.
+- **Same request only.** The key is bound to every body field (`prompt`, `end_user`, `tools`, `context`, `metadata`,
+  `retention_days`, ...; key order in JSON doesn't matter). Another body under that key is `409
+  idempotency_conflict`, which names neither request's contents nor the session.
+- **Your App's keys alone.** Keys are scoped to the calling App: the same key from another App is unrelated and
+  creates that App's own session. Authentication, origin checks and revocation apply first, so a revoked token gets
+  `401` on a retry like on anything else.
+- **Failures don't use the key.** A request refused before the session exists (`400`, `403`, `409
+  end_user_login_required`, `413`, `422`, ...) records nothing; fix it and retry with the same key.
+- **24 hours.** A key is protected for 24 hours from the first successful create. After that it is free again: the
+  same key starts a new session.
+- **Erased sessions stay erased.** If you `DELETE` the session (or retention erases it) within those 24 hours, a retry
+  with its key is `410 idempotency_session_erased`; the session is never created again from it. After the 24 hours the
+  key is free again.
+- **What is kept.** Your App's store holds one row per key: a SHA-256 hash of your App id and the key, a digest of
+  the request body, the session id, and the times. Never the key itself, the prompt, context, tools or metadata.
+  Erasing the session clears the session id from the row; the rest goes when the key expires (the next keyed create
+  removes expired rows) or when your App's store is erased. The row is written in the same transaction as the
+  session, so a daemon that crashes after creating the session but before answering still replays it after a restart.
+
+```python
+import httpx
+from harness_client import Harness
+
+h = Harness("https://tower.your-tailnet.ts.net", token="ha-...")
+key = f"order-{order.id}"  # or str(uuid.uuid4()), saved with the order before the first attempt
+for attempt in range(3):
+    try:
+        s = h.create_session("When does order A-17 ship?", idempotency_key=key)
+        break
+    except httpx.TransportError:  # the response was lost: the session may exist; the same key finds it
+        continue
+```
+
+`h.run(prompt, tools=..., idempotency_key=key)` forwards the key the same way.
 
 ### End users' own logins
 
@@ -779,7 +829,8 @@ and the response waits for its run to end, including a run that just reached `do
 and transcript, so nothing of it is written after the erase. Then its sandbox container, working directory, checkpoint
 snapshots, transcript and its `agent/<session id>` branch in a local project's repository are removed, and last its rows:
 the session, its events, tool calls and results, approvals, artifacts, checkpoints, review drafts and search entries.
-It is idempotent: deleting a session that is already gone returns `204` again. Usage counters (tokens, cost) stay
+It is idempotent: deleting a session that is already gone returns `204` again. A create retried with the
+`Idempotency-Key` that made the session gets `410 idempotency_session_erased` until the key expires. Usage counters (tokens, cost) stay
 with the owner as metadata. Older nightly backups keep the session until they rotate out (see Backups above). A
 session that ran on a runner (the Mac) has its branch and working directory there removed too when the runner is
 awake; otherwise they stay until that runner's own cleanup.
@@ -919,6 +970,7 @@ fields you don't know. Breaking changes will get `/api/v2`, with v1 kept for a t
 | 1.14 | 2026-10-03 | App-tools-only sessions (`tools_only`), `app_tools_only` discovery, `models:warm` scope for Apps |
 | 1.15 | 2026-10-03 | Per-App stores (#330): an App's sessions are its alone. `sessions:all` adds only the owner's sessions, and owner tokens no longer reach an App's sessions (404); nightly backups hold one file per App |
 | 1.17 | 2026-10-03 | Agent Harness Web's store (#330 decision 4): the owner's and members' sessions live in `<data_dir>/apps/app-web/harness.sqlite3`. An App without `sessions:all` never reads it: `/api/v1/queue` and the live session list no longer include the owner's sessions for it, and its id lookups cover its own sessions only |
+| 1.24 | 2026-10-10 | Idempotent session create (#462): an optional `Idempotency-Key` header on `POST /api/v1/sessions` (App tokens) replays the first request's session with `200` and `Idempotency-Replayed: true` for 24 hours; `409 idempotency_conflict` for another body, `410 idempotency_session_erased` after an erase. `features.idempotent_create` is `true`. SDK `create_session(..., idempotency_key=...)` and `run(..., idempotency_key=...)` |
 | 1.23 | 2026-10-09 | Zero-touch pairing requests (#519): `POST /api/v1/pair/requests`, `POST /api/v1/pair/requests/{id}/claim` and `POST /api/v1/pair/requests/{id}/token` (PKCE S256; the daemon mints the `ha-` key at redemption and returns it once). `features.pairing_requests` is `true`. SDK `Harness.request_pairing`, `claim_pairing` and `redeem_pairing`. Existing pairing codes and keys are unchanged |
 | 1.22 | 2026-10-09 | Optional `catalog_app_id` on keys and pairing codes (#518): set on `POST /pairing-codes` and `POST /keys`, copied to the key a pairing code mints, and reported by `GET /keys`, `GET /pairing-codes` and the `app` object of `POST /api/v1/pair` (now a typed `PairedAppResponse`). A label only; it grants nothing and is never in a token |
 | 1.21 | 2026-10-09 | `memory_library` and `homelab` scopes: an App session gets those tools only when its token holds the scope, and an unset `app.capabilities` means what the token's scopes allow. App sessions on a local project clone only its base branch, and erasing one deletes its `agent/<session id>` branch from a local project |

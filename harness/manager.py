@@ -62,6 +62,7 @@ class CreateOptions:
     taint: list | None = None  # untrusted sources the session starts with (taint.py)
     retention_days: float | None = None  # an App session's own retention (#330); else the App's default
     end_user: str = ""  # the App's end user whose own subscription login the session runs on (#365)
+    idempotency: dict | None = None  # the App's Idempotency-Key row, written with the session (#462)
 REMOTE_WORKSPACE_ROOT = "~/.agent-harness/workspaces"  # where runners keep session workspaces (display only)
 TOOLS_ONLY_PROMPT = ("You answer questions for the user of the App '{app}'. You have no files, shell, web access or "
                      "project; the only tools are the App's own tools. Use them to look things up, say plainly when "
@@ -474,7 +475,7 @@ class Manager:
             "taint": list(opts.taint or []), "end_user": end_user,
             **({"retention_days": float(opts.retention_days)} if app and opts.retention_days else {}),
         }
-        self._insert_created(session, app, tools, opts.job_id, prompt, context=context)
+        self._insert_created(session, app, tools, opts.job_id, prompt, context=context, idempotency=opts.idempotency)
         self._spawn(sid)
         return self.db.get_session(sid)
 
@@ -618,11 +619,14 @@ class Manager:
         return self.cfg.max_turns, self.cfg.max_completion_tokens
 
     def _insert_created(self, session: dict, app: dict | None, tools: list, job_id: str, prompt: str,
-                        *, context=None) -> None:
+                        *, context=None, idempotency: dict | None = None) -> None:
         sid = session["id"]
+        store = self.db.for_app(session["app_id"])
 
         def insert_created() -> None:
             self.db.insert_session(session)
+            if idempotency:  # same commit as the session: a crash before the response still finds it on retry
+                store.insert_idempotency_key({**idempotency, "session_id": sid})
             self.bus.emit(sid, "session_created", {**{k: session[k] for k in
                                                        ("project", "target", "model", "backend", "title")},
                                                    **({"app": app["name"], "app_tools": [t["name"] for t in tools]}
@@ -630,7 +634,7 @@ class Manager:
                                                    **({"skills": session["skills"]} if session["skills"] else {})})
             self.bus.emit(sid, "user_message", {"content": prompt})
             namespace_audit.record(self.db, session, context, "session.create", metadata={"fields": ["prompt"]})
-        self.db.for_app(session["app_id"]).write(insert_created)
+        store.write(insert_created)
 
     @staticmethod
     def _create_scope(opts: CreateOptions, prompt: str, project: str, target: str | None) -> tuple:

@@ -460,18 +460,25 @@ class Harness:
     def create_session(self, prompt: str, project: str | None = None, context: dict[str, str] | None = None,
                        tools: list[Tool] | None = None, metadata: dict | None = None, title: str | None = None,
                        model: str | None = None, backend: str = "local", tools_only: bool = False,
-                       retention_days: float | None = None, end_user: str | None = None) -> Session:
+                       retention_days: float | None = None, end_user: str | None = None,
+                       idempotency_key: str | None = None) -> Session:
         """`tools_only=True` starts an App-tools-only session: the model gets only `tools` (no workspace, project,
         built-in or CLI tools). It takes no project; backends that can't do it refuse with
         app_tools_only_unsupported. `retention_days` erases the session once it has been idle that long. `end_user`
         runs the session on that person's own Claude or Codex login (see `start_end_user_login`), or is refused with
-        end_user_login_required."""
+        end_user_login_required.
+
+        `idempotency_key` (App tokens, 1-128 letters, digits, '-' or '_') makes the create safe to retry after a lost
+        response: the same key and arguments within 24 hours return the first call's session instead of starting
+        another. A different request under the key raises HarnessError `idempotency_conflict` (409); a retry after you
+        deleted that session raises `idempotency_session_erased` (410). Nothing is retried for you."""
         body = {"prompt": prompt, "project": project if project is not None or tools_only else "scratch",
                 "backend": backend, "metadata": metadata or {}, "title": title, "model": model,
                 "context": [{"title": k, "content": v} for k, v in (context or {}).items()],
                 "tools": [t.spec() for t in tools or []], "tools_only": tools_only, "retention_days": retention_days,
                 "end_user": end_user}
-        return self._call("POST", "/sessions", json=body)
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key is not None else None
+        return self._call("POST", "/sessions", json=body, headers=headers)
 
     # end users' own subscription logins (#365)
     def start_end_user_login(self, end_user: str, backend: str) -> dict:
