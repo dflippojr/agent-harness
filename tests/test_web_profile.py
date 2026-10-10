@@ -50,15 +50,26 @@ const loc = { origin: "http://localhost", protocol: "http:", pathname: "/", hash
   replace(hash) { this.hash = hash; win.dispatchEvent({ type: "hashchange" }); } };
 let role = "owner";
 let failMenu = false;
+let backendEffort = "high";
+let backendGate = null;
 const fetched = [];
 const response = body => ({ ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => body });
-const fetch = async url => {
+const fetch = async (url, options = {}) => {
   const p = String(url).replace(/^https?:\/\/[^/]+/, "").replace(/^\/api\/(?:admin\/)?v1/, "").split("?")[0];
   fetched.push(p);
   if (p === "/me") return response({ role, name: "Owner", notify: { enabled: false } });
   if (p === "/profile") { if (failMenu) throw new Error("offline"); return response({ emoji: "🙂", choices: ["🙂"] }); }
   if (p === "/health") return response({ protocols: { admin: { min: 1, max: 99 } }, update_hint: {} });
-  if (["/keys", "/accounts", "/sessions", "/backends"].includes(p)) return response([]);
+  if (p === "/backends/claude" && options.method === "PUT") {
+    backendEffort = JSON.parse(options.body).effort;
+    return response({});
+  }
+  if (p === "/backends") {
+    const snapshot = [{ name: "claude", available: true, effort: backendEffort, today: {}, week: {} }];
+    if (backendGate) await backendGate;
+    return response(snapshot);
+  }
+  if (["/keys", "/accounts", "/sessions", "/models"].includes(p)) return response([]);
   if (p === "/config") return response({ revision: 1, settings: [] });
   return response({});
 };
@@ -94,6 +105,28 @@ assert.match(byId.app.textContent, /This device only/);
 const dark = walk(byId.app, n => n.classList.contains("theme-choice") && n.textContent === "Dark")[0];
 dark.click();
 assert.match(menuRow.textContent, /Dark · Default text/, "menu value follows the theme without remounting");
+const backendRow = rows().find(n => n.dataset.splitKey === "backends");
+assert.match(backendRow.textContent, /Claude · high/);
+await go("#/profile/backends");
+const effort = walk(byId.app, n => n.tagName === "SELECT" && n.options.some(o => o.value === "high"))[0];
+assert.ok(effort, byId.app.textContent);
+effort.value = "low";
+effort.dispatchEvent({ type: "change" });
+await sleep();
+assert.match(backendRow.textContent, /Claude · low/, "successful writes refresh the existing menu");
+await go("#/settings");
+assert.equal(rows().find(n => n.dataset.splitKey === "backends"), backendRow);
+assert.match(backendRow.textContent, /Claude · low/, "returning to Settings refreshes server values");
+let releaseBackend;
+backendGate = new Promise(resolve => { releaseBackend = resolve; });
+await go("#/profile/appearance");
+backendEffort = "high";
+backendGate = null;
+await go("#/settings");
+assert.match(backendRow.textContent, /Claude · high/);
+releaseBackend();
+await sleep();
+assert.match(backendRow.textContent, /Claude · high/, "an older read cannot overwrite a newer value");
 await go("#/actions/resources");
 assert.deepEqual(marked(), ["resources"]);
 assert.equal(profileTab.getAttribute("aria-current"), "page");
@@ -120,6 +153,7 @@ doc.dispatchEvent({ type: "keydown", key: "[", target: doc.body });
 assert.equal(doc.body.classList.contains("split-collapsed"), false);
 await go("#/agents");
 assert.equal(pane().getAttribute("aria-label"), "Agents list");
+assert.equal(win._l.hashchange.length, 1, "closing the menu removes its refresh listener");
 role = "member"; fetched.length = 0;
 await go("#/settings");
 assert.ok(!rows().some(n => ["resources", "apps", "backends"].includes(n.dataset.splitKey)));

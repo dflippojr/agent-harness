@@ -4,8 +4,10 @@
 import { settingValueText, settingMeta, recoveryNote } from "../lib/settings-text.mjs";
 import { settingInput } from "../lib/setting-input.mjs";
 import * as sheets from "../lib/sheet.mjs";
+import { refreshingSettingsApi } from "./profile.mjs";
 
 export function mountDaemonSettings({ h, fill, append, api, toast, isGuest, location, confirmSheet = sheets.confirmSheet }) {
+  api = refreshingSettingsApi(api);
   async function daemonSettingsCard() {
     let view;
     try { view = await api("/config"); }

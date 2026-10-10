@@ -10,12 +10,23 @@ import { SPLITS } from "../lib/layout.mjs";
 import { backendsValue, smartApprovalsValue, skillsValue, memoryValue, notificationsValue, resourcesValue, serverSettingsValue,
   accountsValue, remoteControlValue, appsValue, endpointValue, versionStatus, serverVersionText } from "../lib/settings-text.mjs";
 
+// A mounted desktop menu follows successful writes from any of its detail pages.
+const settingsRefreshes = new Set();
+export function refreshingSettingsApi(api) {
+  return async (path, options) => {
+    const result = await api(path, options);
+    if (options?.method && options.method !== "GET") settingsRefreshes.forEach((refresh) => refresh());
+    return result;
+  };
+}
+
 export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, h, fill, append, api, getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route,
   daemonSettingsCard, build = {}, reloadAndUpdate = async () => false, onConnState = () => () => {}, browser, confirmSheet = sheets.confirmSheet,
   promptSheet = sheets.promptSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { document, window, localStorage, location, navigator, history, getComputedStyle, requestAnimationFrame, open,
   setTimeout, clearTimeout, fetch } = browser;
+api = refreshingSettingsApi(api);
 const escalateSuffix = (row) => (row.escalate_reason ? ` (${row.escalate_reason})` : "");
 const originsSuffix = (k) => (k.origins?.length ? ` · ${k.origins.join(", ")}` : "");
 const usedSuffix = (k) => (k.last_used_at ? ` · used ${ago(k.last_used_at)}` : "");
@@ -424,6 +435,7 @@ async function viewProfile(page, extra) {
 async function settingsMenu(pane = null, me = null, profile = null) {
   const target = pane?.body || $app;
   let active = true;
+  let generation = 0;
   const values = {};
   if (pane) {
     pane.header("Settings");
@@ -476,7 +488,22 @@ async function settingsMenu(pane = null, me = null, profile = null) {
     groups.flat(),
     versionRow());
   if (pane) menuValues = values;
-  fillSettingValues(values, me);
+  if (pane) {
+    const refresh = () => {
+      const next = ++generation;
+      const current = () => active && next === generation;
+      api("/me").then((latest) => {
+        if (current()) fillSettingValues(values, latest, current);
+      }).catch((err) => console.debug("settings menu refresh", err));
+    };
+    settingsRefreshes.add(refresh);
+    window.addEventListener("hashchange", refresh);
+    pane.onLeave(() => {
+      settingsRefreshes.delete(refresh);
+      window.removeEventListener("hashchange", refresh);
+    });
+  }
+  fillSettingValues(values, me, () => active && generation === 0);
   pane?.paint();
 }
 
@@ -494,10 +521,10 @@ function serverNote() {
 
 // Paints the menu first, then each row's value as its own request answers. A failed or slow request leaves that
 // row's value blank; it never toasts or holds up the others. Only the owner's rows read the owner API.
-function fillSettingValues(values, me) {
+function fillSettingValues(values, me, current = () => true) {
   const paint = (id, value) => {
     const el = values[id];
-    if (!el || !value) return;
+    if (!current() || !el || !value) return;
     el.textContent = value.text || "";
     el.classList.toggle("warn", !!value.warn);
   };

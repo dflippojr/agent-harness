@@ -5,9 +5,11 @@ import { ago, pluralize, fmtBytes, gpuText } from "../lib/format.mjs";
 import { TARGET_LABEL } from "../lib/targets.mjs";
 import { lastUpdateText, compatibilityText, lastSeenText } from "../lib/settings-text.mjs";
 import * as sheets from "../lib/sheet.mjs";
+import { refreshingSettingsApi } from "./profile.mjs";
 
 export function mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar,
   confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet, formSheet = sheets.formSheet }) {
+  api = refreshingSettingsApi(api);
   // Issue #63: the owner switches member GitHub sign-in on/off and can erase a member's credential. The owner
   // never sees repository URLs, GitHub usernames, or codes, and cannot connect, test, or use the credential.
   function githubOwnerCard(view, rerender) {
