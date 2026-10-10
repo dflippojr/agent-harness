@@ -223,6 +223,7 @@ class Runner:
             sid = s["id"]
             self._sandboxes[sid] = Sandbox(
                 sid, Path(s["workspace"]), sb_cfg, project=project.name if project else "",
+                user_id=session_user_id(s),
                 setup=project.setup if project else "", known=self.db.has_tool_result(sid),
                 on_event=lambda type_, data: self.bus.emit(sid, type_, data))
         return self._sandboxes[s["id"]]
@@ -2122,7 +2123,7 @@ class Runner:
             remaining = self._member_clone_budget(uid)
             cap = None if remaining is None else remaining + dir_size(ws)
             return await asyncio.to_thread(
-                clone.isolated_refresh_origin, ws, storage.user_root(self.cfg, uid), cap)
+                clone.isolated_refresh_origin, ws, project.repo, storage.user_root(self.cfg, uid), cap)
         return await asyncio.to_thread(projects.refresh_origin, project, ws, base)
 
     async def _github_refresh(self, s: dict, project) -> None:

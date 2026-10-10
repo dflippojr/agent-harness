@@ -14,6 +14,7 @@ from harness.config import SandboxConfig, _project_from_spec
 class FakeDocker:
     def __init__(self):
         self.state: str | None = None
+        self.cache_label = ""
         self.calls: list[list[str]] = []
         self.exec_code = 0
 
@@ -21,9 +22,10 @@ class FakeDocker:
         self.calls.append(list(args))
         verb = args[1]
         if verb == "inspect":
-            return (0, self.state, "") if self.state else (1, "", "")
+            return (0, f"{self.state} {self.cache_label}", "") if self.state else (1, "", "")
         if verb == "run":
             self.state = "running"
+            self.cache_label = next((a.split("=", 1)[1] for a in args if a.startswith("agent-harness.cache=")), "")
         elif verb == "rm":
             self.state = None
         elif verb == "stop":
@@ -56,6 +58,39 @@ def test_cache_volumes_mounted_per_project(docker):
     run = next(c for c in docker.calls if c[1] == "run")
     assert "type=volume,source=harness-cache-pip-web,target=/root/.cache/pip" in run
     assert "type=volume,source=harness-cache-npm-web,target=/root/.npm" in run
+
+
+def test_cache_volumes_distinct_per_principal():
+    """#529: a member's slug can equal the owner's; the volumes differ and the owner's names are unchanged."""
+    def volumes(**kw):
+        return [a for a in make(project="web", **kw)._cache_mounts() if a != "--mount"]
+
+    owner = volumes()
+    assert "type=volume,source=harness-cache-pip-web,target=/root/.cache/pip" in owner
+    assert volumes(user_id="owner") == owner
+    alice, bob = volumes(user_id="u-alice"), volumes(user_id="u-bob")
+    assert len({tuple(owner), tuple(alice), tuple(bob)}) == 3
+    assert all(v.startswith("type=volume,source=harness-cache-u") and "-web," in v for v in alice + bob)
+    assert "u-alice" not in " ".join(alice)
+
+
+def test_member_container_from_before_529_is_recreated(docker):
+    """A member container without the cache label may mount the owner's caches, so it is replaced, not reused."""
+    docker.state = "running"
+    asyncio.run(make(project="web", user_id="u-alice").exec("true"))
+    assert docker.verbs()[:3] == ["inspect", "rm", "network"]
+    run = next(c for c in docker.calls if c[1] == "run")
+    assert any("source=harness-cache-u" in a for a in run)
+    assert any(a.startswith("agent-harness.cache=u") for a in run)
+    docker.calls.clear()
+    asyncio.run(make(project="web", user_id="u-alice").exec("true"))
+    assert "rm" not in docker.verbs() and "run" not in docker.verbs()
+
+
+def test_owner_container_without_cache_label_is_reused(docker):
+    docker.state = "running"
+    asyncio.run(make(project="web").exec("true"))
+    assert "rm" not in docker.verbs() and "run" not in docker.verbs()
 
 
 def test_no_cache_volumes_without_project(docker):
