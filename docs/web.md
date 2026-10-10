@@ -54,6 +54,15 @@ open**. The sidebar button in the session header, or <kbd>[</kbd>, hides the lis
 Between 768 and 1279 px the list and the session are separate pages with Back. The framework is in `lib/layout.mjs`
 (`SPLITS`, `mountSplitView`); its header comment says how another list (Jobs, Settings) joins it.
 
+From 768 px the session header is one row: Back (or the sidebar button), the title over its status, project, backend,
+model and context meter, then **Transcript / Changes / Info** and **⋯**. On phones the status line and the tabs stay
+under the bar. The transcript is a 760 px column centred in the pane, and the composer is centred on the pane, not
+the window. A pending approval is a card docked at the pane's foot: the reviewer's verdict on the left, then **Add a
+note**, **Deny** and **Approve** at the right (Cancel task is in **⋯**). Focus never jumps to Approve; it moves to the
+card's heading only when it was in the transcript or the composer. On Changes and Info a pending approval shows as a
+one-line bar with **Review**, which opens the transcript at that approval. The **⋯** menu opens under its button;
+the arrow keys, Home and End move through it, and Escape closes it and returns focus to **⋯**.
+
 ## Colours and touch targets
 
 Every colour comes from the CSS custom properties at the top of `harness/web/style.css`. The Light and Dark themes
