@@ -34,7 +34,9 @@ The response has three arrays:
 
 - `modules`: known capability switches with `name` and `state` (`present`,
   `switched_off`, `absent`), plus optional `status` detail from the runtime hook. Hooks run concurrently,
-  with a six-second timeout for both sync and async implementations. Only the first eight fields are
+  with a six-second timeout for both sync and async implementations. Sync hooks use one daemon thread
+  per runtime; a timed-out probe remains in flight and later polls reuse it until it finishes, so blocked
+  hooks cannot exhaust the shared executor or delay daemon shutdown. Only the first eight fields are
   considered; keys and string values are capped at 200 characters (long keys are dropped). Nested values,
   non-finite floats and integers larger than 64 bits are dropped. Hooks must still avoid secrets in scalars.
 - `apps`: the safe key-list fields (id, name, kind, role, scopes, origins, catalog id, existing prefix,
@@ -45,7 +47,8 @@ The response has three arrays:
   `state` (`paired` or `not_paired`), `paired` (matching key ids, including revoked
   keys), and `pending_pairing` (an unexpired pending, armed, claimed or approved app request exists).
   Both require a matching catalog id and manifest browser origin: a key must have nonempty origins all
-  listed in `app.browser_origins`, and a pending request's origin must be listed there. A catalog label
+  listed in `app.browser_origins`, and a pending request's origin must be listed there. Manifest origins
+  use the same host-case and default-port normalization as pairing; the original manifest is preserved. A catalog label
   alone never marks a trusted entry paired or pending. Native keys and requests with no origin are
   reported separately under `unverified_origin` (`paired` key ids and a `pending_pairing` boolean);
   they do not affect the entry's state. These origin checks are attribution checks, not publisher verification.

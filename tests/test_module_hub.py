@@ -358,11 +358,12 @@ def test_finite_manifest_price_survives_loading(tmp_path):
     ([], "", False, True),
     (["https://web.example.invalid", "https://attacker.example"], "https://attacker.example", False, False),
 ])
-def test_entry_attribution_requires_manifest_origins(tmp_path, origins, pending_origin, paired, unverified):
+@pytest.mark.parametrize("manifest_origin", ["https://web.example.invalid", "https://WEB.example.invalid:443"])
+def test_entry_attribution_requires_manifest_origins(tmp_path, origins, pending_origin, paired, unverified, manifest_origin):
     m = make(tmp_path, ["harness_modules.hub"])
     initialize(m.cfg.config_dir)
     doc = document()
-    doc["entries"][0]["app"]["browser_origins"] = ["https://web.example.invalid"]
+    doc["entries"][0]["app"]["browser_origins"] = [manifest_origin]
     (m.cfg.config_dir / "hub.entries.json").write_text(json.dumps(doc), encoding="utf-8")
     key, _ = m.db.create_api_key("Agent Harness Web", "sessions", kind="app", origins=origins,
                                catalog_app_id=CATALOG)
@@ -456,3 +457,43 @@ def test_status_output_is_bounded_json_scalars_only():
     assert service._bounded_status({str(i): i for i in range(100)}) == {str(i): i for i in range(8)}
     assert service._bounded_status({"x" * 201: "bad", "huge": 1 << 10000, "inf": float("inf"), 123: "bad"}) is None
     assert service._bounded_status(["synthetic-secret"]) is None
+
+
+def test_schema_valid_origin_with_invalid_port_fails_named_validation(tmp_path):
+    doc = document()
+    doc["entries"][0]["app"]["browser_origins"] = ["https://web.example.invalid:99999"]
+    with pytest.raises(EntriesError, match="app.browser_origins"):
+        load(save(tmp_path, doc))
+
+
+def test_repeated_timed_out_sync_probes_do_not_multiply_or_occupy_shared_executor(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from harness_modules.hub import service
+    monkeypatch.setattr(service, "STATUS_TIMEOUT", 0.02)
+    release = threading.Event()
+    calls = []
+
+    def blocked():
+        calls.append(True)
+        release.wait(3)
+        return {"state": "ready"}
+
+    rt = SimpleNamespace(status=blocked)
+
+    async def exercise():
+        # A stuck hook would consume the entire pool if it used the default executor.
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        try:
+            results = await asyncio.gather(*(service._detail(rt) for _ in range(10)))
+            assert results == [{"state": "error"}] * 10
+            for _ in range(5):
+                assert await service._detail(rt) == {"state": "error"}
+            assert calls == [True]
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "snapshot still runs"), 1) == "snapshot still runs"
+        finally:
+            release.set()
+            await asyncio.wait_for(service._sync_waiter(rt), 1)
+        assert await service._detail(rt) == {"state": "ready"}
+        assert calls == [True, True]
+
+    asyncio.run(exercise())

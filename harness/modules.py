@@ -384,6 +384,12 @@ def cli_groups(cfg=None) -> dict[str, str]:
     return {group: text for module in modules for group, text in module.cli_groups.items()}
 
 
+def normalize_origin(value: str) -> str:
+    """Canonical browser origin shared with key creation and pairing."""
+    from .apps import normalize_origin as normalize
+    return normalize(value)
+
+
 def normalize_catalog_app_id(value) -> str:
     """The core key/pairing label contract, also used by local module catalogs."""
     from .catalog_ids import normalize

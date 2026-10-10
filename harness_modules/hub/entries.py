@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from harness.modules import ROOT, normalize_catalog_app_id
+from harness.modules import ROOT, normalize_catalog_app_id, normalize_origin
 
 SCHEMA = ROOT / "docs" / "marketplace-manifest.schema.json"
 EXAMPLE = ROOT / "docs" / "hub.entries.example.json"
@@ -57,6 +57,11 @@ def load(path: Path) -> list[dict]:
             app_id = normalize_catalog_app_id(entry["app"]["app_id"])
         except ValueError as exc:
             raise EntriesError(f"entries[{index}].app.app_id: {exc}") from None
+        try:
+            for origin in entry["app"]["browser_origins"]:
+                normalize_origin(origin)
+        except ValueError:
+            raise EntriesError(f"entries[{index}].app.browser_origins: invalid browser origin") from None
         if app_id in seen:
             raise EntriesError(f"entries[{index}].app.app_id: duplicate id")
         seen.add(app_id)

@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 from dataclasses import fields
 import inspect
 from itertools import islice
 import math
 import time
+import threading
+
+from harness.modules import normalize_origin
 
 from .entries import load
 
@@ -16,6 +20,7 @@ KEY_FIELDS = ("id", "name", "prefix", "kind", "role", "scopes", "origins", "cata
 STORE_FIELDS = ("sessions", "usage", "errors", "last_error", "last_error_at")
 STATUS_TIMEOUT = 6
 STATUS_FIELDS = 8
+_STATUS_LOCK = threading.Lock()
 
 
 def connection_state(row, now):
@@ -51,7 +56,7 @@ def _snapshot(manager, now):
     entries = []
     for manifest in load(manager.cfg.config_dir / "hub.entries.json"):
         app_id = manifest["app"]["app_id"]
-        origins = set(manifest["app"]["browser_origins"])
+        origins = {normalize_origin(origin) for origin in manifest["app"]["browser_origins"]}
         labelled = [app for app in paired if app["catalog_app_id"] == app_id]
         ids = [app["id"] for app in labelled if app["origins"] and set(app["origins"]) <= origins]
         entries.append({"catalog_app_id": app_id, "manifest": manifest, "verified": False,
@@ -82,12 +87,41 @@ def _bounded_status(detail):
     return out or None
 
 
+def _sync_probe(rt):
+    """One daemon thread per runtime, retained after timeout; never occupy the shared executor."""
+    with _STATUS_LOCK:
+        probe = getattr(rt, "_hub_status_probe", None)
+        if probe is None or probe.done():
+            probe = Future()
+            rt._hub_status_probe = probe
+
+            def run():
+                try:
+                    probe.set_result(_bounded_status(rt.status()))
+                except Exception as error:
+                    probe.set_exception(error)
+
+            threading.Thread(target=run, name="hub-status", daemon=True).start()
+        return probe
+
+
+def _sync_waiter(rt):
+    probe = _sync_probe(rt)
+    cached = getattr(rt, "_hub_status_waiter", None)
+    if cached is None or cached[0] is not probe or cached[1].get_loop() is not asyncio.get_running_loop():
+        cached = (probe, asyncio.wrap_future(probe))
+        rt._hub_status_waiter = cached
+        # A hook can raise after every waiter timed out; consume the exception without logging secrets.
+        cached[1].add_done_callback(lambda future: future.exception() if not future.cancelled() else None)
+    return cached[1]
+
+
 async def _detail(rt):
     try:
         if inspect.iscoroutinefunction(rt.status):
             detail = await asyncio.wait_for(rt.status(), timeout=STATUS_TIMEOUT)
         else:
-            detail = await asyncio.wait_for(asyncio.to_thread(rt.status), timeout=STATUS_TIMEOUT)
+            detail = await asyncio.wait_for(asyncio.shield(_sync_waiter(rt)), timeout=STATUS_TIMEOUT)
         return _bounded_status(detail)
     except Exception:
         # Exception strings and traces may contain credentials; never return or log them.
