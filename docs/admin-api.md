@@ -107,6 +107,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/google-signin` | owner | TODO | `harness/google_signin_api.py` `google_status` |
 | GET | `/api/admin/v1/gpu` | owner (`admin` scope) | TODO | `harness_modules/local_model/routes.py` `gpu` |
 | POST | `/api/admin/v1/gpu/{action}` | owner (`admin` scope) | pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the model stays unloaded until something needs it). load: load the model now and keep it loaded for duration_seconds. unload: unload it now without holding the queue. | `harness_modules/local_model/routes.py` `gpu_action` |
+| GET | `/api/admin/v1/hub` | owner | Read module, paired-app and local unsigned-entry status and metadata. | `harness_modules/hub/routes.py` `hub_inventory` |
 | GET | `/api/admin/v1/hub-claim` | owner | Whether a Hub is claimed, its record (never a token or hash), and Hub claim requests still open. | `harness/hub_claim.py` `hub_claim_status` |
 | POST | `/api/admin/v1/hub-claim/release` | see source | Revoke the Hub's key and clear the record so a new Hub may claim (`{"confirm": true}`). Host only; the secret is checked before the body. | `harness/hub_claim.py` `release_hub` |
 | POST | `/api/admin/v1/hub-claim/requests/{rid}/approve` | see source | Approve a Hub claim with the match code the Hub shows (`{"match": "..."}`). Host only: needs the approval secret header, checked before the body. | `harness/hub_claim.py` `approve_hub_claim` |

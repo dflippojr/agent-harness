@@ -171,6 +171,7 @@ def require_admin(request: Request, mgr) -> dict | None:
         if key.get("kind") != OWNER_KIND or ADMIN_SCOPE not in scopes:
             raise HarnessError(403, "app tokens cannot use the owner API")
         _check_token_origin(request, m, key)
+        request.state.authenticated_key_id = key["id"]
         return key
     _check_browser_origin(request, m)
     ident = getattr(request.state, "access", None)

@@ -18,6 +18,7 @@ order they were extracted (the other optional features move one module per PR in
 - **Local model** ([`harness_modules/local_model/`](../harness_modules/local_model/)): llama-server supervision, warm-up, GPU holds and RAM admission
 - **Jobs** ([`harness_modules/jobs/`](../harness_modules/jobs/)): scheduled jobs and templates
 - **MCP client** ([`harness_modules/mcp_client/`](../harness_modules/mcp_client/)): owner-pinned stdio MCP tools for the native loop (#260)
+- **Hub inventory** ([docs/hub.md](hub.md)): read-only module, paired-app and local-entry inventory for the standalone Hub and CLI
 <!-- generated:end modules-list -->
 
 The optional [Hub inventory](hub.md) is read by the standalone Hub app and the CLI.

@@ -426,7 +426,7 @@ class Harness:
             self._raise_response(resp)
         return resp.json() if resp.headers.get("content-type", "").startswith(JSON_MEDIA_TYPE) else resp.content
 
-    def hub_status(self) -> dict:
+    def hub_status(self) -> HubInventory:
         """Owner/Hub-key read-only inventory. An absent Hub module answers 404."""
         resp = self.client.get("/api/admin/v1/hub")
         if resp.status_code >= 400:

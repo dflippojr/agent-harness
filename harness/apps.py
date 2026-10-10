@@ -497,6 +497,7 @@ def auth(request: Request, scope: str) -> dict:
         raise HarnessError(403, f"this token lacks the {scope!r} scope")
     _check_token_origin(request, m, key)
     key["scope_set"] = scopes
+    request.state.authenticated_key_id = key["id"]
     return key
 
 

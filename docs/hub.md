@@ -39,6 +39,10 @@ The response has three arrays:
   `state` (`paired` or `not_paired`), `paired` (matching key ids, including revoked
   keys), and `pending_pairing` (an unexpired pending, armed, claimed or approved app request exists).
 
+Successful scoped App/device and owner/Hub bearer authentication records `last_used_at` asynchronously in
+the main store, including session creation/polling and admin reads. Rejected scope/origin credentials do not
+record activity, and a metadata-write failure never changes a completed operation’s response.
+
 States: erasure pending takes precedence over revoked, then never used, active (age <= 15 minutes), idle
 (age <= 7 days), and stale. Errors are flagged when the last recorded error is within 24 hours. Token age
 is reported in seconds; there is no token expiry. `harness_hub_apps{state="..."}` counts keys per state

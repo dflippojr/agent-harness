@@ -1852,6 +1852,13 @@ class Database:
             row = self.conn.execute("SELECT * FROM api_keys WHERE id = ?", (kid,)).fetchone()
         return _row(row)
 
+    @_writes
+    def touch_api_key(self, kid: str) -> None:
+        """Record successful credential authentication without opening its App store."""
+        with self.lock:
+            self.conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ? AND revoked_at IS NULL",
+                              (time.time(), kid))
+
     @_reads
     def list_api_keys(self) -> list[dict]:
         """The keys: every App's, device's and owner token's. Agent Harness Web's registry row has no key, so it is

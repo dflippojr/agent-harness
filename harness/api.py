@@ -385,6 +385,13 @@ async def _access_guard(request: Request, call_next):
         response = await call_next(request)
     finally:
         namespace_audit.gap.reset(warning_token)
+    authenticated_key_id = getattr(request.state, "authenticated_key_id", None)
+    if authenticated_key_id is not None:
+        try:
+            await m.db.main.awrite(m.db.main.touch_api_key, authenticated_key_id)
+        except Exception:
+            # Activity metadata must not turn a completed operation into an apparent failure.
+            log.warning("key activity metadata could not be recorded")
     if warnings:
         response.headers["X-Agent-Harness-Audit-Warning"] = "audit_gap"
         response.headers["Access-Control-Expose-Headers"] = "X-Agent-Harness-Audit-Warning"

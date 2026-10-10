@@ -202,6 +202,7 @@ def test_presence_disabled_absent_and_owner_auth(tmp_path):
         assert client.get(PATH).status_code == 401
         for token in (owner_token, hub_token):
             assert client.get(PATH, headers={"Authorization": f"Bearer {token}"}).status_code == 200
+            assert m.db.api_key_by_secret(token)["last_used_at"] is not None
         for token in (app_token, device_token):
             assert client.get(PATH, headers={"Authorization": f"Bearer {token}"}).status_code == 403
     absent = make(tmp_path / "absent", [])
