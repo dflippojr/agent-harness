@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -24,6 +25,13 @@ def _no_remote(uri):
     raise NoSuchResource(ref=uri)
 
 
+def _finite_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite JSON number")
+    return number
+
+
 def load(path: Path) -> list[dict]:
     try:
         text = path.read_text(encoding="utf-8")
@@ -32,7 +40,7 @@ def load(path: Path) -> list[dict]:
     except (OSError, UnicodeError):
         raise EntriesError("hub.entries: unreadable file") from None
     try:
-        document = json.loads(text)
+        document = json.loads(text, parse_float=_finite_number, parse_constant=_finite_number)
     except (ValueError, UnicodeError):
         raise EntriesError("hub.entries: invalid JSON") from None
     if not isinstance(document, dict) or set(document) != {"entries"} or not isinstance(document["entries"], list):

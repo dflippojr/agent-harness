@@ -325,3 +325,19 @@ def test_shared_runtime_detail_is_omitted_for_disabled_switch(tmp_path, guard_en
             assert rows["gpu_guard"]["status"] == rows["local_model"]["status"]
         else:
             assert rows["gpu_guard"] == {"name": "gpu_guard", "state": "switched_off"}
+
+
+@pytest.mark.parametrize("price", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
+def test_entries_reject_non_finite_json_prices(tmp_path, price):
+    doc = document()
+    doc["entries"][0]["app"]["monetization"]["price_usd"] = "PRICE_MARKER"
+    path = tmp_path / "entries.json"
+    path.write_text(json.dumps(doc).replace('"PRICE_MARKER"', price), encoding="utf-8")
+    with pytest.raises(EntriesError, match="invalid JSON"):
+        load(path)
+
+
+def test_finite_manifest_price_survives_loading(tmp_path):
+    doc = document()
+    doc["entries"][0]["app"]["monetization"]["price_usd"] = 2.5
+    assert load(save(tmp_path, doc))[0]["app"]["monetization"]["price_usd"] == 2.5
