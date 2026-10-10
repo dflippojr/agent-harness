@@ -640,14 +640,25 @@ class Harness:
     def attach(self, sid: str, tools: list[Tool] | None = None,
                on_event: Callable[[dict], None] | None = None) -> RunResult:
         """Attach to an existing session's current run: serve its pending App tool calls and return the result.
+        Deliver already-requested pending approvals to `on_event` before following new events.
 
         Sends and creates nothing. A finished session is returned as is. Only one driver should own a session."""
         s = self.session(sid)
         result = RunResult(session=s)
         if s.get("status") in ("done", "failed", "cancelled"):
             return result
+        after = s.get("last_event_seq") or 0
+        if on_event:
+            pending = {a["id"] for a in self.pending_approvals(sid)}
+            if pending:
+                for event in self.events(sid, follow=False):
+                    if event["seq"] > after:
+                        break  # newer approvals arrive through the following stream
+                    if event["type"] == "approval_requested" and event["data"]["id"] in pending:
+                        result.events.append(event)
+                        on_event(event)
         return self._drive(sid, {t.name: t for t in tools or []}, result, on_event,
-                           after=s.get("last_event_seq") or 0, confirm_replays=True)
+                           after=after, confirm_replays=True)
 
     # images
     def generate_image(self, prompt: str, model: str = "fast", aspect_ratio: str = "1:1", wait: bool = True,

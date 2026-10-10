@@ -1093,10 +1093,9 @@ async def create_session(body: CreateAppSession, request: Request,
             raise HarnessError(403, "only an App token can name an end user")
         m.check_end_user(end_user, app, backend)
         await m.require_end_user_login(key["id"], end_user, backend or "")
-    # No await between this second look and the create: a concurrent request with the same key, which got past the
-    # first look while this one awaited the end user's login check, cannot slip in and create a second session.
-    if (replay := _replay(m, key, record)) is not None:
-        return replay
+        # Another request may have committed while the login check awaited. No await between this look and create.
+        if (replay := _replay(m, key, record)) is not None:
+            return replay
     s = m.create(body.prompt, project=body.project or "scratch", backend=backend, model=body.model,
                  title=body.title, app=app, app_context=context_text(key["name"], blocks) if blocks else "",
                  app_tools=body.tools, app_metadata=body.metadata, owner_id=user_id,
