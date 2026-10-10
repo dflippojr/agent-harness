@@ -334,87 +334,26 @@ function Get-ReviewRedactionRules {
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(["'']?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
         [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
-        [pscustomobject]@{ Pattern = '(?i)(?<![\p{L}\p{N}\p{M}_./\\-])(?:file:/+)?(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|//[^/\s]+/+(?:[^/\s]+/+)*Users/+[^/\s]+|/+(?:Users|home)/+[^/\s]+|/+root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]'; NormalizeProfilePaths = $true }
     )
 }
 
-function Convert-ReviewProfilePathForms {
-    param([string]$Text, [string]$Pattern)
+# Path checks never canonicalize a path. Instead they reject the spellings that could name one:
+# any Windows absolute root (drive, UNC or extended prefix, file URI) anywhere in the text, and any
+# separator followed by a profile directory name unless it is part of a known repository path.
+# Dot segments, quoting and whitespace cannot hide either form, so no path parsing is needed.
+$script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|\bfile:[\\/]'
+# Trailing periods, spaces or short-name tildes still match (Windows aliases); users.md or rooted do not.
+$script:ReviewProfileSegmentPattern = '(?i)[\\/](?:users|home|root|documents and settings)(?![\p{L}\p{N}\p{M}_-])(?!\.[\p{L}\p{N}])'
 
-    $normalize = {
-        param($match)
-        $uri = $null
-        if ([Uri]::TryCreate($match.Value, [UriKind]::Absolute, [ref]$uri) -and $uri.IsFile) {
-            $path = [Uri]::UnescapeDataString($uri.AbsolutePath)
-            if ($uri.IsUnc -and $uri.Host -ne 'localhost') { $path = '//' + $uri.Host + $path }
-            # Keep every decoded URI separate from earlier unquoted paths on the same line.
-            return '"' + $path + '"'
-        }
-        return $match.Value
-    }.GetNewClosure()
-    $normalized = [regex]::Replace($Text, '(?i)\bfile:[^\s<>"`]+', $normalize)
-    $normalized = $normalized.Replace('\', '/')
-    # Resolve namespace roots before dot segments so UNC paths keep their server/share boundary.
-    $normalized = [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)Volume\{[0-9a-f-]+\}/+', ' C:/')
-    $normalized = [regex]::Replace($normalized, '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:/{2,}[?.]/+GLOBALROOT)?/+Device/[^/\s]+/+', ' C:/')
-    $namespace = {
-        param($match)
-        if ($match.Value -match '(?i)UNC/+$') { return ' //' }
-        return ' '
-    }
-    $normalized = [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)(?:(?=[A-Z]:/+)|UNC/+)', $namespace)
-    $rootPattern = '(?:[A-Z]:/+|/+)'
-    $nextRoot = '(?i)(?<![\p{L}\p{N}\p{M}_./-])' + $rootPattern
-    # Canonicalize absolute path spellings as strings, without touching the filesystem.
-    $canonicalize = {
-        param($match)
-        $path = $match.Groups['Path'].Value
-        $quote = $match.Groups['Quote'].Value
-        if (-not $quote) { $quote = '"' }
-        $candidates = @($path)
-        # Check every root independently, while retaining the full candidate for spaced directory names.
-        foreach ($root in [regex]::Matches($path, $nextRoot)) {
-            if ($root.Index -gt 0) { $candidates += $path.Substring($root.Index) }
-        }
-        $preferred = $null
-        foreach ($path in $candidates) {
-            $prefix = '/'
-            $rootDepths = @(0)
-            $windowsPath = $false
-            if ($path -match '^([A-Za-z]:)/+') {
-                $windowsPath = $true
-                $prefix = $Matches[1] + '/'
-                $path = $path.Substring($Matches[0].Length)
-            } else {
-                if ($path.StartsWith('//')) { $prefix = '//'; $rootDepths = @(2, 0); $windowsPath = $true }
-                $path = $path.TrimStart('/')
-            }
-            # Double-leading slashes can be UNC or POSIX. Reject a profile under either interpretation.
-            foreach ($minimum in $rootDepths) {
-                $parts = New-Object System.Collections.Generic.List[string]
-                foreach ($part in ($path -split '/+')) {
-                    if ($windowsPath) { $part = $part.TrimEnd(' ') }
-                    if (-not $part -or $part -eq '.') { continue }
-                    if ($part -eq '..') {
-                        if ($parts.Count -gt $minimum) { $parts.RemoveAt($parts.Count - 1) }
-                        continue
-                    }
-                    if ($windowsPath) { $part = $part.TrimEnd('.') }
-                    if (-not $part) { continue }
-                    $parts.Add($part)
-                    # Once a protected prefix appears, later prose or another path must not erase it.
-                    $candidate = $prefix + ($parts -join '/')
-                    if ($candidate -match $Pattern) { return $quote + $candidate + $quote }
-                }
-                $candidate = $prefix + ($parts -join '/')
-                if ($null -eq $preferred) { $preferred = $candidate }
-                if ($candidate -match $Pattern) { return $quote + $candidate + $quote }
-            }
-        }
-        return $quote + $preferred + $quote
-    }.GetNewClosure()
-    $pathForms = '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:(?<Quote>[`"''])\s*(?<Path>' + $rootPattern + '[^\r\n]*?)\k<Quote>|(?<Path>' + $rootPattern + '[^\r\n]*))'
-    return [regex]::Replace($normalized, $pathForms, $canonicalize)
+function Get-ReviewScanForms {
+    param([AllowEmptyString()][string]$Text)
+
+    # Scan what a reader would see as well as the raw text: percent escapes, HTML entities,
+    # invisible format characters, compatibility characters and Markdown backslash escapes.
+    $decoded = [System.Net.WebUtility]::HtmlDecode([Uri]::UnescapeDataString($Text))
+    $decoded = ($decoded -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
+    $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
+    return @(@($Text, $decoded, $unescaped) | Select-Object -Unique)
 }
 
 function ConvertFrom-ReviewGitQuotedPath {
@@ -483,25 +422,24 @@ function Assert-ReviewOutputSafe {
         [string[]]$DiffPaths = @()
     )
 
-    $knownPaths = $null
-    foreach ($rule in (Get-ReviewRedactionRules)) {
-        $scanText = $Text
-        $profileRule = [bool]$rule.PSObject.Properties['NormalizeProfilePaths']
-        $repositoryRule = [bool]$rule.PSObject.Properties['RepositoryPathsAllowed']
-        if (($profileRule -or $repositoryRule) -and ($Workspace -or $DiffPaths.Count -gt 0)) {
-            if ($null -eq $knownPaths) { $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths) }
-            # Exact known relative citations cannot be absolute profile paths. Drive/root prefixes never match.
-            # Credential and provider-token patterns always scan the original body.
-            $scanText = Remove-ReviewRepositoryCitations -Text $scanText -Paths $knownPaths
+    $knownPaths = @()
+    if ($Workspace -or $DiffPaths.Count -gt 0) {
+        $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
+        # The decoded scan form is NFKC-normalized, so its citations must match normalized names too.
+        $knownPaths = @($knownPaths + @($knownPaths | ForEach-Object { $_.Normalize([Text.NormalizationForm]::FormKC) }) | Select-Object -Unique)
+    }
+    foreach ($form in (Get-ReviewScanForms -Text $Text)) {
+        # Known relative citations are masked only for the profile-segment and long-token checks.
+        # Absolute roots and credential patterns always scan the unmasked text.
+        $masked = if ($knownPaths.Count -gt 0) { Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths } else { $form }
+        $unsafe = ($form -match $script:ReviewAbsoluteRootPattern) -or ($masked -match $script:ReviewProfileSegmentPattern)
+        # A web link is checked segment by segment, so a long documentation URL is not one token.
+        $segmented = [regex]::Replace($masked, '(?i)\bhttps?://[^\s<>"`]+', { param($url) $url.Value.Replace('/', ' ') })
+        foreach ($rule in (Get-ReviewRedactionRules)) {
+            $scanText = if ($rule.PSObject.Properties['RepositoryPathsAllowed']) { $segmented } else { $form }
+            if ($scanText -match $rule.Pattern) { $unsafe = $true }
         }
-        if ($rule.PSObject.Properties['NormalizeProfilePaths']) {
-            # Canonicalization must not weaken a profile-path match already present in the original body.
-            if ($scanText -match $rule.Pattern) { throw 'Review did not complete: output failed the publication safety scan.' }
-            $scanText = Convert-ReviewProfilePathForms -Text $scanText -Pattern $rule.Pattern
-        }
-        if ($scanText -match $rule.Pattern) {
-            throw 'Review did not complete: output failed the publication safety scan.'
-        }
+        if ($unsafe) { throw 'Review did not complete: output failed the publication safety scan.' }
     }
 }
 
@@ -514,14 +452,25 @@ function Get-ReviewDiagnosticTail {
     )
 
     if ([string]::IsNullOrWhiteSpace($Stderr)) { return '' }
-    $lines = @($Stderr -split "`r?`n")
-    $redacted = (($lines | Select-Object -Last $MaxLines) -join [Environment]::NewLine)
-    foreach ($rule in (Get-ReviewRedactionRules)) {
-        if ($rule.PSObject.Properties['NormalizeProfilePaths']) {
-            $redacted = Convert-ReviewProfilePathForms -Text $redacted -Pattern $rule.Pattern
+    $lines = foreach ($line in @(@($Stderr -split "`r?`n") | Select-Object -Last $MaxLines)) {
+        foreach ($rule in (Get-ReviewRedactionRules)) { $line = $line -replace $rule.Pattern, $rule.Replacement }
+        # Keep the message before a path and drop the rest of the line, which may continue the path.
+        $cut = -1
+        foreach ($pattern in @($script:ReviewAbsoluteRootPattern, $script:ReviewProfileSegmentPattern)) {
+            $match = [regex]::Match($line, $pattern)
+            if ($match.Success -and ($cut -lt 0 -or $match.Index -lt $cut)) { $cut = $match.Index }
         }
-        $redacted = $redacted -replace $rule.Pattern, $rule.Replacement
+        if ($cut -ge 0) {
+            $line.Substring(0, $cut) + '[REDACTED PATH]'
+        } elseif (@(Get-ReviewScanForms -Text $line | Where-Object {
+            $_ -match $script:ReviewAbsoluteRootPattern -or $_ -match $script:ReviewProfileSegmentPattern
+        }).Count -gt 0) {
+            '[REDACTED LINE]'
+        } else {
+            $line
+        }
     }
+    $redacted = @($lines) -join [Environment]::NewLine
     if ($redacted.Length -gt $MaxCharacters) {
         $redacted = $redacted.Substring($redacted.Length - $MaxCharacters)
     }

@@ -6,6 +6,7 @@ Describe 'Review publication safety' {
     }
 
     It 'rejects unsafe backend output without a posted body' -TestCases @(
+        # Credentials and long tokens.
         @{ Payload = 'sk-synthetic12345678' }
         @{ Payload = 'ghp_synthetic12345678' }
         @{ Payload = ('T' * 48) }
@@ -15,61 +16,43 @@ Describe 'Review publication safety' {
         @{ Payload = ('{"api_key":"' + ('A' * 32) + '"}') }
         @{ Payload = '{"password":"short"}' }
         @{ Payload = "'password'='short'" }
+        @{ Payload = ('https://example.invalid/download?sig=' + ('A' * 48)) }
+        # Any Windows absolute root, whatever follows it: no path is parsed or canonicalized.
+        @{ Payload = 'C:/public/config.py' }
         @{ Payload = 'C:\Users\reviewer\.claude\credentials.json' }
-        @{ Payload = 'C:/Users/reviewer/.codex/auth.json' }
-        @{ Payload = 'C:/./Users/reviewer/.codex/auth.json' }
         @{ Payload = 'C:/temp/../Users/reviewer/.codex/auth.json' }
-        @{ Payload = 'C:/temp/../Users/reviewer/.codex/auth.json followed by ../../../../../public/config.py' }
-        @{ Payload = '"file at C:/temp/../Users/reviewer/.codex/auth.json followed by ../../../../../public/config.py"' }
-        @{ Payload = 'C:\Users.\reviewer\.codex\auth.json' }
-        @{ Payload = 'C:\Users...\reviewer\.codex\auth.json' }
-        @{ Payload = '"C:\Users \reviewer\.codex\auth.json"' }
         @{ Payload = '"C:\Program Files\..\Users\reviewer\.codex\auth.json"' }
-        @{ Payload = 'C:\Program Files\..\Users\reviewer\.codex\auth.json' }
-        @{ Payload = '"file at C:\Program Files\..\Users\reviewer\.codex\auth.json"' }
-        @{ Payload = "'C:\Program Files\..\Users\reviewer\.codex\auth.json'" }
-        @{ Payload = '`C:\Program Files\..\Users\reviewer\.codex\auth.json`' }
-        @{ Payload = '"\\?\C:\Program Files\..\Users\reviewer\.codex\auth.json"' }
-        @{ Payload = '"/var/data folder/../../home/reviewer/.codex/auth.json"' }
-        @{ Payload = '"\\server\share\folder name\..\Users\reviewer\.codex\auth.json"' }
-        @{ Payload = 'file:///C:/Program%20Files/%2e%2e/Users/reviewer/.codex/auth.json' }
-        @{ Payload = 'C:/Users//reviewer/.codex/auth.json' }
-        @{ Payload = '/home//reviewer/.codex/auth.json' }
-        @{ Payload = '/tmp/../home/reviewer/.codex/auth.json' }
-        @{ Payload = '//tmp/../home/reviewer/.codex/auth.json' }
-        @{ Payload = '///home///reviewer/.codex/auth.json' }
-        @{ Payload = '\\?\C:\temp\..\Users\reviewer\.codex\auth.json' }
-        @{ Payload = '\\server\share\temp\..\Users\reviewer\.codex\auth.json' }
-        @{ Payload = 'file:///home//reviewer/.codex/auth.json' }
-        @{ Payload = '/Users/reviewer/.claude/credentials.json' }
-        @{ Payload = '/home/reviewer/.codex/auth.json' }
-        @{ Payload = '/root/.codex/auth.json' }
-        @{ Payload = '/root' }
-        @{ Payload = '/root/../public/config.py' }
-        @{ Payload = '[profile](file:///home/reviewer/.codex/auth.json)' }
-        @{ Payload = 'file:///h%6fme/reviewer/.codex/auth.json' }
-        @{ Payload = 'C:/public/config.py followed by file:///h%6fme/reviewer/.codex/auth.json' }
-        @{ Payload = 'C:/public/config.py followed by file:///C:/%55sers/reviewer/.codex/auth.json' }
-        @{ Payload = 'C:/public/config.py followed by C:/temp/../../Users/reviewer/.codex/auth.json' }
-        @{ Payload = 'C:/public/config.py followed by /tmp/../../home/reviewer/.codex/auth.json' }
-        @{ Payload = 'profile:C:/temp/../Users/reviewer/.codex/auth.json' }
-        @{ Payload = 'profile:/tmp/../home/reviewer/.codex/auth.json' }
         @{ Payload = 'C:\temp,dir\..\Users\reviewer\file.py' }
-        @{ Payload = 'C:\temp;dir\..\Users\reviewer\file.py' }
-        @{ Payload = 'C:\temp(dir)\..\Users\reviewer\file.py' }
-        @{ Payload = 'C:\temp`dir\..\Users\reviewer\file.py' }
-        @{ Payload = "C:\temp'dir\..\Users\reviewer\file.py" }
-        @{ Payload = '/tmp<dir>/../home/reviewer/file.py' }
-        @{ Payload = 'file:///C:/Users/reviewer/.codex/auth.json' }
+        @{ Payload = 'profile:C:/temp/../Users/reviewer/.codex/auth.json' }
+        @{ Payload = '\\server\share\folder\config.py' }
         @{ Payload = '\\?\C:\Users\reviewer\.codex\auth.json' }
         @{ Payload = '\\.\C:\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '\\?\Volume{12345678-1234-1234-1234-123456789abc}\config.py' }
         @{ Payload = '\??\C:\Users\reviewer\.codex\auth.json' }
-        @{ Payload = '\\?\UNC\server\share\Users\reviewer\.codex\auth.json' }
-        @{ Payload = '\\server\share\Users\reviewer\.codex\auth.json' }
+        @{ Payload = 'file:///tmp/config.py' }
+        @{ Payload = '[profile](file:///home/reviewer/.codex/auth.json)' }
         @{ Payload = 'file://server/share/Users/reviewer/.codex/auth.json' }
-        @{ Payload = '\\?\Volume{12345678-1234-1234-1234-123456789abc}\Users\reviewer\.codex\auth.json' }
+        # Any separator followed by a profile directory name outside a known repository path.
+        @{ Payload = '/home/reviewer/.codex/auth.json' }
+        @{ Payload = '/Users/reviewer/.claude/credentials.json' }
+        @{ Payload = '/root' }
+        @{ Payload = '/root/../public/config.py' }
+        @{ Payload = '/tmp/../home/reviewer/.codex/auth.json' }
+        @{ Payload = '"/var/data folder/../../home/reviewer/.codex/auth.json"' }
+        @{ Payload = '/tmp<dir>/../home/reviewer/file.py' }
         @{ Payload = '\Device\HarddiskVolume1\Users\reviewer\.codex\auth.json' }
-        @{ Payload = '\\?\GLOBALROOT\Device\HarddiskVolume1\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '\Device\HarddiskVolume1\Users.\reviewer\auth.json' }
+        @{ Payload = '\Device\HarddiskVolume1\USERS~1\reviewer\auth.json' }
+        @{ Payload = '\Documents and Settings\reviewer\auth.json' }
+        @{ Payload = 'app/[locale]/home/components/Nav.tsx' }
+        # Encodings a reader would see decoded.
+        @{ Payload = '/h%6fme/reviewer/.codex/auth.json' }
+        @{ Payload = '&#47;home&#47;reviewer&#47;auth.json' }
+        @{ Payload = 'C&#58;&#92;Users&#92;reviewer' }
+        @{ Payload = '\/home\/reviewer\/auth.json' }
+        @{ Payload = 'C\:\\Users\\reviewer' }
+        @{ Payload = ([string][char]0xFF0F + 'home' + [char]0xFF0F + 'reviewer') }
+        @{ Payload = ('/ho' + [char]0x200B + 'me/reviewer') }
     ) {
         param($Payload)
         $fakeRunner = {
@@ -90,6 +73,35 @@ Describe 'Review publication safety' {
         if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'Unsafe or stale body was retained' }
     }
 
+    It 'publishes ordinary review text' -TestCases @(
+        @{ Payload = 'ops/review/run-review.ps1:340: the regex `[\\/]` misses `"\\n"`.' }
+        @{ Payload = 'See https://learn.microsoft.com/dotnet/standard/io/file-path-formats#trim-characters.' }
+        @{ Payload = 'docs/users.md, docs/root-ca.md and src/rooted/homepage.py' }
+        @{ Payload = 'The old side is /dev/null; the shebang is /usr/bin/env.' }
+        @{ Payload = '`$env:USERPROFILE` and `~/.claude/settings.json` are inherited.' }
+        @{ Payload = 'Call 127.0.0.1:8100/gpu or localhost:8100/gpu.' }
+    ) {
+        param($Payload)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if (-not $body.Contains($Payload)) { throw 'Safe review text was not published unchanged' }
+    }
+
+    It 'publishes a profile-named directory only as a known repository path' {
+        $known = 'app/[locale]/home/components/Nav.tsx'
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "$known`:3: finding" }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -DiffPaths @($known)
+        if (-not (Get-Content -Raw -LiteralPath $script:reviewOutputPath).Contains($known)) { throw 'Known path was not published' }
+        foreach ($prefix in @('/home/reviewer/', 'C:/Users/reviewer/', '/tmp/../home/reviewer/')) {
+            $result.Output = "$prefix$known`:3: finding"
+            $failure = ''
+            try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -DiffPaths @($known) }
+            catch { $failure = $_.Exception.Message }
+            if ($failure -notlike 'Review did not complete*') { throw "A known path exempted the profile prefix $prefix" }
+        }
+    }
+
     It 'publishes a safe review and its validated coverage marker' {
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = 'No significant findings.' }
         Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40)
@@ -105,5 +117,14 @@ Describe 'Review publication safety' {
         catch { $failure = $_.Exception.Message }
         if ($failure -notlike 'Review did not complete*') { throw 'Base ref bypassed the publication gate' }
         if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'Unsafe base ref was published' }
+    }
+
+    It 'keeps the diagnostic message before a path and redacts the rest of the line' {
+        $tail = Get-ReviewDiagnosticTail -Stderr "error: open C:\Users\reviewer\auth.json failed`nplain line`nsee /home/reviewer/.codex`nprofile file:///h%6fme/reviewer`ntoken=synthetic-value"
+        $lines = @($tail -split "`r?`n")
+        if ($tail -like '*reviewer*' -or $tail -like '*synthetic-value*') { throw 'Diagnostic tail leaked a path or token' }
+        if ($lines[0] -ne 'error: open [REDACTED PATH]' -or $lines[1] -ne 'plain line') { throw "Unexpected redaction: $tail" }
+        if ($lines[3] -ne 'profile [REDACTED PATH]') { throw "Unexpected URL redaction: $tail" }
+        if ((Get-ReviewDiagnosticTail -Stderr '&#47;home&#47;reviewer') -ne '[REDACTED LINE]') { throw 'Encoded profile path survived' }
     }
 }

@@ -202,6 +202,8 @@ jobs:
 
             The embedded diff is authoritative for what changed. The workspace is the pull request head and is available only for surrounding code, history, and blame context.
 
+            Cite files only by repository-relative path. Never write an absolute filesystem path (drive letters, UNC or file: paths, or anything under a home, Users or root directory), a credential, or a long opaque token, even as an example; describe it in words instead. The job discards the whole review if its text contains any of these.
+
             Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts it as the PR comment. Only after you have actually inspected the embedded diff and reported findings or no significant findings, end with exactly two lines. First a verdict line: `REVIEW_VERDICT: CLEAN` if you reported no findings, or `REVIEW_VERDICT: FINDINGS <n>` where <n> is the number of items you listed under Findings (advisory style and structure suggestions are never counted). Then a final line exactly `REVIEW_STATUS: COMPLETE`. Do not print either line if you could not inspect the diff.
         run: |
           & .\.review-tooling\ops\review\run-review.ps1 `

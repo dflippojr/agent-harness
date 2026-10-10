@@ -157,11 +157,13 @@ Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -Dif
 $rename = Get-ReviewDiffEmbedding -Diff "diff --git a/{known_path} b/short.py`nsimilarity index 100%`nrename from {known_path}`nrename to short.py"
 if (@($rename.FilePaths).Count -ne 2) {{ throw 'Both rename paths must be retained' }}
 Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' -DiffPaths @($rename.FilePaths)
-foreach ($relative in @('docs/root-ca.md', 'docs/root/code.md', 'examples/home/reviewer/file.py', 'examples/Users/reviewer/file.py')) {{
+foreach ($relative in @('docs/root-ca.md', 'docs/users.md', 'src/rooted/homepage.py')) {{
     $result.Output = $relative
     Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}'
 }}
-foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), ('./' + ('T' * 48) + '/unknown.py'), 'outside/{known_path}', '/{known_path}', 'sk-synthetic12345678')) {{
+# Unknown paths with a profile directory segment fail closed, even when relative.
+$profileLike = @('docs/root/code.md', 'examples/home/reviewer/file.py', 'examples/Users/reviewer/file.py')
+foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), ('./' + ('T' * 48) + '/unknown.py'), 'outside/{known_path}', '/{known_path}', 'sk-synthetic12345678') + $profileLike) {{
     $result.Output = $unsafe
     $failure = ''
     try {{ Write-ReviewResult -Result $result -OutputPath $out -Workspace '{tmp_path}' }}
@@ -238,7 +240,7 @@ foreach ($formatted in @('(/home/reviewer/config.py)', '`/home/reviewer/config.p
     assert "known relative paths and absolute profiles verified" in result.stdout
 
 
-def test_unicode_relative_paths_are_not_absolute_profiles(tmp_path):
+def test_known_unicode_paths_publish_and_diagnostics_redact_profile_segments(tmp_path):
     paths = ["caf\u00e9/home/reviewer/config.py", "cafe\u0301/Users/reviewer/config.py",
              "\u8cc7\u6599/root/config.py", "\u00e9/Device/Volume1/Users/reviewer/config.py"]
     for path in paths:
@@ -254,8 +256,9 @@ $paths = '{json.dumps(paths, ensure_ascii=True)}' | ConvertFrom-Json
 foreach ($path in $paths) {{
     $review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = "$path`:12: finding" }}
     Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}'
+    # Diagnostics have no repository context, so any profile segment is redacted.
     $tail = Get-ReviewDiagnosticTail -Stderr $path
-    if ($tail -ne $path) {{ throw 'Relative Unicode path was redacted or normalized' }}
+    if ($tail -like '*reviewer*' -or $tail -notlike '*[[]REDACTED PATH]') {{ throw 'Profile segment was not redacted' }}
 }}
 'Unicode relative paths verified'
 """,
@@ -298,7 +301,7 @@ if ($copy.FilePaths[0] -ne '{path}' -or $copy.FilePaths[1] -ne 'other b/new.py')
 $modeEmbedding = Get-ReviewDiffEmbedding -Diff "diff --git a/{path} b/{path}`nold mode 100644`nnew mode 100755"
 if (@($modeEmbedding.FilePaths).Count -ne 1 -or $modeEmbedding.FilePaths[0] -ne '{path}') {{ throw 'Mode-only path was split' }}
 $tail = Get-ReviewDiagnosticTail -Stderr 'C:/temp/../Users/reviewer/.codex/auth.json /home//reviewer/.codex/auth.json'
-if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Canonical profile path was not redacted' }}
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'Canonical profile path was not redacted' }}
 'ambiguous paths verified'
 """,
     )
@@ -331,15 +334,15 @@ git -C '{tmp_path}' rm --cached --quiet -- $path
 if ($LASTEXITCODE -ne 0) {{ throw 'Synthetic Unicode deletion failed' }}
 Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
 $tail = Get-ReviewDiagnosticTail -Stderr 'profile file:///h%6fme/reviewer/.codex/auth.json'
-if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Encoded profile URL was not redacted' }}
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'Encoded profile URL was not redacted' }}
 $tail = Get-ReviewDiagnosticTail -Stderr 'C:/public/config.py followed by file:///h%6fme/reviewer/.codex/auth.json'
-if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'A preceding path hid the decoded profile URL' }}
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'A preceding path hid the decoded profile URL' }}
 $tail = Get-ReviewDiagnosticTail -Stderr 'C:/public/config.py followed by C:/temp/../../Users/reviewer/.codex/auth.json'
-if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'A preceding path hid another absolute root' }}
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'A preceding path hid another absolute root' }}
 $tail = Get-ReviewDiagnosticTail -Stderr '\\?\C:\Users\reviewer\.codex\auth.json'
-if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Extended profile path was not redacted' }}
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'Extended profile path was not redacted' }}
 $tail = Get-ReviewDiagnosticTail -Stderr '"C:\Program Files\..\Users\reviewer\.codex\auth.json"'
-if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Quoted profile path was not redacted' }}
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PATH*') {{ throw 'Quoted profile path was not redacted' }}
 'quoted deletion and profile URL verified'
 """,
     )

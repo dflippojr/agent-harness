@@ -229,24 +229,33 @@ The CLI must support these flags (restricted mode requires v2.1.248 or later); a
 See [Claude permission rules](https://code.claude.com/docs/en/permissions) and the [CLI flag reference](https://code.claude.com/docs/en/cli-reference).
 The wrapper, rather than a model, writes the final comment file. Before writing `review-output.md`, it scans the
 public review body using the diagnostic redaction patterns (bearer values, named credentials, provider tokens and
-long tokens), plus Windows/macOS/Linux user-profile absolute paths. A match discards the whole body, removes any
-stale output and fails closed with `Review did not complete`; nothing is posted or copied into the check summary.
-Profile checks also normalize file URLs and their percent escapes, Windows extended/device and NT DOS-device prefixes,
-UNC paths, dot segments and repeated separators, including quoted paths with spaces, without filesystem access.
-The conservative scan includes Windows trailing-period/space aliases; see
-[Microsoft's path normalization rules](https://learn.microsoft.com/en-us/dotnet/standard/io/file-path-formats#trim-characters).
-Git-quoted paths are decoded as UTF-8 bytes
-before matching repository citations, including deleted or renamed non-ASCII filenames. Patch and rename/copy metadata
-disambiguate filenames containing the diff header's ` b/` separator.
-This is intentionally conservative: benign prose and examples matching a credential pattern are also rejected.
-Quote authentication scheme names in backticks (for example, `Bearer`) rather than printing a value-like sequence.
-Known relative repository citations (from the Git index or all diff files, including deletions and both rename sides)
-are exempt from the generic long-token heuristic and recognized before absolute-profile-path matching. Ordinary long
-citations (including `./` prefixes, Windows separators and bracketed directories) and partial-coverage lists remain
-publishable. Absolute drive/root prefixes cannot use this citation exemption. Credential and provider-token patterns
-still check the original text. Validated Git metadata in the coverage marker is added only
-after the scan. It fetches the pull
-request diff before starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review
+long tokens) plus two path rules. A match discards the whole body, removes any stale output and fails closed with
+`Review did not complete`; nothing is posted or copied into the check summary. The path rules never parse or
+canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot hide one:
+
+- Any Windows absolute root is rejected, whatever follows it: a drive root (`C:\` or `C:/`), a UNC or extended
+  prefix (`\\server\`, `\\?\`, `\\.\`), or a `file:` URL.
+- Any separator followed by a profile directory name (`Users`, `home`, `root` or `Documents and Settings`, including
+  Windows trailing-period, trailing-space and short-name spellings) is rejected unless it is part of a known
+  repository path. `docs/users.md` and `root-ca.md` are not profile directories; an unknown `examples/home/x.py` is
+  rejected even though it is relative.
+
+The rules run on the raw body and on what a reader would see: percent escapes, HTML entities, invisible format
+characters, Unicode compatibility forms and Markdown backslash escapes are decoded first. This is intentionally
+conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
+tells the backend to cite only repository-relative paths and describe credentials in words. Quote authentication
+scheme names in backticks (for example, `Bearer`) rather than printing a value-like sequence.
+
+Known repository paths come from the Git index and every diff file, including deletions and both rename/copy sides.
+Git-quoted paths are decoded as UTF-8 bytes, and patch and rename/copy metadata disambiguate filenames containing the
+diff header's ` b/` separator. Exact citations of known paths (including `./` prefixes and Windows separators) are
+masked for the profile-directory and long-token rules only; a known path never exempts an absolute root, a profile
+prefix in front of it, or a credential pattern. Web links are split at `/` for the long-token rule, so a long
+documentation URL is not one token. Validated Git metadata in the coverage marker is added only after the scan.
+Stderr shown in job-log warnings keeps the message before a path and replaces the rest of that line with
+`[REDACTED PATH]`.
+
+The wrapper fetches the pull request diff before starting a backend and embeds up to 200 KB of complete file patches directly in the prompt, so review
 sandboxes do not need GitHub network access. Larger diffs identify every omitted file in the prompt. After installing or
 changing a CLI, verify each backend explicitly against a disposable pull request:
 
