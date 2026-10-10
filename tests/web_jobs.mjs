@@ -57,6 +57,7 @@ const jobs = [
 ];
 const calls = [];
 let failPut = false;
+let listGate = null;
 let gate = null;  // while set, PUTs wait on it, so a test can hold saves in flight
 const api = async (path, opts = {}) => {
   calls.push({ path, method: opts.method || "GET", body: opts.body });
@@ -65,7 +66,11 @@ const api = async (path, opts = {}) => {
     jobs.push(created);
     return structuredClone(created);
   }
-  if (path === "/jobs") return structuredClone(jobs);
+  if (path === "/jobs") {
+    const snapshot = structuredClone(jobs);
+    if (listGate) await listGate;
+    return snapshot;
+  }
   if (path === "/projects") return [{ name: "homelab", target: "tower" }];
   if (path === "/backends?auth=skip") return [{ name: "local", available: true }, { name: "codex", available: true, model: "remote-model" }];
   if (path === "/models") return [{ name: "local-model" }];
@@ -218,17 +223,36 @@ for (const id of ["job-name", "job-task", "job-schedule", "job-cron", "job-proje
   assert.ok(control(id), id);
   assert.equal(walk(desktop.$app, (e) => e.tagName === "LABEL" && e.attributes.for === id).length, 1, "label for " + id);
 }
+const detailEnabled = controls().find((e) => e.attributes["aria-label"] === "Job enabled");
+const listEnabled = walk(paneBody, (e) => e.attributes["aria-label"] === "Weekly disk report enabled")[0];
+listEnabled.checked = false;
+listEnabled.dispatchEvent({ type: "change" });
+await flush(); await flush(); await flush();
+assert.equal(detailEnabled.checked, false, "pausing from the list updates the open form without losing its fields");
 control("job-name").value = "Edited report";
-controls().find((e) => e.attributes["aria-label"] === "Job enabled").checked = false;
 calls.length = 0;
 form.dispatchEvent({ type: "submit" });
 await flush(); await flush();
-assert.equal(calls[0].method, "PUT");
-assert.equal(calls[0].body.name, "Edited report");
-assert.equal(calls[0].body.catch_up_minutes, 90);
-assert.equal(calls[0].body.enabled, false);
+const savedBody = calls.find((c) => c.method === "PUT").body;
+assert.equal(savedBody.name, "Edited report");
+assert.equal(savedBody.catch_up_minutes, 90);
+assert.equal(savedBody.enabled, false, "renaming after a list pause cannot resume scheduled runs");
 assert.ok(paneBody.textContent.includes("Edited report"), "save refreshes the persistent list");
 assert.ok(paints >= 2, "every repaint asks the split to mark the selection");
+
+// Explicit Enabled edits in the header still save, while an external change with no header edit is preserved.
+detailEnabled.checked = true;
+detailEnabled.dispatchEvent({ type: "change" });
+form.dispatchEvent({ type: "submit" });
+await flush(); await flush(); await flush();
+assert.equal(jobs.find((j) => j.id === "j1").enabled, true);
+// The mock route does not remount the form; reopen it to get a fresh Enabled-edit baseline.
+fill(desktop.$app);
+await desktop.page.viewJob("j1");
+jobs.find((j) => j.id === "j1").enabled = false;
+walk(desktop.$app, (e) => e.tagName === "FORM")[0].dispatchEvent({ type: "submit" });
+await flush(); await flush(); await flush();
+assert.equal(jobs.find((j) => j.id === "j1").enabled, false, "a late persisted pause survives a stale form save");
 
 // Backend/model switching and Run now still work from the new toolbar.
 control("job-model").value = "local-model";
@@ -243,8 +267,18 @@ assert.ok(control("job-model").options.some((o) => o.attributes.selected !== und
 walk(desktop.$app, (e) => e.classList.contains("job-run-header"))[0].click();
 await flush(); await flush();
 assert.equal(desktop.location.hash, "#/s/run1");
+let releaseList;
+listGate = new Promise((resolve) => { releaseList = resolve; });
 walk(desktop.$app, (e) => e.tagName === "BUTTON" && e.textContent === "Delete")[0].click();
-await flush(); await flush();
+await flush(); await flush(); await flush();
+const otherSwitch = walk(paneBody, (e) => e.attributes["aria-label"] === "Morning homelab check enabled")[0];
+otherSwitch.checked = true;
+otherSwitch.dispatchEvent({ type: "change" });
+await flush(); await flush(); await flush();
+listGate = null;
+releaseList();
+await flush(); await flush(); await flush();
+assert.equal(walk(paneBody, (e) => e.attributes["aria-label"] === "Morning homelab check enabled")[0].checked, true, "a pending membership refresh cannot overwrite a completed toggle");
 assert.ok(!paneBody.textContent.includes("Edited report"), "delete refreshes the persistent list");
 assert.deepEqual(desktop.navigation.at(-1), ["#/jobs", true]);
 

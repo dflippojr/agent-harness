@@ -8,6 +8,14 @@ import * as sheets from "../lib/sheet.mjs";
 export function mountJobs({ $app, h, fill, append, api, setHeader, showListAction, toast, go, route, isGuest, confirmGpuQueue, badge, jobStatusBadge, location,
   confirmSheet = sheets.confirmSheet, onLeave = () => {} }) {
   let refreshList = null;
+  let openForm = null;
+  // Serialize writes to one job: the list switch and its open editor must not overwrite each other.
+  const writes = new Map();
+  function writeJob(id, action) {
+    const pending = (writes.get(id) || Promise.resolve()).catch(() => {}).then(action);
+    writes.set(id, pending);
+    return pending.finally(() => { if (writes.get(id) === pending) writes.delete(id); });
+  }
   async function viewJobs(pane = null) {
     const target = pane?.body || $app;
     if (pane) pane.header("Jobs", isGuest() ? null : { href: "#/jobs/new", label: "+ New job" });
@@ -21,6 +29,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     // Job id -> the enabled state being saved. Repaints retain every in-flight switch.
     const saving = new Map();
     let refreshVersion = 0;
+    const toggleVersions = new Map();
     const paint = () => {
       if (gone) return;
       fill(list, jobs.length ? JOB_GROUPS.flatMap(([key, label]) => {
@@ -34,11 +43,17 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     // Detail routes keep the split list mounted; successful edits refresh it explicitly.
     async function refresh() {
       const version = ++refreshVersion;
+      const toggles = new Map(toggleVersions);
       try {
         const fresh = await api("/jobs");
         if (gone || version !== refreshVersion) return;
         const existing = new Map(jobs.map((j) => [j.id, j]));
-        jobs = fresh.map((j) => Object.assign(existing.get(j.id) || {}, j));
+        jobs = fresh.map((j) => {
+          const old = existing.get(j.id);
+          // Preserve a switch that changed during this read, while adopting membership changes (create/delete).
+          if (old && (saving.has(j.id) || toggles.get(j.id) !== toggleVersions.get(j.id))) return old;
+          return Object.assign(old || {}, j);
+        });
         paint();
       } catch (err) { if (!gone && version === refreshVersion) toast(`Couldn't refresh jobs: ${err.message}`, 5000); }
     }
@@ -65,18 +80,21 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     // PUT replaces the whole job, so re-read it first: an edit made elsewhere since the list loaded is kept.
     async function setEnabled(j, enabled, undoable = false) {
       if (saving.has(j.id)) return;
-      refreshVersion++;
+      toggleVersions.set(j.id, (toggleVersions.get(j.id) || 0) + 1);
       saving.set(j.id, enabled);
       paint();
       try {
-        const fresh = await api(`/jobs/${j.id}`);
-        if (fresh.enabled !== enabled) Object.assign(j, await api(`/jobs/${j.id}`, { method: "PUT", body: jobBody(fresh, { enabled }) }));
-        else Object.assign(j, fresh);
+        await writeJob(j.id, async () => {
+          const fresh = await api(`/jobs/${j.id}`);
+          if (fresh.enabled !== enabled) Object.assign(j, await api(`/jobs/${j.id}`, { method: "PUT", body: jobBody(fresh, { enabled }) }));
+          else Object.assign(j, fresh);
+          if (openForm?.id === j.id) openForm.syncEnabled(j.enabled);
+        });
       } catch (err) {
         toast(err.message, 5000);
         return;
       } finally {
-        refreshVersion++;
+        toggleVersions.set(j.id, (toggleVersions.get(j.id) || 0) + 1);
         saving.delete(j.id);
         paint();
       }
@@ -130,6 +148,11 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     showBackend();
     const notify = h("select", {}, Object.entries(JOB_NOTIFY).map(([k, label]) => h("option", { value: k, selected: k === j.notify }, label)));
     const enabled = h("input", { type: "checkbox", checked: j.enabled, "aria-label": "Job enabled" });
+    let enabledEdited = false;
+    enabled.addEventListener("change", () => { enabledEdited = true; });
+    const state = { id, syncEnabled: (next) => { enabled.checked = next; enabledEdited = false; } };
+    openForm = state;
+    onLeave(() => { if (openForm === state) openForm = null; });
     let previewTimer = null;
     const preview = () => {
       clearTimeout(previewTimer);
@@ -163,8 +186,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
         finally { button.disabled = false; }
       },
     }, "Run now") : null;
-    const field = (label, control, ...notes) => {
-      const id = `job-${label.split(" ")[0].toLowerCase()}`;
+    const field = (id, label, control, ...notes) => {
       control.setAttribute("id", id);
       return h("div", { class: "job-field" }, h("label", { for: id }, label), control, ...notes);
     };
@@ -174,7 +196,13 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
         if (isNew && backend.value === "local" && !(await confirmGpuQueue("This scheduled job"))) return;
         save.disabled = true;
         try {
-          const saved = await api(isNew ? "/jobs" : `/jobs/${id}`, { method: isNew ? "POST" : "PUT", body: body() });
+          const saved = isNew ? await api("/jobs", { method: "POST", body: body() }) : await writeJob(id, async () => {
+            const fresh = await api(`/jobs/${id}`);
+            const changes = body();
+            // A form that did not edit Enabled keeps the latest persisted state, including a list switch change.
+            if (!enabledEdited) changes.enabled = fresh.enabled;
+            return api(`/jobs/${id}`, { method: "PUT", body: changes });
+          });
           toast(`Saved · next run ${whenText(saved.next_run_at)}`, 3500);
           await refreshList?.();
           if (isNew) location.hash = `#/jobs/${saved.id}`; else void route();
@@ -183,14 +211,14 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       },
     },
     h("div", { class: "job-fields" },
-      field("Name", name),
-      field("Task", prompt),
+      field("job-name", "Name", name),
+      field("job-task", "Task", prompt),
       h("p", { class: "muted small" }, "The agent is asked to end with STATUS: OK or STATUS: ATTENTION, which decides how loudly you're notified. Approvals always notify."),
       h("div", { class: "job-schedule-grid" },
-        field("Schedule (tower time)", preset),
+        field("job-schedule", "Schedule (tower time)", preset),
         h("div", { class: "job-field job-cron" }, h("label", { class: "job-cron-label", for: "job-cron" }, "Cron"), cron, cronNote)),
-      h("div", { class: "job-model-grid" }, field("Project", project), field("Backend", backend, backendNote), field("Model", model)),
-      field("Notify me", notify)),
+      h("div", { class: "job-model-grid" }, field("job-project", "Project", project), field("job-backend", "Backend", backend, backendNote), field("job-model", "Model", model)),
+      field("job-notify", "Notify me", notify)),
     h("div", { class: "job-toolbar" },
       h("h2", { class: "job-heading" }, isNew ? "New job" : j.name),
       h("label", { class: "row job-enabled", style: "font-weight:500" }, enabled, "Enabled"),
@@ -201,7 +229,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
         onclick: async () => {
           if (!(await confirmSheet({ title: `Delete the job “${j.name}”?`, message: "Its past sessions stay.", confirmLabel: "Delete job",
             destructive: true }))) return;
-          try { await api(`/jobs/${id}`, { method: "DELETE" }); await refreshList?.(); go("#/jobs", true); } catch (err) { toast(err.message); }
+          try { await writeJob(id, () => api(`/jobs/${id}`, { method: "DELETE" })); await refreshList?.(); go("#/jobs", true); } catch (err) { toast(err.message); }
         },
       }, "Delete") : null,
       h("span", { class: "spacer" }),
