@@ -534,8 +534,8 @@ def calling_app(key: dict) -> str:
 
 def reaches_web(key: dict) -> bool:
     """Whether this principal may read Agent Harness Web's store, where the owner's and members' sessions live (#330
-    decision 4): everyone but an App, and an App only with the owner-granted, read-only `sessions:all`."""
-    return key.get("kind") != "app" or SESSIONS_ALL in key["scope_set"]
+    decision 4): owners and members, or an App/device with owner-granted, read-only `sessions:all`."""
+    return key.get("kind") in ("owner", "member") or SESSIONS_ALL in key["scope_set"]
 
 
 def visible_session(request: Request, key: dict, ref: str) -> dict:
@@ -908,8 +908,18 @@ def _global_event_visible(e: dict, session: dict | None, user_id: str, key: dict
         return False
     if session.get("app_id"):  # an App's session: that App's alone (#330 decision 3)
         return session["app_id"] == calling_app(key)
-    return not (key.get("kind") == "app" and SESSIONS_ALL not in key["scope_set"]
-                and session.get("app_id") != key["id"])
+    return reaches_web(key)
+
+
+def _stream_active(m, key: dict, user_id: str, epoch: int) -> bool:
+    """Check account epoch and the authenticated key generation, so restoring a key cannot revive old streams."""
+    if m.stream_epoch.get(user_id, 0) != epoch:
+        return False
+    if key.get("bundled"):
+        return True
+    current = m.db.get_api_key(key["id"])
+    return (current is not None and current.get("revoked_at") is None
+            and current["hash"] == key["hash"])
 
 
 async def _global_events_stream(request: Request, m, user_id: str, key: dict, epoch: int, global_types):
@@ -918,15 +928,17 @@ async def _global_events_stream(request: Request, m, user_id: str, key: dict, ep
     try:
         yield ": connected\n\n"
         while True:
-            if m.stream_epoch.get(user_id, 0) != epoch:
+            if not _stream_active(m, key, user_id, epoch):
                 return
             try:
                 e = await asyncio.wait_for(sub.queue.get(), timeout=15)
             except asyncio.TimeoutError:
-                if await request.is_disconnected():
+                if not _stream_active(m, key, user_id, epoch) or await request.is_disconnected():
                     return
                 yield ": keepalive\n\n"
                 continue
+            if not _stream_active(m, key, user_id, epoch):
+                return
             if m.db.app_of(e["session_id"]) not in ("", calling_app(key)):  # another App's: its store stays unread
                 continue
             if not m.db.app_of(e["session_id"]) and not reaches_web(key):  # Web's store: unread without sessions:all
@@ -1345,7 +1357,7 @@ def _ticket_key(request: Request, m, ref: str, ticket: str) -> dict:
     return key
 
 
-async def _session_events_stream(request: Request, m, sid: str, owner: str, after: int, follow: bool):
+async def _session_events_stream(request: Request, m, sid: str, owner: str, after: int, follow: bool, key: dict):
     from .api import sse
     sub = m.bus.subscribe(sid)
     last = after
@@ -1353,20 +1365,24 @@ async def _session_events_stream(request: Request, m, sid: str, owner: str, afte
     try:
         yield ": connected\n\n"
         for e in m.db.events(sid, after):
+            if not _stream_active(m, key, owner, epoch):
+                return
             last = e["seq"]
             yield sse(e)
         if not follow:
             return
         while True:
-            if m.stream_epoch.get(owner, 0) != epoch:
+            if not _stream_active(m, key, owner, epoch):
                 return
             try:
                 e = await asyncio.wait_for(sub.queue.get(), timeout=15)
             except asyncio.TimeoutError:
-                if await request.is_disconnected():
+                if not _stream_active(m, key, owner, epoch) or await request.is_disconnected():
                     return
                 yield ": keepalive\n\n"
                 continue
+            if not _stream_active(m, key, owner, epoch):
+                return
             if e["seq"] is not None:
                 if e["seq"] <= last:
                     continue
@@ -1387,7 +1403,7 @@ async def events(ref: str, request: Request, after: int = 0, follow: bool = True
     if request.headers.get("last-event-id", "").isdigit():
         after = max(after, int(request.headers["last-event-id"]))
 
-    return StreamingResponse(_session_events_stream(request, m, sid, owner, after, follow),
+    return StreamingResponse(_session_events_stream(request, m, sid, owner, after, follow, key),
                              media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                                       "Referrer-Policy": "no-referrer"})

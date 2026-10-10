@@ -85,7 +85,7 @@ def test_session_event_live_replay_deduplicates_and_closes(tmp_path):
         request = SimpleNamespace(is_disconnected=disconnected)
 
         async def consume():
-            stream = _session_events_stream(request, manager, sid, "owner", historical["seq"] - 1, True)
+            stream = _session_events_stream(request, manager, sid, "owner", historical["seq"] - 1, True, {"bundled": True})
             assert await stream.__anext__() == ": connected\n\n"
             assert "historical" in await stream.__anext__()
             subscription = next(iter(manager.bus._subs[sid]))
@@ -118,12 +118,11 @@ def test_global_event_stream_timeout_sends_keepalive_and_closes(tmp_path, monkey
             return False
 
         request = SimpleNamespace(is_disconnected=disconnected)
-        key = {"kind": "owner", "scope_set": set()}
+        key = {"kind": "owner", "scope_set": set(), "bundled": True}
 
         async def timeout_then_disconnect(awaitable, timeout):
             if hasattr(awaitable, "close"):
                 awaitable.close()
-            manager.stream_epoch["owner"] = 1
             raise asyncio.TimeoutError
 
         monkeypatch.setattr(apps.asyncio, "wait_for", timeout_then_disconnect)
@@ -132,6 +131,7 @@ def test_global_event_stream_timeout_sends_keepalive_and_closes(tmp_path, monkey
             stream = _global_events_stream(request, manager, "owner", key, 0, GLOBAL_TYPES)
             assert await stream.__anext__() == ": connected\n\n"
             assert await stream.__anext__() == ": keepalive\n\n"
+            manager.stream_epoch["owner"] = 1
             with pytest.raises(StopAsyncIteration):
                 await stream.__anext__()
             assert not manager.bus._subs["*"]
@@ -172,15 +172,15 @@ def test_session_event_stream_timeout_sends_keepalive_and_closes(tmp_path, monke
         async def timeout_and_reconnect_epoch(awaitable, timeout):
             if hasattr(awaitable, "close"):
                 awaitable.close()
-            manager.stream_epoch["owner"] = 1
             raise asyncio.TimeoutError
 
         monkeypatch.setattr(apps.asyncio, "wait_for", timeout_and_reconnect_epoch)
 
         async def consume():
-            stream = _session_events_stream(request, manager, sid, "owner", 10**9, True)
+            stream = _session_events_stream(request, manager, sid, "owner", 10**9, True, {"bundled": True})
             assert await stream.__anext__() == ": connected\n\n"
             assert await stream.__anext__() == ": keepalive\n\n"
+            manager.stream_epoch["owner"] = 1
             with pytest.raises(StopAsyncIteration):
                 await stream.__anext__()
             assert not manager.bus._subs[sid]
@@ -191,7 +191,7 @@ def test_session_event_stream_timeout_sends_keepalive_and_closes(tmp_path, monke
                 return True
 
             stream = _session_events_stream(SimpleNamespace(is_disconnected=now_disconnected), manager,
-                                            sid, "owner", 10**9, True)
+                                            sid, "owner", 10**9, True, {"bundled": True})
             assert await stream.__anext__() == ": connected\n\n"
             with pytest.raises(StopAsyncIteration):
                 await stream.__anext__()
