@@ -31,7 +31,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.21"
+API_VERSION = "1.22"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
@@ -248,8 +248,9 @@ def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS, 
         {"method": "POST", "path": PREFIX + "/apps/{app_id}/restore"},
         {"method": "PUT", "path": PREFIX + "/apps/{app_id}/retention"},
     ])
-    from . import config_api
+    from . import config_api, pairing_requests
     operations.extend(config_api.register_admin(app, mgr, require_admin))
+    operations.extend(pairing_requests.register_admin(app, mgr, require_admin))
     from .modules import present
     for module in present(cfg) if cfg is not None else ():
         if module.register_admin:

@@ -41,7 +41,7 @@ NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.22"
+API_VERSION = "1.23"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
@@ -103,6 +103,11 @@ def cors_origin_allowed(m, request: Request, origin: str) -> bool:
     path = request.scope.get("harness_original_path", request.url.path)
     if path == "/api/v1/pair":
         return m.db.pairing_origin_active(origin)
+    if path == "/api/v1/pair/requests":
+        return True  # any exact origin may ask to pair (#519): the owner approves, and the request stays bound to it
+    if path.startswith("/api/v1/pair/requests/"):
+        # Any origin with a request on record, finished ones included, so a browser App can read a denial or expiry.
+        return m.db.pairing_request_origin_known(origin)
     ticket = request.query_params.get("ticket", "")
     if ticket and m.db.stream_ticket_origin_active(ticket, origin):
         return True
@@ -665,7 +670,7 @@ async def api_root(request: Request):
                 "app_tools_only_backends": [b["name"] for b in (local_view(m), *backends) if b["app_tools_only"]], "context": True, "events": "sse",
                 **m.modules.features(),
                 "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
-                "browser_pairing": True,
+                "browser_pairing": True, "pairing_requests": True,
                 "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
             **await m.modules.app_root()}
 
@@ -1347,9 +1352,10 @@ def all_scopes(cfg=None) -> dict[str, str]:
 
 
 def register(app: FastAPI, cfg=None) -> None:
-    from . import config_api
+    from . import config_api, pairing_requests
     from .modules import install_routes
     route_table.install(app)
+    pairing_requests.register_app(app)
     if cfg is not None:
         install_routes(app, cfg, "app")
     config_api.register_app(app, mgr, auth, owner_key)

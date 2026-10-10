@@ -128,7 +128,7 @@ def test_minted_secret_has_the_same_shape_with_or_without_an_id(hh):
 
 
 def test_migration_adds_an_empty_column_to_existing_rows(tmp_path):
-    shipped = migrations.discover()
+    shipped = [s for s in migrations.discover() if s[0] <= 55]
     assert shipped[-1][0] == 55
     path = tmp_path / "harness.db"
     old = Database(path, migrations=shipped[:-1])

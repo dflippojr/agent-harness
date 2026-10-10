@@ -136,6 +136,11 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | Owner view. Codes themselves are shown only by the create response. | `harness/apps.py` `pairing_codes` |
 | POST | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | TODO | `harness/apps.py` `create_pairing_code` |
 | DELETE | `/api/admin/v1/pairing-codes/{pid}` | owner (`admin` scope) | TODO | `harness/apps.py` `revoke_pairing_code` |
+| GET | `/api/admin/v1/pairing-requests` | owner | Owner view of pairing requests: metadata, match codes and disclosure copy; never a token or verifier. | `harness/pairing_requests.py` `list_pairing_requests` |
+| POST | `/api/admin/v1/pairing-requests` | owner | Arm a pre-approved slot for a Hub entry (#519): no secret; the App claims it with its own challenge. | `harness/pairing_requests.py` `arm_pairing_request` |
+| POST | `/api/admin/v1/pairing-requests/{rid}/approve` | owner | Approve an App's pairing request with the match code it shows. Elevated scopes need acknowledge_elevated. No token exists until the App redeems. | `harness/pairing_requests.py` `approve_pairing_request` |
+| POST | `/api/admin/v1/pairing-requests/{rid}/confirm` | owner | Confirm a native App's claim on an armed slot with the match code it shows; then it may redeem. | `harness/pairing_requests.py` `confirm_pairing_request` |
+| POST | `/api/admin/v1/pairing-requests/{rid}/deny` | owner | Deny a pairing request, or withdraw an armed slot or an approval the App has not redeemed yet. | `harness/pairing_requests.py` `deny_pairing_request` |
 | GET | `/api/admin/v1/profile` | owner (`admin` scope) | TODO | `harness/api.py` `profile` |
 | PUT | `/api/admin/v1/profile` | owner (`admin` scope) | TODO | `harness/api.py` `update_profile` |
 | GET | `/api/admin/v1/projects` | owner (`admin` scope) | TODO | `harness/api.py` `projects` |
@@ -225,7 +230,7 @@ same; only the prefix and the owner credential check are new.
 | GitHub tasks | `GET /github/projects/{project}/items` (`page`, `q`), `GET /github/projects/{project}/items/{number}`, `POST /github/sessions` (a `POST /sessions` body plus `number`). See [github-tasks.md](github-tasks.md) |
 | Search | `/search`, `/events`, `/queue` |
 | Projects and jobs | `/projects`, `/templates`, `/jobs` |
-| Tokens | `/keys`, `/keys/{kid}`, `/pairing-codes`, `/pairing-codes/{pid}` |
+| Tokens | `/keys`, `/keys/{kid}`, `/pairing-codes`, `/pairing-codes/{pid}`, `/pairing-requests` and its `approve`, `confirm` and `deny` routes (see [Zero-touch pairing requests](#zero-touch-pairing-requests)) |
 | App provider policy | `/provider-credentials`, `/provider-credentials/{credential_id}` |
 | Mac pairing | `/runner-pairing-codes`, `/runner-pairing-codes/{pid}` |
 | Maintenance | `/maintenance`, `/maintenance/cleanup`, `/maintenance/backup` (image-archive retention: see Images) |
@@ -349,6 +354,7 @@ the compatibility routes share one handler, so a change is never logged twice.
 | --- | --- | --- |
 | `key.create`, `key.revoke` | `POST /keys`, `DELETE /keys/{kid}` | opaque key id; `kind`, scope names; `catalog_app_id` on create |
 | `pairing.create`, `pairing.revoke`, `pairing.redeem` | `/pairing-codes`, `POST /api/v1/pair` | pairing and key ids; scope names; `catalog_app_id` on create and redeem |
+| `pairing_request.create`, `.claim`, `.approve`, `.deny`, `.redeem`, `.expire` | `/pairing-requests`, `POST /api/v1/pair/requests` and its `claim` and `token` routes, the expiry sweep | request and key ids; scope names; `catalog_app_id`; `browser`, `armed`, `acknowledged` (elevated scopes acknowledged) and `confirmed` (a native claim confirmed) |
 | `runner_pairing.create`, `.revoke`, `.redeem` | `/runner-pairing-codes`, `POST /api/v1/runner-pair` | pairing and key ids |
 | `app.restore`, `app.retention` | `POST .../apps/{id}/restore`, `PUT .../apps/{id}/retention` | App id; old/new retention days (or null) |
 | `provider_grant.set`, `provider_grant.revoke` | `.../provider-credentials` | grant, previous grant and App ids; backend, policy, changed field names |
@@ -479,6 +485,40 @@ curl -s http://127.0.0.1:8100/api/admin/v1/keys \
 For a separately hosted Agent Harness Web copy, add `"origins":["https://harness-web.example"]`. Browser origins must be HTTPS except for
 loopback development and contain no path, query, fragment, or credentials.
 
+## Zero-touch pairing requests
+
+An App pairs without the owner handling its token (#519, owner API 1.22): the App asks, the owner approves, and the
+daemon hands the `ha-` token straight to the App. The App side is in [app-api.md](app-api.md#zero-touch-pairing).
+These owner routes carry request metadata only: never a token, the App's verifier or its challenge. The standalone Hub
+drives them, and every one has a CLI command.
+
+| Route | CLI | What it does |
+| --- | --- | --- |
+| `GET /pairing-requests` | `harness pairing-requests list` | requests of the last day, newest first |
+| `POST /pairing-requests` `{catalog_app_id, scopes, origin?, name?, acknowledge_elevated?}` | `harness pairing-requests arm <catalog_app_id> --scopes ... [--origin ...]` | arm a pre-approved slot for a Hub entry (201) |
+| `POST /pairing-requests/{id}/approve` `{match, acknowledge_elevated?}` | `harness pairing-requests approve <id> --match <code>` | approve an App-initiated request |
+| `POST /pairing-requests/{id}/confirm` `{match}` | `harness pairing-requests confirm <id> --match <code>` | release a native App's claim on an armed slot |
+| `POST /pairing-requests/{id}/deny` | `harness pairing-requests deny <id>` | deny a request, or withdraw a slot or an unredeemed approval |
+
+Each request reads back as `{id, kind, name, scopes, catalog_app_id, origin, browser, armed, state, match_code, needs,
+created_at, expires_at, approved_at, finished_at, key_id, elevated, disclosures}`. `state` is `pending` (waiting for
+approval), `armed` (a Hub slot no App has claimed yet), `claimed` (a native App claimed the slot; confirm its match
+code), `approved` (the App may fetch its token), `redeemed`, `denied` or `expired`. `needs` names the next step:
+`approve`, `claim`, `confirm`, `redeem` or `""`. `match_code` is shown only while the owner still has to compare it.
+`disclosures` holds, for every requested scope, `{scope, tier, text}`, where `text` is the required copy from
+[marketplace-design.md section 5.2](marketplace-design.md#52-scope-table) and `tier` is `standard` or `elevated`. The
+daemon supplies this text so the Hub and the CLI show the same words.
+
+Approving needs the match code the App shows; a wrong or missing code is refused with 400. Elevated scopes
+(`sessions:all`, `approvals`, `remote_control`, `memory_library`, `homelab`) also need `acknowledge_elevated: true`
+(`--acknowledge-elevated`), on approval and when arming. Without it the call is refused with 400. Arming is the
+approval for a Hub slot, so a browser App's claim from the armed origin needs nothing more. A native claim needs the
+confirm, because the slot's id alone does not prove which App claimed it. For a browser slot the id is the only
+thing a caller needs to claim it from the armed origin, so hand it only to that App, as a one-time code. A decision on a request in the wrong state
+answers 409, and an unknown id 404. Approval is a state change only: the key exists only after the App redeems, and it
+then appears in `GET /keys` with the request's name, scopes, origin and `catalog_app_id`. Requests expire 10 minutes
+after they are made, armed or claimed, and 5 minutes after approval.
+
 ## Agent Harness for Mac pairing
 
 `POST /api/admin/v1/runner-pairing-codes` with `{"name":"My Mac","runner":"macbook"}` creates a code that
@@ -565,6 +605,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.22 | 2026-10-09 | Zero-touch pairing requests (#519, see [Zero-touch pairing requests](#zero-touch-pairing-requests)): `GET` and `POST /pairing-requests`, `POST /pairing-requests/{id}/approve`, `/confirm` and `/deny`. They carry request metadata, match codes and the section 5.2 disclosure copy, never a token or verifier. `pairing_request.*` audit rows record them. CLI `harness pairing-requests list`, `arm`, `approve`, `confirm` and `deny` |
 | 1.21 | 2026-10-09 | Optional `catalog_app_id` on `POST /keys` and `POST /pairing-codes` (#518, see [App API](app-api.md#catalog-app-id)): a lowercase reverse-DNS label, at most 120 characters, reported by `GET /keys` and `GET /pairing-codes` (`""` when absent) and in the `key.create`, `pairing.create` and `pairing.redeem` audit metadata. An invalid value is refused with 400 and a `denied` audit row. It grants nothing and is never part of a token |
 | 1.20 | 2026-10-04 | Nightly backups include known members' and Apps' transcript archives; backup results add `transcript_archives` and `warnings` (#378) |
 | 1.19 | 2026-10-04 | Management parity (#334): checkpoints (list, rewind, fork), secret-finding fix and dismiss, taint clear, and GitHub tasks (items, item, `POST /github/sessions`) answer under `/api/admin/v1`, where Agent Harness Web already called them. Every owner setting and action Web offers has an Agent Harness CLI command ([management-parity.md](management-parity.md)) |

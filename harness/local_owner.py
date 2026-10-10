@@ -10,6 +10,7 @@ health and metrics endpoints answer without one.
 from __future__ import annotations
 
 import hmac
+import re
 import secrets
 from pathlib import Path
 
@@ -19,6 +20,8 @@ TOKEN_FILE = "local-owner.token"
 HEADER = "X-Agent-Harness-Local-Token"
 OPEN_PATHS = frozenset({"/health", "/metrics"})
 API_PREFIXES = ("/api/v1", "/api/admin/v1")  # routes that check a bearer token's kind and scopes themselves
+# Zero-touch pairing (#519): an App has no token yet; the owner's approval and its PKCE verifier decide.
+PAIRING_REQUESTS = re.compile(r"/api/v1/pair/requests(/[^/]+/(claim|token))?")
 REFUSED = "requests from this machine need the local owner token (see docs/INSTALL.md)"
 
 
@@ -58,6 +61,8 @@ def admitted(request, m, path: str) -> bool:
     if (request.method == "OPTIONS" and api and request.headers.get("origin")
             and request.headers.get("access-control-request-method")):
         return True  # a browser's CORS preflight never carries credentials; it returns no data
+    if request.method == "POST" and PAIRING_REQUESTS.fullmatch(path):
+        return True  # an App on this machine pairs like one on the tailnet: rate-limited, owner-approved, PKCE-bound
     expected = getattr(m, "local_owner_token", "")
     sent = request.headers.get(HEADER, "")
     if expected and sent and hmac.compare_digest(sent.encode(), expected.encode()):
