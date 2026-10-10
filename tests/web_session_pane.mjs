@@ -42,23 +42,30 @@ const resize = (desktop) => { media.matches = desktop; for (const fn of [...medi
 
 const approval = { id: "ap1", tool: "write_file", tool_call_id: "c1", reason: "Edit outside the project allowlist",
   detail: "@@ -1 +1 @@\n-a\n+b", args: { path: "sw.js" }, smart: { recommendation: "approve", confidence: 0.92, reason: "routine" } };
-let session = { id: "s1", title: "Fix the bug", status: "waiting_approval", project: "p", target: "tower", backend: "claude", model: "m",
-  totals: {}, context_used: 10, context_limit: 100, pending_approvals: [approval] };
-let deferSession = null;  // when set, /sessions/s1 answers with a promise the test resolves
+// The server's state. Like the manager's summary, GET /sessions/<id> lists pending approvals only while the status is
+// waiting_approval; the approvals route lists them whatever the status.
+let server = { status: "waiting_approval", pending: [approval] };
+const summary = () => ({ id: "s1", title: "Fix the bug", status: server.status, project: "p", target: "tower", backend: "claude", model: "m",
+  totals: {}, context_used: 10, context_limit: 100, ...(server.status === "waiting_approval" ? { pending_approvals: server.pending } : {}) });
+let deferApprovals = null;  // when set, the approvals route answers with a promise the test resolves
 const api = async (path) => {
-  if (path === "/sessions/s1" && deferSession) return new Promise((resolve) => deferSession.push(resolve));
-  if (path === "/sessions/s1") return session;
+  if (path === "/sessions/s1") return summary();
+  if (path === "/sessions/s1/approvals") return deferApprovals ? new Promise((resolve) => deferApprovals.push(resolve)) : [...server.pending];
   if (path === "/sessions/s1/changes") return { removed: true };
   return [];
 };
 let leaves = [];
 const daemonListeners = new Set();
 const streams = [];
-const timers = [];
+// Cancellable timers: run() fires every pending one at once and returns when they all finish.
+const timers = new Map();
+let timerId = 0;
+const run = () => { const fns = [...timers.values()]; timers.clear(); return Promise.all(fns.map((fn) => fn())); };
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 const browser = {
   window: { addEventListener() {}, removeEventListener() {}, scrollTo() {}, innerHeight: 800, matchMedia: () => query },
   document: doc, location: {}, requestAnimationFrame() {},
-  setInterval: () => 0, clearInterval() {}, setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout() {},
+  setInterval: () => 0, clearInterval() {}, setTimeout: (fn) => { timers.set(++timerId, fn); return timerId; }, clearTimeout: (id) => { timers.delete(id); },
 };
 const page = mountSession({
   $app: byId.app, h, fill, append, api, setHeader() {}, toast() {}, go() {}, route() {}, validId: () => true,
@@ -121,19 +128,20 @@ assert.deepEqual(classes(bar), ["back", "title", "conn", "settings-btn"], "leavi
 assert.equal(media.listeners.size, 0, "the width listener goes with the page");
 
 // ---------- the approval bar on Changes and Info ----------
+const approvalBars = () => doc.body.childNodes.filter((n) => n instanceof El && n.className === "approval-bar");
+const event = () => [...daemonListeners][0]();
+timers.clear();
 for (const tab of ["changes", "info"]) {
-  // The first fetch answered "running", but an approval arrived before the stream listener was attached.
-  const before = session;
-  session = { ...session, status: "running", pending_approvals: undefined };
-  const queued = timers.length;
+  // The first fetch answers "running", but an approval arrives before the stream listener is attached.
+  server = { status: "running", pending: [] };
   const viewing = page.viewSession("s1", tab);
-  session = before;
+  server = { status: "waiting_approval", pending: [approval] };
   await viewing;
-  assert.equal(timers.length, queued + 1, `${tab}: the bar catches up once after subscribing`);
-  await timers.pop()();
-  const pending = doc.body.childNodes.filter((n) => n instanceof El && n.className === "approval-bar");
-  assert.equal(pending.length, 1, `${tab}: one approval bar`);
-  const abar = pending[0];
+  const [abar] = approvalBars();
+  assert.equal(approvalBars().length, 1, `${tab}: one approval bar`);
+  assert.equal(abar.hidden, true, "the first fetch saw nothing pending");
+  assert.equal(timers.size, 1, `${tab}: the bar catches up once after subscribing`);
+  await run();
   assert.equal(abar.hidden, false);
   assert.equal(abar.attributes.role, "status");
   assert.match(abar.textContent, /Approval needed · Edit outside the project allowlist/);
@@ -141,39 +149,54 @@ for (const tab of ["changes", "info"]) {
   assert.equal(review.textContent, "Review");
   assert.equal(review.attributes.href, "#/s/s1/approval/ap1", "Review opens the transcript on that approval");
   assert.equal(daemonListeners.size, 1, "the bar follows the app-wide stream");
+  // A burst of events is one refresh.
+  event();
+  event();
+  event();
+  assert.equal(timers.size, 1, "refreshes are debounced");
+  await run();
   // An unchanged approval keeps the same Review link, so one a keyboard user has focused survives the refresh.
-  [...daemonListeners][0]();
-  await timers.pop()();
   assert.equal(walk(abar, (n) => n.tagName === "A")[0], review, "a refresh updates the bar in place");
+  // A pending approval outlives waiting_approval (a session resumed as waiting_target): the summary drops it, the
+  // approvals route still has it.
+  server = { status: "waiting_target", pending: [approval] };
+  event();
+  await run();
+  assert.equal(abar.hidden, false, "the bar follows the approvals route, not only the status");
   // Answers that arrive out of order: only the newest refresh paints.
-  deferSession = [];
-  [...daemonListeners][0]();
-  const older = timers.pop()();
-  [...daemonListeners][0]();
-  const newer = timers.pop()();
-  await Promise.resolve();
-  const [answerOld, answerNew] = deferSession;
-  answerNew({ ...session });
+  deferApprovals = [];
+  event();
+  const older = run();
+  await settle();
+  event();
+  const newer = run();
+  await settle();
+  assert.equal(deferApprovals.length, 2);
+  deferApprovals[1]([approval]);
   await newer;
-  answerOld({ ...session, status: "running", pending_approvals: undefined });
+  deferApprovals[0]([]);
   await older;
   assert.equal(abar.hidden, false, "a slower, older answer does not hide a still-pending approval");
-  deferSession = null;
-  // Decided elsewhere: the next event refetches the session and the bar goes away.
-  session = { ...session, status: "running", pending_approvals: undefined };
-  [...daemonListeners][0]();
-  await timers.pop()();
+  deferApprovals = null;
+  // Decided elsewhere: the next event refetches and the bar goes away.
+  server = { status: "running", pending: [] };
+  event();
+  await run();
   assert.equal(abar.hidden, true, `${tab}: the bar hides once nothing is pending`);
-  session = { ...session, status: "waiting_approval", pending_approvals: [approval] };
+  // Leaving cancels a refresh still waiting on its debounce.
+  event();
+  assert.equal(timers.size, 1);
   leave();
+  assert.equal(timers.size, 0, "leaving cancels the pending refresh");
   assert.equal(daemonListeners.size, 0, "leaving stops listening");
   assert.ok(abar.removed, "leaving removes the bar");
 }
-// No pending approval, no bar.
-session = { ...session, status: "running", pending_approvals: undefined };
+// A finished session shows no bar, even if a stale row is still listed.
+server = { status: "done", pending: [approval] };
 await page.viewSession("s1", "changes");
-const none = doc.body.childNodes.filter((n) => n instanceof El && n.className === "approval-bar");
-assert.equal(none.length, 1);
-assert.equal(none[0].hidden, true);
+await run();
+assert.equal(approvalBars().length, 1);
+assert.equal(approvalBars()[0].hidden, true);
 leave();
+assert.equal(timers.size, 0);
 console.log("ok");

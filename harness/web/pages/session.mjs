@@ -674,8 +674,8 @@ function pendingApprovalBar(session, isActive) {
   const review = h("a", { class: "btn approval-bar-review" }, "Review");
   const bar = h("div", { class: "approval-bar", role: "status", hidden: true }, text, review);
   document.body.append(bar);
-  const paint = (s) => {
-    const a = s.status === "waiting_approval" ? (s.pending_approvals || [])[0] : null;
+  const paint = (s, pending) => {
+    const a = pending[0] || null;
     bar.hidden = !a;
     if (!a) return;
     const label = `Approval needed · ${a.reason || a.tool}`;
@@ -683,16 +683,25 @@ function pendingApprovalBar(session, isActive) {
     if (text.textContent !== label) text.textContent = label;
     if (review.getAttribute("href") !== href) review.setAttribute("href", href);
   };
-  paint(session);
+  // The summary lists pending approvals only while the status is waiting_approval, but one can outlive that status (a
+  // session resumed as waiting_target after a restart), so refreshes ask the approvals route itself.
+  const pendingOf = async (s) => {
+    if (TERMINAL.has(s.status)) return [];
+    if (isGuest()) return s.pending_approvals || [];
+    try { return await api(`/sessions/${s.id}/approvals`); } catch (_) { return s.pending_approvals || []; }
+  };
+  paint(session, session.pending_approvals || []);
   let timer = null;
   let latest = 0;  // only the newest refresh paints, so a slow older answer can't undo a newer one
   const refresh = () => {
     clearTimeout(timer);
     timer = setTimeout(async () => {
+      timer = null;
       const mine = ++latest;
       try {
         const s = await api(`/sessions/${session.id}`);
-        if (isActive() && mine === latest) paint(s);
+        const pending = await pendingOf(s);
+        if (isActive() && mine === latest) paint(s, pending);
       } catch (_) { /* keep the last state; the next event retries */ }
     }, 300);
   };
