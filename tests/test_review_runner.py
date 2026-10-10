@@ -175,6 +175,27 @@ foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), ('./' + ('T' * 4
     assert "safe paths, unsafe tokens" in result.stdout
 
 
+def test_longer_known_citation_is_masked_before_its_shorter_prefix(tmp_path):
+    paths = ["src/docs", "src/docs archive/" + "a" * 48 + ".py"]
+    for path in paths:
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# synthetic context\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+    result = run_powershell(
+        tmp_path,
+        f"""
+$review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = '{paths[1]}:12: synthetic finding' }}
+$out = Join-Path '{tmp_path}' 'review-output.md'
+Write-ReviewResult -Result $review -OutputPath $out -Workspace '{tmp_path}'
+if ((Get-Content -Raw -LiteralPath $out) -notlike '*{paths[1]}:12*') {{ throw 'Longer citation was lost' }}
+Write-ReviewResult -Result $review -OutputPath $out -DiffPaths @('{paths[0]}', '{paths[1]}')
+""",
+    )
+    assert result.returncode == 0, output(result)
+
+
 def test_known_bracketed_paths_cannot_hide_absolute_profile_paths(tmp_path):
     paths = ["app/[locale]/home/components/Nav.tsx", "app/[locale]/Users/reviewer/config.py",
              "app/{locale}/root/settings.py", "\U0001f43e/home/reviewer/config.py"]

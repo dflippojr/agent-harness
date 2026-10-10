@@ -364,7 +364,7 @@ function Convert-ReviewProfilePathForms {
     }
     $normalized = [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)(?:(?=[A-Z]:/+)|UNC/+)', $namespace)
     $rootPattern = '(?:[A-Z]:/+|/+)'
-    $nextRoot = '(?i)(?<![\p{L}\p{N}\p{M}_./:-])' + $rootPattern
+    $nextRoot = '(?i)(?<![\p{L}\p{N}\p{M}_./-])' + $rootPattern
     # Canonicalize absolute path spellings as strings, without touching the filesystem.
     $canonicalize = {
         param($match)
@@ -413,7 +413,7 @@ function Convert-ReviewProfilePathForms {
         }
         return $quote + $preferred + $quote
     }.GetNewClosure()
-    $pathForms = '(?i)(?<![\p{L}\p{N}\p{M}_./:-])(?:(?<Quote>[`"''])\s*(?<Path>' + $rootPattern + '[^\r\n]*?)\k<Quote>|(?<Path>' + $rootPattern + '[^\r\n<>`"''(),;]*))'
+    $pathForms = '(?i)(?<![\p{L}\p{N}\p{M}_./-])(?:(?<Quote>[`"''])\s*(?<Path>' + $rootPattern + '[^\r\n]*?)\k<Quote>|(?<Path>' + $rootPattern + '[^\r\n]*))'
     return [regex]::Replace($normalized, $pathForms, $canonicalize)
 }
 
@@ -467,7 +467,7 @@ function Get-ReviewRepositoryPaths {
 function Remove-ReviewRepositoryCitations {
     param([string]$Text, [string[]]$Paths)
 
-    foreach ($path in $Paths) {
+    foreach ($path in ($Paths | Sort-Object { $_.Length } -Descending)) {
         $pathPattern = [regex]::Escape($path).Replace('/', '[/\\](?:\.[/\\])*')
         $pattern = '(?<![\p{L}\p{N}\p{M}_./\\-])(?:\.[/\\])*' + $pathPattern + '(?![\p{L}\p{N}\p{M}_./\\-])'
         $Text = [regex]::Replace($Text, $pattern, '[REPOSITORY PATH]')
