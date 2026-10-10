@@ -20,6 +20,7 @@
 //   #/jobs[/new|/<id>]       scheduled jobs
 //   #/tasks[/…]              redirects to #/jobs[/…] (the old label for scheduled work)
 //   #/signin[/failed]        Google sign-in for a household member on a Tailscale-admitted device (issue #64)
+// At 1280 px+ #/agents and #/s/<id>[/…] share one split view: the list beside the open session (lib/layout.mjs, #563).
 
 import { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } from "./client.mjs";
 import { h, fill, append } from "./lib/dom.mjs";
@@ -98,7 +99,7 @@ const { viewImages, viewImage, viewImageEdit, viewImageFull } = mountImages({ $a
 const { viewJobs, viewJob } = mountJobs({ $app, h, fill, append, api, setHeader, showListAction, toast, go, route, isGuest,
   confirmGpuQueue, badge, jobStatusBadge, location });
 const { viewList } = mountSessions({ $app, h, fill, append, api, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
-  jobStatusBadge, openStream, ownerSurface, agentHarnessWeb, browser });
+  jobStatusBadge, onDaemonChange: stream.onDaemonChange, onDaemonState: stream.onDaemonState, browser });
 const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar });
 
 // ---------- boot ----------

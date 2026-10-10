@@ -4,6 +4,7 @@
 import { h, fill, append } from "./dom.mjs";
 import { validId } from "./stream.mjs";
 import { GOOGLE_FAILED } from "./signin.mjs";
+import { mountSplitView } from "./layout.mjs";
 
 export const hashParts = (hash) => hash.replace(/^#\/?/, "").split("/").filter(Boolean);
 // The tab bar's sections (#506). Settings and its pages, Actions included, are nested under the gear and show Back.
@@ -38,6 +39,8 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
   const { api, fetchMe, loadWebAuth, isGuest, isMember, isOwner, canChat } = session;
   let cleanup = [];
   const onLeave = (fn) => cleanup.push(fn);
+  // Split views (#563, lib/layout.mjs): at 1280 px+ a list stays mounted beside its detail routes.
+  const split = mountSplitView({ els, h, fill, browser, onChange: () => route() });
 
   function go(hash, replace = false) {
     if (session.isBlocked()) return;
@@ -70,8 +73,16 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
     else await v.viewActions(parts[1]);
   }
 
-  async function routeView(parts) {
+  async function routeView(parts, open) {
     const v = views();
+    if (open) {
+      void split.renderList(v[open.split.list]);
+      if (open.selected === null) {
+        chrome.setHeader("", "");  // the list pane carries the section title
+        split.empty();
+        return;
+      }
+    }
     if (parts.length === 0) go(canChat() ? "#/chat" : "#/agents", true);
     else if (parts[0] === "chat") await v.viewChat(parts[1]);
     else if (parts[0] === "agents") await v.viewList();
@@ -119,6 +130,7 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
     chrome.paintGuestChrome();
     const parts = hashParts(browser.location.hash);
     if (session.needsSignIn()) {
+      split.close();
       $back.hidden = true;
       tabs.paint(parts, { hidden: true });
       signin.viewSignIn(parts[0] === "signin" && parts[1] === "failed");
@@ -127,6 +139,7 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
     }
     // Profile stays reachable so Connection settings can be fixed while offline.
     if (session.getMe().role === "offline" && !isProfileRoute(parts)) {
+      split.close();
       viewOffline();
       return;
     }
@@ -137,12 +150,13 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
       api("/images/cooldown", { method: "POST" }).catch(() => {});
     }
     route.onImages = images;
-    $back.hidden = isTopLevel(parts);
-    tabs.paint(parts);
     const redirect = blockedRedirect(parts, session.getMe().role);
+    const open = redirect ? null : split.sync(parts);
+    $back.hidden = !!open || isTopLevel(parts);  // beside its list, a detail needs no Back
+    tabs.paint(parts);
     if (redirect) { go(redirect, true); return; }
     try {
-      await routeView(parts);
+      await routeView(parts, open);
     } catch (e) {
       append($app, h("p", { class: "note bad" }, e.message),
         h("a", { class: "btn", href: "#/profile/connection" }, "Connection settings"));

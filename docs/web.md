@@ -29,9 +29,9 @@ row shows this bundle's build and protocol, whether it is up to date with the co
 release and supported protocol range. **Check for update** asks the Server again and, when a newer bundle is offered,
 becomes **Reload and update** (see [compatibility](compatibility.md)).
 
-Detail and editor pages (a session, a job, an image, New task) show Back and hide the tab bar. In the installed app
-the bar sits above the home indicator (`env(safe-area-inset-bottom)`). At 960 px and wider the same links form a
-left rail. Scheduled work is called **Jobs** everywhere; the old `#/tasks` links redirect to `#/jobs`.
+On phones, detail and editor pages (a session, a job, an image, New task) show Back and hide the tab bar. In the
+installed app the bar sits above the home indicator (`env(safe-area-inset-bottom)`). At 768 px and wider the same links
+form a left rail that stays on every page. Scheduled work is called **Jobs** everywhere; the old `#/tasks` links redirect to `#/jobs`.
 
 The Jobs list groups jobs as **Needs attention** (the last run ended ATTENTION, failed or waits on an approval),
 **Scheduled** and **Paused**. Each row has an **Enabled** switch that saves at once, through the same
@@ -46,6 +46,13 @@ The Agents list groups sessions into **Needs you** (a pending approval, or a run
 **Running** (running, queued or waiting) and **Recent** (finished). Empty groups are hidden, and each group is sorted
 by most recent activity. An approval row shows the pending command or tool on one line and opens straight at the
 approval. A session on a machine other than the tower shows a laptop icon and the machine's name.
+
+At 1280 px and wider, Agents is a split view: the list sits in a 392 px pane beside the rail and the open session
+fills the rest, so moving from one approval to the next is one click. The URL is still `#/agents` or `#/s/<id>`; it
+only says which row is open, and that row is highlighted. With nothing open the session side says **No session
+open**. The sidebar button in the session header, or <kbd>[</kbd>, hides the list for reading and brings it back.
+Between 768 and 1279 px the list and the session are separate pages with Back. The framework is in `lib/layout.mjs`
+(`SPLITS`, `mountSplitView`); its header comment says how another list (Jobs, Settings) joins it.
 
 ## Colours and touch targets
 
