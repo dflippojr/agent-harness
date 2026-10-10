@@ -328,18 +328,49 @@ function Test-ReviewAttemptRateLimit {
 
 function Get-ReviewRedactionRules {
     # Shared by diagnostics and the publication gate. Never print a matching value.
-    # Publication deliberately rejects even benign examples matching these credential shapes.
+    # Pattern redacts job-log diagnostics aggressively (main's original patterns). PublishPattern,
+    # when present, is what rejects a review body: it needs a value that looks like a credential,
+    # so quoted code such as `token: str` or `password: ${{ secrets.X }}` is publishable.
+    # Maskable rules scan text with known repository citations masked; the others never do.
+    $credentialNames = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(["'']?\s*[:=]\s*)'
+    # A token-like value has a digit and 6+ characters, or 20+ token characters.
+    $tokenValue = '(?=[A-Za-z0-9._~+/=-]*[0-9])[A-Za-z0-9._~+/=-]{6,}|[A-Za-z0-9._~+/=-]{20,}'
+    # A quoted literal is a value unless it is empty or a reference ($VAR, ${{ }}, %VAR%, {x}, <x>).
+    $quotedValue = '"(?![$%{<])[^"\s][^"]*"|''(?![$%{<])[^''\s][^'']*'''
     return @(
-        # A bearer value must look like a token (a digit, or 20+ token characters), so prose such as
-        # "a Bearer token" stays publishable while real credentials are caught.
-        [pscustomobject]@{ Pattern = '(?i)\bBearer\s+(?=[A-Za-z0-9._~+/=-]*[0-9]|[A-Za-z0-9._~+/=-]{20})[A-Za-z0-9._~+/=-]+'; Replacement = 'Bearer [REDACTED]' }
-        [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(["'']?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
-        [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
+        [pscustomobject]@{
+            Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+'
+            PublishPattern = '(?i)\bBearer\s+(?:' + $tokenValue + ')'
+            Replacement = 'Bearer [REDACTED]'
+            Maskable = $false
+        }
+        [pscustomobject]@{
+            Pattern = $credentialNames + '("[^"]*"|''[^'']*''|[^\s,;]+)'
+            PublishPattern = $credentialNames + '(?:' + $quotedValue + '|' + $tokenValue + ')'
+            Replacement = '$1$2[REDACTED]'
+            Maskable = $false
+        }
+        [pscustomobject]@{
+            Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'
+            Replacement = '[REDACTED]'
+            Maskable = $false
+        }
         # A long run of token characters is rejected unless it reads as an identifier: only letters,
         # slashes, underscores and hyphens, at least one underscore or hyphen, and no digits
         # (test_names_like_this, Verb-NounLikeThis). Random tokens of this length almost always have digits.
-        [pscustomobject]@{ Pattern = '(?<![A-Za-z0-9+/=_-])(?!(?=[A-Za-z/]*[_-])[A-Za-z/_-]+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
+        [pscustomobject]@{
+            Pattern = '(?<![A-Za-z0-9+/=_-])(?!(?=[A-Za-z/]*[_-])[A-Za-z/_-]+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'
+            Replacement = '[REDACTED]'
+            Maskable = $true
+        }
     )
+}
+
+function Get-ReviewPublishPattern {
+    param([Parameter(Mandatory = $true)]$Rule)
+
+    if ($Rule.PSObject.Properties['PublishPattern']) { return $Rule.PublishPattern }
+    return $Rule.Pattern
 }
 
 # Path checks never canonicalize a path. Instead they reject the spellings that could name one:
@@ -388,20 +419,23 @@ function Get-ReviewOrdinalUnique {
 function ConvertFrom-ReviewGitQuotedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
+    # Decoding only serves citation matching, so it never blocks a review: malformed quoting returns
+    # the input unchanged and invalid UTF-8 bytes (a Latin-1 name, say) decode to U+FFFD. Either way
+    # the name simply will not match a citation, which fails closed.
     if (-not $Path.StartsWith('"')) { return $Path }
-    if (-not $Path.EndsWith('"') -or $Path.Length -lt 2) { throw 'Invalid Git path quoting' }
+    if (-not $Path.EndsWith('"') -or $Path.Length -lt 2) { return $Path }
     # Git octal escapes encode UTF-8 bytes, not Unicode code points.
-    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $false)
     $encoded = $utf8.GetBytes($Path.Substring(1, $Path.Length - 2))
     $decoded = New-Object System.Collections.Generic.List[byte]
     $escapes = @{ 97 = 7; 98 = 8; 116 = 9; 110 = 10; 118 = 11; 102 = 12; 114 = 13; 34 = 34; 92 = 92 }
     for ($index = 0; $index -lt $encoded.Length; $index++) {
         if ($encoded[$index] -ne 92) { $decoded.Add($encoded[$index]); continue }
         $index++
-        if ($index -ge $encoded.Length) { throw 'Invalid Git path quoting' }
+        if ($index -ge $encoded.Length) { return $Path }
         $next = [int]$encoded[$index]
         if ($escapes.ContainsKey($next)) { $decoded.Add([byte]$escapes[$next]); continue }
-        if ($next -lt 48 -or $next -gt 55) { throw 'Invalid Git path quoting' }
+        if ($next -lt 48 -or $next -gt 55) { return $Path }
         $octal = [string][char]$next
         for ($count = 1; $count -lt 3 -and $index + 1 -lt $encoded.Length; $count++) {
             $digit = [int]$encoded[$index + 1]
@@ -409,7 +443,9 @@ function ConvertFrom-ReviewGitQuotedPath {
             $index++
             $octal += [char]$digit
         }
-        $decoded.Add([Convert]::ToByte($octal, 8))
+        $byte = [Convert]::ToInt32($octal, 8)
+        if ($byte -gt 255) { return $Path }
+        $decoded.Add([byte]$byte)
     }
     return $utf8.GetString($decoded.ToArray())
 }
@@ -423,8 +459,8 @@ function Get-ReviewRepositoryPaths {
             # Reading the index must not launch fsmonitor; ASCII quoting survives Windows code pages.
             $paths = @(& git --no-optional-locks -c core.fsmonitor=false -c core.quotepath=true -C $Workspace ls-files --cached 2>$null)
             if ($LASTEXITCODE -ne 0) { $paths = @() }
+            $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
         } catch { $paths = @() }
-        $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
     }
     # Decoded scan forms are NFKC-normalized and rendered, so citations must match those names too.
     # A name is known only if every spelling is relative: formatting characters, a fullwidth slash
@@ -461,8 +497,8 @@ function Assert-ReviewOutputSafe {
     )
 
     $rules = @(Get-ReviewRedactionRules)
-    $credentialRules = @($rules | Where-Object { -not $_.PSObject.Properties['RepositoryPathsAllowed'] })
-    $maskableRules = @($rules | Where-Object { $_.PSObject.Properties['RepositoryPathsAllowed'] })
+    $credentialRules = @($rules | Where-Object { -not $_.Maskable })
+    $maskableRules = @($rules | Where-Object { $_.Maskable })
     $knownPaths = @()
     if ($Workspace -or $DiffPaths.Count -gt 0) {
         $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
@@ -472,7 +508,7 @@ function Assert-ReviewOutputSafe {
     foreach ($form in (Get-ReviewScanForms -Text $Text)) {
         if (-not $CredentialsOnly -and $form -match $script:ReviewAbsoluteRootPattern) { $unsafe = $true }
         foreach ($rule in $credentialRules) {
-            if ($form -match $rule.Pattern) { $unsafe = $true }
+            if ($form -match (Get-ReviewPublishPattern -Rule $rule)) { $unsafe = $true }
         }
     }
     if (-not $CredentialsOnly) {
@@ -490,11 +526,25 @@ function Assert-ReviewOutputSafe {
         foreach ($form in (Get-ReviewScanForms -Text $segmented)) {
             $masked = Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths
             foreach ($rule in $maskableRules) {
-                if ($masked -match $rule.Pattern) { $unsafe = $true }
+                if ($masked -match (Get-ReviewPublishPattern -Rule $rule)) { $unsafe = $true }
             }
         }
     }
     if ($unsafe) { throw 'Review did not complete: output failed the publication safety scan.' }
+}
+
+function Test-ReviewDiagnosticLineEncodesSecret {
+    param([AllowEmptyString()][string]$Line, [object[]]$Rules)
+
+    # True when a decoded spelling of an already-redacted line still holds a credential or a path.
+    # Redaction is idempotent on its own markers, so any further change means something was hidden.
+    foreach ($form in (Get-ReviewScanForms -Text $Line -PlainText)) {
+        if ($form -match $script:ReviewAbsoluteRootPattern -or $form -match $script:ReviewProfileSegmentPattern) { return $true }
+        $redacted = $form
+        foreach ($rule in $Rules) { $redacted = $redacted -replace $rule.Pattern, $rule.Replacement }
+        if ($redacted -cne $form) { return $true }
+    }
+    return $false
 }
 
 function Get-ReviewDiagnosticTail {
@@ -518,13 +568,8 @@ function Get-ReviewDiagnosticTail {
             if ($match.Success -and ($cut -lt 0 -or $match.Index -lt $cut)) { $cut = $match.Index }
         }
         if ($cut -ge 0) { $line = $line.Substring(0, $cut) + '[REDACTED PATH]' }
-        # Whatever remains must also be clean once decoded; redaction above is idempotent on its markers.
-        $encoded = @(Get-ReviewScanForms -Text $line -PlainText | Where-Object {
-            $form = $_
-            foreach ($rule in $rules) { $form = $form -replace $rule.Pattern, $rule.Replacement }
-            ($form -cne $_) -or ($_ -match $script:ReviewAbsoluteRootPattern) -or ($_ -match $script:ReviewProfileSegmentPattern)
-        }).Count -gt 0
-        if ($encoded) { '[REDACTED LINE]' } else { $line }
+        # Whatever remains must also be clean once decoded.
+        if (Test-ReviewDiagnosticLineEncodesSecret -Line $line -Rules $rules) { '[REDACTED LINE]' } else { $line }
     }
     $redacted = @($lines) -join [Environment]::NewLine
     if ($redacted.Length -gt $MaxCharacters) {
@@ -1170,9 +1215,13 @@ function Get-ReviewDiffFilePaths {
     $header = ($Section -split "`r?`n", 2)[0]
     $oldPath = $header
     $newPath = $header
+    # Side prefixes are stripped only when present, so an odd header cannot throw.
+    $stripSide = { param($value) if ($value -match '^[ab]/') { $value.Substring(2) } else { $value } }
+    # The regex split is a fallback (and the only parse for quoted headers); the exact unquoted
+    # split and the rename/copy and ---/+++ metadata below override it when they are available.
     if ($header -match '^diff --git ("(?:[^"\\]|\\.)*"|a/.*?) ("(?:[^"\\]|\\.)*"|b/[^\r\n]*)\r?$') {
-        $oldPath = (ConvertFrom-ReviewGitQuotedPath -Path $Matches[1]).Substring(2)
-        $newPath = (ConvertFrom-ReviewGitQuotedPath -Path $Matches[2]).Substring(2)
+        $oldPath = & $stripSide (ConvertFrom-ReviewGitQuotedPath -Path $Matches[1])
+        $newPath = & $stripSide (ConvertFrom-ReviewGitQuotedPath -Path $Matches[2])
     }
     # Unquoted headers are ambiguous when a name itself contains " b/". An unchanged name has
     # an exact a/name b/name split; renames and patches provide unambiguous extended headers.
@@ -1197,7 +1246,7 @@ function Get-ReviewDiffFilePaths {
             $line = [regex]::Match($metadata, "(?m)^$prefix ([^`r`n]+)")
             if ($line.Success) {
                 $value = ConvertFrom-ReviewGitQuotedPath -Path $line.Groups[1].Value.TrimEnd("`t")
-                if ($value -ne '/dev/null') { $path = $value.Substring(2) }
+                if ($value -ne '/dev/null') { $path = & $stripSide $value }
             }
         }
         if ($null -ne $path) {

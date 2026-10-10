@@ -77,7 +77,7 @@ def test_publication_safety_pester_regressions(tmp_path):
         f"""
 Import-Module Pester -ErrorAction Stop
 $r = Invoke-Pester '{pester_path}' -PassThru
-if ($r.FailedCount -gt 0 -or $r.PassedCount -lt 10) {{ exit 1 }}
+if ($r.FailedCount -ne 0 -or $r.PassedCount -eq 0 -or $r.PassedCount -ne $r.TotalCount) {{ exit 1 }}
 """,
     )
     assert result.returncode == 0, output(result)

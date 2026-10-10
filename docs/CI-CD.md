@@ -249,9 +249,13 @@ conservative: benign prose and examples matching a credential or path rule are a
 tells the backend to cite only repository-relative paths and describe credentials in words. A run of 40 or more token characters is not
 treated as a token when it reads as an identifier (only letters, slashes, underscores and hyphens, with at least one
 underscore or hyphen and no digits), so long test and function names stay publishable. The base ref in the coverage
-marker is already validated as a branch name and is checked against the credential patterns only. The bearer rule only
-matches a token-like value (one containing a digit, or 20 or more token characters), so prose such as "a Bearer token"
-is publishable.
+marker is already validated as a branch name and is checked against the credential patterns only. For publication, the bearer
+and named-credential rules (`token`, `secret`, `password`, `api_key` and similar followed by `:` or `=`) match only a
+value that looks like a credential: a non-empty quoted literal that is not a reference (`$VAR`, `${{ ... }}`, `%VAR%`,
+`{x}`, `<x>`), or a token-like value (6 or more characters including a digit, or 20 or more token characters). Prose
+such as "a Bearer token" and quoted code such as `token: str`, `self.token = token` or
+`password: ${{ secrets.X }}` are publishable. Job-log diagnostics keep the broader original patterns. Git-quoted names
+that are malformed or not valid UTF-8 never block a review; they simply do not match a citation.
 
 Known repository paths come from the Git index and every diff file, including deletions and both rename/copy sides.
 Git-quoted paths are decoded as UTF-8 bytes, and patch and rename/copy metadata disambiguate filenames containing the

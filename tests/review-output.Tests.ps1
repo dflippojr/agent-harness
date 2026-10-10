@@ -25,7 +25,9 @@ Describe 'Review publication safety' {
         @{ Payload = ('`Bearer` ' + ('a' * 24)) }
         @{ Payload = ('_Bearer_ ' + ('a' * 24)) }
         @{ Payload = ('https://example.invalid/download/' + ('A' * 24) + '%2F' + ('B' * 24) + '/file') }
-        @{ Payload = 'password=synthetic-value' }
+        @{ Payload = 'password=synthetic-value-1' }
+        @{ Payload = 'password = "hunter"' }
+        @{ Payload = ('token: ' + ('a' * 24)) }
         @{ Payload = ('{"api_key":"' + ('A' * 32) + '"}') }
         @{ Payload = '{"password":"short"}' }
         @{ Payload = "'password'='short'" }
@@ -103,6 +105,9 @@ Describe 'Review publication safety' {
         @{ Payload = 'Send a Bearer token in the header; the `Bearer` scheme is case-insensitive.' }
         @{ Payload = 'The header is built as `f"Bearer {token}"`.' }
         @{ Payload = '`test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal` and `Remove-UntrustedReviewAgentConfiguration`.' }
+        @{ Payload = '`def __init__(self, base_url: str, token: str) -> None:` then `self.token = token`.' }
+        @{ Payload = 'The workflow sets `password: ${{ secrets.DEPLOY_PASSWORD }}` and `token = os.environ`.' }
+        @{ Payload = 'Defaults are `token=""` and `secret: "<placeholder>"`.' }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
@@ -133,6 +138,18 @@ Describe 'Review publication safety' {
             Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -DiffPaths $known
             if (-not (Get-Content -Raw -LiteralPath $script:reviewOutputPath).Contains($text)) { throw "Known citation was rejected: $text" }
         }
+    }
+
+    It 'never lets an undecodable Git path block a review' {
+        $latin1 = ConvertFrom-ReviewGitQuotedPath -Path '"caf\351.py"'
+        if ($latin1 -ne ('caf' + [char]0xFFFD + '.py')) { throw "Invalid UTF-8 was not replaced: $latin1" }
+        foreach ($malformed in @('"a\9"', '"a\', '"a\777"', '"unterminated')) {
+            if ((ConvertFrom-ReviewGitQuotedPath -Path $malformed) -ne $malformed) { throw "Malformed quoting changed: $malformed" }
+        }
+        $embedding = Get-ReviewDiffEmbedding -Diff "diff --git `"a/caf\351.py`" `"b/caf\351.py`"`ndeleted file mode 100644`n-old"
+        if (@($embedding.FilePaths).Count -ne 1) { throw 'Undecodable diff path was not parsed' }
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = 'No significant findings.' }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -DiffPaths @($embedding.FilePaths)
     }
 
     It 'keeps composed and decomposed diff names distinct' {
