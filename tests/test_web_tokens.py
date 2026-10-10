@@ -4,6 +4,7 @@ Colours live in the token blocks at the top of style.css (:root, the dark media 
 other rule paints with var(--…). The main text and accent pairs meet WCAG AA in the light and dark themes, and
 interactive controls are at least 44 px tall.
 """
+import functools
 import re
 from pathlib import Path
 
@@ -99,6 +100,7 @@ def _theme_blocks():
     return blocks
 
 
+@functools.cache
 def _themes():
     blocks = _theme_blocks()
     root = blocks[(":root", "")]
@@ -255,6 +257,8 @@ def test_tap_token_and_the_audited_controls():
     switch = _rule(".switch")
     assert switch["height"] == "var(--tap)", "the switch's hit area is a full touch target"
     assert "content-box" in switch["background"], "only the 31 px track is painted"
+    # The content box's corner radius is the outer radius minus the padding on each axis: 15.5 px wide, 22 - 6.5 px tall.
+    assert switch["border-radius"] == "15.5px / calc(var(--tap) / 2)", "the painted track stays a capsule"
 
 
 def test_fills_use_the_primary_token():

@@ -43,7 +43,7 @@ def test_sheet_css_uses_tokens_and_44px_targets():
         "dialog.sheet", ".sheet-actions .btn", ".sheet-cancel", ".sheet-danger", ".sheet-field input", ".sheet-error"))
     assert not re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", sheet_rules), "sheet colours come from the theme tokens"
     assert "min-height: 50px" in _rule(css, ".sheet-actions .btn")
-    assert "min-height: 44px" in _rule(css, ".sheet-field input")
+    assert "min-height: var(--tap)" in _rule(css, ".sheet-field input")
     assert "var(--bad)" in _rule(css, ".sheet-danger")
 
 
