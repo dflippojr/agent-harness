@@ -145,14 +145,10 @@ class DiskWatch:
                 return reason
 
     async def final(self) -> str:
-        """One last look once the command has ended, so a burst between two polls is still caught. The scan keeps the
-        run's duty cycle without its minimum interval, so a short command in a big tree is not slowed by a full walk.
-        It is then skipped only when free space shows no growth past a quota: on the tower's NTFS data drive a file
-        extended from the container takes its space at once (it cannot be made sparse through the bind mount), and
-        the runner's quota check after the call still measures the workspace."""
-        free = await asyncio.to_thread(self._free)
-        due = self._may_be_over(free) or time.monotonic() - self._scanned >= SCAN_DUTY * self._scan_cost
-        return self._floor_reason(free) or (await self._scan_polling() if due else "")
+        """One last look once the command has ended, so a burst between two polls is still caught. Always a full scan:
+        free space cannot rule growth out (other sessions may free space at the same time), and the command has just
+        warmed the tree, so the walk is cheap."""
+        return self._floor_reason(await asyncio.to_thread(self._free)) or await self._scan_polling()
 
 
 if os.name == "nt":

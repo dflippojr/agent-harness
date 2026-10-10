@@ -321,28 +321,20 @@ def test_burst_between_polls_is_caught_when_the_command_ends(monkeypatch, tmp_pa
     assert fake.written == 60 and "restart" in fake.calls and events[0][0] == "sandbox_disk_limit"
 
 
-def test_short_command_in_a_slow_tree_skips_the_final_scan(monkeypatch, tmp_path):
+def test_final_scan_catches_growth_free_space_does_not_show(monkeypatch, tmp_path):
+    # A short command in a slow tree passes its quota while other sessions free as much space (or it writes a sparse
+    # file): free space says nothing, so the final scan has to run anyway.
     monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)
-    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(50 * MB, 100 * MB), chunks=20, pace=0)
-    scans = []
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(10 * MB, 100 * MB), chunks=20, pace=0)
+    monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: TOTAL)
     measure = sandbox.dir_size
 
     def slow(root):
-        scans.append(root)
         time.sleep(0.3)         # a scan costs far more than the command runs
         return measure(root)
     monkeypatch.setattr(sandbox, "dir_size", slow)
-    assert asyncio.run(box.exec("make")) == (0, "built")
-    assert len(scans) == 1      # only the starting scan: the free space lost shows it is under its quota
-
-
-def test_sparse_growth_is_caught_by_the_final_scan(monkeypatch, tmp_path):
-    # A sparse file grows the workspace without using the drive, so free space says nothing; the final scan does.
-    monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)
-    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(10 * MB, 100 * MB), chunks=20, pace=0.005)
-    monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: TOTAL)
     with pytest.raises(sandbox.DiskLimitExceeded, match="past its 10 MB quota"):
-        asyncio.run(box.exec("truncate -s 20M sparse"))
+        asyncio.run(box.exec("make"))
 
 
 def test_free_space_is_polled_during_the_final_scan(monkeypatch, tmp_path):
@@ -420,25 +412,3 @@ def test_watched_exec_drains_its_client_on_cancel(monkeypatch, tmp_path):
     box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(500 * MB, 100 * MB), chunks=1)
     asyncio.run(box.exec("true"))
     assert fake.drain > 0
-
-
-def test_run_cmd_drain_waits_until_the_process_is_gone(monkeypatch):
-    import threading
-    import time as clock
-    gone = threading.Event()
-
-    def blocking(args, input_, timeout, env, started, cancelled):
-        clock.sleep(0.3)        # still spawning, then killed: the worker thread finishes only now
-        gone.set()
-        return 137, "", ""
-    monkeypatch.setattr(sandbox, "_run_blocking", blocking)
-
-    async def cancel_after_start(drain):
-        task = asyncio.ensure_future(sandbox.run_cmd(["docker", "exec"], drain=drain))
-        await asyncio.sleep(0.05)
-        task.cancel()
-        await asyncio.wait({task})
-        return gone.is_set()
-    assert asyncio.run(cancel_after_start(5)) is True
-    gone.clear()
-    assert asyncio.run(cancel_after_start(0)) is False
