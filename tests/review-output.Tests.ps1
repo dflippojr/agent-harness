@@ -14,6 +14,8 @@ Describe 'Review publication safety' {
         @{ Payload = 'gh**p_**synthetic12345678' }
         @{ Payload = 'gh<b>p</b>_synthetic12345678' }
         @{ Payload = 'gh`p`_synthetic12345678' }
+        @{ Payload = '[gh](https://example.invalid)p_synthetic12345678' }
+        @{ Payload = '[/ho][ref]me/reviewer/auth.json' }
         @{ Payload = 'Bearer synthetic-value' }
         @{ Payload = 'Bearer followed by a value' }
         @{ Payload = 'password=synthetic-value' }
@@ -169,5 +171,7 @@ Describe 'Review publication safety' {
         if ((Get-ReviewDiagnosticTail -Stderr 'open %2Fhome%2Freviewer then C:\temp\x') -ne '[REDACTED LINE]') { throw 'Encoded prefix survived truncation' }
         if ((Get-ReviewDiagnosticTail -Stderr 'value ghp%5Fsynthetic12345678') -ne '[REDACTED LINE]') { throw 'Encoded token survived' }
         if ((Get-ReviewDiagnosticTail -Stderr 'token=synthetic-value') -ne 'token=[REDACTED]') { throw 'Redaction marker was re-redacted' }
+        $multiline = Get-ReviewDiagnosticTail -Stderr "password=`"synthetic-first`nsynthetic-rest`" done"
+        if ($multiline -like '*synthetic*') { throw "Multiline quoted credential survived: $multiline" }
     }
 }

@@ -351,12 +351,13 @@ function Get-ReviewScanForms {
 
     # Scan what a reader would see as well as the raw text: percent escapes, HTML entities,
     # invisible format characters, compatibility characters, Markdown backslash escapes, and
-    # rendered text with inline HTML tags and emphasis or code markers removed.
+    # rendered text: link labels without their targets, inline HTML tags and emphasis or code markers removed.
     $decoded = [System.Net.WebUtility]::HtmlDecode([Uri]::UnescapeDataString($Text))
     $decoded = ($decoded -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
     $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
     # Intraword underscores never render as emphasis, so __tests__-style names are left intact.
-    $rendered = $unescaped -replace '<[^<>]*>|[*`]|~~', ''
+    $rendered = $unescaped -replace '\[([^\[\]]*)\](?:\([^()]*\)|\[[^\[\]]*\])', '$1'
+    $rendered = $rendered -replace '<[^<>]*>|[*`]|~~', ''
     return @(Get-ReviewOrdinalUnique -Values @($Text, $decoded, $unescaped, $rendered))
 }
 
@@ -469,8 +470,10 @@ function Get-ReviewDiagnosticTail {
     )
 
     if ([string]::IsNullOrWhiteSpace($Stderr)) { return '' }
-    $lines = foreach ($line in @(@($Stderr -split "`r?`n") | Select-Object -Last $MaxLines)) {
-        foreach ($rule in (Get-ReviewRedactionRules)) { $line = $line -replace $rule.Pattern, $rule.Replacement }
+    $tail = (@($Stderr -split "`r?`n") | Select-Object -Last $MaxLines) -join "`n"
+    # Credentials are redacted across the whole tail first, so a quoted value spanning lines goes too.
+    foreach ($rule in (Get-ReviewRedactionRules)) { $tail = $tail -replace $rule.Pattern, $rule.Replacement }
+    $lines = foreach ($line in @($tail -split "`n")) {
         # Keep the message before a path and drop the rest of the line, which may continue the path.
         $cut = -1
         foreach ($pattern in @($script:ReviewAbsoluteRootPattern, $script:ReviewProfileSegmentPattern)) {
