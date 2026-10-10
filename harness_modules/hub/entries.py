@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from harness.modules import ROOT
+from harness.modules import ROOT, normalize_catalog_app_id
 
 SCHEMA = ROOT / "docs" / "marketplace-manifest.schema.json"
 EXAMPLE = ROOT / "docs" / "hub.entries.example.json"
@@ -45,7 +45,10 @@ def load(path: Path) -> list[dict]:
         if error is not None:
             field = ".".join(str(part) for part in error.path) or "manifest"
             raise EntriesError(f"entries[{index}].{field}: {error.validator} validation failed")
-        app_id = entry["app"]["app_id"]
+        try:
+            app_id = normalize_catalog_app_id(entry["app"]["app_id"])
+        except ValueError as exc:
+            raise EntriesError(f"entries[{index}].app.app_id: {exc}") from None
         if app_id in seen:
             raise EntriesError(f"entries[{index}].app.app_id: duplicate id")
         seen.add(app_id)

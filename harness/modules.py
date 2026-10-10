@@ -381,6 +381,12 @@ def cli_groups(cfg=None) -> dict[str, str]:
     return {group: text for module in modules for group, text in module.cli_groups.items()}
 
 
+def normalize_catalog_app_id(value) -> str:
+    """The core key/pairing label contract, also used by local module catalogs."""
+    from .catalog_ids import normalize
+    return normalize(value)
+
+
 def local_cli(groups) -> None:
     for module in discover():
         if module.local_cli is not None:

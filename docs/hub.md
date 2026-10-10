@@ -10,6 +10,9 @@ Owner credentials and the exclusive Hub key can read it. Other apps, members and
 [marketplace-manifest.schema.json](marketplace-manifest.schema.json) unchanged: publisher `app` plus
 `review`. Its `app.app_id` is the `catalog_app_id` used for matching; display names never match.
 Unknown fields, missing review, bad ids, non-HTTPS origins, admin/unknown scopes, and duplicate ids fail validation.
+After schema validation, ids must also satisfy the core key/pairing label contract (at most 120 characters,
+no token prefixes). This uses the module-interface `normalize_catalog_app_id` helper; the manifest schema
+is unchanged.
 A missing file means an empty list; an unreadable or invalid file produces a named error and a doctor failure.
 
 `harness hub entries init [--config-dir DIR]` creates the file from

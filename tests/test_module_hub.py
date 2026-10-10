@@ -283,3 +283,28 @@ def test_sdk_hub_inventory_and_openapi(tmp_path):
             sdk.validate_openapi(drifted)
     finally:
         sdk.close()
+
+
+@pytest.mark.parametrize("app_id", ["a" * 60 + "." + "b" * 60,
+    "ha-shop.example", "ho-shop.example", "hp-shop.example", "hk-shop.example", "hrp-shop.example"])
+def test_manifest_id_also_obeys_pairing_contract(tmp_path, app_id):
+    from jsonschema import Draft202012Validator, FormatChecker
+    from harness import catalog_ids
+    from harness_modules.hub.entries import SCHEMA
+    doc = document()
+    doc["entries"][0]["app"]["app_id"] = app_id
+    # These still satisfy the unchanged publisher manifest schema, but cannot be paired.
+    Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")),
+                         format_checker=FormatChecker()).validate(doc["entries"][0])
+    assert not catalog_ids.valid(app_id)
+    with pytest.raises(EntriesError, match="app.app_id"):
+        load(save(tmp_path, doc))
+
+
+def test_maximum_pairable_manifest_id(tmp_path):
+    from harness import catalog_ids
+    app_id = "a" * 60 + "." + "b" * 59
+    assert len(app_id) == 120 and catalog_ids.valid(app_id)
+    doc = document()
+    doc["entries"][0]["app"]["app_id"] = app_id
+    assert load(save(tmp_path, doc))[0]["app"]["app_id"] == app_id
