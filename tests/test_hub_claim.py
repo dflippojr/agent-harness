@@ -9,12 +9,14 @@ import json
 import logging
 import re
 import secrets
+import subprocess
+import sys
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import api as harness_api, cli, local_owner, migrations
+from harness import api as harness_api, cli, google_signin, local_owner, migrations
 from harness import pairing_requests as pr
 from harness.admin import PREFIX
 from harness.db import Database
@@ -230,10 +232,28 @@ def test_approve_deny_and_release_need_the_host_secret(hh):
     assert _approve(client, m, rid, match).status_code == 200
 
 
-def test_the_secret_is_new_at_every_start(tmp_path):
+def test_the_secret_is_new_at_every_start_and_owner_only(tmp_path):
     first = local_owner.rotate_hub_secret(tmp_path)
     second = local_owner.rotate_hub_secret(tmp_path)
     assert first != second and local_owner.read_hub_secret(tmp_path) == second
+    path = tmp_path / local_owner.HUB_SECRET_FILE
+    if sys.platform == "win32":   # mode bits mean nothing there: the ACL names this user alone, nothing inherited
+        me = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                             "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"],
+                            capture_output=True, text=True, timeout=60).stdout.strip()
+        assert google_signin._windows_allow_sids(path) == {me}
+    else:
+        assert path.stat().st_mode & 0o077 == 0
+
+
+def test_many_app_requests_never_hide_an_open_hub_claim(hh):
+    client, m = hh
+    asked, _ = _ask(client)
+    for n in range(101):
+        m.db.main.insert_pairing_request({
+            "id": f"pr-app{n:03d}", "kind": "app", "name": "an app", "scopes": "sessions", "state": pr.ARMED,
+            "armed": 1, "created_at": pr.clock() + 1 + n, "expires_at": pr.clock() + 600, "key_id": ""})
+    assert [r["id"] for r in client.get(CLAIM).json()["requests"]] == [asked.json()["id"]]
 
 
 def test_one_hub_at_a_time_until_released(hh):
@@ -435,6 +455,15 @@ def test_sdk_requests_a_hub_claim_and_checks_the_feature(hh, monkeypatch):
     with pytest.raises(sdk_module.HarnessError) as taken:
         Harness.request_hub_claim("http://testserver", "Second Hub")
     assert taken.value.code == "hub_claimed"
+
+    class Locked(Bridge):
+        """A daemon reached on its own machine without the local owner token: its root answers 401."""
+        def get(self, path):
+            return httpx.Response(401, json={"detail": "requests from this machine need the local owner token"})
+    monkeypatch.setattr(sdk_module.httpx, "Client", Locked)
+    with pytest.raises(sdk_module.HarnessError) as locked:   # the probe steps aside; the request itself answers
+        Harness.request_hub_claim("http://testserver", "Hub")
+    assert locked.value.code == "hub_claimed"
 
     class OldServer(Bridge):
         def get(self, path):

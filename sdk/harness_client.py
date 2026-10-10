@@ -84,6 +84,7 @@ class PairedApp(TypedDict, total=False):
     kind: str
     origins: list[str]
     catalog_app_id: str
+    role: str
 
 
 class PairingRequestStatus(TypedDict, total=False):
@@ -320,10 +321,14 @@ class Harness:
 
     @classmethod
     def _require_feature(cls, base_url: str, feature: str, origin: str, timeout: float) -> None:
-        """Refuse up front, with a clear error, when the Server predates `features[feature]` (GET /api/v1)."""
+        """Refuse up front, with a clear error, when the Server predates `features[feature]` (GET /api/v1). A Server
+        that wants credentials to read its root (an App on the daemon's own machine has none yet) is not refused: the
+        pairing request itself is open, and its answer decides."""
         headers = {"Origin": origin} if origin else {}
         with httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout, headers=headers) as client:
             resp = client.get("/api/v1")
+            if resp.status_code in (401, 403):
+                return
             if resp.status_code >= 400:
                 cls._raise_response(resp)
             features = resp.json().get("features") or {}

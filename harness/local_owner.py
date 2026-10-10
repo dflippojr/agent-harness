@@ -14,7 +14,7 @@ import re
 import secrets
 from pathlib import Path
 
-from .atomic_io import write_atomic
+from .atomic_io import owner_only_acl, write_atomic
 
 TOKEN_FILE = "local-owner.token"
 HEADER = "X-Agent-Harness-Local-Token"
@@ -64,7 +64,8 @@ def rotate_hub_secret(data_dir: Path | str) -> str:
     secret = secrets.token_urlsafe(32)
     path = Path(data_dir) / HUB_SECRET_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_atomic(path, secret + "\n", private=True)
+    # Owner-only on Windows too (an ACL, set before the secret goes in), not only by POSIX mode bits.
+    write_atomic(path, secret + "\n", private=True, prepare=owner_only_acl)
     return secret
 
 

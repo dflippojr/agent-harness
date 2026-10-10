@@ -124,7 +124,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         def commit():
             db = m.db.main
             pr.sweep(db, pr.clock())
-            return db.hub_claim(), [r for r in db.list_pairing_requests() if r["kind"] == ROLE]
+            return db.hub_claim(), db.list_pairing_requests(ROLE)
         record, requests = await m.db.main.awrite(commit)
         return JSONResponse({"claimed": record is not None, "hub": record_view(record),
                              "requests": [pr.owner_view(r, m.cfg) for r in requests]}, headers=pr.NO_STORE)

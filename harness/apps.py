@@ -330,6 +330,7 @@ class PairedAppResponse(BaseModel):
     kind: str
     origins: list[str]
     catalog_app_id: str = ""
+    role: str = Field(default="", description='"hub" on the key a Hub claim minted (#543); absent otherwise')
 
 
 class PairResponse(BaseModel):

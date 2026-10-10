@@ -1521,9 +1521,12 @@ class Database:
         return dict(row) if row else None
 
     @_reads
-    def list_pairing_requests(self) -> list[dict]:
+    def list_pairing_requests(self, kind: str | None = None) -> list[dict]:
+        """The newest 100 requests, or the newest 100 of one `kind` (`app` or `hub`)."""
+        where, args = ("WHERE kind = ? ", (kind,)) if kind else ("", ())
         with self.lock:
-            rows = self.conn.execute("SELECT * FROM pairing_requests ORDER BY created_at DESC LIMIT 100").fetchall()
+            rows = self.conn.execute(f"SELECT * FROM pairing_requests {where}ORDER BY created_at DESC LIMIT 100",
+                                     args).fetchall()
         return [dict(r) for r in rows]
 
     @_reads
