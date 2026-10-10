@@ -103,7 +103,7 @@ class Service:
             path.mkdir(parents=True, exist_ok=True)
             def escape(value):
                 return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("\n", "\\n")
-            executable = " ".join('"' + escape(a) + '"' for a in argv)
+            executable = " ".join('"' + escape(a).replace("$", "$$") + '"' for a in argv)
             (path / (self.name + ".service")).write_text(
                 "[Unit]\nDescription=Agent harness Hub\n[Service]\nType=simple\n"
                 f'WorkingDirectory="{escape(workdir)}"\nExecStart={executable}\n'
@@ -169,7 +169,8 @@ def start_hub(args, method, distribution, service_id, hub_dir, claim_file):
     if method == "docker":
         if not shutil.which("docker"):
             raise ValueError("Docker is required for --hub-method docker")
-        command(["docker", "run", "-d", "--restart", "unless-stopped", "--name", Service(service_id).name,
+        identity = ["--user", f"{os.getuid()}:{os.getgid()}"] if sys.platform != "win32" else []
+        command(["docker", "run", "-d", "--restart", "unless-stopped", *identity, "--name", Service(service_id).name,
                  "--network", "host", "--mount", f"type=bind,src={hub_dir},dst=/hub-state",
                  distribution, *launch, "/hub-state/claim.json", "--state-dir", "/hub-state"])
     else:

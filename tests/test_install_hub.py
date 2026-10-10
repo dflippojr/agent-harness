@@ -257,6 +257,17 @@ def test_partial_docker_install_is_removable(tmp_path, monkeypatch):
     assert not (tmp_path / "hub-install.json").exists()
 
 
+def test_docker_state_uses_host_user_on_unix(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub.sys, "platform", "linux")
+    monkeypatch.setattr(hub.os, "getuid", lambda: 1001, raising=False)
+    monkeypatch.setattr(hub.os, "getgid", lambda: 1002, raising=False)
+    monkeypatch.setattr(hub.shutil, "which", lambda _: "docker")
+    calls = []
+    monkeypatch.setattr(hub, "command", lambda args, **_: calls.append(args))
+    hub.start_hub(options(tmp_path), "docker", "stub:1", "a" * 32, tmp_path, tmp_path / "claim.json")
+    assert calls[0][calls[0].index("--user") + 1] == "1001:1002"
+
+
 @pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
 def test_per_user_service_registration_and_removal(tmp_path, monkeypatch, platform):
     monkeypatch.setattr(hub.sys, "platform", platform)
@@ -269,14 +280,14 @@ def test_per_user_service_registration_and_removal(tmp_path, monkeypatch, platfo
         return SimpleNamespace(stdout="- 0 agent-harness-hub-" + "a" * 32, stderr="")
     monkeypatch.setattr(hub, "command", command)
     service = hub.Service("a" * 32)
-    service.start([str(tmp_path / "path with spaces/python"), "-m", "stub_hub", "--state-dir", "a'%b"], tmp_path, tmp_path / "hub.log")
+    service.start([str(tmp_path / "path with spaces/python"), "-m", "stub_hub", "--state-dir", "a'%b$HOME"], tmp_path, tmp_path / "hub.log")
     if platform == "linux":
         unit = (tmp_path / "config/systemd/user" / (service.name + ".service")).read_text()
-        assert "path with spaces" in unit and "a'%%b" in unit
+        assert "path with spaces" in unit and "a'%%b$$HOME" in unit
     elif platform == "darwin":
         import plistlib
         plist = plistlib.loads((tmp_path / "Library/LaunchAgents" / (service.name + ".plist")).read_bytes())
-        assert plist["ProgramArguments"][-1] == "a'%b"
+        assert plist["ProgramArguments"][-1] == "a'%b$HOME"
     else:
         import base64
         script = base64.b64decode(calls[0][-1]).decode("utf-16le")
