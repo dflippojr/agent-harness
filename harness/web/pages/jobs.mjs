@@ -34,8 +34,13 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     let refreshAgain = false;
     let holdPaint = false;
     let nextNoisy = false;
+    let pressed = false;
+    let paintPending = false;
+    let releaseTimer = null;
     const paint = () => {
       if (gone) return;
+      if (pressed) { paintPending = true; return; }
+      paintPending = false;
       const key = JSON.stringify(jobs.map((j) => [j.id, j.name, j.cron, j.project, j.enabled, j.next_run_at, j.last_error,
         j.recent?.[0], saving.has(j.id), saving.get(j.id), j.recent?.[0] ? lastRunText(j.recent[0].created_at) : null,
         j.next_run_at ? shortWhen(j.next_run_at) : null]));
@@ -97,6 +102,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
           }
         } catch (err) {
           if (gone) return;
+          if (refreshAgain) { noisy = nextNoisy; continue; }
           if (!loaded) throw err;
           if (noisy) toast(`Couldn't refresh jobs: ${err.message}`, 5000);
           return; // a failed background read retains the last successful list
@@ -105,6 +111,31 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       } while (refreshAgain && !gone);
     }
     refreshList = refresh;
+    // Keep a pressed native control alive through its click. A daemon update may arrive between pointerdown/up.
+    const press = (event) => {
+      if (!event.target?.closest?.(".job-row")) return;
+      clearTimeout(releaseTimer);
+      pressed = true;
+    };
+    const release = () => {
+      if (!pressed) return;
+      clearTimeout(releaseTimer);
+      releaseTimer = setTimeout(() => {
+        pressed = false;
+        if (paintPending) paint();
+      }, 0);
+    };
+    list.addEventListener("pointerdown", press);
+    browser.document?.addEventListener("pointerup", release);
+    browser.document?.addEventListener("pointercancel", release);
+    browser.window?.addEventListener("blur", release);
+    leave(() => {
+      clearTimeout(releaseTimer);
+      list.removeEventListener("pointerdown", press);
+      browser.document?.removeEventListener("pointerup", release);
+      browser.document?.removeEventListener("pointercancel", release);
+      browser.window?.removeEventListener("blur", release);
+    });
     if (pane) {
       let refreshTimer = null;
       const schedule = () => {

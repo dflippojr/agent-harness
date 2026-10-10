@@ -440,6 +440,88 @@ assert.notEqual(newStableSwitch, stableSwitch);
 assert.equal(doc.activeElement, newStableSwitch, "a changed row restores focus to the same job control");
 stableLeaves.forEach((fn) => fn());
 
+
+// These race scenarios own their data, requests, events, and both pane/form cleanups.
+async function jobFixture(seed, readList = async (data) => structuredClone(data)) {
+  const data = structuredClone(seed);
+  const requests = [];
+  const notices = [];
+  const window = new Emitter();
+  const document = new Emitter();
+  Object.defineProperty(document, "activeElement", { get: () => doc.activeElement });
+  document.hidden = false;
+  let notify;
+  let listReads = 0;
+  const fixture = mount(false, {
+    browser: { window, document, location: { hash: "#/jobs" } },
+    onDaemonChange: (fn) => { notify = fn; return () => {}; },
+    toast: (message) => notices.push(message),
+    api: async (path, opts = {}) => {
+      requests.push({ path, method: opts.method || "GET", body: opts.body });
+      if (path === "/jobs") return readList(data, ++listReads);
+      if (path === "/projects") return [{ name: "homelab", target: "tower" }];
+      if (path === "/models") return [];
+      if (path === "/backends?auth=skip") return [{ name: "local", available: true }];
+      if (path.startsWith("/jobs/preview")) return { ok: true, next: [] };
+      const item = data.find((j) => path === "/jobs/" + j.id);
+      assert.ok(item, path);
+      if (opts.method === "PUT") Object.assign(item, opts.body);
+      return structuredClone(item);
+    },
+  });
+  const body = new StrictEl("section");
+  const leaves = [];
+  await fixture.page.viewJobs({ body, header() {}, paint() {}, onLeave: (fn) => leaves.push(fn) });
+  return { ...fixture, data, body, document, requests, notices, notify: () => notify(),
+    readCount: () => listReads, cleanup: () => [...leaves, ...fixture.leaves].forEach((fn) => fn()) };
+}
+
+// A failed notification request must still run the Save refresh queued behind it.
+let failBackground;
+const backgroundReply = new Promise((resolve, reject) => { failBackground = reject; });
+const queuedSave = await jobFixture([job("queued", "Before save")],
+  async (data, count) => count === 2 ? backgroundReply : structuredClone(data));
+try {
+  await queuedSave.page.viewJob("queued");
+  queuedSave.notify();
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  assert.equal(queuedSave.readCount(), 2);
+  walk(queuedSave.$app, (e) => e.id === "job-name")[0].value = "After save";
+  walk(queuedSave.$app, (e) => e.tagName === "FORM")[0].dispatchEvent({ type: "submit" });
+  await flush(); await flush();
+  assert.ok(queuedSave.requests.some((r) => r.method === "PUT" && r.body.name === "After save"));
+  failBackground(new Error("Offline"));
+  await flush(); await flush(); await flush();
+  assert.equal(queuedSave.readCount(), 3, "a failed background read cannot discard a queued Save refresh");
+  assert.match(queuedSave.body.textContent, /After save/);
+  assert.doesNotMatch(queuedSave.body.textContent, /Before save/);
+} finally { queuedSave.cleanup(); }
+
+// Updates wait until after the native pointer click, for both links and switches.
+const pressedRows = await jobFixture([job("pressed", "Pressed job"), job("other", "Other job")]);
+try {
+  const list = walk(pressedRows.body, (e) => e.classList.contains("job-groups"))[0];
+  const rowControl = (kind) => walk(pressedRows.body, (e) => e.attributes["data-job"] === "pressed")
+    .flatMap((row) => walk(row, (e) => e.classList.contains(kind)))[0];
+  for (const kind of ["job-main", "switch"]) {
+    const control = rowControl(kind);
+    let clicks = 0;
+    control.addEventListener("click", () => { clicks++; });
+    list.dispatchEvent({ type: "pointerdown", target: control });
+    pressedRows.data[1].name += " changed";
+    pressedRows.notify();
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(rowControl(kind), control, "a background response preserves the pressed " + kind);
+    pressedRows.document.dispatchEvent({ type: "pointerup" });
+    assert.equal(rowControl(kind), control, "pointerup keeps the element for the following click");
+    control.click();
+    assert.equal(clicks, 1);
+    await flush();
+    assert.match(pressedRows.body.textContent, /Other job changed/);
+    assert.notEqual(rowControl(kind), control, "the deferred update paints after the click");
+  }
+} finally { pressedRows.cleanup(); }
+
 // Fresh fixture: completing a toggle must not take focus away from a neighbouring editor.
 const focusPage = mount(false);
 await focusPage.page.viewJobs();
