@@ -84,7 +84,13 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
 
   const IMAGE_MODELS_EMPTY = "No image models are installed. Install them with ops/images-models.ps1 into the server's configured Comfy models directory.";
 
+  function imagePageLayout() {
+    $app.classList.add("images-page");
+    onLeave(() => $app.classList.remove("images-page"));
+  }
+
   async function viewImages() {
+    imagePageLayout();
     setHeader("images", "Images");
     let data;
     try { data = await api("/images"); } catch (e) { append($app, h("p", { class: "note bad" }, e.message)); return; }
@@ -92,7 +98,7 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
     if (!isMember()) {
       try { gpu = await api("/gpu"); } catch (_) { /* offline */ }
     }
-    const prompt = h("textarea", { placeholder: "Describe the image…" });
+    const prompt = h("textarea", { placeholder: "Describe the image…", "aria-label": "Prompt" });
     const draftKey = "harness.imageDraft";
     try { prompt.value = localStorage.getItem(draftKey) || ""; } catch (_) { /* private mode */ }
     const startWarmup = () => {
@@ -119,7 +125,7 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
     const model = modeEntries.length ? h("select", { "aria-label": "Model" }, modeEntries.map(([key, spec]) => h("option", {
       value: key,
     }, spec.label || spec))) : null;
-    const aspect = h("select", {}, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
+    const aspect = h("select", { "aria-label": "Aspect ratio" }, data.status.aspect_ratios.map((a) => h("option", { value: a }, a)));
     let resolutionTouched = false;
     const resolutionInputs = Object.entries(data.status.resolutions).map(([name, spec]) => {
       const input = h("input", { type: "radio", name: "resolution", value: name, checked: name === "standard" });
@@ -148,7 +154,7 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
     }
     renderResolutions();
     const upscaleInfo = data.status.upscale || {};
-    const upscale = h("select", {},
+    const upscale = h("select", { "aria-label": "Upscale" },
       h("option", { value: "none", selected: true }, "Don't upscale"),
       h("option", { value: "2x", disabled: !upscaleInfo.available }, "Upscale 2× after generate"),
       h("option", { value: "4x", disabled: !upscaleInfo.available }, "Upscale 4× after generate"));
@@ -199,7 +205,7 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
       ? "Upscaling is off unless you choose 2× or 4×."
       : "Real-ESRGAN weights are not installed, so 2×/4× upscaling is unavailable.");
     const uploadControls = edit.available && edit.enabled ? [upload, uploadBtn] : [];
-    append($app, 
+    const generation = h("div", { class: "image-generation" },
       isGuest() ? h("p", { class: "muted small" }, "Demo access can view generated images, not start new ones.") : h("form", {
         onsubmit: async (e) => {
           e.preventDefault();
@@ -228,8 +234,9 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
       editHint,
       h("div", { class: "row image-generate-row", style: "margin-top:12px" },
         uploadControls,
-        h("span", { class: "spacer" }), go)),
-      phase, grid);
+        h("span", { class: "spacer" }), go)));
+    append($app, h("div", { class: "images-workspace" }, generation,
+      h("section", { class: "image-gallery", "aria-label": "Image gallery" }, phase, grid)));
     let timer = 0;
     const tick = async () => {
       try {
@@ -299,6 +306,7 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
   }
 
   async function viewImage(id) {
+    imagePageLayout();
     setHeader("images", "Image", { page: true });
     const load = async () => {
       const img = await api(`/images/${id}`);
@@ -325,10 +333,10 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
       let editControl = null;
       if (canEdit) editControl = h("a", { class: "btn", href: `#/images/${id}/edit` }, "Edit");
       else if (editReady) editControl = h("button", { class: "btn", type: "button", disabled: true, title: editBlockedReason }, "Edit");
-      fill($app,
-        img.status === "done" ? h("a", { href: `#/images/${id}/full` }, daemonImage(`/images/${id}.png`, { class: "image-full", alt: img.prompt }))
-          : h("p", { class: noteClass }, imageNote()),
-        h("div", { class: "card" },
+      fill($app, h("div", { class: "image-detail-layout" },
+        h("div", { class: "image-preview" }, img.status === "done" ? h("a", { href: `#/images/${id}/full` }, daemonImage(`/images/${id}.png`, { class: "image-full", alt: img.prompt }))
+          : h("div", { class: noteClass }, imageNote())),
+        h("div", { class: "card image-details" },
           h("p", {}, img.prompt),
           h("p", { class: "muted small" }, meta.join(" · ")),
           provenanceNote(img),
@@ -338,7 +346,7 @@ export function mountImages({ $app, h, fill, append, api, setHeader, toast, go, 
             ...(img.children.flatMap((c, i) => [i ? ", " : "", h("a", { href: `#/images/${c.id}` },
               c.operation === "upscale" ? `${c.scale}×` : c.operation)]))) : null,
           !isGuest() && (!edit.enabled || !edit.available) ? h("p", { class: "muted small" }, edit.setup || "") : null,
-          imageActionRow(img, id, { editControl, canUpscale, startUpscale })));
+          imageActionRow(img, id, { editControl, canUpscale, startUpscale }))));
       return img;
     };
     let img = await load();

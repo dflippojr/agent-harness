@@ -945,3 +945,32 @@ body.has-tabs .composer { bottom: var(--tabbar-offset); padding-bottom: 8px; }
   #split-list .version-row { text-align: left; }
 }
 /* End Desktop 8. */
+
+/* Desktop 7: Images (#568). Page-local columns; the shell's split list is for list/detail routes.
+   Below 768 px the generation form, gallery and image details retain their phone flow. */
+@media (min-width: 768px) {
+  main.images-page { max-width: 1440px; padding: 24px 24px 48px; }
+  body:has(main.images-page) #bar { padding-inline: max(24px, calc((100% - 1440px) / 2 + 24px)); }
+  .images-workspace { display: grid; grid-template-columns: 380px minmax(0, 1fr); gap: 24px; align-items: start; }
+  .image-generation { padding: 20px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+  .image-generation .row > div { min-width: 0; }
+  .image-generation textarea { min-height: 120px; }
+  .image-generation .image-generate-row { margin-bottom: 0; }
+  .image-gallery { min-width: 0; }
+  .image-gallery .image-status { margin: 0 0 16px; }
+  .image-gallery .image-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; margin-top: 0; }
+  .image-gallery .image-card { padding: 8px; color: var(--text); text-decoration: none; }
+  .image-gallery .image-card:hover { border-color: var(--accent); }
+  .image-gallery .image-card:focus-visible, .images-page .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .image-gallery .image-placeholder.running { background: var(--info-bg); color: var(--accent); }
+  .image-gallery .image-placeholder.queued { background: var(--warn-bg); color: var(--warn); }
+  .image-detail-layout { display: grid; gap: 24px; align-items: start; }
+  .image-preview, .image-details { min-width: 0; }
+  .image-preview > a { display: block; }
+  .image-preview .image-full { max-height: calc(100dvh - var(--bar-h, 64px) - 48px); object-fit: contain; margin-bottom: 0; }
+  .image-details { margin: 0; overflow-wrap: anywhere; }
+}
+@media (min-width: 1280px) {
+  .image-detail-layout { grid-template-columns: minmax(0, 1fr) 380px; }
+}
+/* End Desktop 7. */
