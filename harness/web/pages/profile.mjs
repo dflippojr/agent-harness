@@ -6,6 +6,7 @@ import { md } from "../lib/markdown.mjs";
 import { showSecretOnce as showSecret } from "../lib/secret.mjs";
 import * as sheets from "../lib/sheet.mjs";
 import { protocolMismatch } from "../lib/compat.mjs";
+import { SPLITS } from "../lib/layout.mjs";
 import { backendsValue, smartApprovalsValue, skillsValue, memoryValue, notificationsValue, resourcesValue, serverSettingsValue,
   accountsValue, remoteControlValue, appsValue, endpointValue, versionStatus, serverVersionText } from "../lib/settings-text.mjs";
 
@@ -51,7 +52,7 @@ const PROFILE_PAGES = {
 // The Settings menu (#512): four groups of rows, each row showing its current value. `action` rows are the owner's
 // Actions pages (#/actions/<id>), folded in under Server; the rest open #/profile/<id>.
 const SETTINGS_GROUPS = [
-  ["This phone", ["appearance", "notifications", "connection", "install"]],
+  ["This device", ["appearance", "notifications", "connection", "install"]],
   ["Agents", ["backends", "smart-approvals", "skills", "memory"]],
   ["Server", ["resources", "daemon", "accounts", "remote-control", "disk"]],
   ["Integrations", ["apps", "endpoint"]],
@@ -93,6 +94,7 @@ function applyTheme(name, hues) {
     localStorage.setItem("harness.theme", theme);
     localStorage.setItem("harness.themeHues", JSON.stringify(colors));
   } catch (_) { /* private mode */ }
+  refreshAppearanceValue();
 }
 
 const TEXT_SIZES = {
@@ -115,6 +117,7 @@ function applyTextSize(id) {
   document.documentElement.style.setProperty("--text-scale", String(TEXT_SIZES[size].scale));
   try { localStorage.setItem("harness.textSize", size); } catch (_) { /* private mode */ }
   requestAnimationFrame(layoutBar);
+  refreshAppearanceValue();
 }
 
 // Copies text and says so; when the clipboard is unavailable (insecure context, permission denied) the
@@ -383,7 +386,29 @@ const PROFILE_CARDS = {
   endpoint: (me) => endpointCard(me),
 };
 
+// Register through the shared framework without changing other desktop workers' files.
+// The shell resolves this list through its existing viewProfile view.
+if (!SPLITS.some((split) => split.key === "settings")) SPLITS.push({
+  key: "settings", list: "viewProfile", label: "Settings menu",
+  match: (parts) => {
+    if (["profile", "settings"].includes(parts[0])) {
+      if (parts.length === 1) return null;
+      if (parts[1] === "account" || Object.hasOwn(PROFILE_PAGES, parts[1])) return parts[1];
+    }
+    if (parts[0] === "actions" && Object.hasOwn(ACTION_PAGES, parts[1])) return parts[1];
+    return undefined;
+  },
+  empty: { title: "No setting open", text: "Choose your profile or a setting from the menu." },
+});
+let menuValues = null;
+function refreshAppearanceValue() {
+  const value = menuValues?.appearance;
+  if (value) value.textContent = `${THEMES[readTheme()]?.label || "System"} · ${TEXT_SIZES[readTextSize()].label} text`;
+}
+
 async function viewProfile(page, extra) {
+  // With a pane, the router is asking for the persistent menu rather than a detail page.
+  if (page?.body) return settingsMenu(page);
   const titles = { account: "Account", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
@@ -393,17 +418,32 @@ async function viewProfile(page, extra) {
   if (page === "connection") return append($app, connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
   if (Object.hasOwn(PROFILE_CARDS, page)) return append($app, await PROFILE_CARDS[page](me, profile, extra));
+  return settingsMenu(null, me, profile);
+}
+
+async function settingsMenu(pane = null, me = null, profile = null) {
+  const target = pane?.body || $app;
+  let active = true;
+  const values = {};
+  if (pane) {
+    pane.header("Settings");
+    pane.onLeave(() => {
+      active = false;
+      if (menuValues === values) menuValues = null;
+    });
+  }
+  if (!me) [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
+  if (!active) return;
   let hidden = new Set();
   if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
   else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
   const shown = (id) => (Object.hasOwn(ACTION_PAGES, id) ? isOwner()
     : (id !== "install" || !isStandalone()) && !hidden.has(id));
-  const values = {};
   const groups = SETTINGS_GROUPS.map(([label, ids]) => {
     const rows = ids.filter(shown).map((id) => {
       values[id] = h("span", { class: "set-value" });
       const href = Object.hasOwn(ACTION_PAGES, id) ? `#/actions/${id}` : `#/profile/${id}`;
-      return h("a", { class: "set-row", href, "data-setting": id },
+      return h("a", { class: "set-row", href, "data-setting": id, "data-split-key": id },
         h("span", { class: `set-icon ic-${id}`, "aria-hidden": "true" }),
         h("span", { class: "set-label" }, ACTION_PAGES[id] || PROFILE_PAGES[id]),
         values[id],
@@ -419,9 +459,10 @@ async function viewProfile(page, extra) {
       if (identityNote.isConnected) identityNote.textContent = serverNote();
       else stop();
     });
+    pane?.onLeave(stop);
   }
-  append($app,
-    h("a", { class: "card identity", href: "#/profile/account" },
+  append(target,
+    h("a", { class: "card identity", href: "#/profile/account", "data-split-key": "account" },
       h("div", { class: "row" },
         h("span", { class: "identity-emoji" }, profile.emoji || "🙂"),
         h("div", { class: "spacer" },
@@ -434,7 +475,9 @@ async function viewProfile(page, extra) {
       h("p", { class: "muted small" }, `${me.usage.running || 0} running · ${me.usage.queued || 0} queued`)) : null,
     groups.flat(),
     versionRow());
+  if (pane) menuValues = values;
   fillSettingValues(values, me);
+  pane?.paint();
 }
 
 function serverLabel() {
@@ -680,10 +723,10 @@ function appearanceCard() {
       h("div", { class: "hue-control" }, preview, input));
   }));
   return h("div", { class: "card" },
-    h("p", { class: "muted small" }, "How the app looks on this phone. The profile icon — the emoji next to your name — lives on the Profile card."),
+    h("p", { class: "muted small" }, "How the app looks on this device. The profile icon — the emoji next to your name — lives on the Profile card."),
     grid, hueRow,
     h("p", { class: "section-label" }, "Text size"),
-    h("p", { class: "muted small" }, "This phone only, like the theme. Session list, transcript, Settings, and the header all follow it."),
+    h("p", { class: "muted small" }, "This device only, like the theme. Session list, transcript, Settings, and the header all follow it."),
     sizes,
     h("p", { class: "section-label" }, "Home screen icon"),
     h("p", { class: "muted small" }, "Used when you add this app to the home screen. Separate from the profile icon."),

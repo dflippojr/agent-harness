@@ -204,7 +204,7 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
     const selected = ACTION_TABS.some(([id]) => id === tab) ? tab : "resources";
     if (tab !== selected) { go("#/actions/resources", true); return; }  // also old #/actions/gpu bookmarks
     setHeader("agents", "Actions", { page: true });
-    const tabs = h("div", { class: "tabs", role: "tablist", "aria-label": "Actions" },
+    const tabs = h("div", { class: "tabs resources-tabs", role: "tablist", "aria-label": "Server settings" },
       ACTION_TABS.map(([id, label]) => h("button", {
         type: "button", role: "tab", class: id === selected ? "on" : "",
         "aria-selected": id === selected ? "true" : "false",
