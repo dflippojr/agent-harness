@@ -68,13 +68,14 @@ const sessions = [
 ];
 const detail = (s) => ({ ...s, backend: "local", model: "m", totals: {}, created_at: now - 900, workspace: "/tmp" });
 const fetched = [];
+let failList = false;  // the list's /sessions answers 502 (the rail's count shares the path; it just hides)
 const fakeFetch = async (url) => {
   const path = String(url).replace(/^https?:\/\/[^/]+/, "").replace(/^\/api\/(?:admin\/)?v1/, "");
   fetched.push(path);
   if (path === "/health") return jsonResp({ protocols: { admin: { min: 1, max: 4 } }, update_hint: {} });
   if (path === "/me") return jsonResp({ role: "owner", name: "Owner", login: "owner", public_url: "http://localhost" });
   if (path === "/profile") return jsonResp({ emoji: "🙂", choices: ["🙂"] });
-  if (path === "/sessions") return jsonResp(sessions);
+  if (path === "/sessions") return failList ? jsonResp({ detail: "Bad gateway" }, 502) : jsonResp(sessions);
   const one = sessions.find((s) => path === `/sessions/${s.id}`);
   if (one) return jsonResp(detail(one));
   if (/^\/sessions\/s\d\/changes$/.test(path)) return jsonResp({ removed: false, secret_scan: null, repos: [] });
@@ -86,6 +87,7 @@ const fakeFetch = async (url) => {
 
 // A controllable (min-width: 1280px) query: flipping `matches` and emitting "change" is the window crossing it.
 const wideQuery = Object.assign(new Emitter(), { matches: true });
+const sources = [];  // every EventSource the app opens
 const win = new Emitter();
 Object.assign(win, {
   addEventListener: (...a) => Emitter.prototype.addEventListener.call(win, ...a),
@@ -96,7 +98,7 @@ Object.assign(win, {
   history: { replaceState() {}, back() {} },
   scrollTo() {}, innerWidth: 1440, innerHeight: 900, scrollY: 0,
   matchMedia: (q) => (q === "(min-width: 1280px)" ? wideQuery : Object.assign(new Emitter(), { matches: false })),
-  EventSource: fakeEventSource([]), fetch: fakeFetch,
+  EventSource: fakeEventSource(sources), fetch: fakeFetch,
   requestAnimationFrame: (fn) => setTimeout(fn, 0), cancelAnimationFrame: (id) => clearTimeout(id),
 });
 globalThis.window = win;
@@ -205,14 +207,27 @@ await waitFor(() => rows().length === 2, "a fresh list when the split reopens on
 assert.notEqual(walk(pane(), (n) => n.className === "split-body")[0], listBody);
 assert.deepEqual(marked(), ["s1"]);
 
-// 1024 px: one pane. Crossing the breakpoint re-routes: the session alone with Back, and the list alone as a page.
+// 1024 px: one pane. Crossing the breakpoint on a session keeps the session's page (review on #578: an unsent message
+// must survive a resize) and only drops the list beside it; Back takes its place.
+const sessionPage = byId.app.childNodes[0];
+assert.ok(sessionPage, "the session is rendered");
 wideQuery.matches = false;
 wideQuery.emit("change");
 await sleep(60);
-await waitFor(() => byId.title.textContent === "Fix the flaky test", "the session after narrowing");
+assert.equal(byId.app.childNodes[0], sessionPage, "narrowing does not re-render the session");
+assert.equal(byId.title.textContent, "Fix the flaky test");
 assert.ok(!body.contains("split"));
 assert.equal(pane().childNodes.length, 0);
 assert.equal(byId.back.hidden, false, "below 1280 px a session has Back");
+wideQuery.matches = true;
+wideQuery.emit("change");
+await waitFor(() => rows().length === 2, "the list beside the session again");
+assert.equal(byId.app.childNodes[0], sessionPage, "widening does not re-render the session either");
+assert.equal(byId.back.hidden, true);
+assert.deepEqual(marked(), ["s1"]);
+wideQuery.matches = false;
+wideQuery.emit("change");
+await sleep(60);
 press();
 assert.ok(!body.contains("split-collapsed"), "[ does nothing without a split");
 await go("#/agents");
@@ -224,5 +239,42 @@ assert.doesNotMatch(byId.app.textContent, /No session open/);
 wideQuery.matches = true;
 wideQuery.emit("change");
 await waitFor(() => rows().length === 2 && /No session open/.test(byId.app.textContent), "the split again at 1440");
+
+// A list that fails to load says why with Retry, and is not counted as loaded (review on #578): Retry, the next route in
+// the split and the next server event each try again.
+const paneError = () => walk(pane(), (n) => n.className === "note bad")[0];
+const retryButton = () => walk(pane(), (n) => n.tagName === "BUTTON" && n.textContent === "Retry")[0];
+const errors = console.error;
+console.error = () => {};
+failList = true;
+await go("#/jobs");
+await go("#/agents");
+await waitFor(() => paneError(), "the pane's load error");
+assert.ok(retryButton(), "the error offers Retry");
+assert.equal(rows().length, 0);
+retryButton().click();
+await sleep(60);
+assert.ok(paneError(), "still failing: still saying so");
+failList = false;
+retryButton().click();
+await waitFor(() => rows().length === 2 && !paneError(), "Retry loads the list");
+failList = true;
+await go("#/jobs");
+await go("#/s/s1");
+await waitFor(() => paneError(), "a deep link whose list fails");
+failList = false;
+await go("#/s/s2");
+await waitFor(() => rows().length === 2 && !paneError(), "the next route in the split retries");
+assert.deepEqual(marked(), ["s2"]);
+failList = true;
+await go("#/jobs");
+await go("#/agents");
+await waitFor(() => paneError(), "a failed list again");
+failList = false;
+const daemon = sources.find((src) => /\/v1\/events$/.test(src.url) && src.readyState !== 2);
+assert.ok(daemon, "the app-wide stream is open");
+daemon.emit("status", { status: "running" }, 1);
+await waitFor(() => rows().length === 2 && !paneError(), "the next server event retries");
+console.error = errors;
 console.log("ok");
 process.exit(0);

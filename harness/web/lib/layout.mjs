@@ -65,14 +65,15 @@ const AGENT_SVG = '<svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" 
 
 // The router calls sync(parts) on every route and gets back the active split ({ split, selected, pane }) or null; it
 // renders the list once per open with renderList(view) and, when nothing is open, the detail's empty state with empty().
-// `onChange` re-runs the route when the window crosses the breakpoint.
-export function mountSplitView({ els, h, fill, browser, onChange }) {
+// `onChange` runs when the window crosses the breakpoint. `onDaemonChange` (the app-wide stream's event hook) lets a
+// list that failed to load retry when the server is heard from again.
+export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange = null }) {
   const { $app, $back } = els;
   const { window, document } = browser;
   const query = window.matchMedia?.(`(min-width: ${SPLIT_MIN_WIDTH}px)`) || null;
   let $pane = null;
   let $toggle = null;
-  let current = null;  // { split, selected, pane, cleanup, closed, rendered }
+  let current = null;  // { split, selected, pane, cleanup, closed, rendered, loading }
   let collapsed = false;
 
   const wide = () => !!query?.matches;
@@ -118,19 +119,25 @@ export function mountSplitView({ els, h, fill, browser, onChange }) {
     }
   }
 
+  const runCleanup = (state) => {
+    const fns = state.cleanup;
+    state.cleanup = [];
+    fns.forEach((fn) => { try { fn(); } catch (_) { /* ignore */ } });
+  };
+
   function close() {
     if (!current) return;
-    const { cleanup } = current;
-    current.closed = true;
+    const state = current;
+    state.closed = true;
     current = null;
-    cleanup.forEach((fn) => { try { fn(); } catch (_) { /* ignore */ } });
+    runCleanup(state);
     if ($pane) fill($pane);
     paintBody();
   }
 
   function open(split, selected) {
     ensureElements();
-    const state = { split, selected, cleanup: [], closed: false, rendered: false };
+    const state = { split, selected, cleanup: [], closed: false, rendered: false, loading: false };
     const body = h("div", { class: "split-body" });
     const head = h("header", { class: "split-head" });
     state.pane = {
@@ -159,17 +166,32 @@ export function mountSplitView({ els, h, fill, browser, onChange }) {
     return current;
   }
 
-  // Renders the split's list into its pane once per open; the router passes the view (it may still be fetching).
+  // Renders the split's list into its pane once per open; the router passes the view (it may still be fetching). A load
+  // that fails is not counted: the pane says why with Retry, and the next route in the split or the next event from the
+  // server tries again.
   async function renderList(view) {
     const state = current;
-    if (!state || state.rendered) return;
-    state.rendered = true;
+    if (!state || state.rendered || state.loading) return;
+    state.loading = true;
+    fill(state.pane.body);
     try {
       await view(state.pane);
+      state.rendered = true;
     } catch (e) {
-      if (!state.closed) fill(state.pane.body, h("p", { class: "note bad" }, e.message));
+      if (!state.closed) failed(state, view, e);
+    } finally {
+      state.loading = false;
     }
     if (current === state) mark(true);
+  }
+
+  function failed(state, view, e) {
+    runCleanup(state);  // whatever the half-built list registered
+    const retry = () => { if (current === state) void renderList(view); };
+    fill(state.pane.body, h("p", { class: "note bad" }, e.message),
+      h("button", { class: "btn", type: "button", onclick: retry }, "Retry"));
+    const stop = onDaemonChange?.(() => { stop?.(); retry(); });
+    if (stop) state.cleanup.push(stop);
   }
 
   function empty() {

@@ -4,7 +4,7 @@
 import { h, fill, append } from "./dom.mjs";
 import { validId } from "./stream.mjs";
 import { GOOGLE_FAILED } from "./signin.mjs";
-import { mountSplitView } from "./layout.mjs";
+import { mountSplitView, splitRoute } from "./layout.mjs";
 
 export const hashParts = (hash) => hash.replace(/^#\/?/, "").split("/").filter(Boolean);
 // The tab bar's sections (#506). Settings and its pages, Actions included, are nested under the gear and show Back.
@@ -40,7 +40,22 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
   let cleanup = [];
   const onLeave = (fn) => cleanup.push(fn);
   // Split views (#563, lib/layout.mjs): at 1280 px+ a list stays mounted beside its detail routes.
-  const split = mountSplitView({ els, h, fill, browser, onChange: () => route() });
+  const split = mountSplitView({ els, h, fill, browser, onChange: () => crossBreakpoint(), onDaemonChange: stream.onDaemonChange });
+
+  // The window crossed 1280 px. Only a split route changes layout, and a detail route keeps its page (an unsent message,
+  // an open sheet): the list is added beside it or closed, and Back follows. The list route itself re-routes, since its
+  // list moves between <main> and the pane.
+  function crossBreakpoint() {
+    if (session.isBlocked() || session.needsSignIn() || session.getMe()?.role === "offline") return;
+    const parts = hashParts(browser.location.hash);
+    const found = splitRoute(parts);
+    if (!found) return;
+    if (found.selected === null) { void route(); return; }
+    const open = split.sync(parts);
+    $back.hidden = !!open || isTopLevel(parts);
+    if (open) void split.renderList(views()[open.split.list]);
+    chrome.repaintBar?.();
+  }
 
   function go(hash, replace = false) {
     if (session.isBlocked()) return;
