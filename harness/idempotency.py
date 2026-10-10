@@ -2,7 +2,7 @@
 
 An App that lost the response to POST /api/v1/sessions retries it with the same `Idempotency-Key` header and gets the
 session the first request created (200, `Idempotency-Replayed: true`) instead of a second run. v1 covers App tokens
-on that one route. The App's own store keeps one row per key (migration 0057): the hash of the App id and the key, a
+on that one route. The App's own store keeps one row per key (migration 0058): the hash of the App id and the key, a
 digest of the validated request body and the session id, written in the transaction that inserts the session, so a
 crash after the commit still finds it and a failed request leaves no row. Nothing of the prompt, context or tools is
 kept. A key is protected for `WINDOW_SECONDS` from the first successful create, then reusable. Under a protected key:
