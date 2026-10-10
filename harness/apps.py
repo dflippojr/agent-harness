@@ -562,7 +562,7 @@ def view(m, s: dict) -> dict:
     out["metadata"] = s.get("app_metadata") or {}
     if s.get("end_user"):
         out["end_user"] = s["end_user"]
-    out["answer"] = m.db.get_session(s["id"])["answer"]
+    out["answer"] = s["answer"]
     return out
 
 
@@ -1040,7 +1040,11 @@ def _replay(m, key: dict, record: dict | None) -> JSONResponse | None:
     sid = idempotency.replayed_session(m.db.for_app(key["id"]), record)
     if sid is None:
         return None
-    return JSONResponse(view(m, m.db.get_session(sid)), headers={idempotency.REPLAYED_HEADER: "true"})
+    session = m.db.get_session(sid)
+    if session is None:
+        raise HarnessError(410, f"the session this {idempotency.HEADER} created was erased; it is not created again",
+                           idempotency.ERASED)
+    return JSONResponse(view(m, session), headers={idempotency.REPLAYED_HEADER: "true"})
 
 
 _CREATE_RESPONSES = {

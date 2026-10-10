@@ -629,12 +629,13 @@ class Harness:
 
     def run(self, prompt: str, tools: list[Tool] | None = None, on_event: Callable[[dict], None] | None = None,
             **create_args) -> RunResult:
-        """Create a session and serve its tool calls until it ends. With an idempotency key, historical tool calls
-        are served only while still pending, so retrying a completed run does not repeat answered calls."""
+        """Create a session and serve its tool calls until it ends. With an idempotency key, attach to its current
+        run so a retry skips completed runs and answered tool calls."""
         by_name = {t.name: t for t in tools or []}
         s = self.create_session(prompt, tools=tools, **create_args)
-        return self._drive(s["id"], by_name, RunResult(session=s), on_event,
-                           confirm_replays=create_args.get("idempotency_key") is not None)
+        if create_args.get("idempotency_key") is not None:
+            return self.attach(s["id"], tools=tools, on_event=on_event)
+        return self._drive(s["id"], by_name, RunResult(session=s), on_event)
 
     def attach(self, sid: str, tools: list[Tool] | None = None,
                on_event: Callable[[dict], None] | None = None) -> RunResult:

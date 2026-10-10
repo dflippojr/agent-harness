@@ -242,6 +242,34 @@ def test_keyed_run_retries_do_not_execute_completed_tool_calls_again():
     assert [call_id for call_id, _ in server.results] == ["c1"]
 
 
+def test_keyed_run_retry_drives_the_current_followup_past_an_earlier_finish():
+    log = []
+    done = {"id": "s1", "status": "done", "last_event_seq": 7, "answer": "follow-up done"}
+    current = _call("c2", text="follow-up")
+    server = FakeAttachServer(_active(5), [], [
+        {"seq": 2, "type": "run_finished", "data": {}},
+        {"seq": 6, "type": "app_tool_call", "data": current},
+        {"seq": 7, "type": "run_finished", "data": {}},
+    ])
+
+    def handler(request):
+        if request.url.path == "/api/v1/sessions" and request.method == "POST":
+            return httpx.Response(200, json=server.session)
+        if request.url.path.endswith("/events"):
+            server.pending.append(current)
+            server.session = done
+        return server.handler(request)
+
+    with server.sdk() as sdk:
+        sdk.client.close()
+        sdk.client = httpx.Client(base_url=sdk.base, transport=httpx.MockTransport(handler))
+        result = sdk.run("buy once", tools=_attach_tools(log), idempotency_key="order-7")
+    assert result.session == done
+    assert [e["seq"] for e in result.events] == [6, 7]
+    assert log == ["follow-up"]
+    assert [call_id for call_id, _ in server.results] == ["c2"]
+
+
 def test_attach_ignores_earlier_run_finish_and_returns_on_terminal_status_without_tools():
     log = []
     server = FakeAttachServer(_active(5), [], [

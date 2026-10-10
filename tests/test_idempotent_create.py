@@ -364,3 +364,45 @@ def test_browser_apps_can_preflight_idempotent_creates_and_read_the_replay_heade
         assert replay.headers[idempotency.REPLAYED_HEADER] == "true"
         assert replay.headers["access-control-allow-origin"] == ORIGIN
         assert idempotency.REPLAYED_HEADER.lower() in replay.headers["access-control-expose-headers"].lower()
+
+
+def test_erasure_between_the_replay_lookup_and_view_returns_gone(tmp_path, monkeypatch):
+    m = _manager(make_cfg(tmp_path))
+    with TestClient(create_app(m), raise_server_exceptions=False) as client:
+        app_id, auth = _key(client, "shop", "sessions")
+        sid = _post(client, auth, "k").json()["id"]
+        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        replayed_session = idempotency.replayed_session
+
+        def erase_before_view(store, record):
+            replayed = replayed_session(store, record)
+            assert replayed == sid
+            m.db.delete_session(sid)
+            return replayed
+
+        monkeypatch.setattr(idempotency, "replayed_session", erase_before_view)
+        replay = _post(client, auth, "k")
+        assert replay.status_code == 410
+        assert replay.json()["error"]["code"] == idempotency.ERASED
+        assert m.db.app_session_ids(app_id) == [] and _spawned(m) == [sid]
+
+
+def test_replay_view_uses_its_snapshot_if_erasure_commits_during_rendering(tmp_path, monkeypatch):
+    m = _manager(make_cfg(tmp_path))
+    with TestClient(create_app(m), raise_server_exceptions=False) as client:
+        app_id, auth = _key(client, "shop", "sessions")
+        sid = _post(client, auth, "k").json()["id"]
+        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        snapshot = m.db.get_session(sid)
+        summary = m.summary
+
+        def erase_during_view(session):
+            result = summary(session)
+            m.db.delete_session(sid)
+            return result
+
+        monkeypatch.setattr(m, "summary", erase_during_view)
+        replay = _post(client, auth, "k")
+        assert replay.status_code == 200 and replay.json()["answer"] == snapshot["answer"]
+        assert _post(client, auth, "k").status_code == 410
+        assert m.db.app_session_ids(app_id) == [] and _spawned(m) == [sid]

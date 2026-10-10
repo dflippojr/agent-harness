@@ -638,9 +638,10 @@ else:
     raise RuntimeError("the daemon is unreachable; retry later with the same key")
 ```
 
-`h.run(prompt, tools=..., idempotency_key=key)` forwards the key the same way and checks that replayed tool calls are
-still pending before serving them, so completed tool calls are not executed again. Only one driver should own a
-session; the key protects session creation, not a tool's external side effects before its result reaches the daemon.
+`h.run(prompt, tools=..., idempotency_key=key)` forwards the key the same way and attaches to the session's current
+run. It checks that replayed tool calls are still pending before serving them, so completed tool calls are not
+executed again. Only one driver should own a session; the key protects session creation, not a tool's external side
+effects before its result reaches the daemon.
 
 ### End users' own logins
 
