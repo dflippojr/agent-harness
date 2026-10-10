@@ -6,7 +6,7 @@ import { ago } from "../lib/format.mjs";
 import * as sheets from "../lib/sheet.mjs";
 
 export function mountJobs({ $app, h, fill, append, api, setHeader, showListAction, toast, go, route, isGuest, confirmGpuQueue, badge, jobStatusBadge, location,
-  confirmSheet = sheets.confirmSheet, onLeave = () => {} }) {
+  confirmSheet = sheets.confirmSheet, onLeave = () => {}, onDaemonChange = null, browser = globalThis }) {
   let refreshList = null;
   let openForm = null;
   // Serialize writes to one job: the list switch and its open editor must not overwrite each other.
@@ -40,7 +40,8 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       pane?.paint();
     };
     // Detail routes keep the split list mounted; successful edits refresh it explicitly.
-    async function refresh({ initial = false } = {}) {
+    async function refresh({ initial = false, quiet = false } = {}) {
+      if (gone) return;
       const version = ++refreshVersion;
       const toggles = new Map(toggleVersions);
       try {
@@ -57,10 +58,31 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       } catch (err) {
         if (gone || version !== refreshVersion) return;
         if (initial) throw err;
-        toast(`Couldn't refresh jobs: ${err.message}`, 5000);
+        if (!quiet) toast(`Couldn't refresh jobs: ${err.message}`, 5000);
       }
     }
     refreshList = refresh;
+    if (pane) {
+      let refreshTimer = null;
+      const schedule = () => {
+        if (gone) return;
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(() => void refresh({ quiet: true }), 300);
+      };
+      const stop = onDaemonChange?.(schedule);
+      const poll = setInterval(() => { if (!browser.document?.hidden) schedule(); }, 60000);
+      const backToList = () => { if (browser.location?.hash === "#/jobs") schedule(); };
+      const visible = () => { if (!browser.document?.hidden) schedule(); };
+      browser.window?.addEventListener("hashchange", backToList);
+      browser.document?.addEventListener("visibilitychange", visible);
+      leave(() => {
+        stop?.();
+        clearTimeout(refreshTimer);
+        clearInterval(poll);
+        browser.window?.removeEventListener("hashchange", backToList);
+        browser.document?.removeEventListener("visibilitychange", visible);
+      });
+    }
 
     function jobRow(j) {
       const last = j.recent?.[0];
@@ -69,7 +91,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
       const toggle = h("input", { type: "checkbox", class: "switch", role: "switch", "aria-label": `${j.name} enabled`,
         disabled: isGuest() || saving.has(j.id) });
       toggle.checked = saving.has(j.id) ? saving.get(j.id) : !!j.enabled;
-      toggle.addEventListener("change", () => setEnabled(j, toggle.checked, true));
+      toggle.addEventListener("change", () => setEnabled(j, toggle.checked, true, toggle));
       return h("div", { class: `job-row${j.enabled ? "" : " paused"}`, "data-job": j.id, "data-split-key": j.id },
         h("a", { class: "job-main", href: `#/jobs/${j.id}` },
           h("h3", {}, j.name),
@@ -81,8 +103,9 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
     }
 
     // PUT replaces the whole job, so re-read it first: an edit made elsewhere since the list loaded is kept.
-    async function setEnabled(j, enabled, undoable = false) {
+    async function setEnabled(j, enabled, undoable = false, source = null) {
       if (saving.has(j.id)) return;
+      const hadFocus = source && browser.document?.activeElement === source;
       const form = openForm?.id === j.id ? openForm : null;
       const formRevision = form?.revision();
       toggleVersions.set(j.id, (toggleVersions.get(j.id) || 0) + 1);
@@ -103,7 +126,10 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
         saving.delete(j.id);
         paint();
       }
-      if (undoable) list.querySelector(`[data-job="${j.id}"] .switch`)?.focus();  // keep keyboard focus on the row that moved
+      const active = browser.document?.activeElement;
+      if (undoable && hadFocus && (active === source || active === browser.document?.body)) {
+        list.querySelector(`[data-job="${j.id}"] .switch`)?.focus();
+      }
       const said = `${j.name} ${enabled ? "resumed" : "paused"}`;
       if (undoable) toast(said, 5000, { label: "Undo", onClick: () => setEnabled(j, !enabled) });
       else toast(said);

@@ -1,7 +1,7 @@
 // Jobs list (#511): attention groups, the inline Enabled switch that saves at once with an Undo toast, and the row body
 // that still opens the full form. Renders pages/jobs.mjs with the real dom.mjs helpers over the shared stub DOM.
 import assert from "node:assert/strict";
-import { El, Node, createDocument, walk } from "./web_stub_dom.mjs";
+import { El, Emitter, Node, createDocument, walk } from "./web_stub_dom.mjs";
 import { h, fill, append } from "../harness/web/lib/dom.mjs";
 import { SPLITS, splitRoute } from "../harness/web/lib/layout.mjs";
 import { mountJobs } from "../harness/web/pages/jobs.mjs";
@@ -9,6 +9,7 @@ import { jobGroup, jobBody, lastRunPill, lastRunText, shortWhen, JOB_FIELDS } fr
 
 // Browsers stringify an array passed to append(), so this stub refuses one rather than flattening it.
 class StrictEl extends El {
+  focus() { doc.activeElement = this; }
   append(...nodes) {
     assert.ok(!nodes.some(Array.isArray), "append() got a nested array; a browser would print it as text");
     super.append(...nodes);
@@ -88,14 +89,14 @@ const api = async (path, opts = {}) => {
   return [];
 };
 const toasts = [];
-const mount = (guest) => {
+const mount = (guest, extra = {}) => {
   const $app = new StrictEl("main");
   const leaves = [];
   const location = {};
   const navigation = [];
   const page = mountJobs({ $app, h, fill, append, api, setHeader() {}, showListAction() {},
     toast: (text, ms, action) => toasts.push({ text, ms, action }), go: (...args) => navigation.push(args), route() {}, onLeave: (fn) => leaves.push(fn), isGuest: () => guest,
-    confirmGpuQueue: async () => true, badge: (s) => h("span", {}, s), jobStatusBadge: () => null, location, confirmSheet: async () => true });
+    confirmGpuQueue: async () => true, badge: (s) => h("span", {}, s), jobStatusBadge: () => null, location, confirmSheet: async () => true, ...extra });
   return { $app, page, leaves, location, navigation };
 };
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -350,6 +351,60 @@ assert.match(emptyPane.textContent, /First job/);
 assert.doesNotMatch(emptyPane.textContent, /No scheduled jobs yet/);
 first.leaves.forEach((fn) => fn());
 jobs.splice(0, jobs.length, ...previousJobs);
+
+
+// Fresh fixture: daemon changes and returning to Jobs refresh the persistent list; teardown removes the watchers.
+const freshWindow = new Emitter();
+const freshDocument = new Emitter();
+freshDocument.hidden = false;
+const freshLocation = { hash: "#/jobs/j2" };
+let daemonChange;
+let daemonStopped = false;
+const live = mount(false, {
+  browser: { window: freshWindow, document: freshDocument, location: freshLocation },
+  onDaemonChange: (fn) => { daemonChange = fn; return () => { daemonStopped = true; }; },
+});
+const liveBody = new StrictEl("section");
+const liveLeaves = [];
+await live.page.viewJobs({ body: liveBody, header() {}, paint() {}, onLeave: (fn) => liveLeaves.push(fn) });
+const changedJob = jobs.find((j) => j.id === "j2");
+const beforeRun = structuredClone(changedJob.recent);
+changedJob.recent = [{ id: "late-failure", status: "failed", created_at: now }];
+daemonChange();
+await new Promise((resolve) => setTimeout(resolve, 350));
+assert.match(liveBody.textContent, /Failed/, "a run failure repaints the mounted Jobs list");
+changedJob.recent = [{ id: "late-ok", status: "done", job_status: "ok", created_at: now }];
+freshLocation.hash = "#/jobs";
+freshWindow.dispatchEvent({ type: "hashchange" });
+await new Promise((resolve) => setTimeout(resolve, 350));
+assert.match(liveBody.textContent, /OK/, "returning to Jobs also refreshes, even if a daemon event was missed");
+liveLeaves.forEach((fn) => fn());
+assert.equal(daemonStopped, true);
+calls.length = 0;
+daemonChange();
+freshWindow.dispatchEvent({ type: "hashchange" });
+await new Promise((resolve) => setTimeout(resolve, 350));
+assert.equal(calls.length, 0, "a disposed pane does not fetch or repaint");
+changedJob.recent = beforeRun;
+
+// Fresh fixture: completing a toggle must not take focus away from a neighbouring editor.
+const focusPage = mount(false);
+await focusPage.page.viewJobs();
+await focusPage.page.viewJob("j2");
+const focusSwitch = walk(focusPage.$app, (e) => e.attributes["aria-label"] === "Morning homelab check enabled")[0];
+const taskEditor = walk(focusPage.$app, (e) => e.id === "job-task")[0];
+let releaseFocusSave;
+gate = new Promise((resolve) => { releaseFocusSave = resolve; });
+focusSwitch.focus();
+focusSwitch.checked = !focusSwitch.checked;
+focusSwitch.dispatchEvent({ type: "change" });
+await flush(); await flush();
+taskEditor.focus();
+gate = null;
+releaseFocusSave();
+await flush(); await flush(); await flush();
+assert.equal(doc.activeElement, taskEditor, "a completed toggle preserves the reader's newer focus");
+focusPage.leaves.forEach((fn) => fn());
 
 // Pane teardown stops subsequent list paints; form teardown cancels cron preview timers.
 paneLeaves.forEach((fn) => fn());
