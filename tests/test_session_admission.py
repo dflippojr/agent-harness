@@ -17,7 +17,7 @@ from harness.config import BackendConfig
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.principal import OWNER_USER_ID
-from harness.runner import HOLDS_PLACE, WAITING, RunClock, unresolved_calls
+from harness.runner import HOLDS_PLACE, WAITING, CliLimitError, RunClock, unresolved_calls
 from harness.storage import workspaces_dir
 
 from test_app_stores import _key
@@ -981,6 +981,51 @@ def test_a_time_budget_turned_on_mid_run_applies_to_it(tmp_path):
 async def _slow_compaction(s):
     await asyncio.sleep(60)
     return s
+
+
+def test_a_run_ended_on_its_budget_while_parked_leaves_no_approval_pending(tmp_path):
+    """The owner lowers the time budget below what a run parked on an approval has spent: it ends `budget_time`, and
+    its approval is closed with it rather than left to decide."""
+    cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "action": "ask", "reason": "test"}])
+    script = Script([Completion(tool_calls=[call("write_file", 0, path="a.txt", content="x")]),
+                     Completion(content="never reached")])
+
+    async def slow_script(*args, **kwargs):
+        await asyncio.sleep(0.3)  # time running before it parks
+        return await script(*args, **kwargs)
+
+    async def body():
+        m = Manager(cfg, chat=slow_script)
+        await m.start()
+        app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
+        sid = m.create("write", project="guarded", app=app)["id"]
+        await wait_status(m, sid, "waiting_approval")
+        assert m.runner._run_seconds(sid) > 0.2
+        m.settings.patch_admin({"sessions.max_run_seconds": 0.1}, m.settings.admin_view()["revision"])
+        s = await wait_status(m, sid, "done", "failed", timeout=8)
+        assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
+        assert m.db.pending_approvals(sid) == []
+        assert unresolved_calls(s["context"]) == []
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_a_hosted_run_falling_back_to_an_api_key_waits_for_its_slot_queued(tmp_path):
+    """After its subscription's limit it retries on the API key, and may wait for a backend slot meanwhile: queued, so
+    that wait does not count as its running time; it keeps its place under its cap."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "fallback01", "running", app_id=app_id)
+        m.db.update_session("fallback01", backend="claude")
+        m.runner._clocks["fallback01"] = RunClock(since=time.monotonic())
+        m.runner._backend_credential = lambda s: {"policy": "subscription_then_api_key", "key": "sk-test"}
+        await m.runner._cli_limit_reached("fallback01", "claude", CliLimitError(), use_api_key=False)
+        s = m.db.get_session("fallback01")
+        assert s["status"] == "queued" and s["run"]["backend_auth"] == "api_key" and s["run"].get(HOLDS_PLACE)
+        assert m.runner._clocks["fallback01"].since is None  # its clock stopped
+        assert m._scheduler_eligible("fallback01")
+    asyncio.run(body())
 
 
 def test_a_run_stopped_on_its_budget_mid_tool_answers_every_tool_call(tmp_path):

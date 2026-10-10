@@ -1071,6 +1071,8 @@ class Runner:
                                              "Stopped: the task reached its time budget while this ran.")
             else:
                 await self._close_unresolved(sid, "Not run: nobody decided its approval in time.")
+            for approval in self.db.pending_approvals(sid):  # nothing is left to decide, as on a cancel
+                self.db.decide_approval(approval["id"], "cancelled")
             await self.aset_status(sid, "done", stop_reason=reason)
         if sid in self._unended:
             await self._end_run(sid)
@@ -1360,8 +1362,12 @@ class Runner:
         credential = self._backend_credential(s)
         if credential["policy"] == "subscription_then_api_key" and credential["key"] and not use_api_key:
             run = {**s["run"], "backend_auth": "api_key"}
-            self.db.update_session(sid, run=run)
-            await self.bus.aemit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
+
+            def fall_back() -> None:  # queued for a slot again: that wait is not its running time (#524)
+                self.db.update_session(sid, run=run)
+                self._status_writer(sid, "queued", {})()
+                self.bus.emit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
+            await self.db.for_session(sid).awrite(fall_back)
             return
         reset = limit.reset_at or time.time() + 300
         run = {**s["run"], "limit_resets_at": reset}
