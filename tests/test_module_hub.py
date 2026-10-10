@@ -308,3 +308,20 @@ def test_maximum_pairable_manifest_id(tmp_path):
     doc = document()
     doc["entries"][0]["app"]["app_id"] = app_id
     assert load(save(tmp_path, doc))[0]["app"]["app_id"] == app_id
+
+
+@pytest.mark.parametrize("guard_enabled", [False, True])
+def test_shared_runtime_detail_is_omitted_for_disabled_switch(tmp_path, guard_enabled):
+    cfg = make_cfg(tmp_path)
+    cfg.config_dir = tmp_path / "cfg"
+    cfg.module_packages = ["harness_modules.local_model", "harness_modules.hub"]
+    cfg.gpu_guard.enabled = guard_enabled
+    m = Manager(cfg)
+    with TestClient(create_app(m)) as client:
+        rows = {row["name"]: row for row in client.get(PATH).json()["modules"]}
+        assert rows["local_model"]["status"]["loaded"] is True
+        if guard_enabled:
+            assert rows["gpu_guard"]["state"] == "present"
+            assert rows["gpu_guard"]["status"] == rows["local_model"]["status"]
+        else:
+            assert rows["gpu_guard"] == {"name": "gpu_guard", "state": "switched_off"}

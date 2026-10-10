@@ -78,7 +78,7 @@ async def inventory(manager):
         present = name in caps
         row = {"name": name, "state": "present" if caps.get(name) else "switched_off" if present else "absent"}
         rt = next((rt for rt in manager.modules if name in rt.module.switches), None)
-        detail = details.get(rt.module.name) if rt else None
+        detail = details.get(rt.module.name) if rt and caps.get(name) else None
         if detail is not None:
             row["status"] = detail
         module_rows.append(row)
