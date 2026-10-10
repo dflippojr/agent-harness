@@ -451,7 +451,8 @@ def test_per_user_service_registration_and_removal(tmp_path, monkeypatch, platfo
     service.start([str(tmp_path / "path with spaces/python"), "-m", "stub_hub", "--state-dir", "a'%b$HOME"], workdir, tmp_path / "hub.log")
     if platform == "linux":
         unit = (tmp_path / "config/systemd/user" / (service.name + ".service")).read_text()
-        assert "path with spaces" in unit and "a'%%b$$HOME" in unit
+        assert "path with spaces" in unit and "a'%%b$HOME" in unit
+        assert "ExecStart=:" in unit
         directory = next(line.removeprefix("WorkingDirectory=") for line in unit.splitlines() if line.startswith("WorkingDirectory="))
         assert directory == str(workdir).replace("%", "%%")
         assert not directory.startswith('"')
@@ -656,9 +657,13 @@ def test_systemd_executable_keeps_literal_dollar_path(tmp_path, monkeypatch, nam
 
     workdir = tmp_path / ("Hub path with spaces%" + name)
     workdir.mkdir()
-    python = workdir / "python"
-    python.write_text("#!/bin/sh\nprintf 'stub Hub starts\\n'\n")
-    python.chmod(0o755)
+    if os.name == "nt":
+        python = workdir / "python"
+        python.touch()
+    else:
+        import venv
+        venv.EnvBuilder(with_pip=False).create(workdir / "venv")
+        python = workdir / "venv/bin/python"
     monkeypatch.setattr(hub.sys, "platform", "linux")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setattr(hub, "command", lambda *_args, **_kwargs: None)
@@ -666,11 +671,14 @@ def test_systemd_executable_keeps_literal_dollar_path(tmp_path, monkeypatch, nam
     service.start([str(python), "--state-dir", str(workdir)], workdir, workdir / "hub.log")
     unit = service.definition_path.read_text()
     line = next(line.removeprefix("ExecStart=") for line in unit.splitlines() if line.startswith("ExecStart="))
-    words = shlex.split(line)
-    # Resolve the executable after unit specifiers, before argument-variable expansion.
+    # The ':' prefix prevents variable expansion in both argv[0] and arguments.
+    assert line.startswith(":")
+    words = shlex.split(line.removeprefix(":"))
     executable = Path(words[0].replace("%%", "%"))
     assert executable == python and executable.is_file()
-    assert words[2].replace("%%", "%").replace("$$", "$") == str(workdir)
+    assert words[2].replace("%%", "%") == str(workdir)
     if os.name != "nt":
-        result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
-        assert result.returncode == 0 and result.stdout == "stub Hub starts\n"
+        result = subprocess.run([str(executable), "-c", "import sys; print(sys.prefix)"],
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert Path(result.stdout.strip()) == workdir / "venv"

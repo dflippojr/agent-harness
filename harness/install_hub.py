@@ -120,17 +120,16 @@ class Service:
             path.parent.mkdir(parents=True, exist_ok=True)
             def escape(value):
                 return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("\n", "\\n")
-            # systemd resolves the executable before expanding argument variables.
-            words = ['"' + escape(argv[0]) + '"']
-            words.extend('"' + escape(a).replace("$", "$$") + '"' for a in argv[1:])
-            executable = " ".join(words)
+            # All values are literal. ':' disables variable expansion, including
+            # argv[0], which Python uses to locate the dedicated Hub venv.
+            executable = " ".join('"' + escape(a) + '"' for a in argv)
             # WorkingDirectory is a raw path, unlike ExecStart's quoted arguments.
             directory = str(workdir).replace("%", "%%")
             if "\n" in directory or "\r" in directory:
                 raise ValueError("Hub working directory cannot contain line breaks")
             path.write_text(
                 "[Unit]\nDescription=Agent harness Hub\n[Service]\nType=simple\n"
-                f"WorkingDirectory={directory}\nExecStart={executable}\n"
+                f"WorkingDirectory={directory}\nExecStart=:{executable}\n"
                 "Restart=on-failure\nRestartSec=10\n[Install]\nWantedBy=default.target\n", encoding="utf-8")
             command([SYSTEMCTL, "--user", "daemon-reload"])
             command([SYSTEMCTL, "--user", "enable", "--now", self.name + ".service"])
