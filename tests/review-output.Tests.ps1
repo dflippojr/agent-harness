@@ -17,6 +17,8 @@ Describe 'Review publication safety' {
         @{ Payload = '{"password":"short"}' }
         @{ Payload = "'password'='short'" }
         @{ Payload = ('https://example.invalid/download?sig=' + ('A' * 48)) }
+        @{ Payload = ('https://example.invalid/blob?sv=2024&sig=' + ('A' * 24) + '/' + ('B' * 24)) }
+        @{ Payload = ('https://example.invalid/blob?sv=2024&sig=' + ('A' * 24) + '%2F' + ('B' * 24)) }
         # Any Windows absolute root, whatever follows it: no path is parsed or canonicalized.
         @{ Payload = 'C:/public/config.py' }
         @{ Payload = 'C:\Users\reviewer\.claude\credentials.json' }
@@ -25,6 +27,9 @@ Describe 'Review publication safety' {
         @{ Payload = 'C:\temp,dir\..\Users\reviewer\file.py' }
         @{ Payload = 'profile:C:/temp/../Users/reviewer/.codex/auth.json' }
         @{ Payload = '\\server\share\folder\config.py' }
+        @{ Payload = '//server/share/folder/config.py' }
+        @{ Payload = 'see (//server/share/folder/config.py)' }
+        @{ Payload = '/\server\share\folder\config.py' }
         @{ Payload = '\\?\C:\Users\reviewer\.codex\auth.json' }
         @{ Payload = '\\.\C:\Users\reviewer\.codex\auth.json' }
         @{ Payload = '\\?\Volume{12345678-1234-1234-1234-123456789abc}\config.py' }
@@ -80,6 +85,7 @@ Describe 'Review publication safety' {
         @{ Payload = 'The old side is /dev/null; the shebang is /usr/bin/env.' }
         @{ Payload = '`$env:USERPROFILE` and `~/.claude/settings.json` are inherited.' }
         @{ Payload = 'Call 127.0.0.1:8100/gpu or localhost:8100/gpu.' }
+        @{ Payload = 'See https://github.com/dflippojr/agent-harness/pull/549 and // a code comment.' }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }

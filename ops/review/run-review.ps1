@@ -341,7 +341,8 @@ function Get-ReviewRedactionRules {
 # any Windows absolute root (drive, UNC or extended prefix, file URI) anywhere in the text, and any
 # separator followed by a profile directory name unless it is part of a known repository path.
 # Dot segments, quoting and whitespace cannot hide either form, so no path parsing is needed.
-$script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|\bfile:[\\/]'
+# UNC roots may use either separator; a URL authority (after a scheme's colon) is not one.
+$script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
 # Trailing periods, spaces or short-name tildes still match (Windows aliases); users.md or rooted do not.
 $script:ReviewProfileSegmentPattern = '(?i)[\\/](?:users|home|root|documents and settings)(?![\p{L}\p{N}\p{M}_-])(?!\.[\p{L}\p{N}])'
 
@@ -433,8 +434,9 @@ function Assert-ReviewOutputSafe {
         # Absolute roots and credential patterns always scan the unmasked text.
         $masked = if ($knownPaths.Count -gt 0) { Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths } else { $form }
         $unsafe = ($form -match $script:ReviewAbsoluteRootPattern) -or ($masked -match $script:ReviewProfileSegmentPattern)
-        # A web link is checked segment by segment, so a long documentation URL is not one token.
-        $segmented = [regex]::Replace($masked, '(?i)\bhttps?://[^\s<>"`]+', { param($url) $url.Value.Replace('/', ' ') })
+        # A web link's path is checked segment by segment, so a long documentation URL is not one token.
+        # The query and fragment stay whole: signatures there may contain Base64 slashes.
+        $segmented = [regex]::Replace($masked, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
         foreach ($rule in (Get-ReviewRedactionRules)) {
             $scanText = if ($rule.PSObject.Properties['RepositoryPathsAllowed']) { $segmented } else { $form }
             if ($scanText -match $rule.Pattern) { $unsafe = $true }

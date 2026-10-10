@@ -234,7 +234,7 @@ long tokens) plus two path rules. A match discards the whole body, removes any s
 canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot hide one:
 
 - Any Windows absolute root is rejected, whatever follows it: a drive root (`C:\` or `C:/`), a UNC or extended
-  prefix (`\\server\`, `\\?\`, `\\.\`), or a `file:` URL.
+  prefix (`\\server\`, `//server/`, `\\?\`, `\\.\`), or a `file:` URL.
 - Any separator followed by a profile directory name (`Users`, `home`, `root` or `Documents and Settings`, including
   Windows trailing-period, trailing-space and short-name spellings) is rejected unless it is part of a known
   repository path. `docs/users.md` and `root-ca.md` are not profile directories; an unknown `examples/home/x.py` is
@@ -250,8 +250,8 @@ Known repository paths come from the Git index and every diff file, including de
 Git-quoted paths are decoded as UTF-8 bytes, and patch and rename/copy metadata disambiguate filenames containing the
 diff header's ` b/` separator. Exact citations of known paths (including `./` prefixes and Windows separators) are
 masked for the profile-directory and long-token rules only; a known path never exempts an absolute root, a profile
-prefix in front of it, or a credential pattern. Web links are split at `/` for the long-token rule, so a long
-documentation URL is not one token. Validated Git metadata in the coverage marker is added only after the scan.
+prefix in front of it, or a credential pattern. For the long-token rule, a web link's path is split at `/`, so a long
+documentation URL is not one token; its query and fragment stay whole, so a signature there is still caught. Validated Git metadata in the coverage marker is added only after the scan.
 Stderr shown in job-log warnings keeps the message before a path and replaces the rest of that line with
 `[REDACTED PATH]`.
 
