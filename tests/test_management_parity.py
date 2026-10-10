@@ -1,20 +1,29 @@
 """Issue #334 stage (a): every owner action Agent Harness Web offers has an owner API endpoint and a CLI command.
+Issue #544: every owner API route (and so every Hub action) has a CLI command, whether or not Web calls it.
 
-docs/management-parity.md is the inventory. These tests tie it to Web's `api(...)` calls, to the live owner API
-operations and to the CLI parser, so a new Web call, endpoint or command can't drift out of parity silently."""
+docs/management-parity.md is the inventory. These tests tie it to Web's `api(...)` calls, to the routes mounted under
+the owner API and to the CLI parser, so a new Web call, endpoint or command can't drift out of parity silently."""
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import re
 import shlex
 from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
 
-from harness import cli
-from harness.admin import PREFIX
+from harness import cli, modules
+from harness.admin import ADMIN_PATHS, PREFIX
+from harness.api import create_app
+from harness.llm import Completion
+from harness.manager import Manager
 
-from test_admin import make_client
+from test_admin import LOGIN
+from test_daemon import Script, make_cfg
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "management-parity.md"
@@ -27,6 +36,15 @@ HAND_WRITTEN = {
     "transcript": ("GET", "/sessions/{ref}/transcript"), "cancel": ("POST", "/sessions/{ref}/cancel"),
     "send": ("POST", "/sessions/{ref}/messages"), "approve": ("POST", "/sessions/{ref}/approvals/{approval_id}"),
     "deny": ("POST", "/sessions/{ref}/approvals/{approval_id}"), "queue": ("GET", "/queue"),
+    "watch": ("GET", "/sessions/{ref}/events"),
+}
+
+# Owner API routes deliberately not on the CLI, and why. Keep it short: anything else gets a command.
+NOT_ON_CLI = {
+    ("GET", "/events"): "Web's global live feed; it only tells Web to refresh lists the CLI reads on demand",
+    ("GET", "/chats/{ref}/events"): "a live chat reply stream; `harness chats show <ref>` reads the reply once it ends",
+    ("PUT", "/sessions/{ref}"): "older Web builds' alias of PATCH, which `harness sessions rename` calls",
+    ("PUT", "/chats/{ref}"): "older Web builds' alias of PATCH, which `harness chats rename` calls",
 }
 
 
@@ -140,10 +158,42 @@ def _web_calls() -> list[tuple[str, re.Pattern[str], str, set[str] | None]]:
     return calls
 
 
+def _owner_app(tmp: Path):
+    """The daemon's app with every add-on module present, so every module's owner routes are mounted."""
+    cfg = make_cfg(tmp)
+    cfg.allowed_logins = [LOGIN]
+    for field in dataclasses.fields(cfg.installed):
+        setattr(cfg.installed, field.name, True)
+        setattr(cfg.modules, field.name, True)
+    return create_app(Manager(cfg, chat=Script([Completion(content="hi")]))), cfg
+
+
+def _mounted_owner_routes(app, cfg) -> set[tuple[str, str]]:
+    """(method, path) of every route the live router serves under /api/admin/v1: the ones mounted there, and the
+    unversioned core and module routes admin.register mirrors there (ADMIN_PATHS, Module.admin_paths)."""
+    mirrored = ADMIN_PATHS | modules.admin_paths(cfg)
+    routes = set()
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if route.path.startswith(PREFIX):
+            path = route.path[len(PREFIX):] or "/"
+        elif route.path in mirrored:
+            path = route.path
+        else:
+            continue
+        routes |= {(method, path) for method in route.methods or () if method != "HEAD"}
+    return routes
+
+
 @pytest.fixture(scope="module")
-def operations(tmp_path_factory) -> set[tuple[str, str]]:
-    client, _ = make_client(tmp_path_factory.mktemp("parity"))
-    with client:
+def owner_app(tmp_path_factory):
+    return _owner_app(tmp_path_factory.mktemp("parity"))
+
+
+@pytest.fixture(scope="module")
+def operations(owner_app) -> set[tuple[str, str]]:
+    with TestClient(owner_app[0]) as client:
         ops = client.get(PREFIX).json()["operations"]
     return {(op["method"], op["path"][len(PREFIX):] or "/") for op in ops} | {("GET", "/")}
 
@@ -152,12 +202,67 @@ def _is_operation(operations, method: str, endpoint: str) -> bool:
     return any(m == method and _template_re(path).fullmatch(endpoint) for m, path in operations)
 
 
+@functools.cache
+def _parser():
+    return cli._build_parser()
+
+
+@functools.cache
 def _cli_route(command: str) -> tuple[str, str]:
     argv = shlex.split(re.sub(r"<[^>]+>", "1", command))[1:]
-    args = cli._build_parser().parse_args(argv)
+    args = _parser().parse_args(argv)
     if getattr(args, "admin", None):
         return args.admin[1], args.admin[2] or "/"
     return HAND_WRITTEN[args.cmd]
+
+
+def _routes_without_cli(routes: set[tuple[str, str]], allowed=NOT_ON_CLI.keys()) -> list[str]:
+    """Owner API routes with no inventory row, or whose rows have no CLI command calling them."""
+    rows = _doc_rows()
+    missing = []
+    for method, template in sorted(routes - set(allowed), key=lambda r: (r[1], r[0])):
+        matches = _template_re(template)
+        listed = [row for row in rows if method in row["methods"] and matches.fullmatch(row["endpoint"])]
+        if not listed:
+            missing.append(f"{method} {template}: no row in docs/management-parity.md")
+        elif not any(row["cli"] and _cli_route(row["cli"]) == (method, row["endpoint"]) for row in listed):
+            missing.append(f"{method} {template}: no CLI command calls it")
+    return missing
+
+
+def test_every_owner_route_has_a_cli_command(owner_app):
+    routes = _mounted_owner_routes(*owner_app)
+    assert len(routes) > 100
+    assert routes >= NOT_ON_CLI.keys(), sorted(NOT_ON_CLI.keys() - routes)  # the allowlist names live routes only
+    missing = _routes_without_cli(routes)
+    assert not missing, "Owner API routes with no CLI command:\n" + "\n".join(missing)
+
+
+def test_owner_routes_include_module_admin_paths(owner_app):
+    routes = {path for _, path in _mounted_owner_routes(*owner_app)}
+    assert modules.admin_paths(owner_app[1]) <= routes
+    assert {"/gpu/{action}", "/jobs", "/images"} <= routes
+
+
+def test_discovery_lists_the_mounted_owner_routes(owner_app, operations):
+    assert operations == _mounted_owner_routes(*owner_app)
+
+
+def test_an_owner_route_with_no_cli_command_fails(tmp_path):
+    app, cfg = _owner_app(tmp_path)
+
+    async def probe():
+        return {}
+
+    app.add_api_route(PREFIX + "/parity-probe/{pid}", probe, methods=["POST"])
+    app.add_api_route(PREFIX + "/sessions/{ref}/parity-probe", probe, methods=["GET"])
+    assert _routes_without_cli(_mounted_owner_routes(app, cfg)) == [
+        "POST /parity-probe/{pid}: no row in docs/management-parity.md",
+        "GET /sessions/{ref}/parity-probe: no row in docs/management-parity.md",
+    ]
+    # A row alone isn't enough: its CLI command has to call the route (the rename row lists PUT, the command PATCHes).
+    assert _routes_without_cli({("PUT", "/sessions/{ref}"), ("PATCH", "/sessions/{ref}")}, allowed=()) == [
+        "PUT /sessions/{ref}: no CLI command calls it"]
 
 
 def test_inventory_is_well_formed():
