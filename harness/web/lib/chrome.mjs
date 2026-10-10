@@ -2,6 +2,7 @@
 // repaint hooks for the installed iOS app. mountChrome() takes the shell elements and browser globals as arguments and
 // registers the window/document listeners when called, so importing this module touches nothing and works under plain Node.
 import { pageMetrics, scrollPage } from "./session-ui.mjs";
+import { sessionGroup } from "./session-groups.mjs";
 
 const SECTION_TITLES = { chat: "Chat", agents: "Agents", jobs: "Jobs", images: "Images" };
 const CONN_LABEL = { live: "Live", reconnecting: "Reconnecting", offline: "Offline" };
@@ -19,6 +20,52 @@ export function mountChrome({ els, browser, session }) {
   let barPaintPhase = false;
   let pagePaintFrame = 0;
   let pagePaintPhase = false;
+
+  // Desktop's count uses the same Needs you rule as the Agents list, independent of list filters.
+  // Reuse the connection stream; do not open another EventSource for persistent chrome.
+  const needsYou = document.getElementById("agents-needs-you");
+  let needsScope = "";
+  let needsGeneration = 0;
+  let needsTimer = null;
+  let needsPoll = null;
+  let stopNeedsEvents = null;
+  let refreshNeedsYou = null;
+  function watchNeedsYou(active, stream) {
+    const me = session.getMe();
+    const scope = active && !session.isBlocked() && !session.needsSignIn() && me.role !== "offline"
+      ? JSON.stringify([me.role, me.id, me.login]) : "";
+    if (!needsYou || scope === needsScope) return;
+    needsScope = scope;
+    needsGeneration++;
+    clearTimeout(needsTimer);
+    clearInterval(needsPoll);
+    stopNeedsEvents?.();
+    needsYou.hidden = true;
+    refreshNeedsYou = null;
+    if (!scope) return;
+    const refresh = async () => {
+      if (document.hidden || session.isBlocked()) return;
+      const generation = ++needsGeneration;
+      try {
+        const sessions = await session.api("/sessions");
+        if (generation !== needsGeneration) return;
+        const count = sessions.filter((s) => sessionGroup(s) === "needs").length;
+        needsYou.textContent = String(count);
+        needsYou.setAttribute("aria-label", `${count} ${count === 1 ? "agent needs" : "agents need"} you`);
+        needsYou.hidden = count === 0;
+      } catch (_) {
+        if (generation === needsGeneration) needsYou.hidden = true; // an unavailable count is not zero
+      }
+    };
+    const schedule = () => {
+      clearTimeout(needsTimer);
+      needsTimer = setTimeout(refresh, 300);
+    };
+    stopNeedsEvents = stream?.onDaemonChange(schedule);
+    refreshNeedsYou = refresh;
+    needsPoll = setInterval(refresh, 60000); // fresh failures age out even without a daemon event
+    void refresh();
+  }
 
   function layoutBar() {
     const bar = document.getElementById("bar");
@@ -137,8 +184,9 @@ export function mountChrome({ els, browser, session }) {
   window.addEventListener("orientationchange", repaintBar);
   window.addEventListener("pageshow", repaintBar);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintBar(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) void refreshNeedsYou?.(); });
   window.addEventListener("pageshow", repaintPage);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) repaintPage(); });
 
-  return { layoutBar, repaintBar, repaintPage, setHeader, showFab, toast, setConnState, onConnState, paintGuestChrome };
+  return { layoutBar, repaintBar, repaintPage, setHeader, showFab, toast, setConnState, onConnState, paintGuestChrome, watchNeedsYou };
 }

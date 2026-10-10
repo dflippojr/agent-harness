@@ -12,18 +12,23 @@ export function currentTab(parts) {
   return SECTIONS.has(first) ? first : "";
 }
 
-// Detail and editor pages (a session, a job, an image, New task) have Back and their own bottom controls instead.
-export const tabBarHidden = (parts) => !(isTopLevel(parts) || isProfileRoute(parts) || parts[0] === "actions");
+// Phone detail/editor pages have Back and their own bottom controls; desktop keeps the rail.
+export const tabBarHidden = (parts, desktop = false) => !desktop && !(isTopLevel(parts) || isProfileRoute(parts) || parts[0] === "actions");
 
 // The same role rules the drawer had: Chat needs chat access, and household members have no Jobs or Images.
 export const tabHidden = (tab, { canChat, member }) => (tab === "chat" && !canChat) || (member && (tab === "jobs" || tab === "images"));
 
-export function mountTabs({ els, session, browser }) {
+export function mountTabs({ els, session, browser, chrome, stream }) {
   const { $tabBar, $settings } = els;
+  let lastParts = [];
+  let lastOptions = { hidden: true };
 
   // `show` keeps the bar on a page that is not a section (the offline card); `hidden` drops it (sign-in, blocked).
   function paint(parts, { show = false, hidden = false } = {}) {
-    const off = hidden || (!show && tabBarHidden(parts));
+    lastParts = parts;
+    lastOptions = { show, hidden };
+    const desktop = browser.window.innerWidth >= 768;
+    const off = hidden || (!show && tabBarHidden(parts, desktop));
     $tabBar.hidden = off;
     browser.document.body.classList.toggle("has-tabs", !off);
     $settings.hidden = hidden || !(show || isTopLevel(parts));
@@ -33,7 +38,11 @@ export function mountTabs({ els, session, browser }) {
       a.hidden = tabHidden(a.dataset.tab, roles);
       if (a.dataset.tab === tab) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     }
+    chrome?.watchNeedsYou?.(desktop && !off, stream);
   }
+
+  // Resizing on a detail page changes the navigation without reloading the page or its editor.
+  browser.window.addEventListener("resize", () => paint(lastParts, lastOptions));
 
   return { paint };
 }
