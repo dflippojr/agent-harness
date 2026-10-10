@@ -1096,7 +1096,7 @@ class Manager:
 
     @namespace_audit.failures("session.rerun")
     def rerun(self, ref: str, *, context=None) -> dict:
-        """Start a fresh session with the same task, project, and model."""
+        """Start a fresh session with the same task, project, model, and starting taint."""
         from .apps import AppTool
         s = self.get(ref)
         if s.get("kind") == TOOLS_ONLY:  # its tools live in the App, which has to send them again
