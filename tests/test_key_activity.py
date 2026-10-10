@@ -60,3 +60,22 @@ def test_activity_write_failure_preserves_successful_response(tmp_path, monkeypa
         assert client.get("/api/admin/v1/keys", headers=headers(token)).status_code == 200
     assert "key activity metadata could not be recorded" in caplog.text
     assert "synthetic-secret-write-error" not in caplog.text
+
+
+def test_inference_discovery_tracks_bearer_and_anthropic_key_activity(tmp_path):
+    m = Manager(make_cfg(tmp_path))
+    m.cfg.endpoint.enabled = True
+    device, token = m.db.create_api_key("Inference device", "inference", kind="device")
+    app, app_token = m.db.create_api_key("No inference scope", "sessions", kind="app")
+    with TestClient(create_app(m)) as client:
+        assert client.get("/v1/models", headers=headers(app_token)).status_code == 401
+        assert m.db.api_key_by_secret(app_token)["last_used_at"] is None
+        for path in ("/v1/models", "/v1/capabilities"):
+            for auth in (headers(token), {"x-api-key": token}):
+                m.db.main.write(lambda: m.db.main.conn.execute(
+                    "UPDATE api_keys SET last_used_at = NULL WHERE id = ?", (device["id"],)))
+                assert client.get(path, headers=auth).status_code == 200
+                assert m.db.api_key_by_secret(token)["last_used_at"] > time.time() - 60
+        inventory = client.get("/api/admin/v1/hub").json()
+        states = {row["id"]: row["state"] for row in inventory["apps"]}
+        assert states[device["id"]] == "active" and states[app["id"]] == "never_used"

@@ -106,7 +106,10 @@ def authenticate(m, request: Request) -> dict | None:
     auth = request.headers.get("authorization", "")
     key = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("x-api-key", "").strip()
     row = m.db.api_key_by_secret(key)
-    return row if row and "inference" in (row.get("scopes") or "").split() else None
+    if row is None or "inference" not in (row.get("scopes") or "").split():
+        return None
+    request.state.authenticated_key_id = row["id"]
+    return row
 
 
 def flavor_of(request: Request) -> str:
