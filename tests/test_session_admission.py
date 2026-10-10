@@ -51,6 +51,24 @@ async def _until(predicate, timeout: float = 10) -> None:
         assert time.monotonic() < deadline, "condition not met in time"
         await asyncio.sleep(0.02)
 
+class OfflineMac:
+    """A runner hub whose Mac is offline until `back()`."""
+
+    def __init__(self):
+        self.up = asyncio.Event()
+
+    def online(self, target: str) -> bool:
+        return self.up.is_set()
+
+    def startup_grace(self) -> float:
+        return 0
+
+    async def wait_online(self, target: str) -> None:
+        await self.up.wait()
+
+    def back(self) -> None:
+        self.up.set()
+
 
 # per-App caps ---------------------------------------------------------------------------------------------------------
 def test_an_apps_extra_queued_session_is_refused_and_a_slot_frees_when_one_ends(tmp_path):
@@ -175,6 +193,31 @@ def test_local_parked_sessions_over_a_lowered_cap_get_the_gpu_back_once_approved
         await wait_status(m, second, "done", timeout=10)
         assert m.runner.admitted == {}
         await m.stop()
+    asyncio.run(body())
+
+def test_a_session_back_from_an_offline_mac_keeps_its_place_under_the_cap(tmp_path):
+    """An App's running Mac session waits for its Mac while another of its sessions is queued for the GPU: when the
+    Mac is back the first one gets the GPU again; the other must not take its place meanwhile."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        assert m.db.set_app_limits(app_id, {"max_running": 1})
+        _insert(m, "macsess001", "running", app_id=app_id)
+        m.db.update_session("macsess001", target="macbook")
+        _insert(m, "queued0004", "queued", app_id=app_id)
+        mac = m.runner.hub = OfflineMac()
+        await m.scheduler.acquire("macsess001")
+        waiting = asyncio.create_task(m.runner._wait_for_target("macsess001"))
+        await _until(lambda: m.db.get_session("macsess001")["status"] == "waiting_target")
+        other = asyncio.create_task(m.scheduler.acquire("queued0004"))
+        await asyncio.sleep(0.1)
+        assert m.scheduler.holder is None and not other.done()  # the parked one still holds the App's slot
+        mac.back()
+        await asyncio.wait_for(waiting, 5)
+        assert m.scheduler.holder == "macsess001" and not other.done()
+        assert m.db.get_session("macsess001")["status"] == "running" and m.runner.admitted == {}
+        other.cancel()
+        await asyncio.gather(other, return_exceptions=True)
     asyncio.run(body())
 
 
@@ -446,6 +489,29 @@ def test_an_expired_approval_leaves_no_tool_call_unanswered(tmp_path):
         s = m.create("try", project="guarded")
         s = await wait_status(m, s["id"], "done", "failed")
         assert s["stop_reason"] == "approval_expired"
+        assert unresolved_calls(s["context"]) == []
+        await m.stop()
+    asyncio.run(body())
+
+def test_an_approval_expires_while_its_recovered_run_waits_for_an_offline_mac(tmp_path):
+    """After a restart the run is held for its offline Mac before it reaches the approval: the approval still expires
+    on time, is denied, and the run ends with every tool call answered."""
+    cfg = make_cfg(tmp_path)
+    cfg.approval_timeout_seconds = 1
+
+    async def body():
+        m = Manager(cfg, chat=Script([Completion(content="never reached")]))
+        m.runner.hub = OfflineMac()
+        _insert(m, "macpark001", "waiting_approval")
+        pending = call("write_file", 0, path="a.txt", content="x")
+        m.db.update_session("macpark001", target="macbook", context=[
+            {"role": "user", "content": "write it"}, {"role": "assistant", "content": "", "tool_calls": [pending]}])
+        m.db.insert_approval({"id": "a-mac00001", "session_id": "macpark001", "tool_call_id": pending["id"],
+                              "tool": "write_file", "args": {"path": "a.txt", "content": "x"}, "reason": "test"})
+        await m.start(maintenance=False)
+        s = await wait_status(m, "macpark001", "done", "failed", "cancelled", timeout=15)
+        assert (s["status"], s["stop_reason"]) == ("done", "approval_expired")
+        assert m.db.get_approval("a-mac00001")["status"] == "denied"
         assert unresolved_calls(s["context"]) == []
         await m.stop()
     asyncio.run(body())

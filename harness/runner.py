@@ -74,8 +74,8 @@ When the task is complete, reply with your final answer (or call `finish`). Don'
 
 MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the workspace (a separate clone of the user's repository, so their own checkout is never touched) on branch `{branch}`, created from `{base_branch}`. Commit your work to this branch with clear messages. Don't switch branches, don't change git config, and don't push: when the run ends the harness saves the branch (committing anything left uncommitted), and the user reviews and merges it. `origin/{base_branch}` is refreshed from the source at the start of every run; if the user asks you to catch up, merge it into your branch."""
 
-ACTIVE = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit")
 WAITING = ("waiting_approval", "waiting_target", "waiting_app", "waiting_limit")  # parked: count toward caps (#524)
+ACTIVE = ("queued", "running", *WAITING)
 # Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
 # cleared after its branch save and transcript: a daemon stopped in between leaves it set, and the next start finishes
 # that run's end from where it stopped (Manager.start).
@@ -252,7 +252,7 @@ class Runner:
         # backend slot back (#524). sid -> admission key; Manager._scheduler_eligible counts them, and lets them run.
         self.admitted: dict[str, str] = {}
         self._clocks: dict[str, RunClock] = {}         # live run -> its time spent running
-        self._out_of_time: set[str] = set()            # runs their time-budget watch cancelled
+        self._deadline_hit: dict[str, str] = {}        # runs their deadline watch cancelled -> the stop reason
         self._locks = credential_sources.KeyedLocks()
         self.cli_factory = ClaudeSession
         self.codex_factory = CodexSession
@@ -800,6 +800,11 @@ class Runner:
         await self.db.for_session(sid).awrite(waiting)
         await self.hub.wait_online(target)
         status = "waiting_approval" if previous == "waiting_approval" else "queued"
+        key = admission_key(self.db, s)
+        if held and key:
+            # It held its place under its member's or App's running cap: keep it as `queued` until _acquire gives it
+            # the GPU back (#524).
+            self.admitted[sid] = key
 
         def online() -> None:
             self.db.update_session(sid, status=status)
@@ -892,8 +897,8 @@ class Runner:
         watch = None
         try:
             s = self.db.get_session(sid)
-            if self._time_left(s) is not None:
-                watch = asyncio.create_task(self._watch_time_budget(sid, asyncio.current_task()))
+            if self._time_left(s) is not None or float(self.cfg.approval_timeout_seconds or 0) > 0:
+                watch = asyncio.create_task(self._watch_deadlines(sid, asyncio.current_task()))
             if s.get("kind") == TOOLS_ONLY and s.get("backend", "local") not in TOOLS_ONLY_BACKENDS:
                 raise ToolsOnlyUnsupported(f"backend {s['backend']!r} can't run App-tools-only sessions")
             if s.get("backend", "local") != "local":
@@ -903,17 +908,15 @@ class Runner:
                 raise CliBackendError("the local model is disabled in this service profile")
             await self._run_local(sid, s, recovered)
         except asyncio.CancelledError:
-            if sid in self._out_of_time and sid not in self.user_cancelled:
-                await finish_then_cancel(self._end_out_of_time(sid))
+            if sid in self._deadline_hit and sid not in self.user_cancelled:
+                await finish_then_cancel(self._end_on_deadline(sid, self._deadline_hit[sid]))
             else:
                 await self._take_pending_cancel(sid, cancelled=True)
             raise
         except ApprovalExpired:
             if await self._take_pending_cancel(sid):
                 return
-            await self._close_unresolved(sid, "Not run: nobody decided its approval in time.")
-            await self.aset_status(sid, "done", stop_reason="approval_expired")
-            await self._end_run(sid)
+            await self._end_on_deadline(sid, "approval_expired")
         except CliBackendError as e:
             if await self._take_pending_cancel(sid):
                 return
@@ -939,7 +942,7 @@ class Runner:
         finally:
             if watch is not None:
                 watch.cancel()
-            self._out_of_time.discard(sid)
+            self._deadline_hit.pop(sid, None)
             await asyncio.shield(self._stop_cli(sid))
             if self.modules is not None:
                 await asyncio.shield(self.modules.end_session(sid))
@@ -952,28 +955,51 @@ class Runner:
             self._unended.discard(sid)
             self._clocks.pop(sid, None)
 
-    async def _watch_time_budget(self, sid: str, run: asyncio.Task) -> None:
-        """Stop a member's or an App's run once its time running reaches `max_run_seconds` (#524), wherever it is: a
-        model call, compaction, a tool or a delegated call. The clock stops while the run is parked (queued for the
-        GPU, on an approval, the Mac or the App), so this follows the clock rather than a fixed deadline."""
+    async def _watch_deadlines(self, sid: str, run: asyncio.Task) -> None:
+        """Stop the run at a deadline wherever it is (#524), like a cancel but ending `done`:
+        - a member's or an App's time running reaching `max_run_seconds` (a model call, compaction, a tool, a delegated
+          call). The clock stops while the run is parked, so this follows the clock rather than a fixed deadline;
+        - an approval past `approval_timeout_seconds` that the run is not waiting on itself (e.g. a recovered run
+          held for its offline Mac first): it is denied as expired. One the run waits on, `_wait_approval` expires."""
         while True:
             s = self.db.get_session(sid)
-            left = self._time_left(s) if s is not None else None
-            if left is None or s["status"] not in ACTIVE:
+            if s is None or s["status"] not in ACTIVE:
                 return
-            if left <= 0:
-                break
-            await asyncio.sleep(min(left, 5.0))
-        if sid not in self.user_cancelled:
-            self._out_of_time.add(sid)
-            run.cancel()  # like a cancel, but the run ends `done` with budget_time
+            waits = [30.0]  # a new approval or a resumed clock is noticed within this
+            left = self._time_left(s)
+            if left is not None:
+                if left <= 0:
+                    self._stop_on_deadline(sid, run, "budget_time")
+                    return
+                waits.append(left)
+            for approval in self.db.pending_approvals(sid):
+                approval_left = self._approval_time_left(approval)
+                if approval_left is None or approval["id"] in self.approval_events:
+                    continue
+                if approval_left <= 0:
+                    if await self._decide_expired(approval):
+                        self._stop_on_deadline(sid, run, "approval_expired")
+                        return
+                    continue
+                waits.append(approval_left)
+            await asyncio.sleep(min(waits))
 
-    async def _end_out_of_time(self, sid: str) -> None:
+    def _stop_on_deadline(self, sid: str, run: asyncio.Task, reason: str) -> None:
+        if sid not in self.user_cancelled:
+            self._deadline_hit[sid] = reason
+            run.cancel()
+
+    async def _end_on_deadline(self, sid: str, reason: str) -> None:
+        """End a run on its time budget (`budget_time`) or an expired approval (`approval_expired`): each tool call
+        it leaves gets a result, as on a cancel."""
         s = self.db.get_session(sid)
         if s is not None and s["status"] in ACTIVE:
-            await self._close_unresolved(sid, "Not run: the task reached its time budget.",
-                                         "Stopped: the task reached its time budget while this ran.")
-            await self.aset_status(sid, "done", stop_reason="budget_time")
+            if reason == "budget_time":
+                await self._close_unresolved(sid, "Not run: the task reached its time budget.",
+                                             "Stopped: the task reached its time budget while this ran.")
+            else:
+                await self._close_unresolved(sid, "Not run: nobody decided its approval in time.")
+            await self.aset_status(sid, "done", stop_reason=reason)
         if sid in self._unended:
             await self._end_run(sid)
 
@@ -2521,6 +2547,11 @@ class Runner:
 
     async def _expire_approval(self, approval: dict) -> None:
         """Deny an approval nobody decided in time and end its run; a decision that landed first stands."""
+        if await self._decide_expired(approval):
+            raise ApprovalExpired(approval["id"])
+
+    async def _decide_expired(self, approval: dict) -> bool:
+        """Deny `approval` as expired; False when a decision landed first."""
         sid, aid = approval["session_id"], approval["id"]
         note = "Expired: nobody decided it in time."
 
@@ -2529,8 +2560,7 @@ class Runner:
                 return False
             self.bus.emit(sid, "approval_decided", {"id": aid, "status": "denied", "note": note, "expired": True})
             return True
-        if await self.db.for_session(sid).awrite(expire):
-            raise ApprovalExpired(aid)
+        return await self.db.for_session(sid).awrite(expire)
 
     async def _execute(self, sid: str, call: dict, name: str, args: dict, ws: Workspace,
                        max_chars: int = 10**9) -> str:
