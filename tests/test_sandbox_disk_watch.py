@@ -189,7 +189,7 @@ def test_growth_during_a_scan_counts_as_lost_space(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "dir_size", grows_after_measuring)
     watch = sandbox.DiskWatch(tmp_path, sandbox.DiskLimits(10 * MB, 100 * MB))
     watch.start()
-    assert watch._scan_due(watch._free())
+    assert watch._may_be_over(watch._free())
 
 
 def test_failed_setup_from_the_watchdog_is_reported_not_raised(monkeypatch, tmp_path):
@@ -319,11 +319,51 @@ def test_burst_between_polls_is_caught_when_the_command_ends(monkeypatch, tmp_pa
     assert fake.written == 60 and "restart" in fake.calls and events[0][0] == "sandbox_disk_limit"
 
 
-def test_command_ending_under_its_limits_skips_the_final_scan(monkeypatch, tmp_path):
+def test_short_command_in_a_slow_tree_skips_the_final_scan(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)
     box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(50 * MB, 100 * MB), chunks=20, pace=0)
     scans = []
     measure = sandbox.dir_size
-    monkeypatch.setattr(sandbox, "dir_size", lambda root: scans.append(root) or measure(root))
+
+    def slow(root):
+        scans.append(root)
+        time.sleep(0.3)         # a scan costs far more than the command runs
+        return measure(root)
+    monkeypatch.setattr(sandbox, "dir_size", slow)
     assert asyncio.run(box.exec("make")) == (0, "built")
     assert len(scans) == 1      # only the starting scan: the free space lost shows it is under its quota
+
+
+def test_sparse_growth_is_caught_by_the_final_scan(monkeypatch, tmp_path):
+    # A sparse file grows the workspace without using the drive, so free space says nothing; the final scan does.
+    monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(10 * MB, 100 * MB), chunks=20, pace=0)
+    monkeypatch.setattr(sandbox.DiskWatch, "_free", lambda self: TOTAL)
+    with pytest.raises(sandbox.DiskLimitExceeded, match="past its 10 MB quota"):
+        asyncio.run(box.exec("truncate -s 20M sparse"))
+
+
+def test_free_space_is_polled_during_the_final_scan(monkeypatch, tmp_path):
+    # The shell crosses its quota and exits, leaving a writer behind that eats the drive while the final scan runs.
+    monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)     # no polls during the command itself
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(10 * MB, 950 * MB), chunks=20, pace=0)
+    docker = sandbox.run_cmd
+
+    async def then_poll_fast(args, **kw):
+        result = await docker(args, **kw)
+        if args[1] == "exec":
+            monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 0.005)
+        return result
+    monkeypatch.setattr(sandbox, "run_cmd", then_poll_fast)
+    measure = sandbox.dir_size
+    scans = []
+
+    def slow(root):
+        scans.append(root)
+        if len(scans) > 1:
+            fake.other = 200 * MB   # the background writer
+            time.sleep(1.5)
+        return measure(root)
+    monkeypatch.setattr(sandbox, "dir_size", slow)
+    with pytest.raises(sandbox.DiskLimitExceeded, match="data drive"):
+        asyncio.run(box.exec("make & exit"))

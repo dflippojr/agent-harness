@@ -58,7 +58,8 @@ class DiskWatch:
     Free space on the workspace drive is polled every FREE_POLL_SECONDS. Whatever the workspace grows also comes off
     that free space, so the size at the last scan plus the free space lost since bounds the size now: a full scan runs
     as soon as that bound passes the cap, and on an adaptive interval otherwise (sparse files, writes the drive does
-    not see). Shrinking is always allowed, so a workspace already over its quota can still be cleaned up."""
+    not see). Scans run in a thread while free space is still polled, and once more when the command ends. Shrinking
+    is always allowed, so a workspace already over its quota can still be cleaned up."""
 
     def __init__(self, root: Path, limits: DiskLimits):
         self.root = root
@@ -72,15 +73,16 @@ class DiskWatch:
     def _free(self) -> int:
         return shutil.disk_usage(self.root).free
 
-    def _scan(self) -> None:
+    def _scan(self) -> tuple[int, int]:
+        """Measure the workspace (and the account): (size, account usage). Blocking: run it in a thread."""
         began = time.monotonic()
         free = self._free()     # before the walk, so what is written during it counts as space lost since the scan
-        self._size = dir_size(self.root)
-        if self.account:
-            self._account_used = self.limits.account_usage()
-        self._free_at_scan = free
+        size = dir_size(self.root)
+        used = self.limits.account_usage() if self.account else 0
+        self._size, self._account_used, self._free_at_scan = size, used, free
         self._scanned = time.monotonic()
         self._scan_cost = self._scanned - began
+        return size, used
 
     def start(self) -> None:
         """Measure the starting point. Blocking: run it in a thread."""
@@ -101,50 +103,50 @@ class DiskWatch:
         lost = max(0, self._free_at_scan - free)
         return self._size + lost > self.cap or (self.account and self._account_used + lost > self.account_cap)
 
-    def _scan_due(self, free: int) -> bool:
-        return self._may_be_over(free) or time.monotonic() - self._scanned >= max(MIN_SCAN_SECONDS,
-                                                                                   SCAN_DUTY * self._scan_cost)
-
-    def final(self) -> str:
-        """One last look once the command has ended, so a burst between two polls is still caught: the free-space
-        floor, and a scan only when the space lost says a quota may have been passed. Blocking: run it in a thread."""
-        free = self._free()
-        return self._floor_reason(free) or (self._scan_reason() if self._may_be_over(free) else "")
-
     def _scan_reason(self) -> str:
         """Scan, then '' while within the quotas, else why the command must stop. Blocking: run it in a thread."""
-        self._scan()
-        if self._size > self.cap:
-            return (f"the workspace grew to {self._size / 2**20:.0f} MB, past its "
+        size, used = self._scan()   # its own results: a cancelled scan still running in another thread may also write
+        if size > self.cap:
+            return (f"the workspace grew to {size / 2**20:.0f} MB, past its "
                     f"{self.limits.quota_bytes / 2**20:.0f} MB quota")
-        if self.account and self._account_used > self.account_cap:
-            return (f"the account grew to {self._account_used / 2**20:.0f} MB, past its "
+        if self.account and used > self.account_cap:
+            return (f"the account grew to {used / 2**20:.0f} MB, past its "
                     f"{self.limits.account_quota_bytes / 2**20:.0f} MB disk quota")
         return ""
 
-    async def run(self) -> str:
-        """Poll until a limit is passed and return why. The caller cancels it when the command ends first. A scan runs
-        in its own thread, so free space is still polled while a big tree is being measured."""
-        scan: asyncio.Future | None = None
+    async def _scan_polling(self) -> str:
+        """Scan in a thread and keep polling the free-space floor until it finishes, so a big tree never leaves the
+        drive unwatched. '' or why the command must stop."""
+        scan = asyncio.ensure_future(asyncio.to_thread(self._scan_reason))
         try:
             while True:
-                if scan is None:
-                    await asyncio.sleep(FREE_POLL_SECONDS)
-                else:   # wakes as soon as the scan finishes
-                    await asyncio.wait({scan}, timeout=FREE_POLL_SECONDS)
-                if scan is not None and scan.done():
-                    reason, scan = scan.result(), None
-                    if reason:
-                        return reason
-                free = await asyncio.to_thread(self._free)
-                reason = self._floor_reason(free)
+                done, _ = await asyncio.wait({scan}, timeout=FREE_POLL_SECONDS)
+                if done:
+                    return scan.result()
+                reason = self._floor_reason(await asyncio.to_thread(self._free))
                 if reason:
                     return reason
-                if scan is None and self._scan_due(free):
-                    scan = asyncio.ensure_future(asyncio.to_thread(self._scan_reason))
         finally:
-            if scan is not None:
-                scan.cancel()
+            scan.cancel()
+
+    async def run(self) -> str:
+        """Poll until a limit is passed and return why. The caller cancels it when the command ends first."""
+        while True:
+            await asyncio.sleep(FREE_POLL_SECONDS)
+            free = await asyncio.to_thread(self._free)
+            since = time.monotonic() - self._scanned
+            due = self._may_be_over(free) or since >= max(MIN_SCAN_SECONDS, SCAN_DUTY * self._scan_cost)
+            reason = self._floor_reason(free) or (await self._scan_polling() if due else "")
+            if reason:
+                return reason
+
+    async def final(self) -> str:
+        """One last look once the command has ended, so a burst between two polls is still caught. The scan keeps the
+        run's duty cycle without its minimum interval, so it is skipped only after a short command in a big tree,
+        where the runner's quota check after the call remains."""
+        free = await asyncio.to_thread(self._free)
+        due = self._may_be_over(free) or time.monotonic() - self._scanned >= SCAN_DUTY * self._scan_cost
+        return self._floor_reason(free) or (await self._scan_polling() if due else "")
 
 
 if os.name == "nt":
@@ -502,7 +504,7 @@ class Sandbox:
         finally:
             watcher.cancel()
         try:    # a limit passed as the command ended still counts: it may have left a writer behind
-            reason = watcher.result() if watcher.done() else await asyncio.to_thread(watch.final)
+            reason = watcher.result() if watcher.done() else await watch.final()
         except Exception as e:  # fail closed: a command nothing watches could fill the drive
             reason = f"the disk watchdog failed ({type(e).__name__}: {e})"
         if not reason:

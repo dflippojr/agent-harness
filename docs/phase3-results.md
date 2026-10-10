@@ -64,8 +64,9 @@ Allowlist: plex-webhook, prometheus, grafana, cadvisor, ntfy, harness-demo. Port
   shrinking is always allowed, so a follow-up "delete the build artifacts" works.
 - While a sandbox command (or the project setup) runs, a disk watchdog (#525) polls the data drive's free space
   and rescans the workspace as soon as the space lost could have taken it past its quota (otherwise at least every
-  second, slower for big trees). For a member it also re-measures the whole account, so commands running in several
-  of its sessions share one quota. A command that grows the workspace past its quota (or the member's account past
+  second, slower for big trees), still polling free space while a scan runs, and takes one last look when the
+  command ends. For a member it also re-measures the whole account, so commands running in several of its sessions
+  share one quota. A command that grows the workspace past its quota (or the member's account past
   its quota), or takes the drive under `cleanup.min_free_gb`, is stopped by restarting the container (killing it if
   the restart fails) and fails with a tool error; so does a command whose watchdog itself fails. The quota check
   after the call then stops the run as above.
