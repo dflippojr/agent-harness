@@ -21,7 +21,24 @@ class El extends Node {
   }
   setAttribute(k, v) { this.attrs[k] = v; }
   removeAttribute(k) { delete this.attrs[k]; }
-  append(...nodes) { this.children.push(...nodes); }
+  append(...nodes) {
+    for (const node of nodes) {
+      if (node instanceof El) node.parentNode = this;
+      this.children.push(node);
+    }
+  }
+  after(node) {
+    if (!this.parentNode) return;
+    const siblings = this.parentNode.children;
+    siblings.splice(siblings.indexOf(this) + 1, 0, node);
+    node.parentNode = this.parentNode;
+  }
+  remove() {
+    if (!this.parentNode) return;
+    const siblings = this.parentNode.children;
+    siblings.splice(siblings.indexOf(this), 1);
+    this.parentNode = null;
+  }
   replaceChildren(...nodes) { this.children = [...nodes]; }
   querySelector() { return null; }
   querySelectorAll() { return []; }
@@ -296,6 +313,7 @@ const els = Object.fromEntries(["app", "title", "back", "conn", "profile-icon", 
   .map((id) => [id, doc.getElementById(id)]));
 const E = { $app: els.app, $title: els.title, $back: els.back, $conn: els.conn, $profileIcon: els["profile-icon"],
   $fabHost: els["fab-host"], $fab: els.fab, $tabBar: els["tab-bar"], $settings: els["settings-btn"] };
+doc.getElementById("bar").append(E.$back, E.$title, E.$conn, E.$settings);
 const tabLinks = ["chat", "agents", "jobs", "images", "profile"].map((tab) => Object.assign(new El("a"), { dataset: { tab } }));
 E.$tabBar.querySelectorAll = (sel) => (sel === "a[data-tab]" ? tabLinks : []);
 const chrome = imports.chrome.mountChrome({ els: E, browser, session });
@@ -343,12 +361,24 @@ const chrome = imports.chrome.mountChrome({ els: E, browser, session });
   assert.equal(E.$title.hidden, true);
   assert.ok(!doc.getElementById("bar").set.has("top"));
   E.$back.hidden = true;
-  chrome.showFab("#/new", "Go");
+  chrome.showListAction("#/new", "Go");
   assert.equal(E.$fab.href, "#/new");
   assert.equal(E.$fabHost.hidden, false);
+  const header = doc.getElementById("bar");
+  const newAction = header.children[header.children.indexOf(E.$title) + 1];
+  assert.equal(newAction.className, "btn primary list-new");
+  assert.equal(newAction.href, "#/new");
+  chrome.showListAction("#/jobs/new", "+ New job");
+  assert.ok(!header.children.includes(newAction), "showListAction replaces the previous list action");
+  const jobAction = header.children[header.children.indexOf(E.$title) + 1];
+  assert.equal(jobAction.href, "#/jobs/new");
+  chrome.setHeader("jobs", "Job", { page: true });
+  assert.ok(header.children.includes(jobAction), "title updates do not tear down the current route's action");
+  chrome.hideListAction();
+  assert.ok(!header.children.includes(jobAction), "route teardown clears the list action");
   E.$fabHost.hidden = true;
   session.setMe({ role: "guest", guest_until: "2099-01-01T00:00:00Z" });
-  chrome.showFab("#/new", "Go");
+  chrome.showListAction("#/new", "Go");
   assert.equal(E.$fabHost.hidden, true, "guests get no floating button");
   chrome.paintGuestChrome();
   assert.ok(doc.documentElement.set.has("guest"));
@@ -453,7 +483,12 @@ let router;
   assert.equal(browser.location.hash, "#/agents");
   assert.equal(tabLinks[2].hidden, true, "members have no Jobs tab");
   assert.equal(tabLinks[0].hidden, true, "members have no Chat tab");
+  chrome.showListAction("#/new", "+ New task");
+  const expiredAction = doc.getElementById("bar").children.find((el) => el.className === "btn primary list-new");
+  assert.ok(expiredAction);
   assert.deepEqual(await run("#/agents", "signin"), [["signin", false]]);
+  assert.ok(!doc.getElementById("bar").children.includes(expiredAction), "sign-in clears the desktop list action");
+  assert.equal(E.$fabHost.hidden, true, "sign-in also hides the phone FAB");
   assert.equal(E.$back.hidden, true);
   assert.equal(E.$tabBar.hidden, true, "sign-in offers no navigation");
   let cleaned = 0;

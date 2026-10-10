@@ -73,7 +73,7 @@ const api = async (path, opts = {}) => {
 const toasts = [];
 const mount = (guest) => {
   const $app = new StrictEl("main");
-  const page = mountJobs({ $app, h, fill, append, api, setHeader() {}, showFab() {},
+  const page = mountJobs({ $app, h, fill, append, api, setHeader() {}, showListAction() {},
     toast: (text, ms, action) => toasts.push({ text, ms, action }), go() {}, route() {}, isGuest: () => guest,
     confirmGpuQueue: async () => true, badge: (s) => h("span", {}, s), jobStatusBadge: () => null, location: {}, confirmSheet: async () => true });
   return { $app, page };

@@ -146,9 +146,9 @@ def test_web_app_and_guard(tmp_path):
         assert ".switch:checked" in css
         assert "prefers-reduced-motion: reduce" in css
         assert ".image-status .progress.indeterminate > span" in css
-        assert 'showFab("#/new", "+ New task")' in sessions_js
+        assert 'showListAction("#/new", "+ New task")' in sessions_js
         jobs_page = client.get("/static/pages/jobs.mjs").text
-        assert 'showFab("#/jobs/new", "+ New job")' in jobs_page
+        assert 'showListAction("#/jobs/new", "+ New job")' in jobs_page
         assert 'api("/backends?auth=skip")' in jobs_page
         assert 'if (images && !route.onImages) api("/images/warmup"' not in js
         images_page = client.get("/static/pages/images.mjs").text
