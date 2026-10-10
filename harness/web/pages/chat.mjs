@@ -256,17 +256,18 @@ async function viewChat(id) {
   let ui = null;
   const feed = h("div", { class: "chat-feed", "aria-live": "polite" });
   const welcome = id ? null : h("div", { class: "chat-welcome" },
-    h("div", { class: "chat-welcome-mark", "aria-hidden": "true" }, "💬"),
-    h("h2", {}, "How can I help?"),
-    h("p", { class: "muted" }, "Ask a question or paste code to review. To change files or run work, use Agents."),
-    h("div", { class: "chat-starters" }, CHAT_STARTERS.map((text) => h("button", {
-      class: "btn small", type: "button",
-      onclick: () => {
-        if (!ui) return;
-        ui.input.value = text;
-        ui.input.focus();
-      },
-    }, text))), recentChats());
+    h("div", { class: "chat-welcome-content" },
+      h("div", { class: "chat-welcome-mark", "aria-hidden": "true" }, "💬"),
+      h("h2", {}, "How can I help?"),
+      h("p", { class: "muted" }, "Ask a question or paste code to review. To change files or run work, use Agents."),
+      h("div", { class: "chat-starters" }, CHAT_STARTERS.map((text) => h("button", {
+        class: "btn small", type: "button",
+        onclick: () => {
+          if (!ui) return;
+          ui.input.value = text;
+          ui.input.focus();
+        },
+      }, text)))), recentChats());
   const wrap = h("div", { class: "chat-wrap" }, welcome, feed);
   append($app, wrap);
 
