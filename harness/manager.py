@@ -27,8 +27,8 @@ from .app_stores import EVERY_APP, SessionStores
 from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .runner_contract import RunnerError, NoRunnerHub, RunnerOffline
-from .runner import (ACTIVE, WAITING, capped_app, END_PENDING, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT,
-                     SYSTEM_PROMPT, Runner, new_run)
+from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT,
+                     REPO_PROMPT, SYSTEM_PROMPT, Runner, new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
@@ -477,7 +477,12 @@ class Manager:
             "taint": list(opts.taint or []), "end_user": end_user,
             **({"retention_days": float(opts.retention_days)} if app and opts.retention_days else {}),
         }
-        self._insert_created(session, app, tools, opts.job_id, prompt, context=context)
+        try:
+            self._insert_created(session, app, tools, opts.job_id, prompt, context=context)
+        except HarnessError:  # over a cap after all: another request filled it meanwhile
+            if not remote:
+                remove_tree(workspace)
+            raise
         self._spawn(sid)
         return self.db.get_session(sid)
 
@@ -625,6 +630,7 @@ class Manager:
         sid = session["id"]
 
         def insert_created() -> None:
+            self._enforce_queue_caps(session)
             self.db.insert_session(session)
             self.bus.emit(sid, "session_created", {**{k: session[k] for k in
                                                        ("project", "target", "model", "backend", "title")},
@@ -898,6 +904,7 @@ class Manager:
                 # Delivered before the agent's next model call.
                 self.db.update_session(sid, inbox=s["inbox"] + [model_content])
             else:
+                self._enforce_queue_caps(s)
                 run = new_run(carry=s["run"])
                 app_key = self.db.get_api_key(s["app_id"]) if s.get("app_id") else None
                 if getattr(self, "settings", None):
@@ -2053,7 +2060,21 @@ class Manager:
             return True
         if s.get("status") in WAITING:
             occupied -= 1  # its own slot in the cap
-        return occupied < cap
+        return occupied + self._about_to_run(sid, admission_key(self.db, s)) < cap
+
+    def _about_to_run(self, sid: str, key: str) -> int:
+        """Sessions of admission `key` (other than `sid`) let past its running cap whose status does not count yet:
+        hosted sessions admitted and waiting for a backend slot, and the GPU holder until its `running` commits."""
+        others = {other for other, k in self.runner.admitted.items() if k == key}
+        if self.scheduler.holder is not None:
+            others.add(self.scheduler.holder)
+        others.discard(sid)
+        n = 0
+        for other in others:
+            row = self.db.get_session(other)
+            if row and row["status"] == "queued" and admission_key(self.db, row) == key:  # else its status counts
+                n += 1
+        return n
 
     def app_limits(self, app_id: str) -> dict:
         """App `app_id`'s effective session caps: what the owner set, else the daemon's `app_max_*` defaults."""
@@ -2085,12 +2106,24 @@ class Manager:
         if queued >= max_q:
             raise HarnessError(429, f"this account already has {queued} queued or waiting sessions (limit {max_q})")
 
+    def _enforce_queue_caps(self, s: dict) -> None:
+        """In the write that queues session `s` (a new one, or a finished one restarting): its member's and App's
+        `max_queued` once more, counted in the transaction of the store that holds the App's sessions. The early check
+        in the request reserves nothing, so two requests can both pass it; their writes run one after the other."""
+        user_id = session_user_id(s)
+        if user_id != OWNER_USER_ID:
+            account = self.db.account_by_id(user_id)
+            if account is not None:
+                self._enforce_member_caps(account)
+        self._enforce_app_caps(s.get("app_id") or "")
+
     def _enforce_app_caps(self, app_id: str) -> None:
         """An App's next session (or a finished one it restarts) waits in the shared queue: refuse past `max_queued`
         (#524). Sessions parked on an approval or a reply count as queued."""
         if not capped_app(self.db, app_id):
             return
-        queued = self.db.count_app_sessions(app_id, "queued", *WAITING)
+        # From the App's own store, not the index of every store, which is updated only after each commit.
+        queued = self.db.for_app(app_id).count_app_sessions(app_id, "queued", *WAITING)
         max_q = self.app_limits(app_id)["max_queued"]
         if queued >= max_q:
             raise HarnessError(429, f"this App already has {queued} queued or waiting sessions (limit {max_q})",

@@ -5,11 +5,15 @@ waits on an approval, an approval deadline, and a wall-clock budget for members'
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import sys
 import time
 
 from fastapi.testclient import TestClient
 
 from harness.api import create_app
+from harness.cli_backends import ClaudeSession
+from harness.config import BackendConfig
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.principal import OWNER_USER_ID
@@ -19,7 +23,7 @@ from test_app_stores import _key
 from test_daemon import Script, call, make_cfg, wait_status
 from test_household import ALICE, OWNER, H, create_member, household
 from test_phase6 import wait_for
-from test_phase8 import _claude_manager
+from test_phase8 import FAKE_CLAUDE, _claude_manager
 
 LIMITS = "/api/admin/v1/apps/{}/limits"
 
@@ -288,7 +292,7 @@ def test_time_budget_counts_only_time_running(tmp_path):
     assert runner._time_left({"id": "s1", "owner_id": OWNER_USER_ID, "app_id": ""}) is None
 
 
-def test_member_running_cap_still_refuses_with_429_message(tmp_path):
+def test_a_members_parked_session_counts_toward_max_queued(tmp_path):
     client, m = household(tmp_path)
     with client:
         alice = create_member(client, ALICE, "Alice", max_queued=1)
@@ -335,3 +339,142 @@ def test_owner_device_token_sessions_have_no_time_budget(tmp_path):
     m.runner._clocks["s1"] = [0.0, None]
     assert m.runner._time_left({"id": "s1", "owner_id": OWNER_USER_ID, "app_id": device}) is None
     assert m.runner._time_left({"id": "s1", "owner_id": OWNER_USER_ID, "app_id": app}) == m.cfg.max_run_seconds
+
+
+# second review follow-ups ---------------------------------------------------------------------------------------------
+def _mixed_manager(tmp_path, max_sessions: int = 1):
+    """A manager with a fake Claude backend whose mode is picked per session (`modes[sid]`, "ask" by default) and a
+    local model that answers at once, plus an App capped at one running session that has a Claude credential."""
+    fake = tmp_path / "fake_claude.py"
+    fake.write_text(FAKE_CLAUDE, encoding="utf-8")
+    cfg = make_cfg(tmp_path)
+    cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", max_sessions=max_sessions)
+    m = Manager(cfg, chat=Script([Completion(content="ok")]))
+    modes: dict[str, str] = {}
+
+    def factory(**kwargs):
+        sid = kwargs["session_id"]
+        return ClaudeSession(**kwargs, command=[sys.executable, "-u", str(fake), modes.get(sid, "ask"),
+                                                str(tmp_path / f"state-{sid}.jsonl"), "tool-1", "python build.py"])
+    m.runner.cli_factory = factory
+    key = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
+    m.set_app_provider_credential(key["id"], "claude", "", "subscription", [])
+    assert m.db.set_app_limits(key["id"], {"max_running": 1})
+    return m, modes, key
+
+
+def test_a_session_waiting_on_its_cap_does_not_block_a_parked_one_coming_back(tmp_path):
+    """After a restart an App's queued session may reach admission before its parked one: waiting for the parked one
+    to end must not keep that one from coming back (and its approval from expiring)."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        assert m.db.set_app_limits(app_id, {"max_running": 1})
+        _insert(m, "queued0002", "queued", app_id=app_id)
+        _insert(m, "parked0002", "waiting_approval", app_id=app_id)
+        async def admit(sid):
+            async with contextlib.AsyncExitStack() as stack:
+                await m.runner._admit_hosted(sid, m.db.get_session(sid), stack)
+        waiting = asyncio.create_task(admit("queued0002"))
+        await asyncio.sleep(0.1)
+        assert not waiting.done()
+        await asyncio.wait_for(admit("parked0002"), 2)
+        await asyncio.sleep(0.1)
+        assert not waiting.done()  # the parked one still holds the App's only running slot
+        m.db.update_session("parked0002", status="done")
+        m.runner._unreserve("parked0002")
+        await asyncio.wait_for(waiting, 2)
+    asyncio.run(body())
+
+
+class SlowFinalModel:
+    """A model whose one call takes ten seconds and then gives the final answer."""
+
+    async def __call__(self, model, messages, tools, on_delta=None, max_tokens=None, extra=None, timeout=0,
+                       on_progress=None):
+        await asyncio.sleep(10)
+        return Completion(content="finished late", prompt_tokens=10, completion_tokens=1)
+
+
+def test_the_time_budget_ends_a_run_during_a_long_model_call(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.max_run_seconds = 1
+
+    async def body():
+        m = Manager(cfg, chat=SlowFinalModel())
+        await m.start()
+        app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
+        started = time.monotonic()
+        sid = m.create("slow", app=app)["id"]
+        s = await wait_status(m, sid, "done", "failed", timeout=8)
+        assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
+        assert s["answer"] != "finished late"
+        assert time.monotonic() - started < 8
+        assert m.scheduler.holder is None
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_concurrent_restarts_of_an_apps_finished_sessions_respect_max_queued(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        await m.start()
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        assert m.db.set_app_limits(app_id, {"max_queued": 1})
+        m.scheduler.set_paused(True)  # a restarted session stays queued
+        _insert(m, "finished01", "done", app_id=app_id)
+        _insert(m, "finished02", "done", app_id=app_id)
+        results = await asyncio.gather(m.send("finished01", "again"), m.send("finished02", "again"),
+                                       return_exceptions=True)
+        refused = [r for r in results if isinstance(r, HarnessError)]
+        assert len(refused) == 1 and refused[0].status == 429, results
+        assert sorted(m.db.get_session(sid)["status"] for sid in ("finished01", "finished02")) == ["done", "queued"]
+        m.scheduler.set_paused(False)
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_a_hosted_session_waiting_for_a_backend_slot_holds_its_apps_running_cap(tmp_path):
+    """The App's hosted session passed its cap and waits for the busy backend: the App's local session must not
+    start meanwhile, or both would run once the backend frees up."""
+    async def body():
+        m, modes, key = _mixed_manager(tmp_path)
+        await m.start()
+        busy = m.create("the owner's", backend="claude")["id"]
+        modes[busy] = "cancel"
+        await wait_status(m, busy, "running")
+        hosted = m.create("hosted", backend="claude", app=key)["id"]
+        await asyncio.sleep(0.5)
+        local = m.create("local", app=key)["id"]
+        await asyncio.sleep(0.5)
+        assert (m.get(hosted)["status"], m.get(local)["status"]) == ("queued", "queued")
+        await m.cancel(busy)
+        await wait_status(m, hosted, "waiting_approval")
+        assert m.get(local)["status"] == "queued"  # parked, the hosted session still holds the App's slot
+        m.decide(hosted, None, approve=True)
+        await wait_status(m, hosted, "done")
+        await wait_status(m, local, "done")
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_an_approved_session_waiting_for_its_backend_slot_keeps_its_place_under_the_cap(tmp_path):
+    async def body():
+        m, modes, key = _mixed_manager(tmp_path)
+        await m.start()
+        parked = m.create("asks", backend="claude", app=key)["id"]
+        await wait_status(m, parked, "waiting_approval")
+        busy = m.create("the owner's", backend="claude")["id"]
+        modes[busy] = "cancel"
+        await wait_status(m, busy, "running")  # took the slot the parked session gave up
+        local = m.create("local", app=key)["id"]
+        m.decide(parked, None, approve=True)
+        await _until(lambda: m.get(parked)["status"] == "queued")  # approved, waiting for its slot back
+        await asyncio.sleep(0.5)
+        assert m.get(local)["status"] == "queued"
+        await m.cancel(busy)
+        await wait_status(m, parked, "done")
+        await wait_status(m, local, "done")
+        assert m.runner.admitted == {}
+        await m.stop()
+    asyncio.run(body())

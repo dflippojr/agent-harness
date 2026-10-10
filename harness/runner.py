@@ -52,6 +52,10 @@ class ApprovalExpired(Exception):
     """A pending approval passed `approval_timeout_seconds`: it was denied and the run ends (#524)."""
 
 
+class TimeBudgetSpent(Exception):
+    """A member's or an App's run reached `max_run_seconds` during a model call (#524)."""
+
+
 class CliLimitError(Exception):
     def __init__(self, reset_at: float = 0):
         self.reset_at = reset_at
@@ -239,6 +243,9 @@ class Runner:
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
                                for name, backend in cfg.backends.items()}
         self._held_slots: dict[str, _HeldSlot] = {}   # a hosted run's backend slot, released around approvals
+        # Hosted sessions admitted under their member's or App's running cap whose status does not count yet: waiting
+        # for the credential or a backend slot (#524). sid -> admission key; Manager._scheduler_eligible counts them.
+        self.admitted: dict[str, str] = {}
         self._clocks: dict[str, list] = {}             # live run -> [seconds spent running, running since or None]
         self._locks = credential_sources.KeyedLocks()
         self.cli_factory = ClaudeSession
@@ -902,6 +909,10 @@ class Runner:
             if self.modules is not None:
                 await asyncio.shield(self.modules.end_session(sid))
             self.scheduler.release(sid)
+            self.admitted.pop(sid, None)
+            # Not every final status goes through set_status (a CLI's result, a final reply): a session its member's
+            # or App's cap held back may run now.
+            self.scheduler.recheck()
             self.user_cancelled.discard(sid)
             self._unended.discard(sid)
             self._clocks.pop(sid, None)
@@ -976,9 +987,13 @@ class Runner:
 
                 self._close_span(turn)
                 turn = tracer.start("turn", {"harness.turn": int(s["run"].get("turns", 0)) + 1})
-                with tracer.activate(turn):
-                    s = await self._maybe_compact(s)
-                    ended = await self._generate(s)
+                try:
+                    with tracer.activate(turn):
+                        s = await self._maybe_compact(s)
+                        ended = await self._generate(s)
+                except TimeBudgetSpent:  # mid-call: the reply, if one was coming, is dropped
+                    await self.aset_status(sid, "done", stop_reason="budget_time")
+                    ended = True
                 if ended:
                     turn = self._close_span(turn)
                     await self._end_run(sid)
@@ -1030,8 +1045,12 @@ class Runner:
             await self._memory_gate(sid, f"{backend_name} worker container")
             held = _HeldSlot(slot)
             try:
-                async with self._credential_lock(s), contextlib.AsyncExitStack() as stack:
-                    await self._admit_hosted(sid, s, held, stack)
+                async with contextlib.AsyncExitStack() as stack:
+                    await self._admit_hosted(sid, s, stack)
+                    await stack.enter_async_context(held)
+                    if self.admitted.get(sid) and self.db.get_session(sid)["status"] not in ("running", *WAITING):
+                        await self.aset_status(sid, "running")
+                    self._unreserve(sid)  # counted by its status from here on
                     self._held_slots[sid] = held
                     with telemetry.span("hosted_cli_turn", {"harness.backend": backend_name,
                                                             "gen_ai.request.model": backend.model}):
@@ -1044,17 +1063,32 @@ class Runner:
                 recovered = True
             finally:
                 self._held_slots.pop(sid, None)
+                self._unreserve(sid)
 
-    async def _admit_hosted(self, sid: str, s: dict, held: _HeldSlot, stack: contextlib.AsyncExitStack) -> None:
-        """Take a backend slot once the session's member or App is under its running cap (#524). The cap check, the
-        slot and the `running` status that makes the session count happen under one lock per member or App, so two of
-        its sessions waiting on the same slot can't both pass the check while neither counts yet."""
+    async def _admit_hosted(self, sid: str, s: dict, stack: contextlib.AsyncExitStack) -> None:
+        """Take the session's credential lock (onto `stack`) once its member or App is under its running cap (#524),
+        and reserve its place under that cap: it counts against the cap while it waits for a backend slot, until its
+        `running` status counts instead. The check and the reservation happen with no await between them, so two
+        sessions of one member or App can't both pass the check while neither counts yet. Nothing is held while
+        waiting on the cap, so a parked session that holds it can still come back; and a session waiting for the
+        credential (another of the same end user's runs) holds no place under the cap."""
         key = admission_key(self.db, s)
-        async with (self._locks.hold("admit:" + key) if key else contextlib.nullcontext()):
-            await self.scheduler.wait_eligible(sid)
-            await stack.enter_async_context(held)
-            if key and self.db.get_session(sid)["status"] not in ("running", *WAITING):
-                await self.aset_status(sid, "running")
+        while True:
+            if key:
+                await self.scheduler.wait_eligible(sid)
+            attempt = contextlib.AsyncExitStack()
+            await attempt.enter_async_context(self._credential_lock(s))
+            if not key or self.scheduler.eligible(sid):
+                if key:
+                    self.admitted[sid] = key
+                await stack.enter_async_context(attempt)
+                return
+            await attempt.aclose()  # the cap filled while it waited for the credential
+
+    def _unreserve(self, sid: str) -> None:
+        """Drop `sid`'s reservation under its cap; a session that could not run while it held one may now."""
+        if self.admitted.pop(sid, None) is not None:
+            self.scheduler.recheck()
 
     def _credential_lock(self, s: dict):
         """Held for a CLI attempt on a credential that two sessions must not use at once (#365 decision 5: one end
@@ -1716,16 +1750,28 @@ class Runner:
             await self.aset_status(sid, "waiting_approval")
             held = self._held_slots.get(sid)
             # Another session gets the backend slot while this one waits on a person (#524).
-            async with (held.released(lambda: self.aset_status(sid, "queued")) if held is not None
-                        else contextlib.nullcontext()):
-                existing = await self._wait_approval(existing["id"])
+            try:
+                async with (held.released(lambda: self._queue_for_slot(sid, s)) if held is not None
+                            else contextlib.nullcontext()):
+                    existing = await self._wait_approval(existing["id"])
+            except BaseException:
+                self._unreserve(sid)
+                raise
+        await self.aset_status(sid, "running")
+        self._unreserve(sid)  # counted by its status again
         if existing["status"] == "approved":
-            await self.aset_status(sid, "running")
             await self._allow_cli(sid, cli, request_id, name, args, call_id, existing.get("tool_call_id") or "")
             return
         note = f" User note: {existing['note']}" if existing.get("note") else ""
-        await self.aset_status(sid, "running")
         await cli.respond_permission(request_id, "deny", args, f"The user denied this {name} call.{note}")
+
+    async def _queue_for_slot(self, sid: str, s: dict) -> None:
+        """A decided session whose backend slot was taken meanwhile waits for one as `queued`, still holding its place
+        under its member's or App's running cap: it held it while parked, and nobody may take it in between (#524)."""
+        key = admission_key(self.db, s)
+        if key:
+            self.admitted[sid] = key
+        await self.aset_status(sid, "queued")
 
     async def _ask_cli_policy(self, s: dict, cli, request_id, request: dict, name: str, args: dict,
                               call_id: str) -> dict | None:
@@ -1836,7 +1882,18 @@ class Runner:
 
         run = s["run"]
         tools = self.tool_schemas(s, ws)
-        completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache, run)
+        left = self._time_left(s)
+        try:
+            # A member's or an App's run ends at its time budget even mid-call: one slow reply must not hold the GPU
+            # past it (#524).
+            completion = await asyncio.wait_for(
+                self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache, run),
+                None if left is None else max(0.0, left))
+        except asyncio.TimeoutError:
+            if left is None or (self._time_left(s) or 0) > 0:
+                raise  # the call's own timeout, not the budget's
+            stream.flush()
+            raise TimeBudgetSpent() from None
         stream.flush()
         if completion.cache_tokens is None and cache_box["seen"]:
             completion.cache_tokens = cache_box["tokens"]

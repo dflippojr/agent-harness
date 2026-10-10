@@ -129,6 +129,10 @@ class GpuScheduler:
         self._waiters.update(skipped)
         self._waiters.update(rest)
 
+    def eligible(self, sid: str) -> bool:
+        """May `sid` run now under its member's or App's running cap?"""
+        return self._grantable(sid)
+
     async def wait_eligible(self, sid: str, poll: float = 5) -> None:
         """Wait until `sid` may run under its member's or App's running cap, without taking the GPU slot: a hosted
         session's admission (#524). `recheck` wakes it; `poll` covers a change that does not go through it."""
