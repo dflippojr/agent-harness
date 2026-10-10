@@ -357,6 +357,26 @@ def test_a_parked_hosted_run_saved_before_places_were_recorded_recovers_parked(t
         await m.stop()
     asyncio.run(body())
 
+def test_a_running_session_saved_before_places_were_recorded_keeps_its_place_once_recovered(tmp_path):
+    """Upgraded with an App's Mac session running: recovered, it is marked as holding its place before its offline
+    Mac parks it, so it gets the idle GPU back though two parked sessions fill the App's cap of two."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "oldrun0001", "running", app_id=app_id, holds=False)
+        m.db.update_session("oldrun0001", target="macbook")
+        _insert(m, "parked0009", "waiting_approval", app_id=app_id)
+        _insert(m, "parked0010", "waiting_approval", app_id=app_id)
+        mac = m.runner.hub = OfflineMac()
+        await m.runner._mark_parked_place("oldrun0001", m.db.get_session("oldrun0001"))  # as _run recovers it
+        waiting = asyncio.create_task(m.runner._wait_for_target("oldrun0001"))
+        await _until(lambda: m.db.get_session("oldrun0001")["status"] == "waiting_target")
+        mac.back()
+        await asyncio.wait_for(waiting, 5)
+        await asyncio.wait_for(m.runner._acquire("oldrun0001"), 5)
+        assert m.scheduler.holder == "oldrun0001"
+    asyncio.run(body())
+
 
 # members --------------------------------------------------------------------------------------------------------------
 def test_a_member_at_max_queued_with_parked_sessions_is_refused(tmp_path):

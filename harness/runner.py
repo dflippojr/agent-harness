@@ -1020,14 +1020,16 @@ class Runner:
         changed.set()
 
     async def _mark_parked_place(self, sid: str, s: dict) -> None:
-        """A run recovered parked on an approval, an App's reply or a provider limit had run before (only a running
-        run parks on those), so it holds its place under its cap; one saved before HOLDS_PLACE existed gets it now."""
-        if s["status"] not in ("waiting_approval", "waiting_app", "waiting_limit") or s["run"].get(HOLDS_PLACE):
+        """A run recovered running, or parked on an approval, an App's reply or a provider limit, had run before (only
+        a running run parks on those), so it holds its place under its cap; one saved before HOLDS_PLACE existed gets
+        it now, before anything changes its status (an offline Mac, the GPU queue)."""
+        ran = ("running", "waiting_approval", "waiting_app", "waiting_limit")
+        if s["status"] not in ran or s["run"].get(HOLDS_PLACE):
             return
 
         def mark() -> None:
             current = self.db.get_session(sid)
-            if current is not None and current["status"] in WAITING:
+            if current is not None and current["status"] in ran:
                 self.db.update_session(sid, run={**current["run"], HOLDS_PLACE: True})
         await self.db.for_session(sid).awrite(mark)
 
