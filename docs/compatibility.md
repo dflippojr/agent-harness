@@ -29,6 +29,12 @@ Zero-touch pairing requests (App API 1.23, owner API 1.22, #519) are additive to
 checks that feature before it asks. Against an older Server it falls back to an owner-made pairing code, whose routes
 are unchanged. The new routes return the same `{token, app, api_version}` shape as `POST /api/v1/pair`.
 
+The exclusive Hub claim (App API 1.24, owner API 1.23, #543) is additive as well: an optional `kind` field on
+`POST /api/v1/pair/requests`, the `/api/admin/v1/hub-claim` routes, `role` on `GET /keys` rows, `hub.claimed` in
+`GET /api/admin/v1`, and `features.hub_claim` and `features.hub_claimed` in `GET /api/v1`. A Hub checks
+`features.hub_claim` before it asks; an older Server has no such feature, and the SDK's `request_hub_claim` refuses
+with `feature_unsupported` there instead of sending a request the Server would treat as an App's.
+
 ## Agent Harness for Mac
 
 ```sh

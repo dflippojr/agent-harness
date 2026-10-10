@@ -35,6 +35,7 @@ BASE = "http://127.0.0.1:8100"
 TOKEN = ""
 LOCAL_TOKEN = ""  # the daemon's local owner token, sent to a daemon on this machine (harness/local_owner.py)
 LOCAL_TOKEN_HEADER = "X-Agent-Harness-Local-Token"
+HUB_APPROVAL_HEADER = "X-Agent-Harness-Hub-Approval"  # the daemon host's Hub approval secret (harness/hub_claim.py)
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 CONFIG_PATH = DEFAULT_CONFIG
 ADMIN_PREFIX = "/api/admin/v1"
@@ -450,6 +451,12 @@ ADMIN_COMMANDS = (
     ("pairing-requests confirm", "POST", "/pairing-requests/{rid}/confirm",
      "confirm a native App's claim on an armed slot with the match code it shows", ("--match",)),
     ("pairing-requests deny", "POST", "/pairing-requests/{rid}/deny", "deny or withdraw an App pairing request", ()),
+    ("hub status", "GET", "/hub-claim", "show whether a Hub is claimed, its record and open Hub claim requests", ()),
+    ("hub approve", "POST", "/hub-claim/requests/{rid}/approve",
+     "approve a Hub claim with the match code the Hub shows (on the daemon host)", ("--match",)),
+    ("hub deny", "POST", "/hub-claim/requests/{rid}/deny", "deny a Hub claim request (on the daemon host)", ()),
+    ("hub release", "POST", "/hub-claim/release",
+     "release the Hub: revoke its key so a new Hub may claim (on the daemon host)", ("--confirm:flag",)),
     ("projects list", "GET", "/projects", "list the server's projects", ()),
     ("projects create", "POST", "/projects", "add a project to the server's catalog",
      ("name", "--description", "--target", "--repo", "--github:flag")),
@@ -513,7 +520,7 @@ _GROUP_HELP = {
     "profile": "server profile", "accounts": "household members", "github-member-auth": "members' GitHub access",
     "google-signin": "members' Google sign-in", "keys": "App, device and owner keys", "apps": "App data retention and session caps",
     "provider-credentials": "per-App provider credentials", "pairing-codes": "App pairing codes",
-    "pairing-requests": "zero-touch App pairing requests",
+    "pairing-requests": "zero-touch App pairing requests", "hub": "the exclusive Hub claim",
     "models": "local models", "backends": "model backends",
     "smart-approvals": "smart approvals",
     "config": "daemon settings", "maintenance": "disk cleanup and backups",
@@ -802,13 +809,65 @@ def _cmd_decide(args) -> int:
     return 0
 
 
+HUB_HOST_PATHS = re.compile(r"/hub-claim/(requests/[^/]+/(approve|deny)|release)")
+
+
+def _hub_approval_secret() -> str:
+    """The daemon's host-only Hub approval secret (#543), read from its data_dir. Only the daemon's account can read
+    the file, and it is only ever sent to a daemon on this machine."""
+    if not _is_loopback(BASE):
+        sys.exit("approve, deny and release a Hub claim on the daemon host, against its local address")
+    try:
+        from .config import resolve_data_dir
+        from .local_owner import read_hub_secret
+        secret = read_hub_secret(resolve_data_dir())
+    except (ImportError, OSError, ValueError):
+        secret = ""
+    if not secret:
+        sys.exit("cannot read the daemon's Hub approval secret: run this on the daemon host as the daemon's user")
+    return secret
+
+
+def _hub_request_line(req: dict) -> str:
+    where = f"browser Hub at {req.get('origin')}" if req.get("browser") else "native Hub (no browser origin)"
+    return f"  {req.get('id')}  {req.get('name')!r}  {where}  {req.get('state')}"
+
+
+def _hub_status_notes(status) -> None:
+    """Where each open Hub claim comes from, on stderr so stdout stays JSON. The match code is not shown: read it
+    off the Hub's own screen."""
+    requests = status.get("requests") if isinstance(status, dict) else None
+    if requests:
+        print("Hub claim requests (compare the match code on the Hub's own screen; it is not shown here):",
+              file=sys.stderr)
+        for req in requests:
+            print(_hub_request_line(req), file=sys.stderr)
+
+
+def _warn_other_hub_claims(rid: str) -> None:
+    """`hub approve` warns when more than one Hub claim is pending: one of them may be a look-alike."""
+    status = api("GET", "/hub-claim")
+    pending = [r for r in (status.get("requests") or []) if r.get("state") == "pending"]         if isinstance(status, dict) else []
+    if len(pending) > 1:
+        print(f"{YELLOW}warning: {len(pending)} Hub claims are pending. Approve only the one whose name, origin "
+              f"and match code are on the Hub you are setting up; deny the others.{RESET}", file=sys.stderr)
+        for req in pending:
+            print(("* " if req.get("id") == rid else "  ") + _hub_request_line(req).lstrip(), file=sys.stderr)
+
+
 def _cmd_admin(args) -> int:
     method, path, kwargs = admin_request(args)
+    if HUB_HOST_PATHS.fullmatch(path):
+        kwargs["headers"] = {HUB_APPROVAL_HEADER: _hub_approval_secret()}
+        if path.endswith("/approve"):
+            _warn_other_hub_claims(path.split("/")[3])
     result = api(method, path, **kwargs)
     if isinstance(result, str):
         print(result or "ok")
     else:
         print(json.dumps(result, indent=2))
+    if path == "/hub-claim":
+        _hub_status_notes(result)
     return 0
 
 

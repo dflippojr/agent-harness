@@ -196,3 +196,27 @@ def test_a_remote_clone_is_asked_about_once_the_session_is_tainted():
     assert taint.escalate(Decision(ALLOW), "git_clone", clone, [], set()).action == ALLOW
     assert taint.escalate(Decision(ALLOW), "git_clone", clone, SRC, set()).action == ASK
     assert taint.escalate(Decision(ALLOW), "git_clone", {"url": "local:demo"}, SRC, set()).action == ALLOW
+
+
+def test_rerun_keeps_the_original_sessions_taint(tmp_path):
+    """Issue #528: a rerun replays the original prompt, so it starts with the original's taint, as a fork does."""
+    from test_smart_approvals import _approve, _enable_smart
+    cfg = _enable_smart(make_cfg(tmp_path, rules=NET_ALLOW), tmp_path, "auto")
+
+    async def body():
+        m = Manager(cfg, chat=Script([Completion(content="done"), Completion(content="done")]))
+        m.runner.smart.complete = _approve
+        await m.start()
+        s = m.create("tainted", project="guarded", taint=SRC)
+        await wait_status(m, s["id"], "done")
+        r = m.rerun(s["id"])
+        await wait_status(m, r["id"], "done")
+        rerun = m.db.get_session(r["id"])
+        assert rerun["taint"] == m.db.get_session(s["id"])["taint"] == SRC
+        shell = {"command": "echo hi", "network": True}
+        assert m.runner._decide(rerun, "run_shell", shell).action == ASK
+        tagged = Decision(ASK, "runs a Claude Code shell command", smart_eligible=True)
+        extra = await m.runner._review_ask(rerun, "Bash", {"command": "ls"}, tagged)
+        assert extra["status"] == "pending" and m.runner.smart.calls == []
+        await m.stop()
+    asyncio.run(body())

@@ -68,6 +68,12 @@ ALWAYS_ASK: dict[str, str] = {
     "open_claude_remote_control": "starts Claude Code Remote Control in a project folder on this PC",
 }
 
+# Edits under the workspace's .claude/ folder are asked even when a project rule would allow them (#531): hosted
+# Claude Code ignores project settings, but a file there could still change a later Claude session on that folder.
+CLAUDE_DIR_REASON = "changes Claude Code settings under .claude/"
+_WRITE_PATH_KEYS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path",
+                    "write_file": "path", "edit_file": "path"}
+
 
 # Hosted Claude Code sees the daemon's own tools through the harness MCP server as mcp__harness__<tool> (#300). They are
 # decided as the native tool they name, so project rules and defaults apply unchanged. Native client servers are
@@ -237,6 +243,21 @@ def _target_outside_scratch(target: str) -> bool:
     return not any(fnmatch.fnmatch(path, g) for g in SCRATCH_GLOBS)
 
 
+def _under_claude_dir(value: str, root: Path | None) -> bool:
+    """A write path inside the workspace's .claude/ folder. The host folder is often case-insensitive, so the name is
+    compared without case; with the host `root`, a link elsewhere in the workspace that lands there counts too."""
+    raw = value.strip().replace("\\", "/")
+    normalized = posixpath.normpath(raw if raw.startswith("/") else "/workspace/" + raw)
+    if normalized.lower() == "/workspace/.claude" or normalized.lower().startswith("/workspace/.claude/"):
+        return True
+    if root is None or not normalized.startswith("/workspace/"):
+        return False
+    target = os.path.realpath(root / normalized[len("/workspace/"):])
+    claude_dir = os.path.normcase(os.path.realpath(root / ".claude"))
+    target = os.path.normcase(target)
+    return target == claude_dir or target.startswith(claude_dir + os.sep)
+
+
 class Policy:
     def __init__(self, project_rules: list[dict] | None = None, repo: bool = False,
                  workspace_root: Path | None = None, mcp_servers=()):
@@ -270,6 +291,8 @@ class Policy:
         alias = name if bare else ""
         name = bare or name
         decision = self._rule_decision(name, args, alias)
+        if (decision is None or decision.action != DENY) and self._writes_claude_dir(name, args):
+            return Decision(ASK, CLAUDE_DIR_REASON)
         if decision is not None:
             return decision
         if name in ALWAYS_ASK:
@@ -287,6 +310,17 @@ class Policy:
                 return Decision(rule["action"], rule.get("reason", ""),
                                 smart_eligible=bool(rule.get("smart_eligible")))
         return None
+
+    def _writes_claude_dir(self, name: str, args: dict) -> bool:
+        """True when a file-changing call may land under /workspace/.claude/."""
+        if name == "apply_patch":
+            values = args.get("file_paths")
+            values = values if isinstance(values, list) else []
+        elif name in _WRITE_PATH_KEYS:
+            values = [args.get(_WRITE_PATH_KEYS[name])]
+        else:
+            return False
+        return any(isinstance(v, str) and _under_claude_dir(v, self.workspace_root) for v in values)
 
     def is_mcp_client_tool(self, name: str) -> bool:
         return any(name.startswith(f"mcp__{server}__") and len(name) > len(f"mcp__{server}__")
