@@ -57,7 +57,9 @@ for (const id of ["rename", "cancel", "rerun", "clear-taint", "download"]) asser
 const renamed = [];
 const leaves = [];
 const session = { id: "s1", title: "Hello" };
-const ui = mountSessionUi({ h: el, api, setHeader: (...a) => renamed.push(a), toast() {}, isGuest: () => false, onLeave: (fn) => leaves.push(fn), layoutBar() {}, browser });
+let announced = 0;
+const ui = mountSessionUi({ h: el, api, setHeader: (...a) => renamed.push(a), toast() {}, isGuest: () => false, onLeave: (fn) => leaves.push(fn), layoutBar() {}, browser,
+  onRenamed: () => { announced++; } });
 assert.equal(ui.sessionTitle, undefined, "tapping the title no longer starts a rename");
 const picked = [];
 let status = "running";
@@ -94,6 +96,7 @@ input.listeners.keydown({ key: "Enter", preventDefault() {} });
 await new Promise((resolve) => setTimeout(resolve, 0));
 assert.deepEqual(requests.slice(-2), [["PATCH", "/sessions/s1"], ["PUT", "/sessions/s1"]]); // a 405 retries once with PUT
 assert.equal(session.title, "New name");
+assert.equal(announced, 1, "a saved rename is announced, so the Agents list beside the session refreshes (#563)");
 assert.deepEqual(renamed.at(-1), ["agents", "New name", { page: true }]);
 assert.equal(title.hidden, false);
 assert.ok(input.removed);
@@ -108,6 +111,7 @@ active = false;
 title.hidden = true;  // the next page's setHeader hid it (a chat still loading)
 await new Promise((resolve) => setTimeout(resolve, 0));
 assert.equal(title.hidden, true, "a late rename does not unhide the next page's title");
+assert.equal(announced, 2, "the list still hears about a rename saved after the page left");
 title.hidden = false;
 
 leaves.forEach((fn) => fn());

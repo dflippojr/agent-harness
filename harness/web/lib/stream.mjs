@@ -205,5 +205,8 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
     });
   }
 
-  return { openStream, watchDaemonConnection, onDaemonChange, onDaemonState };
+  // A change this app made that the server announces on no stream (a session rename): listeners refresh as for an event.
+  const announceChange = () => notifyDaemonChange();
+
+  return { openStream, watchDaemonConnection, onDaemonChange, onDaemonState, announceChange };
 }

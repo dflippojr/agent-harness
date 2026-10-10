@@ -68,11 +68,12 @@ const sessions = [
 ];
 const detail = (s) => ({ ...s, backend: "local", model: "m", totals: {}, created_at: now - 900, workspace: "/tmp" });
 const fetched = [];
-let failList = false;  // the list's /sessions answers 502 (the rail's count shares the path; it just hides)
+let failList = false;
+let health = { protocols: { admin: { min: 1, max: 99 } }, update_hint: {} };  // the list's /sessions answers 502 (the rail's count shares the path; it just hides)
 const fakeFetch = async (url) => {
   const path = String(url).replace(/^https?:\/\/[^/]+/, "").replace(/^\/api\/(?:admin\/)?v1/, "");
   fetched.push(path);
-  if (path === "/health") return jsonResp({ protocols: { admin: { min: 1, max: 4 } }, update_hint: {} });
+  if (path === "/health") return jsonResp(health);
   if (path === "/me") return jsonResp({ role: "owner", name: "Owner", login: "owner", public_url: "http://localhost" });
   if (path === "/profile") return jsonResp({ emoji: "🙂", choices: ["🙂"] });
   if (path === "/sessions") return failList ? jsonResp({ detail: "Bad gateway" }, 502) : jsonResp(sessions);
@@ -173,6 +174,12 @@ assert.equal(walk(pane(), (n) => n.className === "split-body")[0], listBody);
 await go("#/s/s2/changes");
 assert.deepEqual(marked(), ["s2"], "a session's tabs keep its row marked");
 assert.ok(sessionFetches() - before <= 1, "moving between rows does not reload the list (the rail's count may refresh)");
+
+// The pane scrolls on its own, so its wheel events stop there: an upward wheel over the list must not reach the window,
+// where the transcript would stop following new output (review on #578).
+let stopped = 0;
+pane().dispatchEvent({ type: "wheel", deltaY: -40, stopPropagation() { stopped++; } });
+assert.equal(stopped, 1, "the pane stops its wheel events");
 
 // [ hides the list and shows it again; the bar's toggle says which; typing in a field never toggles it.
 assert.equal(toggle().attributes["aria-controls"], "split-list");
@@ -276,5 +283,14 @@ assert.ok(daemon, "the app-wide stream is open");
 daemon.emit("status", { status: "running" }, 1);
 await waitFor(() => rows().length === 2 && !paneError(), "the next server event retries");
 console.error = errors;
+
+// A protocol mismatch blocks the app on the update card: no list pane beside it (review on #578).
+await go("#/s/s1");
+await waitFor(() => body.contains("split-open"), "a session beside its list");
+health = { protocols: { admin: { min: 0, max: 0 } }, update_hint: {} };
+doc.dispatchEvent({ type: "visibilitychange" });
+await waitFor(() => /Update Agent Harness/.test(byId.app.textContent), "the update card");
+assert.ok(!body.contains("split") && !body.contains("split-open"), "the split closes for the update card");
+assert.equal(pane().childNodes.length, 0);
 console.log("ok");
 process.exit(0);

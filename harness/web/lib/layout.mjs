@@ -84,6 +84,9 @@ export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange
     $pane = document.createElement("section");
     $pane.id = "split-list";
     $app.parentNode.insertBefore($pane, $app);
+    // The pane scrolls on its own: its wheel events must not reach the window, where an open transcript reads an upward
+    // wheel as the reader leaving the bottom and stops following new output.
+    $pane.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
     // A toggle keeps one name; aria-pressed says whether the list is hidden.
     $toggle = h("button", { id: "split-toggle", class: "icon split-toggle", type: "button", "aria-controls": "split-list",
       "aria-label": "Hide the list", "aria-pressed": "false", title: "Hide the list ( [ )", html: SIDEBAR_SVG,

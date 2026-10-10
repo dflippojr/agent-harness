@@ -8,7 +8,7 @@ import * as sheets from "./sheet.mjs";
 
 export const UPDATE_GUARD = "harness.webUpdateAttempt";
 
-export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, build, browser, confirmSheet = sheets.confirmSheet,
+export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, closeSplit = () => {}, build, browser, confirmSheet = sheets.confirmSheet,
   sheetOpen = sheets.sheetOpen }) {
   const { $app } = els;
   const { document } = browser;
@@ -52,6 +52,7 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
   function blockingUpdate(meta, state) {
     session.setBlocked(true);
     tabs.paint([], { hidden: true }); // a blocked app offers no navigation
+    closeSplit(); // nor a list pane beside the card (#563)
     chrome.setHeader("agents", "Update required", { page: true });
     const daemonIsOld = state === "daemon_update_required";
     fill($app, h("div", { class: "card" },

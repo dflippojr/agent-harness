@@ -191,5 +191,5 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
   // Connectivity is back: re-run the identity check if the last one could not reach the server (#368).
   window.addEventListener("online", () => { if (session.isOffline()) void route(); });
 
-  return { go, route, onLeave };
+  return { go, route, onLeave, closeSplit: split.close };
 }
