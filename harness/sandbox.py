@@ -121,10 +121,8 @@ class DiskWatch:
         try:
             while True:
                 done, _ = await asyncio.wait({scan}, timeout=FREE_POLL_SECONDS)
-                if done:
-                    return scan.result()
-                reason = self._floor_reason(await asyncio.to_thread(self._free))
-                if reason:
+                reason = (scan.result() if done else "") or self._floor_reason(await asyncio.to_thread(self._free))
+                if reason or done:
                     return reason
         finally:
             scan.cancel()

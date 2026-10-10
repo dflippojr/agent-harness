@@ -73,6 +73,9 @@ Allowlist: plex-webhook, prometheus, grafana, cadvisor, ntfy, harness-demo. Port
 - New sessions are refused (HTTP 507) when the data drive has under 20 GB free.
 - Not covered: the container's writable layer (e.g. packages installed outside /workspace). Docker Desktop's overlay
   storage has no per-container size limit; `GET /maintenance` reports each container's size instead.
+- Not covered: a process a command leaves running in the background after the call returns. The watchdog only runs
+  during a command; the next command (or the runner's quota check after a call) sees what it wrote, and the idle stop
+  ends it.
 
 ## Verification on the tower
 

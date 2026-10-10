@@ -367,3 +367,20 @@ def test_free_space_is_polled_during_the_final_scan(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "dir_size", slow)
     with pytest.raises(sandbox.DiskLimitExceeded, match="data drive"):
         asyncio.run(box.exec("make & exit"))
+
+
+def test_free_space_is_checked_after_a_quick_final_scan(monkeypatch, tmp_path):
+    # The scan itself finds the workspace under its quota, but a writer left behind ate the drive while it ran.
+    monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(50 * MB, 950 * MB), chunks=20, pace=0)
+    measure = sandbox.dir_size
+    scans = []
+
+    def writer_runs_during_scan(root):
+        scans.append(root)
+        if len(scans) > 1:
+            fake.other = 200 * MB
+        return measure(root)
+    monkeypatch.setattr(sandbox, "dir_size", writer_runs_during_scan)
+    with pytest.raises(sandbox.DiskLimitExceeded, match="data drive"):
+        asyncio.run(box.exec("make & exit"))
