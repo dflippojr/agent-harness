@@ -194,6 +194,7 @@ export function mountJobs({ $app, h, fill, append, api, setHeader, showListActio
           enabledUpdates.set(j.id, { enabled: j.enabled });
           if (openForm?.id === j.id) openForm.syncEnabled(j.enabled, openForm === form ? formRevision : 0);
         });
+        if (refreshList && refreshList !== refresh) await refreshList();
       } catch (err) {
         toast(err.message, 5000);
         return;

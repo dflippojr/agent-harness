@@ -446,7 +446,8 @@ stableLeaves.forEach((fn) => fn());
 
 
 // These race scenarios own their data, requests, events, and both pane/form cleanups.
-async function jobFixture(seed, readList = async (data) => structuredClone(data), readJob = async (item) => structuredClone(item)) {
+async function jobFixture(seed, readList = async (data) => structuredClone(data), readJob = async (item) => structuredClone(item),
+  putJob = async (item, body) => { Object.assign(item, body); return structuredClone(item); }) {
   const data = structuredClone(seed);
   const requests = [];
   const notices = [];
@@ -469,7 +470,7 @@ async function jobFixture(seed, readList = async (data) => structuredClone(data)
       if (path.startsWith("/jobs/preview")) return { ok: true, next: [] };
       const item = data.find((j) => path === "/jobs/" + j.id);
       assert.ok(item, path);
-      if (opts.method === "PUT") { Object.assign(item, opts.body); return structuredClone(item); }
+      if (opts.method === "PUT") return putJob(item, opts.body);
       return readJob(item);
     },
   });
@@ -480,6 +481,32 @@ async function jobFixture(seed, readList = async (data) => structuredClone(data)
     readCount: () => listReads, cleanup: () => [...leaves, ...fixture.leaves].forEach((fn) => fn()) };
 }
 
+
+
+// A switch started in a disposed narrow list refreshes its replacement after resizing to split view.
+let finishResizedToggle;
+const resizedReply = new Promise((resolve) => { finishResizedToggle = resolve; });
+const replacingList = await jobFixture([job("resized", "Resize job")], undefined, undefined, async (item, body) => {
+  await resizedReply;
+  Object.assign(item, body);
+  return structuredClone(item);
+});
+const replacementBody = new StrictEl("section");
+const replacementLeaves = [];
+try {
+  const narrowSwitch = walk(replacingList.body, (e) => e.classList.contains("switch"))[0];
+  narrowSwitch.checked = false;
+  narrowSwitch.dispatchEvent({ type: "change" });
+  await flush(); await flush();
+  replacingList.cleanup();
+  await replacingList.page.viewJobs({ body: replacementBody, header() {}, paint() {}, onLeave: (fn) => replacementLeaves.push(fn) });
+  assert.equal(walk(replacementBody, (e) => e.classList.contains("switch"))[0].checked, true, "the replacement first reads the pending toggle's old state");
+  finishResizedToggle();
+  await flush(); await flush(); await flush();
+  assert.equal(replacingList.data[0].enabled, false);
+  assert.equal(walk(replacementBody, (e) => e.classList.contains("switch"))[0].checked, false,
+    "a completed toggle refreshes the currently mounted list");
+} finally { finishResizedToggle(); replacementLeaves.forEach((fn) => fn()); replacingList.cleanup(); }
 
 // A list toggle completed during detail loading wins over the earlier detail snapshot.
 let releaseDetail;
