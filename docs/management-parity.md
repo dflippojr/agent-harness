@@ -252,6 +252,8 @@ Web has no page for these; like every owner route, each has a CLI command.
 | One member | GET | `/accounts/{user_id}` | `harness accounts show <user_id>` |
 | Apps waiting to be erased | GET | `/apps/erasures` | `harness apps erasures` |
 | App retention | PUT | `/apps/{app_id}/retention` | `harness apps retention <app_id>` |
+| App session caps | GET | `/apps/{app_id}/limits` | `harness apps limits <app_id>` |
+| Set App session caps | PUT | `/apps/{app_id}/limits` | `harness apps set-limits <app_id>` |
 | Per-App provider credentials | GET | `/provider-credentials` | `harness provider-credentials list` |
 | Set a provider credential | POST | `/provider-credentials` | `harness provider-credentials set <app_id> <backend>` |
 | Revoke a provider credential | DELETE | `/provider-credentials/{credential_id}` | `harness provider-credentials revoke <credential_id>` |

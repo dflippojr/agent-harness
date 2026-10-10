@@ -74,6 +74,8 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | POST | `/api/admin/v1/accounts/{user_id}/google/invitation` | owner | TODO | `harness/google_signin_api.py` `google_invite` |
 | POST | `/api/admin/v1/accounts/{user_id}/google/revoke-sessions` | owner | TODO | `harness/google_signin_api.py` `google_revoke` |
 | GET | `/api/admin/v1/apps/erasures` | owner | TODO | `harness/admin.py` `app_erasures` |
+| GET | `/api/admin/v1/apps/{app_id}/limits` | owner | An App's session caps: what the owner set, what applies, and its sessions that count against them. | `harness/admin.py` `get_app_limits` |
+| PUT | `/api/admin/v1/apps/{app_id}/limits` | owner | Set how many sessions an App may have running and queued (#524); a field left out keeps its value and null restores the default. Only the owner can; an App cannot. | `harness/admin.py` `set_app_limits` |
 | POST | `/api/admin/v1/apps/{app_id}/restore` | owner | TODO | `harness/admin.py` `restore_app` |
 | PUT | `/api/admin/v1/apps/{app_id}/retention` | owner | TODO | `harness/admin.py` `set_app_retention` |
 | GET | `/api/admin/v1/audit` | owner | Owner-only review of every retained audit row, newest first, with a cursor (#467). | `harness/admin.py` `audit_review` |
@@ -281,6 +283,16 @@ is outside the member privacy guarantee.
 identity. `PATCH /api/admin/v1/accounts/{user_id}` can rename, rebind the login (same `user_id`, old login invalid
 immediately), disable/re-enable, or change quota and concurrency. Disable cancels that member's running and queued
 work and revokes their live streams; data stays. There is no Delete in v1.
+
+Session admission (#524). A member's sessions parked on an approval, the Mac, an App tool reply or a provider limit
+count toward both `max_queued` (new sessions past it get `429`) and `max_running` (a queued session waits for the GPU
+or a hosted backend slot until one ends). Apps have the same two caps: `GET /api/admin/v1/apps/{app_id}/limits`
+shows what is set, what applies and what counts against it; `PUT` with `max_running` and/or `max_queued` sets them
+(a field left out keeps its value, `null` restores the `budgets.app_max_*` default). A session waiting on an approval
+gives its hosted backend slot (and the GPU) to others and takes it back after the decision. Pending approvals are
+denied after `budgets.approval_timeout_seconds` and their run ends (`stop_reason` `approval_expired`); members' and
+Apps' runs end after `budgets.max_run_seconds` spent running (`budget_time`). The owner's own runs have no time
+budget.
 
 Member GitHub sign-in ([`member-github-auth.md`](member-github-auth.md)): `GET /api/admin/v1/github-member-auth`
 returns `configured`, `enabled`, the last preflight result, and each member's coarse `status` and `last_used_at`

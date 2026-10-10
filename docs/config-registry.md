@@ -250,7 +250,11 @@ Every key of the registry with all modules present, read from `harness/settings_
 | `remote_control.discovery.roots` | discovery_root_list | `[]` | admin | Windows owner-only, default-off metadata discovery. No file contents, trust or launch. Limits: 20,000 directories; 500 candidates; 30 seconds; 50 errors; one active scan; results expire after 15 minutes. Hidden/system entries, all reparse points (including OneDrive), credentials, caches and build folders are excluded. |
 | `remote_control.enabled` | bool | `false` | admin | Runtime enable for Remote Control. Does not install the module. |
 | `search.enabled` | bool | `false` | admin | Runtime enable for session search. Does not install the search module. |
+| `sessions.app_max_queued` | int | `4` | admin | How many sessions an App may have queued or parked before new ones are refused (429), unless the owner set its own cap. |
+| `sessions.app_max_running` | int | `2` | admin | How many sessions an App may have running or parked at once, unless the owner set its own cap. |
+| `sessions.approval_timeout_seconds` | float | `86400` | admin | Deny a pending approval nobody decided after this long and end its run. 0 never expires one. |
 | `sessions.max_completion_tokens` | int | — | admin | Per-run completion-token cap for new sessions. Changing this does not raise an active run's budget. |
+| `sessions.max_run_seconds` | float | `3600` | admin | End a member's or an App's run after this long running (approval, queue and reply waits do not count). 0 is no limit. The owner's own runs have none. |
 | `sessions.max_turns` | int | `80` | admin | Per-run turn cap for new sessions. Changing this does not raise an active run's budget. |
 | `skills.enabled` | bool | `false` | admin | Runtime enable for owner-approved instruction skills. Does not install the skills module. |
 | `smart_approvals.enabled` | bool | `false` | admin | Runtime enable for the hosted smart-approval reviewer. Does not configure a secret_ref. |

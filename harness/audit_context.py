@@ -83,6 +83,7 @@ METADATA_ALLOWLIST.update({
     "runner_pairing.redeem": _CRED_COMMON | {"kind"},
     "app.restore": _CRED_COMMON | {"kind"},
     "app.retention": _CRED_COMMON | {"old_retention_days", "new_retention_days"},
+    "app.limits": _CRED_COMMON | {"old_max_running", "new_max_running", "old_max_queued", "new_max_queued"},
     "provider_grant.set": _CRED_COMMON | {"backend", "policy", "fields", "replaced"},
     "provider_grant.revoke": _CRED_COMMON | {"backend", "policy"},
     "member_key.set": _CRED_COMMON | {"backend", "configured", "replaced", "result"},
@@ -167,6 +168,9 @@ def _clean_credential(key: str, value, out: dict) -> bool:
             names = sorted({v for v in value if _NAME.fullmatch(v)})[:20]
             if names:
                 out[key] = names
+    elif key in _LIMITS and key.endswith(("_max_running", "_max_queued")):  # an App's caps (#524); None: default
+        if value is None or (_int(value) and value >= 1):
+            out[key] = value
     elif key in ("old_retention_days", "new_retention_days"):
         if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)
                              and 0 < value <= 36500):

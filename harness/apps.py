@@ -407,7 +407,7 @@ class AppToolBroker:
         event = self._events.setdefault(key, asyncio.Event())
         deadline = row["created_at"] + tool["timeout_seconds"]
         started = time.monotonic()
-        waited = False
+        waited = cancelled = False
         try:
             while row["status"] == "pending":
                 remaining = deadline - time.time()
@@ -424,9 +424,12 @@ class AppToolBroker:
                     pass
                 event.clear()
                 row = self.db.get_app_tool_call(sid, call_id)
+        except asyncio.CancelledError:
+            cancelled = True  # the run is ending (a cancel, a deadline): it does not wait for its GPU slot again
+            raise
         finally:
             self._events.pop(key, None)
-            if waited and on_resume:
+            if waited and on_resume and not cancelled:
                 await on_resume()
         if not row["ok"]:
             raise ToolError(row["output"] or f"{name} failed in the app")

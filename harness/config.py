@@ -78,7 +78,7 @@ class SandboxConfig:
     pids: int = 512
     network: str = "harness-sandbox"
     egress_network: str = "harness-egress"
-    idle_stop_seconds: float = 0   # stop the container after this long without a command (0 = never, #428)
+    idle_stop_seconds: float = 900  # stop the container after this long without a command (0 = never, #428, #524)
 
 
 TOOL_MODES = ("builtin", "split")
@@ -506,6 +506,13 @@ class Config:
     smart_approvals: object = field(default_factory=_smart_approvals_default)
     max_turns: int = 80
     max_completion_tokens: int = 200000
+    # Admission (#524): a pending approval is denied after this long and its run ends (0 = never); a member's or an
+    # App's run ends after this much wall-clock time outside approval waits (0 = never); an App's session caps when
+    # the owner set none of its own.
+    approval_timeout_seconds: float = 86400
+    max_run_seconds: float = 3600
+    app_max_running: int = 2
+    app_max_queued: int = 4
     elide_at: float = 0.55
     summarize_at: float = 0.65
     keep_recent: float = 0.20
@@ -980,6 +987,10 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         smart_approvals=load_smart_config(raw.get("smart_approvals")),
         max_turns=int(budgets.get("max_turns", 80)),
         max_completion_tokens=int(budgets.get("max_completion_tokens", 200000)),
+        approval_timeout_seconds=float(budgets.get("approval_timeout_seconds", 86400)),
+        max_run_seconds=float(budgets.get("max_run_seconds", 3600)),
+        app_max_running=int(budgets.get("app_max_running", 2)),
+        app_max_queued=int(budgets.get("app_max_queued", 4)),
         elide_at=float(compaction.get("elide_at", 0.55)),
         summarize_at=float(compaction.get("summarize_at", 0.65)),
         keep_recent=float(compaction.get("keep_recent", 0.20)),

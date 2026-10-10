@@ -25,6 +25,7 @@ class GpuScheduler:
         self._on_change = on_change
         self._eligible = eligible
         self.low_priority: set[str] = set()  # background sessions (the canary, #265): a real session never waits behind one
+        self._eligibility_waiters: set[asyncio.Future] = set()
 
     def positions(self) -> dict[str, int]:
         """Queue position per session: the holder is at 0, the next waiter at 1, and so on."""
@@ -128,8 +129,26 @@ class GpuScheduler:
         self._waiters.update(skipped)
         self._waiters.update(rest)
 
+    def eligible(self, sid: str) -> bool:
+        """May `sid` run now under its member's or App's running cap?"""
+        return self._grantable(sid)
+
+    async def wait_eligible(self, sid: str, poll: float = 5) -> None:
+        """Wait until `sid` may run under its member's or App's running cap, without taking the GPU slot: a hosted
+        session's admission (#524). `recheck` wakes it; `poll` covers a change that does not go through it."""
+        while not self._grantable(sid):
+            waiter = asyncio.get_running_loop().create_future()
+            self._eligibility_waiters.add(waiter)
+            try:
+                await asyncio.wait({waiter}, timeout=poll)
+            finally:
+                self._eligibility_waiters.discard(waiter)
+
     def recheck(self) -> None:
         """Retry granting after eligibility may have changed (caps, status, account enabled)."""
+        for waiter in self._eligibility_waiters:
+            if not waiter.done():
+                waiter.set_result(None)
         if self.paused or self.holder is not None:
             return
         self._grant_next()
