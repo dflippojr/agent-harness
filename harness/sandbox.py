@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import hashlib
 import os
 import subprocess
 import threading
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from .config import SandboxConfig
 from .fileops import CappedStream
+from .principal import OWNER_USER_ID
 
 
 SETUP_TIMEOUT = 600
@@ -180,9 +182,10 @@ async def ensure_networks(cfg: SandboxConfig) -> None:
 
 class Sandbox:
     def __init__(self, session_id: str, workspace: Path, cfg: SandboxConfig, *, project: str = "", setup: str = "",
-                 known: bool = False, on_event=None):
+                 known: bool = False, on_event=None, user_id: str = OWNER_USER_ID):
         self.session_id = session_id
         self.project = project      # names the per-project pip/npm cache volumes (#429)
+        self.user_id = user_id      # with the project, so principals never share a writable cache (#529)
         self.setup = setup.strip()  # run (with network) each time a container is created
         self.known = known          # the session has run tools before, so a "created" container is a recreation
         self.on_event = on_event    # on_event(type, data): session events from here (setup result)
@@ -193,13 +196,26 @@ class Sandbox:
         self._idle_timer: asyncio.Task | None = None
         self._idle_stopped = False   # we stopped it (not a crash), so the next start owes the model a notice
 
+    async def _inspect(self) -> tuple[str | None, str]:
+        """(container status or None, its cache label)."""
+        code, out, _ = await run_cmd(
+            ["docker", "inspect", "-f", '{{.State.Status}} {{index .Config.Labels "agent-harness.cache"}}', self.name],
+            timeout=30)
+        if code != 0:
+            return None, ""
+        parts = out.split()
+        return (parts[0] if parts else None), (parts[1] if len(parts) > 1 else "")
+
     async def _state(self) -> str | None:
-        code, out, _ = await run_cmd(["docker", "inspect", "-f", "{{.State.Status}}", self.name], timeout=30)
-        return out.strip() if code == 0 else None
+        return (await self._inspect())[0]
 
     async def ensure_running(self) -> str:
         """Start (or create) the container. Returns 'running', 'started', or 'created'."""
-        state = await self._state()
+        state, cache = await self._inspect()
+        if state is not None and self.user_id != OWNER_USER_ID and cache != self._cache_key():
+            # Created before per-principal cache volumes (#529): it may mount another principal's caches.
+            await run_cmd(["docker", "rm", "-f", self.name], timeout=30)
+            state = None
         if state == "running":
             return "running"
         if state is not None:
@@ -213,6 +229,7 @@ class Sandbox:
             "docker", "run", "-d", "--init",  # --init: `sleep` would ignore SIGTERM and slow every stop
             "--name", self.name,
             "--label", f"agent-harness.session={self.session_id}",
+            "--label", f"agent-harness.cache={self._cache_key()}",
             "--network", self.cfg.network,
             "--memory", self.cfg.memory,
             "--cpus", str(self.cfg.cpus),
@@ -228,13 +245,23 @@ class Sandbox:
             raise SandboxUnavailable(f"could not start sandbox container: {(err or out).strip()[:500]}")
         return "created"
 
+    def _cache_key(self) -> str:
+        """Whose caches the container mounts: 'owner', or 'u' and a hash of the user id."""
+        if self.user_id == OWNER_USER_ID:
+            return "owner"
+        return "u" + hashlib.sha256(self.user_id.encode("utf-8")).hexdigest()[:16]
+
     def _cache_mounts(self) -> list[str]:
         """Named per-project volumes for the pip and npm caches, so a recreated container reinstalls from cache."""
         if not self.project:
             return []
+        # Member project slugs can equal the owner's, so a non-owner volume name carries a hash of the user id. It goes
+        # before the cache name ('pip'/'npm' for the owner, 'u<hash>' for others), so no project name can make two
+        # principals' names collide. The owner's names stay as they were, keeping existing caches.
+        prefix = "" if self.user_id == OWNER_USER_ID else f"{self._cache_key()}-"
         out: list[str] = []
         for name, target in (("pip", "/root/.cache/pip"), ("npm", "/root/.npm")):
-            out += ["--mount", f"type=volume,source=harness-cache-{name}-{self.project},target={target}"]
+            out += ["--mount", f"type=volume,source=harness-cache-{prefix}{name}-{self.project},target={target}"]
         return out
 
     async def _network(self, attach: bool) -> None:
