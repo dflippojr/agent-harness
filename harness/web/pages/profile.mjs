@@ -57,16 +57,17 @@ const SETTINGS_GROUPS = [
   ["Integrations", ["apps", "endpoint"]],
 ];
 const ACTION_PAGES = { resources: "Resources", accounts: "Accounts", "remote-control": "Remote control", disk: "Disk" };
+// Swatches preview each theme's --bg, --panel and --accent from style.css (tests/test_web_tokens.py keeps them in step).
 const THEMES = {
-  auto: { label: "System", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
-  light: { label: "Light", swatch: ["#f6f7f9", "#ffffff", "#2563eb"] },
-  dark: { label: "Dark", swatch: ["#000000", "#232323", "#dddddd"] },
+  auto: { label: "System", swatch: ["#f3f4f6", "#ffffff", "#2457d9"] },
+  light: { label: "Light", swatch: ["#f3f4f6", "#ffffff", "#2457d9"] },
+  dark: { label: "Dark", swatch: ["#000000", "#15181d", "#8cb5ff"] },
   midnight: { label: "Midnight", swatch: ["#0b1220", "#152038", "#7dd3fc"] },
   forest: { label: "Forest", swatch: ["#0f1a14", "#1a2c22", "#86efac"] },
   paper: { label: "Paper", swatch: ["#f4efe6", "#fffaf2", "#9a3412"] },
   custom: { label: "Custom", swatch: ["#888888", "#aaaaaa", "#2563eb"] },
 };
-const THEME_COLORS = { bg: "#f6f7f9", panel: "#ffffff", accent: "#2563eb" };
+const THEME_COLORS = { bg: "#f3f4f6", panel: "#ffffff", accent: "#2457d9" };
 
 function readTheme() {
   try { return localStorage.getItem("harness.theme") || "auto"; } catch (_) { return "auto"; }

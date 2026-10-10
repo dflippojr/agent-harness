@@ -47,6 +47,20 @@ The Agents list groups sessions into **Needs you** (a pending approval, or a run
 by most recent activity. An approval row shows the pending command or tool on one line and opens straight at the
 approval. A session on a machine other than the tower shows a laptop icon and the machine's name.
 
+## Colours and touch targets
+
+Every colour comes from the CSS custom properties at the top of `harness/web/style.css`. The Light and Dark themes
+(and System, which follows the device) use the mobile redesign's palette. Midnight, Forest and Paper keep their own
+values. `--accent` colours text-like actions such as links, the current tab and running badges. `--primary` fills
+buttons, the New task button and your own chat bubbles, with `--on-primary` text. In Dark the accent is blue, not
+grey. The other rules use `var(--…)` only, and `tests/test_web_tokens.py` fails on a hex, `rgb()` or `hsl()` colour
+outside the token blocks. The same test checks that the main text, muted, accent, primary and status pairs reach WCAG AA
+(4.5:1) in Light and Dark, and that the theme swatches on the Appearance page and the `theme-color` meta tags match
+the tokens.
+
+Every button, tab, segmented control, switch, field, picker and disclosure is at least 44 px tall (`--tap`). A switch
+keeps its 51 × 31 px track inside a 44 px hit area.
+
 ## Connection state
 
 The header chip says **Live**, **Reconnecting** or **Offline**. It follows the app-wide event stream from Agent Harness
