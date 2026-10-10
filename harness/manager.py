@@ -27,8 +27,8 @@ from .app_stores import EVERY_APP, SessionStores
 from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .runner_contract import RunnerError, NoRunnerHub, RunnerOffline
-from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT,
-                     REPO_PROMPT, SYSTEM_PROMPT, Runner, new_run)
+from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, holds_place, MAC_REPO_PROMPT,
+                     MAC_SYSTEM_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner, new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
@@ -2049,19 +2049,20 @@ class Manager:
         account = self.db.account_by_id(user_id) if user_id != OWNER_USER_ID else None
         if user_id != OWNER_USER_ID and (account is None or not account.get("enabled", 1)):
             return False
-        if s.get("status") in ("running", *WAITING) or sid in self.runner.admitted:
+        if holds_place(s) or sid in self.runner.admitted:
             return True  # it counts against the cap already, and coming back adds nothing (even over a lowered cap)
         if account is not None:
-            occupied, cap = self.db.count_stored_sessions(user_id, "running", *WAITING), int(account["max_running"])
+            occupied = self.db.count_stored_sessions(user_id, *ACTIVE, holding=True)
+            cap = int(account["max_running"])
         elif capped_app(self.db, s.get("app_id") or ""):
-            occupied = self.db.count_stored_app_sessions(s["app_id"], "running", *WAITING)
+            occupied = self.db.count_stored_app_sessions(s["app_id"], *ACTIVE, holding=True)
             cap = self.app_limits(s["app_id"])["max_running"]
         else:
             return True
         return occupied + self._about_to_run(sid, admission_key(self.db, s)) < cap
 
     def _about_to_run(self, sid: str, key: str) -> int:
-        """Sessions of admission `key` (other than `sid`) let past its running cap whose status does not count yet:
+        """Sessions of admission `key` (other than `sid`) let past its running cap that do not hold their place yet:
         hosted sessions admitted and waiting for a backend slot, and the GPU holder until its `running` commits."""
         others = {other for other, k in self.runner.admitted.items() if k == key}
         if self.scheduler.holder is not None:
@@ -2070,7 +2071,7 @@ class Manager:
         n = 0
         for other in others:
             row = self.db.get_session(other)
-            if row and row["status"] == "queued" and admission_key(self.db, row) == key:  # else its status counts
+            if row and row["status"] in ACTIVE and not holds_place(row) and admission_key(self.db, row) == key:
                 n += 1
         return n
 

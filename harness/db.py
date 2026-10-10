@@ -981,23 +981,22 @@ class Database:
         return [_row(r) for r in rows]
 
     @_reads
-    def count_sessions(self, user_id: str, *statuses: str) -> int:
-        marks = ",".join("?" * len(statuses))
-        with self.lock:
-            row = self.conn.execute(
-                f"SELECT COUNT(*) AS n FROM sessions WHERE owner_id = ? AND status IN ({marks})",
-                (user_id, *statuses),
-            ).fetchone()
-        return int(row["n"] if row else 0)
+    def count_sessions(self, user_id: str, *statuses: str, holding: bool = False) -> int:
+        """`holding`: only those running or holding a place under their running cap (`run.holds_place`, #524)."""
+        return self._count_sessions("owner_id", user_id, statuses, holding)
 
     @_reads
-    def count_app_sessions(self, app_id: str, *statuses: str) -> int:
-        """App `app_id`'s sessions in any of `statuses` (#524)."""
+    def count_app_sessions(self, app_id: str, *statuses: str, holding: bool = False) -> int:
+        """App `app_id`'s sessions in any of `statuses` (#524), `holding` as in count_sessions."""
+        return self._count_sessions("app_id", app_id, statuses, holding)
+
+    def _count_sessions(self, column: str, value: str, statuses: tuple, holding: bool) -> int:
         marks = ",".join("?" * len(statuses))
+        held = " AND (status = 'running' OR json_extract(run, '$.holds_place') = 1)" if holding else ""
         with self.lock:
             row = self.conn.execute(
-                f"SELECT COUNT(*) AS n FROM sessions WHERE app_id = ? AND status IN ({marks})",
-                (app_id, *statuses),
+                f"SELECT COUNT(*) AS n FROM sessions WHERE {column} = ? AND status IN ({marks}){held}",
+                (value, *statuses),
             ).fetchone()
         return int(row["n"] if row else 0)
 

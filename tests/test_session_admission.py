@@ -17,7 +17,7 @@ from harness.config import BackendConfig
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.principal import OWNER_USER_ID
-from harness.runner import RunClock, unresolved_calls
+from harness.runner import HOLDS_PLACE, WAITING, RunClock, unresolved_calls
 from harness.storage import workspaces_dir
 
 from test_app_stores import _key
@@ -33,14 +33,18 @@ def _status(client, sid: str, auth: dict) -> str:
     return client.get(f"/api/v1/sessions/{sid}", headers=auth).json()["status"]
 
 
-def _insert(m, sid: str, status: str, owner_id: str = OWNER_USER_ID, app_id: str = "") -> None:
+def _insert(m, sid: str, status: str, owner_id: str = OWNER_USER_ID, app_id: str = "",
+            holds: bool | None = None) -> None:
+    """A session row. A running or parked one has run, so it holds its place under its cap unless `holds` says."""
+    holds = status in ("running", *WAITING) if holds is None else holds
     now = time.time()
     ws = workspaces_dir(m.cfg, owner_id, app_id) / sid
     ws.mkdir(parents=True, exist_ok=True)
     m.db.insert_session({
         "id": sid, "project": "scratch", "target": "tower", "model": "fake", "backend": "local", "title": sid,
         "status": status, "workspace": str(ws), "created_at": now, "updated_at": now,
-        "context": [{"role": "user", "content": "hi"}], "run": {}, "totals": {}, "inbox": [],
+        "context": [{"role": "user", "content": "hi"}], "run": {HOLDS_PLACE: True} if holds else {},
+        "totals": {}, "inbox": [],
         "owner_id": owner_id, "app_id": app_id,
     })
 
@@ -260,7 +264,7 @@ def test_a_run_back_from_a_provider_limit_keeps_its_place_under_a_lowered_cap(tm
         await m.start()
         _insert(m, "parked0006", "waiting_approval", app_id=key["id"])
         _insert(m, "limited001", "waiting_limit", app_id=key["id"])
-        m.db.update_session("limited001", backend="claude", run={"limit_resets_at": 0})
+        m.db.update_session("limited001", backend="claude", run={HOLDS_PLACE: True, "limit_resets_at": 0})
         modes["limited001"] = "echo"
         m._spawn("limited001", recovered=True)
         s = await wait_status(m, "limited001", "done", "failed", timeout=15)
@@ -268,6 +272,51 @@ def test_a_run_back_from_a_provider_limit_keeps_its_place_under_a_lowered_cap(tm
         assert m.runner.admitted == {}
         await m.stop()
     asyncio.run(body())
+
+def test_new_sessions_waiting_for_an_offline_mac_hold_no_place_under_the_cap(tmp_path):
+    """New sessions held for their offline Mac before they ever ran are not running work: they neither count against
+    the App's running cap (blocking its tower sessions) nor skip admission when the Mac is back."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        assert m.db.set_app_limits(app_id, {"max_running": 2})
+        _insert(m, "running007", "running", app_id=app_id)
+        _insert(m, "newmac0001", "queued", app_id=app_id)
+        _insert(m, "newmac0002", "queued", app_id=app_id)
+        _insert(m, "towerq0001", "queued", app_id=app_id)
+        for sid in ("newmac0001", "newmac0002"):
+            m.db.update_session(sid, target="macbook")
+        m.runner.hub = OfflineMac()
+        waits = [asyncio.create_task(m.runner._wait_for_target(sid)) for sid in ("newmac0001", "newmac0002")]
+        await _until(lambda: all(m.db.get_session(sid)["status"] == "waiting_target"
+                                 for sid in ("newmac0001", "newmac0002")))
+        assert m._scheduler_eligible("towerq0001")       # one running of two: the Mac waiters take no place
+        _insert(m, "running008", "running", app_id=app_id)
+        assert not m._scheduler_eligible("newmac0001")   # at the cap, a never-run Mac session is not let in
+        for task in waits:
+            task.cancel()
+        await asyncio.gather(*waits, return_exceptions=True)
+    asyncio.run(body())
+
+
+def test_an_approved_session_queued_for_its_slot_keeps_its_place_across_a_restart(tmp_path):
+    async def body():
+        m, modes, key = _mixed_manager(tmp_path)
+        await m.start()
+        parked = m.create("asks", backend="claude", app=key)["id"]
+        await wait_status(m, parked, "waiting_approval")
+        busy = m.create("the owner's", backend="claude")["id"]
+        modes[busy] = "cancel"
+        await wait_status(m, busy, "running")
+        _insert(m, "parked0007", "waiting_approval", app_id=key["id"])  # the App's cap is one: it is over it now
+        m.decide(parked, None, approve=True)
+        await _until(lambda: m.get(parked)["status"] == "queued")
+        await m.stop()                                   # the daemon stops; the place is in the session's run
+        restarted = Manager(m.cfg, chat=Script([Completion(content="ok")]))
+        assert restarted._scheduler_eligible(parked)
+        assert restarted._scheduler_eligible("parked0007")  # parked, it holds its own place too
+    asyncio.run(body())
+
 
 # members --------------------------------------------------------------------------------------------------------------
 def test_a_member_at_max_queued_with_parked_sessions_is_refused(tmp_path):
@@ -821,6 +870,32 @@ def test_a_split_mode_runs_end_stops_its_sandbox(tmp_path):
         m.runner._sandboxes["split00002"] = Box()
         await m.runner._end_run("split00002")
         assert stopped == [True]
+    asyncio.run(body())
+
+
+def test_an_app_reply_does_not_restart_the_clock_while_an_approval_is_pending(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "hosted0004", "waiting_approval", app_id=app_id)
+        m.db.update_session("hosted0004", backend="claude")
+        m.db.insert_approval({"id": "a-host0004", "session_id": "hosted0004", "tool_call_id": "t1", "tool": "Bash",
+                              "args": {"command": "make"}, "reason": "test"})
+
+        class Lookup:
+            def names(self, s):
+                return {"lookup"}
+
+            async def call(self, s, call_id, name, args, on_wait=None, on_resume=None):
+                on_wait()
+                await on_resume()
+                return "answer"
+        m.runner.app_tools = Lookup()
+        await m.runner._dispatch_mcp(m.db.get_session("hosted0004"), "c1", "lookup", {})
+        assert m.db.get_session("hosted0004")["status"] == "waiting_approval"  # its clock stays stopped
+        m.runner._app_waits["hosted0004"] = 1  # an App call still out when the approval is decided
+        m.db.decide_approval("a-host0004", "approved", "")
+        assert m.runner._hosted_status("hosted0004") == "waiting_app"
     asyncio.run(body())
 
 

@@ -650,19 +650,19 @@ class SessionStores:
     def count_app_sessions(self, app_id: str, *statuses: str) -> int:
         return len(self._indexed(lambda e: e["app_id"] == app_id and e["status"] in statuses))
 
-    def count_stored_sessions(self, user_id: str, *statuses: str) -> int:
+    def count_stored_sessions(self, user_id: str, *statuses: str, holding: bool = False) -> int:
         """`count_sessions` from the rows of each store that may hold one, not from the index, which takes a commit
         only once its callbacks run: what admission caps count (#524). Inside a write, its store's own rows."""
         apps = self._holding(lambda e: e["owner_id"] == user_id and (e["status"] in statuses
                                                                         or e["status"] not in _ENDED))
-        return self.web.count_sessions(user_id, *statuses) + sum(
-            self._call(app_id, "count_sessions", user_id, *statuses) for app_id in apps)
+        return self.web.count_sessions(user_id, *statuses, holding=holding) + sum(
+            self._call(app_id, "count_sessions", user_id, *statuses, holding=holding) for app_id in apps)
 
-    def count_stored_app_sessions(self, app_id: str, *statuses: str) -> int:
+    def count_stored_app_sessions(self, app_id: str, *statuses: str, holding: bool = False) -> int:
         """`count_app_sessions` from App `app_id`'s own store, as `count_stored_sessions`; 0 without one."""
         if not self._holding(lambda e: e["app_id"] == app_id):
             return 0
-        return self._call(app_id, "count_app_sessions", app_id, *statuses)
+        return self._call(app_id, "count_app_sessions", app_id, *statuses, holding=holding)
 
     def _holding(self, pred) -> list[str]:
         """The Apps whose stores hold a session matching `pred`, including one whose insert has not committed yet."""

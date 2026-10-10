@@ -76,6 +76,9 @@ MAC_REPO_PROMPT = """Project repository: `{repo_name}` is checked out in the wor
 
 WAITING = ("waiting_approval", "waiting_target", "waiting_app", "waiting_limit")  # parked: count toward caps (#524)
 ACTIVE = ("queued", "running", *WAITING)
+# Set on `run` when the run first goes `running`: it holds a place under its member's or App's running cap until the
+# run ends, parked or queued again meanwhile (and across a daemon restart). new_run() does not carry it (#524).
+HOLDS_PLACE = "holds_place"
 # Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
 # cleared after its branch save and transcript: a daemon stopped in between leaves it set, and the next start finishes
 # that run's end from where it stopped (Manager.start).
@@ -114,6 +117,11 @@ def unresolved_calls(context: list[dict]) -> list[dict]:
         return []
     done = {m.get("tool_call_id") for m in context[i + 1:]}
     return [c for c in context[i]["tool_calls"] if c["id"] not in done]
+
+
+def holds_place(s: dict) -> bool:
+    """Does active session `s` hold a place under its running cap (#524)?"""
+    return s["status"] == "running" or (s["status"] in ACTIVE and bool((s.get("run") or {}).get(HOLDS_PLACE)))
 
 
 def capped_app(db, app_id: str) -> bool:
@@ -247,9 +255,9 @@ class Runner:
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
                                for name, backend in cfg.backends.items()}
         self._held_slots: dict[str, _HeldSlot] = {}   # a hosted run's backend slot, released around approvals
-        # Sessions holding a place under their member's or App's running cap whose status does not show it: a hosted
-        # one admitted and waiting for a backend slot, or one that was running or parked and waits for its GPU or
-        # backend slot back (#524). sid -> admission key; Manager._scheduler_eligible counts them, and lets them run.
+        # Hosted sessions admitted under their member's or App's running cap before their first `running` (which marks
+        # HOLDS_PLACE): waiting for a backend slot (#524). sid -> admission key; Manager._scheduler_eligible counts
+        # them, and lets them run.
         self.admitted: dict[str, str] = {}
         self._clocks: dict[str, RunClock] = {}         # live run -> its time spent running
         self._deadline_hit: dict[str, str] = {}        # runs their deadline watch cancelled -> the stop reason
@@ -511,17 +519,18 @@ class Runner:
         return output
 
     async def _resume_from_app(self, sid: str) -> None:
-        """A hosted session the App answered runs again once no other of its calls waits on the App, unless it ended
-        meanwhile (a cancel while it waited)."""
+        """A hosted session the App answered runs again once nothing else parks it (another call waiting on the App, a
+        pending approval), unless it ended meanwhile (a cancel while it waited)."""
         waits = self._app_waits.get(sid, 1) - 1
         if waits > 0:
             self._app_waits[sid] = waits
-            return
-        self._app_waits.pop(sid, None)
+        else:
+            self._app_waits.pop(sid, None)
 
         def resume() -> None:
-            if self.db.get_session(sid)["status"] == "waiting_app":
-                self._status_writer(sid, "running", {})()
+            status = self._hosted_status(sid)
+            if self.db.get_session(sid)["status"] == "waiting_app" and status != "waiting_app":
+                self._status_writer(sid, status, {})()
         await self.db.for_session(sid).awrite(resume)
 
     async def _dispatch_mcp(self, s: dict, call_id: str, name: str, args: dict):
@@ -532,7 +541,8 @@ class Runner:
 
             def wait() -> None:
                 self._app_waits[sid] = self._app_waits.get(sid, 0) + 1
-                self.set_status(sid, "waiting_app")
+                if self.db.get_session(sid)["status"] == "running":
+                    self.set_status(sid, self._hosted_status(sid))
             # Parked on the App's reply: its time does not count toward the run's budget (#524).
             return await self.app_tools.call(s, call_id, name, args, on_wait=wait,
                                              on_resume=lambda: self._resume_from_app(sid))
@@ -626,7 +636,12 @@ class Runner:
 
     def _status_writer(self, sid: str, status: str, fields: dict):
         def set_status() -> None:
-            self.db.update_session(sid, status=status, **fields)
+            marked = fields
+            if status == "running" and "run" not in fields:
+                run = (self.db.get_session(sid) or {}).get("run") or {}
+                if not run.get(HOLDS_PLACE):
+                    marked = {**fields, "run": {**run, HOLDS_PLACE: True}}
+            self.db.update_session(sid, status=status, **marked)
             self._flag_end_pending(sid, status)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
@@ -678,21 +693,13 @@ class Runner:
         if self.scheduler.holder == sid:
             return
         s = self.db.get_session(sid)
-        key = admission_key(self.db, s)
-        if key and s["status"] in ("running", *WAITING):
-            # It held its place under its member's or App's running cap (parked, or stepping aside for the GPU
-            # guard): it keeps it while it waits for the GPU, even over a cap lowered meanwhile (#524).
-            self.admitted[sid] = key
-        try:
-            if s["status"] != "queued":
-                await self.aset_status(sid, "queued")
-            if self.guard is not None and self.guard.active:
-                self.note_gpu_pause(sid)
-            with telemetry.span("gpu_slot_wait", {"harness.queue_front": front}):
-                await self.scheduler.acquire(sid, front=front)
-            await self.aset_status(sid, "running")
-        finally:
-            self._unreserve(sid)
+        if s["status"] != "queued":
+            await self.aset_status(sid, "queued")
+        if self.guard is not None and self.guard.active:
+            self.note_gpu_pause(sid)
+        with telemetry.span("gpu_slot_wait", {"harness.queue_front": front}):
+            await self.scheduler.acquire(sid, front=front)
+        await self.aset_status(sid, "running")
 
     # GPU contention (gpu_guard.py)
     def note_gpu_pause(self, sid: str) -> None:
@@ -817,23 +824,14 @@ class Runner:
         since = time.monotonic()
 
         def waiting() -> None:
-            self.db.update_session(sid, status="waiting_target")
-            self.db.after_commit(lambda: self._tick_clock(sid, "waiting_target"))
-            self.bus.emit(sid, "status", {"status": "waiting_target"})
+            self._status_writer(sid, "waiting_target", {})()
             self.bus.emit(sid, "target_waiting", {"target": target})
         await self.db.for_session(sid).awrite(waiting)
         await self.hub.wait_online(target)
         status = "waiting_approval" if previous == "waiting_approval" else "queued"
-        key = admission_key(self.db, s)
-        if key and status == "queued" and previous in ("running", *WAITING):
-            # It held its place under its member's or App's running cap (running, or parked since before a restart):
-            # it keeps it as `queued` until _acquire gives it the GPU back (#524).
-            self.admitted[sid] = key
 
         def online() -> None:
-            self.db.update_session(sid, status=status)
-            self.db.after_commit(lambda: self._tick_clock(sid, status))
-            self.bus.emit(sid, "status", {"status": status})
+            self._status_writer(sid, status, {})()
             self.bus.emit(sid, "target_online", {"target": target, "seconds": round(time.monotonic() - since)})
         await self.db.for_session(sid).awrite(online)
         if held:
@@ -1146,7 +1144,7 @@ class Runner:
                 delay = max(0, float(s["run"].get("limit_resets_at") or 0) - time.time())
                 if delay:
                     await asyncio.sleep(delay)
-                await self._requeue_keeping_place(sid, s)
+                await self.aset_status(sid, "queued")  # still holding its place (HOLDS_PLACE)
             backend_session_id = str(s["run"].get("backend_session_id") or "")
             credential, use_api_key, api_key = self._cli_credentials(sid, s, backend_name)
             await self._memory_gate(sid, f"{backend_name} worker container")
@@ -1155,9 +1153,9 @@ class Runner:
                 async with contextlib.AsyncExitStack() as stack:
                     await self._admit_hosted(sid, s, stack)
                     await stack.enter_async_context(held)
-                    if self.admitted.get(sid) and self.db.get_session(sid)["status"] not in ("running", *WAITING):
+                    if self.admitted.get(sid) and not holds_place(self.db.get_session(sid)):
                         await self.aset_status(sid, "running")
-                    self._unreserve(sid)  # counted by its status from here on
+                    self._unreserve(sid)  # holds its place from here on
                     self._held_slots[sid] = held
                     with telemetry.span("hosted_cli_turn", {"harness.backend": backend_name,
                                                             "gen_ai.request.model": backend.model}):
@@ -1851,29 +1849,23 @@ class Runner:
             await self.aset_status(sid, "waiting_approval")
             held = self._held_slots.get(sid)
             # Another session gets the backend slot while this one waits on a person (#524).
-            try:
-                async with (held.released(lambda: self._requeue_keeping_place(sid, s)) if held is not None
-                            else contextlib.nullcontext()):
-                    existing = await self._wait_approval(existing["id"])
-            except BaseException:
-                self._unreserve(sid)
-                raise
-        await self.aset_status(sid, "running")
-        self._unreserve(sid)  # counted by its status again
+            # Decided while the slot is taken: it waits for one as `queued`, still holding its place (HOLDS_PLACE).
+            async with (held.released(lambda: self.aset_status(sid, "queued")) if held is not None
+                        else contextlib.nullcontext()):
+                existing = await self._wait_approval(existing["id"])
+        await self.aset_status(sid, self._hosted_status(sid))
         if existing["status"] == "approved":
             await self._allow_cli(sid, cli, request_id, name, args, call_id, existing.get("tool_call_id") or "")
             return
         note = f" User note: {existing['note']}" if existing.get("note") else ""
         await cli.respond_permission(request_id, "deny", args, f"The user denied this {name} call.{note}")
 
-    async def _requeue_keeping_place(self, sid: str, s: dict) -> None:
-        """A parked session that waits again as `queued` (decided, but its backend slot was taken meanwhile; back from
-        a provider limit) still holds its place under its member's or App's running cap: it held it while parked,
-        and nobody may take it in between, even over a cap lowered meanwhile (#524)."""
-        key = admission_key(self.db, s)
-        if key:
-            self.admitted[sid] = key
-        await self.aset_status(sid, "queued")
+    def _hosted_status(self, sid: str) -> str:
+        """A hosted session's status while it runs: parked on an approval or an App's reply while any is pending (its
+        clock stops), else `running`. Its MCP calls and permission requests can overlap (#524)."""
+        if self.db.pending_approvals(sid):
+            return "waiting_approval"
+        return "waiting_app" if self._app_waits.get(sid) else "running"
 
     async def _ask_cli_policy(self, s: dict, cli, request_id, request: dict, name: str, args: dict,
                               call_id: str) -> dict | None:
