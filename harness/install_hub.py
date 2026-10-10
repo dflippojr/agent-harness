@@ -173,8 +173,8 @@ def distribution_choice(args) -> tuple[str, str]:
     return method, distribution
 
 
-def start_hub(args, method, distribution, service_id, hub_dir, claim_file):
-    launch = ["--daemon-url", f"http://127.0.0.1:{args.port}", "--claim-file"]
+def start_hub(args, method, distribution, service_id, hub_dir, claim_file, *, port: int):
+    launch = ["--daemon-url", f"http://127.0.0.1:{port}", "--claim-file"]
     if method == DOCKER:
         if not shutil.which(DOCKER):
             raise ValueError("Docker is required for --hub-method docker")
@@ -219,8 +219,8 @@ def install(args) -> int:
         print(LATER)
         return 0
     from .config import resolve_port
-    args.port = resolve_port(args.config_dir)
-    env = cli_env(args.config_dir, args.port)
+    port = resolve_port(args.config_dir)
+    env = cli_env(args.config_dir, port)
     if hub_cli(["hub", "status"], env)["claimed"]:
         print("A Hub is already claimed. Release it explicitly with harness hub release --confirm.")
         return 0
@@ -236,9 +236,9 @@ def install(args) -> int:
         raise ValueError("Hub state directory was modified before it could be secured")
     claim_file = hub_dir / "claim.json"
     # Record ownership before starting: a failed/partial install remains removable.
-    write_atomic(state, json.dumps({"id": service_id, "method": method, "port": args.port}) + "\n",
+    write_atomic(state, json.dumps({"id": service_id, "method": method, "port": port}) + "\n",
                  private=True, prepare=owner_only_acl)
-    start_hub(args, method, distribution, service_id, hub_dir, claim_file)
+    start_hub(args, method, distribution, service_id, hub_dir, claim_file, port=port)
     approve_and_wait(claim_file, env)
     return 0
 
@@ -271,14 +271,15 @@ def daemon_available(port: int) -> bool:
 def uninstall(args) -> int:
     state = args.install_dir / INSTALL_RECORD
     record = json.loads(state.read_text(encoding="utf-8")) if state.exists() else None
-    from .config import resolve_port
-    try:
-        port = resolve_port(args.config_dir)
-    except FileNotFoundError:
+    # This is stdlib-only until configuration exists: a failed venv dependency
+    # install must still be removable without importing PyYAML/httpx.
+    if not (args.config_dir / "harness.yaml").is_file():
         if record:
-            raise ValueError("Restore daemon configuration to release the installer-owned Hub before uninstalling") from None
+            raise ValueError("Restore daemon configuration to release the installer-owned Hub before uninstalling")
         print("No daemon configuration or installer-owned Hub; continuing partial daemon uninstall.")
         return 0
+    from .config import resolve_port
+    port = resolve_port(args.config_dir)
     if record:
         Service(record["id"])
         if record["method"] not in ("pip", DOCKER):

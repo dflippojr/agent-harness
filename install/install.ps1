@@ -70,6 +70,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 if ($WithHub -and $NoHub) { throw '-WithHub and -NoHub are mutually exclusive' }
+$HubMethod = $HubMethod.ToLowerInvariant()
 
 $AppDir = Split-Path $PSScriptRoot -Parent
 if (-not $DataDir) { $DataDir = Join-Path $InstallDir 'data' }
@@ -351,7 +352,8 @@ if ($DryRun) {
 Step 'Checking the install (python -m harness.doctor)'
 if ($DryRun) { Info '[dry run] skipped' } else {
     Push-Location $AppDir
-    $doctorArgs = @('-m', 'harness.doctor', '--config-dir', $configDir, '--instance', $(if ($NoTasks) { '' } else { $Instance }))
+    $doctorArgs = @('-m', 'harness.doctor', '--config-dir', $configDir)
+    if (-not $NoTasks) { $doctorArgs += @('--instance', $Instance) }
     if ($NoTasks) { $doctorArgs += '--not-started' }
     if ($ExistingServer -or -not $NeedsLocalModel) { $doctorArgs += '--existing-server' }
     try {

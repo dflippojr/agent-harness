@@ -276,7 +276,7 @@ def test_add_hub_later_uses_preserved_config_port(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(hub, "hub_cli", lambda cmd, env: calls.append(env["HARNESS_URL"]) or {"claimed": True})
     assert hub.install(args) == 0
-    assert args.port == 8199 and calls == ["http://127.0.0.1:8199"]
+    assert args.port == 8100 and calls == ["http://127.0.0.1:8199"]
 
 
 def test_stopped_daemon_without_owned_hub_can_be_uninstalled(tmp_path, monkeypatch, capsys):
@@ -346,6 +346,38 @@ def test_partial_install_without_config_is_removable(tmp_path, monkeypatch, caps
         hub.uninstall(args)
 
 
+def test_partial_uninstall_without_site_packages(tmp_path):
+    result = subprocess.run([sys.executable, "-S", "-m", "harness.install_hub", "uninstall",
+                             "--install-dir", str(tmp_path), "--config-dir", str(tmp_path / "missing-config")],
+                            cwd=ROOT, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "continuing partial daemon uninstall" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell native argument passing")
+@pytest.mark.parametrize("no_tasks", [True, False])
+def test_windows_doctor_native_arguments(tmp_path, no_tasks):
+    source = (ROOT / "install/install.ps1").read_text()
+    block = source[source.index("    $doctorArgs ="):source.index("    try {\n        & $python @doctorArgs")]
+    stub = tmp_path / "argv.py"
+    stub.write_text("import json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+    quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+    script = (
+        f"$configDir = {quote(tmp_path / 'config directory')}; $Instance = 'Main'; "
+        f"$NoTasks = {'$true' if no_tasks else '$false'}; $ExistingServer = ''; $NeedsLocalModel = $false;\n"
+        + block + f"\n& {quote(sys.executable)} {quote(stub)} @doctorArgs"
+    )
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(result.stdout)
+    assert argv[:4] == ["-m", "harness.doctor", "--config-dir", str(tmp_path / "config directory")]
+    if no_tasks:
+        assert "--instance" not in argv and "--not-started" in argv
+    else:
+        assert argv[argv.index("--instance") + 1] == "Main" and "--not-started" not in argv
+
+
 def test_not_started_keeps_image_files_and_defers_live_probes(tmp_path, monkeypatch):
     from harness import config, doctor, modules, setup_config
     from harness_modules.local_model import doctor as model_doctor
@@ -399,7 +431,7 @@ def test_docker_state_uses_host_user_on_unix(tmp_path, monkeypatch):
     monkeypatch.setattr(hub.shutil, "which", lambda _: "docker")
     calls = []
     monkeypatch.setattr(hub, "command", lambda args, **_: calls.append(args))
-    hub.start_hub(options(tmp_path), "docker", "stub:1", "a" * 32, tmp_path, tmp_path / "claim.json")
+    hub.start_hub(options(tmp_path), "docker", "stub:1", "a" * 32, tmp_path, tmp_path / "claim.json", port=8199)
     assert calls[0][calls[0].index("--user") + 1] == "1001:1002"
 
 
@@ -452,7 +484,8 @@ def test_unix_conflicting_flags(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows installer")
-@pytest.mark.parametrize("flags", [["-WithHub"], ["-WithHub", "-HubMethod", "docker", "-HubImage", "stub:1"], ["-NoHub"], []])
+@pytest.mark.parametrize("flags", [["-WithHub"], ["-WithHub", "-HubMethod", "docker", "-HubImage", "stub:1"],
+                                  ["-WithHub", "-HubMethod", "Docker", "-HubImage", "stub:1"], ["-NoHub"], []])
 def test_windows_hub_dry_run(tmp_path, flags):
     result = subprocess.run(["powershell.exe", "-NoProfile", "-File", str(ROOT / "install/install.ps1"),
                              "-InstallDir", str(tmp_path / "install"), "-Profile", "Service", "-DryRun", *flags],
@@ -461,6 +494,8 @@ def test_windows_hub_dry_run(tmp_path, flags):
     if "-WithHub" in flags:
         assert "harness hub approve <request_id> --match <code>" in result.stdout
         assert result.stdout.index("Checking the install") < result.stdout.index("Optional Hub")
+        if "Docker" in flags:
+            assert "Hub distribution: docker" in result.stdout
     else:
         assert "docs/management-parity.md" in result.stdout and "Add the Hub later" in result.stdout
     assert not (tmp_path / "install").exists()
