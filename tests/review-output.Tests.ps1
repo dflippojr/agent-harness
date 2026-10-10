@@ -17,6 +17,16 @@ Describe 'Review publication safety' {
         @{ Payload = "'password'='short'" }
         @{ Payload = 'C:\Users\reviewer\.claude\credentials.json' }
         @{ Payload = 'C:/Users/reviewer/.codex/auth.json' }
+        @{ Payload = 'C:/./Users/reviewer/.codex/auth.json' }
+        @{ Payload = 'C:/temp/../Users/reviewer/.codex/auth.json' }
+        @{ Payload = 'C:/Users//reviewer/.codex/auth.json' }
+        @{ Payload = '/home//reviewer/.codex/auth.json' }
+        @{ Payload = '/tmp/../home/reviewer/.codex/auth.json' }
+        @{ Payload = '//tmp/../home/reviewer/.codex/auth.json' }
+        @{ Payload = '///home///reviewer/.codex/auth.json' }
+        @{ Payload = '\\?\C:\temp\..\Users\reviewer\.codex\auth.json' }
+        @{ Payload = '\\server\share\temp\..\Users\reviewer\.codex\auth.json' }
+        @{ Payload = 'file:///home//reviewer/.codex/auth.json' }
         @{ Payload = '/Users/reviewer/.claude/credentials.json' }
         @{ Payload = '/home/reviewer/.codex/auth.json' }
         @{ Payload = '/root/.codex/auth.json' }

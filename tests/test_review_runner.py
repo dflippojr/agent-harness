@@ -170,6 +170,48 @@ foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), 'sk-synthetic123
     assert "safe paths, unsafe tokens" in result.stdout
 
 
+def test_git_diff_path_with_embedded_header_separator(tmp_path):
+    path = "examples b/" + "a" * 48 + ".py"
+    target = tmp_path / path
+    target.parent.mkdir()
+    target.write_text("# synthetic file\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", path], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
+         "commit", "--quiet", "-m", "synthetic fixture"], check=True, capture_output=True,
+    )
+    target.unlink()
+    diff = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "diff", "--no-ext-diff", "--no-textconv"], text=True,
+    )
+    # Remove the deleted file from the index too, so only parsed diff paths can exempt its citation.
+    subprocess.run(["git", "-C", str(tmp_path), "rm", "--cached", "--quiet", "--", path], check=True, capture_output=True)
+    diff_path = tmp_path / "synthetic.diff"
+    diff_path.write_text(diff, encoding="utf-8")
+    result = run_powershell(
+        tmp_path,
+        f"""
+$diff = Get-Content -Raw -LiteralPath '{diff_path}'
+$embedding = Get-ReviewDiffEmbedding -Diff $diff
+if (@($embedding.FilePaths).Count -ne 1 -or $embedding.FilePaths[0] -ne '{path}') {{ throw 'Ambiguous deletion path was split' }}
+$review = [pscustomobject]@{{ Backend = 'fake'; Model = ''; Output = '{path}:12: deletion finding' }}
+Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
+$rename = Get-ReviewDiffEmbedding -Diff "diff --git a/{path} b/other b/new.py`nsimilarity index 100%`nrename from {path}`nrename to other b/new.py"
+if ($rename.FilePaths[0] -ne '{path}' -or $rename.FilePaths[1] -ne 'other b/new.py') {{ throw 'Ambiguous rename path was split' }}
+$copy = Get-ReviewDiffEmbedding -Diff "diff --git a/{path} b/other b/new.py`nsimilarity index 100%`ncopy from {path}`ncopy to other b/new.py"
+if ($copy.FilePaths[0] -ne '{path}' -or $copy.FilePaths[1] -ne 'other b/new.py') {{ throw 'Ambiguous copy path was split' }}
+$modeEmbedding = Get-ReviewDiffEmbedding -Diff "diff --git a/{path} b/{path}`nold mode 100644`nnew mode 100755"
+if (@($modeEmbedding.FilePaths).Count -ne 1 -or $modeEmbedding.FilePaths[0] -ne '{path}') {{ throw 'Mode-only path was split' }}
+$tail = Get-ReviewDiagnosticTail -Stderr 'C:/temp/../Users/reviewer/.codex/auth.json /home//reviewer/.codex/auth.json'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Canonical profile path was not redacted' }}
+'ambiguous paths verified'
+""",
+    )
+    assert result.returncode == 0, output(result)
+    assert "ambiguous paths verified" in result.stdout
+
+
 def test_git_quoted_unicode_deletion_and_profile_url_redaction(tmp_path):
     unicode_path = "caf\u00e9/" + "a" * 40 + ".py"
     target = tmp_path / unicode_path

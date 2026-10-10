@@ -334,7 +334,7 @@ function Get-ReviewRedactionRules {
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(["'']?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
         [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
-        [pscustomobject]@{ Pattern = '(?i)(?<![A-Za-z0-9_./\\-])(?:file:/+)?(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|//[^/\s]+/+(?:[^/\s]+/+)*Users/+[^/\s]+|/(?:Users|home)/[^/\s]+|/root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]'; NormalizeProfilePaths = $true }
+        [pscustomobject]@{ Pattern = '(?i)(?<![A-Za-z0-9_./\\-])(?:file:/+)?(?:[A-Z]:[\\/]+Users[\\/]+[^\\/\s]+|//[^/\s]+/+(?:[^/\s]+/+)*Users/+[^/\s]+|/+(?:Users|home)/+[^/\s]+|/+root)(?=[\\/]|$|[\s`"''),;])'; Replacement = '[REDACTED PROFILE PATH]'; NormalizeProfilePaths = $true }
     )
 }
 
@@ -347,22 +347,53 @@ function Convert-ReviewProfilePathForms {
         if ([Uri]::TryCreate($match.Value, [UriKind]::Absolute, [ref]$uri) -and $uri.IsFile) {
             $path = [Uri]::UnescapeDataString($uri.AbsolutePath)
             if ($uri.IsUnc -and $uri.Host -ne 'localhost') { $path = '//' + $uri.Host + $path }
-            if ($path -match $Pattern) { return $path }
+            return $path
         }
         return $match.Value
     }.GetNewClosure()
     $normalized = [regex]::Replace($Text, '(?i)\bfile:[^\s<>"`]+', $normalize)
     $normalized = $normalized.Replace('\', '/')
-    # Volume GUID and native device aliases can address the same Users directory without a drive letter.
-    $normalized = [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)Volume\{[0-9a-f-]+\}/+(?=Users/+)', ' C:/')
-    $normalized = [regex]::Replace($normalized, '(?i)(?<![A-Za-z0-9_./-])(?:/{2,}[?.]/+GLOBALROOT)?/+Device/[^/\s]+/+(?=Users/+)', ' C:/')
-    # Win32 extended/device prefixes and the NT DOS-device prefix designate absolute paths.
+    # Resolve namespace roots before dot segments so UNC paths keep their server/share boundary.
+    $normalized = [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)Volume\{[0-9a-f-]+\}/+', ' C:/')
+    $normalized = [regex]::Replace($normalized, '(?i)(?<![A-Za-z0-9_./-])(?:/{2,}[?.]/+GLOBALROOT)?/+Device/[^/\s]+/+', ' C:/')
     $namespace = {
         param($match)
         if ($match.Value -match '(?i)UNC/+$') { return ' //' }
         return ' '
     }
-    return [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)(?:(?=[A-Z]:/+)|UNC/+)', $namespace)
+    $normalized = [regex]::Replace($normalized, '(?i)(?:/{2,}[?.]/+|/\?\?/+)(?:(?=[A-Z]:/+)|UNC/+)', $namespace)
+    # Canonicalize absolute path spellings as strings, without touching the filesystem.
+    $canonicalize = {
+        param($match)
+        $path = $match.Value
+        $prefix = '/'
+        $rootDepths = @(0)
+        if ($path -match '^([A-Za-z]:)/+') {
+            $prefix = $Matches[1] + '/'
+            $path = $path.Substring($Matches[0].Length)
+        } else {
+            if ($path.StartsWith('//')) { $prefix = '//'; $rootDepths = @(2, 0) }
+            $path = $path.TrimStart('/')
+        }
+        $preferred = $null
+        # Double-leading slashes can be UNC or POSIX. Reject a profile under either interpretation.
+        foreach ($minimum in $rootDepths) {
+            $parts = New-Object System.Collections.Generic.List[string]
+            foreach ($part in ($path -split '/+')) {
+                if (-not $part -or $part -eq '.') { continue }
+                if ($part -eq '..') {
+                    if ($parts.Count -gt $minimum) { $parts.RemoveAt($parts.Count - 1) }
+                    continue
+                }
+                $parts.Add($part)
+            }
+            $candidate = $prefix + ($parts -join '/')
+            if ($null -eq $preferred) { $preferred = $candidate }
+            if ($candidate -match $Pattern) { return $candidate }
+        }
+        return $preferred
+    }.GetNewClosure()
+    return [regex]::Replace($normalized, '(?i)(?<![A-Za-z0-9_./-])(?:[A-Z]:/+|/+)[^\s<>`"''(),;]*', $canonicalize)
 }
 
 function ConvertFrom-ReviewGitQuotedPath {
@@ -1085,6 +1116,48 @@ function Get-ReviewFileRiskTier {
     return 0
 }
 
+function Get-ReviewDiffFilePaths {
+    param([Parameter(Mandatory = $true)][string]$Section)
+
+    $header = ($Section -split "`r?`n", 2)[0]
+    $oldPath = $header
+    $newPath = $header
+    if ($header -match '^diff --git ("(?:[^"\\]|\\.)*"|a/.*?) ("(?:[^"\\]|\\.)*"|b/[^\r\n]*)\r?$') {
+        $oldPath = (ConvertFrom-ReviewGitQuotedPath -Path $Matches[1]).Substring(2)
+        $newPath = (ConvertFrom-ReviewGitQuotedPath -Path $Matches[2]).Substring(2)
+    }
+    # Unquoted headers are ambiguous when a name itself contains " b/". An unchanged name has
+    # an exact a/name b/name split; renames and patches provide unambiguous extended headers.
+    if ($header.StartsWith('diff --git a/')) {
+        foreach ($separator in [regex]::Matches($header, ' b/')) {
+            $left = $header.Substring(13, $separator.Index - 13)
+            $right = $header.Substring($separator.Index + 3)
+            if ($left -ceq $right) { $oldPath = $left; $newPath = $right; break }
+        }
+    }
+    $hunk = [regex]::Match($Section, '(?m)^@@')
+    $metadata = if ($hunk.Success) { $Section.Substring(0, $hunk.Index) } else { $Section }
+    foreach ($side in @('old', 'new')) {
+        $rename = if ($side -eq 'old') { 'from' } else { 'to' }
+        $prefix = if ($side -eq 'old') { '---' } else { '\+\+\+' }
+        $path = $null
+        $line = [regex]::Match($metadata, "(?m)^(?:rename|copy) $rename ([^`r`n]+)")
+        if ($line.Success) {
+            $path = ConvertFrom-ReviewGitQuotedPath -Path $line.Groups[1].Value
+        } else {
+            $line = [regex]::Match($metadata, "(?m)^$prefix ([^`r`n]+)")
+            if ($line.Success) {
+                $value = ConvertFrom-ReviewGitQuotedPath -Path $line.Groups[1].Value.TrimEnd("`t")
+                if ($value -ne '/dev/null') { $path = $value.Substring(2) }
+            }
+        }
+        if ($null -ne $path) {
+            if ($side -eq 'old') { $oldPath = $path } else { $newPath = $path }
+        }
+    }
+    return [pscustomobject]@{ OldPath = $oldPath; NewPath = $newPath }
+}
+
 function Get-ReviewDiffEmbedding {
     [CmdletBinding()]
     param(
@@ -1102,14 +1175,10 @@ function Get-ReviewDiffEmbedding {
     $fileStarts = @([regex]::Matches($Diff, '(?m)^diff --git .+$'))
     $totalFiles = $fileStarts.Count
     # Parse once for both publication paths and diff-budget metadata. Retain both rename sides.
-    $fileMetadata = @($fileStarts | ForEach-Object {
-        $oldPath = $_.Value
-        $newPath = $_.Value
-        if ($_.Value -match '^diff --git ("(?:[^"\\]|\\.)*"|a/.*?) ("(?:[^"\\]|\\.)*"|b/.*)\r?$') {
-            $oldPath = (ConvertFrom-ReviewGitQuotedPath -Path $Matches[1].Trim()).Substring(2)
-            $newPath = (ConvertFrom-ReviewGitQuotedPath -Path $Matches[2].Trim()).Substring(2)
-        }
-        [pscustomobject]@{ OldPath = $oldPath; NewPath = $newPath }
+    $fileMetadata = @(for ($index = 0; $index -lt $fileStarts.Count; $index++) {
+        $start = $fileStarts[$index].Index
+        $end = if ($index + 1 -lt $fileStarts.Count) { $fileStarts[$index + 1].Index } else { $Diff.Length }
+        Get-ReviewDiffFilePaths -Section $Diff.Substring($start, $end - $start)
     })
     $filePaths = @($fileMetadata | ForEach-Object { $_.OldPath; $_.NewPath } | Select-Object -Unique)
     $embeddedFileCount = $totalFiles
