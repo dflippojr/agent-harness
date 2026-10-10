@@ -46,14 +46,16 @@ def test_owner_only_directory_protects_future_children(tmp_path):
     child = directory / "claim.json"
     child.write_text("{}")
     quote = lambda path: "'" + str(path).replace("'", "''") + "'"
+    # Inspect the real ACL through .NET, independently of Security-module autoload.
     script = (
-        f"$parentAcl = Get-Acl -LiteralPath {quote(directory)}; "
-        f"$childAcl = Get-Acl -LiteralPath {quote(child)}; "
+        "$ErrorActionPreference = 'Stop'; "
+        f"$parentAcl = [IO.Directory]::GetAccessControl({quote(directory)}); "
+        f"$childAcl = [IO.File]::GetAccessControl({quote(child)}); "
+        "$rules = $childAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]); "
         "$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
         "[ordered]@{ protected=$parentAcl.AreAccessRulesProtected; current=$currentSid; "
-        "childSids=@($childAcl.Access | ForEach-Object { "
-        "$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value }); "
-        "inherited=@($childAcl.Access | Where-Object IsInherited).Count } | ConvertTo-Json"
+        "childSids=@(foreach ($rule in $rules) { $rule.IdentityReference.Value }); "
+        "inherited=@(foreach ($rule in $rules) { if ($rule.IsInherited) { $rule } }).Count } | ConvertTo-Json"
     )
     result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
                             capture_output=True, text=True, check=True, timeout=30)
