@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import fields
 import inspect
+from itertools import islice
+import math
 import time
 
 from .entries import load
@@ -12,6 +14,8 @@ STATES = ("active", "idle", "stale", "never_used", "revoked", "erasure_pending")
 KEY_FIELDS = ("id", "name", "prefix", "kind", "role", "scopes", "origins", "catalog_app_id", "created_at",
               "last_used_at", "revoked_at", "erase_after", "erased_at")
 STORE_FIELDS = ("sessions", "usage", "errors", "last_error", "last_error_at")
+STATUS_TIMEOUT = 6
+STATUS_FIELDS = 8
 
 
 def connection_state(row, now):
@@ -43,22 +47,48 @@ def apps(db, now):
 
 def _snapshot(manager, now):
     paired = apps(manager.db, now)
-    pending = set(manager.db.main.pending_pairing_catalog_ids(now))
+    pending = manager.db.main.pending_pairing_catalog_origins(now)
     entries = []
     for manifest in load(manager.cfg.config_dir / "hub.entries.json"):
         app_id = manifest["app"]["app_id"]
-        ids = [app["id"] for app in paired if app["catalog_app_id"] == app_id]
+        origins = set(manifest["app"]["browser_origins"])
+        labelled = [app for app in paired if app["catalog_app_id"] == app_id]
+        ids = [app["id"] for app in labelled if app["origins"] and set(app["origins"]) <= origins]
         entries.append({"catalog_app_id": app_id, "manifest": manifest, "verified": False,
                         "state": "paired" if ids else "not_paired", "paired": ids,
-                        "pending_pairing": app_id in pending})
+                        "pending_pairing": any(label == app_id and origin in origins for label, origin in pending),
+                        "unverified_origin": {
+                            "paired": [app["id"] for app in labelled if not app["origins"]],
+                            "pending_pairing": any(label == app_id and not origin for label, origin in pending)}})
     return paired, entries
+
+
+def _bounded_status(detail):
+    """Only the first eight fields, with short strings and finite JSON scalar values."""
+    if not isinstance(detail, dict):
+        return None
+    out = {}
+    for key, value in islice(detail.items(), STATUS_FIELDS):
+        if type(key) is not str or len(key) > 200:
+            continue
+        if type(value) is str:
+            out[key] = value[:200]
+        elif value is None or type(value) is bool:
+            out[key] = value
+        elif type(value) is int and value.bit_length() <= 64:
+            out[key] = value
+        elif type(value) is float and math.isfinite(value):
+            out[key] = value
+    return out or None
 
 
 async def _detail(rt):
     try:
         if inspect.iscoroutinefunction(rt.status):
-            return await asyncio.wait_for(rt.status(), timeout=6)
-        return await asyncio.to_thread(rt.status)
+            detail = await asyncio.wait_for(rt.status(), timeout=STATUS_TIMEOUT)
+        else:
+            detail = await asyncio.wait_for(asyncio.to_thread(rt.status), timeout=STATUS_TIMEOUT)
+        return _bounded_status(detail)
     except Exception:
         # Exception strings and traces may contain credentials; never return or log them.
         return {"state": "error"}
@@ -68,10 +98,9 @@ async def inventory(manager):
     now = time.time()
     paired, entries = await asyncio.to_thread(_snapshot, manager, now)
     caps = manager.cfg.capabilities()["modules"]
-    details = {}
-    for rt in manager.modules:
-        if rt.effective():
-            details[rt.module.name] = await _detail(rt)
+    runtimes = [rt for rt in manager.modules if rt.effective()]
+    results = await asyncio.gather(*(_detail(rt) for rt in runtimes))
+    details = {rt.module.name: detail for rt, detail in zip(runtimes, results)}
     module_rows = []
     names = dict.fromkeys([field.name for field in fields(manager.cfg.installed)] + list(caps))
     for name in names:

@@ -1562,14 +1562,14 @@ class Database:
         return [dict(r) for r in rows]
 
     @_reads
-    def pending_pairing_catalog_ids(self, now: float) -> list[str]:
-        """Matching labels of unexpired open App requests; no secrets or 100-row list limit."""
+    def pending_pairing_catalog_origins(self, now: float) -> list[tuple[str, str]]:
+        """Labels and origins of unexpired open App requests; no secrets or 100-row list limit."""
         with self.lock:
             rows = self.conn.execute(
-                "SELECT DISTINCT catalog_app_id FROM pairing_requests WHERE kind = 'app' "
+                "SELECT DISTINCT catalog_app_id, origin FROM pairing_requests WHERE kind = 'app' "
                 "AND state IN ('pending', 'armed', 'claimed', 'approved') AND expires_at > ?",
                 (now,)).fetchall()
-        return [row[0] for row in rows]
+        return [(row[0], row[1]) for row in rows]
 
     @_reads
     def pairing_request_load(self, source: str, since: float, active: tuple[str, ...]) -> tuple[int, int, int]:

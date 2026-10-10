@@ -33,7 +33,10 @@ checks, artifact digest checks, remote fetching or downloads. Those remain in #1
 The response has three arrays:
 
 - `modules`: known capability switches with `name` and `state` (`present`,
-  `switched_off`, `absent`), plus optional `status` detail from the runtime hook.
+  `switched_off`, `absent`), plus optional `status` detail from the runtime hook. Hooks run concurrently,
+  with a six-second timeout for both sync and async implementations. Only the first eight fields are
+  considered; keys and string values are capped at 200 characters (long keys are dropped). Nested values,
+  non-finite floats and integers larger than 64 bits are dropped. Hooks must still avoid secrets in scalars.
 - `apps`: the safe key-list fields (id, name, kind, role, scopes, origins, catalog id, existing prefix,
   creation/use/revocation/erasure times), `token_age_seconds`, `state`, `errors` and
   `store` metadata (session counts by status, usage, error count, last error kind/time). No app store contents
@@ -41,9 +44,16 @@ The response has three arrays:
 - `entries`: full `manifest`, `catalog_app_id`, `verified: false`,
   `state` (`paired` or `not_paired`), `paired` (matching key ids, including revoked
   keys), and `pending_pairing` (an unexpired pending, armed, claimed or approved app request exists).
+  Both require a matching catalog id and manifest browser origin: a key must have nonempty origins all
+  listed in `app.browser_origins`, and a pending request's origin must be listed there. A catalog label
+  alone never marks a trusted entry paired or pending. Native keys and requests with no origin are
+  reported separately under `unverified_origin` (`paired` key ids and a `pending_pairing` boolean);
+  they do not affect the entry's state. These origin checks are attribution checks, not publisher verification.
 
-Successful scoped App/device and owner/Hub bearer authentication records `last_used_at` asynchronously in
-the main store, including session creation/polling and admin reads. Rejected scope/origin credentials do not
+Successful scoped App/device and owner/Hub bearer authentication records `last_used_at` in a background
+main-store write, at most once per key per 60-second window, including session creation/polling and admin
+reads. A pending write suppresses another even after the window expires. Inference accounting already
+updates activity, so those requests do not queue an additional metadata write. Rejected scope/origin credentials do not
 record activity, and a metadata-write failure never changes a completed operation’s response.
 
 States: erasure pending takes precedence over revoked, then never used, active (age <= 15 minutes), idle

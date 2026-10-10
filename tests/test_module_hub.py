@@ -1,7 +1,11 @@
 """Synthetic Hub inventory, local strict manifests and module presence (#520)."""
 from __future__ import annotations
 
+import asyncio
 import copy
+import threading
+from dataclasses import make_dataclass
+from types import SimpleNamespace
 import json
 import socket
 import time
@@ -149,8 +153,11 @@ def test_inventory_states_errors_metrics_and_secret_exclusion(tmp_path, monkeypa
 def test_entries_match_ids_pending_and_do_not_open_app_stores(tmp_path, monkeypatch):
     m = make(tmp_path, ["harness_modules.hub"])
     initialize(m.cfg.config_dir)
+    doc = document()
+    doc["entries"][0]["app"]["browser_origins"] = ["https://web.example.invalid"]
+    (m.cfg.config_dir / "hub.entries.json").write_text(json.dumps(doc), encoding="utf-8")
     key, token = m.db.create_api_key("display name intentionally different", "sessions", kind="app",
-                                    catalog_app_id=CATALOG)
+                                    catalog_app_id=CATALOG, origins=["https://web.example.invalid"])
     unmatched, _ = m.db.create_api_key("Agent Harness Web", "sessions", kind="app")
     now = time.time()
     def add_requests():
@@ -158,7 +165,7 @@ def test_entries_match_ids_pending_and_do_not_open_app_stores(tmp_path, monkeypa
         for index in range(105):
             m.db.main.insert_pairing_request({"id": f"pr-{index}", "kind": "app", "name": "request",
                 "scopes": "sessions", "catalog_app_id": CATALOG if index == 0 else "ahpub.example.other",
-                "origin": "", "source": "", "challenge_hash": "synthetic-challenge", "match_code": "1234",
+                "origin": "https://web.example.invalid", "source": "", "challenge_hash": "synthetic-challenge", "match_code": "1234",
                 "state": "claimed", "armed": 1, "created_at": now + index, "expires_at": now + 500,
                 "approved_at": None, "finished_at": None, "key_id": ""})
     m.db.main.write(add_requests)
@@ -202,6 +209,8 @@ def test_presence_disabled_absent_and_owner_auth(tmp_path):
         assert client.get(PATH).status_code == 401
         for token in (owner_token, hub_token):
             assert client.get(PATH, headers={"Authorization": f"Bearer {token}"}).status_code == 200
+            from test_key_activity import drain_activity
+            drain_activity(client, m)
             assert m.db.api_key_by_secret(token)["last_used_at"] is not None
         for token in (app_token, device_token):
             assert client.get(PATH, headers={"Authorization": f"Bearer {token}"}).status_code == 403
@@ -341,3 +350,109 @@ def test_finite_manifest_price_survives_loading(tmp_path):
     doc = document()
     doc["entries"][0]["app"]["monetization"]["price_usd"] = 2.5
     assert load(save(tmp_path, doc))[0]["app"]["monetization"]["price_usd"] == 2.5
+
+
+@pytest.mark.parametrize("origins, pending_origin, paired, unverified", [
+    (["https://web.example.invalid"], "https://web.example.invalid", True, False),
+    (["https://attacker.example"], "https://attacker.example", False, False),
+    ([], "", False, True),
+    (["https://web.example.invalid", "https://attacker.example"], "https://attacker.example", False, False),
+])
+def test_entry_attribution_requires_manifest_origins(tmp_path, origins, pending_origin, paired, unverified):
+    m = make(tmp_path, ["harness_modules.hub"])
+    initialize(m.cfg.config_dir)
+    doc = document()
+    doc["entries"][0]["app"]["browser_origins"] = ["https://web.example.invalid"]
+    (m.cfg.config_dir / "hub.entries.json").write_text(json.dumps(doc), encoding="utf-8")
+    key, _ = m.db.create_api_key("Agent Harness Web", "sessions", kind="app", origins=origins,
+                               catalog_app_id=CATALOG)
+    now = time.time()
+    m.db.main.write(m.db.main.insert_pairing_request, {
+        "id": "synthetic", "kind": "app", "name": "Agent Harness Web", "catalog_app_id": CATALOG,
+        "origin": pending_origin, "scopes": "sessions", "source": "synthetic",
+        "challenge_hash": "synthetic-challenge", "match_code": "1234",
+        "state": "pending", "created_at": now, "expires_at": now + 500})
+    with TestClient(create_app(m)) as client:
+        response = client.get(PATH)
+        assert response.status_code == 200, response.text
+        entry = response.json()["entries"][0]
+        assert entry["paired"] == ([key["id"]] if paired else [])
+        assert entry["state"] == ("paired" if paired else "not_paired")
+        assert entry["pending_pairing"] is paired
+        assert entry["unverified_origin"] == {
+            "paired": [key["id"]] if unverified else [], "pending_pairing": unverified}
+        assert key["id"] in [app["id"] for app in response.json()["apps"]]
+        m.db.main.write(lambda: m.db.main.conn.execute("UPDATE pairing_requests SET expires_at = 0"))
+        expired = client.get(PATH).json()["entries"][0]
+        assert expired["pending_pairing"] is False
+        assert expired["unverified_origin"]["pending_pairing"] is False
+
+
+@pytest.mark.parametrize("async_hook", [False, True])
+def test_status_timeout_returns_safe_error_for_sync_and_async_hooks(monkeypatch, async_hook):
+    from harness_modules.hub import service
+    monkeypatch.setattr(service, "STATUS_TIMEOUT", 0.03)
+    release = threading.Event()
+
+    def blocked():
+        release.wait(2)
+        return {"state": "late"}
+
+    async def asleep():
+        await asyncio.Event().wait()
+
+    async def exercise():
+        try:
+            detail = await asyncio.wait_for(service._detail(SimpleNamespace(status=asleep if async_hook else blocked)), 1)
+            assert detail == {"state": "error"}
+        finally:
+            release.set()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("async_hook", [False, True])
+def test_inventory_probes_modules_concurrently(monkeypatch, async_hook):
+    from harness_modules.hub import service
+    monkeypatch.setattr(service, "STATUS_TIMEOUT", 0.2)
+    monkeypatch.setattr(service, "_snapshot", lambda manager, now: ([], []))
+    barrier = threading.Barrier(2)
+
+    async def exercise():
+        started = set()
+        both = asyncio.Event()
+
+        def sync_status():
+            barrier.wait(1)
+            return {"state": "ready"}
+
+        def runtime(name):
+            async def async_status():
+                started.add(name)
+                if len(started) == 2:
+                    both.set()
+                await both.wait()
+                return {"state": "ready"}
+            return SimpleNamespace(module=SimpleNamespace(name=name, switches=(name,)), effective=lambda: True,
+                                   status=async_status if async_hook else sync_status)
+
+        installed = make_dataclass("Installed", [("first", bool), ("second", bool)])(True, True)
+        cfg = SimpleNamespace(installed=installed, capabilities=lambda: {"modules": {"first": True, "second": True}})
+        manager = SimpleNamespace(cfg=cfg, modules=[runtime("first"), runtime("second")])
+        inventory = await asyncio.wait_for(service.inventory(manager), 2)
+        assert [row["status"] for row in inventory["modules"]] == [{"state": "ready"}] * 2
+
+    asyncio.run(exercise())
+
+
+def test_status_output_is_bounded_json_scalars_only():
+    from harness_modules.hub import service
+    payload = {"state": "x" * 1000, "config": {"secret": "synthetic-secret"}, "list": ["synthetic-secret"],
+               "count": 12, "enabled": True, "time": 1.5, "missing": None, "invalid": float("nan"),
+               "extra": "must-not-appear"}
+    result = asyncio.run(service._detail(SimpleNamespace(status=lambda: payload)))
+    assert result == {"state": "x" * 200, "count": 12, "enabled": True, "time": 1.5, "missing": None}
+    assert "synthetic-secret" not in json.dumps(result, allow_nan=False)
+    assert service._bounded_status({str(i): i for i in range(100)}) == {str(i): i for i in range(8)}
+    assert service._bounded_status({"x" * 201: "bad", "huge": 1 << 10000, "inf": float("inf"), 123: "bad"}) is None
+    assert service._bounded_status(["synthetic-secret"]) is None

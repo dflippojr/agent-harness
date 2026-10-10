@@ -295,7 +295,10 @@ class ModuleRuntime:
         return {}
 
     def status(self) -> dict | None:
-        """Optional read-only, secret-free Hub detail. May also be async; no detail by default."""
+        """Optional read-only, secret-free Hub scalars (up to 8 fields, strings <= 200 chars).
+
+        May also be async; Hub probes concurrently with a six-second timeout. No detail by default.
+        """
         return None
 
     def metrics(self, out, db) -> None:
