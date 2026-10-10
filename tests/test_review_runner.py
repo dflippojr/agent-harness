@@ -178,7 +178,8 @@ foreach ($unsafe in @(('T' * 48), (('T' * 48) + '/unknown.py'), ('./' + ('T' * 4
 def test_known_bracketed_paths_cannot_hide_absolute_profile_paths(tmp_path):
     paths = ["app/[locale]/home/components/Nav.tsx", "app/[locale]/Users/reviewer/config.py",
              "app/{locale}/root/settings.py", "\U0001f43e/home/reviewer/config.py"]
-    for path in paths:
+    ambiguous = ["(/home/reviewer/config.py", "`/home/reviewer/config.py"]
+    for path in paths + ambiguous:
         target = tmp_path / path
         target.parent.mkdir(parents=True)
         target.write_text("# synthetic file\n", encoding="utf-8")
@@ -201,6 +202,13 @@ foreach ($absolute in @('C:/Users/reviewer/', '/home/reviewer/', 'C:/temp/../Use
     try {{ Write-ReviewResult -Result $review -OutputPath $out -Workspace '{tmp_path}' -DiffPaths $paths }}
     catch {{ $failure = $_.Exception.Message }}
     if ($failure -notlike 'Review did not complete*' -or (Test-Path $out)) {{ throw 'Absolute profile reference was exempted' }}
+}}
+foreach ($formatted in @('(/home/reviewer/config.py)', '`/home/reviewer/config.py`')) {{
+    $review.Output = $formatted
+    $failure = ''
+    try {{ Write-ReviewResult -Result $review -OutputPath $out -Workspace '{tmp_path}' }}
+    catch {{ $failure = $_.Exception.Message }}
+    if ($failure -notlike 'Review did not complete*' -or (Test-Path $out)) {{ throw 'Ambiguous filename exempted an absolute profile' }}
 }}
 'known relative paths and absolute profiles verified'
 """,
@@ -303,6 +311,8 @@ if ($LASTEXITCODE -ne 0) {{ throw 'Synthetic Unicode deletion failed' }}
 Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-output.md') -Workspace '{tmp_path}' -DiffPaths @($embedding.FilePaths)
 $tail = Get-ReviewDiagnosticTail -Stderr 'profile file:///h%6fme/reviewer/.codex/auth.json'
 if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Encoded profile URL was not redacted' }}
+$tail = Get-ReviewDiagnosticTail -Stderr 'C:/public/config.py followed by file:///h%6fme/reviewer/.codex/auth.json'
+if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'A preceding path hid the decoded profile URL' }}
 $tail = Get-ReviewDiagnosticTail -Stderr '\\?\C:\Users\reviewer\.codex\auth.json'
 if ($tail -like '*reviewer*' -or $tail -notlike '*REDACTED PROFILE PATH*') {{ throw 'Extended profile path was not redacted' }}
 $tail = Get-ReviewDiagnosticTail -Stderr '"C:\Program Files\..\Users\reviewer\.codex\auth.json"'

@@ -347,8 +347,8 @@ function Convert-ReviewProfilePathForms {
         if ([Uri]::TryCreate($match.Value, [UriKind]::Absolute, [ref]$uri) -and $uri.IsFile) {
             $path = [Uri]::UnescapeDataString($uri.AbsolutePath)
             if ($uri.IsUnc -and $uri.Host -ne 'localhost') { $path = '//' + $uri.Host + $path }
-            if ($path -match '\s') { return '"' + $path + '"' }
-            return $path
+            # Keep every decoded URI separate from earlier unquoted paths on the same line.
+            return '"' + $path + '"'
         }
         return $match.Value
     }.GetNewClosure()
@@ -450,7 +450,8 @@ function Get-ReviewRepositoryPaths {
         $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
     }
     return @($paths + $DiffPaths | Where-Object {
-        $_ -and $_ -notmatch '(^[/\\]|^[A-Za-z]:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
+        # Formatting characters must not disguise an absolute-looking name as a relative citation.
+        $_ -and $_ -notmatch '(^[\s`"''()\[\]{}*<>=:]*[/\\]|:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
     } | Select-Object -Unique)
 }
 
