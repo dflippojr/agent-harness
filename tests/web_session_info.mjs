@@ -35,3 +35,16 @@ assert.match(full, /b from main/);
 assert.match(full, /x v2 \(0123456789ab\)/);
 assert.match(full, /\/w \(removed\)/);
 console.log("ok");
+
+// Desktop facts share stable label/value columns; trace links and copy fallback remain available.
+const rows = appended[0].kids;
+assert.equal(appended[0].attrs.class, "card session-info");
+assert.ok(rows.every(row => row.attrs.class === "row session-info-row"));
+assert.ok(rows.slice(0, -1).every(row => row.kids[1].attrs.class === "session-info-value"));
+assert.equal(rows.at(-1).kids[1].tag, "copy");
+({ appended } = run({ ...base, trace_id: "abc", trace_url: "https://example.com/trace/abc" }));
+const traceLink = appended[0].kids.at(-1).kids[1];
+assert.equal(traceLink.tag, "a");
+assert.equal(traceLink.attrs.class, "session-info-value");
+assert.equal(traceLink.attrs.href, "https://example.com/trace/abc");
+assert.equal(traceLink.attrs.rel, "noopener");

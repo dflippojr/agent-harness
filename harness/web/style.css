@@ -1047,3 +1047,37 @@ body.has-tabs .composer { bottom: var(--tabbar-offset); padding-bottom: 8px; }
   .image-detail-layout { grid-template-columns: minmax(0, 1fr) 380px; }
 }
 /* End Desktop 7. */
+
+/* Desktop 5: Changes and Info (#565). The phone keeps stacked review/diffs and right-aligned facts.
+   Changes uses the full session pane, with Review and file navigation beside the diff column. */
+.changes-files { display: none; }
+.session-info-row { justify-content: space-between; padding: 4px 0; }
+.session-info-value { overflow-wrap: anywhere; text-align: right; }
+@media (min-width: 768px) {
+  body.session-page.session-changes main { max-width: none; }
+  .changes-layout { display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); gap: var(--row-gap); align-items: start; }
+  .changes-sidebar, .changes-diffs, .changes-repo { min-width: 0; }
+  .changes-sidebar { position: sticky; top: calc(var(--bar-h, 64px) + var(--row-gap)); max-height: calc(100dvh - var(--bar-h, 64px) - var(--tap) * 2); overflow-y: auto; }
+  .changes-sidebar .meta { overflow-wrap: anywhere; }
+  .changes-sidebar .row.end { flex-wrap: wrap; }
+  .changes-files { display: block; }
+  .changes-repo-files h4 { margin: var(--row-gap) 0; font-weight: 500; }
+  .changes-file-link {
+    display: block; width: 100%; min-height: var(--tap); padding: calc(var(--row-gap) / 2) var(--row-gap);
+    border: 0; border-radius: calc(var(--radius) / 2); background: none; color: var(--text);
+    font-family: var(--mono); font-size: .8125rem; text-align: left; overflow-wrap: anywhere; cursor: pointer;
+  }
+  .changes-file-link:hover { background: var(--panel-2); }
+  .changes-file-link[aria-current="true"] { background: var(--info-bg); color: var(--accent); }
+  .changes-file-link:focus-visible, .changes-diffs .file > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .changes-diffs .file { scroll-margin-top: calc(var(--bar-h, 64px) + var(--row-gap)); }
+  .changes-diffs .diff { background: var(--code-bg); }
+  .changes-diffs .diff .dl { width: max-content; min-width: 100%; }
+  .changes-diffs .diff .review-composer { position: sticky; left: 0; width: 100%; box-sizing: border-box; font-family: inherit; }
+  .changes-diffs .review-composer :is(textarea, button) { font-family: system-ui, sans-serif; }
+  .session-info { display: grid; grid-template-columns: minmax(0, 10rem) minmax(0, 1fr); column-gap: var(--row-gap); }
+  .session-info-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: start; gap: var(--row-gap); }
+  .session-info-value { min-width: 0; text-align: left; font-variant-numeric: tabular-nums; }
+  .session-info-row .copy-box { min-width: 0; overflow-wrap: anywhere; }
+}
+/* End Desktop 5. */

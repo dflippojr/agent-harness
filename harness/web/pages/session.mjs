@@ -5,7 +5,7 @@ import { TARGET_LABEL } from "../lib/targets.mjs";
 import { fmtElapsed, fmtTokens, readFraction, readingText, fmtSpan, pluralize } from "../lib/format.mjs";
 import { toolSummaryText, approvalWhat, toolKind, resultState } from "../lib/tools.mjs";
 import { createToolRows } from "../lib/tool-row.mjs";
-import { approvalDiffClass, diffLineClass } from "../lib/diff.mjs";
+import { approvalDiffClass, diffLineClass, splitDiff } from "../lib/diff.mjs";
 import { md } from "../lib/markdown.mjs";
 import { withTaint } from "../lib/taint.mjs";
 import { mountSessionUi, sessionMenuItems, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
@@ -109,6 +109,10 @@ async function viewSession(sid, tab, focusApproval) {
   if (!isGuest()) sessionMenu({ items: () => sessionMenuItems(session, { guest: false, terminal: TERMINAL }), run: (id) => menuActions[id]() });
 
   if (tab === "changes" || tab === "info") {
+    if (tab === "changes") {
+      document.body.classList?.add("session-changes");
+      onLeave(() => document.body.classList?.remove("session-changes"));
+    }
     pendingApprovalBar(session, () => !left);
     if (tab === "changes") await viewChanges(session); else viewInfo(session);
     jumps.updateJumps();
@@ -792,14 +796,16 @@ function reviewCard(s) {
 async function viewChanges(session) {
   const sid = session.id;
   const box = h("div", {}, h("p", { class: "note" }, "Loading changes…"));
-  append($app, reviewCard(session), box);
+  const review = reviewCard(session);
+  append($app, box);
+  const message = (text) => fill(box, review, h("p", { class: "empty" }, text));
   const data = await api(`/sessions/${sid}/changes`);
   if (data.removed) {
-    fill(box, h("p", { class: "empty" }, "This workspace was cleaned up or discarded."));
+    message("This workspace was cleaned up or discarded.");
     return;
   }
   if (!data.repos.length) {
-    fill(box, h("p", { class: "empty" }, "No git repositories in this workspace yet."));
+    message("No git repositories in this workspace yet.");
     return;
   }
   const canComment = !isGuest() && data.repos.some((r) => r.parsed);
@@ -808,8 +814,16 @@ async function viewChanges(session) {
     try { comments = await api(`/sessions/${sid}/review-comments`); } catch { comments = []; }
   }
   const state = { comments, sel: null };  // sel: {repo, path, side, anchor, start, end}
-  const render = () => fill(box, secretScanCard(sid, data.secret_scan, state, canComment, render),
-    data.repos.map((repo) => repoChanges(sid, repo, state, canComment, render)));
+  const render = () => {
+    state.fileButtons = [];
+    const repos = data.repos.map((repo) => repoChanges(sid, repo, state, canComment, render));
+    fill(box, h("div", { class: "changes-layout" },
+      h("aside", { class: "changes-sidebar", "aria-label": "Review and changed files" }, review,
+        secretScanCard(sid, data.secret_scan, state, canComment, render),
+        h("nav", { class: "changes-files card", "aria-label": "Changed files" }, h("h3", {}, "Changed files"),
+          repos.map((repo) => repo.navigation))),
+      h("div", { class: "changes-diffs" }, repos.map((repo) => repo.detail))));
+  };
   render();
 }
 
@@ -997,34 +1011,39 @@ function repoChanges(sid, repo, state, canComment, render) {
       h("div", {}, c.comment))),
     h("div", { class: "row end", style: "margin-top:8px" },
       h("button", { class: "btn ok", type: "button", onclick: send }, `Send ${state.comments.length} to agent`))) : null;
-  return h("section", { class: "card" },
+  const fileViews = new Map();
+  const navigation = h("div", { class: "changes-repo-files" },
+    h("h4", { class: "muted small" }, repo.path === "." ? "workspace" : repo.path),
+    files.length ? files.map((f) => {
+      const button = h("button", { class: "changes-file-link", type: "button", "aria-current": state.file?.repo === repo.path && state.file.path === f.name ? "true" : undefined, onclick: () => {
+        const file = fileViews.get(f.name);
+        file.open = true;
+        state.file = { repo: repo.path, path: f.name };
+        state.fileButtons.forEach((b) => b.removeAttribute("aria-current"));
+        button.setAttribute("aria-current", "true");
+        file.scrollIntoView({ block: "start" });
+        file.querySelector("summary").focus({ preventScroll: true });
+      } }, f.name);
+      state.fileButtons.push(button);
+      return button;
+    }) : h("p", { class: "muted small" }, "No differences."));
+  const detail = h("section", { class: "card changes-repo" },
     h("h3", {}, repo.path === "." ? "workspace" : repo.path),
     h("div", { class: "meta" }, h("span", {}, `branch ${repo.branch}`), repo.base ? h("span", {}, `since ${repo.base.slice(0, 8)}`) : null,
       h("span", {}, `${repo.files.length} changed file${repo.files.length === 1 ? "" : "s"}`)),
     repo.commits.length ? h("details", { style: "margin-top:8px" }, h("summary", {}, pluralize(repo.commits.length, "new commit")),
       h("pre", { class: "small", style: "white-space:pre-wrap" }, repo.commits.join("\n"))) : null,
     drafts,
-    files.length ? files.map((f) => h("details", { class: "file", open: files.length <= 4 || (sel?.path === f.name) || undefined },
-      h("summary", {}, f.name),
-      h("div", { class: "diff" }, fileBody(f)))) : h("p", { class: "muted small" }, "No differences."),
+    files.length ? files.map((f) => {
+      const file = h("details", { class: "file", open: files.length <= 4 || (sel?.path === f.name) || (state.file?.repo === repo.path && state.file.path === f.name) || undefined },
+        h("summary", {}, f.name), h("div", { class: "diff" }, fileBody(f)));
+      fileViews.set(f.name, file);
+      return file;
+    }) : h("p", { class: "muted small" }, "No differences."),
     repo.truncated ? h("p", { class: "note" }, "Diff truncated.") : null);
+  return { navigation, detail };
 }
 
-function splitDiff(diff) {
-  const files = [];
-  let cur = null;
-  for (const line of (diff || "").split("\n")) {
-    if (line.startsWith("diff --git ")) {
-      const m = line.match(/ b\/(.+)$/);
-      cur = { name: m ? m[1] : line, lines: [] };
-      files.push(cur);
-    } else if (cur && !/^(index |new file mode|deleted file mode|--- |\+\+\+ )/.test(line)) {
-      cur.lines.push(line);
-    }
-  }
-  files.forEach((f) => { while (f.lines.length && !f.lines.at(-1)) f.lines.pop(); });
-  return files;
-}
 
 return { viewSession };
 }
