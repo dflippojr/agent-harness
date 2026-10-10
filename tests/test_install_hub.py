@@ -11,7 +11,14 @@ from types import SimpleNamespace
 import pytest
 
 from harness import install_hub as hub
-from tests.test_unix_installers import BASH, ROOT, run_installer
+from tests.installer_support import BASH, ROOT, run_installer
+
+DAEMON_AVAILABLE = hub.daemon_available
+
+
+@pytest.fixture(autouse=True)
+def no_real_daemon_probe(monkeypatch):
+    monkeypatch.setattr(hub, "daemon_available", lambda _: True)
 
 
 def options(tmp_path, **changes):
@@ -19,6 +26,9 @@ def options(tmp_path, **changes):
                   with_hub=True, no_hub=False, hub_method="pip", hub_package="stub-hub==1",
                   hub_image="example.invalid/stub-hub:1", hub_module="stub_hub", uv="uv", no_start=False)
     values.update(changes)
+    values["config_dir"].mkdir(exist_ok=True)
+    (values["config_dir"] / "harness.yaml").write_text(json.dumps({
+        "listen": {"port": values["port"]}, "data_dir": str(tmp_path / "data")}))
     return SimpleNamespace(**values)
 
 
@@ -235,13 +245,82 @@ def test_uninstall_release_failure_preserves_owned_install(tmp_path, monkeypatch
     assert directory.exists() and (tmp_path / "hub-install.json").exists()
 
 
-def test_uninstall_without_owned_hub_uses_config_port(tmp_path, monkeypatch):
+@pytest.mark.parametrize("record_port", [None, 8100])
+def test_uninstall_uses_current_config_port(tmp_path, monkeypatch, record_port):
     from harness import config
-    monkeypatch.setattr(config, "load", lambda _: SimpleNamespace(port=8199))
+    if record_port is not None:
+        (tmp_path / "hub-install.json").write_text(json.dumps({"id": "a" * 32, "method": "pip", "port": record_port}))
+        monkeypatch.setattr(hub.Service, "stop", lambda _: None)
+    monkeypatch.setattr(config, "resolve_port", lambda _: 8199)
     calls = []
     monkeypatch.setattr(hub, "hub_cli", lambda args, env: calls.append(env["HARNESS_URL"]) or {"claimed": False})
     assert hub.uninstall(options(tmp_path)) == 0
     assert calls == ["http://127.0.0.1:8199"]
+
+
+def test_add_hub_later_uses_preserved_config_port(tmp_path, monkeypatch):
+    args = options(tmp_path, port=8100)
+    (args.config_dir / "harness.yaml").write_text(json.dumps({"listen": {"port": 8199}}))
+    calls = []
+    monkeypatch.setattr(hub, "hub_cli", lambda cmd, env: calls.append(env["HARNESS_URL"]) or {"claimed": True})
+    assert hub.install(args) == 0
+    assert args.port == 8199 and calls == ["http://127.0.0.1:8199"]
+
+
+def test_stopped_daemon_without_owned_hub_can_be_uninstalled(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(hub, "daemon_available", lambda _: False)
+    monkeypatch.setattr(hub, "hub_cli", lambda *_: pytest.fail("must not query stopped daemon"))
+    assert hub.uninstall(options(tmp_path)) == 0
+    assert "Continuing daemon uninstall" in capsys.readouterr().out
+
+
+def test_stopped_daemon_with_owned_hub_requires_release(tmp_path, monkeypatch):
+    (tmp_path / "hub-install.json").write_text(json.dumps({"id": "a" * 32, "method": "pip", "port": 8199}))
+    monkeypatch.setattr(hub, "daemon_available", lambda _: False)
+    with pytest.raises(ValueError, match="Start the daemon"):
+        hub.uninstall(options(tmp_path))
+    assert (tmp_path / "hub-install.json").exists()
+
+
+def test_daemon_probe_uses_loopback_and_handles_stopped_server(monkeypatch):
+    seen = []
+    class Connection:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+    def connect(address, timeout):
+        seen.append((address, timeout))
+        return Connection()
+    monkeypatch.setattr(hub.socket, "create_connection", connect)
+    assert DAEMON_AVAILABLE(8199)
+    assert seen == [(("127.0.0.1", 8199), 2)]
+    def stopped(*args, **kwargs):
+        raise ConnectionRefusedError
+    monkeypatch.setattr(hub.socket, "create_connection", stopped)
+    assert not DAEMON_AVAILABLE(8199)
+
+
+def test_doctor_not_started_preserves_config_and_image_checks(monkeypatch, tmp_path):
+    from harness import config, doctor
+    cfg = SimpleNamespace(default_model="", modules=SimpleNamespace(local_model=False), profile="service", port=8199)
+    monkeypatch.setattr(config, "load", lambda _: cfg)
+    seen = []
+    for name in dir(doctor):
+        if name.startswith("check_"):
+            def check(*args, _name=name):
+                seen.append(_name)
+                if _name in ("check_daemon", "check_optional"):
+                    args[0].fail("Stopped service", "not running")
+            monkeypatch.setattr(doctor, name, check)
+    assert doctor.main(["--not-started"]) == 0
+    assert "check_data_dir" in seen and "check_docker" in seen
+    assert "check_daemon" not in seen and "check_optional" not in seen
+    assert doctor.main([]) == 1
+    monkeypatch.setattr(doctor, "check_docker", lambda report, cfg: report.fail("Docker image", "missing"))
+    assert doctor.main(["--not-started"]) == 1
+    assert "[[ $no_start -eq 1 ]] && doctor_args+=(--not-started)" in (ROOT / "install/install.sh").read_text()
+    assert "if ($NoTasks) { $doctorArgs += '--not-started' }" in (ROOT / "install/install.ps1").read_text()
 
 
 def test_partial_docker_install_is_removable(tmp_path, monkeypatch):

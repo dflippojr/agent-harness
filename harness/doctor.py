@@ -281,6 +281,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config-dir")
     ap.add_argument("--instance", default="", help="scheduled task name prefix used by install.ps1, e.g. Main")
     ap.add_argument("--existing-server", action="store_true", help="the install uses a model server it doesn't run")
+    ap.add_argument("--not-started", action="store_true",
+                    help="check an install whose startup was disabled; skip live daemon and optional service probes")
     args = ap.parse_args(argv)
     r = Report()
 
@@ -299,10 +301,14 @@ def main(argv: list[str] | None = None) -> int:
     check_claude_token(r, cfg)
     check_canary(r, cfg)
     check_docker(r, cfg)
-    check_daemon(r, cfg)
-    check_autostart(r, cfg, args)
+    if args.not_started:
+        r.warn("Live services", "not checked: startup was disabled; run doctor again after starting the daemon")
+    else:
+        check_daemon(r, cfg)
+        check_autostart(r, cfg, args)
     check_secret_scanner(r, cfg)
-    check_optional(r, cfg)
+    if not args.not_started:
+        check_optional(r, cfg)
 
     print(f"\n{r.failed} failed, {r.warned} warnings")
     return 1 if r.failed else 0

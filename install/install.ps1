@@ -352,6 +352,7 @@ Step 'Checking the install (python -m harness.doctor)'
 if ($DryRun) { Info '[dry run] skipped' } else {
     Push-Location $AppDir
     $doctorArgs = @('-m', 'harness.doctor', '--config-dir', $configDir, '--instance', $(if ($NoTasks) { '' } else { $Instance }))
+    if ($NoTasks) { $doctorArgs += '--not-started' }
     if ($ExistingServer -or -not $NeedsLocalModel) { $doctorArgs += '--existing-server' }
     try {
         & $python @doctorArgs

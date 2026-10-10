@@ -899,6 +899,12 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
     }
 
 
+def resolve_port(config_dir: Path | None = None) -> int:
+    """Read this daemon's port without validating unrelated runtime configuration."""
+    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+    return int((_read_raw_config(config_dir).get("listen") or {}).get("port", 8100))
+
+
 def resolve_data_dir(config_dir: Path | None = None) -> Path:
     """The data_dir `load` would use, without building the whole Config (the local CLI reads its token from here)."""
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")

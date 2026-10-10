@@ -12,6 +12,7 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -209,6 +210,8 @@ def install(args) -> int:
         print("Hub setup deferred: startup services are disabled. Start the daemon and rerun without --no-start / -NoTasks.")
         print(LATER)
         return 0
+    from .config import resolve_port
+    args.port = resolve_port(args.config_dir)
     env = cli_env(args.config_dir, args.port)
     if hub_cli(["hub", "status"], env)["claimed"]:
         print("A Hub is already claimed. Release it explicitly with harness hub release --confirm.")
@@ -228,34 +231,52 @@ def install(args) -> int:
     return 0
 
 
+def remove_owned_hub(record, install_dir):
+    service = Service(record["id"])
+    if record["method"] == "docker":
+        containers = command(["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True).stdout
+        if service.name in containers.splitlines():
+            command(["docker", "rm", "-f", service.name])
+    else:
+        service.stop()
+    directory = install_dir / ("hub-" + record["id"])
+    if directory.is_symlink():
+        raise ValueError("refusing to remove a linked Hub directory")
+    if directory.exists():
+        shutil.rmtree(directory)
+    (install_dir / "hub-install.json").unlink()
+    print("Removed the Hub installed by this daemon installer.")
+
+
+def daemon_available(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
 def uninstall(args) -> int:
     state = args.install_dir / "hub-install.json"
     record = json.loads(state.read_text(encoding="utf-8")) if state.exists() else None
-    from .config import load
-    port = record["port"] if record else load(args.config_dir).port
+    from .config import resolve_port
+    port = resolve_port(args.config_dir)
     if record:
-        service = Service(record["id"])
+        Service(record["id"])
         if record["method"] not in ("pip", "docker"):
             raise ValueError("invalid Hub install record")
+    if not daemon_available(port):
+        if record:
+            raise ValueError("Start the daemon to release the installer-owned Hub before uninstalling")
+        print("Daemon is stopped; no installer-owned Hub to remove. Continuing daemon uninstall.")
+        return 0
     env = cli_env(args.config_dir, port)
     status = hub_cli(["hub", "status"], env)
     if status["claimed"]:
         print("harness hub release --confirm (before removing the daemon)")
         hub_cli(["hub", "release", "--confirm"], env)
     if record:
-        if record["method"] == "docker":
-            containers = command(["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True).stdout
-            if service.name in containers.splitlines():
-                command(["docker", "rm", "-f", service.name])
-        elif record["method"] == "pip":
-            service.stop()
-        directory = args.install_dir / ("hub-" + record["id"])
-        if directory.is_symlink():
-            raise ValueError("refusing to remove a linked Hub directory")
-        if directory.exists():
-            shutil.rmtree(directory)
-        state.unlink()
-        print("Removed the Hub installed by this daemon installer.")
+        remove_owned_hub(record, args.install_dir)
     return 0
 
 

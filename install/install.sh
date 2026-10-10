@@ -447,6 +447,7 @@ else
         fi
     fi
     doctor_args=(-m harness.doctor --config-dir "$config_dir")
+    [[ $no_start -eq 1 ]] && doctor_args+=(--not-started)
     [[ $no_start -eq 0 ]] && doctor_args+=(--instance "$instance")
     [[ -n $existing_server || $needs_local -eq 0 ]] && doctor_args+=(--existing-server)
     (cd "$app_dir" && "$python" "${doctor_args[@]}")
