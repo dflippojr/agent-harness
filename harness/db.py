@@ -1417,38 +1417,41 @@ class Database:
     # inference endpoint keys and request log
     @_writes
     def create_api_key(self, name: str, scopes: str = "inference", kind: str = "device",
-                       origins: list[str] | None = None) -> tuple[dict, str]:
+                       origins: list[str] | None = None, catalog_app_id: str = "") -> tuple[dict, str]:
         import hashlib
         prefix = {"app": "ha-", "owner": "ho-"}.get(kind, "hk-")
         key = prefix + secrets.token_urlsafe(32)
         row = {"id": "k-" + secrets.token_hex(4), "name": name, "prefix": key[:10], "created_at": time.time(),
-               "scopes": scopes, "kind": kind, "origins": origins or []}
+               "scopes": scopes, "kind": kind, "origins": origins or [], "catalog_app_id": catalog_app_id}
         with self.lock:
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins) "
-                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
+                              "catalog_app_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                               (row["id"], name, row["prefix"], hashlib.sha256(key.encode()).hexdigest(),
-                               row["created_at"], scopes, kind, json.dumps(row["origins"])))
+                               row["created_at"], scopes, kind, json.dumps(row["origins"]), catalog_app_id))
         return row, key
 
     # browser pairing and EventSource tickets
     @_writes
-    def create_pairing_code(self, name: str, origin: str, scopes: str, ttl_seconds: int) -> tuple[dict, str]:
+    def create_pairing_code(self, name: str, origin: str, scopes: str, ttl_seconds: int,
+                            catalog_app_id: str = "") -> tuple[dict, str]:
         import hashlib
         now = time.time()
         code = "hp-" + secrets.token_urlsafe(18)
         row = {"id": "p-" + secrets.token_hex(4), "name": name, "origin": origin, "scopes": scopes,
-               "created_at": now, "expires_at": now + ttl_seconds, "used_at": None, "key_id": ""}
+               "catalog_app_id": catalog_app_id, "created_at": now, "expires_at": now + ttl_seconds,
+               "used_at": None, "key_id": ""}
         with self.lock:
-            self.conn.execute("INSERT INTO pairing_codes (id, hash, name, origin, scopes, created_at, expires_at) "
-                              "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                              (row["id"], hashlib.sha256(code.encode()).hexdigest(), name, origin, scopes, now,
-                               row["expires_at"]))
+            self.conn.execute("INSERT INTO pairing_codes (id, hash, name, origin, scopes, catalog_app_id, created_at, "
+                              "expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                              (row["id"], hashlib.sha256(code.encode()).hexdigest(), name, origin, scopes,
+                               catalog_app_id, now, row["expires_at"]))
         return row, code
 
     @_reads
     def list_pairing_codes(self) -> list[dict]:
         with self.lock:
-            rows = self.conn.execute("SELECT id, name, origin, scopes, created_at, expires_at, used_at, key_id "
+            rows = self.conn.execute("SELECT id, name, origin, scopes, COALESCE(catalog_app_id, '') AS catalog_app_id, "
+                                     "created_at, expires_at, used_at, key_id "
                                      "FROM pairing_codes ORDER BY created_at DESC LIMIT 100").fetchall()
         return [dict(r) for r in rows]
 
@@ -1488,11 +1491,12 @@ class Database:
                 return None, "", "pairing code is not approved for this origin"
             secret = "ha-" + secrets.token_urlsafe(32)
             key = {"id": "k-" + secrets.token_hex(4), "name": pairing["name"], "prefix": secret[:10],
-                   "created_at": now, "scopes": pairing["scopes"], "kind": "app", "origins": [origin]}
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins) "
-                              "VALUES (?, ?, ?, ?, ?, ?, 'app', ?)",
+                   "created_at": now, "scopes": pairing["scopes"], "kind": "app", "origins": [origin],
+                   "catalog_app_id": pairing["catalog_app_id"] or ""}
+            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
+                              "catalog_app_id) VALUES (?, ?, ?, ?, ?, ?, 'app', ?, ?)",
                               (key["id"], key["name"], key["prefix"], hashlib.sha256(secret.encode()).hexdigest(),
-                               now, key["scopes"], json.dumps(key["origins"])))
+                               now, key["scopes"], json.dumps(key["origins"]), key["catalog_app_id"]))
             self.conn.execute("UPDATE pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
                               (now, key["id"], pairing["id"]))
         return key, secret, ""
@@ -1656,7 +1660,8 @@ class Database:
         not listed (`get_api_key(WEB_APP_ID)` reads it)."""
         with self.lock:
             rows = self.conn.execute(
-                "SELECT k.id, k.name, k.prefix, k.kind, k.scopes, k.origins, k.created_at, k.last_used_at, k.revoked_at, "
+                "SELECT k.id, k.name, k.prefix, k.kind, k.scopes, k.origins, COALESCE(k.catalog_app_id, '') AS catalog_app_id, "
+                "k.created_at, k.last_used_at, k.revoked_at, "
                 "k.retention_days, k.erase_after, k.erased_at, "
                 "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
                 "FROM api_keys k WHERE k.kind != 'web' ORDER BY k.created_at").fetchall()

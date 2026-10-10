@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from starlette.datastructures import MutableHeaders
 
 from . import operation_audit, namespace_audit, access as access_mod
+from . import catalog_ids
 from . import compat
 from . import credential_audit
 from . import config as config_mod
@@ -1134,6 +1135,13 @@ def _key_origins(body: dict, kind: str) -> list:
         raise HarnessError(400, str(e))
 
 
+def _key_catalog_app_id(body: dict) -> str:
+    try:
+        return catalog_ids.normalize(body.get("catalog_app_id"))
+    except ValueError as e:
+        raise HarnessError(400, str(e))
+
+
 @api_router.get("/keys")
 async def list_keys(request: Request):
     return mgr(request).db.list_api_keys()
@@ -1148,15 +1156,17 @@ async def create_key(request: Request):
     try:
         name, scopes, kind = parse_key_spec(body)
         origins = _key_origins(body, kind)
+        catalog_app_id = _key_catalog_app_id(body)
     except HarnessError:
         await m.db.main.awrite(credential_audit.record, m.db, ctx, "key.create", "", "denied", "api_key",
                                {"reason": "invalid_request"})
         raise
 
     def commit():
-        row, key = m.db.main.create_api_key(name, scopes, kind, origins)
+        row, key = m.db.main.create_api_key(name, scopes, kind, origins, catalog_app_id)
         credential_audit.record(m.db, ctx, "key.create", row["id"], "ok", "api_key",
-                                {"key_id": row["id"], "kind": kind, "scopes": scopes.split()})
+                                {"key_id": row["id"], "kind": kind, "scopes": scopes.split(),
+                                 "catalog_app_id": catalog_app_id})
         return row, key
     row, key = await m.db.main.awrite(commit)
     return {**row, "key": key}

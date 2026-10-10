@@ -10,6 +10,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from . import catalog_ids
 from .principal import OWNER_USER_ID
 
 SOURCES = frozenset({"admin_api", "legacy_api", "app_api", "notification_link", "job", "maintenance", "agent",
@@ -51,11 +52,11 @@ _NAME = re.compile(r"[a-z][a-z0-9_:.-]{0,39}")
 _BACKEND = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 _CRED_COMMON = frozenset({*_CRED_ID_KEYS, "reason"})
 METADATA_ALLOWLIST.update({
-    "key.create": _CRED_COMMON | {"kind", "scopes"},
+    "key.create": _CRED_COMMON | {"kind", "scopes", "catalog_app_id"},
     "key.revoke": _CRED_COMMON | {"kind"},
-    "pairing.create": _CRED_COMMON | {"scopes"},
+    "pairing.create": _CRED_COMMON | {"scopes", "catalog_app_id"},
     "pairing.revoke": _CRED_COMMON,
-    "pairing.redeem": _CRED_COMMON | {"kind", "scopes"},
+    "pairing.redeem": _CRED_COMMON | {"kind", "scopes", "catalog_app_id"},
     "runner_pairing.create": _CRED_COMMON,
     "runner_pairing.revoke": _CRED_COMMON,
     "runner_pairing.redeem": _CRED_COMMON | {"kind"},
@@ -130,6 +131,9 @@ def _clean_credential(key: str, value, out: dict) -> bool:
             out[key] = value
     elif key == "backend":
         if isinstance(value, str) and _BACKEND.fullmatch(value):
+            out[key] = value
+    elif key == "catalog_app_id":
+        if catalog_ids.valid(value):
             out[key] = value
     elif key in _CRED_BOOL_KEYS:
         if isinstance(value, bool):

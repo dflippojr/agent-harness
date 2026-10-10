@@ -35,13 +35,13 @@ from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
 from .policy import TOOLS_ONLY
-from . import audit_context, compat, credential_audit, namespace_audit
+from . import audit_context, catalog_ids, compat, credential_audit, namespace_audit
 
 NO_SUCH_SESSION = "no session matches that id"
 
 log = logging.getLogger("harness.apps")
 
-API_VERSION = "1.21"
+API_VERSION = "1.22"
 SESSIONS_ALL = "sessions:all"
 MODELS_WARM = "models:warm"
 SCOPES = {
@@ -204,6 +204,8 @@ class PairingCodeRequest(BaseModel):
     origin: str = Field(max_length=500)
     scopes: list[str] = Field(default_factory=lambda: ["sessions"])
     ttl_seconds: int = Field(default=PAIRING_TTL_SECONDS, ge=60, le=PAIRING_TTL_SECONDS)
+    catalog_app_id: str = Field(default="",
+                                description="Optional catalog app id (a label, never part of a token)")
 
 
 class PairRequest(BaseModel):
@@ -313,9 +315,21 @@ class AcceptedResponse(BaseModel):
     accepted: bool
 
 
+class PairedAppResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str
+    name: str
+    prefix: str
+    created_at: float
+    scopes: str
+    kind: str
+    origins: list[str]
+    catalog_app_id: str = ""
+
+
 class PairResponse(BaseModel):
     token: str
-    app: dict
+    app: PairedAppResponse
     api_version: str
 
 
@@ -571,12 +585,19 @@ async def create_pairing_code(body: PairingCodeRequest, request: Request):
         await m.db.main.awrite(credential_audit.record, m.db, ctx, "pairing.create", "", "denied", "pairing",
                                {"reason": "invalid_request"})
         raise HarnessError(400, str(e))
+    try:
+        catalog_app_id = catalog_ids.normalize(body.catalog_app_id)
+    except ValueError as e:
+        await m.db.main.awrite(credential_audit.record, m.db, ctx, "pairing.create", "", "denied", "pairing",
+                               {"reason": "invalid_request"})
+        raise HarnessError(400, str(e))
     scopes = " ".join(dict.fromkeys(body.scopes))
 
     def commit():
-        row, code = m.db.main.create_pairing_code(name, origin, scopes, body.ttl_seconds)
+        row, code = m.db.main.create_pairing_code(name, origin, scopes, body.ttl_seconds, catalog_app_id)
         credential_audit.record(m.db, ctx, "pairing.create", row["id"], "ok", "pairing",
-                                {"pairing_id": row["id"], "scopes": scopes.split()})
+                                {"pairing_id": row["id"], "scopes": scopes.split(),
+                                 "catalog_app_id": catalog_app_id})
         return row, code
     row, code = await m.db.main.awrite(commit)
     return JSONResponse({**row, "code": code}, status_code=201,
@@ -619,7 +640,7 @@ async def pair_browser(body: PairRequest, request: Request):
             credential_audit.record(m.db, credential_audit.device_context(key["id"], key["kind"]),
                                     "pairing.redeem", key["id"], "ok", "api_key",
                                     {"key_id": key["id"], "pairing_id": pid, "kind": key["kind"],
-                                     "scopes": key["scopes"].split()})
+                                     "scopes": key["scopes"].split(), "catalog_app_id": key["catalog_app_id"]})
         return key, secret, error
     key, secret, error = await m.db.main.awrite(commit)
     if key is None:

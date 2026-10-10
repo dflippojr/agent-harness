@@ -208,11 +208,11 @@ Page: `pages/daemon-settings.mjs`.
 | Web action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
 | Apps and keys | GET | `/keys` | `harness keys list` |
-| Create a key or Web connection token | POST | `/keys` | `harness keys create <name>` |
+| Create a key or Web connection token, optionally with a catalog app id | POST | `/keys` | `harness keys create <name> --catalog-app-id <id>` |
 | Revoke a key | DELETE | `/keys/{kid}` | `harness keys revoke <kid>` |
 | Restore a revoked App before erasure | POST | `/apps/{app_id}/restore` | `harness apps restore <app_id>` |
 | App pairing codes | GET | `/pairing-codes` | `harness pairing-codes list` |
-| Make an App pairing code | POST | `/pairing-codes` | `harness pairing-codes create <name> <origin>` |
+| Make an App pairing code, optionally with a catalog app id | POST | `/pairing-codes` | `harness pairing-codes create <name> <origin> --catalog-app-id <id>` |
 | Revoke an App pairing code | DELETE | `/pairing-codes/{pid}` | `harness pairing-codes revoke <pid>` |
 | Mac pairing codes | GET | `/runner-pairing-codes` | `harness runner-pairing-codes list` |
 | Make a Mac pairing code | POST | `/runner-pairing-codes` | `harness runner-pairing-codes create` |
