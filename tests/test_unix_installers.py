@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 import subprocess
 
 import pytest
@@ -145,3 +146,22 @@ def test_unix_hub_dry_run(tmp_path, args):
 def test_unix_conflicting_flags(tmp_path):
     result = run_installer(tmp_path, "Linux", "x86_64", "--with-hub", "--no-hub")
     assert result.returncode != 0 and "mutually exclusive" in result.stderr
+
+
+
+def test_relative_uninstall_from_outside_checkout_keeps_daemon_on_hub_failure(tmp_path):
+    if not BASH:
+        pytest.skip("bash is not installed")
+    python = tmp_path / "runtime/venv/bin/python"
+    python.parent.mkdir(parents=True)
+    args_file = tmp_path / "hub-uninstall-args"
+    python.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > ' + shlex.quote(args_file.as_posix()) + '\nexit 23\n')
+    python.chmod(0o755)
+    result = subprocess.run([BASH, str(ROOT / "install/uninstall.sh"), "--install-dir", "./runtime"],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 23, result.stderr
+    # The stub runs in the checkout; arguments must still name the caller's install.
+    args = args_file.read_text().splitlines()
+    directory = args[args.index("--install-dir") + 1]
+    assert directory.startswith("/") and directory.endswith("/runtime")
+    assert args[args.index("--config-dir") + 1] == directory + "/config"

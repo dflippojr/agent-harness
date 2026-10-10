@@ -524,6 +524,30 @@ def test_uninstall_dry_run(tmp_path):
         assert result.returncode == 0 and "before removing daemon" in result.stdout
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows installer")
+def test_windows_relative_uninstall_resolves_before_checkout_change(tmp_path):
+    python = tmp_path / "runtime/venv/Scripts/python.exe"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    capture = tmp_path / "uninstall-args.json"
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "function Invoke-FakePython { "
+        f"ConvertTo-Json -InputObject @($args) | Set-Content -LiteralPath {hub.ps_quote(str(capture))}; "
+        "$global:LASTEXITCODE = 23 }; "
+        f"Set-Alias -Name {hub.ps_quote(str(python))} -Value Invoke-FakePython; "
+        "function Get-ScheduledTask { throw 'must preserve daemon tasks' }; "
+        "function Get-CimInstance { throw 'must preserve daemon processes' }; "
+        f"& {hub.ps_quote(str(ROOT / 'install/uninstall.ps1'))} -InstallDir './runtime'"
+    )
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0 and "Hub release/removal failed" in result.stderr
+    args = json.loads(capture.read_text(encoding="utf-8-sig"))
+    assert Path(args[args.index("--install-dir") + 1]) == tmp_path / "runtime"
+    assert Path(args[args.index("--config-dir") + 1]) == tmp_path / "runtime/config"
+
+
 def test_main_errors_and_decline(tmp_path, monkeypatch, capsys):
     base = ["install", "--install-dir", str(tmp_path), "--config-dir", str(tmp_path / "config")]
     assert hub.main([*base, "--no-hub"]) == 0

@@ -9,6 +9,8 @@ param(
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($InstallDir)) { throw 'Empty install directory' }
+$InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
 $settingsPath = Join-Path $InstallDir 'settings.json'
 $s = if (Test-Path $settingsPath) { Get-Content $settingsPath -Raw | ConvertFrom-Json } else { $null }
 

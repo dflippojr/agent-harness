@@ -26,6 +26,12 @@ if [[ $dry_run -eq 1 ]]; then
     echo "[dry run] remove daemon services; remove files: $remove_files"
     exit 0
 fi
+[[ -n $install_dir ]] || { echo "empty install directory" >&2; exit 64; }
+if [[ -d $install_dir ]]; then
+    install_dir=$(CDPATH= cd -- "$install_dir" && pwd -P)
+elif [[ $install_dir != /* ]]; then
+    install_dir="$PWD/$install_dir"
+fi
 python="$install_dir/venv/bin/python"
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 app_dir=$(dirname "$script_dir")
