@@ -795,8 +795,8 @@ function reviewCard(s) {
 
 async function viewChanges(session) {
   const sid = session.id;
-  const box = h("div", {}, h("p", { class: "note" }, "Loading changes…"));
   const review = reviewCard(session);
+  const box = h("div", {}, review, h("p", { class: "note" }, "Loading changes…"));
   append($app, box);
   const message = (text) => fill(box, review, h("p", { class: "empty" }, text));
   const data = await api(`/sessions/${sid}/changes`);
@@ -914,6 +914,7 @@ function repoChanges(sid, repo, state, canComment, render) {
   const sel = state.sel?.repo === repo.path ? state.sel : null;
 
   const pick = (path, side, num) => {
+    state.file = { repo: repo.path, path };
     if (sel?.path === path && sel.side === side) {
       const lines = sideLines(repo.parsed, path, side);
       const start = Math.min(sel.anchor, num), end = Math.max(sel.anchor, num);
