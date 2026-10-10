@@ -2052,9 +2052,9 @@ class Manager:
         if s.get("status") in ("running", *WAITING) or sid in self.runner.admitted:
             return True  # it counts against the cap already, and coming back adds nothing (even over a lowered cap)
         if account is not None:
-            occupied, cap = self.db.count_sessions(user_id, "running", *WAITING), int(account["max_running"])
+            occupied, cap = self.db.count_stored_sessions(user_id, "running", *WAITING), int(account["max_running"])
         elif capped_app(self.db, s.get("app_id") or ""):
-            occupied = self.db.count_app_sessions(s["app_id"], "running", *WAITING)
+            occupied = self.db.count_stored_app_sessions(s["app_id"], "running", *WAITING)
             cap = self.app_limits(s["app_id"])["max_running"]
         else:
             return True
@@ -2099,7 +2099,7 @@ class Manager:
 
     def _enforce_member_caps(self, account: dict) -> None:
         user_id = account["user_id"]
-        queued = self.db.count_sessions(user_id, "queued", *WAITING)
+        queued = self.db.count_stored_sessions(user_id, "queued", *WAITING)
         max_q = int(account["max_queued"])
         if queued >= max_q:
             raise HarnessError(429, f"this account already has {queued} queued or waiting sessions (limit {max_q})")
@@ -2120,8 +2120,7 @@ class Manager:
         (#524). Sessions parked on an approval or a reply count as queued."""
         if not capped_app(self.db, app_id):
             return
-        # From the App's own store, not the index of every store, which is updated only after each commit.
-        queued = self.db.for_app(app_id).count_app_sessions(app_id, "queued", *WAITING)
+        queued = self.db.count_stored_app_sessions(app_id, "queued", *WAITING)
         max_q = self.app_limits(app_id)["max_queued"]
         if queued >= max_q:
             raise HarnessError(429, f"this App already has {queued} queued or waiting sessions (limit {max_q})",

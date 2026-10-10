@@ -169,14 +169,6 @@ def _hidden(key, label, help, category, yaml_path, modules=()):
     )
 
 
-def _get_max_turns(cfg: Config):
-    return cfg.max_turns
-
-
-def _set_max_turns(cfg: Config, value):
-    cfg.max_turns = int(value)
-
-
 def _cfg_attr(name: str, cast):
     """Getter and setter for a top-level Config field."""
     def getter(cfg: Config):
@@ -185,14 +177,6 @@ def _cfg_attr(name: str, cast):
     def setter(cfg: Config, value):
         setattr(cfg, name, cast(value))
     return getter, setter
-
-
-def _get_max_tokens(cfg: Config):
-    return cfg.max_completion_tokens
-
-
-def _set_max_tokens(cfg: Config, value):
-    cfg.max_completion_tokens = int(value)
 
 
 def _get_elide(cfg: Config):
@@ -470,10 +454,10 @@ def _app_set(key: str):
 STATIC_ADMIN: list[SettingSpec] = [
     _int("sessions.max_turns", "Maximum turns",
          "Per-run turn cap for new sessions. Changing this does not raise an active run's budget.",
-         "Sessions", 80, _get_max_turns, _set_max_turns, 1, 500, ("budgets", "max_turns")),
+         "Sessions", 80, *_cfg_attr("max_turns", int), 1, 500, ("budgets", "max_turns")),
     _int("sessions.max_completion_tokens", "Maximum completion tokens",
          "Per-run completion-token cap for new sessions. Changing this does not raise an active run's budget.",
-         "Sessions", 200000, _get_max_tokens, _set_max_tokens, 1000, 2_000_000,
+         "Sessions", 200000, *_cfg_attr("max_completion_tokens", int), 1000, 2_000_000,
          ("budgets", "max_completion_tokens")),
     _float("sessions.approval_timeout_seconds", "Approval deadline (seconds)",
            "Deny a pending approval nobody decided after this long and end its run. 0 never expires one.",

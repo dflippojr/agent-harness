@@ -220,6 +220,37 @@ def test_a_session_back_from_an_offline_mac_keeps_its_place_under_the_cap(tmp_pa
         await asyncio.gather(other, return_exceptions=True)
     asyncio.run(body())
 
+def test_a_session_whose_running_status_committed_counts_before_the_index_catches_up(tmp_path):
+    """The App store has committed a session's `running`, but the index of every store only takes it once the
+    commit's callbacks run: the cap must count it already."""
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+    assert m.db.set_app_limits(app_id, {"max_running": 1})
+    _insert(m, "runsnow001", "queued", app_id=app_id)
+    _insert(m, "queued0005", "queued", app_id=app_id)
+    with m.db._using(app_id, write=True) as store:  # the row, without the index's callback
+        store.update_session("runsnow001", status="running")
+    assert not m._scheduler_eligible("queued0005")
+
+
+def test_a_mac_session_recovered_after_a_restart_keeps_its_place_under_a_lowered_cap(tmp_path):
+    """It was running when the daemon stopped and its Mac is offline at the restart: once the Mac is back it takes
+    the idle GPU, though another of its App's sessions is parked and the cap is now one."""
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "macsess002", "running", app_id=app_id)
+        m.db.update_session("macsess002", target="macbook")
+        _insert(m, "parked0005", "waiting_approval", app_id=app_id)
+        assert m.db.set_app_limits(app_id, {"max_running": 1})
+        mac = m.runner.hub = OfflineMac()
+        waiting = asyncio.create_task(m.runner._wait_for_target("macsess002"))  # the recovered run's setup
+        await _until(lambda: m.db.get_session("macsess002")["status"] == "waiting_target")
+        mac.back()
+        await asyncio.wait_for(waiting, 5)
+        await asyncio.wait_for(m.runner._acquire("macsess002"), 5)
+        assert m.scheduler.holder == "macsess002" and m.runner.admitted == {}
+    asyncio.run(body())
 
 # members --------------------------------------------------------------------------------------------------------------
 def test_a_member_at_max_queued_with_parked_sessions_is_refused(tmp_path):
@@ -700,6 +731,38 @@ def test_a_hosted_sessions_wait_on_an_app_tool_reply_stops_its_clock(tmp_path):
         assert await runner._dispatch_mcp(m.db.get_session("hosted0001"), "c1", "lookup", {}) == "answer"
         assert seen == {"status": "waiting_app", "paused": True}
         assert m.db.get_session("hosted0001")["status"] == "running"
+    asyncio.run(body())
+
+
+def test_a_hosted_session_resumes_only_when_its_last_app_call_is_answered(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+        _insert(m, "hosted0003", "running", app_id=app_id)
+        m.db.update_session("hosted0003", backend="claude")
+        replies = {"c1": asyncio.Event(), "c2": asyncio.Event()}
+        parked = {"n": 0}
+
+        class TwoCalls:
+            def names(self, s):
+                return {"lookup"}
+
+            async def call(self, s, call_id, name, args, on_wait=None, on_resume=None):
+                on_wait()
+                parked["n"] += 1
+                await replies[call_id].wait()
+                await on_resume()
+                return call_id
+        m.runner.app_tools = TwoCalls()
+        s = m.db.get_session("hosted0003")
+        calls = [asyncio.create_task(m.runner._dispatch_mcp(s, cid, "lookup", {})) for cid in ("c1", "c2")]
+        await _until(lambda: parked["n"] == 2)
+        replies["c1"].set()
+        await calls[0]
+        assert m.db.get_session("hosted0003")["status"] == "waiting_app"  # c2 still waits on the App
+        replies["c2"].set()
+        await calls[1]
+        assert m.db.get_session("hosted0003")["status"] == "running"
     asyncio.run(body())
 
 

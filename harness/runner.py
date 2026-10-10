@@ -253,6 +253,7 @@ class Runner:
         self.admitted: dict[str, str] = {}
         self._clocks: dict[str, RunClock] = {}         # live run -> its time spent running
         self._deadline_hit: dict[str, str] = {}        # runs their deadline watch cancelled -> the stop reason
+        self._app_waits: dict[str, int] = {}           # hosted session -> its MCP calls parked on the App's reply
         self._locks = credential_sources.KeyedLocks()
         self.cli_factory = ClaudeSession
         self.codex_factory = CodexSession
@@ -497,7 +498,14 @@ class Runner:
         return output
 
     async def _resume_from_app(self, sid: str) -> None:
-        """A hosted session the App answered runs again, unless it ended meanwhile (a cancel while it waited)."""
+        """A hosted session the App answered runs again once no other of its calls waits on the App, unless it ended
+        meanwhile (a cancel while it waited)."""
+        waits = self._app_waits.get(sid, 1) - 1
+        if waits > 0:
+            self._app_waits[sid] = waits
+            return
+        self._app_waits.pop(sid, None)
+
         def resume() -> None:
             if self.db.get_session(sid)["status"] == "waiting_app":
                 self._status_writer(sid, "running", {})()
@@ -508,9 +516,12 @@ class Runner:
             return await self._split_call(s, name, args)
         if self.app_tools is not None and name in self.app_tools.names(s):
             sid = s["id"]
+
+            def wait() -> None:
+                self._app_waits[sid] = self._app_waits.get(sid, 0) + 1
+                self.set_status(sid, "waiting_app")
             # Parked on the App's reply: its time does not count toward the run's budget (#524).
-            return await self.app_tools.call(s, call_id, name, args,
-                                             on_wait=lambda: self.set_status(sid, "waiting_app"),
+            return await self.app_tools.call(s, call_id, name, args, on_wait=wait,
                                              on_resume=lambda: self._resume_from_app(sid))
         kit = next(k for k in self.daemon_toolkits(s) if name in k.tool_names)
         gate = self._module_gate(kit)
@@ -801,9 +812,9 @@ class Runner:
         await self.hub.wait_online(target)
         status = "waiting_approval" if previous == "waiting_approval" else "queued"
         key = admission_key(self.db, s)
-        if held and key:
-            # It held its place under its member's or App's running cap: keep it as `queued` until _acquire gives it
-            # the GPU back (#524).
+        if key and status == "queued" and previous in ("running", *WAITING):
+            # It held its place under its member's or App's running cap (running, or parked since before a restart):
+            # it keeps it as `queued` until _acquire gives it the GPU back (#524).
             self.admitted[sid] = key
 
         def online() -> None:
@@ -954,6 +965,7 @@ class Runner:
             self.user_cancelled.discard(sid)
             self._unended.discard(sid)
             self._clocks.pop(sid, None)
+            self._app_waits.pop(sid, None)
 
     async def _watch_deadlines(self, sid: str, run: asyncio.Task) -> None:
         """Stop the run at a deadline wherever it is (#524), like a cancel but ending `done`:

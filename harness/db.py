@@ -1001,6 +1001,10 @@ class Database:
             ).fetchone()
         return int(row["n"] if row else 0)
 
+    # A lone store has no index: its rows are what SessionStores' stored counts read (#524).
+    count_stored_sessions = count_sessions
+    count_stored_app_sessions = count_app_sessions
+
     # events
     @_writes
     def insert_event(self, sid: str, type_: str, data: dict) -> dict:
