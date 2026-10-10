@@ -697,6 +697,8 @@ function pendingApprovalBar(session, isActive) {
     }, 300);
   };
   const stop = onDaemonChange?.(refresh);
+  // An approval requested while the page's first fetch was in flight raised no event this listener heard: catch up once.
+  if (stop) refresh();
   onLeave(() => { clearTimeout(timer); stop?.(); bar.remove(); });
   return bar;
 }

@@ -122,7 +122,15 @@ assert.equal(media.listeners.size, 0, "the width listener goes with the page");
 
 // ---------- the approval bar on Changes and Info ----------
 for (const tab of ["changes", "info"]) {
-  await page.viewSession("s1", tab);
+  // The first fetch answered "running", but an approval arrived before the stream listener was attached.
+  const before = session;
+  session = { ...session, status: "running", pending_approvals: undefined };
+  const queued = timers.length;
+  const viewing = page.viewSession("s1", tab);
+  session = before;
+  await viewing;
+  assert.equal(timers.length, queued + 1, `${tab}: the bar catches up once after subscribing`);
+  await timers.pop()();
   const pending = doc.body.childNodes.filter((n) => n instanceof El && n.className === "approval-bar");
   assert.equal(pending.length, 1, `${tab}: one approval bar`);
   const abar = pending[0];
