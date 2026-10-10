@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKEN
                      AppToolsPolicy, ChatPolicy, Decision, Policy, mcp_harness_tool)
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .runner_contract import RemoteWorkspace, RunnerError, NoRunnerHub
+from .disk_watch import AccountLimit, DiskLimits
 from .sandbox import Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
@@ -225,8 +227,29 @@ class Runner:
                 sid, Path(s["workspace"]), sb_cfg, project=project.name if project else "",
                 user_id=session_user_id(s),
                 setup=project.setup if project else "", known=self.db.has_tool_result(sid),
-                on_event=lambda type_, data: self.bus.emit(sid, type_, data))
+                on_event=lambda type_, data: self._sandbox_event(sid, type_, data),
+                disk_limits=lambda: self._disk_limits(sid))
         return self._sandboxes[s["id"]]
+
+    def _sandbox_event(self, sid: str, type_: str, data: dict) -> None:
+        if type_ == "sandbox_disk_limit":    # internal: the model sees the tool error, the UI the run's stop
+            self._quota_checked.pop(sid, None)  # the quota check after this call must not be throttled
+        self.bus.emit(sid, type_, data)
+
+    async def _disk_limits(self, sid: str):
+        """The disk watchdog's limits for one sandbox command (#525): the workspace quota, a member's account quota,
+        and the data drive's free-space floor. The account is re-measured while the command runs, so commands in
+        several of a member's sessions at once share what is left rather than each getting all of it."""
+        s = self.db.get_session(sid)
+        user_id = session_user_id(s)
+        limit = None
+        if user_id != OWNER_USER_ID:
+            from .storage import account_usage_bytes
+            account = await asyncio.to_thread(self.db.account_by_id, user_id)
+            limit = AccountLimit(int(account["disk_quota_bytes"]) if account is not None else 0,
+                                 functools.partial(account_usage_bytes, self.cfg, user_id))
+        return DiskLimits(quota_bytes=self.quota_mb(s) * 2**20,
+                          min_free_bytes=int(self.cfg.cleanup.min_free_gb * 2**30), account=limit)
 
     async def _park_sandbox(self, sid: str) -> None:
         """The session is about to wait on the owner or the GPU guard: stop its idle container (#428). Best effort;
