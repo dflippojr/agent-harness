@@ -6,8 +6,19 @@ import { md } from "../lib/markdown.mjs";
 import { showSecretOnce as showSecret } from "../lib/secret.mjs";
 import * as sheets from "../lib/sheet.mjs";
 import { protocolMismatch } from "../lib/compat.mjs";
+import { SPLITS } from "../lib/layout.mjs";
 import { backendsValue, smartApprovalsValue, skillsValue, memoryValue, notificationsValue, resourcesValue, serverSettingsValue,
   accountsValue, remoteControlValue, appsValue, endpointValue, versionStatus, serverVersionText } from "../lib/settings-text.mjs";
+
+// A mounted desktop menu follows successful writes from any of its detail pages.
+const settingsRefreshes = new Set();
+export function refreshingSettingsApi(api) {
+  return async (path, options) => {
+    const result = await api(path, options);
+    if (options?.method && options.method !== "GET") settingsRefreshes.forEach((refresh) => refresh());
+    return result;
+  };
+}
 
 export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, h, fill, append, api, getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route,
   daemonSettingsCard, build = {}, reloadAndUpdate = async () => false, onConnState = () => () => {}, browser, confirmSheet = sheets.confirmSheet,
@@ -15,6 +26,7 @@ export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, 
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { document, window, localStorage, location, navigator, history, getComputedStyle, requestAnimationFrame, open,
   setTimeout, clearTimeout, fetch } = browser;
+api = refreshingSettingsApi(api);
 const escalateSuffix = (row) => (row.escalate_reason ? ` (${row.escalate_reason})` : "");
 const originsSuffix = (k) => (k.origins?.length ? ` · ${k.origins.join(", ")}` : "");
 const usedSuffix = (k) => (k.last_used_at ? ` · used ${ago(k.last_used_at)}` : "");
@@ -51,7 +63,7 @@ const PROFILE_PAGES = {
 // The Settings menu (#512): four groups of rows, each row showing its current value. `action` rows are the owner's
 // Actions pages (#/actions/<id>), folded in under Server; the rest open #/profile/<id>.
 const SETTINGS_GROUPS = [
-  ["This phone", ["appearance", "notifications", "connection", "install"]],
+  ["This device", ["appearance", "notifications", "connection", "install"]],
   ["Agents", ["backends", "smart-approvals", "skills", "memory"]],
   ["Server", ["resources", "daemon", "accounts", "remote-control", "disk"]],
   ["Integrations", ["apps", "endpoint"]],
@@ -93,6 +105,7 @@ function applyTheme(name, hues) {
     localStorage.setItem("harness.theme", theme);
     localStorage.setItem("harness.themeHues", JSON.stringify(colors));
   } catch (_) { /* private mode */ }
+  refreshAppearanceValue();
 }
 
 const TEXT_SIZES = {
@@ -115,6 +128,7 @@ function applyTextSize(id) {
   document.documentElement.style.setProperty("--text-scale", String(TEXT_SIZES[size].scale));
   try { localStorage.setItem("harness.textSize", size); } catch (_) { /* private mode */ }
   requestAnimationFrame(layoutBar);
+  refreshAppearanceValue();
 }
 
 // Copies text and says so; when the clipboard is unavailable (insecure context, permission denied) the
@@ -383,7 +397,49 @@ const PROFILE_CARDS = {
   endpoint: (me) => endpointCard(me),
 };
 
+// Register through the shared framework without changing other desktop workers' files.
+// The shell resolves this list through its existing viewProfile view.
+if (!SPLITS.some((split) => split.key === "settings")) SPLITS.push({
+  key: "settings", list: "viewProfile", label: "Settings menu",
+  match: (parts) => {
+    // An unknown offline identity uses the router's single-pane recovery path, including on resize.
+    if (!isOwner() && !isMember() && !isGuest()) return undefined;
+    if (["profile", "settings"].includes(parts[0])) {
+      if (parts.length === 1) return null;
+      if (parts[1] === "account" || Object.hasOwn(PROFILE_PAGES, parts[1])) return parts[1];
+    }
+    if (parts[0] === "actions" && Object.hasOwn(ACTION_PAGES, parts[1])) return parts[1];
+    return undefined;
+  },
+  empty: { title: "No setting open", text: "Choose your profile or a setting from the menu." },
+});
+let menuValues = null;
+function refreshAppearanceValue() {
+  const value = menuValues?.appearance;
+  if (value) value.textContent = `${THEMES[readTheme()]?.label || "System"} · ${TEXT_SIZES[readTextSize()].label} text`;
+}
+
+function settingsGroupRows(values, isOwner, hidden) {
+  const shown = (id) => (Object.hasOwn(ACTION_PAGES, id) ? isOwner()
+    : (id !== "install" || !isStandalone()) && !hidden.has(id));
+  return SETTINGS_GROUPS.map(([label, ids]) => {
+    const rows = ids.filter(shown).map((id) => {
+      values[id] = h("span", { class: "set-value" });
+      const href = Object.hasOwn(ACTION_PAGES, id) ? `#/actions/${id}` : `#/profile/${id}`;
+      return h("a", { class: "set-row", href, "data-setting": id, "data-split-key": id },
+        h("span", { class: `set-icon ic-${id}`, "aria-hidden": "true" }),
+        h("span", { class: "set-label" }, ACTION_PAGES[id] || PROFILE_PAGES[id]),
+        values[id],
+        h("span", { class: "chevron", "aria-hidden": "true" }, "›"));
+    });
+    // A group whose rows are all hidden for this role (a member's Agents, say) gets no header either.
+    return rows.length ? [h("p", { class: "section-label" }, label), h("div", { class: "card settings-group" }, rows)] : null;
+  }).flat();
+}
+
 async function viewProfile(page, extra) {
+  // With a pane, the router is asking for the persistent menu rather than a detail page.
+  if (page?.body) return settingsMenu(page);
   const titles = { account: "Account", ...PROFILE_PAGES };
   if (page && !titles[page]) { go("#/profile", true); return; }
   if (page === "install" && isStandalone()) { go("#/profile", true); return; }
@@ -393,48 +449,111 @@ async function viewProfile(page, extra) {
   if (page === "connection") return append($app, connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
   if (Object.hasOwn(PROFILE_CARDS, page)) return append($app, await PROFILE_CARDS[page](me, profile, extra));
-  let hidden = new Set();
-  if (isGuest()) hidden = GUEST_HIDDEN_PAGES;
-  else if (isMember()) hidden = MEMBER_HIDDEN_PAGES;
-  const shown = (id) => (Object.hasOwn(ACTION_PAGES, id) ? isOwner()
-    : (id !== "install" || !isStandalone()) && !hidden.has(id));
+  return settingsMenu(null, me, profile);
+}
+
+async function settingsMenu(pane = null, me = null, profile = null) {
+  const target = pane?.body || $app;
+  let active = true;
+  let generation = 0;
+  let menuError = null;
   const values = {};
-  const groups = SETTINGS_GROUPS.map(([label, ids]) => {
-    const rows = ids.filter(shown).map((id) => {
-      values[id] = h("span", { class: "set-value" });
-      const href = Object.hasOwn(ACTION_PAGES, id) ? `#/actions/${id}` : `#/profile/${id}`;
-      return h("a", { class: "set-row", href, "data-setting": id },
-        h("span", { class: `set-icon ic-${id}`, "aria-hidden": "true" }),
-        h("span", { class: "set-label" }, ACTION_PAGES[id] || PROFILE_PAGES[id]),
-        values[id],
-        h("span", { class: "chevron", "aria-hidden": "true" }, "›"));
-    });
-    // A group whose rows are all hidden for this role (a member's Agents, say) gets no header either.
-    return rows.length ? [h("p", { class: "section-label" }, label), h("div", { class: "card settings-group" }, rows)] : null;
-  });
-  const identityNote = h("div", { class: "muted small" }, isMember() ? "Household member" : serverNote());
-  if (!isMember()) {
-    // Follows the header chip while Settings is open; the first change after the page is gone unsubscribes.
-    const stop = onConnState(() => {
-      if (identityNote.isConnected) identityNote.textContent = serverNote();
-      else stop();
+  if (pane) {
+    pane.header("Settings");
+    pane.onLeave(() => {
+      active = false;
+      if (menuValues === values) menuValues = null;
     });
   }
-  append($app,
-    h("a", { class: "card identity", href: "#/profile/account" },
+  if (!me) [me, profile] = await Promise.all([
+    api("/me").catch((err) => { menuError = err; return {}; }),
+    api("/profile").catch(() => ({ emoji: "🙂", choices: [] })),
+  ]);
+  if (!active) return;
+  const currentRole = () => isGuest() ? "guest" : isMember() ? "member" : isOwner() ? "owner" : "offline";
+  let menuRole = currentRole();
+  const groups = pane ? h("div") : null;
+  let groupNodes;
+  const renderGroups = () => {
+    for (const id of Object.keys(values)) delete values[id];
+    const hidden = menuRole === "guest" ? GUEST_HIDDEN_PAGES : menuRole === "member" ? MEMBER_HIDDEN_PAGES : new Set();
+    groupNodes = settingsGroupRows(values, () => menuRole === "owner", hidden);
+    if (groups) fill(groups, groupNodes);
+  };
+  renderGroups();
+  const identityNote = h("div", { class: "muted small" }, menuRole === "member" ? "Household member" : serverNote());
+  {
+    // Follows the header chip while Settings is open; the first change after the page is gone unsubscribes.
+    const stop = onConnState(() => {
+      if (identityNote.isConnected) identityNote.textContent = menuRole === "member" ? "Household member" : serverNote();
+      else stop();
+    });
+    pane?.onLeave(stop);
+  }
+  const identityEmoji = h("span", { class: "identity-emoji" }, profile.emoji || "🙂");
+  const identityName = h("h3", {}, me.name || "You");
+  const usage = pane ? h("div") : null;
+  let usageCard;
+  const renderUsage = (latest) => {
+    usageCard = menuRole === "member" && latest.usage ? h("div", { class: "card" },
+      h("h3", {}, "Usage"),
+      h("p", { class: "muted small" }, latest.usage.disk_note || ""),
+      h("p", { class: "muted small" }, `${latest.usage.running || 0} running · ${latest.usage.queued || 0} queued`)) : null;
+    if (usage) fill(usage, usageCard);
+  };
+  renderUsage(me);
+  const errorNote = menuError ? h("p", { class: "note bad" }, menuError.message) : null;
+  append(target,
+    errorNote,
+    h("a", { class: "card identity", href: "#/profile/account", "data-split-key": "account" },
       h("div", { class: "row" },
-        h("span", { class: "identity-emoji" }, profile.emoji || "🙂"),
+        identityEmoji,
         h("div", { class: "spacer" },
-          h("h3", {}, me.name || "You"),
+          identityName,
           identityNote),
         h("span", { class: "chevron", "aria-hidden": "true" }, "›"))),
-    isMember() && me.usage ? h("div", { class: "card" },
-      h("h3", {}, "Usage"),
-      h("p", { class: "muted small" }, me.usage.disk_note || ""),
-      h("p", { class: "muted small" }, `${me.usage.running || 0} running · ${me.usage.queued || 0} queued`)) : null,
-    groups.flat(),
+    pane ? usage : usageCard,
+    pane ? groups : groupNodes,
     versionRow());
-  fillSettingValues(values, me);
+  if (pane) menuValues = values;
+  if (pane) {
+    const readMe = () => api("/me").catch((err) => {
+      // The router may still be adopting a new member identity when this hash-change listener runs.
+      if (err.status === 403) return api("/me", { surface: "app" });
+      throw err;
+    });
+    const refresh = () => {
+      const next = ++generation;
+      const current = () => active && next === generation;
+      Promise.all([readMe(), api("/profile").catch(() => null)]).then(([latest, icon]) => {
+        if (!current()) return;
+        if (errorNote) errorNote.hidden = true;
+        const latestRole = latest.role || currentRole();
+        if (menuRole !== latestRole) {
+          menuRole = latestRole;
+          renderGroups();
+          pane.paint();
+        }
+        fillSettingValues(values, latest, current, menuRole === "owner");
+        identityName.textContent = latest.name || "You";
+        identityNote.textContent = menuRole === "member" ? "Household member" : serverNote();
+        renderUsage(latest);
+        if (icon) identityEmoji.textContent = icon.emoji || "🙂";
+      }).catch((err) => console.debug("settings menu refresh", err));
+    };
+    settingsRefreshes.add(refresh);
+    window.addEventListener("hashchange", refresh);
+    window.addEventListener("online", refresh);
+    const stopConnectionRefresh = onConnState((state) => { if (state === "live") refresh(); });
+    pane.onLeave(() => {
+      settingsRefreshes.delete(refresh);
+      window.removeEventListener("hashchange", refresh);
+      window.removeEventListener("online", refresh);
+      stopConnectionRefresh();
+    });
+  }
+  fillSettingValues(values, me, () => active && generation === 0, menuRole === "owner");
+  pane?.paint();
 }
 
 function serverLabel() {
@@ -451,10 +570,10 @@ function serverNote() {
 
 // Paints the menu first, then each row's value as its own request answers. A failed or slow request leaves that
 // row's value blank; it never toasts or holds up the others. Only the owner's rows read the owner API.
-function fillSettingValues(values, me) {
+function fillSettingValues(values, me, current = () => true, owner = isOwner()) {
   const paint = (id, value) => {
     const el = values[id];
-    if (!el || !value) return;
+    if (!current() || !el || !value) return;
     el.textContent = value.text || "";
     el.classList.toggle("warn", !!value.warn);
   };
@@ -463,7 +582,7 @@ function fillSettingValues(values, me) {
   paint("connection", { text: serverLabel() });
   paint("notifications", notificationsValue(me.notify));
   paint("install", { text: "Add to Home Screen" });
-  if (!isOwner()) return;
+  if (!owner) return;
   let keys = null;
   const readKeys = () => (keys ||= api("/keys"));
   const loaders = {
@@ -680,10 +799,10 @@ function appearanceCard() {
       h("div", { class: "hue-control" }, preview, input));
   }));
   return h("div", { class: "card" },
-    h("p", { class: "muted small" }, "How the app looks on this phone. The profile icon — the emoji next to your name — lives on the Profile card."),
+    h("p", { class: "muted small" }, "How the app looks on this device. The profile icon — the emoji next to your name — lives on the Profile card."),
     grid, hueRow,
     h("p", { class: "section-label" }, "Text size"),
-    h("p", { class: "muted small" }, "This phone only, like the theme. Session list, transcript, Settings, and the header all follow it."),
+    h("p", { class: "muted small" }, "This device only, like the theme. Session list, transcript, Settings, and the header all follow it."),
     sizes,
     h("p", { class: "section-label" }, "Home screen icon"),
     h("p", { class: "muted small" }, "Used when you add this app to the home screen. Separate from the profile icon."),
