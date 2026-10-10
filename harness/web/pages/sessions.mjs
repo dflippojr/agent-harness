@@ -117,8 +117,10 @@ async function viewList(pane = null) {
 
   let gone = false;  // the page left: a late search or refresh changes nothing, not even the remembered query
   leave(() => { gone = true; });
+  let searchRun = 0;  // only the latest search paints, even when an older one for the same query answers last
   const runSearch = async () => {
     if (gone) return;
+    const run = ++searchRun;
     const q = search.value.trim();
     searchQuery = search.value;
     results.hidden = !q;
@@ -128,7 +130,7 @@ async function viewList(pane = null) {
     if (!q) return;
     try {
       const data = await api(`/search?q=${encodeURIComponent(q)}`);
-      if (gone || search.value.trim() !== q) return;  // left, or a newer query is on its way
+      if (gone || run !== searchRun) return;  // left, or a newer search is on its way
       // A refresh that finds the same results keeps the links, so a press or keyboard focus on one survives it.
       const keys = JSON.stringify([q, data]);
       if (results.dataset.keys === keys) return;
@@ -143,7 +145,7 @@ async function viewList(pane = null) {
             h("span", { html: markPassage(p.text) }))))) : h("p", { class: "empty" }, `Nothing matches “${q}”.`));
       pane?.paint();
     } catch (e) {
-      if (gone) return;
+      if (gone || run !== searchRun) return;
       delete results.dataset.keys;
       fill(results, h("p", { class: "note bad" }, e.message));
     }

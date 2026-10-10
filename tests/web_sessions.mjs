@@ -123,10 +123,13 @@ for (const guest of [false, true]) {
 {
   const searches = [];
   let title = "Fix the bug";
+  let searchGate = null;  // when set, each search waits for the test to answer it
   const searchApi = async (path) => {
     if (!path.startsWith("/search")) return api(path);
     searches.push(path);
-    return { mode: "all", results: [{ id: "s1", title, status: "done", project: "scratch", created_at: "2026-10-10T12:00:00Z", hits: 1, passages: [] }] };
+    const asked = title;  // the answer reflects the title when the search was asked
+    if (searchGate) await searchGate(path);
+    return { mode: "all", results: [{ id: "s1", title: asked, status: "done", project: "scratch", created_at: "2026-10-10T12:00:00Z", hits: 1, passages: [] }] };
   };
   let box = null;
   let resultsBox = null;
@@ -177,6 +180,24 @@ for (const guest of [false, true]) {
   windowListeners.pointerup();
   await sleep(20);
   assert.equal(searches.length, 4, "releasing the press runs the held refresh");
+  // Overlapping searches for the same query: an older answer arriving last does not paint over the newer one.
+  const answers = [];
+  searchGate = (path) => new Promise((resolve) => answers.push(() => resolve(path)));
+  title = "Old";
+  changeHooks[hook]();
+  await sleep(320);
+  title = "New";
+  changeHooks[hook]();
+  await sleep(320);
+  assert.equal(answers.length, 2, "two searches in flight");
+  answers[1]();
+  await sleep(10);
+  assert.match(filledResults.slice(-3).map(text).join(" "), /New/);
+  const paints = resultFills;
+  answers[0]();
+  await sleep(10);
+  assert.equal(resultFills, paints, "the older answer arriving last is dropped");
+  searchGate = null;
   // A refresh in flight when the page leaves neither searches nor changes the remembered query.
   let open;
   gate = new Promise((r) => { open = r; });
@@ -185,7 +206,7 @@ for (const guest of [false, true]) {
   for (const fn of searchLeft) fn();
   open();
   await sleep(20);
-  assert.equal(searches.length, 4, "a refresh finishing after the page left runs no search");
+  assert.equal(searches.length, 6, "a refresh finishing after the page left runs no search");
   gate = null;
   box.value = "";
 }
