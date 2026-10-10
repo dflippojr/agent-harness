@@ -237,6 +237,8 @@ async def proxy(m, request: Request, path: str) -> Response:
         body.pop("stream", None)
     stream = bool(body.get("stream"))
     started = time.monotonic()
+    # Accounting already updates last_used_at, including after a streaming response completes.
+    request.state.key_activity_in_endpoint_log = True
     finish = _request_log(m, {"key_id": key["id"], "route": path, "model": model.name,
                               "stream": stream, "status": 0}, started)
 
