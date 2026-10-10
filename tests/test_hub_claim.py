@@ -16,7 +16,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import api as harness_api, cli, google_signin, local_owner, migrations
+from harness import api as harness_api, cli, local_owner, migrations
 from harness import pairing_requests as pr
 from harness.admin import PREFIX
 from harness.db import Database
@@ -238,10 +238,11 @@ def test_the_secret_is_new_at_every_start_and_owner_only(tmp_path):
     assert first != second and local_owner.read_hub_secret(tmp_path) == second
     path = tmp_path / local_owner.HUB_SECRET_FILE
     if sys.platform == "win32":   # mode bits mean nothing there: the ACL names this user alone, nothing inherited
-        me = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                             "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"],
-                            capture_output=True, text=True, timeout=60).stdout.strip()
-        assert google_signin._windows_allow_sids(path) == {me}
+        me = subprocess.run(["whoami"], capture_output=True, text=True, timeout=60).stdout.strip().lower()
+        listing = subprocess.run(["icacls", str(path)], capture_output=True, text=True, timeout=60).stdout
+        entries = [line.replace(str(path), "").strip() for line in listing.splitlines()
+                   if ":(" in line and not line.startswith("Successfully")]
+        assert [e.lower() for e in entries] == [f"{me}:(f)"], listing
     else:
         assert path.stat().st_mode & 0o077 == 0
 
