@@ -241,7 +241,8 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
   rejected even though it is relative.
 
 The rules run on the raw body and on what a reader would see: percent escapes, HTML entities, invisible format
-characters, Unicode compatibility forms and Markdown backslash escapes are decoded first. This is intentionally
+characters, Unicode compatibility forms and Markdown backslash escapes are decoded first, and a rendered form also
+drops inline HTML tags and emphasis or code markers that could split a token. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
 tells the backend to cite only repository-relative paths and describe credentials in words. Quote authentication
 scheme names in backticks (for example, `Bearer`) rather than printing a value-like sequence.

@@ -333,7 +333,7 @@ function Get-ReviewRedactionRules {
         [pscustomobject]@{ Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+'; Replacement = 'Bearer [REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password)(["'']?\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'; Replacement = '$1$2[REDACTED]' }
         [pscustomobject]@{ Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'; Replacement = '[REDACTED]' }
-        [pscustomobject]@{ Pattern = '\b[A-Za-z0-9+/=_-]{40,}\b'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
+        [pscustomobject]@{ Pattern = '(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'; Replacement = '[REDACTED]'; RepositoryPathsAllowed = $true }
     )
 }
 
@@ -350,11 +350,22 @@ function Get-ReviewScanForms {
     param([AllowEmptyString()][string]$Text)
 
     # Scan what a reader would see as well as the raw text: percent escapes, HTML entities,
-    # invisible format characters, compatibility characters and Markdown backslash escapes.
+    # invisible format characters, compatibility characters, Markdown backslash escapes, and
+    # rendered text with inline HTML tags and emphasis or code markers removed.
     $decoded = [System.Net.WebUtility]::HtmlDecode([Uri]::UnescapeDataString($Text))
     $decoded = ($decoded -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
     $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
-    return @(@($Text, $decoded, $unescaped) | Select-Object -Unique)
+    $rendered = $unescaped -replace '<[^<>]*>|[*`]|~~|__', ''
+    return @(Get-ReviewOrdinalUnique -Values @($Text, $decoded, $unescaped, $rendered))
+}
+
+function Get-ReviewOrdinalUnique {
+    param([AllowEmptyCollection()][AllowEmptyString()][string[]]$Values)
+
+    # Select-Object -Unique compares with culture rules, which equate canonically equivalent
+    # spellings. Scan forms and normalized citations must stay distinct, so compare ordinally.
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    return @($Values | Where-Object { $seen.Add($_) })
 }
 
 function ConvertFrom-ReviewGitQuotedPath {
@@ -402,10 +413,10 @@ function Get-ReviewRepositoryPaths {
     # The decoded scan form is NFKC-normalized, so citations must match normalized names too.
     # Normalized names pass the same relative-path filter: a fullwidth slash can become a root.
     $paths = @($paths + @($paths | Where-Object { $_ } | ForEach-Object { $_.Normalize([Text.NormalizationForm]::FormKC) }))
-    return @($paths | Where-Object {
+    return @(Get-ReviewOrdinalUnique -Values @($paths | Where-Object {
         # Formatting characters must not disguise an absolute-looking name as a relative citation.
         $_ -and $_ -notmatch '(^[\s`"''()\[\]{}*<>=:]*[/\\]|:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
-    } | Select-Object -Unique)
+    }))
 }
 
 function Remove-ReviewRepositoryCitations {
@@ -1173,7 +1184,9 @@ function Get-ReviewDiffEmbedding {
     $fileMetadata = @(for ($index = 0; $index -lt $fileStarts.Count; $index++) {
         $start = $fileStarts[$index].Index
         $end = if ($index + 1 -lt $fileStarts.Count) { $fileStarts[$index + 1].Index } else { $Diff.Length }
-        Get-ReviewDiffFilePaths -Section $Diff.Substring($start, $end - $start)
+        $section = $Diff.Substring($start, $end - $start)
+        $paths = Get-ReviewDiffFilePaths -Section $section
+        [pscustomobject]@{ OldPath = $paths.OldPath; NewPath = $paths.NewPath; Section = $section }
     })
     $filePaths = @($fileMetadata | ForEach-Object { $_.OldPath; $_.NewPath } | Select-Object -Unique)
     $embeddedFileCount = $totalFiles
@@ -1187,10 +1200,8 @@ function Get-ReviewDiffEmbedding {
         if ($fileStarts[0].Index -gt 0) { $preamble = $Diff.Substring(0, $fileStarts[0].Index) }
         $remaining = $MaxDiffBytes - $utf8.GetByteCount($preamble)
         $entries = New-Object System.Collections.Generic.List[object]
-        for ($index = 0; $index -lt $fileStarts.Count; $index++) {
-            $start = $fileStarts[$index].Index
-            $end = if ($index + 1 -lt $fileStarts.Count) { $fileStarts[$index + 1].Index } else { $Diff.Length }
-            $section = $Diff.Substring($start, $end - $start)
+        for ($index = 0; $index -lt $fileMetadata.Count; $index++) {
+            $section = $fileMetadata[$index].Section
             $fileName = $fileMetadata[$index].NewPath
             $entries.Add([pscustomobject]@{
                 Index = $index

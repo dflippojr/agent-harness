@@ -10,6 +10,10 @@ Describe 'Review publication safety' {
         @{ Payload = 'sk-synthetic12345678' }
         @{ Payload = 'ghp_synthetic12345678' }
         @{ Payload = ('T' * 48) }
+        @{ Payload = (('A' * 38) + '==') }
+        @{ Payload = 'gh**p_**synthetic12345678' }
+        @{ Payload = 'gh<b>p</b>_synthetic12345678' }
+        @{ Payload = 'gh`p`_synthetic12345678' }
         @{ Payload = 'Bearer synthetic-value' }
         @{ Payload = 'Bearer followed by a value' }
         @{ Payload = 'password=synthetic-value' }
@@ -86,6 +90,7 @@ Describe 'Review publication safety' {
         @{ Payload = '`$env:USERPROFILE` and `~/.claude/settings.json` are inherited.' }
         @{ Payload = 'Call 127.0.0.1:8100/gpu or localhost:8100/gpu.' }
         @{ Payload = 'See https://github.com/dflippojr/agent-harness/pull/549 and // a code comment.' }
+        @{ Payload = '**Structure** `harness/__init__.py`: keep the `<n>` placeholder.' }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
