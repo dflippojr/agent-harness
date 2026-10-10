@@ -97,10 +97,19 @@ class DiskWatch:
                     f"{self.limits.min_free_bytes / 2**30:.1f} GB minimum")
         return ""
 
-    def _scan_due(self, free: int) -> bool:
+    def _may_be_over(self, free: int) -> bool:
         lost = max(0, self._free_at_scan - free)
-        return (self._size + lost > self.cap or (self.account and self._account_used + lost > self.account_cap)
-                or time.monotonic() - self._scanned >= max(MIN_SCAN_SECONDS, SCAN_DUTY * self._scan_cost))
+        return self._size + lost > self.cap or (self.account and self._account_used + lost > self.account_cap)
+
+    def _scan_due(self, free: int) -> bool:
+        return self._may_be_over(free) or time.monotonic() - self._scanned >= max(MIN_SCAN_SECONDS,
+                                                                                   SCAN_DUTY * self._scan_cost)
+
+    def final(self) -> str:
+        """One last look once the command has ended, so a burst between two polls is still caught: the free-space
+        floor, and a scan only when the space lost says a quota may have been passed. Blocking: run it in a thread."""
+        free = self._free()
+        return self._floor_reason(free) or (self._scan_reason() if self._may_be_over(free) else "")
 
     def _scan_reason(self) -> str:
         """Scan, then '' while within the quotas, else why the command must stop. Blocking: run it in a thread."""
@@ -492,12 +501,12 @@ class Sandbox:
             raise
         finally:
             watcher.cancel()
-        if not watcher.done():  # a limit seen as the command ended still counts: it may have left a writer behind
-            return command.result()
-        try:
-            reason = watcher.result()
+        try:    # a limit passed as the command ended still counts: it may have left a writer behind
+            reason = watcher.result() if watcher.done() else await asyncio.to_thread(watch.final)
         except Exception as e:  # fail closed: a command nothing watches could fill the drive
             reason = f"the disk watchdog failed ({type(e).__name__}: {e})"
+        if not reason:
+            return command.result()
         stopped, detail = await self._halt()
         try:
             await asyncio.wait_for(command, timeout=30)

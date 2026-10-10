@@ -305,3 +305,25 @@ def test_limit_seen_as_the_command_ends_still_stops_the_container(monkeypatch, t
     with pytest.raises(sandbox.DiskLimitExceeded, match="past its 10 MB quota"):
         asyncio.run(box.exec("make & exit"))
     assert "restart" in fake.calls and events[0][0] == "sandbox_disk_limit"
+
+
+@pytest.mark.parametrize("limits, match", [
+    (sandbox.DiskLimits(900 * MB, 950 * MB), "data drive"),
+    (sandbox.DiskLimits(10 * MB, 100 * MB), "past its 10 MB quota"),
+])
+def test_burst_between_polls_is_caught_when_the_command_ends(monkeypatch, tmp_path, limits, match):
+    monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)     # the watchdog never polls during the command
+    box, fake, events = make(monkeypatch, tmp_path, limits, chunks=60, pace=0)
+    with pytest.raises(sandbox.DiskLimitExceeded, match=match):
+        asyncio.run(box.exec("make burst"))
+    assert fake.written == 60 and "restart" in fake.calls and events[0][0] == "sandbox_disk_limit"
+
+
+def test_command_ending_under_its_limits_skips_the_final_scan(monkeypatch, tmp_path):
+    monkeypatch.setattr(sandbox, "FREE_POLL_SECONDS", 60)
+    box, fake, _ = make(monkeypatch, tmp_path, sandbox.DiskLimits(50 * MB, 100 * MB), chunks=20, pace=0)
+    scans = []
+    measure = sandbox.dir_size
+    monkeypatch.setattr(sandbox, "dir_size", lambda root: scans.append(root) or measure(root))
+    assert asyncio.run(box.exec("make")) == (0, "built")
+    assert len(scans) == 1      # only the starting scan: the free space lost shows it is under its quota
