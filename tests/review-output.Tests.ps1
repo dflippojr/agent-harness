@@ -16,6 +16,7 @@ Describe 'Review publication safety' {
         @{ Payload = 'gh`p`_synthetic12345678' }
         @{ Payload = '[gh](https://example.invalid)p_synthetic12345678' }
         @{ Payload = '[/ho][ref]me/reviewer/auth.json' }
+        @{ Payload = "[gh]p_synthetic12345678`n`n[gh]: https://example.invalid" }
         @{ Payload = 'Bearer synthetic-value' }
         @{ Payload = 'Bearer followed by a value' }
         @{ Payload = 'password=synthetic-value' }

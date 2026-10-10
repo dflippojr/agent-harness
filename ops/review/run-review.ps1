@@ -347,18 +347,27 @@ $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\
 $script:ReviewProfileSegmentPattern = '(?i)[\\/](?:users|home|root|documents and settings)(?![\p{L}\p{N}\p{M}_-])(?!\.[\p{L}\p{N}])'
 
 function Get-ReviewScanForms {
-    param([AllowEmptyString()][string]$Text)
+    param([AllowEmptyString()][string]$Text, [switch]$PlainText)
 
     # Scan what a reader would see as well as the raw text: percent escapes, HTML entities,
     # invisible format characters, compatibility characters, Markdown backslash escapes, and
-    # rendered text: link labels without their targets, inline HTML tags and emphasis or code markers removed.
+    # (except for plain-text job logs) an approximate Markdown rendering without markup.
     $decoded = [System.Net.WebUtility]::HtmlDecode([Uri]::UnescapeDataString($Text))
     $decoded = ($decoded -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
     $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
+    $forms = @($Text, $decoded, $unescaped)
+    if (-not $PlainText) { $forms += ConvertTo-ReviewRenderedText -Text $unescaped }
+    return @(Get-ReviewOrdinalUnique -Values $forms)
+}
+
+function ConvertTo-ReviewRenderedText {
+    param([AllowEmptyString()][string]$Text)
+
+    # Keep link labels and drop their targets, then drop every bracket (shortcut and reference
+    # links), inline HTML tags, and emphasis or code markers, so markup cannot split a value.
     # Intraword underscores never render as emphasis, so __tests__-style names are left intact.
-    $rendered = $unescaped -replace '\[([^\[\]]*)\](?:\([^()]*\)|\[[^\[\]]*\])', '$1'
-    $rendered = $rendered -replace '<[^<>]*>|[*`]|~~', ''
-    return @(Get-ReviewOrdinalUnique -Values @($Text, $decoded, $unescaped, $rendered))
+    $rendered = $Text -replace '\[([^\[\]]*)\](?:\([^()]*\)|\[[^\[\]]*\])', '$1'
+    return $rendered -replace '<[^<>]*>|[*`\[\]]|~~', ''
 }
 
 function Get-ReviewOrdinalUnique {
@@ -412,9 +421,10 @@ function Get-ReviewRepositoryPaths {
         $paths = @($paths | ForEach-Object { ConvertFrom-ReviewGitQuotedPath -Path $_ })
     }
     $paths = @($paths + $DiffPaths)
-    # The decoded scan form is NFKC-normalized, so citations must match normalized names too.
-    # Normalized names pass the same relative-path filter: a fullwidth slash can become a root.
-    $paths = @($paths + @($paths | Where-Object { $_ } | ForEach-Object { $_.Normalize([Text.NormalizationForm]::FormKC) }))
+    # Decoded scan forms are NFKC-normalized and rendered, so citations must match those names too.
+    # They pass the same relative-path filter: a fullwidth slash or stripped markup can expose a root.
+    $normalized = @($paths | Where-Object { $_ } | ForEach-Object { $_.Normalize([Text.NormalizationForm]::FormKC) })
+    $paths = @($paths + $normalized + @($normalized | ForEach-Object { ConvertTo-ReviewRenderedText -Text $_ }))
     return @(Get-ReviewOrdinalUnique -Values @($paths | Where-Object {
         # Formatting characters must not disguise an absolute-looking name as a relative citation.
         $_ -and $_ -notmatch '(^[\s`"''()\[\]{}*<>=:]*[/\\]|:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
@@ -482,7 +492,7 @@ function Get-ReviewDiagnosticTail {
         }
         if ($cut -ge 0) { $line = $line.Substring(0, $cut) + '[REDACTED PATH]' }
         # Whatever remains must also be clean once decoded; redaction above is idempotent on its markers.
-        $encoded = @(Get-ReviewScanForms -Text $line | Where-Object {
+        $encoded = @(Get-ReviewScanForms -Text $line -PlainText | Where-Object {
             $form = $_
             foreach ($rule in (Get-ReviewRedactionRules)) { $form = $form -replace $rule.Pattern, $rule.Replacement }
             ($form -cne $_) -or ($_ -match $script:ReviewAbsoluteRootPattern) -or ($_ -match $script:ReviewProfileSegmentPattern)
