@@ -8,4 +8,4 @@ These are isolated synthetic session fixtures rendered by headless Edge with the
 - `*-output-*.png`: the full tool output with Wrap, Copy and Close.
 - `metrics.json`: measured dialog bounds, focus, backdrop colour and button sizes for all 16 captures.
 
-Browser assertions verify centring, 44 px controls, natural-width sheet actions, safe focus, Escape dismissal and restored focus at both desktop widths in both themes. Session menu ArrowDown/Escape also pass. At 390/767 px the sheet keeps its handle and 50 px buttons and output stays full-screen; 768 px switches to the desktop rules. Browsers and the ephemeral localhost server are closed after capture.
+Browser assertions verify centring, 44 px controls, natural-width sheet actions, safe focus, Escape dismissal and restored focus at both desktop widths in both themes. Session menu ArrowDown/Escape also pass. At 390 px the sheet keeps its handle and 50 px buttons. The existing 700–767 px centred sheet keeps its 50 px buttons; output stays full-screen below 768 px. At 768 px the new desktop rules apply. Browsers and the ephemeral localhost server are closed after capture.

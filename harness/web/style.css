@@ -608,10 +608,14 @@ dialog.sheet::backdrop { background: var(--backdrop); }
 .sheet-actions .btn { flex: 1; min-height: 50px; border-radius: 14px; font-weight: 650; font-size: 1rem; }
 .sheet-cancel { background: none; border: 1.5px solid var(--line); color: var(--text); }
 .sheet-danger { background: var(--bad); border: 1.5px solid var(--bad); color: var(--bg); }
-/* Desktop 9: sheets and output modal (#566). Phone geometry stays in the base rules above. */
-@media (min-width: 768px) {
+@media (min-width: 700px) {
   dialog.sheet { margin: auto; border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 16px 48px color-mix(in srgb, var(--text) 22%, transparent); }
   .sheet-handle { display: none; }
+  .sheet-body { padding: 20px; }
+}
+
+/* Desktop 9: sheets and output modal (#566). Narrower layouts keep their existing geometry. */
+@media (min-width: 768px) {
   .sheet-body { padding: 24px; }
   .sheet-actions { justify-content: flex-end; flex-wrap: wrap; }
   .sheet-actions .btn { flex: 0 1 auto; min-height: var(--tap); padding: 0 18px; border-radius: var(--radius); font-size: 0.875rem; }
