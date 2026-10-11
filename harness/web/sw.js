@@ -9,6 +9,7 @@ const ASSETS = [
   "/lib/compat.mjs",
   "/lib/diff.mjs",
   "/lib/jobs.mjs",
+  "/lib/keys.mjs",
   "/lib/format.mjs",
   "/lib/layout.mjs",
   "/lib/markdown.mjs",

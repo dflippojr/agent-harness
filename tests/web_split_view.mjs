@@ -148,7 +148,8 @@ const press = (extra = {}) => doc.dispatchEvent({ type: "keydown", key: "[", tar
 
 // #/agents at 1440: the list in its pane beside the rail, an empty detail, no Back and no section title in the bar.
 await waitFor(() => rows().length === 2, "the list in its pane");
-assert.equal(doc.body.childNodes.indexOf(pane()), doc.body.childNodes.indexOf(byId.app) - 1, "the pane sits just before <main>");
+assert.equal(doc.body.childNodes.indexOf(pane()), doc.body.childNodes.indexOf(byId.bar) - 1,
+  "the pane sits just before the header bar, so Tab reads the list before the detail (#571)");
 assert.ok(body.contains("split") && !body.contains("split-open"), "a split with nothing open");
 assert.equal(pane().attributes["aria-label"], "Agents list");
 const head = walk(pane(), (n) => n.className === "split-head")[0];
