@@ -1019,6 +1019,52 @@ body.has-tabs .composer { bottom: var(--tabbar-offset); padding-bottom: 8px; }
 .discovery-candidate .row { flex-wrap: wrap; }
 .discovery-candidate input { flex: 1 1 180px; min-width: 0; font-size: 1rem; }
 
+/* Desktop 6: Jobs (#567). Phone fields and footer retain their single-column order; desktop uses the pane width. */
+.job-toolbar, .job-field, .job-schedule-grid, .job-model-grid { display: contents; }
+.job-fields { display: block; order: 1; }
+.job-heading, .job-run-header, .job-cron-label { display: none; }
+.job-form { display: flex; flex-direction: column; }
+.job-fields > .job-field, .job-fields > p, .job-schedule-grid, .job-model-grid { order: 1; }
+.job-enabled { order: 2; }
+.job-footer { order: 3; }
+.job-cron { display: block; margin-top: 8px; }
+.job-runs-heading { margin-top: 28px; }
+@media (min-width: 768px) {
+  main:has(.job-detail) { max-width: 1120px; padding-top: 24px; padding-inline: 24px; }
+  body:has(.job-detail) #bar { padding-inline: max(24px, calc((100% - 1120px) / 2 + 24px)); }
+  .job-detail { container: job-detail / inline-size; }
+  .job-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; align-items: start; }
+  .job-form, .job-fields, .job-field, .job-runs { min-width: 0; }
+  .job-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; order: 0; margin-bottom: 20px; }
+  .job-heading { display: block; flex: 1 1 220px; min-width: 0; margin: 0; font-size: 1.25rem; font-weight: 650; overflow-wrap: anywhere; }
+  .job-enabled { flex: none; margin: 0; order: 0; }
+  .job-run-header { display: inline-flex; }
+  .job-run-footer { display: none; }
+  .job-fields { display: block; order: 1; }
+  .job-field { display: block; }
+  .job-field label { margin-top: 0; }
+  .job-fields > .job-field { margin-bottom: 18px; }
+  .job-fields > p { margin: -8px 0 20px; }
+  .job-schedule-grid, .job-model-grid { display: grid; gap: 16px; margin-bottom: 18px; align-items: start; }
+  .job-schedule-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .job-model-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .job-cron { margin-top: 0; }
+  .job-cron-label { display: block; }
+  .job-field input, .job-field select, .job-field textarea { min-width: 0; }
+  .job-footer { padding-top: 18px; border-top: 1px solid var(--line); }
+  .job-runs-heading { margin-top: 0; font-size: 1rem; font-weight: 650; }
+  .job-runs .card { cursor: pointer; }
+  .job-row:hover, .job-runs .card:hover { background: var(--panel-2); }
+  .job-main:focus-visible, .job-runs .card:focus-visible, .job-detail .btn:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius);
+  }
+  #split-list .job-row[aria-current="page"] { background: var(--info-bg); }
+  #split-list .job-main .meta { font-variant-numeric: tabular-nums; }
+  @container job-detail (min-width: 900px) {
+    .job-layout { grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
+  }
+}
+/* End Desktop 6. */
 /* Desktop 11: New task and Chat (#570). Keep every layout override above the phone breakpoint. */
 @media (min-width: 768px) {
   main:has(.new-task-page) { max-width: 1120px; padding-top: 24px; }
