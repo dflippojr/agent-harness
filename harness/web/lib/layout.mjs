@@ -34,6 +34,16 @@ const AGENT_ICON = '<svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true"
 // open row's key for a detail route.
 export const SPLITS = [
   {
+    key: "jobs", list: "viewJobs", label: "Jobs list",
+    match: (parts) => {
+      if (parts[0] !== "jobs") return undefined;
+      if (parts.length === 1) return null;
+      if (parts.length === 2 && (parts[1] === "new" || validId(parts[1]))) return parts[1];
+      return undefined;
+    },
+    empty: { title: "No job open", text: "Pick one from the list, or create a new job." },
+  },
+  {
     key: "agents",
     list: "viewList",
     label: "Agents list",

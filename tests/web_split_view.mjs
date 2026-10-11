@@ -15,7 +15,7 @@ assert.deepEqual(splitRoute(["s", "abc", "changes"]), { split: agents, selected:
 assert.deepEqual(splitRoute(["s", "abc", "approval", "a1"]), { split: agents, selected: "abc" });
 assert.equal(splitRoute(["s", "../x"]), null, "an id the daemon could not have issued is not a row");
 assert.equal(splitRoute(["agents", "extra"]), null);
-for (const parts of [[], ["chat"], ["jobs"], ["jobs", "j1"], ["new"], ["profile"], ["images"]]) {
+for (const parts of [[], ["chat"], ["new"], ["profile"], ["images"]]) {
   assert.equal(splitRoute(parts), null, `${parts.join("/")} is not part of the Agents split`);
 }
 const key = (extra = {}) => ({ key: "[", target: { tagName: "BODY" }, ...extra });
@@ -80,7 +80,17 @@ const fakeFetch = async (url) => {
   const one = sessions.find((s) => path === `/sessions/${s.id}`);
   if (one) return jsonResp(detail(one));
   if (/^\/sessions\/s\d\/changes$/.test(path)) return jsonResp({ removed: false, secret_scan: null, repos: [] });
-  if (path === "/queue" || path === "/jobs" || path.startsWith("/chats")) return jsonResp([]);
+  if (path === "/queue" || path.startsWith("/chats")) return jsonResp([]);
+  const jobList = [
+    { id: "j1", name: "Morning check", prompt: "Check services", cron: "0 8 * * *", project: "web", backend: "local", model: "", notify: "low", enabled: true, recent: [] },
+    { id: "j2", name: "Disk report", prompt: "Check storage", cron: "0 8 * * *", project: "web", backend: "local", model: "", notify: "attention", enabled: false, recent: [] },
+  ];
+  if (path === "/jobs") return jsonResp(jobList);
+  const jobDetail = jobList.find((j) => path === `/jobs/${j.id}`);
+  if (jobDetail) return jsonResp(jobDetail);
+  if (path === "/models") return jsonResp([]);
+  if (path === "/backends?auth=skip") return jsonResp([{ name: "local", available: true }]);
+  if (path.startsWith("/jobs/preview")) return jsonResp({ ok: true, next: [] });
   if (path === "/gpu") return jsonResp({ manual: false, state: "clear" });
   if (path === "/projects") return jsonResp([{ name: "web", target: "tower" }]);
   return jsonResp({});
@@ -207,7 +217,7 @@ assert.equal(walk(pane(), (n) => n.className === "split-body")[0], listBody, "ba
 assert.deepEqual(marked(), []);
 
 // Leaving the split closes the pane.
-await go("#/jobs");
+await go("#/chat");
 assert.ok(!body.contains("split") && !body.contains("split-open"));
 assert.equal(pane().childNodes.length, 0, "the pane is emptied");
 await go("#/s/s1");
@@ -284,6 +294,49 @@ assert.ok(daemon, "the app-wide stream is open");
 daemon.emit("status", { status: "running" }, 1);
 await waitFor(() => rows().length === 2 && !paneError(), "the next server event retries");
 console.error = errors;
+
+
+// Jobs use the same router lifecycle: deep links, empty detail, selection and preserving an unsaved form on resize.
+await go("#/jobs");
+await waitFor(() => rows().length === 2 && /No job open/.test(byId.app.textContent), "Jobs list with empty detail");
+assert.equal(pane().attributes["aria-label"], "Jobs list");
+assert.equal(byId.back.hidden, true);
+await go("#/jobs/j1");
+await waitFor(() => /Morning check/.test(byId.app.textContent), "Jobs deep link");
+assert.deepEqual(marked(), ["j1"]);
+const jobPage = byId.app.childNodes[0];
+const jobName = walk(jobPage, (n) => n.id === "job-name")[0];
+jobName.value = "Unsaved job name";
+const jobList = walk(pane(), (n) => n.className === "split-body")[0];
+await go("#/jobs/j2");
+await waitFor(() => /Disk report/.test(byId.app.textContent), "second job");
+assert.deepEqual(marked(), ["j2"]);
+assert.equal(walk(pane(), (n) => n.className === "split-body")[0], jobList, "Jobs list stays mounted");
+const secondPage = byId.app.childNodes[0];
+const secondName = walk(secondPage, (n) => n.id === "job-name")[0];
+secondName.value = "Draft survives resize";
+wideQuery.matches = false;
+wideQuery.emit("change");
+await sleep(60);
+assert.equal(byId.app.childNodes[0], secondPage);
+assert.equal(secondName.value, "Draft survives resize");
+assert.equal(byId.back.hidden, false);
+assert.ok(!body.contains("split"));
+wideQuery.matches = true;
+wideQuery.emit("change");
+await waitFor(() => rows().length === 2, "Jobs list after widening");
+assert.equal(byId.app.childNodes[0], secondPage);
+assert.equal(secondName.value, "Draft survives resize");
+assert.deepEqual(marked(), ["j2"]);
+press();
+assert.ok(body.contains("split-collapsed"));
+press({ target: secondName });
+assert.ok(body.contains("split-collapsed"), "[ in the job form is text");
+press();
+await go("#/jobs/new");
+await waitFor(() => /Create/.test(byId.app.textContent), "New job in the detail pane");
+assert.ok(body.contains("split-open"));
+assert.deepEqual(marked(), []);
 
 // A protocol mismatch blocks the app on the update card: no list pane beside it (review on #578).
 await go("#/s/s1");
