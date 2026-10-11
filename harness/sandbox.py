@@ -449,14 +449,21 @@ NO_DOCKER = ("the shell sandbox is off in fake model mode: this test instance sh
              "harness, so it never creates containers (docs/ui-testing.md)")
 
 
+def _no_docker() -> Exception:
+    from .fileops import ToolError
+    return ToolError(NO_DOCKER)
+
+
 class NoDockerSandbox(Sandbox):
     """Fake model mode's sandbox (#588). The Docker engine, with its networks, cache volumes and session containers, is
     shared with the real harness, so a test instance never touches it: a shell command is a tool error, and stopping
     or removing the container is a no-op. The file tools don't use the sandbox and work as usual."""
 
+    async def ensure_running(self) -> str:
+        raise _no_docker()
+
     async def exec(self, command: str, timeout: int = 120, network: bool = False) -> tuple[int, str]:
-        from .fileops import ToolError
-        raise ToolError(NO_DOCKER)
+        raise _no_docker()
 
     async def stop_if_idle(self) -> bool:
         return False

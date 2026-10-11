@@ -326,8 +326,9 @@ def test_fake_mode_never_touches_docker(monkeypatch, fake_manager, tmp_path):
     session = {"id": "s1", "target": "tower", "workspace": str(tmp_path), "project": "ui", "owner_id": "owner"}
     sb = fake_manager.runner.sandbox(session)
     assert isinstance(sb, sandbox.NoDockerSandbox)
-    with pytest.raises(ToolError, match="sandbox is off in fake model mode"):
-        run(sb.exec("echo hi"))
+    for call in (sb.exec("echo hi"), sb.ensure_running()):
+        with pytest.raises(ToolError, match="sandbox is off in fake model mode"):
+            run(call)
     run(sb.stop())
     run(sb.restart())
     run(sb.remove())
