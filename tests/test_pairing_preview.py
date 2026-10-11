@@ -284,3 +284,21 @@ def test_sdk_binds_arm_to_preview_and_surfaces_drift(hh, monkeypatch):
         assert changed.value.status == 409
         assert changed.value.code == "disclosures_changed"
     assert len(m.db.main.list_pairing_requests()) == 1
+
+
+@pytest.mark.parametrize("scope", [*all_scopes(), None], ids=[*all_scopes(), "all-scopes"])
+def test_preview_arm_and_list_disclosures_match_for_every_known_scope(hh, scope):
+    client, m = hh
+    known = all_scopes(m.cfg)
+    assert set(known) == set(all_scopes())
+    scopes = list(known) if scope is None else [scope]
+    preview = client.post(PREVIEW, headers=H(OWNER), json={"scopes": scopes})
+    assert preview.status_code == 200, preview.text
+    armed = client.post(BASE, headers=H(OWNER), json={
+        "catalog_app_id": CATALOG_ID, "scopes": scopes, "acknowledge_elevated": True,
+        "expected_disclosures_digest": preview.headers["X-Disclosures-Digest"]})
+    assert armed.status_code == 201, armed.text
+    listed = client.get(BASE, headers=H(OWNER))
+    assert listed.status_code == 200, listed.text
+    row = next(r for r in listed.json() if r["id"] == armed.json()["id"])
+    assert preview.json() == armed.json()["disclosures"] == row["disclosures"]
