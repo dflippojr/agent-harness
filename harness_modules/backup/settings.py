@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from harness.modules import Bounds, SettingSpec, setting_bool, setting_int
+from harness.modules import Bounds, SettingSpec, setting_bool, setting_hidden, setting_int
 
 from .member_key import key_dir
 
@@ -58,23 +58,11 @@ def _set_keep(cfg, value):
     cfg.backup.keep_days = int(value)
 
 
-def _dir_get(cfg):
-    return None
-
-
-def _dir_set(cfg, value):
-    raise ValueError("this setting is managed in local configuration")
-
-
 def specs() -> list:
     return [
-        SettingSpec(
-            key="backup.member_key_dir", label="Member key backup directory",
-            help="Separate key copies; keep apart from database backups off-site. Unset uses backup.dir/member-keys.",
-            category="Backup", value_type="string", default=None, scope="admin", apply_mode="installer_only",
-            getter=_dir_get, setter=_dir_set, sensitivity="hidden", readable=False, writable=False,
-            yaml_path=("backup", "member_key_dir"), modules=("backup",),
-        ),
+        setting_hidden("backup.member_key_dir", "Member key backup directory",
+                       "Separate key copies; keep apart from database backups off-site. Unset uses backup.dir/member-keys.",
+                       "Backup", ("backup", "member_key_dir"), modules=("backup",)),
         SettingSpec(
             key="backup.at", label="Backup time", help="Local time (HH:MM) for the nightly backup.",
             category="Backup", value_type="string", default="03:30", scope="admin", apply_mode="live",
@@ -89,10 +77,6 @@ def specs() -> list:
                      "Runtime enable for the nightly backup. Does not change the backup directory.",
                      "Features", False, _get_enabled, _set_enabled, ("backup", "enabled"),
                      apply_mode="daemon_restart", modules=("backup",), enable_check=check_backup),
-        SettingSpec(
-            key="backup.dir", label="Backup directory", help="Where nightly backups are written.",
-            category="Backup", value_type="string", default=None, scope="admin", apply_mode="installer_only",
-            getter=_dir_get, setter=_dir_set, sensitivity="hidden", readable=False, writable=False,
-            yaml_path=("backup", "dir"), modules=("backup",),
-        ),
+        setting_hidden("backup.dir", "Backup directory", "Where nightly backups are written.",
+                       "Backup", ("backup", "dir"), modules=("backup",)),
     ]

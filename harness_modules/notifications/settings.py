@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from harness.modules import SettingSpec, require_readable_file, require_url, setting_bool
+from harness.modules import require_readable_file, require_url, setting_bool, setting_hidden
 
 NOTIFICATIONS = "Notifications"
 
@@ -24,28 +24,16 @@ def _set_enabled(cfg, value):
     cfg.notify.enabled = bool(value)
 
 
-def _hidden(key, label, help, yaml_path):
-    def getter(cfg):
-        return None
-
-    def setter(cfg, value):
-        raise ValueError("this setting is managed in local configuration")
-
-    return SettingSpec(
-        key=key, label=label, help=help, category=NOTIFICATIONS, value_type="string", default=None,
-        scope="admin", apply_mode="installer_only", getter=getter, setter=setter,
-        sensitivity="hidden", readable=False, writable=False, yaml_path=yaml_path, modules=("notifications",),
-    )
-
-
 def specs() -> list:
     return [
         setting_bool("notifications.enabled", "Notifications",
                      "Runtime enable for ntfy notifications. Does not configure a server or topic.",
                      "Features", False, _get_enabled, _set_enabled, ("notify", "enabled"),
                      apply_mode="daemon_restart", modules=("notifications",), enable_check=check_notifications),
-        _hidden("notify.server", "Notification server", "ntfy server URL.", ("notify", "server")),
-        _hidden("notify.topic", "Notification topic", "ntfy topic name.", ("notify", "topic")),
-        _hidden("notify.token_file", "Notification token file", "File holding the ntfy write token.",
-                ("notify", "token_file")),
+        setting_hidden("notify.server", "Notification server", "ntfy server URL.",
+                       NOTIFICATIONS, ("notify", "server"), modules=("notifications",)),
+        setting_hidden("notify.topic", "Notification topic", "ntfy topic name.",
+                       NOTIFICATIONS, ("notify", "topic"), modules=("notifications",)),
+        setting_hidden("notify.token_file", "Notification token file", "File holding the ntfy write token.",
+                       NOTIFICATIONS, ("notify", "token_file"), modules=("notifications",)),
     ]
