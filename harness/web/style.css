@@ -888,8 +888,14 @@ dialog.sheet::backdrop { background: var(--backdrop); }
 .session-strip > * { flex: none; }
 .session-strip > .session-strip-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .session-strip .ctx .progress { width: 44px; height: 5px; }
-.tabs.session-tabs { margin: 2px 0 0; padding: 2px; border-radius: var(--radius); }
+.tabs.session-tabs { margin: 2px 0 0; padding: 2px; gap: 8px; border-radius: var(--radius); }
 .tabs.session-tabs button { min-height: var(--tap); padding: 0 8px; border-radius: 10px; font-size: 0.875rem; font-weight: 600; }
+/* Phone jump actions use reserved status-strip space, leaving the transcript unobstructed in either orientation. */
+@media (max-width: 767px) {
+  .session-chrome .session-strip { height: var(--tap); padding-right: 112px; }
+  body.session-page .jump { top: var(--bar-h, 52px); bottom: auto; margin: 0; }
+  body.session-page .jump-top { right: calc(max(16px, env(safe-area-inset-right, 0px)) + var(--tap) + 8px); }
+}
 .session-title-edit {
   flex: 1; min-width: 0; min-height: var(--tap); margin: -4px 0; padding: 0 10px; box-sizing: border-box;
   font-size: max(16px, 1.0625rem); font-weight: 650;
@@ -998,7 +1004,8 @@ a.quote-source { text-decoration: underline; text-decoration-style: dotted; text
 /* chat */
 .chat-wrap { min-height: calc(100dvh - var(--bar-h, 52px) - 200px); display: flex; flex-direction: column; }
 .chat-welcome {
-  margin: auto; text-align: center; padding: 32px 16px; border-radius: 18px;
+  margin: auto; max-width: 100%; min-width: 0; box-sizing: border-box;
+  text-align: center; padding: 32px 16px; border-radius: 18px;
   background: radial-gradient(ellipse at 50% 0%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 70%);
 }
 .chat-welcome-mark { font-size: 3rem; line-height: 1; margin-bottom: 8px; }
@@ -1042,7 +1049,7 @@ body.has-tabs .composer { bottom: var(--tabbar-offset); padding-bottom: 8px; }
 .job-heading, .job-run-header, .job-cron-label { display: none; }
 .job-form { display: flex; flex-direction: column; }
 .job-fields > .job-field, .job-fields > p, .job-schedule-grid, .job-model-grid { order: 1; }
-.job-enabled { order: 2; }
+.job-enabled { order: 2; min-width: var(--tap); min-height: var(--tap); cursor: pointer; }
 .job-footer { order: 3; }
 .job-cron { display: block; margin-top: 8px; }
 .job-runs-heading { margin-top: 28px; }

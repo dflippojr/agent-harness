@@ -24,9 +24,8 @@ export async function createTask(page: Page, title: string, prompt: string) {
   await page.goto('/#/new');
   await expect(page.getByRole('region', { name: 'New task', exact: true })).toBeVisible();
   await page.getByLabel('Prompt', { exact: true }).fill(prompt);
-  // Project and Title lack associated labels in the existing UI (tracked by the UI pass).
-  await page.locator('#new-task-form select').first().selectOption('ui');
-  await page.getByPlaceholder('Optional; defaults to the first line').fill(title);
+  await page.getByLabel('Project', { exact: true }).selectOption('ui');
+  await page.getByLabel('Title', { exact: true }).fill(title);
   await page.getByRole('button', { name: 'Start', exact: true }).click();
   await expect(page).toHaveURL(/#\/s\/[^/]+$/);
   await expect(page.locator('.session-tabs')).toBeVisible();
