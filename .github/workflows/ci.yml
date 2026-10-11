@@ -1,6 +1,7 @@
 name: CI
 
-# One workflow, two jobs, both GitHub-hosted (free for this public repo):
+# One workflow, three jobs, all GitHub-hosted (free for this public repo):
+#   web-types - generated OpenAPI freshness and native JavaScript type checking
 #   test  - the complete pytest suite with coverage (coverage.xml artifact)
 #   sonar - SonarCloud analysis of that coverage, with the quality-gate wait
 # The suite runs once. Tests used to run a second time on a self-hosted

@@ -29,3 +29,18 @@ export async function checkContracts(api, id) {
   const deleted = await api(`/jobs/${id}`, { method: "DELETE" });
   return { title, preview, position, wrong, cron, path, deleted };
 }
+
+/** @param {import('../../harness/web/client.mjs').AgentHarnessWebClient} client @param {string} id */
+export async function checkTransport(client, id) {
+  const session = await client.request(`/sessions/${id}`, { surface: "app" });
+  /** @type {string} */
+  const title = session.title;
+  // @ts-expect-error The actual transport must preserve the generated field types.
+  session.session_title.toUpperCase();
+  const created = await client.request("/sessions", { method: "POST", body: { prompt: "Test" }, surface: "app" });
+  /** @type {string} */
+  const createdId = created.id;
+  // @ts-expect-error POST /sessions returns one session, not the GET session list.
+  created.map(() => "");
+  return { title, createdId };
+}
