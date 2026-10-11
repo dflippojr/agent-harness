@@ -1,0 +1,15 @@
+{
+  "name": "agent-harness-ui-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tooling.test.mjs && node run.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@types/node": "24.10.1"
+  },
+  "dependencies": {
+    "fflate": "0.8.3"
+  }
+}

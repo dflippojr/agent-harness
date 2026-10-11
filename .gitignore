@@ -15,3 +15,9 @@ scripts/*.log
 
 # Lock file the managed-config writer creates during tests
 data/managed-config.lock
+
+# Disposable UI exploration and Playwright artifacts
+output/ui-pass/
+.playwright-cli/
+tools/ui-tests/playwright-report/
+tools/ui-tests/test-results/

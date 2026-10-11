@@ -129,7 +129,7 @@ owner. Runs queue one at a time, in this order:
 | Nightly report | job, `0 3 * * *`, enabled | – | Prompt "Write the nightly report.", project `ui` |
 | Weekly cleanup | job, `0 4 * * 1`, disabled | – | The same prompt |
 
-Session and job IDs are random. Find seeded rows by title or name.
+Session and job IDs are random. Find seeded rows by title or name. The recent list is bounded; after many mutations, use the search field and the exact seed title to find older sessions rather than expecting them in Recent. Read-only deep-link cases may reuse the IDs found at the start of that disposable instance.
 
 The `ui` project's policy asks before any `write_file` or `edit_file` under `protected/`. A `scratch` project exists
 too.
@@ -180,13 +180,13 @@ readiness signal.
 | ID | Path / ready signal | Seed | Actions | Expected outcome, and after reload | Audit expectation |
 | --- | --- | --- | --- | --- | --- |
 | AH-01 sign-in and connection | `<web>/connect` → `#/chat`; ready: `#conn[data-state="live"]` and `textarea[aria-label="Message"]` | default | Open `/connect`. | The chip `#conn` reads "Live", and the tab bar `nav#tab-bar` has Chat, Agents, Jobs, Images and Profile. After reload: still Live with no token prompt. | Not applicable: sign-in writes no audit row |
-| AH-02 agents groups and search | `#/agents`; ready: `section.agent-group[aria-label="Needs you"]` with `a.agent-row` | default | Read the groups. Type "compaction" in `input[type=search]`, then clear it. | Needs you: Protected settings and Failed run. Recent: the four done seeds. The search shows only "Long task with compaction". After reload: the same groups. | Not applicable (read-only; Web has no session delete) |
-| AH-03 tool rows | `#/agents` → "Tool rows" → `#/s/<id>`; ready: `.tabs.session-tabs` and the `.badge` "done" | default | Expand the `read_file notes/log.txt` row, use Copy and the full-screen viewer, close it. Open Changes, then Info. | Rows as seeded; the missing read is marked "error". Changes lists notes/log.txt and notes/todo.md. After reload: the same rows. | Not applicable (read-only) |
-| AH-04 approve | Agents → "Protected settings"; ready: `section.approval-sheet[aria-label="Approval needed"]` | default, **consumes the seeded approval** | Check the diff (`+  "theme": "system",`) and the reason. Click "✓ Approve". | The sheet closes, the card says "approved", the badge goes to done, and the answer is "Finished. The tool row shows whether the write was approved or denied." Changes lists protected/settings.json. After reload: done and approved. | `GET <server>/api/admin/v1/audit?action=approval.decide`: newest row (after a `started` row) has outcome `ok`, `metadata.decision` `approved`, `target_kind` `approval`, `actor_kind` `owner_key` and `key_id` equal to READY `key_id` |
+| AH-02 agents groups and search | `#/agents`; ready: `section.agent-group[aria-label="Needs you"]` with `a.agent-row` | default | Read the groups. Type "compaction" in `input[type=search]`, then clear it. | Needs you: Protected settings and Failed run. Recent: the four done seeds. Search is full-text and may also return "Tab bar tour" because its reply mentions the compact header. Search the complete title "Long task with compaction" when identifying that seed. After reload: the same groups. | Not applicable (read-only; Web has no session delete) |
+| AH-03 tool rows | `#/agents` → "Tool rows" → `#/s/<id>`; ready: `.tabs.session-tabs` and the `.badge` "done" | default | Expand the `read_file notes/log.txt` row, use Copy and the full-screen viewer, close it. Open Changes, then Info. | Rows as seeded; the missing read is marked "error". Changes says "No git repositories in this workspace yet.": these files are loose workspace files, not a git repository. Verify their contents in the tool output viewer. After reload: the same rows. | Not applicable (read-only) |
+| AH-04 approve | Agents → "Protected settings"; ready: `section.approval-sheet[aria-label="Approval needed"]` | default, **consumes the seeded approval** | Check the diff (`+  "theme": "system",`) and the reason. Click "✓ Approve". | The sheet closes, the card says "approved", the badge goes to done, and the answer is "Finished. The tool row shows whether the write was approved or denied." Changes still says "No git repositories in this workspace yet."; the write is confirmed by the tool result and approval audit. After reload: done and approved. | `GET <server>/api/admin/v1/audit?action=approval.decide`: newest row (after a `started` row) has outcome `ok`, `metadata.decision` `approved`, `target_kind` `approval`, `actor_kind` `owner_key` and `key_id` equal to READY `key_id` |
 | AH-05 deny with a note | Agents → "Tab bar tour"; ready: composer `textarea` with placeholder "Continue this session…" | default | Send "Now edit the protected settings file." When the sheet shows, click "Add a note for the agent", type "UI pass deny" and click "✕ Deny". | The card says "denied" with the note, the tool row is an error, and the same final answer arrives. After reload: still denied. | As in AH-04, with `decision` `denied` |
 | AH-06 new task: create and validation | `#/new`; ready: `section.new-task-page[aria-label="New task"]` | default | Click "Start" with an empty prompt. Then pick Project `ui`, Title "UI pass markdown", Prompt "Show me some markdown." and Start. | The empty prompt gives the toast "Write a prompt first" and creates nothing. Start opens `#/s/<id>` and streams "Summary", the table and the code block, then done. After reload: the session is done and listed under Recent. | None: session creation is not audited |
 | AH-07 running, queue and cancel | `#/new` | default | Start "Run a slow task so I can watch it running.", then right away start "Hello again". On the slow session, open Session menu → "Cancel task" → "Cancel task". | The slow session is under Running and the second shows queued until the slow one ends. Cancel ends it as cancelled, and the queued one then finishes done. After reload: cancelled and done. | None: cancel is not audited |
-| AH-08 retry and failure | Agents → "Retry after a model error", then "Failed run"; ready: `.session-tabs` | default | Read both. On Failed run, open Session menu → "Run again as new session". | Retry: one retry row, then the answer. Failed: the failed badge and the HTTP 400 text, and the rerun fails the same way (scripted). After reload: unchanged. | None |
+| AH-08 retry and failure | Agents → "Retry after a model error", then "Failed run"; ready: `.session-tabs` | default | Read both. On Failed run, open Session menu → "Run again as new session". | Retry: the row "Model call retried (1)", then the answer. The seeded HTTP 500 is a server-side fixture detail; the row does not render its error text. Failed: the failed badge and the HTTP 400 text, and the rerun fails the same way (scripted). After reload: unchanged. | None |
 | AH-09 compaction | Agents → "Long task with compaction" | default | Scroll the transcript. | Compaction rows appear between the long replies, then the final answer. After reload: unchanged. | Not applicable (read-only) |
 | AH-10 rename: edit and cancel | Any done session; ready: `button.session-menu-btn[aria-label="Session menu"]` | default | Session menu → Rename, type "Renamed by UI pass", Enter. Rename again, type "discard", press Escape. | The header shows "Renamed by UI pass", and the Escape edit is dropped. After reload: "Renamed by UI pass" in the header and in Agents. | None: owner session rename is not audited (verified) |
 | AH-11 jobs CRUD | `#/jobs`; ready: `.job-row[data-job]` with section labels "Scheduled" and "Paused" | default | 1. Switch `Weekly cleanup enabled` on. 2. `#/jobs/new`: Name "UI pass job", Task "Write the nightly report.", Cron "bad", then Create. 3. Fix Cron to `0 5 * * *`, Project `ui`, Create. 4. Rename it to "UI pass job v2" and Save. 5. Run now. 6. Delete → Cancel. 7. Delete → "Delete job". | 1: toast "Weekly cleanup resumed" with Undo. 2: "a schedule needs 5 fields: minute hour day-of-month month day-of-week" under Cron and as a toast; nothing is created. 3: toast "Saved · next run …". 5: a new session ends with "Nightly report written to reports/nightly.md. All quiet." 6: no change. 7: the job is gone. After reload: Weekly cleanup is enabled, "UI pass job v2" exists after steps 3 and 4, and it is absent after step 7. | `/api/admin/v1/audit?target_id=<job id>`: `job.create` (step 3), `job.update` with `metadata.fields` `["name"]` (step 4), `job.run` (step 5; a `started` row, then `ok`), `job.delete` (step 7), each ending `ok` with READY `key_id`. Step 1 is a `job.update` on the Weekly cleanup id. |
@@ -249,7 +249,7 @@ readiness signal.
 
 ## Playwright and CI
 
-- **Current state.** The repository has no Playwright suite yet. The first pass adds it at the paths below. The
+- **Current state.** The Playwright suite added by #589 lives at the paths below. The
   existing web tests are pytest wrappers around Node scripts with DOM stubs (`tests/test_web_*.py`).
 - **Package manager and paths.** npm, in a self-contained package like `tools/web-types`:
   - `tools/ui-tests/package.json` with `@playwright/test` pinned to an exact version, plus its `package-lock.json`
@@ -260,17 +260,18 @@ readiness signal.
   ```
   npm --prefix tools/ui-tests ci
   npm --prefix tools/ui-tests exec -- playwright install chromium webkit
-  npm --prefix tools/ui-tests test
+  npm --prefix tools/ui-tests test -- --workers=1
   ```
 
 - **Instance and base URL.**
-  - Playwright's `webServer.command` runs `python -m harness.fake_instance --dir <instance-dir> --port 18800 --web-port
-    18801` from the repository root (`cwd: '../..'`).
+  - Playwright's `webServer.command` runs `node start.mjs`, which invokes `python -m harness.fake_instance --dir <instance-dir> --port 18800 --web-port
+    18801` from the repository root. The wrapper suppresses stdout so the disposable tokens are never printed in CI.
   - Use `url: 'http://127.0.0.1:18801/ready'`, `reuseExistingServer: false` and `timeout: 180_000`.
   - Set `use.baseURL` to `http://127.0.0.1:18801`.
   - Use one fixed `<instance-dir>` for start and both teardown paths:
     `process.env.HARNESS_UI_INSTANCE_DIR ?? path.join(os.tmpdir(), 'harness-ui-tests')`. CI sets
-    `HARNESS_UI_INSTANCE_DIR` to `${{ runner.temp }}/harness-ui-tests` for the whole job.
+    `HARNESS_UI_INSTANCE_DIR` to `$RUNNER_TEMP/harness-ui-tests` through `GITHUB_ENV`
+    in an initial setup step, so the test and cleanup steps share the same directory.
   - Because Start refuses a non-empty directory, a leftover from a killed run fails the next start loudly. Run
     Teardown on that directory before starting, both locally and as the first CI step (it is a no-op when the
     directory is absent).
@@ -278,7 +279,7 @@ readiness signal.
 - **Fixtures.**
   - A `signedIn` fixture calls `page.goto('/connect')` and waits for `#conn[data-state="live"]`.
   - Mutating specs create their own sessions, jobs and chats with unique names, or run with `workers: 1` against a
-    fresh instance.
+    fresh instance. Every mutating test uses a unique name; approval tests create their own pending approval, so the default protected seed stays available for layout tests.
   - Nothing is shared or persistent between runs.
 - **Projects.** Desktop light and dark at 1440×900, and phone light and dark with `devices['iPhone SE']` (WebKit) and
   `devices['Pixel 7']` (Chromium).
@@ -287,7 +288,7 @@ readiness signal.
   `if: always()`.
 - **Reports and traces.** Reports go to `tools/ui-tests/playwright-report/` and traces and screenshots to
   `tools/ui-tests/test-results/`, with `trace: 'retain-on-failure'`. Both are gitignored. CI uploads them with
-  `actions/upload-artifact` and `if: always()`, after making sure they contain no tokens.
+  `actions/upload-artifact` and `if: always()`, after redacting tokens from both original traces and HTML-report trace copies. `teardown.mjs` and `cleanup.mjs` implement that redaction; a failed cleanup prevents evidence upload. The npm runner stops the instance in `finally`, and CI repeats cleanup with `if: always()`.
 - **CI.**
   - The repository is **public** (`gh api repos/dflippojr/agent-harness --jq .private` → `false`), so it uses
     GitHub-hosted runners only.
@@ -334,3 +335,11 @@ To verify that nothing owned remains:
 
 Teardown touches nothing outside the instance directory. Screenshots, reports and logs you redirected elsewhere stay
 where they are.
+
+## First pass coverage and limitations (#589)
+
+- Regression commands use one Playwright worker. On the tower, local pytest uses at most `-n 2` under the dispatcher memory limit. Hosted CI retains its existing four-worker pytest cap.
+- Passing flow tests cover AH-01 through AH-14; AH-15 remains not applicable. The no-overflow regression covers Agents, New task, Jobs, Job form, Profile, Settings, Appearance, Connection, approval, and session Transcript/Changes/Info at 320/375/768/1440 in both themes and phone projects. Chat landing at 320 is intentionally deferred to the separate #591 fix; no skipped test, expected-failure assertion, retry, or hidden overflow makes it pass here. The phone-landscape tool action failure is #593; portrait viewer regression remains covered. New task label associations are #592; the job Enabled touch target is #594, and phone session-tab spacing is #595.
+- Optional disabled modules currently yield 404 probes for `/gpu`, `/models/status`, `/resources`, `/memory`, and `/remote-control`. Record these as expected feature-detection diagnostics in fake mode, separately from unexpected HTTP failures and JavaScript exceptions. No request reaches a GPU or real model provider.
+- Installed iPhone SE descriptors can be 320×568; explicitly use 375×667 while retaining the descriptor UA/DPR/mobile/touch settings. Windows WebKit reports `navigator.maxTouchPoints=0` despite a context with `hasTouch=true`; record both rather than claiming physical touch hardware. Chromium Pixel emulation reports touch=1.
+- Root-font scaling is only a text-size approximation: fixed 16px form text stays 16px. Record that limitation separately from actual 320 CSS px reflow. The desktop breakpoint sweep includes 2560px, and short-screen checks include 1280×600, 1024×500, and phone landscapes.
