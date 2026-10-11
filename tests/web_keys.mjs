@@ -26,6 +26,8 @@ assert.deepEqual(keyAction(press("x"), { chord: true }), { action: "cancel" }, "
 assert.deepEqual(keyAction(press("j"), { chord: true }), { action: "go", hash: "#/jobs" }, "G J is Jobs, not the next row");
 assert.equal(keyAction(press("j", { repeat: true }))?.action, "next", "J and K repeat while held");
 assert.equal(keyAction(press("n", { repeat: true })), null, "other keys don't repeat");
+assert.equal(keyAction(press("?", { shiftKey: true, repeat: true })), null, "a held ? doesn't toggle the sheet");
+assert.equal(keyAction(press("g", { repeat: true }), { chord: true }), null, "a held G keeps waiting for its second key");
 assert.equal(keyAction(press("N", { shiftKey: true })), null, "Shift+N is not N");
 
 // Modified keys belong to the browser and assistive technology; composing text is typing.

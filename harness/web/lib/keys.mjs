@@ -52,13 +52,14 @@ export function keyAction(e, { chord = false } = {}) {
   if (!e || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return null;
   if (isTypingTarget(e.target)) return null;
   const key = String(e.key || "");
+  // Held down, only J and K repeat: a held `?` or `G` must not toggle or chord again.
+  if (e.repeat && !["j", "k"].includes(key.toLowerCase())) return null;
   if (chord) {
     const hash = GO_KEYS[key.toLowerCase()];
     return hash && !e.shiftKey ? { action: "go", hash } : { action: "cancel" };
   }
   if (key === "?") return { action: "help" };
-  // Held down, only J and K repeat.
-  if (e.shiftKey || (e.repeat && !["j", "k"].includes(key.toLowerCase()))) return null;
+  if (e.shiftKey) return null;
   switch (key.toLowerCase()) {
     case "/": return { action: "search" };
     case "n": return { action: "new" };
