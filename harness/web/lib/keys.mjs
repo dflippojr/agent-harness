@@ -105,8 +105,27 @@ export function shortcutsBody(role) {
   ];
 }
 
+// From 768 px the rail is the left column and the list pane (#563) the next, both fixed beside the header bar and the page.
+// Tab follows reading order there, so the rail moves ahead of them in the DOM; on phones it goes back after the bar, where
+// it has always been. Both are position: fixed, so the move changes no layout.
+export const READING_ORDER_QUERY = "(min-width: 768px)";
+export function mountReadingOrder({ document, window }) {
+  const query = window.matchMedia?.(READING_ORDER_QUERY);
+  const nav = document.getElementById("tab-bar");
+  const bar = document.getElementById("bar");
+  if (!query || !nav || !bar) return;
+  const place = () => {
+    const parent = bar.parentNode;
+    if (query.matches) parent.insertBefore(nav, document.getElementById("split-list") || bar);
+    else parent.insertBefore(nav, bar.nextSibling);
+  };
+  query.addEventListener?.("change", place);
+  place();
+}
+
 export function mountKeys({ browser, go, role }) {
   const { document, window } = browser;
+  mountReadingOrder({ document, window });
   let chordTimer = null;
   let chord = false;
   let helpOpen = false;

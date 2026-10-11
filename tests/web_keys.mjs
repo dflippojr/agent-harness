@@ -2,8 +2,8 @@
 // Approve key; mountKeys() opens and closes the `?` sheet, focuses search, starts New, switches section after `G` and moves
 // through list rows with J and K, and leaves the page alone while a sheet or menu answers its own keys.
 import assert from "node:assert/strict";
-import { keyAction, isTypingTarget, newHash, stepRow, mountKeys, SHORTCUTS, GO_KEYS, CHORD_MS, ROW_SELECTOR,
-  shortcutsBody } from "../harness/web/lib/keys.mjs";
+import { keyAction, isTypingTarget, newHash, stepRow, mountKeys, mountReadingOrder, READING_ORDER_QUERY, SHORTCUTS, GO_KEYS,
+  CHORD_MS, ROW_SELECTOR, shortcutsBody } from "../harness/web/lib/keys.mjs";
 import { SPLITS } from "../harness/web/lib/layout.mjs";
 import { createDocument, Emitter, Node, El, walk } from "./web_stub_dom.mjs";
 
@@ -72,6 +72,39 @@ assert.equal(stepRow(3, 0, 2, 1), 1, "the focused row wins over the open one");
 assert.equal(stepRow(3, 2, -1, 1), 2, "the ends hold");
 assert.equal(stepRow(3, 0, -1, -1), 0);
 assert.ok(SPLITS[0].empty.keys.some(([caps]) => caps.includes("?")), "the empty Agents pane points at ?");
+
+// ---------- reading order: from 768 px the rail, then the list pane, then the header bar ----------
+{
+  const parent = { kids: [],
+    insertBefore(node, ref) {
+      this.kids = this.kids.filter((k) => k !== node);
+      const at = ref ? this.kids.indexOf(ref) : -1;
+      this.kids.splice(at < 0 ? this.kids.length : at, 0, node);
+      node.parentNode = this;
+    } };
+  const node = (id) => ({ id, get nextSibling() { const i = parent.kids.indexOf(this); return parent.kids[i + 1] || null; } });
+  const [bar, nav, banner, app] = ["bar", "tab-bar", "guest-banner", "app"].map(node);
+  [bar, nav, banner, app].forEach((n) => parent.insertBefore(n, null));
+  const ids = { bar, "tab-bar": nav };
+  const order = () => parent.kids.map((k) => k.id).join(" ");
+  const media = new Emitter();
+  media.matches = true;
+  let asked = null;
+  mountReadingOrder({ document: { getElementById: (id) => ids[id] || null },
+    window: { matchMedia: (q) => { asked = q; return media; } } });
+  assert.equal(asked, READING_ORDER_QUERY);
+  assert.equal(READING_ORDER_QUERY, "(min-width: 768px)");
+  assert.equal(order(), "tab-bar bar guest-banner app", "desktop: the rail reads first");
+  media.matches = false;
+  media.emit("change");
+  assert.equal(order(), "bar tab-bar guest-banner app", "phone: back after the bar, as index.html has it");
+  const pane = node("split-list");
+  parent.insertBefore(pane, bar);
+  ids["split-list"] = pane;
+  media.matches = true;
+  media.emit("change");
+  assert.equal(order(), "tab-bar split-list bar guest-banner app", "the rail, the list, then the detail's bar");
+}
 
 // ---------- mountKeys in a stub page ----------
 const { doc, byId } = createDocument();

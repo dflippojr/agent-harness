@@ -1149,6 +1149,7 @@ kbd {
   .split-empty .split-empty-keys { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 18px; margin-top: 6px; }
   .split-empty-keys span { display: inline-flex; align-items: center; gap: 6px; }
   :is(.btn, .icon, .tabs button, .switch):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .icon:focus-visible { border-radius: var(--radius); }
   :is(a.agent-row, a.card, a.job-main, a.set-row):focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 }
 /* End Desktop 10. */

@@ -86,7 +86,9 @@ export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange
     if ($pane) return;
     $pane = document.createElement("section");
     $pane.id = "split-list";
-    $app.parentNode.insertBefore($pane, $app);
+    // Before the header bar, which sits over the detail: Tab reads the rail, the list, then the detail (#571).
+    const $bar = $back.parentNode;
+    $bar.parentNode.insertBefore($pane, $bar);
     // The pane scrolls on its own: its wheel events must not reach the window, where an open transcript reads an upward
     // wheel as the reader leaving the bottom and stops following new output.
     $pane.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
