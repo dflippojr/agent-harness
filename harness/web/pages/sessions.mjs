@@ -35,11 +35,13 @@ async function viewList(pane = null) {
   const list = h("div", { class: "agent-groups" });
   const results = h("div", { hidden: true });
   const queueNote = h("p", { class: "note" });
-  const search = h("input", { type: "search", placeholder: "Search", value: searchQuery, class: "search" });
+  const search = h("input", { type: "search", placeholder: "Search", value: searchQuery, class: "search", "aria-keyshortcuts": "/" });
   const targetSwitch = h("div", { class: "tabs", role: "group", "aria-label": "Filter sessions by machine" });
   // #510: a failed refresh says so (when the list last updated, and why) instead of silently keeping the old list.
   const stale = staleNote({ make: h, place: (el) => targetSwitch.after(el), onRetry: () => refreshNow() });
-  append(host, h("div", { class: "search-wrap" }, search), targetSwitch, queueNote, results, list);
+  // The `/` cap shows on desktop (#571): it focuses this field from anywhere on the page.
+  append(host, h("div", { class: "search-wrap" }, search, h("kbd", { class: "search-key", "aria-hidden": "true" }, "/")),
+    targetSwitch, queueNote, results, list);
   if (pane) pane.header("Agents", isGuest() ? null : { href: "#/new", label: "+ New task" });
   else {
     setHeader("agents", "Agents");

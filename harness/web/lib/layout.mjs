@@ -21,7 +21,7 @@ export function sessionJumpHidden(y, viewH, pageH) {
 //
 // Adding a split (Jobs, Settings):
 //   1. Add an entry to SPLITS: `key`, `list` (the router's view name), `label` (the pane's name), `match(parts)` and the
-//      `empty` state (`icon`, an inline SVG string, plus `title` and `text`).
+//      `empty` state (`icon`, an inline SVG string, plus `title`, `text` and optional `keys`, [[caps], what] hints).
 //   2. Let that list view take an optional pane: `viewX(pane)`. With a pane it renders into `pane.body`, registers its
 //      teardown with `pane.onLeave` (run when the split closes, not on every row change), puts its title and New action
 //      in `pane.header(title, action)` instead of the bar, gives each row `data-split-key="<the key match() returns>"`,
@@ -42,7 +42,8 @@ export const SPLITS = [
       if (parts.length === 2 && (parts[1] === "new" || validId(parts[1]))) return parts[1];
       return undefined;
     },
-    empty: { title: "No job open", text: "Pick one from the list, or create a new job." },
+    empty: { title: "No job open", text: "Pick one from the list, or create a new job.",
+      keys: [[["J", "K"], "move"], [["Enter"], "open"], [["N"], "new job"], [["?"], "all shortcuts"]] },
   },
   {
     key: "agents",
@@ -53,7 +54,8 @@ export const SPLITS = [
       if (parts[0] === "s" && validId(parts[1])) return parts[1];
       return undefined;
     },
-    empty: { icon: AGENT_ICON, title: "No session open", text: "Pick one from the list, or start a new task." },
+    empty: { icon: AGENT_ICON, title: "No session open", text: "Pick one from the list, or start a new task.",
+      keys: [[["J", "K"], "move"], [["Enter"], "open"], [["N"], "new task"], [["?"], "all shortcuts"]] },
   },
 ];
 
@@ -76,6 +78,25 @@ export function isListToggleKey(e) {
 
 const SIDEBAR_SVG = '<svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>';
 
+// From 768 px the rail is the left column and the list pane the next, both fixed beside the header bar and the page.
+// Tab follows reading order there (#571), so the rail moves ahead of them in the DOM; on phones it goes back after the bar, where
+// it has always been. Both are position: fixed, so the move changes no layout.
+export const READING_ORDER_QUERY = "(min-width: 768px)";
+export function mountReadingOrder({ document, window }) {
+  const query = window.matchMedia?.(READING_ORDER_QUERY);
+  const nav = document.getElementById("tab-bar");
+  const bar = document.getElementById("bar");
+  if (!query || !nav || !bar) return;
+  const place = () => {
+    const parent = bar.parentNode;
+    if (!parent) return;  // a shell not on the page yet (the app under a test stub)
+    if (query.matches) parent.insertBefore(nav, document.getElementById("split-list") || bar);
+    else parent.insertBefore(nav, bar.nextSibling);
+  };
+  query.addEventListener?.("change", place);
+  place();
+}
+
 // The router calls sync(parts) on every route and gets back the active split ({ split, selected, pane }) or null; it
 // renders the list once per open with renderList(view) and, when nothing is open, the detail's empty state with empty().
 // `onChange` runs when the window crosses the breakpoint. `onDaemonChange` (the app-wide stream's event hook) lets a
@@ -83,6 +104,7 @@ const SIDEBAR_SVG = '<svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true
 export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange = null }) {
   const { $app, $back } = els;
   const { window, document } = browser;
+  mountReadingOrder({ document, window });
   const query = window.matchMedia?.(`(min-width: ${SPLIT_MIN_WIDTH}px)`) || null;
   let $pane = null;
   let $toggle = null;
@@ -96,7 +118,9 @@ export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange
     if ($pane) return;
     $pane = document.createElement("section");
     $pane.id = "split-list";
-    $app.parentNode.insertBefore($pane, $app);
+    // Before the header bar, which sits over the detail: Tab reads the rail, the list, then the detail (#571).
+    const $bar = $back.parentNode;
+    $bar.parentNode.insertBefore($pane, $bar);
     // The pane scrolls on its own: its wheel events must not reach the window, where an open transcript reads an upward
     // wheel as the reader leaving the bottom and stops following new output.
     $pane.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
@@ -163,7 +187,7 @@ export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange
       onLeave: (fn) => { if (state.closed) fn(); else state.cleanup.push(fn); },
       // `action` is { href, label } or null (guests start nothing).
       header: (title, action = null) => fill(head, h("h2", {}, title),
-        action ? h("a", { class: "btn primary list-new", href: action.href }, action.label) : null),
+        action ? h("a", { class: "btn primary list-new", href: action.href, "aria-keyshortcuts": "n" }, action.label) : null),
       paint: () => { if (current === state) mark(); },
     };
     $pane.setAttribute("aria-label", split.label);
@@ -215,7 +239,9 @@ export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange
     fill($app, h("section", { class: "split-empty" },
       text.icon ? h("span", { class: "split-empty-icon", html: text.icon }) : null,
       h("h2", {}, text.title),
-      h("p", {}, text.text)));
+      h("p", {}, text.text),
+      text.keys ? h("p", { class: "split-empty-keys" }, text.keys.map(([caps, what]) =>
+        h("span", {}, caps.map((k) => h("kbd", {}, k)), what))) : null));
   }
 
   document.addEventListener("keydown", (e) => {
