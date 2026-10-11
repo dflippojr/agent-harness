@@ -3,7 +3,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const python = process.env.PYTHON ?? 'python';
 const runName = /^run-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -11,7 +11,7 @@ const runName = /^run-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 // HARNESS_UI_INSTANCE_DIR remains the base shared with CI's later cleanup step. Each invocation gets an
 // unreused child directory; the persisted owner lets that step find a run even without its inherited env.
 export function createLifecycle({ directory = process.env.HARNESS_UI_INSTANCE_DIR ?? path.join(os.tmpdir(), 'harness-ui-tests'), command = python, commandArgs = [] } = {}) {
-  const base = path.resolve(directory);
+  const base = path.resolve(repoRoot, directory);
   function runDirectory(id) {
     if (!runName.test(id)) throw new Error('Invalid UI test run identity');
     return path.join(base, id);
@@ -40,7 +40,12 @@ export function createLifecycle({ directory = process.env.HARNESS_UI_INSTANCE_DI
     catch (error) { if (error.code === 'ENOENT') return; throw error; }
     for (const entry of entries) {
       if (!entry.isDirectory() || !runName.test(entry.name)) continue;
-      const owner = record(entry.name);
+      let owner;
+      try { owner = record(entry.name); }
+      catch {
+        console.error(`Preserving UI test run ${entry.name}: ownership is unreadable`);
+        continue;
+      }
       if (!owner) continue; // Allocation was interrupted before ownership was written: preserve uncertainty.
       try { process.kill(owner.pid, 0); }
       catch (error) {
@@ -54,7 +59,9 @@ export function createLifecycle({ directory = process.env.HARNESS_UI_INSTANCE_DI
     const id = 'run-' + randomUUID();
     mkdirSync(base, { recursive: true });
     mkdirSync(runDirectory(id));
-    writeFileSync(path.join(runDirectory(id), 'owner.json'), JSON.stringify({ id, pid: process.pid }), { flag: 'wx' });
+    const pending = path.join(runDirectory(id), 'owner.tmp');
+    writeFileSync(pending, JSON.stringify({ id, pid: process.pid }), { flag: 'wx' });
+    renameSync(pending, path.join(runDirectory(id), 'owner.json'));
     return id;
   }
   function instance(id) {

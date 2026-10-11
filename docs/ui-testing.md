@@ -272,6 +272,7 @@ readiness signal.
     `process.env.HARNESS_UI_INSTANCE_DIR ?? path.join(os.tmpdir(), 'harness-ui-tests')`. CI sets
     `HARNESS_UI_INSTANCE_DIR` to `$RUNNER_TEMP/harness-ui-tests` through `GITHUB_ENV`
     in an initial setup step, so the test and cleanup steps share the same base directory.
+    Relative base paths resolve from the repository root for both npm and standalone cleanup.
   - `run.mjs` allocates a unique `run-<uuid>` child with an `owner.json` recording its identity and runner pid;
     the actual fake instance lives in `<base>/run-<uuid>/instance`. It propagates `HARNESS_UI_RUN_ID` to Start
     and Playwright's global teardown. The npm `finally` teardown uses that same identity, and repeated cleanup
@@ -279,6 +280,8 @@ readiness signal.
   - The separate CI `cleanup.mjs` step recovers those persisted identities only after their runner has exited.
     Startup also recovers stale runs this way. A live or unreadable owner pid (including a reused live pid)
     leaves the run untouched. If stopping its recorded instance fails, the handle and ownership record remain.
+    Ownership records are published atomically; incomplete or unreadable records are preserved without blocking
+    allocation of another run.
     Legacy instances directly in the base directory are preserved; stop them explicitly with the manual command.
   - The start refuses busy ports, so a competing invocation fails loudly and cleans only its own allocation.
     It never pre-cleans the other invocation's live instance. Parallel browser suites are not supported.

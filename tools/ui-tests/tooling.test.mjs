@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { zipSync, unzipSync } from 'fflate';
 import { sanitizeText, sanitizeTraces } from './teardown.mjs';
-import { createLifecycle } from './instance.mjs';
+import { createLifecycle, repoRoot } from './instance.mjs';
 import { spawnSync } from 'node:child_process';
 
 async function lifecycleTest(body) {
@@ -24,7 +24,7 @@ async function lifecycleTest(body) {
       if (identity?.fail) { console.error('cannot verify process'); process.exit(1); }
       rmSync(root, { recursive: true, force: true });
     `);
-    const caller = () => createLifecycle({ directory: path.join(directory, 'base'), command: process.execPath, commandArgs: [stub] });
+    const caller = (base = path.join(directory, 'base')) => createLifecycle({ directory: base, command: process.execPath, commandArgs: [stub] });
     const lifecycle = caller();
     const stops = async () => {
       try { return (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line)); }
@@ -120,6 +120,43 @@ test('unreadable owner metadata never authorizes stale recovery', async () => {
     assert.deepEqual(await stops(), []);
     assert.equal(JSON.parse(await readFile(path.join(root, 'instance.json'), 'utf8')).id, id);
     lifecycle.stop(id);
+  });
+});
+
+test('interrupted ownership publication preserves the allocation without blocking other runs', async () => {
+  await lifecycleTest(async ({ lifecycle, stops, seed }) => {
+    const incomplete = lifecycle.begin();
+    const root = await seed(incomplete);
+    const ownerFile = path.join(path.dirname(root), 'owner.json');
+    await writeFile(ownerFile, '{"id":'); // A partially written record from an older runner.
+    const next = lifecycle.begin();
+    assert.deepEqual(await stops(), []);
+    assert.equal(JSON.parse(await readFile(path.join(root, 'instance.json'), 'utf8')).id, incomplete);
+    await rm(ownerFile);
+    await writeFile(path.join(path.dirname(root), 'owner.tmp'), '{"id":'); // Interrupted before atomic publication.
+    lifecycle.recoverStale();
+    assert.deepEqual(await stops(), []);
+    lifecycle.stop(next);
+    assert.equal(JSON.parse(await readFile(path.join(root, 'instance.json'), 'utf8')).id, incomplete);
+  });
+});
+
+test('relative base paths resolve identically from npm and repository-root cleanup', async () => {
+  await lifecycleTest(async ({ lifecycle, caller, stops, seed }) => {
+    const id = lifecycle.begin();
+    const root = await seed(id);
+    const relative = path.relative(repoRoot, path.dirname(path.dirname(root)));
+    const previous = process.cwd();
+    try {
+      process.chdir(path.join(repoRoot, 'tools', 'ui-tests'));
+      const npmCaller = caller(relative);
+      assert.equal(npmCaller.instance(id), root);
+      process.chdir(repoRoot);
+      const cleanupCaller = caller(relative);
+      assert.equal(cleanupCaller.instance(id), root);
+      cleanupCaller.stop(id);
+      assert.deepEqual((await stops()).map(stop => stop.identity.id), [id]);
+    } finally { process.chdir(previous); }
   });
 });
 
