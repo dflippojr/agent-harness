@@ -153,6 +153,7 @@ test('AH-12 chat streams, rename persists and delete persists', async ({ signedI
   const sheet = page.getByRole('dialog', { name: 'Rename chat', exact: true });
   await sheet.getByLabel('Title', { exact: true }).fill(title);
   await sheet.getByRole('button', { name: 'Rename', exact: true }).click();
+  await expect(page.locator('#title')).toHaveText(title);
   await page.reload();
   await expect(page.locator('#title')).toHaveText(title);
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
