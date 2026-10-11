@@ -423,6 +423,30 @@ def test_stop_ends_the_recorded_instance_process(tmp_path):
         proc.kill()
 
 
+def test_teardown_removes_only_this_instances_sandbox_containers(monkeypatch, tmp_path):
+    import sqlite3
+    import subprocess
+    instance = tmp_path / "instance"
+    fake_instance.write_instance(instance, 0)
+    for db, ids in ((instance / "data" / "harness.sqlite3", ("s1", "s2")),
+                    (instance / "data" / "apps" / "app-x" / "harness.sqlite3", ("s3",))):
+        db.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE sessions (id TEXT)")
+        con.executemany("INSERT INTO sessions VALUES (?)", [(i,) for i in ids])
+        con.commit()
+        con.close()
+
+    def no_docker(args, **kwargs):
+        raise FileNotFoundError("docker")
+    monkeypatch.setattr(subprocess, "run", no_docker)
+    fake_instance.remove_containers(instance)   # no Docker CLI: no containers, no error
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda args, **kwargs: calls.append(args))
+    assert fake_instance.stop(instance) == 0 and not instance.exists()
+    assert calls == [["docker", "rm", "-f", "harness-s1", "harness-s2", "harness-s3"]]
+
+
 def test_kill_survives_a_child_that_already_exited(monkeypatch):
     import psutil
     killed = []

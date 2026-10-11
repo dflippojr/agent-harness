@@ -306,6 +306,8 @@ What it does:
 - It reads `<dir>/instance.json`.
 - It stops that process and its children, but only if the process's command line is `harness.fake_instance` and its
   start time matches the handle. A reused pid, even one belonging to another instance, is never killed.
+- It removes the sandbox containers of this instance's own sessions (`harness-<session id>`, read from its
+  databases), if any exist and Docker is installed. It removes no other containers.
 - It deletes the directory, including the read-only git checkpoint objects.
 - It works after a partial start:
   - with no handle file
