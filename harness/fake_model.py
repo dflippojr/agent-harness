@@ -45,6 +45,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
 import yaml
 
@@ -254,9 +255,20 @@ class FakeModel:
 
     def __init__(self, fixtures: Fixtures):
         self.fixtures = fixtures
-        # A call's context -> retryable errors raised for it so far. Cleared once the call gets through (always within
-        # the harness's retries), so the next session that reaches the same context fails the same way again.
-        self._failures: dict[str, int] = {}
+        # Manager gives each run its own task; all retry attempts execute in that task. Direct callers must also
+        # keep a sequence's attempts in one task. Identical contexts in different runs never share progress.
+        # Weak keys avoid owning the task; the done callback clears even retained tasks after backoff/termination.
+        self._failures: WeakKeyDictionary[asyncio.Task, dict[str, int]] = WeakKeyDictionary()
+
+    def _forget_failures(self, task: asyncio.Task) -> None:
+        self._failures.pop(task, None)
+
+    def _retry_counts(self) -> dict[str, int]:
+        task = asyncio.current_task()
+        if task not in self._failures:
+            self._failures[task] = {}
+            task.add_done_callback(self._forget_failures)
+        return self._failures[task]
 
     @classmethod
     def from_path(cls, path: Path | str) -> "FakeModel":
@@ -311,13 +323,18 @@ class FakeModel:
             raise LLMError(turn.error["message"], retryable=False)   # every time: a rerun fails the same way
         if turn.error is not None:
             key = hashlib.sha256(json.dumps(messages, sort_keys=True, default=str).encode()).hexdigest()
-            seen = self._failures.get(key, 0)
+            failures = self._retry_counts()
+            seen = failures.get(key, 0)
             if seen < turn.error["times"]:
-                self._failures[key] = seen + 1
+                failures[key] = seen + 1
                 if turn.wait:
-                    await asyncio.sleep(turn.wait)
+                    try:
+                        await asyncio.sleep(turn.wait)
+                    except asyncio.CancelledError:
+                        failures.pop(key, None)
+                        raise
                 raise LLMError(turn.error["message"], retryable=turn.error["retryable"])
-            self._failures.pop(key, None)
+            failures.pop(key, None)
             if not turn.text and not turn.tool_calls and not turn.reasoning:
                 turn = Turn(text=["[fake model] Recovered after the scripted error."])
         return await self._emit(turn, prompt_tokens, on_delta, script.name, index, tools)
