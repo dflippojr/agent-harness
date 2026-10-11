@@ -1348,7 +1348,7 @@ export interface paths {
         put?: never;
         /**
          * Confirm Pairing Request
-         * @description Confirm a native App's claim on an armed slot with the match code it shows; then it may redeem.
+         * @description Confirm an App's claim on an armed slot with the match code it shows; then it may redeem.
          */
         post: operations["confirm_pairing_request_api_admin_v1_pairing_requests__rid__confirm_post"];
         delete?: never;

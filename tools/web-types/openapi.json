@@ -6201,7 +6201,7 @@
     },
     "/api/admin/v1/pairing-requests/{rid}/confirm": {
       "post": {
-        "description": "Confirm a native App's claim on an armed slot with the match code it shows; then it may redeem.",
+        "description": "Confirm an App's claim on an armed slot with the match code it shows; then it may redeem.",
         "operationId": "confirm_pairing_request_api_admin_v1_pairing_requests__rid__confirm_post",
         "parameters": [
           {

@@ -323,7 +323,13 @@ def test_hub_armed_browser_slot(hh):
     assert client.post(f"/api/v1/pair/requests/{rid}/claim", json={"code_challenge": challenge}).status_code == 403
     claimed = client.post(f"/api/v1/pair/requests/{rid}/claim", headers={"Origin": ORIGIN},
                           json={"code_challenge": challenge})
-    assert claimed.status_code == 200 and claimed.json()["state"] == "approved"  # exact origin is the check
+    assert claimed.status_code == 200 and claimed.json()["state"] == "claimed"
+    match = claimed.json()["match_code"]
+    assert re.fullmatch(r"\d{6}", match)
+    assert _redeem(client, rid, verifier, ORIGIN).status_code == 409
+    assert rec.owner("POST", f"{BASE}/{rid}/confirm", json={"match": match}).status_code == 200
+    assert _redeem(client, rid, verifier).status_code == 403
+    assert _redeem(client, rid, verifier, OTHER).status_code == 403
     assert client.post(f"/api/v1/pair/requests/{rid}/claim", headers={"Origin": ORIGIN},
                        json={"code_challenge": _pkce()[1]}).status_code == 409   # claimed once
     paired = _redeem(client, rid, verifier, ORIGIN)
@@ -334,6 +340,50 @@ def test_hub_armed_browser_slot(hh):
     _assert_no_secrets(rec.texts, paired.json()["token"], verifier)
     create = _audit(client, "pairing_request.create", outcome="ok")[0]
     assert create["actor_kind"] == "owner" and create["metadata"]["armed"] is True
+
+
+def test_native_caller_forging_browser_origin_cannot_redeem_without_typed_confirmation(hh):
+    client, m = hh
+    rid = client.post(BASE, headers=H(OWNER), json={
+        "catalog_app_id": CATALOG_ID, "origin": ORIGIN, "scopes": ["sessions", "approvals"],
+        "acknowledge_elevated": True}).json()["id"]
+    verifier, challenge = _pkce()
+    client.local_owner = False  # an unauthenticated native HTTP client supplies the browser's Origin
+    claimed = client.post(f"/api/v1/pair/requests/{rid}/claim", headers={"Origin": ORIGIN},
+                          json={"code_challenge": challenge})
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["state"] == "claimed" and claimed.json()["browser"] is True
+    match = claimed.json()["match_code"]
+    assert re.fullmatch(r"\d{6}", match)
+    assert _redeem(client, rid, verifier, ORIGIN).json()["error"]["code"] == "pairing_pending"
+    assert _app_keys(m) == []
+    wrong = "123456" if match != "123456" else "654321"
+    for given in ("", wrong):
+        refused = client.post(f"{BASE}/{rid}/confirm", headers=H(OWNER), json={"match": given})
+        assert refused.status_code == 400 and refused.json()["error"]["code"] == "match_mismatch"
+        assert _redeem(client, rid, verifier, ORIGIN).status_code == 409
+        assert _app_keys(m) == []
+    assert client.post(f"{BASE}/{rid}/confirm", json={"match": match}).status_code == 401
+    assert client.post(f"{BASE}/{rid}/confirm", headers=H(OWNER), json={"match": match}).status_code == 200
+    assert _redeem(client, rid, verifier).status_code == 403
+    assert _redeem(client, rid, verifier, OTHER).status_code == 403
+    assert _app_keys(m) == []
+    paired = _redeem(client, rid, verifier, ORIGIN)
+    assert paired.status_code == 201 and paired.json()["app"]["scopes"] == "sessions approvals"
+    assert len(_app_keys(m)) == 1
+    assert len(_audit(client, "pairing_request.approve", outcome="denied")) == 2
+
+
+@pytest.mark.parametrize("state", ["claimed", "approved", "redeemed"])
+def test_cli_pairing_recovery_notice_includes_finished_requests(monkeypatch, capsys, state):
+    monkeypatch.setattr(cli, "api", lambda *args, **kwargs: [{"kind": "app", "state": state}])
+    args = cli._build_parser().parse_args(["pairing-requests", "list"])
+    assert cli._cmd_admin(args) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == [{"kind": "app", "state": state}]
+    assert "harness pairing-requests list" in output.err
+    assert "harness keys revoke <key_id>" in output.err
+    assert "harness pairing-requests deny <id>" in output.err
 
 
 def test_hub_armed_native_slot_waits_for_the_owner_to_confirm(hh):
@@ -482,7 +532,10 @@ def test_cli_rows_call_the_owner_routes_and_print_no_secret(hh, monkeypatch, cap
     assert listed[hub.json()["id"]]["kind"] == "hub" and {r["match_code"] for r in listed.values()} == {""}
     assert '"approved"' in out[1] and '"armed"' in out[2]
     assert "from the App" in err[0] and "no code or an error, deny" in err[0]
-    assert "slot was already claimed, withdraw" in err[0] and "pairing-requests deny <id>" in err[0]
+    assert "slot was already claimed, run harness pairing-requests list" in err[0]
+    assert "redeemed, revoke its key_id with harness keys revoke <key_id>" in err[0]
+    assert "approved or claimed, deny it with harness pairing-requests deny <id>" in err[0]
+    assert "Browser and native claims both need harness pairing-requests confirm" in err[0]
     assert _redeem(client, rid, verifier, ORIGIN).status_code == 201
     slot = json.loads(out[2])["id"]
     monkeypatch.setattr("sys.argv", ["harness", "pairing-requests", "deny", slot])

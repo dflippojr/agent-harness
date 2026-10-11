@@ -871,11 +871,13 @@ def _cmd_admin(args) -> int:
     if path == "/hub-claim":
         _hub_status_notes(result)
     if method == "GET" and path == "/pairing-requests" and isinstance(result, list):
-        if any(r.get("kind") == "app" and r.get("state") in ("pending", "claimed") for r in result):
+        if any(r.get("kind") == "app" for r in result):
             print("Read the match code from the App you are setting up; it is not shown here. "
                   "If the App shows no code or an error, deny the request. "
-                  "If the App reports the slot was already claimed, withdraw it with "
-                  "harness pairing-requests deny <id>.", file=sys.stderr)
+                  "Browser and native claims both need harness pairing-requests confirm <id> --match <code>. "
+                  "If the App reports the slot was already claimed, run harness pairing-requests list. "
+                  "If its row is redeemed, revoke its key_id with harness keys revoke <key_id>. "
+                  "If it is approved or claimed, deny it with harness pairing-requests deny <id>.", file=sys.stderr)
     return 0
 
 

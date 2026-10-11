@@ -356,16 +356,18 @@ entry's `catalog_app_id`, scopes and (for a browser App) origin. The Hub gives t
 URL, as a deep link or text to paste. The App claims the slot with `POST /api/v1/pair/requests/{id}/claim`
 `{"code_challenge", "code_challenge_method": "S256"}`:
 
-- a browser claim must come from the armed origin and is approved at once (`state: "approved"`): the exact-origin
-  binding is the check;
-- a native claim answers `state: "claimed"` with a `match_code` to show. The owner confirms it (`harness
-  pairing-requests confirm <id> --match <code>`) before the token is released.
+- both browser and native claims answer `state: "claimed"` with a 6-digit `match_code` for the App to show.
+  The owner types that code into `harness pairing-requests confirm <id> --match <code>` before the token is released;
+- a browser claim and redemption must also send the bound exact `Origin`. A native client can forge that header,
+  so origin binding alone does not authorize redemption.
 
 The App then redeems as in step 3.
 
 Owner views, including `harness pairing-requests list`, always leave `match_code` empty. Only the requester receives
 its own code. If the App shows no code or an error, deny the request. If the App reports the slot was already claimed,
-withdraw it with `harness pairing-requests deny <id>`; do not confirm another caller's claim.
+run `harness pairing-requests list`. If the row is `redeemed`, revoke its `key_id` with
+`harness keys revoke <key_id>`. If it is `approved` or `claimed`, deny it with
+`harness pairing-requests deny <id>`; do not confirm another caller's claim.
 
 **Lifetimes and refusals.** A request has 10 minutes to be approved (or claimed, or confirmed) and 5 minutes after
 approval to be redeemed. A redeemed, denied or expired request is never reused. The redeem refuses a wrong verifier
@@ -389,7 +391,8 @@ print("Approve this App in the Hub. Match code:", pending.match_code)
 h = Harness.redeem_pairing(pending)   # waits up to 10 minutes for the approval; h.token is the App's ha- token
 ```
 
-`Harness.claim_pairing(url, request_id, origin=...)` claims a Hub-armed slot instead. A browser App passes its
+`Harness.claim_pairing(url, request_id, origin=...)` claims a Hub-armed slot instead. Show its `match_code` and wait
+for the owner to confirm it before redemption. A browser App passes its
 `origin` to both. Both check `features.pairing_requests` in `GET /api/v1` first and raise `feature_unsupported`
 against an older Server.
 

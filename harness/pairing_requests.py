@@ -12,8 +12,8 @@ One request model for browser and native Apps (docs/app-api.md#zero-touch-pairin
    browser.
 4. **Hub-initiated.** The owner arms a pre-approved slot (`POST /api/admin/v1/pairing-requests`) for a catalog app id,
    scopes and an optional origin, and hands the App only the slot's id. The App claims it with its challenge
-   (`POST /api/v1/pair/requests/{id}/claim`). A browser claim must come from the armed origin and is approved at
-   once; a native claim gets a match code the owner confirms (`/confirm`) before the token is released.
+   (`POST /api/v1/pair/requests/{id}/claim`). A browser claim must come from the armed origin. Every claim gets a match code
+   the owner confirms (`/confirm`) before the token is released.
 
 A Hub claim (#543, harness/hub_claim.py) is the same request with `kind: "hub"`: it asks for no scopes, is refused
 while a Hub is recorded, is approved or denied only on the daemon host, and redeems to the one `hub` key.
@@ -313,10 +313,8 @@ def register_app(app: FastAPI) -> None:
                 credential_audit.record(db, unknown, "pairing_request.claim", "", "denied", "pairing_request",
                                         {"reason": refusal[2]})
                 return _refuse(*refusal)
-            if origin:  # the exact-origin binding is the check: approved at once (decision 2)
-                fields = {"state": APPROVED, "approved_at": now, "expires_at": now + REDEEM_TTL_SECONDS}
-            else:       # a native claim waits for the owner to confirm its match code
-                fields = {"state": CLAIMED, "match_code": _match_code(), "expires_at": now + APPROVE_TTL_SECONDS}
+            # Origin can be forged by a native caller: every claim needs the owner's typed code (#519 decision 2).
+            fields = {"state": CLAIMED, "match_code": _match_code(), "expires_at": now + APPROVE_TTL_SECONDS}
             if not db.update_pairing_request(rid, (ARMED,), challenge_hash=challenge, **fields):
                 return _refuse(409, "this pairing request cannot be claimed", "not_claimable")
             credential_audit.record(db, unknown, "pairing_request.claim", rid, "ok", "pairing_request",
@@ -526,7 +524,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
     @app.post(base + "/{rid}/confirm")
     async def confirm_pairing_request(rid: str, body: ConfirmPairingRequest, request: Request):
-        """Confirm a native App's claim on an armed slot with the match code it shows; then it may redeem."""
+        """Confirm an App's claim on an armed slot with the match code it shows; then it may redeem."""
         key = require_admin(request, mgr)
 
         def check(row):
