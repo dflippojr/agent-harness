@@ -149,7 +149,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | Owner view. Codes themselves are shown only by the create response. | `harness/apps.py` `pairing_codes` |
 | POST | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | TODO | `harness/apps.py` `create_pairing_code` |
 | DELETE | `/api/admin/v1/pairing-codes/{pid}` | owner (`admin` scope) | TODO | `harness/apps.py` `revoke_pairing_code` |
-| GET | `/api/admin/v1/pairing-requests` | owner | Owner view of pairing requests: metadata, match codes and disclosure copy; never a token or verifier. | `harness/pairing_requests.py` `list_pairing_requests` |
+| GET | `/api/admin/v1/pairing-requests` | owner | Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier. | `harness/pairing_requests.py` `list_pairing_requests` |
 | POST | `/api/admin/v1/pairing-requests` | owner | Arm a pre-approved slot for a Hub entry (#519): no secret; the App claims it with its own challenge. | `harness/pairing_requests.py` `arm_pairing_request` |
 | POST | `/api/admin/v1/pairing-requests/{rid}/approve` | owner | Approve an App's pairing request with the match code it shows. Elevated scopes need acknowledge_elevated. No token exists until the App redeems. | `harness/pairing_requests.py` `approve_pairing_request` |
 | POST | `/api/admin/v1/pairing-requests/{rid}/confirm` | owner | Confirm a native App's claim on an armed slot with the match code it shows; then it may redeem. | `harness/pairing_requests.py` `confirm_pairing_request` |
