@@ -127,6 +127,7 @@ export function mountChrome({ els, browser, session }) {
     // so resizing needs no route refresh. Route teardown clears both presentations, including entry into sign-in.
     listNew = document.createElement("a");
     listNew.className = "btn primary list-new";
+    listNew.setAttribute("aria-keyshortcuts", "n");
     listNew.href = href;
     listNew.textContent = label;
     $title.after(listNew);

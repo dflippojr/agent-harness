@@ -20,7 +20,7 @@ export function sessionJumpHidden(y, viewH, pageH) {
 //
 // Adding a split (Jobs, Settings):
 //   1. Add an entry to SPLITS: `key`, `list` (the router's view name), `label` (the pane's name), `match(parts)` and the
-//      `empty` state (`icon`, an inline SVG string, plus `title` and `text`).
+//      `empty` state (`icon`, an inline SVG string, plus `title`, `text` and optional `keys`, [[caps], what] hints).
 //   2. Let that list view take an optional pane: `viewX(pane)`. With a pane it renders into `pane.body`, registers its
 //      teardown with `pane.onLeave` (run when the split closes, not on every row change), puts its title and New action
 //      in `pane.header(title, action)` instead of the bar, gives each row `data-split-key="<the key match() returns>"`,
@@ -42,7 +42,8 @@ export const SPLITS = [
       if (parts[0] === "s" && validId(parts[1])) return parts[1];
       return undefined;
     },
-    empty: { icon: AGENT_ICON, title: "No session open", text: "Pick one from the list, or start a new task." },
+    empty: { icon: AGENT_ICON, title: "No session open", text: "Pick one from the list, or start a new task.",
+      keys: [[["J", "K"], "move"], [["Enter"], "open"], [["N"], "new task"], [["?"], "all shortcuts"]] },
   },
 ];
 
@@ -152,7 +153,7 @@ export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange
       onLeave: (fn) => { if (state.closed) fn(); else state.cleanup.push(fn); },
       // `action` is { href, label } or null (guests start nothing).
       header: (title, action = null) => fill(head, h("h2", {}, title),
-        action ? h("a", { class: "btn primary list-new", href: action.href }, action.label) : null),
+        action ? h("a", { class: "btn primary list-new", href: action.href, "aria-keyshortcuts": "n" }, action.label) : null),
       paint: () => { if (current === state) mark(); },
     };
     $pane.setAttribute("aria-label", split.label);
@@ -204,7 +205,9 @@ export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange
     fill($app, h("section", { class: "split-empty" },
       text.icon ? h("span", { class: "split-empty-icon", html: text.icon }) : null,
       h("h2", {}, text.title),
-      h("p", {}, text.text)));
+      h("p", {}, text.text),
+      text.keys ? h("p", { class: "split-empty-keys" }, text.keys.map(([caps, what]) =>
+        h("span", {}, caps.map((k) => h("kbd", {}, k)), what))) : null));
   }
 
   document.addEventListener("keydown", (e) => {

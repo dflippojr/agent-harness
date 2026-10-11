@@ -149,6 +149,10 @@ async function viewSession(sid, tab, focusApproval) {
     h("div", { class: "row", style: "flex-wrap:nowrap;align-items:flex-end" }, input, send)));
   if (composer) document.body.append(composer);
   input.addEventListener("input", () => { input.style.height = "44px"; input.style.height = `${Math.min(160, input.scrollHeight)}px`; });
+  // Ctrl+Enter (or ⌘+Enter) sends, as in Chat (#571); a plain Enter is a new line.
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !e.isComposing) { e.preventDefault(); send.click(); }
+  });
   send.addEventListener("click", async () => {
     const text = input.value.trim();
     if (!text) return;

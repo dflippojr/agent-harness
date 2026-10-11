@@ -32,6 +32,7 @@ import { mountSignIn } from "./lib/signin.mjs";
 import { mountRouter } from "./lib/router.mjs";
 import { mountTabs } from "./lib/tabs.mjs";
 import { mountUpdate } from "./lib/update.mjs";
+import { mountKeys } from "./lib/keys.mjs";
 import { startBoot } from "./lib/boot.mjs";
 import { createWarmModel } from "./lib/warm-model.mjs";
 import { TERMINAL, REVIEW_LABEL, progressBar, reviewBadge, badge, jobStatusBadge } from "./lib/widgets.mjs";
@@ -102,6 +103,9 @@ const { viewJobs, viewJob } = mountJobs({ $app, h, fill, append, api, setHeader,
 const { viewList } = mountSessions({ $app, h, fill, append, api, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, onDaemonChange: stream.onDaemonChange, onDaemonState: stream.onDaemonState, browser });
 const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar });
+
+// Keyboard shortcuts (#571): `?` lists them; none fires while focus is in a field.
+mountKeys({ browser, go, role: () => session.getMe()?.role });
 
 // ---------- boot ----------
 async function loadProfileIcon() {

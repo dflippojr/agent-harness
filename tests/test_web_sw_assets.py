@@ -29,3 +29,10 @@ def test_index_preloads_every_module_but_app():
     preloaded = set(re.findall(r'<link rel="modulepreload" href="([^"]+)"', html))
     modules = {"/" + p.relative_to(WEB).as_posix() for p in WEB.rglob("*.mjs")}
     assert preloaded == modules, f"modulepreload mismatch in index.html: {sorted(preloaded ^ modules)}"
+
+
+def test_keyboard_shortcuts_module_is_cached_and_preloaded():
+    # #571: lib/keys.mjs is loaded by app.js on every page, so it must work offline and arrive with the first paint.
+    assert "/lib/keys.mjs" in _assets()
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    assert '<link rel="modulepreload" href="/lib/keys.mjs">' in html
