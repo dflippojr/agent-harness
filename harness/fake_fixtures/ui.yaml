@@ -150,7 +150,7 @@ scripts:
   - name: model-failure
     match: "failure|\\bfail"
     turns:
-      - error: {message: "HTTP 400: simulated fatal model error (fake model mode)", retryable: false, times: 1000}
+      - error: {message: "HTTP 400: simulated fatal model error (fake model mode)", retryable: false}
 
   - name: compaction
     match: "compaction"

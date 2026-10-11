@@ -99,6 +99,8 @@ def test_default_fixtures_load_and_cover_the_redesign_surfaces():
     ("scripts: [{name: a, match: x, turns: [{text: hi, delay: 99}]}]", "0 to 60"),
     ("scripts: [{name: a, match: '(', turns: [{text: hi}]}]", "match"),
     ("scripts: [{name: a, match: x, turns: [{error: {retryable: true}}]}]", "needs a message"),
+    ("scripts: [{name: a, match: x, turns: [{error: {message: m, retryable: true, times: 4}}]}]", "must be 1 to 3"),
+    ("scripts: [{name: a, match: x, turns: [{error: {message: m, times: 2}}]}]", "drop times"),
     ("scripts: [{name: a, match: x, turns: [{tool_calls: [{args: {}}]}]}]", "needs a name"),
     ("context_tokens: 10\nscripts: []", "context_tokens"),
     ("scripts:\n  - {name: a, match: x, turns: [{text: hi}]}\n  - {name: a, match: y, turns: [{text: hi}]}",
@@ -183,7 +185,7 @@ scripts:
     turns: [{error: {message: "HTTP 500: boom", retryable: true, times: 2}, text: "recovered"}]
   - name: fatal
     match: fatal
-    turns: [{error: {message: "HTTP 400: no", times: 1}}]
+    turns: [{error: {message: "HTTP 400: no"}}]
 """, tmp_path)
     messages = [{"role": "user", "content": "flaky"}]
     for _ in range(2):
@@ -195,10 +197,10 @@ scripts:
     with pytest.raises(LLMError, match="boom"):
         run(fake(None, messages, TOOLS))
     fatal = [{"role": "user", "content": "fatal"}]
-    with pytest.raises(LLMError) as raised:
-        run(fake(None, fatal, TOOLS))
-    assert not raised.value.retryable
-    assert "Recovered after the scripted error" in run(fake(None, fatal, TOOLS)).content
+    for _ in range(2):   # a fatal error fails every time, so a rerun of the failed session fails the same way
+        with pytest.raises(LLMError) as raised:
+            run(fake(None, fatal, TOOLS))
+        assert not raised.value.retryable
 
 
 def test_summary_requests_get_the_fixture_summary_and_no_tool_calls(tmp_path):
@@ -208,8 +210,10 @@ def test_summary_requests_get_the_fixture_summary_and_no_tool_calls(tmp_path):
                                          2, 4, 10000)
     out = run(fake(None, request, None))
     assert out.content == "Handoff notes." and not out.tool_calls
-    # Any request without tools (a delegate edit, a skill review) gets text only.
+    # Any request without tools (a delegate edit, a skill review, Chat without web tools) gets text only.
     assert run(fake(None, [{"role": "user", "content": "edit"}], None)).tool_calls == []
+    chat = run(fake(None, [{"role": "user", "content": "edit"}], []))
+    assert chat.tool_calls == [] and chat.finish_reason == "stop"
 
 
 def test_filler_makes_a_long_reply(tmp_path):

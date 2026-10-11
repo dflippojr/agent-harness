@@ -92,6 +92,7 @@ INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so
 # The user-role messages the loop adds itself when a reply has no tool calls (fake_model.py skips them, #588).
 CUT_OFF_NUDGE = "Your reply was cut off by the output limit. Continue, using the tools if needed."
 CONTINUE_NUDGE = "Continue the task using the tools. When you are done, give your final answer."
+MODEL_CALL_ATTEMPTS = 4   # a model turn's tries on a retryable LLMError (fake_model.py's error fixtures rely on it)
 QUOTA_CHECK_SECONDS = 30
 READ_ARTIFACT_SCHEMA = {"type": "function", "function": {
     "name": "read_artifact",
@@ -2100,12 +2101,12 @@ class Runner:
 
     async def _call_with_retries(self, sid: str, model, context: list, tools: list, stream: "_DeltaStream",
                                  reading, run: dict):
-        for attempt in range(4):
+        for attempt in range(MODEL_CALL_ATTEMPTS):
             try:
                 return await self._model_call(sid, model, context, tools, stream.on_delta, on_progress=reading)
             except llm.LLMError as e:
                 stream.flush()
-                if not e.retryable or attempt == 3:
+                if not e.retryable or attempt == MODEL_CALL_ATTEMPTS - 1:
                     raise
                 if "HTTP 500" in str(e):
                     run["invalid_tool_calls"] += 1

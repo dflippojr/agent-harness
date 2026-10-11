@@ -25,7 +25,7 @@ A fixture file (YAML; every ``*.yaml`` / ``*.yml`` in the directory, in name ord
             wait: 1.0           # seconds before the first chunk
             tool_calls:
               - {name: write_file, args: {path: protected/settings.json, content: "{}"}}
-          - error: {message: "HTTP 500: simulated", retryable: true, times: 1}  # the first call fails, then:
+          - error: {message: "HTTP 500: simulated", retryable: true, times: 1}  # fails 1-3 times, then:
             text: "Done."
             filler_chars: 40000 # a long reply: pads the text so the next turn compacts
 
@@ -159,10 +159,15 @@ def _turn(raw, where: str) -> Turn:
     if error is not None:
         if not isinstance(error, dict) or not isinstance(error.get("message"), str):
             raise FixtureError(f"{where}.error: needs a message")
+        from .runner import MODEL_CALL_ATTEMPTS
+        retries = MODEL_CALL_ATTEMPTS - 1   # more failures than retries would fail the run instead
+        retryable = bool(error.get("retryable", False))
         times = error.get("times", 1)
-        if isinstance(times, bool) or not isinstance(times, int) or times < 1:
-            raise FixtureError(f"{where}.error.times: must be a positive integer")
-        error = {"message": error["message"], "retryable": bool(error.get("retryable", False)), "times": times}
+        if not retryable and "times" in error:
+            raise FixtureError(f"{where}.error.times: a non-retryable error fails every call; drop times")
+        if isinstance(times, bool) or not isinstance(times, int) or not 1 <= times <= retries:
+            raise FixtureError(f"{where}.error.times: must be 1 to {retries} (for a failed run, use retryable: false)")
+        error = {"message": error["message"], "retryable": retryable, "times": times}
     filler = raw.get("filler_chars", 0)
     if isinstance(filler, bool) or not isinstance(filler, int) or not 0 <= filler <= 2_000_000:
         raise FixtureError(f"{where}.filler_chars: must be an integer from 0 to 2000000")
@@ -249,8 +254,8 @@ class FakeModel:
 
     def __init__(self, fixtures: Fixtures):
         self.fixtures = fixtures
-        # A call's context -> errors raised for it so far. Cleared once the call gets through, so the next session
-        # that reaches the same context (the same prompt in a new session) fails the same way again.
+        # A call's context -> retryable errors raised for it so far. Cleared once the call gets through (always within
+        # the harness's retries), so the next session that reaches the same context fails the same way again.
         self._failures: dict[str, int] = {}
 
     @classmethod
@@ -302,6 +307,8 @@ class FakeModel:
         else:
             turn = script.turns[index]
         log.info("fake model: script %s turn %d", script.name, index)
+        if turn.error is not None and not turn.error["retryable"]:
+            raise LLMError(turn.error["message"], retryable=False)   # every time: a rerun fails the same way
         if turn.error is not None:
             key = hashlib.sha256(json.dumps(messages, sort_keys=True, default=str).encode()).hexdigest()
             seen = self._failures.get(key, 0)
@@ -339,7 +346,7 @@ class FakeModel:
                     out.content += part
                 if on_delta:
                     await on_delta(kind, part)
-        if tools is not None:  # a request without tools (a summary, a delegate edit) gets no calls
+        if tools:  # a request without tools (a summary, a delegate edit, Chat without web tools) gets no calls
             # Unique per call (the runner matches approvals and results by id); script and turn are what resume uses.
             out.tool_calls = [{"id": f"fake-{script}-{index}-{n}-{uuid.uuid4().hex[:12]}", "type": "function",
                                "function": dict(call)} for n, call in enumerate(turn.tool_calls)]
