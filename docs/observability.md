@@ -47,6 +47,7 @@ session                      created → end of the latest run
 │   ├── compaction           elide / summarize / round reset (a summary adds its own `chat` child)
 │   ├── gpu_slot_wait        re-queued after the GPU guard paused the model
 │   ├── chat                 one model request
+│   ├── completion_commit    completion metrics, context/totals and events committed to SQLite
 │   ├── execute_tool         one tool call
 │   │   ├── approval_wait    waiting for the user to approve or deny
 │   │   ├── gpu_slot_wait    re-queued after the approval
@@ -61,7 +62,8 @@ session                      created → end of the latest run
 Sibling spans under a `turn` don't overlap. Tools run one at a time today. A tool source that runs calls in
 parallel (MCP tools, #260) should open each call with `telemetry.tool_span(name, call_id, parallel=True)`, which
 marks the span `harness.parallel=true`. In tests, the direct children of `session` cover its duration, and the
-children of each `turn` cover the turn, both within 5%.
+children of each `turn` cover the turn, with bounded gaps. Recovery tests use controlled work timestamps so
+scheduler pauses do not count as missing instrumentation; removing a model, completion commit, tool or approval span still fails.
 
 The root `session` span keeps the same ids for the life of the session and is exported again at the end of each
 run with the later end time. Tempo keeps one copy of a span id. Until a session has finished its last run, the root
@@ -77,6 +79,7 @@ Work outside a session isn't traced, for example image jobs started from the Ima
 | `turn` | `harness.turn` (1-based model turn in the run), `harness.resumed` (set on the turn that finishes tool calls left pending by a daemon restart) |
 | `chat` | `gen_ai.operation.name=chat`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `harness.cache_read_tokens`, `harness.prompt_ms` (prompt processing), `harness.decode_ms` (generation) |
 | `execute_tool` | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `harness.policy_decision` (allow/ask/deny), `harness.ok` (false when blocked or denied), `harness.output_chars`, `harness.parallel` |
+| `completion_commit` | No additional attributes; includes the awaited completion transaction |
 | `approval_wait` | `harness.approval_status` |
 | `sandbox_exec`, `image_job` | `gen_ai.tool.name` |
 | `gpu_slot_wait` | `harness.queue_front` |

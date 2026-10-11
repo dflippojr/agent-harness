@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import logging
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -16,7 +18,7 @@ from harness.llm import Completion
 from harness.manager import Manager
 from harness_modules.local_model.warmup import READY
 from test_daemon import Script, call, make_cfg, wait_status
-from waits import timeout_scale
+from waits import scaled, timeout_scale
 
 ROOT = Path(__file__).resolve().parent.parent
 SENTINEL = "zq-sentinel-7f3a91"
@@ -93,6 +95,52 @@ def _assert_tiled(parent, children, *, resume_boundary=None) -> None:
         assert gap == allowed or child.start_time - cursor <= MAX_GAP_NS, (parent.name, gaps)
         cursor = max(cursor, child.end_time)
     assert parent.end_time - cursor <= MAX_GAP_NS, (parent.name, gaps)
+
+
+@pytest.fixture
+def work_clock(monkeypatch):
+    """Advance trace time at actual work hooks, independently of host scheduling.
+
+    Patch both SDK nanoseconds and persisted float timestamps. Monotonic deadlines
+    remain real; the clock advances even if the corresponding span is omitted.
+    """
+    pytest.importorskip("opentelemetry.sdk")
+    import opentelemetry.sdk.trace as sdk_trace
+
+    class Clock:
+        now = (time.time_ns() // 1_000_000) * 1_000_000
+
+        def advance(self):
+            self.now += MAX_GAP_NS * 2
+
+    clock = Clock()
+    monkeypatch.setattr(time, "time", lambda: clock.now / 1_000_000_000)
+    monkeypatch.setattr(sdk_trace, "time_ns", lambda: int(time.time() * 1_000_000_000))
+    return clock
+
+
+@asynccontextmanager
+async def _running_manager(m):
+    try:
+        await m.start()
+        yield
+    finally:
+        try:
+            await m.stop()
+        finally:
+            m.db.close()
+
+
+async def _wait_for_approval(m, sid, timeout=30):
+    """Fail promptly if recovery exits; a live but stuck runner has a deadline."""
+    deadline = time.monotonic() + scaled(timeout)
+    while not m.runner.approval_events:
+        task = m.tasks.get(sid)
+        status = m.db.get_session(sid)["status"]
+        assert task is not None and not task.done(), f"recovery task exited before approval (status={status})"
+        assert status not in ("failed", "done", "cancelled"), f"recovery ended before approval (status={status})"
+        assert time.monotonic() < deadline, f"recovery never reached approval (status={status})"
+        await asyncio.sleep(0.01)
 
 
 # --- off by default ---
@@ -309,7 +357,7 @@ def test_scripted_session_produces_one_covering_trace(tmp_path):
 
 
 @pytest.mark.parametrize("delay_resume", [False, True], ids=["normal", "delayed-resume"])
-def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path, monkeypatch, delay_resume):
+def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path, monkeypatch, delay_resume, work_clock):
     """A daemon restart mid-approval resolves the pending call under a `turn`, not straight under `session`."""
     cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "path": "secret/*", "action": "ask", "reason": "x"}])
     script = Script([
@@ -318,7 +366,8 @@ def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path, monkeypatch,
     ])
 
     async def slow_chat(*args, **kwargs):
-        await asyncio.sleep(0.15)  # model time dominates the bookkeeping between spans
+        work_clock.advance()  # actual model work, whether or not chat is instrumented
+        await asyncio.sleep(0)  # exercise scheduling without adding logical work time
         return await script(*args, **kwargs)
 
     async def ready(model):
@@ -326,46 +375,60 @@ def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path, monkeypatch,
 
     def daemon():
         m, exporter = _traced_manager(cfg, slow_chat)
-        m.warmer.state = ready  # skip the un-spanned probe of the fake model's unresolvable base_url
+        m.warmer.state = ready  # the fake model has no server to probe
+        commit = m.runner._commit_completion
+        resolve = m.runner._resolve_calls
+
+        async def contended_commit(*args, **kwargs):
+            work_clock.advance()  # persistence must be covered by completion_commit
+            await asyncio.sleep(0.01)  # controlled contention at the awaited write boundary
+            return await commit(*args, **kwargs)
+
+        async def scheduled_resolve(*args, **kwargs):
+            # A pause after persistence is scheduling, not omitted model/tool work.
+            # The work clock stays put, even when wall time exceeds the gap limit.
+            await asyncio.sleep(MAX_GAP_NS / 1_000_000_000 + 0.05)
+            return await resolve(*args, **kwargs)
+
+        monkeypatch.setattr(m.runner, "_commit_completion", contended_commit)
+        monkeypatch.setattr(m.runner, "_resolve_calls", scheduled_resolve)
         return m, exporter
 
     async def first():
         m, exporter = daemon()
-        await m.start()
-        s = m.create("write the secret", project="guarded")
-        await wait_status(m, s["id"], "waiting_approval")
-        await m.stop()
-        m.db.close()
+        async with _running_manager(m):
+            s = m.create("write the secret", project="guarded")
+            await wait_status(m, s["id"], "waiting_approval")
+            await _wait_for_approval(m, s["id"])
+            work_clock.advance()  # time parked on approval, before daemon shutdown
         return s["id"], exporter.get_finished_spans()
 
     async def second(sid):
         m, exporter = daemon()
+        release = asyncio.Event()
         if delay_resume:
             emit = m.bus.aemit
             held = asyncio.Event()
 
             async def delayed_emit(session_id, event, data):
                 if event == "resumed":
-                    # Force the recovery boundary beyond the tolerance, even on CI/coverage. The test releases
-                    # it, so the length of the gap is a floor rather than a race against the rest of the run.
+                    work_clock.advance()  # only the established idle -> run_setup exception
                     held.set()
                     await release.wait()
                 await emit(session_id, event, data)
 
-            release = asyncio.Event()
             monkeypatch.setattr(m.bus, "aemit", delayed_emit)
-        await m.start()
-        if delay_resume:
-            await asyncio.wait_for(held.wait(), 30)
-            await asyncio.sleep(MAX_GAP_NS / 1_000_000_000 + 0.1)
+        try:
+            async with _running_manager(m):
+                if delay_resume:
+                    await asyncio.wait_for(held.wait(), scaled(30))
+                    release.set()
+                await _wait_for_approval(m, sid)
+                work_clock.advance()  # removing approval_wait must expose this work
+                m.decide(sid, None, approve=True)
+                await wait_status(m, sid, "done")
+        finally:
             release.set()
-        # Decide only once the resumed turn is parked on the approval, so the span tree never depends on
-        # whether the decision landed before or after the wait began.
-        while not m.runner.approval_events:
-            await asyncio.sleep(0.01)
-        m.decide(sid, None, approve=True)
-        await wait_status(m, sid, "done")
-        await m.stop()
         return exporter.get_finished_spans()
 
     sid, before = asyncio.run(first())
@@ -381,6 +444,16 @@ def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path, monkeypatch,
     for turn in (sp for sp in spans if sp.name == "turn"):
         kids = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == turn.context.span_id]
         _assert_tiled(turn, kids)
+    assert {"chat", "completion_commit", "execute_tool", "approval_wait"} <= {sp.name for sp in spans}
+    for tool in (sp for sp in spans if sp.name == "execute_tool"):
+        kids = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == tool.context.span_id]
+        _assert_tiled(tool, kids)
+    # Negative probes retain containment/order checks and expose each omitted work span.
+    for missing in (sp for sp in spans if sp.name in {"chat", "completion_commit", "execute_tool", "approval_wait"}):
+        parent = by_id[missing.parent.span_id]
+        siblings = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == parent.context.span_id]
+        with pytest.raises(AssertionError):
+            _assert_tiled(parent, [sp for sp in siblings if sp is not missing])
     root = next(sp for sp in after if sp.name == "session")
     children = [sp for sp in spans if sp.parent is not None and sp.parent.span_id == root.context.span_id]
     assert not {c.name for c in children} & {"execute_tool", "approval_wait", "sandbox_exec"}
@@ -397,6 +470,31 @@ def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path, monkeypatch,
         with pytest.raises(AssertionError):
             _assert_tiled(root, [c for c in children if c is not missing], resume_boundary=boundary)
 
+
+@pytest.mark.parametrize("outcome", ["stuck", "failed", "exited"])
+def test_recovery_approval_wait_is_bounded_and_cleans_up(tmp_path, monkeypatch, outcome):
+    async def body():
+        m, _ = _traced_manager(make_cfg(tmp_path), Script([]))
+        tasks = []
+
+        async def never_approves(sid, recovered=False):
+            if outcome == "failed":
+                m.db.update_session(sid, status="failed")
+            elif outcome == "stuck":
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(m.runner, "run", never_approves)
+        with pytest.raises(AssertionError, match="before approval|never reached approval"):
+            async with _running_manager(m):
+                sid = m.create("never approves")["id"]
+                tasks.append(m.tasks[sid])
+                await _wait_for_approval(m, sid, timeout=0.02)
+        assert tasks and all(task.done() for task in tasks)
+        assert not m.tasks and not m.runner.approval_events
+        assert m.db._closed
+        assert m._scanner_boot is None or m._scanner_boot.done()
+
+    asyncio.run(body())
 
 def test_sentinel_never_reaches_a_span(tmp_path):
     cfg = make_cfg(tmp_path)

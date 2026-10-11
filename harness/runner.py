@@ -2082,22 +2082,23 @@ class Runner:
         run = s["run"]
         tools = self.tool_schemas(s, ws)
         completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache, run)
-        stream.flush()
-        if completion.cache_tokens is None and cache_box["seen"]:
-            completion.cache_tokens = cache_box["tokens"]
+        with telemetry.span("completion_commit"):
+            stream.flush()
+            if completion.cache_tokens is None and cache_box["seen"]:
+                completion.cache_tokens = cache_box["tokens"]
 
-        run["turns"] += 1
-        run["prompt_tokens"] += completion.prompt_tokens
-        run["completion_tokens"] += completion.completion_tokens
-        if completion.prompt_tokens > 2000:
-            # prompt_tokens covers the whole prompt (cached or not), including the tool schemas.
-            chars = sum(compaction.message_chars(m) for m in s["context"]) + len(json.dumps(tools))
-            run["chars_per_token"] = min(6.0, max(1.5, chars / completion.prompt_tokens))
-            run["context_tokens"] = completion.prompt_tokens + completion.completion_tokens
-        ended = await self._commit_completion(s, run, completion, model, tools)
-        if ended or not completion.tool_calls:
-            self._emit_turn_metrics(sid)
-        return ended
+            run["turns"] += 1
+            run["prompt_tokens"] += completion.prompt_tokens
+            run["completion_tokens"] += completion.completion_tokens
+            if completion.prompt_tokens > 2000:
+                # prompt_tokens covers the whole prompt (cached or not), including the tool schemas.
+                chars = sum(compaction.message_chars(m) for m in s["context"]) + len(json.dumps(tools))
+                run["chars_per_token"] = min(6.0, max(1.5, chars / completion.prompt_tokens))
+                run["context_tokens"] = completion.prompt_tokens + completion.completion_tokens
+            ended = await self._commit_completion(s, run, completion, model, tools)
+            if ended or not completion.tool_calls:
+                self._emit_turn_metrics(sid)
+            return ended
 
     async def _call_with_retries(self, sid: str, model, context: list, tools: list, stream: "_DeltaStream",
                                  reading, run: dict):
