@@ -1,11 +1,12 @@
 import type { paths, components } from "./api.js";
 
 export type Surface = "app" | "admin" | "legacy" | "";
+export type ApiSurface = Exclude<Surface, "">;
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-export interface RequestOptions<M extends HttpMethod = HttpMethod> {
+export interface RequestOptions<M extends HttpMethod = HttpMethod, S extends Surface = Surface> {
   method?: M;
   body?: unknown;
-  surface?: Surface;
+  surface?: S;
 }
 // api() selects the surface at runtime: shared fields are typed; surface-specific fields require narrowing.
 export type SessionDetail =
@@ -16,21 +17,22 @@ export type SessionList =
   paths["/api/admin/v1/sessions"]["get"]["responses"][200]["content"]["application/json"];
 export type JobList = paths["/api/admin/v1/jobs"]["get"]["responses"][200]["content"]["application/json"];
 export type AdminDiscovery = paths["/api/admin/v1"]["get"]["responses"][200]["content"]["application/json"];
+export type AppDiscovery = paths["/api/v1"]["get"]["responses"][200]["content"]["application/json"];
 export type CronPreview = paths["/api/admin/v1/jobs/preview"]["get"]["responses"][200]["content"]["application/json"];
 
 // Only the first response contracts are opted in. Other endpoints remain incremental work.
 type Route<P extends string> = P extends `${infer Path}?${string}` ? Path : P;
-type ResponseFor<P extends string, M extends HttpMethod> =
+type ResponseFor<P extends string, M extends HttpMethod, S extends Surface> =
   P extends "/sessions" ? (M extends "GET" ? SessionList : M extends "POST" ? SessionDetail : any) :
   P extends `/sessions/${infer Ref}` ? (Ref extends `${string}/${string}` ? any : M extends "GET" | "PATCH" | "PUT" ? SessionDetail : any) :
   P extends "/jobs" ? (M extends "GET" ? JobList : M extends "POST" ? components["schemas"]["JobResponse"] : any) :
   P extends "/jobs/preview" ? (M extends "GET" ? CronPreview : any) :
   P extends `/jobs/${infer Ref}` ? (Ref extends `${string}/${string}` ? any : M extends "DELETE" ? null : components["schemas"]["JobResponse"]) :
-  P extends "" ? AdminDiscovery : any;
-export type ApiResponse<P extends string, M extends HttpMethod = "GET"> = ResponseFor<Route<P>, M>;
+  P extends "" ? (S extends "admin" ? AdminDiscovery : S extends "app" ? AppDiscovery : string) : any;
+export type ApiResponse<P extends string, M extends HttpMethod = "GET", S extends Surface = Surface> = ResponseFor<Route<P>, M, S>;
 
 export interface Api {
-  <P extends string, M extends HttpMethod = "GET">(path: P, options?: RequestOptions<M>): Promise<ApiResponse<P, M>>;
+  <P extends string, M extends HttpMethod = "GET", S extends ApiSurface = ApiSurface>(path: P, options?: RequestOptions<M, S>): Promise<ApiResponse<P, M, S>>;
 }
 export interface ClientError extends Error {
   status?: number;

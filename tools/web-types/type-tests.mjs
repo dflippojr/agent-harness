@@ -30,7 +30,7 @@ export async function checkContracts(api, id) {
   } else {
     previewed.error.toUpperCase();
   }
-  const discovery = await api("");
+  const discovery = await api("", { surface: "admin" });
   /** @type {string} */
   const path = discovery.operations[0].path;
   // @ts-expect-error The discovery contract declares path, not url.
@@ -42,6 +42,12 @@ export async function checkContracts(api, id) {
 
 /** @param {import('../../harness/web/client.mjs').AgentHarnessWebClient} client @param {string} id */
 export async function checkTransport(client, id) {
+  const appDiscovery = await client.request("", { surface: "app" });
+  appDiscovery.projects.map((project) => project.name.toUpperCase());
+  // @ts-expect-error App discovery does not declare admin operations.
+  appDiscovery.operations.map(() => "");
+  const adminDiscovery = await client.request("");
+  adminDiscovery.operations.map((operation) => operation.path.toUpperCase());
   const session = await client.request(`/sessions/${id}`, { surface: "app" });
   /** @type {string} */
   const title = session.title;

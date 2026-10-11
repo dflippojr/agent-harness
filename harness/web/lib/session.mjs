@@ -2,7 +2,7 @@
 // protocol-blocked flag and the api() wrapper. createSession() holds that state in a closure; nothing here touches
 // document/window, so it imports under plain Node.
 /** @import { AgentHarnessWebClient } from '../client.mjs' */
-/** @import { ApiResponse, ClientError, HttpMethod, Identity, RequestOptions, WebAuth } from '../../../tools/web-types/contracts.js' */
+/** @import { ApiResponse, ApiSurface, ClientError, HttpMethod, Identity, RequestOptions, WebAuth } from '../../../tools/web-types/contracts.js' */
 
 // Which API surface a request uses: guests and members go through the app surface, the owner through admin except for
 // the few session endpoints the app surface serves.
@@ -57,9 +57,10 @@ export function createSession({ agentHarnessWeb, storage = null }) {
   /**
    * @template {string} P
    * @template {HttpMethod} [M="GET"]
+   * @template {ApiSurface} [S=ApiSurface]
    * @param {P} path
-   * @param {RequestOptions<M>} [options]
-   * @returns {Promise<ApiResponse<P, M>>}
+   * @param {RequestOptions<M, S>} [options]
+   * @returns {Promise<ApiResponse<P, M, S>>}
    */
   async function api(path, { method = /** @type {M} */ ("GET"), body, surface } = {}) {
     if (protocolBlocked) {
@@ -69,7 +70,8 @@ export function createSession({ agentHarnessWeb, storage = null }) {
       throw err;
     }
     const chosen = surface || apiSurface(path, method, { role: currentMe.role, hasToken: !!agentHarnessWeb.token });
-    return agentHarnessWeb.request(path, { method, body, surface: chosen });
+    // An explicit surface is honored; without one S includes every surface apiSurface() can choose.
+    return /** @type {Promise<ApiResponse<P, M, S>>} */ (agentHarnessWeb.request(path, { method, body, surface: chosen }));
   }
 
   // Called only when an identity is adopted (setMe), never from fetchMe: boot discards a speculative /me on a

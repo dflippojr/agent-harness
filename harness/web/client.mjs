@@ -83,11 +83,12 @@ export class AgentHarnessWebClient {
   /**
    * @template {string} P
    * @template {HttpMethod} [M="GET"]
+   * @template {Surface} [S="admin"]
    * @param {P} path
-   * @param {RequestOptions<M>} [options]
-   * @returns {Promise<ApiResponse<P, M>>}
+   * @param {RequestOptions<M, S>} [options]
+   * @returns {Promise<ApiResponse<P, M, S>>}
    */
-  async request(path, { method = /** @type {M} */ ("GET"), body, surface = "admin" } = {}) {
+  async request(path, { method = /** @type {M} */ ("GET"), body, surface = /** @type {S} */ ("admin") } = {}) {
     const headers = this.headers();
     /** @type {RequestInit} */
     const opts = { method, headers, cache: "no-store" };
@@ -102,7 +103,7 @@ export class AgentHarnessWebClient {
     let resp;
     try { resp = await fetch(this.url(path, surface), opts); }
     catch (_) { throw unreachable(); }
-    if (resp.status === 204) return /** @type {ApiResponse<P, M>} */ (null);
+    if (resp.status === 204) return /** @type {ApiResponse<P, M, S>} */ (null);
     const type = resp.headers.get("content-type") || "";
     const data = type.includes("json") ? await resp.json() : await resp.text();
     if (!resp.ok) {
