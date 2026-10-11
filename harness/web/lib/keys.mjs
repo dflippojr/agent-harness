@@ -105,28 +105,8 @@ export function shortcutsBody(role) {
   ];
 }
 
-// From 768 px the rail is the left column and the list pane (#563) the next, both fixed beside the header bar and the page.
-// Tab follows reading order there, so the rail moves ahead of them in the DOM; on phones it goes back after the bar, where
-// it has always been. Both are position: fixed, so the move changes no layout.
-export const READING_ORDER_QUERY = "(min-width: 768px)";
-export function mountReadingOrder({ document, window }) {
-  const query = window.matchMedia?.(READING_ORDER_QUERY);
-  const nav = document.getElementById("tab-bar");
-  const bar = document.getElementById("bar");
-  if (!query || !nav || !bar) return;
-  const place = () => {
-    const parent = bar.parentNode;
-    if (!parent) return;  // a shell not on the page yet (the app under a test stub)
-    if (query.matches) parent.insertBefore(nav, document.getElementById("split-list") || bar);
-    else parent.insertBefore(nav, bar.nextSibling);
-  };
-  query.addEventListener?.("change", place);
-  place();
-}
-
 export function mountKeys({ browser, go, role }) {
   const { document, window } = browser;
-  mountReadingOrder({ document, window });
   let chordTimer = null;
   let chord = false;
   let helpOpen = false;
@@ -171,7 +151,10 @@ export function mountKeys({ browser, go, role }) {
     const rows = inPane.length ? inPane : [...document.getElementById("app").querySelectorAll(ROW_SELECTOR)].filter(shown);
     // The open row is the link itself (Agents) or the row around it (a job, beside its Enabled switch).
     const open = rows.findIndex((r) => r.getAttribute("aria-current") || r.closest?.("[aria-current]"));
-    const next = stepRow(rows.length, rows.indexOf(document.activeElement), open, step);
+    // Focus on a control inside a row (a job's Enabled switch) counts as that row.
+    const active = document.activeElement;
+    const at = rows.findIndex((r) => r === active || r.closest?.(".job-row")?.contains(active));
+    const next = stepRow(rows.length, at, open, step);
     if (next < 0) return false;
     rows[next].focus();
     rows[next].scrollIntoView?.({ block: "nearest" });

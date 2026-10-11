@@ -2,9 +2,9 @@
 // Approve key; mountKeys() opens and closes the `?` sheet, focuses search, starts New, switches section after `G` and moves
 // through list rows with J and K, and leaves the page alone while a sheet or menu answers its own keys.
 import assert from "node:assert/strict";
-import { keyAction, isTypingTarget, newHash, stepRow, mountKeys, mountReadingOrder, READING_ORDER_QUERY, SHORTCUTS, GO_KEYS,
-  CHORD_MS, ROW_SELECTOR, shortcutsBody } from "../harness/web/lib/keys.mjs";
-import { SPLITS } from "../harness/web/lib/layout.mjs";
+import { keyAction, isTypingTarget, newHash, stepRow, mountKeys, SHORTCUTS, GO_KEYS, CHORD_MS, ROW_SELECTOR,
+  shortcutsBody } from "../harness/web/lib/keys.mjs";
+import { SPLITS, mountReadingOrder, READING_ORDER_QUERY } from "../harness/web/lib/layout.mjs";
 import { createDocument, Emitter, Node, El, walk } from "./web_stub_dom.mjs";
 
 const el = (tagName, extra = {}) => ({ tagName, ...extra });
@@ -267,6 +267,19 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   key("k");
   assert.equal(doc.activeElement, rowEls[0], "hidden rows are skipped");
   rowEls[1].hidden = false;
+  // A job's Enabled switch sits beside its link: with the switch focused, J and K step from that job (#586 review).
+  const toggle = new El("input", { type: "checkbox" });
+  const jobRow = { contains: (n) => n === toggle || n === rowEls[1] };
+  rowEls[1].closest = (sel) => (sel === ".job-row" ? jobRow : null);
+  list.append(toggle);
+  toggle.focus();
+  key("j");
+  assert.equal(doc.activeElement, rowEls[2], "J from the second job's switch goes to the third job");
+  toggle.focus();
+  key("k");
+  assert.equal(doc.activeElement, rowEls[0], "K from it goes to the first");
+  toggle.remove();
+  delete rowEls[1].closest;
 
   // Beside an open session the list pane is the one that moves, starting from the open row.
   const pane = new El("section", { id: "split-list" });

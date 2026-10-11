@@ -77,6 +77,25 @@ export function isListToggleKey(e) {
 
 const SIDEBAR_SVG = '<svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>';
 
+// From 768 px the rail is the left column and the list pane the next, both fixed beside the header bar and the page.
+// Tab follows reading order there (#571), so the rail moves ahead of them in the DOM; on phones it goes back after the bar, where
+// it has always been. Both are position: fixed, so the move changes no layout.
+export const READING_ORDER_QUERY = "(min-width: 768px)";
+export function mountReadingOrder({ document, window }) {
+  const query = window.matchMedia?.(READING_ORDER_QUERY);
+  const nav = document.getElementById("tab-bar");
+  const bar = document.getElementById("bar");
+  if (!query || !nav || !bar) return;
+  const place = () => {
+    const parent = bar.parentNode;
+    if (!parent) return;  // a shell not on the page yet (the app under a test stub)
+    if (query.matches) parent.insertBefore(nav, document.getElementById("split-list") || bar);
+    else parent.insertBefore(nav, bar.nextSibling);
+  };
+  query.addEventListener?.("change", place);
+  place();
+}
+
 // The router calls sync(parts) on every route and gets back the active split ({ split, selected, pane }) or null; it
 // renders the list once per open with renderList(view) and, when nothing is open, the detail's empty state with empty().
 // `onChange` runs when the window crosses the breakpoint. `onDaemonChange` (the app-wide stream's event hook) lets a
@@ -84,6 +103,7 @@ const SIDEBAR_SVG = '<svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true
 export function mountSplitView({ els, h, fill, browser, onChange, onDaemonChange = null }) {
   const { $app, $back } = els;
   const { window, document } = browser;
+  mountReadingOrder({ document, window });
   const query = window.matchMedia?.(`(min-width: ${SPLIT_MIN_WIDTH}px)`) || null;
   let $pane = null;
   let $toggle = null;
