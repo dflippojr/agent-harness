@@ -208,3 +208,46 @@ jobs:
           npm --prefix tools/web-types ci
       - name: Verify generated API contract and check native JavaScript
         run: npm --prefix tools/web-types run check
+
+  ui-tests:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      HARNESS_UI_INSTANCE_DIR: ${{ runner.temp }}/harness-ui-tests
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: tools/ui-tests/package-lock.json
+      - name: Install UI test dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          npm --prefix tools/ui-tests ci
+          npm --prefix tools/ui-tests exec -- playwright install chromium webkit
+      - name: Run disposable fake-model UI journeys
+        run: npm --prefix tools/ui-tests test -- --workers=1
+      - name: Redact traces and stop the disposable instance
+        id: cleanup
+        if: always()
+        run: |
+          if (Test-Path tools/ui-tests/node_modules/fflate) {
+            node tools/ui-tests/cleanup.mjs
+          } else {
+            python -m harness.fake_instance stop --dir "$env:HARNESS_UI_INSTANCE_DIR"
+          }
+      - name: Upload sanitized UI evidence
+        if: always() && steps.cleanup.outcome == 'success'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ui-test-evidence
+          path: |
+            tools/ui-tests/playwright-report/
+            tools/ui-tests/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
