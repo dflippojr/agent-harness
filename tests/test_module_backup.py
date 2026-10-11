@@ -92,9 +92,12 @@ def test_settings_accessors_and_checks(tmp_path):
         == (True, "04:15", 7)
     with pytest.raises(ValueError):
         backup_settings._set_at(cfg, "25:00")
-    assert backup_settings._dir_get(cfg) is None
-    with pytest.raises(ValueError):
-        backup_settings._dir_set(cfg, "x")
+    specs = {spec.key: spec for spec in backup_settings.specs()}
+    for key in ("backup.dir", "backup.member_key_dir"):
+        spec = specs[key]
+        assert spec.getter(cfg) is None
+        with pytest.raises(ValueError):
+            spec.setter(cfg, "x")
 
 
 def test_doctor_reports_backup_status(monkeypatch):
