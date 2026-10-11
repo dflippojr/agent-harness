@@ -140,7 +140,9 @@ def disclosures(scopes: list[str], cfg=None) -> list[dict]:
     from .apps import all_scopes
     known = all_scopes(cfg)
     return [{"scope": s, "tier": "elevated" if s in ELEVATED or s == "admin" else "standard",
-             "text": DISCLOSURES.get(s) or known.get(s, "")} for s in scopes]
+             "text": (DISCLOSURES.get(s) or known.get(s, "")).strip() or
+                     f"No description was provided for scope {s}. Ask its module publisher what it allows before "
+                     "approving."} for s in scopes]
 
 
 def challenge_of(verifier: str) -> str:

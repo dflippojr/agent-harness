@@ -59,6 +59,25 @@ def test_preview_uses_addon_declared_text_from_the_daemons_config(hh, monkeypatc
     assert armed.json()["disclosures"] == response.json()
 
 
+@pytest.mark.parametrize("description", ["", " \t\n"])
+def test_addon_missing_description_has_warning_in_preview_arm_and_list(hh, monkeypatch, description):
+    client, m = hh
+    addon = modules.Module(name="example", switches=("example",), app_scopes={"example:read": description})
+    original = modules.discovered
+    monkeypatch.setattr(modules, "discovered", lambda cfg: (*original(cfg), addon))
+    preview = client.post(PREVIEW, headers=H(OWNER), json={"scopes": ["example:read"]})
+    assert preview.status_code == 200, preview.text
+    assert preview.json() == [{"scope": "example:read", "tier": "standard",
+                               "text": "No description was provided for scope example:read. Ask its module publisher "
+                                       "what it allows before approving."}]
+    armed = client.post(BASE, headers=H(OWNER), json={"catalog_app_id": CATALOG_ID, "scopes": ["example:read"]})
+    assert armed.status_code == 201, armed.text
+    listed = client.get(BASE, headers=H(OWNER))
+    assert listed.status_code == 200, listed.text
+    row = next(r for r in listed.json() if r["id"] == armed.json()["id"])
+    assert preview.json() == armed.json()["disclosures"] == row["disclosures"]
+
+
 @pytest.mark.parametrize("scopes", [[], ["bogus"], ["sessions", "bogus"], ["admin"], ["sessions", "admin"],
                                     [" sessions"], ["sessions approvals"]])
 def test_preview_refuses_the_same_invalid_app_scopes_as_arming(hh, scopes):

@@ -548,7 +548,10 @@ an array of `{scope, tier, text}` disclosures, in requested order with duplicate
 
 Display the returned daemon text before asking the owner
 to arm; clients do not need their own disclosure or elevated-scope tables. Built-in scopes use the shared disclosure
-copy, and add-on scopes without built-in copy use the module's `app_scopes` description. Elevated scopes can be
+copy, and add-on scopes without built-in copy use the module's `app_scopes` description. If that description is
+empty or whitespace, the module remains available and the daemon returns the fixed warning
+`No description was provided for scope {scope}. Ask its module publisher what it allows before approving.`
+Disclosure text is never empty. Elevated scopes can be
 previewed without acknowledgement; arming still requires `acknowledge_elevated`. Empty or unknown scope lists,
 and `admin` (even alongside App scopes), return 400, matching App pairing validation. A missing or malformed
 `scopes` field returns 422. Preview creates no request, slot, match code, token or approval and does not expire or
