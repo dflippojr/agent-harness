@@ -1578,6 +1578,14 @@ class Database:
         return [dict(r) for r in rows]
 
     @_reads
+    def open_pairing_match_codes(self) -> set[str]:
+        """Codes waiting for owner approval or confirmation, across all kinds and without a row limit."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT match_code FROM pairing_requests WHERE state IN ('pending', 'claimed')").fetchall()
+        return {row[0] for row in rows}
+
+    @_reads
     def pending_pairing_catalog_origins(self, now: float) -> list[tuple[str, str]]:
         """Labels and origins of unexpired open App requests; no secrets or 100-row list limit."""
         with self.lock:

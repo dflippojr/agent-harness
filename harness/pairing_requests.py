@@ -144,6 +144,15 @@ def _match_code() -> str:
     return f"{secrets.randbelow(10 ** 6):06d}"
 
 
+def _unused_match_code(db) -> str:
+    """Called inside the allocation write, after sweeping expired requests."""
+    used = db.open_pairing_match_codes()
+    code = _match_code()
+    while code in used:
+        code = _match_code()
+    return code
+
+
 def _same_match(row: dict, given: str) -> bool:
     given = re.sub(r"[\s-]", "", given or "")
     return bool(row["match_code"]) and hmac.compare_digest(given.encode(), row["match_code"].encode())
@@ -157,7 +166,7 @@ def owner_view(row: dict, cfg=None) -> dict:
             "catalog_app_id": row["catalog_app_id"] or "", "origin": row["origin"], "browser": bool(row["origin"]),
             "armed": bool(row["armed"]), "state": state,
             # Read the code from the App or Hub being set up: copying it from an owner list could approve a
-            # look-alike request or confirm an attacker's claim on an armed native slot.
+            # look-alike request or confirm an attacker's claim on an armed slot.
             "match_code": "",
             "needs": {PENDING: "approve", ARMED: "claim", CLAIMED: "confirm", APPROVED: "redeem"}.get(state, ""),
             "created_at": row["created_at"], "expires_at": row["expires_at"], "approved_at": row["approved_at"],
@@ -276,7 +285,7 @@ def register_app(app: FastAPI) -> None:
                 return _refuse(429, "too many pairing requests; wait for the owner or try again later", reason)
             row = {"id": "pr-" + secrets.token_hex(12), "kind": body.kind, "name": name, "scopes": scopes,
                    "catalog_app_id": catalog_app_id, "origin": origin, "source": source, "challenge_hash": challenge,
-                   "match_code": _match_code(), "state": PENDING, "armed": 0, "created_at": now,
+                   "match_code": _unused_match_code(db), "state": PENDING, "armed": 0, "created_at": now,
                    "expires_at": now + APPROVE_TTL_SECONDS, "approved_at": None, "finished_at": None, "key_id": ""}
             db.insert_pairing_request(row)
             credential_audit.record(db, unknown, action, row["id"], "ok", "pairing_request",
@@ -314,7 +323,7 @@ def register_app(app: FastAPI) -> None:
                                         {"reason": refusal[2]})
                 return _refuse(*refusal)
             # Origin can be forged by a native caller: every claim needs the owner's typed code (#519 decision 2).
-            fields = {"state": CLAIMED, "match_code": _match_code(), "expires_at": now + APPROVE_TTL_SECONDS}
+            fields = {"state": CLAIMED, "match_code": _unused_match_code(db), "expires_at": now + APPROVE_TTL_SECONDS}
             if not db.update_pairing_request(rid, (ARMED,), challenge_hash=challenge, **fields):
                 return _refuse(409, "this pairing request cannot be claimed", "not_claimable")
             credential_audit.record(db, unknown, "pairing_request.claim", rid, "ok", "pairing_request",

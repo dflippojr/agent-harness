@@ -109,6 +109,48 @@ def test_owner_view_never_exposes_a_match_code_in_any_state(hh, kind, origin, st
     assert pr.app_view(row)["match_code"] == expected_code
 
 
+@pytest.mark.parametrize("first_flow", ["app", "hub", "native_slot", "browser_slot"])
+@pytest.mark.parametrize("second_flow", ["app", "hub", "native_slot", "browser_slot"])
+def test_open_pairing_requests_redraw_duplicate_match_codes(hh, monkeypatch, first_flow, second_flow):
+    client, m = hh
+    codes = iter(["123456", "123456", "654321"])
+    monkeypatch.setattr(pr, "_match_code", lambda: next(codes))
+
+    def allocate(flow):
+        if flow in ("app", "hub"):
+            return _ask(client, kind=flow, scopes=None if flow == "hub" else ("sessions",))[0]
+        origin = ORIGIN if flow == "browser_slot" else ""
+        rid = client.post(BASE, headers=H(OWNER), json={
+            "catalog_app_id": CATALOG_ID, "origin": origin}).json()["id"]
+        return client.post(f"/api/v1/pair/requests/{rid}/claim", headers={"Origin": origin} if origin else {},
+                           json={"code_challenge": _pkce()[1]})
+
+    first, second = allocate(first_flow), allocate(second_flow)
+    assert first.status_code in (200, 201), first.text
+    assert second.status_code in (200, 201), second.text
+    assert first.json()["match_code"] == "123456"
+    assert second.json()["match_code"] == "654321"
+    for response in (first, second):
+        assert m.db.main.get_pairing_request(response.json()["id"])["match_code"] == response.json()["match_code"]
+    assert {row["match_code"] for row in client.get(BASE, headers=H(OWNER)).json()} == {""}
+
+
+def test_match_code_uniqueness_includes_requests_outside_the_owner_list(hh, clock, monkeypatch):
+    client, m = hh
+    codes = iter(["123456", "123456", "654321"])
+    monkeypatch.setattr(pr, "_match_code", lambda: next(codes))
+    first, _ = _ask(client)
+    row = m.db.main.get_pairing_request(first.json()["id"])
+    clock[0] += 1
+    # The owner's newest-100 list is a projection, not the set of codes that must stay unique.
+    for i in range(100):
+        m.db.main.insert_pairing_request({**row, "id": f"pr-finished-{i}", "state": pr.DENIED,
+                                         "source": "", "created_at": clock[0], "finished_at": clock[0]})
+    assert first.json()["id"] not in {r["id"] for r in m.db.main.list_pairing_requests()}
+    second, _ = _ask(client)
+    assert second.status_code == 201 and second.json()["match_code"] == "654321"
+
+
 def test_look_alike_request_cannot_be_approved_with_the_real_apps_code(hh, monkeypatch):
     client, m = hh
     codes = iter(["123456", "654321"])
