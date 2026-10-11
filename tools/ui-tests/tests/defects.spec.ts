@@ -12,15 +12,22 @@ async function expectHitTarget(target: Locator) {
 }
 
 test('#591 Chat starters and recent chats remain reachable at four reflow widths', async ({ signedIn: page }) => {
+  // The welcome paints before options arrive; exercise that startup boundary too.
+  await page.route('**/chats/options', async route => {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    await route.continue();
+  });
   for (const width of [320, 375, 768, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto('/#/chat');
     const starters = page.locator('.chat-starters button');
     await expect(starters.first()).toBeVisible();
+    const message = page.getByRole('textbox', { name: 'Message', exact: true });
+    await expect(message).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     for (const starter of await starters.all()) {
       await starter.click();
-      await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toHaveValue(await starter.innerText());
+      await expect(message).toHaveValue(await starter.innerText());
     }
     const recent = page.getByRole('region', { name: 'Recent chats', exact: true }).getByRole('link').first();
     await recent.click();
