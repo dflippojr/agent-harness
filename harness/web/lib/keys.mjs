@@ -116,6 +116,7 @@ export function mountReadingOrder({ document, window }) {
   if (!query || !nav || !bar) return;
   const place = () => {
     const parent = bar.parentNode;
+    if (!parent) return;  // a shell not on the page yet (the app under a test stub)
     if (query.matches) parent.insertBefore(nav, document.getElementById("split-list") || bar);
     else parent.insertBefore(nav, bar.nextSibling);
   };
