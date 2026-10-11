@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import teardown from './teardown.mjs';
-import { stopInstance } from './instance.mjs';
-stopInstance();
+import { beginRun } from './instance.mjs';
+beginRun();
 const cli = fileURLToPath(new URL('./node_modules/@playwright/test/cli.js', import.meta.url));
 try {
   process.exitCode = await new Promise((resolve, reject) => {

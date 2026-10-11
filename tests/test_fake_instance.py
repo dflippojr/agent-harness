@@ -177,6 +177,69 @@ def test_stop_leaves_an_unrelated_process_alone(tmp_path):
         proc.kill()
 
 
+@pytest.mark.parametrize("stage", ["lookup", "create_time", "cmdline"])
+@pytest.mark.parametrize("error_name", ["AccessDenied", "Error"])
+def test_stop_preserves_unverifiable_process(monkeypatch, tmp_path, capsys, stage, error_name):
+    import psutil
+    from unittest.mock import Mock
+    instance = tmp_path / "instance"
+    fake_instance.write_instance(instance, 0)
+    fake_instance.write_handle(instance, {"pid": 123, "pid_created": 42})
+    before = {p.relative_to(instance): p.read_bytes() for p in instance.rglob("*") if p.is_file()}
+    error = getattr(psutil, error_name)(123)
+    proc = Mock(pid=123)
+    proc.create_time.return_value = 42
+    proc.cmdline.return_value = ["python", "-m", "harness.fake_instance"]
+    lookup = Mock(return_value=proc)
+    (lookup if stage == "lookup" else getattr(proc, stage)).side_effect = error
+    monkeypatch.setattr(psutil, "Process", lookup)
+    kill, remove = Mock(), Mock()
+    monkeypatch.setattr(fake_instance, "_kill", kill)
+    monkeypatch.setattr(fake_instance, "remove", remove)
+    assert fake_instance.stop(instance) == 1
+    kill.assert_not_called()
+    remove.assert_not_called()
+    assert before == {p.relative_to(instance): p.read_bytes() for p in instance.rglob("*") if p.is_file()}
+    assert "could not verify" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("stage", ["lookup", "create_time", "cmdline", "reused", "unrelated"])
+def test_stop_cleans_up_a_definitively_gone_or_unrelated_process(monkeypatch, tmp_path, stage):
+    import psutil
+    from unittest.mock import Mock
+    instance = tmp_path / "instance"
+    fake_instance.write_instance(instance, 0)
+    fake_instance.write_handle(instance, {"pid": 123, "pid_created": 42})
+    proc = Mock(pid=123)
+    proc.create_time.return_value = 43 if stage == "reused" else 42
+    proc.cmdline.return_value = ["unrelated"]
+    lookup = Mock(return_value=proc)
+    if stage in ("lookup", "create_time", "cmdline"):
+        (lookup if stage == "lookup" else getattr(proc, stage)).side_effect = psutil.NoSuchProcess(123)
+    monkeypatch.setattr(psutil, "Process", lookup)
+    kill = Mock()
+    monkeypatch.setattr(fake_instance, "_kill", kill)
+    assert fake_instance.stop(instance) == 0 and not instance.exists()
+    kill.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["alive", "inspection"])
+def test_stop_preserves_directory_when_shutdown_fails(monkeypatch, tmp_path, failure):
+    import psutil
+    from unittest.mock import Mock
+    instance = tmp_path / "instance"
+    fake_instance.write_instance(instance, 0)
+    fake_instance.write_handle(instance, {"pid": 123, "pid_created": 42})
+    monkeypatch.setattr(fake_instance, "_instance_process", lambda handle: Mock(pid=123))
+    kill = Mock(return_value=False, side_effect=psutil.AccessDenied(123) if failure == "inspection" else None)
+    monkeypatch.setattr(fake_instance, "_kill", kill)
+    remove = Mock()
+    monkeypatch.setattr(fake_instance, "remove", remove)
+    assert fake_instance.stop(instance) == 1
+    remove.assert_not_called()
+    assert (instance / fake_instance.HANDLE).is_file()
+
+
 def test_main_stop_subcommand(tmp_path):
     assert fake_instance.main(["stop", "--dir", str(tmp_path / "absent")]) == 0
 

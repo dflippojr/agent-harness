@@ -493,6 +493,8 @@ def test_repeated_timed_out_sync_probes_do_not_multiply_or_occupy_shared_executo
         finally:
             release.set()
             await asyncio.wait_for(service._sync_waiter(rt), 1)
+        # The short deadline exercises stuck hooks above, not scheduling a fresh healthy thread on a busy runner.
+        monkeypatch.setattr(service, "STATUS_TIMEOUT", 1)
         assert await service._detail(rt) == {"state": "ready"}
         assert calls == [True, True]
 
