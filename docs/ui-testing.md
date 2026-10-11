@@ -27,6 +27,9 @@ docstring of [`harness/fake_model.py`](../harness/fake_model.py).
   - A `fake_model:` key in any YAML file stops the daemon from starting.
   - Fake mode removes the local-model supervision, inference-endpoint and image modules, so there is no warm-up, no
     GPU guard and no llama-server call. The manual GPU hold has no effect on it.
+  - The instance shares the Docker engine with any real harness on the machine. In fake mode the maintenance sweep
+    (scheduled, or Settings → Disk → Cleanup) never removes session containers, so it can't take a live harness's
+    containers for orphans.
   - `tests/test_fake_model.py` covers these guards.
 - **Disabled or stubbed integrations.**
   - Model: scripted (stubbed).

@@ -117,6 +117,10 @@ class Maintenance:
             return self.last_report
 
     async def _containers(self, now: float, report: dict) -> None:
+        if self.cfg.fake_model is not None:
+            # A fake-model test instance (#588) shares the Docker engine with the real harness, whose session
+            # containers it doesn't know: it must never remove them as orphans.
+            return
         code, out, _ = await run_cmd(["docker", "ps", "-a", "--filter", "label=agent-harness.session",
                                       "--format", "{{json .}}"], timeout=60)
         if code != 0:

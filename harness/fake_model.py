@@ -246,7 +246,9 @@ class FakeModel:
 
     def __init__(self, fixtures: Fixtures):
         self.fixtures = fixtures
-        self._failures: dict[str, int] = {}   # one call's context -> errors raised for it so far
+        # A call's context -> errors raised for it so far. Cleared once the call gets through, so the next session
+        # that reaches the same context (the same prompt in a new session) fails the same way again.
+        self._failures: dict[str, int] = {}
 
     @classmethod
     def from_path(cls, path: Path | str) -> "FakeModel":
@@ -303,6 +305,7 @@ class FakeModel:
                 if turn.wait:
                     await asyncio.sleep(turn.wait)
                 raise LLMError(turn.error["message"], retryable=turn.error["retryable"])
+            self._failures.pop(key, None)
             if not turn.text and not turn.tool_calls and not turn.reasoning:
                 turn = Turn(text=["[fake model] Recovered after the scripted error."])
         position = sum(1 for m in messages if m.get("role") == "assistant")

@@ -173,6 +173,9 @@ scripts:
             run(fake(None, messages, TOOLS))
         assert raised.value.retryable
     assert run(fake(None, messages, TOOLS)).content == "recovered"
+    # Once a call got through, the next session that reaches the same context fails the same way again.
+    with pytest.raises(LLMError, match="boom"):
+        run(fake(None, messages, TOOLS))
     fatal = [{"role": "user", "content": "fatal"}]
     with pytest.raises(LLMError) as raised:
         run(fake(None, fatal, TOOLS))
@@ -252,6 +255,24 @@ def test_apply_drops_everything_that_touches_the_gpu(monkeypatch, tmp_path):
     assert "local_model" not in m.modules and "endpoint" not in m.modules and "images" not in m.modules
 
 
+def test_maintenance_never_removes_containers_from_a_fake_instance(monkeypatch, tmp_path):
+    """The Docker engine is shared with the real harness, whose session containers this instance doesn't know."""
+    from harness import maintenance
+    config_dir, data_dir = fake_instance.write_instance(tmp_path, 0)
+    monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
+    m = Manager(config_mod.load(config_dir, data_dir))
+    calls = []
+
+    async def docker(args, *rest, **kwargs):
+        calls.append(args)
+        return 0, '{"Names": "harness-live", "State": "running", "Labels": "agent-harness.session=live1"}', ""
+    monkeypatch.setattr(maintenance, "run_cmd", docker)
+    report = {"containers_removed": []}
+    run(m.maintenance._containers(time.time(), report))
+    assert calls == [] and report["containers_removed"] == []
+    m.db.close()
+
+
 def test_a_bad_fixture_fails_the_start(monkeypatch, tmp_path):
     config_dir, data_dir = fake_instance.write_instance(tmp_path, 0)
     monkeypatch.setenv(fake_model.ENV, str(fixtures(tmp_path, "scripts: [{name: x}]")))
@@ -287,7 +308,7 @@ def test_start_refuses_an_occupied_port_or_a_used_dir(tmp_path, capsys):
         held.bind(("127.0.0.1", 0))
         held.listen()
         port = held.getsockname()[1]
-        assert not fake_instance.port_free(port)
+        assert fake_instance.reserve_port(port) is None and fake_instance.reserve_port(0)
         with pytest.raises(SystemExit):
             fake_instance.main(["--port", str(port), "--dir", str(tmp_path / "new")])
         assert "is in use" in capsys.readouterr().err and not (tmp_path / "new").exists()
@@ -297,6 +318,89 @@ def test_start_refuses_an_occupied_port_or_a_used_dir(tmp_path, capsys):
     with pytest.raises(SystemExit):
         fake_instance.main(["--dir", str(used)])
     assert "not empty" in capsys.readouterr().err
+
+
+def test_serve_seeds_settles_and_shuts_down(monkeypatch, tmp_path):
+    """The instance end to end in this process: READY only once the seeded runs settled, then a clean stop."""
+    import argparse
+    import httpx
+    monkeypatch.setenv(fake_model.ENV, "")  # serve sets it for its own process; restored after the test
+    root = tmp_path / "instance"
+    root.mkdir()
+    args = argparse.Namespace(port=0, web_port=0, fixtures=fake_model.DEFAULT_FIXTURES, no_seed=False, keep=False)
+
+    async def body():
+        task = asyncio.create_task(fake_instance.serve(args, root))
+        deadline = time.monotonic() + scaled(120)
+        state = {}
+        while state.get("status") != "ready":
+            assert time.monotonic() < deadline and not task.done(), "the instance never got ready"
+            await asyncio.sleep(0.2)
+            try:
+                state = json.loads((root / fake_instance.HANDLE).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        async with httpx.AsyncClient() as client:
+            assert (await client.get(state["web"] + "/ready")).json()["key_id"] == state["key_id"]
+            assert "harness.ownerToken" in (await client.get(state["connect"])).text
+            assert (await client.get(state["server"] + "/health")).status_code == 200
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return state
+    state = run(body())
+    assert state["pid"] and "token" not in json.dumps(state).lower()
+    assert fake_instance.remove(root) and not root.exists()
+
+
+@pytest.mark.parametrize("outcome,code", [(fake_instance.StartError("seeding failed"), 1), (KeyboardInterrupt(), 0)])
+def test_start_cleans_up_after_a_failure_or_ctrl_c(monkeypatch, tmp_path, capsys, outcome, code):
+    import signal
+    handlers = []
+    monkeypatch.setattr(signal, "signal", lambda sig, handler: handlers.append(sig))
+    seen = {}
+
+    async def serve(args, root):
+        seen["root"] = root
+        fake_instance.write_instance(root, 0)
+        raise outcome
+    monkeypatch.setattr(fake_instance, "serve", serve)
+    assert fake_instance.main(["--dir", str(tmp_path / "instance")]) == code
+    assert seen["root"] == (tmp_path / "instance").resolve() and not seen["root"].exists()
+    assert handlers  # Ctrl+Break / SIGTERM reach the cleanup as KeyboardInterrupt
+    assert ("FAILED seeding failed" in capsys.readouterr().err) == (code == 1)
+
+
+def test_stop_ends_the_recorded_instance_process(tmp_path):
+    import subprocess
+    import sys
+    instance = tmp_path / "instance"
+    fake_instance.write_instance(instance, 0)
+    # Stands in for a running instance: its command line names harness.fake_instance.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", "harness.fake_instance"])
+    try:
+        fake_instance.write_handle(instance, {"pid": proc.pid})
+        assert fake_instance.stop(instance) == 0
+        assert proc.wait(timeout=30) is not None and not instance.exists()
+    finally:
+        proc.kill()
+
+
+def test_stop_leaves_an_unrelated_process_alone(tmp_path):
+    import subprocess
+    import sys
+    instance = tmp_path / "instance"
+    fake_instance.write_instance(instance, 0)
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        fake_instance.write_handle(instance, {"pid": proc.pid})  # a reused pid: not an instance
+        assert fake_instance.stop(instance) == 0 and proc.poll() is None and not instance.exists()
+    finally:
+        proc.kill()
+
+
+def test_main_stop_subcommand(tmp_path):
+    assert fake_instance.main(["stop", "--dir", str(tmp_path / "absent")]) == 0
 
 
 def test_ready_answers_503_until_seeded():

@@ -56,19 +56,14 @@ class StartError(RuntimeError):
     pass
 
 
-def free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def port_free(port: int) -> bool:
+def reserve_port(requested: int) -> int | None:
+    """The loopback port to listen on: `requested` if it is free (0 picks a free one), None if it is taken."""
     with socket.socket() as s:
         try:
-            s.bind(("127.0.0.1", port))
+            s.bind(("127.0.0.1", requested))
         except OSError:
-            return False
-    return True
+            return None
+        return s.getsockname()[1]
 
 
 def write_instance(root: Path, port: int) -> tuple[Path, Path]:
@@ -197,8 +192,9 @@ async def serve(args, root: Path) -> None:
     from .apps import normalize_origin
     from .manager import Manager
 
-    port = args.port or free_port()
-    web_port = args.web_port or free_port()
+    port, web_port = reserve_port(args.port), reserve_port(args.web_port)
+    if port is None or web_port is None:
+        raise StartError("a port is in use; this command never reuses a running server")
     server, web = f"http://127.0.0.1:{port}", f"http://127.0.0.1:{web_port}"
     state = {"status": "starting", "pid": os.getpid(), "server": server, "web": web, "connect": f"{web}/connect",
              "dir": str(root), "fixtures": str(Path(args.fixtures).resolve()), "started_at": time.time()}
@@ -244,13 +240,14 @@ async def _started(servers, tasks) -> None:
 
 def remove(root: Path) -> bool:
     """Delete the instance directory, including the read-only objects of its checkpoint git repositories."""
-    from .clone import _remove_tree
-    for _ in range(10):  # SQLite handles can linger a moment on Windows
-        _remove_tree(root)
-        if not root.exists():
+    from .maintenance import remove_tree
+    for _ in range(20):  # SQLite handles can linger a moment on Windows
+        try:
+            remove_tree(root)
             return True
-        time.sleep(0.5)
-    return False
+        except OSError:
+            time.sleep(0.5)
+    return not root.exists()
 
 
 def owned(root: Path) -> bool:
@@ -297,7 +294,7 @@ def _interrupt(_sig, _frame):
 def start(args, ap) -> int:
     fake_model.load_fixtures(args.fixtures)  # fail before creating anything
     for flag, port in (("--port", args.port), ("--web-port", args.web_port)):
-        if port and not port_free(port):
+        if port and reserve_port(port) is None:
             ap.error(f"{flag} {port} is in use; this command never reuses a running server")
     if args.dir is not None and args.dir.exists() and any(args.dir.iterdir()):
         ap.error(f"{args.dir} is not empty (stop the instance there first: python -m harness.fake_instance stop "
