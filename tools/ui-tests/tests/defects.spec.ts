@@ -35,6 +35,52 @@ test('#591 Chat starters and recent chats remain reachable at four reflow widths
   }
 });
 
+test('#603 Chat starter tapped before options load fills the ready composer', async ({ signedIn: page }, info) => {
+  let releaseOptions!: () => void;
+  const optionsGate = new Promise<void>(resolve => { releaseOptions = resolve; });
+  let optionsRequested!: () => void;
+  const optionsRequest = new Promise<void>(resolve => { optionsRequested = resolve; });
+  await page.route('**/chats/options', async route => {
+    optionsRequested();
+    await optionsGate;
+    await route.continue();
+  });
+  const prompts: string[] = [];
+  page.on('request', request => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/chats')) {
+      prompts.push(request.postDataJSON().prompt);
+    }
+  });
+  try {
+    await page.goto('/#/agents');
+    await expect(page.locator('.agent-row').first()).toBeVisible();
+    await page.goto('/#/chat');
+    await optionsRequest;
+    const starter = page.locator('.chat-starters button').first();
+    await expect(starter).toBeVisible();
+    const text = (await starter.innerText()).trim();
+    const message = page.getByRole('textbox', { name: 'Message', exact: true });
+    await expect(message).toHaveCount(0);
+    if (info.project.use.hasTouch) await starter.tap();
+    else await starter.click();
+    await expect(message).toHaveCount(0);
+    releaseOptions();
+    await expect(message).toHaveValue(text);
+    await expect(message).toBeFocused();
+    expect(prompts).toEqual([]);
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await expect(page).toHaveURL(new RegExp('#/chat/[A-Za-z0-9_-]+$'));
+    expect(prompts).toEqual([text]);
+    await expect(page.locator('.msg.assistant.final')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Delete', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Delete chat', exact: true }).click();
+    await expect(page).toHaveURL(new RegExp('#/chat$'));
+  } finally {
+    releaseOptions();
+  }
+});
+
 test('#592 New task and optional project labels name and focus their fields', async ({ signedIn: page }) => {
   await page.goto('/#/new');
   for (const label of ['Project', 'Backend', 'Model', 'Title']) {
@@ -72,8 +118,16 @@ test('#594 Enabled label has a 44px target with separated actions in create and 
       const box = (await label.boundingBox())!;
       expect(box.width).toBeGreaterThanOrEqual(44);
       expect(box.height).toBeGreaterThanOrEqual(44);
-      const footer = (await page.locator('.job-footer').boundingBox())!;
-      expect(footer.y - box.y - box.height).toBeGreaterThanOrEqual(8);
+      // Read all vertical positions together so focus scrolling cannot skew the gaps.
+      const gaps = await label.evaluate(el => {
+        const toggle = el.getBoundingClientRect();
+        const form = el.closest('form')!;
+        const above = form.querySelector('#job-notify')!.getBoundingClientRect();
+        const footer = form.querySelector('.job-footer')!.getBoundingClientRect();
+        return { above: toggle.top - above.bottom, below: footer.top - toggle.bottom };
+      });
+      expect(gaps.above).toBeGreaterThanOrEqual(8);
+      expect(gaps.below).toBeGreaterThanOrEqual(8);
       for (const position of [{ x: 2, y: 2 }, { x: box.width - 2, y: box.height - 2 }]) {
         const checked = await checkbox.isChecked();
         if (info.project.use.hasTouch) await label.tap({ position });

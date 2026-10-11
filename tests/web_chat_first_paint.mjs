@@ -157,8 +157,7 @@ const findTag = (node, tag) => {
   return null;
 };
 
-// Clicking a chat-starter button before /chats/options resolves (ui is still null) must be a
-// harmless no-op, not throw (#180 review finding: TypeError on ui.input while ui is null).
+// A starter selected before options resolve stays queued until the composer mounts (#603).
 const starters = findByClass(byId.app, "chat-starters");
 if (!starters) throw new Error("chat-starters welcome shell was not painted");
 const starterButton = findTag(starters, "BUTTON");
@@ -167,6 +166,11 @@ starterButton.click();
 
 releaseChatOptions();
 await sleep(30);
+
+const composerInput = findTag(doc.body, "TEXTAREA");
+if (composerInput?.value !== starterButton.textContent) {
+  throw new Error("early starter selection was not restored in the composer");
+}
 
 if (!fetched.some((u) => u.includes("/chats/options"))) {
   throw new Error("expected /chats/options to have been requested");
