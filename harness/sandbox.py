@@ -443,3 +443,39 @@ class Sandbox:
 
     async def remove(self) -> None:
         await run_cmd(["docker", "rm", "-f", self.name], timeout=60)
+
+
+NO_DOCKER = ("the shell sandbox is off in fake model mode: this test instance shares the Docker engine with the real "
+             "harness, so it never creates containers (docs/ui-testing.md)")
+
+
+def _no_docker() -> Exception:
+    from .fileops import ToolError
+    return ToolError(NO_DOCKER)
+
+
+class NoDockerSandbox(Sandbox):
+    """Fake model mode's sandbox (#588). The Docker engine, with its networks, cache volumes and session containers, is
+    shared with the real harness, so a test instance never touches it: a shell command is a tool error, and stopping
+    or removing the container is a no-op. The file tools don't use the sandbox and work as usual."""
+
+    async def ensure_running(self) -> str:
+        raise _no_docker()
+
+    async def exec(self, command: str, timeout: int = 120, network: bool = False) -> tuple[int, str]:
+        raise _no_docker()
+
+    async def stop_if_idle(self) -> bool:
+        return False
+
+    def arm_idle_stop(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def restart(self) -> None:
+        pass
+
+    async def remove(self) -> None:
+        pass

@@ -531,6 +531,8 @@ class Config:
     tool_output: ToolOutputConfig = field(default_factory=ToolOutputConfig)
     # Add-on module packages (harness/modules.py); None: every package under the harness_modules namespace.
     module_packages: tuple[str, ...] | None = None
+    # Fake model mode's fixture path (harness/fake_model.py, #588): set only from HARNESS_FAKE_MODEL, never from YAML.
+    fake_model: Path | None = None
 
     @property
     def db_path(self) -> Path:
@@ -932,6 +934,9 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     from .smart_approvals import load_smart_config
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
     raw = _read_raw_config(config_dir)
+    if "fake_model" in raw:
+        raise ValueError("fake_model is not a config key: fake model mode is opt-in through HARNESS_FAKE_MODEL only "
+                         "(docs/ui-testing.md)")
     profile, raw_modules, selected = _resolve_profile(raw)
     provider_secret_files = _load_provider_secret_files(raw)
     resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data"))
@@ -1018,6 +1023,8 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         state_max_chars=_state_max_chars(compaction.get("state_max_chars", 8000)),
         tool_output=_tool_output(raw.get("tool_output")),
     )
+    from . import fake_model
+    fake_model.apply(cfg)
     _validate_loaded(cfg)
     from .settings_keys import build_registry
     registry = build_registry(cfg)

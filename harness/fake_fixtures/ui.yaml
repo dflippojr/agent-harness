@@ -1,0 +1,207 @@
+# Default fake-model fixtures for UI testing (#588, docs/ui-testing.md). They cover the mobile redesign surfaces
+# (#506-#515). Scripts are tried in order; `match` is a case-insensitive regex searched in the user's message.
+# Every turn but the last needs tool_calls: the harness ends a run on a reply without them. Only the file tools
+# work: fake mode never touches Docker, so run_shell, git_clone and verify return a tool error. Writes under
+# protected/ ask first in the disposable instance's `ui` project.
+#
+# Prompts that pick each script (the disposable instance seeds most of them):
+#   "Hello ..." / "tab bar"        -> tab-bar-tour          a streamed answer with reasoning (Recent, header, tab bar)
+#   "tool rows"                    -> tool-rows             write / read / search / list, one long output (#508)
+#   "protected"                    -> approval-sheet        one write that asks: the pinned approval sheet (#507)
+#   "two approvals"                -> approval-batch        two writes that ask in one turn
+#   "slow" / "running"             -> slow-running          a minute of tool calls (Running group, connection state)
+#   "retry"                        -> model-retry           a retryable model error, then success (llm_retry row)
+#   "failure" / "fail"             -> model-failure         a fatal model error (Needs you, failed header)
+#   "compaction"                   -> compaction            long replies, then a compaction summary
+#   "markdown"                     -> markdown-answer       headings, lists, a table and code
+#   "nightly report"               -> nightly-report        what the seeded job runs (Jobs, #511)
+#   "bad tool call"                -> invalid-tool-call     malformed tool arguments the harness rejects
+
+context_tokens: 32768
+summary: |
+  ## User requests
+  none
+  ## Done so far
+  Wrote notes/long-task.md in several long passes (fake model mode).
+  ## Findings
+  The long passes were filler from the fake model's compaction script.
+  ## Answer so far
+  none yet
+  ## Next steps
+  Finish the long task and report.
+
+scripts:
+  - name: tab-bar-tour
+    match: "^\\s*(hello|hi)\\b|tab bar"
+    turns:
+      - reasoning: "The user wants a short tour. Keep it brief."
+        text: >-
+          Hi! This is the fake model. Agent Harness Web's tab bar has Agents, Chat, Jobs and Settings. Agents
+          groups sessions into Needs you, Running and Recent. Open a session to see its compact header and its
+          overflow menu.
+        delay: 0.03
+
+  - name: tool-rows
+    match: "tool rows|tool calls"
+    turns:
+      - text: "I'll create a few files first."
+        tool_calls:
+          - name: write_file
+            args:
+              path: notes/todo.md
+              content: |
+                # To do
+                - Check the tool rows
+                - Copy an output
+                - Open the full-screen viewer
+          - name: write_file
+            args:
+              path: notes/log.txt
+              content: |
+                line 001 the quick brown fox jumps over the lazy dog
+                line 002 the quick brown fox jumps over the lazy dog
+                line 003 the quick brown fox jumps over the lazy dog
+                line 004 the quick brown fox jumps over the lazy dog
+                line 005 the quick brown fox jumps over the lazy dog
+                line 006 the quick brown fox jumps over the lazy dog
+                line 007 the quick brown fox jumps over the lazy dog
+                line 008 the quick brown fox jumps over the lazy dog
+                line 009 the quick brown fox jumps over the lazy dog
+                line 010 the quick brown fox jumps over the lazy dog
+                line 011 the quick brown fox jumps over the lazy dog
+                line 012 the quick brown fox jumps over the lazy dog
+                line 013 the quick brown fox jumps over the lazy dog
+                line 014 the quick brown fox jumps over the lazy dog
+                line 015 the quick brown fox jumps over the lazy dog
+                line 016 the quick brown fox jumps over the lazy dog
+                line 017 the quick brown fox jumps over the lazy dog
+                line 018 the quick brown fox jumps over the lazy dog
+                line 019 the quick brown fox jumps over the lazy dog
+                line 020 the quick brown fox jumps over the lazy dog
+                line 021 the quick brown fox jumps over the lazy dog
+                line 022 the quick brown fox jumps over the lazy dog
+                line 023 the quick brown fox jumps over the lazy dog
+                line 024 the quick brown fox jumps over the lazy dog
+                line 025 the quick brown fox jumps over the lazy dog
+                line 026 the quick brown fox jumps over the lazy dog
+                line 027 the quick brown fox jumps over the lazy dog
+                line 028 the quick brown fox jumps over the lazy dog
+                line 029 the quick brown fox jumps over the lazy dog
+                line 030 the quick brown fox jumps over the lazy dog
+                line 031 the quick brown fox jumps over the lazy dog
+                line 032 the quick brown fox jumps over the lazy dog
+                line 033 the quick brown fox jumps over the lazy dog
+                line 034 the quick brown fox jumps over the lazy dog
+                line 035 the quick brown fox jumps over the lazy dog
+                line 036 the quick brown fox jumps over the lazy dog
+                line 037 the quick brown fox jumps over the lazy dog
+                line 038 the quick brown fox jumps over the lazy dog
+                line 039 the quick brown fox jumps over the lazy dog
+                line 040 the quick brown fox jumps over the lazy dog
+      - text: "Now reading them back."
+        tool_calls:
+          - {name: read_file, args: {path: notes/log.txt}}
+          - {name: list_files, args: {path: "."}}
+      - text: "And a search."
+        tool_calls:
+          - {name: search, args: {pattern: "fox", path: notes}}
+          - {name: read_file, args: {path: notes/missing.md}}
+      - text: >-
+          Done. The tool rows above show two writes, a long read (collapsed, with Copy and the full-screen viewer),
+          a listing, a search and one failed read.
+
+  - name: approval-batch
+    match: "two approvals"
+    turns:
+      - text: "Both of these files are protected, so each write asks first."
+        tool_calls:
+          - {name: write_file, args: {path: protected/a.json, content: "{\"a\": 1}\n"}}
+          - {name: write_file, args: {path: protected/b.json, content: "{\"b\": 2}\n"}}
+      - text: "Finished. The tool rows show which writes you approved."
+
+  - name: approval-sheet
+    match: "protected"
+    turns:
+      - reasoning: "Writes under protected/ need the owner's approval."
+        text: "I need to update protected/settings.json. This will ask for your approval."
+        tool_calls:
+          - name: write_file
+            args:
+              path: protected/settings.json
+              content: "{\n  \"theme\": \"system\",\n  \"notifications\": true\n}\n"
+      - text: "Finished. The tool row shows whether the write was approved or denied."
+
+  - name: slow-running
+    match: "slow|running"
+    turns:
+      - {text: "Starting a slow task.", wait: 8, tool_calls: [{name: list_files, args: {path: "."}}]}
+      - {text: "Still working.", wait: 8, tool_calls: [{name: write_file, args: {path: slow/step1.txt, content: "1\n"}}]}
+      - {text: "Still working.", wait: 8, tool_calls: [{name: write_file, args: {path: slow/step2.txt, content: "2\n"}}]}
+      - {text: "Still working.", wait: 8, tool_calls: [{name: write_file, args: {path: slow/step3.txt, content: "3\n"}}]}
+      - {text: "Almost there.", wait: 8, tool_calls: [{name: list_files, args: {path: slow}}]}
+      - {text: "Done with the slow task. It wrote three files under slow/.", wait: 8, delay: 0.1}
+
+  - name: model-retry
+    match: "retry"
+    turns:
+      - error: {message: "HTTP 500: simulated model server error (fake model mode)", retryable: true, times: 1}
+        text: "The model server failed once and the harness retried. This reply came from the retry."
+
+  - name: model-failure
+    match: "failure|\\bfail"
+    turns:
+      - error: {message: "HTTP 400: simulated fatal model error (fake model mode)", retryable: false}
+
+  - name: compaction
+    match: "compaction"
+    turns:
+      - text: "Writing the first long pass."
+        filler_chars: 30000
+        tool_calls:
+          - {name: write_file, args: {path: notes/long-task.md, content: "pass 1\n"}}
+      - text: "Writing the second long pass."
+        filler_chars: 30000
+        tool_calls:
+          - {name: write_file, args: {path: notes/long-task.md, content: "pass 2\n"}}
+      - text: "Writing the third long pass."
+        filler_chars: 30000
+        tool_calls:
+          - {name: write_file, args: {path: notes/long-task.md, content: "pass 3\n"}}
+      - text: "Done. The transcript shows the compaction rows before the later passes."
+
+  - name: markdown-answer
+    match: "markdown"
+    turns:
+      - text: |
+          ## Summary
+
+          Here is a reply with **bold**, *italic* and `inline code`.
+
+          1. A numbered item
+          2. Another one
+
+          | Surface | Issue |
+          |---|---|
+          | Tab bar | #506 |
+          | Approval sheet | #507 |
+
+          ```python
+          def hello():
+              return "fake model"
+          ```
+
+  - name: nightly-report
+    match: "nightly report"
+    turns:
+      - text: "Collecting the report."
+        tool_calls:
+          - {name: write_file, args: {path: reports/nightly.md, content: "# Nightly report\nAll quiet.\n"}}
+      - text: "Nightly report written to reports/nightly.md. All quiet."
+
+  - name: invalid-tool-call
+    match: "bad tool call"
+    turns:
+      - text: "Calling a tool with broken arguments."
+        tool_calls:
+          - {name: write_file, args: "{\"path\": \"x.md\", \"content\": "}
+      - text: "The harness rejected the malformed call, as the tool row shows."

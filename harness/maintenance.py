@@ -117,6 +117,10 @@ class Maintenance:
             return self.last_report
 
     async def _containers(self, now: float, report: dict) -> None:
+        if self.cfg.fake_model is not None:
+            # A fake-model test instance (#588) shares the Docker engine with the real harness, whose session
+            # containers it doesn't know: it must never remove them as orphans.
+            return
         code, out, _ = await run_cmd(["docker", "ps", "-a", "--filter", "label=agent-harness.session",
                                       "--format", "{{json .}}"], timeout=60)
         if code != 0:
@@ -137,6 +141,18 @@ class Maintenance:
             await run_cmd(["docker", "rm", "-f", item["Names"]], timeout=60)
             self.runner._sandboxes.pop(sid, None)
             report["containers_removed"].append(item["Names"])
+
+    async def _container_sizes(self) -> list[dict]:
+        if self.cfg.fake_model is not None:
+            return []  # the shared Docker engine's session containers are the real harness's, not this instance's
+        try:
+            code, text, _ = await run_cmd(["docker", "ps", "-a", "-s", "--filter", "label=agent-harness.session",
+                                           "--format", "{{.Names}}\t{{.State}}\t{{.Size}}"], timeout=120)
+        except FileNotFoundError:  # no Docker CLI on this machine
+            return []
+        if code != 0:
+            return []
+        return [dict(zip(("name", "state", "size"), line.split("\t"))) for line in text.splitlines()]
 
     def _workspace_roots(self) -> list:
         from .storage import is_reparse_point, workspaces_dir
@@ -266,10 +282,7 @@ class Maintenance:
                     "free_gb": round(disk.free / 2**30, 1), "total_gb": round(disk.total / 2**30, 1)}
 
         out = await asyncio.to_thread(measure)
-        code, text, _ = await run_cmd(["docker", "ps", "-a", "-s", "--filter", "label=agent-harness.session",
-                                       "--format", "{{.Names}}\t{{.State}}\t{{.Size}}"], timeout=120)
-        out["containers"] = [dict(zip(("name", "state", "size"), line.split("\t")))
-                             for line in text.splitlines()] if code == 0 else []
+        out["containers"] = await self._container_sizes()
         out["quota_mb"] = self.cfg.cleanup.workspace_quota_mb
         out["runners"] = self.runner.hub.status()
         out["last_cleanup"] = self.last_report

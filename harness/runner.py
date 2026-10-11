@@ -36,7 +36,7 @@ from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKEN
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .runner_contract import RemoteWorkspace, RunnerError, NoRunnerHub
 from .disk_watch import AccountLimit, DiskLimits
-from .sandbox import Sandbox, SandboxUnavailable
+from .sandbox import NoDockerSandbox, Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
@@ -89,6 +89,10 @@ END_PENDING = "end_pending"
 RUN_FINISHED = "run_finished"
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
                "Check the workspace state before retrying.")
+# The user-role messages the loop adds itself when a reply has no tool calls (fake_model.py skips them, #588).
+CUT_OFF_NUDGE = "Your reply was cut off by the output limit. Continue, using the tools if needed."
+CONTINUE_NUDGE = "Continue the task using the tools. When you are done, give your final answer."
+MODEL_CALL_ATTEMPTS = 4   # a model turn's tries on a retryable LLMError (fake_model.py's error fixtures rely on it)
 QUOTA_CHECK_SECONDS = 30
 READ_ARTIFACT_SCHEMA = {"type": "function", "function": {
     "name": "read_artifact",
@@ -312,7 +316,8 @@ class Runner:
             if project and project.sandbox:
                 sb_cfg = type(sb_cfg)(**{**sb_cfg.__dict__, **project.sandbox})
             sid = s["id"]
-            self._sandboxes[sid] = Sandbox(
+            sandbox_class = NoDockerSandbox if self.cfg.fake_model is not None else Sandbox
+            self._sandboxes[sid] = sandbox_class(
                 sid, Path(s["workspace"]), sb_cfg, project=project.name if project else "",
                 user_id=session_user_id(s),
                 setup=project.setup if project else "", known=self.db.has_tool_result(sid),
@@ -2096,12 +2101,12 @@ class Runner:
 
     async def _call_with_retries(self, sid: str, model, context: list, tools: list, stream: "_DeltaStream",
                                  reading, run: dict):
-        for attempt in range(4):
+        for attempt in range(MODEL_CALL_ATTEMPTS):
             try:
                 return await self._model_call(sid, model, context, tools, stream.on_delta, on_progress=reading)
             except llm.LLMError as e:
                 stream.flush()
-                if not e.retryable or attempt == 3:
+                if not e.retryable or attempt == MODEL_CALL_ATTEMPTS - 1:
                     raise
                 if "HTTP 500" in str(e):
                     run["invalid_tool_calls"] += 1
@@ -2188,10 +2193,7 @@ class Runner:
             self.bus.emit(sid, "quote_check", {"quotes": quotes})
         elif not completion.tool_calls:
             run["idle"] += 1
-            if completion.finish_reason == "length":
-                nudge = "Your reply was cut off by the output limit. Continue, using the tools if needed."
-            else:
-                nudge = "Continue the task using the tools. When you are done, give your final answer."
+            nudge = CUT_OFF_NUDGE if completion.finish_reason == "length" else CONTINUE_NUDGE
             context.append({"role": "user", "content": nudge})
         else:
             run["idle"] = 0
