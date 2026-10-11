@@ -24,7 +24,7 @@ export type CronPreview = paths["/api/admin/v1/jobs/preview"]["get"]["responses"
 type Route<P extends string> = P extends `${infer Path}?${string}` ? Path : P;
 type ResponseFor<P extends string, M extends HttpMethod, S extends Surface> =
   P extends "/sessions" ? (M extends "GET" ? SessionList : M extends "POST" ? SessionDetail : any) :
-  P extends `/sessions/${infer Ref}` ? (Ref extends `${string}/${string}` ? any : M extends "GET" | "PATCH" | "PUT" ? SessionDetail : any) :
+  P extends `/sessions/${infer Ref}` ? (Ref extends `${string}/${string}` ? any : M extends "GET" ? SessionDetail : any) :
   P extends "/jobs" ? (M extends "GET" ? JobList : M extends "POST" ? components["schemas"]["JobResponse"] : any) :
   P extends "/jobs/preview" ? (M extends "GET" ? CronPreview : any) :
   P extends `/jobs/${infer Ref}` ? (Ref extends `${string}/${string}` ? any : M extends "DELETE" ? null : components["schemas"]["JobResponse"]) :
