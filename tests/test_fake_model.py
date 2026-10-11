@@ -421,6 +421,28 @@ def test_stop_ends_the_recorded_instance_process(tmp_path):
         proc.kill()
 
 
+def test_kill_survives_a_child_that_already_exited(monkeypatch):
+    import psutil
+    killed = []
+
+    class Proc:
+        def __init__(self, pid, gone=False, kids=()):
+            self.pid, self.gone, self.kids = pid, gone, list(kids)
+
+        def children(self, recursive=False):
+            return self.kids
+
+        def kill(self):
+            if self.gone:
+                raise psutil.NoSuchProcess(self.pid)
+            killed.append(self.pid)
+    parent = Proc(1, kids=[Proc(2, gone=True), Proc(3)])
+    monkeypatch.setattr(psutil, "wait_procs", lambda procs, timeout: (procs, []))
+    assert fake_instance._kill(parent) and killed == [3, 1]
+    monkeypatch.setattr(psutil, "wait_procs", lambda procs, timeout: ([], procs))
+    assert not fake_instance._kill(Proc(4))   # still alive: stop leaves the directory in place
+
+
 def test_stop_leaves_an_unrelated_process_alone(tmp_path):
     import subprocess
     import sys

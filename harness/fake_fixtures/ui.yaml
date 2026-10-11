@@ -56,7 +56,47 @@ scripts:
           - name: write_file
             args:
               path: notes/log.txt
-              content: "line 001 the quick brown fox jumps over the lazy dog\nline 002 the quick brown fox jumps over the lazy dog\nline 003 the quick brown fox jumps over the lazy dog\nline 004 the quick brown fox jumps over the lazy dog\nline 005 the quick brown fox jumps over the lazy dog\nline 006 the quick brown fox jumps over the lazy dog\nline 007 the quick brown fox jumps over the lazy dog\nline 008 the quick brown fox jumps over the lazy dog\nline 009 the quick brown fox jumps over the lazy dog\nline 010 the quick brown fox jumps over the lazy dog\nline 011 the quick brown fox jumps over the lazy dog\nline 012 the quick brown fox jumps over the lazy dog\nline 013 the quick brown fox jumps over the lazy dog\nline 014 the quick brown fox jumps over the lazy dog\nline 015 the quick brown fox jumps over the lazy dog\nline 016 the quick brown fox jumps over the lazy dog\nline 017 the quick brown fox jumps over the lazy dog\nline 018 the quick brown fox jumps over the lazy dog\nline 019 the quick brown fox jumps over the lazy dog\nline 020 the quick brown fox jumps over the lazy dog\nline 021 the quick brown fox jumps over the lazy dog\nline 022 the quick brown fox jumps over the lazy dog\nline 023 the quick brown fox jumps over the lazy dog\nline 024 the quick brown fox jumps over the lazy dog\nline 025 the quick brown fox jumps over the lazy dog\nline 026 the quick brown fox jumps over the lazy dog\nline 027 the quick brown fox jumps over the lazy dog\nline 028 the quick brown fox jumps over the lazy dog\nline 029 the quick brown fox jumps over the lazy dog\nline 030 the quick brown fox jumps over the lazy dog\nline 031 the quick brown fox jumps over the lazy dog\nline 032 the quick brown fox jumps over the lazy dog\nline 033 the quick brown fox jumps over the lazy dog\nline 034 the quick brown fox jumps over the lazy dog\nline 035 the quick brown fox jumps over the lazy dog\nline 036 the quick brown fox jumps over the lazy dog\nline 037 the quick brown fox jumps over the lazy dog\nline 038 the quick brown fox jumps over the lazy dog\nline 039 the quick brown fox jumps over the lazy dog\nline 040 the quick brown fox jumps over the lazy dog\n"
+              content: |
+                line 001 the quick brown fox jumps over the lazy dog
+                line 002 the quick brown fox jumps over the lazy dog
+                line 003 the quick brown fox jumps over the lazy dog
+                line 004 the quick brown fox jumps over the lazy dog
+                line 005 the quick brown fox jumps over the lazy dog
+                line 006 the quick brown fox jumps over the lazy dog
+                line 007 the quick brown fox jumps over the lazy dog
+                line 008 the quick brown fox jumps over the lazy dog
+                line 009 the quick brown fox jumps over the lazy dog
+                line 010 the quick brown fox jumps over the lazy dog
+                line 011 the quick brown fox jumps over the lazy dog
+                line 012 the quick brown fox jumps over the lazy dog
+                line 013 the quick brown fox jumps over the lazy dog
+                line 014 the quick brown fox jumps over the lazy dog
+                line 015 the quick brown fox jumps over the lazy dog
+                line 016 the quick brown fox jumps over the lazy dog
+                line 017 the quick brown fox jumps over the lazy dog
+                line 018 the quick brown fox jumps over the lazy dog
+                line 019 the quick brown fox jumps over the lazy dog
+                line 020 the quick brown fox jumps over the lazy dog
+                line 021 the quick brown fox jumps over the lazy dog
+                line 022 the quick brown fox jumps over the lazy dog
+                line 023 the quick brown fox jumps over the lazy dog
+                line 024 the quick brown fox jumps over the lazy dog
+                line 025 the quick brown fox jumps over the lazy dog
+                line 026 the quick brown fox jumps over the lazy dog
+                line 027 the quick brown fox jumps over the lazy dog
+                line 028 the quick brown fox jumps over the lazy dog
+                line 029 the quick brown fox jumps over the lazy dog
+                line 030 the quick brown fox jumps over the lazy dog
+                line 031 the quick brown fox jumps over the lazy dog
+                line 032 the quick brown fox jumps over the lazy dog
+                line 033 the quick brown fox jumps over the lazy dog
+                line 034 the quick brown fox jumps over the lazy dog
+                line 035 the quick brown fox jumps over the lazy dog
+                line 036 the quick brown fox jumps over the lazy dog
+                line 037 the quick brown fox jumps over the lazy dog
+                line 038 the quick brown fox jumps over the lazy dog
+                line 039 the quick brown fox jumps over the lazy dog
+                line 040 the quick brown fox jumps over the lazy dog
       - text: "Now reading them back."
         tool_calls:
           - {name: read_file, args: {path: notes/log.txt}}

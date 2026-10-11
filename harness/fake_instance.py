@@ -167,7 +167,8 @@ async def settle(client: httpx.AsyncClient, expected: dict[str, tuple[str, str, 
 
 
 def write_handle(root: Path, state: dict) -> None:
-    (root / HANDLE).write_text(json.dumps(state, indent=1), encoding="utf-8")
+    from .atomic_io import write_atomic
+    write_atomic(root / HANDLE, json.dumps(state, indent=1))  # `stop` may read it meanwhile: never half-written
 
 
 def summary(state: dict, token: str, local_token: str, keep: bool) -> str:
@@ -272,6 +273,26 @@ def _instance_process(handle: dict):
         return None
 
 
+def _kill(proc) -> bool:
+    """Kill the instance and its children. A child that already exited is fine; the instance itself must be gone."""
+    import psutil
+    try:
+        children = proc.children(recursive=True)
+    except psutil.NoSuchProcess:
+        children = []
+    for p in children + [proc]:
+        try:
+            p.kill()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.Error as e:
+            print(f"process {p.pid}: {e}", file=sys.stderr)
+    _, alive = psutil.wait_procs([proc], timeout=15)
+    if not alive:
+        print(f"stopped process {proc.pid}")
+    return not alive
+
+
 def stop(root: Path) -> int:
     """End the instance recorded in `root` and delete `root`. Safe to repeat, and after a partial start."""
     import psutil
@@ -287,14 +308,9 @@ def stop(root: Path) -> int:
     except (OSError, ValueError):
         handle = {}
     proc = _instance_process(handle) if isinstance(handle, dict) else None
-    if proc is not None:
-        try:
-            for p in proc.children(recursive=True) + [proc]:
-                p.kill()
-            psutil.wait_procs([proc], timeout=15)
-            print(f"stopped process {proc.pid}")
-        except psutil.Error as e:
-            print(f"process {proc.pid}: {e}", file=sys.stderr)
+    if proc is not None and not _kill(proc):
+        print(f"could not stop process {proc.pid}; {root} is left in place", file=sys.stderr)
+        return 1
     if not remove(root):
         print(f"could not delete {root}; is a process still using it?", file=sys.stderr)
         return 1
