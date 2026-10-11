@@ -19,12 +19,12 @@ export function mountSessionInfo({ $app, h, append, copyBox, downloadDaemonFile 
       rows.push(["Skills", frozen.map((sk) => `${sk.slug} v${sk.version} (${(sk.content_hash || "").slice(0, 12)})`).join(", ")]);
     }
     const trace = traceInfo(s);
-    const traceRow = trace && h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
+    const traceRow = trace && h("div", { class: "row session-info-row" },
       h("span", { class: "muted" }, "Trace"),
-      trace.url ? h("a", { href: trace.url, target: "_blank", rel: "noopener", style: "overflow-wrap:anywhere;text-align:right" }, trace.id)
+      trace.url ? h("a", { href: trace.url, target: "_blank", rel: "noopener", class: "session-info-value" }, trace.id)
         : copyBox(trace.id));
-    append($app, h("div", { class: "card" }, rows.map(([k, v]) => h("div", { class: "row", style: "justify-content:space-between;padding:4px 0" },
-      h("span", { class: "muted" }, k), h("span", { style: "overflow-wrap:anywhere;text-align:right" }, String(v)))), traceRow),
+    append($app, h("div", { class: "card session-info" }, rows.map(([k, v]) => h("div", { class: "row session-info-row" },
+      h("span", { class: "muted" }, k), h("span", { class: "session-info-value" }, String(v)))), traceRow),
     h("button", { class: "btn", onclick: () => downloadDaemonFile(`/sessions/${s.id}/transcript`, `${s.id}.md`) },
       "Download Markdown transcript"));
   }
