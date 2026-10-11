@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Runner targets and backend choice. Pure: no DOM.
 
 export const TARGET_LABEL = { tower: "tower", macbook: "MacBook" };

@@ -34,6 +34,7 @@ from . import taint
 from . import telemetry
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
+from .api_models import WebSessionResponse
 from .modules import principal_capabilities
 from .webgzip import WebGzipMiddleware
 
@@ -680,13 +681,13 @@ async def queue(request: Request):
     return out
 
 
-@api_router.get("/sessions")
+@api_router.get("/sessions", response_model=list[WebSessionResponse], response_model_exclude_unset=True)
 async def list_sessions(request: Request, limit: int = 50):
     m = mgr(request)
     return [m.list_summary(s) for s in m.db.list_sessions(limit, owner_id=owner_id(request))]
 
 
-@api_router.post("/sessions", status_code=201)
+@api_router.post("/sessions", status_code=201, response_model=WebSessionResponse, response_model_exclude_unset=True)
 async def create_session(body: CreateSession, request: Request):
     m = mgr(request)
     s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
@@ -759,7 +760,7 @@ async def discard_compare(group: str, request: Request):
     return await m.compare_discard(group, owner_id(request), context=operation_audit.request_context(request, m))
 
 
-@api_router.get("/sessions/{ref}")
+@api_router.get("/sessions/{ref}", response_model=WebSessionResponse, response_model_exclude_unset=True)
 async def get_session(ref: str, request: Request):
     m, _, session = owned_session(request, ref)
     return m.summary(session)

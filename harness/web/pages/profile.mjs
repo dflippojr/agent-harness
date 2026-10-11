@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Profile page (#258): account, appearance, notifications, install, backends, smart approvals, skills, memory,
 // endpoint and apps cards. The shell (DOM builder, router, auth state) is injected by app.js so this module
 // imports under plain Node and never reaches into another page.

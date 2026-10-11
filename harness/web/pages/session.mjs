@@ -11,6 +11,40 @@ import { withTaint } from "../lib/taint.mjs";
 import { mountSessionUi, sessionMenuItems, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
 import { sinceText } from "../lib/widgets.mjs";
 import * as sheets from "../lib/sheet.mjs";
+/** @import { Api, ConfirmSheet, OpenStream, PromptSheet, SessionDetail, StreamHandlers } from '../../../tools/web-types/contracts.js' */
+
+/**
+ * The shell and UI helpers are incremental boundaries; API responses use the generated contract.
+ * @typedef {Object} SessionDependencies
+ * @property {Api} api
+ * @property {OpenStream} openStream
+ * @property {typeof globalThis} browser
+ * @property {import('../client.mjs').AgentHarnessWebClient} agentHarnessWeb
+ * @property {((fn: () => void) => (() => void)) | null} [onDaemonChange]
+ * @property {() => void} [announceChange]
+ * @property {any} [$app]
+ * @property {any} h
+ * @property {any} fill
+ * @property {any} append
+ * @property {any} setHeader
+ * @property {any} toast
+ * @property {any} go
+ * @property {any} route
+ * @property {(id: string) => boolean} validId
+ * @property {() => boolean} isGuest
+ * @property {() => boolean} isMember
+ * @property {() => boolean} isOwner
+ * @property {(fn: () => void) => void} onLeave
+ * @property {any} badge
+ * @property {any} reviewBadge
+ * @property {any} progressBar
+ * @property {any} layoutBar
+ * @property {any} viewInfo
+ * @property {any} downloadDaemonFile
+ * @property {Set<string>} TERMINAL
+ * @property {ConfirmSheet} [confirmSheet]
+ * @property {PromptSheet} [promptSheet]
+ */
 
 const SESSION_EVENT_TYPES = [
   "session_created", "user_message", "status", "assistant", "delta", "tool_call", "tool_result",
@@ -20,9 +54,10 @@ const SESSION_EVENT_TYPES = [
   "quote_check", "ungrounded_quotes", "taint_added", "taint_cleared", "checkpoint", "rewound", "forked", "sandbox_setup",
 ];
 
+/** @param {SessionDependencies} dependencies */
 export function mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
-  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser, confirmSheet = sheets.confirmSheet,
-  promptSheet = sheets.promptSheet, announceChange = () => {}, onDaemonChange = null }) {
+  progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser, confirmSheet = /** @type {ConfirmSheet} */ (sheets.confirmSheet),
+  promptSheet = /** @type {PromptSheet} */ (sheets.promptSheet), announceChange = () => {}, onDaemonChange = null }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, location, setInterval, clearInterval, setTimeout, clearTimeout } = browser;
 const { renameTitle, sessionMenu, bindSessionJumps, placeSessionHeader } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser,
@@ -31,6 +66,7 @@ const pageMetrics = () => measurePage(browser);
 const scrollPage = (top) => scrollPageOf(top, browser);
 const { toolRow, closeViewer } = createToolRows({ h, fill, toast, browser });
 
+/** @param {string} sid @param {string} [tab] @param {string} [focusApproval] */
 async function viewSession(sid, tab, focusApproval) {
   if (!validId(sid)) { go("#/agents", true); return; }
   let session = await api(`/sessions/${sid}`);
@@ -61,21 +97,23 @@ async function viewSession(sid, tab, focusApproval) {
     if (id) fetchById.set(id, href);
     pages.push({ url: href, text: text || "" });
   };
+  /** @type {NonNullable<SessionDetail['totals']>} */
   let totals = session.totals || {};
   let ctxUsed = session.context_used || 0;
   const ctxLimit = session.context_limit || 0;
 
   const renderHead = () => {
+    /** @type {NonNullable<NonNullable<SessionDetail['run']>['rate_limits']>} */
     const limits = session.run?.rate_limits || {};
     const limitName = String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h");
-    const backendUsage = session.backend && session.backend !== "local" && limits.utilization !== undefined
+    const backendUsage = session.backend && session.backend !== "local" && limits.utilization != null
       ? ` · ${limitName} ${Math.round(limits.utilization * 100)}%` : "";
     const onTarget = session.target !== "tower" ? ` on ${TARGET_LABEL[session.target] || session.target}` : "";
     const pct = ctxLimit && ctxUsed ? Math.round((100 * ctxUsed) / ctxLimit) : null;
     const tokens = `Tokens ${fmtTokens(totals.prompt_tokens)} in · ${fmtTokens(totals.completion_tokens)} out`;
     const taint = session.taint || [];
     fill(head, badge(session.status),
-      session.queue_position > 0 ? h("span", { class: "badge" }, `#${session.queue_position} in GPU queue`) : null,
+      (session.queue_position || 0) > 0 ? h("span", { class: "badge" }, `#${session.queue_position} in GPU queue`) : null,
       taint.length ? h("span", { class: "badge warn", title: `Untrusted content read: ${taint.map((t) => t.origin).join(", ")}. Risky actions ask for approval until cleared.` }, "Tainted") : null,
       h("span", { class: "session-strip-meta", title: tokens }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`),
       pct === null ? null : h("span", { class: `ctx${pct >= 55 ? " high" : ""}`, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up. ${tokens}.` },
@@ -650,14 +688,16 @@ async function viewSession(sid, tab, focusApproval) {
       }
     },
   };
+  /** @type {StreamHandlers} */
   const tracked = {};
   for (const type of SESSION_EVENT_TYPES) {
     tracked[type] = (e) => {
       lastHeardAt = Date.now();
-      const persisted = e.seq !== null && e.seq !== undefined;
+      const seq = e.seq;
+      const persisted = seq != null;
       if (persisted) {
-        if (e.seq <= lastSeq) return;
-        lastSeq = e.seq;
+        if (seq <= lastSeq) return;
+        lastSeq = seq;
         if (e.ts) { prevEventAt = lastEventAt; lastEventAt = e.ts * 1000; }
       }
       handlers[type]?.(e);
@@ -676,6 +716,7 @@ async function viewSession(sid, tab, focusApproval) {
 
 // Changes and Info have no transcript stream, so a pending approval shows there as a one-line bar at the pane's foot with
 // Review (#564), refreshed by the app-wide stream's events. style.css shows it from 768 px up only.
+/** @param {SessionDetail} session @param {() => boolean} isActive */
 function pendingApprovalBar(session, isActive) {
   // Built once and updated in place, so a refresh never removes a Review link that has focus.
   const text = h("span", { class: "approval-bar-text" });
@@ -720,6 +761,7 @@ function pendingApprovalBar(session, isActive) {
   return bar;
 }
 
+/** @param {SessionDetail} s */
 function reviewCard(s) {
   if (!s.repo_kind || !s.branch) return null;
   const busy = !TERMINAL.has(s.status);
@@ -797,6 +839,7 @@ function reviewCard(s) {
     buttons.length ? h("div", { class: "row end", style: "margin-top:8px" }, buttons) : null);
 }
 
+/** @param {SessionDetail} session */
 async function viewChanges(session) {
   const sid = session.id;
   const review = reviewCard(session);

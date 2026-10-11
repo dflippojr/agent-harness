@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Small shared widgets (#258): status/review/job badges and the progress bar. Labels are plain data; the elements come from
 // dom.mjs, so nothing here touches document at module top level.
 import { h } from "./dom.mjs";

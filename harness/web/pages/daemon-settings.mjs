@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Owner Settings -> Daemon page (#258): operational config view, change plan, apply, rollback and supervised restart.
 // The shell (DOM builder, api, toast) is injected by app.js so this module imports under plain Node and never
 // reaches into another page.

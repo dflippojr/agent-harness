@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Scheduled jobs pages (#258): list, create/edit form and recent runs. The shell (DOM builder, api, router, header)
 // is injected by app.js so this module imports under plain Node and never reaches into another page.
 import { JOB_NOTIFY, CRON_PRESETS, JOB_GROUPS, fmtWhen, whenText, cronLabel, newJobDefaults, jobGroup, shortWhen, lastRunPill,

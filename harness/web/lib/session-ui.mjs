@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Session chrome helpers (#258): the overflow menu and its rename (#514), the desktop header placement (#564), the scroll
 // measurements and the jump buttons that
 // the session page uses and app.js's repaint hook reuses. Nothing here touches document/window at module top level, so it imports

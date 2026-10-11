@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Session list page (#258): the Agents home, with search, machine filter and live refresh. The shell (DOM builder,
 // router hooks, event stream) is injected by app.js so this module imports under plain Node and never reaches into
 // another page.

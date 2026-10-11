@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The session Info tab's trace row (#259). Pure: no DOM.
 
 // What to show for a session's OpenTelemetry trace: null when tracing is off (no id), else the id and the

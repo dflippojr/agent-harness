@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Bottom tab bar and Settings gear (#506), replacing the navigation drawer: which tab a route belongs to and when the bar
 // shows (pure), and mountTabs(), whose paint() the router calls after each route. The tabs are plain links in index.html;
 // on wide screens style.css turns the same bar into a left rail. Importing this module touches nothing.

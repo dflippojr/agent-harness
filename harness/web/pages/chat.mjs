@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Chat page (#258): the welcome state, the durable non-agent conversation with its model picker and composer, and the
 // snippet runner (#85). The shell (DOM builder, router hooks, event stream) is injected by app.js so this module imports
 // under plain Node and never reaches into another page.

@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .api import RouteTable, mgr, sse
+from .api_models import ApprovalResponse, SessionResponse
 from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
@@ -268,52 +269,12 @@ class AppRootResponse(BaseModel):
     update_hint: dict
 
 
-class ProviderFailureResponse(BaseModel):
-    code: str
-    provider: str
-    message: str
-    retryable: bool
-
-
-class SessionResponse(BaseModel):
-    """Stable app fields; extra additive fields remain present in serialized responses."""
-    model_config = ConfigDict(extra="allow")
-    id: str
-    project: str
-    target: str
-    backend: str
-    model: str
-    title: str
-    status: str
-    stop_reason: str = ""
-    created_at: float
-    updated_at: float
-    totals: dict = Field(default_factory=dict)
-    run: dict = Field(default_factory=dict)
-    answer: str = ""
-    app_tools: list[str] = Field(default_factory=list)
-    metadata: dict = Field(default_factory=dict)
-    failure: ProviderFailureResponse | None = None
-    last_event_seq: int = 0
-    queue_position: int | None = None
-
-
 class AppToolCallResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     call_id: str
     name: str
     args: dict
     status: str
-
-
-class ApprovalResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    id: str
-    tool: str
-    args: dict
-    reason: str = ""
-    detail: str = ""
-    status: str = "pending"
 
 
 class AcceptedResponse(BaseModel):
@@ -1075,7 +1036,7 @@ _CREATE_RESPONSES = {
 }
 
 
-@route_table.post("/api/v1/sessions", status_code=201, response_model=SessionResponse, responses=_CREATE_RESPONSES)
+@route_table.post("/api/v1/sessions", status_code=201, response_model=SessionResponse, response_model_exclude_unset=True, responses=_CREATE_RESPONSES)
 async def create_session(body: CreateAppSession, request: Request,
                          idempotency_key: str | None = Header(default=None, alias=idempotency.HEADER, description=(
                              "Optional, App tokens only: 1-128 letters, digits, '-' or '_'. A retry with the same "
@@ -1209,7 +1170,7 @@ async def scoped_audit(request: Request, limit: int = 200, before_id: int | None
                                                 outcome=outcome, since=since, until=until)
 
 
-@route_table.get("/api/v1/sessions", response_model=list[SessionResponse])
+@route_table.get("/api/v1/sessions", response_model=list[SessionResponse], response_model_exclude_unset=True)
 async def list_sessions(request: Request, limit: int = 50):
     m = mgr(request)
     key = auth(request, "sessions")
@@ -1225,14 +1186,14 @@ async def list_sessions(request: Request, limit: int = 50):
     return [m.list_summary(r) for r in mine[:limit]]
 
 
-@route_table.get("/api/v1/sessions/{ref}", response_model=SessionResponse)
+@route_table.get("/api/v1/sessions/{ref}", response_model=SessionResponse, response_model_exclude_unset=True)
 async def get_session(ref: str, request: Request):
     m = mgr(request)
     return view(m, visible_session(request, auth(request, "sessions"), ref))
 
 
-@route_table.patch("/api/v1/sessions/{ref}", response_model=SessionResponse)
-@route_table.put("/api/v1/sessions/{ref}", response_model=SessionResponse)
+@route_table.patch("/api/v1/sessions/{ref}", response_model=SessionResponse, response_model_exclude_unset=True)
+@route_table.put("/api/v1/sessions/{ref}", response_model=SessionResponse, response_model_exclude_unset=True)
 async def patch_session(ref: str, body: AppSessionUpdate, request: Request):
     m = mgr(request)
     key = auth(request, "sessions")
@@ -1240,7 +1201,7 @@ async def patch_session(ref: str, body: AppSessionUpdate, request: Request):
     return view(m, m.rename(s["id"], body.title, context=namespace_audit.key_context(key)))
 
 
-@route_table.post("/api/v1/sessions/{ref}/rerun", status_code=201, response_model=SessionResponse)
+@route_table.post("/api/v1/sessions/{ref}/rerun", status_code=201, response_model=SessionResponse, response_model_exclude_unset=True)
 async def rerun_session(ref: str, request: Request):
     m = mgr(request)
     key = auth(request, "sessions")
@@ -1248,7 +1209,7 @@ async def rerun_session(ref: str, request: Request):
     return view(m, m.rerun(s["id"], context=namespace_audit.key_context(key)))
 
 
-@route_table.post("/api/v1/sessions/{ref}/messages", response_model=SessionResponse)
+@route_table.post("/api/v1/sessions/{ref}/messages", response_model=SessionResponse, response_model_exclude_unset=True)
 async def send(ref: str, body: AppMessage, request: Request):
     m = mgr(request)
     key = auth(request, "sessions")
@@ -1256,7 +1217,7 @@ async def send(ref: str, body: AppMessage, request: Request):
     return view(m, await m.send(s["id"], body.content, context=namespace_audit.key_context(key)))
 
 
-@route_table.post("/api/v1/sessions/{ref}/context", response_model=SessionResponse)
+@route_table.post("/api/v1/sessions/{ref}/context", response_model=SessionResponse, response_model_exclude_unset=True)
 async def add_context(ref: str, body: AppContext, request: Request):
     m = mgr(request)
     key = auth(request, "sessions")
@@ -1268,7 +1229,7 @@ async def add_context(ref: str, body: AppContext, request: Request):
                                context=namespace_audit.key_context(key)))
 
 
-@route_table.post("/api/v1/sessions/{ref}/cancel", response_model=SessionResponse)
+@route_table.post("/api/v1/sessions/{ref}/cancel", response_model=SessionResponse, response_model_exclude_unset=True)
 async def cancel(ref: str, request: Request):
     m = mgr(request)
     key = auth(request, "sessions")

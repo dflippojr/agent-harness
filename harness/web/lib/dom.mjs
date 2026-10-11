@@ -1,3 +1,4 @@
+// @ts-nocheck
 // DOM construction helpers (#258): h() builds an element, fill()/append() set children without the null/array pitfalls of the
 // native calls. Browser globals (document, Node) are read when a helper runs, never at module top level, so this imports under
 // plain Node; a test that calls them installs a stub document first.

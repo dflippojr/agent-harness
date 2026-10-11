@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Page layout rules: the session jump buttons (pure) and the desktop split view (#563). Importing this module touches
 // nothing; mountSplitView() receives the shell elements and browser globals as arguments.
 import { validId } from "./stream.mjs";

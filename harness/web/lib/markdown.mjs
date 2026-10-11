@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Small, safe Markdown subset rendered to an HTML string. Pure: no DOM.
 import { snippetLanguage } from "./snippets.mjs";
 

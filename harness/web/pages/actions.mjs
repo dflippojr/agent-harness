@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Owner Actions page (#258): Resources (GPU hold, local model, diagnostics; #311), household accounts, Claude Remote Control and disk/maintenance tabs. The shell
 // (DOM builder, api, router, header) is injected by app.js so this module imports under plain Node and never
 // reaches into another page.

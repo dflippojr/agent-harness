@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The app's persistent chrome (#258): header bar, floating action button, toast, connection chip, guest banner and the
 // repaint hooks for the installed iOS app. mountChrome() takes the shell elements and browser globals as arguments and
 // registers the window/document listeners when called, so importing this module touches nothing and works under plain Node.

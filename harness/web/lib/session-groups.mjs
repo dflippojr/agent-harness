@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Shared session classification for the Agents list and persistent shell. No browser globals.
 // A failure stays under Needs you this long, then joins Recent (#509): the list has no "seen" state to clear it by.
 export const FAILED_NEEDS_YOU_SECONDS = 24 * 3600;

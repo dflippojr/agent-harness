@@ -9,3 +9,6 @@ harness/cli_home/** text eol=lf
 harness/cli_erase.py text eol=lf
 # The pinned gitleaks rules (harness/gitleaks/pin.json) must hash the same on every checkout.
 harness/gitleaks/** text eol=lf
+# Freshly generated API contracts compare byte-for-byte on Windows and in CI.
+tools/web-types/openapi.json text eol=lf
+tools/web-types/api.d.ts text eol=lf

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Images pages (#258): gallery and generation form, one result, masked edit and the full-screen viewer. The shell
 // (DOM builder, api, router, header) is injected by app.js so this module imports under plain Node and never
 // reaches into another page.

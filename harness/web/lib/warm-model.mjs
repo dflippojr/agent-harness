@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Model warm-up (#258). Loading the model takes about a minute after it has been unloaded. Only an explicit local-model
 // selection (choosing the local backend or a model, or typing a task with it selected) starts a load; the server skips it
 // when RAM is short. Opening a page never does (#311).

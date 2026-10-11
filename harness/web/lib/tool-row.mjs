@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Tool-call rows in the session transcript (#508): a 48 px summary (icon, name, argument summary, status pill) whose
 // output and arguments are only built when the row first opens, each behind a line count with Copy and Open. Open shows
 // the full text in a viewer (full-screen on phones, centred on desktop) with wrap and monospace.

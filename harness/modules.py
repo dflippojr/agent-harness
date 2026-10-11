@@ -104,6 +104,7 @@ _PUBLIC = {
     "run_cmd": ("harness.sandbox", "run_cmd"),
     "HarnessError": ("harness.manager", "HarnessError"),
     "RouteTable": ("harness.api", "RouteTable"),
+    "WebSessionResponse": ("harness.api_models", "WebSessionResponse"),
     "require_owner": ("harness.api", "require_owner"),
     "app_auth": ("harness.apps", "auth"),
     "calling_app": ("harness.apps", "calling_app"),

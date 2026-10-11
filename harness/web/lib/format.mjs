@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Time, size and count formatting shared by every page. Pure: no DOM.
 
 export const fmtElapsed = (ms) => {
