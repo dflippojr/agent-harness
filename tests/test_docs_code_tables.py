@@ -3,7 +3,9 @@
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -227,8 +229,72 @@ def test_real_repo_tables_are_in_sync_and_cover_known_entries():
     assert {"sessions.max_turns", "app.capabilities"} <= keys
 
 
-def test_generation_stays_under_a_second():
-    start = time.perf_counter()
-    code_tables.collect_routes(ROOT)
-    code_tables.load_specs(ROOT)
-    assert time.perf_counter() - start < 2.0   # 1 s budget on a developer machine, doubled for shared runners
+@pytest.mark.parametrize("file_count,routes_per_file,delay", [
+    (1, 1, 0), (1, 24, 0), (4, 1, 0), (4, 24, 0), (4, 24, 2.1),
+])
+def test_route_generation_reads_and_parses_sources_once(tmp_path, monkeypatch, file_count, routes_per_file, delay):
+    """Catch per-route rescans/reparses and parsing routeless files as the input grows.
+
+    Count actual work, not elapsed time: the delayed case exceeds the old two-second
+    budget without adding work, just as a descheduled CI worker would.
+    """
+    sources, route_sources, expected_routes = set(), set(), set()
+    for directory in code_tables.ROUTE_DIRS:
+        base = tmp_path / directory
+        base.mkdir()
+        constants = base / f"{directory}_constants.py"
+        constants.write_text('BASE = "/api/v1"\n', encoding="utf-8")
+        sources.add(constants)
+        for index in range(file_count):
+            path = base / f"routes_{index}.py"
+            source = f"from .{constants.stem} import BASE\n\n"
+            for route in range(routes_per_file):
+                suffix = f"/{directory}/{index}/{route}"
+                source += (f'@app_routes.get(BASE + "{suffix}")\n'
+                           f'async def route_{route}(request):\n    """Fixture route."""\n\n')
+                expected_routes.add(("GET", "/api/v1" + suffix))
+            path.write_text(source, encoding="utf-8")
+            sources.add(path)
+            route_sources.add(path.relative_to(tmp_path).as_posix())
+
+    reads, parses = Counter(), Counter()
+    read_text, parse = Path.read_text, code_tables.ast.parse
+
+    def counted_read(path, *args, **kwargs):
+        reads[path] += 1
+        if delay and path == min(sources):
+            time.sleep(delay)
+        return read_text(path, *args, **kwargs)
+
+    def counted_parse(source, filename="<unknown>", *args, **kwargs):
+        parses[filename] += 1
+        return parse(source, filename, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read)
+    monkeypatch.setattr(code_tables.ast, "parse", counted_parse)
+    routes = code_tables.collect_routes(tmp_path)
+    assert {(r.method, r.path) for r in routes} == expected_routes
+    assert reads == Counter({path: 1 for path in sources})
+    assert parses == Counter({name: 1 for name in route_sources})
+
+
+def test_settings_generation_loads_config_and_builds_registry_once(monkeypatch):
+    """Catch rebuilding the config/registry for each setting instead of sharing one load."""
+    from harness import config, settings_keys
+
+    load_config = config.load
+    build_registry = Mock(wraps=settings_keys.build_registry)
+
+    def counted_load(*args, **kwargs):
+        cfg = load_config(*args, **kwargs)
+        # Config validation builds its own registries; count the docs extraction separately.
+        build_registry.reset_mock()
+        return cfg
+
+    load = Mock(wraps=counted_load)
+    monkeypatch.setattr(config, "load", load)
+    monkeypatch.setattr(settings_keys, "build_registry", build_registry)
+    specs = code_tables.load_specs(ROOT)
+    assert {"sessions.max_turns", "app.capabilities"} <= {s.key for s in specs}
+    load.assert_called_once()
+    build_registry.assert_called_once()
