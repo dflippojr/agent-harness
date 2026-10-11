@@ -255,6 +255,7 @@ async function viewChat(id) {
   onLeave(() => { active = false; document.body.classList.remove("chat-page"); });
 
   let ui = null;
+  let pendingStarter = null;
   const feed = h("div", { class: "chat-feed", "aria-live": "polite" });
   const welcome = id ? null : h("div", { class: "chat-welcome" },
     h("div", { class: "chat-welcome-content" },
@@ -264,7 +265,7 @@ async function viewChat(id) {
       h("div", { class: "chat-starters" }, CHAT_STARTERS.map((text) => h("button", {
         class: "btn small", type: "button",
         onclick: () => {
-          if (!ui) return;
+          if (!ui) { pendingStarter = text; return; }
           ui.input.value = text;
           ui.input.focus();
         },
@@ -281,6 +282,7 @@ async function viewChat(id) {
   setHeader("chat", session ? session.title : "Chat");
   ui = chatComposer(options, session);
   document.body.append(ui.el);
+  if (pendingStarter !== null) ui.input.value = pendingStarter;
   const stopKeyboard = trackKeyboard(ui.el);
   onLeave(() => { ui.el.remove(); stopKeyboard(); });
 

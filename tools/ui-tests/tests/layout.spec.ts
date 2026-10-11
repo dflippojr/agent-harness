@@ -1,4 +1,14 @@
 import { test, expect, openSession, expectDone } from './fixtures';
+import type { Page } from '@playwright/test';
+
+async function expectReflow(page: Page) {
+  for (const width of [320, 375, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect.poll(() => page.evaluate(() => innerWidth)).toBe(width);
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+}
 
 const surfaces = [
   { name: 'Chat landing', route: '/#/chat', ready: '.chat-welcome' },
@@ -19,22 +29,12 @@ test('primary pages reflow without overflow at 320/375/768/1440 CSS pixels', asy
     await test.step(surface.name, async () => {
       await page.goto(surface.route);
       await expect(page.locator(surface.ready).first()).toBeVisible();
-      for (const width of [320, 375, 768, 1440]) {
-        await page.setViewportSize({ width, height: 900 });
-        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-        await expect.poll(() => page.evaluate(() => innerWidth)).toBe(width);
-        await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      }
+      await expectReflow(page);
     });
   }
   await openSession(page, 'Protected settings');
   await expect(page.getByRole('region', { name: 'Approval needed', exact: true })).toBeVisible();
-  for (const width of [320, 375, 768, 1440]) {
-    await page.setViewportSize({ width, height: 900 });
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    await expect.poll(() => page.evaluate(() => innerWidth)).toBe(width);
-    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  }
+  await expectReflow(page);
   await openSession(page, 'Tool rows');
   await expectDone(page);
   const sessionUrl = page.url();
@@ -44,12 +44,7 @@ test('primary pages reflow without overflow at 320/375/768/1440 CSS pixels', asy
     if (!tab) await expectDone(page);
     else if (tab === '/changes') await expect(page.getByText('No git repositories in this workspace yet.', { exact: true })).toBeVisible();
     else await expect(page.locator('main')).toContainText('Tool rows');
-    for (const width of [320, 375, 768, 1440]) {
-      await page.setViewportSize({ width, height: 900 });
-      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-      await expect.poll(() => page.evaluate(() => innerWidth)).toBe(width);
-      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    }
+    await expectReflow(page);
   }
 });
 

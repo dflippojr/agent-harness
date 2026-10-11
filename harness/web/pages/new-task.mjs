@@ -11,6 +11,11 @@ export function mountNewTask({ $app, h, fill, append, api, setHeader, toast, rou
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { localStorage, location, setInterval, clearInterval } = browser;
 
+const field = (id, label, control, ...notes) => {
+  control.setAttribute("id", id);
+  return [h("label", { for: id }, label), control, ...notes];
+};
+
 async function confirmGpuQueue(label) {
   if (isMember()) return true;
   let gpu;
@@ -189,7 +194,6 @@ async function viewNew() {
     pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
   const newProjectDescription = h("input", { id: "new-project-description", type: "text", placeholder: "Optional description", maxlength: "240" });
   const newProjectTarget = projectTargetInput(targets, target);
-  newProjectTarget.id = "new-project-target";
   const newProjectSource = h("select", { id: "new-project-source" },
     h("option", { value: "empty" }, "Empty workspace"),
     h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"),
@@ -238,10 +242,10 @@ async function viewNew() {
       }
     } },
     h("p", { class: "muted small" }, NEW_PROJECT_NOTE[isMember() ? "member" : "owner"]),
-    h("label", { for: "new-project-name" }, "Name"), newProjectName,
-    h("label", { for: "new-project-description" }, "Description"), newProjectDescription,
-    isMember() ? [] : [h("label", { for: "new-project-target" }, "Runs on"), newProjectTarget],
-    h("label", { for: "new-project-source" }, "Workspace"), newProjectSource, newProjectRepo, githubConnect,
+    field("new-project-name", "Name", newProjectName),
+    field("new-project-description", "Description", newProjectDescription),
+    isMember() ? [] : field("new-project-target", "Runs on", newProjectTarget),
+    field("new-project-source", "Workspace", newProjectSource), newProjectRepo, githubConnect,
     h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", { id: "new-task-model" }, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   let localModel = model.value;
@@ -407,10 +411,10 @@ async function viewNew() {
       if (!started) start.disabled = false;
     },
   },
-  h("label", { for: "new-task-project" }, "Project"), project, targetState, projectHint,
-  isMember() && availableBackends.length < 2 ? [] : [h("label", { for: "new-task-backend" }, "Backend"), backend, holdNotice, backendState],
-  h("label", { for: "new-task-model" }, "Model"), model, modelState,
-  h("label", { for: "new-task-title" }, "Title"), title,
+  field("new-task-project", "Project", project), targetState, projectHint,
+  isMember() && availableBackends.length < 2 ? [] : field("new-task-backend", "Backend", backend, holdNotice, backendState),
+  field("new-task-model", "Model", model), modelState,
+  field("new-task-title", "Title", title),
   skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,
   h("div", { class: "row", style: "margin-top:18px" },
     isMember() ? null : h("button", {
@@ -421,10 +425,10 @@ async function viewNew() {
     h("span", { class: "spacer" }), start));
   const context = h("div", { class: "new-task-context" },
     targetSwitch ? [h("label", {}, "Runs on"), targetSwitch] : null,
-    allTemplates.length ? [h("label", { for: "new-task-template" }, "Template"), tplSelect] : null, githubPicker);
+    allTemplates.length ? field("new-task-template", "Template", tplSelect) : null, githubPicker);
   // The prompt remains associated with the settings form even though desktop places it in its own column.
   // DOM order keeps the phone flow: context, prompt, settings, then the submit actions.
-  const promptPane = h("div", { class: "new-task-prompt" }, h("label", { for: "new-task-prompt" }, "Prompt"), prompt);
+  const promptPane = h("div", { class: "new-task-prompt" }, field("new-task-prompt", "Prompt", prompt));
   append($app, h("section", { class: "new-task-page", "aria-label": "New task" }, projectCreator,
     h("section", { class: "new-task-layout", "aria-label": "Task configuration" }, context, promptPane, form),
     allTemplates.length ? templateManager(allTemplates) : null));
