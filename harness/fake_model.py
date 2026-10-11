@@ -27,7 +27,7 @@ A fixture file (YAML; every ``*.yaml`` / ``*.yml`` in the directory, in name ord
             text: "Done."
             filler_chars: 40000 # a long reply: pads the text so the next turn compacts
 
-The next turn comes from the tool-call ids on the latest assistant message (``fake-<script>-<turn>-<n>-<k>``), so a
+The next turn comes from the tool-call ids on the latest assistant message (``fake-<script>-<turn>-<n>-<random>``), so a
 run continues deterministically after an approval, a compaction (which always keeps the newest turn) or a daemon
 restart. A new user message picks a script again.
 """
@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,7 +61,7 @@ DEFAULT_FIXTURES = Path(__file__).resolve().parent / "fake_fixtures"
 GPU_PACKAGES = ("harness_modules.local_model", "harness_modules.endpoint", "harness_modules.images")
 GPU_SWITCHES = ("gpu_guard", "endpoint", "images", "image_edit")
 NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
-CALL_ID = re.compile(r"^fake-([a-z0-9][a-z0-9-]*)-(\d+)-\d+-\d+$")
+CALL_ID = re.compile(r"^fake-([a-z0-9][a-z0-9-]*)-(\d+)-\d+-[0-9a-f]{12}$")
 TURN_KEYS = {"text", "reasoning", "delay", "wait", "tool_calls", "error", "filler_chars", "finish_reason"}
 DEFAULT_SUMMARY = ("## User requests\nnone\n## Done so far\nThe fake model ran a scripted task.\n## Findings\n"
                    "Nothing real: this is fake model mode.\n## Answer so far\nnone yet\n## Next steps\n"
@@ -308,8 +309,7 @@ class FakeModel:
             self._failures.pop(key, None)
             if not turn.text and not turn.tool_calls and not turn.reasoning:
                 turn = Turn(text=["[fake model] Recovered after the scripted error."])
-        position = sum(1 for m in messages if m.get("role") == "assistant")
-        return await self._emit(turn, prompt_tokens, on_delta, script.name, index, tools, position)
+        return await self._emit(turn, prompt_tokens, on_delta, script.name, index, tools)
 
     def _fallback(self) -> Turn:
         names = ", ".join(s.name for s in self.fixtures.scripts) or "none"
@@ -317,7 +317,7 @@ class FakeModel:
                                  "fallback"))
 
     async def _emit(self, turn: Turn, prompt_tokens: int, on_delta, script: str, index: int,
-                    tools: list[dict] | None, position: int = 0) -> Completion:
+                    tools: list[dict] | None) -> Completion:
         if turn.wait:
             await asyncio.sleep(turn.wait)
         out = Completion(prompt_tokens=prompt_tokens)
@@ -336,7 +336,8 @@ class FakeModel:
                 if on_delta:
                     await on_delta(kind, part)
         if tools is not None:  # a request without tools (a summary, a delegate edit) gets no calls
-            out.tool_calls = [{"id": f"fake-{script}-{index}-{n}-{position}", "type": "function",
+            # Unique per call (the runner matches approvals and results by id); script and turn are what resume uses.
+            out.tool_calls = [{"id": f"fake-{script}-{index}-{n}-{uuid.uuid4().hex[:12]}", "type": "function",
                                "function": dict(call)} for n, call in enumerate(turn.tool_calls)]
         out.finish_reason = turn.finish_reason or ("tool_calls" if out.tool_calls else "stop")
         out.completion_tokens = max(1, (len(out.content) + len(out.reasoning)) // 4)

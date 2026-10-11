@@ -98,8 +98,8 @@ What the command does:
   Ctrl+C to stop.
   ```
 
-- **Instance handle.** `<dir>/instance.json` records `pid`, `server`, `web`, `connect`, `dir`, `fixtures`, `key_id`
-  and `status` (`starting` or `ready`). It holds no tokens. Teardown uses it.
+- **Instance handle.** `<dir>/instance.json` records `pid`, `pid_created`, `server`, `web`, `connect`, `dir`, `fixtures`,
+  `key_id` and `status` (`starting` or `ready`). It holds no tokens. Teardown uses it.
 - **Logs.** Server logs go to stderr. They start with a `FAKE MODEL MODE` warning banner, and each model reply logs
   `fake model: script <name> turn <n>`. Redirect stderr to a file outside the instance directory, for example
   `2> output/ui-pass/agent-harness/<date>/server.log`, so it survives teardown.
@@ -304,14 +304,15 @@ python -m harness.fake_instance stop --dir <instance-dir>
 What it does:
 
 - It reads `<dir>/instance.json`.
-- It stops that process and its children, but only if the process command line is `harness.fake_instance`.
+- It stops that process and its children, but only if the process's command line is `harness.fake_instance` and its
+  start time matches the handle. A reused pid, even one belonging to another instance, is never killed.
 - It deletes the directory, including the read-only git checkpoint objects.
 - It works after a partial start:
   - with no handle file
   - with a handle whose process is already gone
   - on an empty directory
-- It refuses (exit 2) any directory that has no `fake-model-instance` marker, no `instance.json` and other contents,
-  so it never deletes unrelated files.
+- It refuses (exit 2) any non-empty directory without the `data/fake-model-instance` marker, so it never deletes
+  unrelated files. An `instance.json` alone is not enough.
 - It is safe to repeat. A missing directory prints `nothing to stop` and exits 0.
 
 In an interactive terminal, Ctrl+C, Ctrl+Break or SIGTERM do the same: both servers stop, the SQLite files close and

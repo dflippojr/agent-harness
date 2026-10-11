@@ -119,7 +119,9 @@ def test_turns_stream_and_tool_calls_continue_the_script(tmp_path):
     assert [k for k, _ in deltas] == ["reasoning", "content"]
     assert progress[-1][0] == progress[-1][1] > 0 and first.prompt_tokens == progress[-1][1]
     [call] = first.tool_calls
-    assert call["id"] == "fake-edit-0-0-0"
+    assert call["id"].startswith("fake-edit-0-0-") and fake_model.CALL_ID.match(call["id"])
+    # Ids are unique per call, even for the same context: the runner matches approvals and results by id.
+    assert run(fake(None, messages, TOOLS)).tool_calls[0]["id"] != call["id"]
     assert json.loads(call["function"]["arguments"]) == {"path": "a.md", "content": "x"}
     messages += [{"role": "assistant", "content": first.content, "tool_calls": first.tool_calls},
                  {"role": "tool", "tool_call_id": call["id"], "content": "denied"}]
@@ -129,7 +131,7 @@ def test_turns_stream_and_tool_calls_continue_the_script(tmp_path):
 
 def test_a_compaction_summary_or_nudge_keeps_the_scripts_place(tmp_path):
     fake = model(SCRIPT, tmp_path)
-    call = {"id": "fake-edit-0-0-3", "type": "function", "function": {"name": "write_file", "arguments": "{}"}}
+    call = {"id": "fake-edit-0-0-0123456789ab", "type": "function", "function": {"name": "write_file", "arguments": "{}"}}
     messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "edit it"},
                 {"role": "user", "content": f"{compaction.SUMMARY_TAG} Earlier work, condensed"},
                 {"role": "assistant", "content": "", "tool_calls": [call]},
@@ -151,7 +153,7 @@ def test_follow_ups_pick_a_script_again_and_unmatched_ones_fall_back(tmp_path):
 
 def test_an_exhausted_script_ends_the_run(tmp_path):
     fake = model(SCRIPT, tmp_path)
-    call = {"id": "fake-edit-1-0-2", "type": "function", "function": {"name": "write_file", "arguments": "{}"}}
+    call = {"id": "fake-edit-1-0-0123456789ab", "type": "function", "function": {"name": "write_file", "arguments": "{}"}}
     out = run(fake(None, [{"role": "user", "content": "edit"}, {"role": "assistant", "content": "",
                                                                  "tool_calls": [call]}], TOOLS))
     assert "has no turn 3" in out.content and not out.tool_calls
@@ -297,6 +299,11 @@ def test_stop_is_safe_to_repeat_and_only_deletes_instance_dirs(tmp_path):
     fake_instance.write_handle(instance, {"pid": 0})
     assert fake_instance.stop(instance) == 0 and not instance.exists()
     assert fake_instance.stop(instance) == 0
+    lookalike = tmp_path / "lookalike"   # an instance.json alone is no licence to delete a directory
+    lookalike.mkdir()
+    (lookalike / fake_instance.HANDLE).write_text("{}", encoding="utf-8")
+    (lookalike / "notes.txt").write_text("keep me", encoding="utf-8")
+    assert fake_instance.stop(lookalike) == 2 and (lookalike / "notes.txt").exists()
     partial = tmp_path / "partial"
     partial.mkdir()   # a start that failed before writing anything
     assert fake_instance.stop(partial) == 0 and not partial.exists()
@@ -308,7 +315,7 @@ def test_start_refuses_an_occupied_port_or_a_used_dir(tmp_path, capsys):
         held.bind(("127.0.0.1", 0))
         held.listen()
         port = held.getsockname()[1]
-        assert fake_instance.reserve_port(port) is None and fake_instance.reserve_port(0)
+        assert fake_instance.available_port(port) is None and fake_instance.available_port(0)
         with pytest.raises(SystemExit):
             fake_instance.main(["--port", str(port), "--dir", str(tmp_path / "new")])
         assert "is in use" in capsys.readouterr().err and not (tmp_path / "new").exists()
@@ -377,9 +384,14 @@ def test_stop_ends_the_recorded_instance_process(tmp_path):
     instance = tmp_path / "instance"
     fake_instance.write_instance(instance, 0)
     # Stands in for a running instance: its command line names harness.fake_instance.
+    import psutil
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", "harness.fake_instance"])
     try:
-        fake_instance.write_handle(instance, {"pid": proc.pid})
+        created = psutil.Process(proc.pid).create_time()
+        # The same pid with another start time is a reused pid (another instance, say): never killed.
+        fake_instance.write_handle(instance, {"pid": proc.pid, "pid_created": created - 60})
+        assert fake_instance._instance_process({"pid": proc.pid, "pid_created": created - 60}) is None
+        fake_instance.write_handle(instance, {"pid": proc.pid, "pid_created": created})
         assert fake_instance.stop(instance) == 0
         assert proc.wait(timeout=30) is not None and not instance.exists()
     finally:
@@ -393,7 +405,9 @@ def test_stop_leaves_an_unrelated_process_alone(tmp_path):
     fake_instance.write_instance(instance, 0)
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
     try:
-        fake_instance.write_handle(instance, {"pid": proc.pid})  # a reused pid: not an instance
+        import psutil
+        created = psutil.Process(proc.pid).create_time()
+        fake_instance.write_handle(instance, {"pid": proc.pid, "pid_created": created})  # not an instance
         assert fake_instance.stop(instance) == 0 and proc.poll() is None and not instance.exists()
     finally:
         proc.kill()
@@ -443,7 +457,7 @@ def test_full_stack_approval_and_compaction(monkeypatch, tmp_path):
         sid = made.json()["id"]
         wait_session(client, sid, headers, "waiting_approval")
         [approval] = client.get(f"/api/v1/sessions/{sid}/approvals", headers=headers).json()
-        assert approval["tool"] == "write_file" and approval["tool_call_id"] == "fake-approval-sheet-0-0-0"
+        assert approval["tool"] == "write_file" and approval["tool_call_id"].startswith("fake-approval-sheet-0-0-")
         decided = client.post(f"/api/v1/sessions/{sid}/approvals/{approval['id']}", headers=headers,
                               json={"decision": "approve"})
         assert decided.status_code == 200, decided.text

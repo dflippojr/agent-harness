@@ -56,8 +56,8 @@ class StartError(RuntimeError):
     pass
 
 
-def reserve_port(requested: int) -> int | None:
-    """The loopback port to listen on: `requested` if it is free (0 picks a free one), None if it is taken."""
+def available_port(requested: int) -> int | None:
+    """A loopback port that is free right now: `requested` (0: any), or None if it is taken. Not held after return."""
     with socket.socket() as s:
         try:
             s.bind(("127.0.0.1", requested))
@@ -192,14 +192,16 @@ async def serve(args, root: Path) -> None:
     from .apps import normalize_origin
     from .manager import Manager
 
-    port, web_port = reserve_port(args.port), reserve_port(args.web_port)
+    port, web_port = available_port(args.port), available_port(args.web_port)
     if port is None or web_port is None:
         raise StartError("a port is in use; this command never reuses a running server")
     server, web = f"http://127.0.0.1:{port}", f"http://127.0.0.1:{web_port}"
-    state = {"status": "starting", "pid": os.getpid(), "server": server, "web": web, "connect": f"{web}/connect",
-             "dir": str(root), "fixtures": str(Path(args.fixtures).resolve()), "started_at": time.time()}
+    import psutil
+    state = {"status": "starting", "pid": os.getpid(), "pid_created": psutil.Process().create_time(),
+             "server": server, "web": web, "connect": f"{web}/connect", "dir": str(root),
+             "fixtures": str(Path(args.fixtures).resolve()), "started_at": time.time()}
+    config_dir, data_dir = write_instance(root, port)  # the marker first: it is what lets `stop` delete the dir
     write_handle(root, state)
-    config_dir, data_dir = write_instance(root, port)
     os.environ[fake_model.ENV] = state["fixtures"]
     manager = Manager(config_mod.load(config_dir, data_dir))
     try:
@@ -252,8 +254,20 @@ def remove(root: Path) -> bool:
 
 def owned(root: Path) -> bool:
     """Whether `root` is a fake-model instance directory this command may delete (or an empty leftover)."""
-    return ((root / "data" / fake_model.MARKER).is_file() or (root / HANDLE).is_file()
-            or (root.is_dir() and not any(root.iterdir())))
+    return (root / "data" / fake_model.MARKER).is_file() or (root.is_dir() and not any(root.iterdir()))
+
+
+def _instance_process(handle: dict):
+    """The live process the handle recorded, or None: the pid must still be that same process (its start time
+    matches), so a reused pid, even another instance's, is never killed."""
+    import psutil
+    try:
+        proc = psutil.Process(int(handle["pid"]))
+        if abs(proc.create_time() - float(handle["pid_created"])) > 0.01:
+            return None
+        return proc if "harness.fake_instance" in " ".join(proc.cmdline()) else None
+    except (KeyError, TypeError, ValueError, psutil.Error):
+        return None
 
 
 def stop(root: Path) -> int:
@@ -267,19 +281,18 @@ def stop(root: Path) -> int:
         print(f"refusing: {root} is not a fake-model instance directory", file=sys.stderr)
         return 2
     try:
-        pid = int(json.loads((root / HANDLE).read_text(encoding="utf-8"))["pid"])
-    except (OSError, ValueError, KeyError, TypeError):
-        pid = 0
-    if pid and psutil.pid_exists(pid):
+        handle = json.loads((root / HANDLE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        handle = {}
+    proc = _instance_process(handle) if isinstance(handle, dict) else None
+    if proc is not None:
         try:
-            proc = psutil.Process(pid)
-            if "harness.fake_instance" in " ".join(proc.cmdline()):
-                for p in proc.children(recursive=True) + [proc]:
-                    p.kill()
-                psutil.wait_procs([proc], timeout=15)
-                print(f"stopped process {pid}")
+            for p in proc.children(recursive=True) + [proc]:
+                p.kill()
+            psutil.wait_procs([proc], timeout=15)
+            print(f"stopped process {proc.pid}")
         except psutil.Error as e:
-            print(f"process {pid}: {e}", file=sys.stderr)
+            print(f"process {proc.pid}: {e}", file=sys.stderr)
     if not remove(root):
         print(f"could not delete {root}; is a process still using it?", file=sys.stderr)
         return 1
@@ -294,7 +307,7 @@ def _interrupt(_sig, _frame):
 def start(args, ap) -> int:
     fake_model.load_fixtures(args.fixtures)  # fail before creating anything
     for flag, port in (("--port", args.port), ("--web-port", args.web_port)):
-        if port and reserve_port(port) is None:
+        if port and available_port(port) is None:
             ap.error(f"{flag} {port} is in use; this command never reuses a running server")
     if args.dir is not None and args.dir.exists() and any(args.dir.iterdir()):
         ap.error(f"{args.dir} is not empty (stop the instance there first: python -m harness.fake_instance stop "
