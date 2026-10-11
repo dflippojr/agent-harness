@@ -520,6 +520,7 @@ drives them, and every one has a CLI command.
 | Route | CLI | What it does |
 | --- | --- | --- |
 | `GET /pairing-requests` | `harness pairing-requests list` | requests of the last day, newest first |
+| `POST /pairing-requests/preview` `{scopes}` | `harness pairing-requests preview --scopes ...` | preview daemon disclosure copy before arming (200); no pairing state is created or changed |
 | `POST /pairing-requests` `{catalog_app_id, scopes, origin?, name?, acknowledge_elevated?}` | `harness pairing-requests arm <catalog_app_id> --scopes ... [--origin ...]` | arm a pre-approved slot for a Hub entry (201) |
 | `POST /pairing-requests/{id}/approve` `{match, acknowledge_elevated?}` | `harness pairing-requests approve <id> --match <code>` | approve an App-initiated request |
 | `POST /pairing-requests/{id}/confirm` `{match}` | `harness pairing-requests confirm <id> --match <code>` | release a browser or native App's claim on an armed slot |
@@ -534,6 +535,24 @@ requests in every state. Read and type the code from the App or Hub you are sett
 `disclosures` holds, for every requested scope, `{scope, tier, text}`, where `text` is the required copy from
 [marketplace-design.md section 5.2](marketplace-design.md#52-scope-table) and `tier` is `standard` or `elevated`. The
 daemon supplies this text so the Hub and the CLI show the same words.
+
+Before arming App setup, every owner client can call `POST /api/admin/v1/pairing-requests/preview` with
+`{"scopes": ["approvals"]}`. Owner identity, owner tokens and the Hub's origin-bound owner token use
+the same authentication as arming. App and device tokens, members and guests cannot preview. The 200 response is
+an array of `{scope, tier, text}` disclosures, in requested order with duplicates removed, for example:
+
+```json
+[{"scope": "approvals", "tier": "elevated", "text": "This app can **approve or deny tool calls** in its own tasks, including shell and file changes the agent requests. That is a substitute for you tapping Approve."}]
+```
+
+Display the returned daemon text before asking the owner
+to arm; clients do not need their own disclosure or elevated-scope tables. Built-in scopes use the shared disclosure
+copy, and add-on scopes without built-in copy use the module's `app_scopes` description. Elevated scopes can be
+previewed without acknowledgement; arming still requires `acknowledge_elevated`. Empty or unknown scope lists,
+and `admin` (even alongside App scopes), return 400, matching App pairing validation. A missing or malformed
+`scopes` field returns 422. Preview creates no request, slot, match code, token or approval and does not expire or
+otherwise update existing pairing requests. Responses use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
+The Python SDK exposes `Harness.preview_pairing(scopes)` on a client authenticated with an owner/Hub token.
 
 Approving or confirming needs the match code the App shows; a wrong or missing code is refused with 400. If the App
 shows no code or an error, deny the request. If it reports the slot was already claimed, run
@@ -690,6 +709,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.25 | 2026-10-11 | Read-only `POST /pairing-requests/preview` (#604), CLI `harness pairing-requests preview --scopes ...`, SDK `Harness.preview_pairing(scopes)`: shared daemon App scope disclosures before arming, including module fallback copy and elevated tiers, without pairing side effects. |
 | 1.24 | 2026-10-10 | Optional read-only `GET /hub` inventory (#520), `harness hub status`, SDK `Harness.hub_status()`, strict local entries and state/error metrics. The claim CLI view is now `harness hub claim-status`. |
 | 1.23 | 2026-10-09 | Exclusive Hub claim (#543, see [Hub claim](#hub-claim)): `GET /hub-claim`, and the host-only `POST /hub-claim/requests/{id}/approve`, `/deny` and `POST /hub-claim/release` (owner credentials plus the `X-Agent-Harness-Hub-Approval` secret from `<data_dir>/hub-approval.secret`). The Hub's key is an owner token with role `hub`; `GET /keys` adds `role`; `DELETE /keys/{id}` on it answers 409; `POST /keys` refuses `kind: "hub"` and `role`. `GET /api/admin/v1` adds `hub.claimed`. Audit `hub.claim.*` and `hub.release` rows, `actor_kind` `hub`. CLI `harness hub claim-status`, `approve`, `deny` and `release` |
 | 1.22 | 2026-10-09 | Zero-touch pairing requests (#519, see [Zero-touch pairing requests](#zero-touch-pairing-requests)): `GET` and `POST /pairing-requests`, `POST /pairing-requests/{id}/approve`, `/confirm` and `/deny`. They carry request metadata, match codes and the section 5.2 disclosure copy, never a token or verifier. `pairing_request.*` audit rows record them. CLI `harness pairing-requests list`, `arm`, `approve`, `confirm` and `deny` |

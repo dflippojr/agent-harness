@@ -1316,6 +1316,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/v1/pairing-requests/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Pairing Request
+         * @description Preview App scope disclosures before arming, without creating or changing pairing state.
+         */
+        post: operations["preview_pairing_request_api_admin_v1_pairing_requests_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/v1/pairing-requests/{rid}/approve": {
         parameters: {
             query?: never;
@@ -6332,6 +6352,14 @@ export interface components {
             /** Winner */
             winner: string;
         };
+        /** PreviewPairingRequest */
+        PreviewPairingRequest: {
+            /**
+             * Scopes
+             * @description App scopes to disclose before arming; nonempty, never admin
+             */
+            scopes: string[];
+        };
         /** ProfileUpdate */
         ProfileUpdate: {
             /** Emoji */
@@ -6514,6 +6542,18 @@ export interface components {
             ok: boolean;
             /** Value */
             value?: unknown;
+        };
+        /** ScopeDisclosure */
+        ScopeDisclosure: {
+            /** Scope */
+            scope: string;
+            /** Text */
+            text: string;
+            /**
+             * Tier
+             * @enum {string}
+             */
+            tier: "standard" | "elevated";
         };
         /** SecretDismissal */
         SecretDismissal: {
@@ -9407,6 +9447,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_pairing_request_api_admin_v1_pairing_requests_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewPairingRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScopeDisclosure"][];
                 };
             };
             /** @description Validation Error */

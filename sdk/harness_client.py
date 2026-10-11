@@ -40,6 +40,7 @@ JSON_MEDIA_TYPE = "application/json"
 # Used by validate_openapi() and CI. Paths use the server's OpenAPI templates, not formatted runtime ids.
 SDK_OPERATIONS = {
     "hub_status": ("get", "/api/admin/v1/hub"),
+    "preview_pairing": ("post", "/api/admin/v1/pairing-requests/preview"),
     "audit": ("get", "/api/v1/audit"),
     "info": ("get", "/api/v1"), "pair": ("post", "/api/v1/pair"),
     "request_pairing": ("post", "/api/v1/pair/requests"),
@@ -60,6 +61,7 @@ SDK_OPERATIONS = {
 }
 # Keyed off SDK_OPERATIONS so a path only ever spells itself once, in the table above.
 SDK_REQUEST_FIELDS = {
+    SDK_OPERATIONS["preview_pairing"]: {"scopes"},
     SDK_OPERATIONS["pair"]: {"code"},
     SDK_OPERATIONS["request_pairing"]: {"name", "kind", "scopes", "catalog_app_id", "code_challenge",
                                         "code_challenge_method"},
@@ -94,6 +96,12 @@ class PairingRequestStatus(TypedDict, total=False):
     match_code: str
     expires_at: float
     browser: bool
+
+
+class ScopeDisclosure(TypedDict):
+    scope: str
+    tier: str
+    text: str
 
 
 class Capabilities(TypedDict, total=False):
@@ -171,6 +179,7 @@ class HubInventory(TypedDict):
 
 
 SDK_RESPONSE_TYPES = {
+    SDK_OPERATIONS["preview_pairing"]: ("200", ScopeDisclosure, True),
     SDK_OPERATIONS["hub_status"]: ("200", HubInventory, False),
     SDK_OPERATIONS["backends"]: ("200", BackendStatus, True),
     SDK_OPERATIONS["create_session"]: ("201", Session, False),
@@ -429,6 +438,13 @@ class Harness:
     def hub_status(self) -> HubInventory:
         """Owner/Hub-key read-only inventory. An absent Hub module answers 404."""
         resp = self.client.get("/api/admin/v1/hub")
+        if resp.status_code >= 400:
+            self._raise_response(resp)
+        return resp.json()
+
+    def preview_pairing(self, scopes: list[str]) -> list[ScopeDisclosure]:
+        """Owner/Hub-key App scope disclosures before arming; creates no pairing state."""
+        resp = self.client.post("/api/admin/v1/pairing-requests/preview", json={"scopes": scopes})
         if resp.status_code >= 400:
             self._raise_response(resp)
         return resp.json()

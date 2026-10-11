@@ -30,6 +30,7 @@ import hmac
 import re
 import secrets
 import time
+from typing import Literal
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -114,6 +115,16 @@ class ArmPairingRequest(BaseModel):
     origin: str = Field(default="", max_length=500, description="The browser App's exact origin; empty for native")
     name: str = Field(default="", max_length=60)
     acknowledge_elevated: bool = False
+
+
+class PreviewPairingRequest(BaseModel):
+    scopes: list[str] = Field(description="App scopes to disclose before arming; nonempty, never admin")
+
+
+class ScopeDisclosure(BaseModel):
+    scope: str
+    tier: Literal["standard", "elevated"]
+    text: str
 
 
 class ApprovePairingRequest(BaseModel):
@@ -421,7 +432,7 @@ def _redeem_refusal(row: dict | None, origin: str, verifier: str) -> tuple[int, 
 
 
 def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
-    """The owner side (/api/admin/v1/pairing-requests): list, arm, approve, confirm, deny. Returns the operations
+    """The owner side (/api/admin/v1/pairing-requests): preview, list, arm, approve, confirm, deny. Returns the operations
     for discovery."""
     from .admin import PREFIX
     base = PREFIX + "/pairing-requests"
@@ -476,6 +487,17 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
             return m.db.main.list_pairing_requests()
         rows = await m.db.main.awrite(commit)
         return JSONResponse([owner_view(r, m.cfg) for r in rows], headers=NO_STORE)
+
+    @app.post(base + "/preview", response_model=list[ScopeDisclosure])
+    async def preview_pairing_request(body: PreviewPairingRequest, request: Request):
+        """Preview App scope disclosures before arming, without creating or changing pairing state."""
+        require_admin(request, mgr)
+        m = mgr(request)
+        try:
+            scopes = _scopes(body.scopes, m.cfg)
+        except ValueError as e:
+            raise HarnessError(400, str(e))
+        return JSONResponse(disclosures(scopes.split(), m.cfg), headers=NO_STORE)
 
     @app.post(base, status_code=201)
     async def arm_pairing_request(body: ArmPairingRequest, request: Request):
@@ -552,5 +574,6 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                             lambda now: {"state": DENIED, "finished_at": now}, lambda _row: {})
 
     return [{"method": "GET", "path": base}, {"method": "POST", "path": base},
+            {"method": "POST", "path": base + "/preview"},
             {"method": "POST", "path": base + "/{rid}/approve"}, {"method": "POST", "path": base + "/{rid}/confirm"},
             {"method": "POST", "path": base + "/{rid}/deny"}]

@@ -215,6 +215,7 @@ Page: `pages/daemon-settings.mjs`.
 | Make an App pairing code, optionally with a catalog app id | POST | `/pairing-codes` | `harness pairing-codes create <name> <origin> --catalog-app-id <id>` |
 | Revoke an App pairing code | DELETE | `/pairing-codes/{pid}` | `harness pairing-codes revoke <pid>` |
 | Hub: App pairing requests and scope disclosures; match codes come from the App | GET | `/pairing-requests` | `harness pairing-requests list` |
+| Hub: preview App scope disclosures before arming | POST | `/pairing-requests/preview` | `harness pairing-requests preview --scopes <scope>` |
 | Hub: arm a pre-approved pairing slot for a Hub entry | POST | `/pairing-requests` | `harness pairing-requests arm <catalog_app_id> --scopes <scope>` |
 | Hub: approve an App's pairing request | POST | `/pairing-requests/{rid}/approve` | `harness pairing-requests approve <rid> --match <code>` |
 | Hub: confirm a native App's claim on an armed slot | POST | `/pairing-requests/{rid}/confirm` | `harness pairing-requests confirm <rid> --match <code>` |

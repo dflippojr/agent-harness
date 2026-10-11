@@ -443,6 +443,8 @@ ADMIN_COMMANDS = (
     ("pairing-codes revoke", "DELETE", "/pairing-codes/{pid}", "revoke an App pairing code", ()),
     ("pairing-requests list", "GET", "/pairing-requests",
      "list App pairing requests and scope disclosures; read match codes from the App", ()),
+    ("pairing-requests preview", "POST", "/pairing-requests/preview",
+     "preview App scope disclosures without arming a pairing slot", ("--scopes:list",)),
     ("pairing-requests arm", "POST", "/pairing-requests", "arm a pre-approved pairing slot for a Hub entry",
      ("catalog_app_id", "--scopes:list", "--origin", "--name", "--acknowledge_elevated:flag")),
     ("pairing-requests approve", "POST", "/pairing-requests/{rid}/approve",
