@@ -6,8 +6,7 @@ from typing import Literal
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
-from harness.modules import HarnessError, RouteTable, manager, operation_audit
-from harness.api_models import WebSessionResponse
+from harness.modules import HarnessError, RouteTable, WebSessionResponse, manager, operation_audit
 
 NO_SUCH_JOB = "no such job"
 owner_routes = RouteTable()
