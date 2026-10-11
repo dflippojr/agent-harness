@@ -41,7 +41,8 @@ export const SPLITS = [
       if (parts.length === 2 && (parts[1] === "new" || validId(parts[1]))) return parts[1];
       return undefined;
     },
-    empty: { title: "No job open", text: "Pick one from the list, or create a new job." },
+    empty: { title: "No job open", text: "Pick one from the list, or create a new job.",
+      keys: [[["J", "K"], "move"], [["Enter"], "open"], [["N"], "new job"], [["?"], "all shortcuts"]] },
   },
   {
     key: "agents",

@@ -71,7 +71,7 @@ assert.equal(stepRow(3, -1, 1, 1), 2, "from the open row");
 assert.equal(stepRow(3, 0, 2, 1), 1, "the focused row wins over the open one");
 assert.equal(stepRow(3, 2, -1, 1), 2, "the ends hold");
 assert.equal(stepRow(3, 0, -1, -1), 0);
-assert.ok(SPLITS[0].empty.keys.some(([caps]) => caps.includes("?")), "the empty Agents pane points at ?");
+for (const split of SPLITS) assert.ok(split.empty.keys?.some(([caps]) => caps.includes("?")), `the empty ${split.key} pane points at ?`);
 
 // ---------- reading order: from 768 px the rail, then the list pane, then the header bar ----------
 {
