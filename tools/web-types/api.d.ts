@@ -1301,7 +1301,7 @@ export interface paths {
         };
         /**
          * List Pairing Requests
-         * @description Owner view of pairing requests: metadata, match codes and disclosure copy; never a token or verifier.
+         * @description Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier.
          */
         get: operations["list_pairing_requests_api_admin_v1_pairing_requests_get"];
         put?: never;
@@ -1348,7 +1348,7 @@ export interface paths {
         put?: never;
         /**
          * Confirm Pairing Request
-         * @description Confirm a native App's claim on an armed slot with the match code it shows; then it may redeem.
+         * @description Confirm an App's claim on an armed slot with the match code it shows; then it may redeem.
          */
         post: operations["confirm_pairing_request_api_admin_v1_pairing_requests__rid__confirm_post"];
         delete?: never;

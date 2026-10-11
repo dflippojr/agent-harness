@@ -6101,7 +6101,7 @@
     },
     "/api/admin/v1/pairing-requests": {
       "get": {
-        "description": "Owner view of pairing requests: metadata, match codes and disclosure copy; never a token or verifier.",
+        "description": "Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier.",
         "operationId": "list_pairing_requests_api_admin_v1_pairing_requests_get",
         "responses": {
           "200": {
@@ -6201,7 +6201,7 @@
     },
     "/api/admin/v1/pairing-requests/{rid}/confirm": {
       "post": {
-        "description": "Confirm a native App's claim on an armed slot with the match code it shows; then it may redeem.",
+        "description": "Confirm an App's claim on an armed slot with the match code it shows; then it may redeem.",
         "operationId": "confirm_pairing_request_api_admin_v1_pairing_requests__rid__confirm_post",
         "parameters": [
           {

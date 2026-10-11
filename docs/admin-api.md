@@ -149,10 +149,10 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | Owner view. Codes themselves are shown only by the create response. | `harness/apps.py` `pairing_codes` |
 | POST | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | TODO | `harness/apps.py` `create_pairing_code` |
 | DELETE | `/api/admin/v1/pairing-codes/{pid}` | owner (`admin` scope) | TODO | `harness/apps.py` `revoke_pairing_code` |
-| GET | `/api/admin/v1/pairing-requests` | owner | Owner view of pairing requests: metadata, match codes and disclosure copy; never a token or verifier. | `harness/pairing_requests.py` `list_pairing_requests` |
+| GET | `/api/admin/v1/pairing-requests` | owner | Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier. | `harness/pairing_requests.py` `list_pairing_requests` |
 | POST | `/api/admin/v1/pairing-requests` | owner | Arm a pre-approved slot for a Hub entry (#519): no secret; the App claims it with its own challenge. | `harness/pairing_requests.py` `arm_pairing_request` |
 | POST | `/api/admin/v1/pairing-requests/{rid}/approve` | owner | Approve an App's pairing request with the match code it shows. Elevated scopes need acknowledge_elevated. No token exists until the App redeems. | `harness/pairing_requests.py` `approve_pairing_request` |
-| POST | `/api/admin/v1/pairing-requests/{rid}/confirm` | owner | Confirm a native App's claim on an armed slot with the match code it shows; then it may redeem. | `harness/pairing_requests.py` `confirm_pairing_request` |
+| POST | `/api/admin/v1/pairing-requests/{rid}/confirm` | owner | Confirm an App's claim on an armed slot with the match code it shows; then it may redeem. | `harness/pairing_requests.py` `confirm_pairing_request` |
 | POST | `/api/admin/v1/pairing-requests/{rid}/deny` | owner | Deny a pairing request, or withdraw an armed slot or an approval the App has not redeemed yet. | `harness/pairing_requests.py` `deny_pairing_request` |
 | GET | `/api/admin/v1/profile` | owner (`admin` scope) | TODO | `harness/api.py` `profile` |
 | PUT | `/api/admin/v1/profile` | owner (`admin` scope) | TODO | `harness/api.py` `update_profile` |
@@ -378,7 +378,7 @@ the compatibility routes share one handler, so a change is never logged twice.
 | --- | --- | --- |
 | `key.create`, `key.revoke` | `POST /keys`, `DELETE /keys/{kid}` | opaque key id; `kind`, scope names; `catalog_app_id` on create |
 | `pairing.create`, `pairing.revoke`, `pairing.redeem` | `/pairing-codes`, `POST /api/v1/pair` | pairing and key ids; scope names; `catalog_app_id` on create and redeem |
-| `pairing_request.create`, `.claim`, `.approve`, `.deny`, `.redeem`, `.expire` | `/pairing-requests`, `POST /api/v1/pair/requests` and its `claim` and `token` routes, the expiry sweep | request and key ids; scope names; `catalog_app_id`; `browser`, `armed`, `acknowledged` (elevated scopes acknowledged) and `confirmed` (a native claim confirmed) |
+| `pairing_request.create`, `.claim`, `.approve`, `.deny`, `.redeem`, `.expire` | `/pairing-requests`, `POST /api/v1/pair/requests` and its `claim` and `token` routes, the expiry sweep | request and key ids; scope names; `catalog_app_id`; `browser`, `armed`, `acknowledged` (elevated scopes acknowledged) and `confirmed` (a browser or native claim confirmed) |
 | `hub.claim.request`, `.approve`, `.deny`, `.redeem`, `.refused`, `.expire`, `hub.release` | `POST /api/v1/pair/requests` with `kind: "hub"` and its `token` route, `/hub-claim` routes, the expiry sweep | request and key ids; `catalog_app_id`; `browser`; `reason` (`host_proof_required`, `hub_key`, `hub_claimed`, `no_hub`, `match_mismatch`, ...) |
 | `runner_pairing.create`, `.revoke`, `.redeem` | `/runner-pairing-codes`, `POST /api/v1/runner-pair` | pairing and key ids |
 | `app.restore`, `app.retention` | `POST .../apps/{id}/restore`, `PUT .../apps/{id}/retention` | App id; old/new retention days (or null) |
@@ -522,24 +522,31 @@ drives them, and every one has a CLI command.
 | `GET /pairing-requests` | `harness pairing-requests list` | requests of the last day, newest first |
 | `POST /pairing-requests` `{catalog_app_id, scopes, origin?, name?, acknowledge_elevated?}` | `harness pairing-requests arm <catalog_app_id> --scopes ... [--origin ...]` | arm a pre-approved slot for a Hub entry (201) |
 | `POST /pairing-requests/{id}/approve` `{match, acknowledge_elevated?}` | `harness pairing-requests approve <id> --match <code>` | approve an App-initiated request |
-| `POST /pairing-requests/{id}/confirm` `{match}` | `harness pairing-requests confirm <id> --match <code>` | release a native App's claim on an armed slot |
+| `POST /pairing-requests/{id}/confirm` `{match}` | `harness pairing-requests confirm <id> --match <code>` | release a browser or native App's claim on an armed slot |
 | `POST /pairing-requests/{id}/deny` | `harness pairing-requests deny <id>` | deny a request, or withdraw a slot or an unredeemed approval |
 
 Each request reads back as `{id, kind, name, scopes, catalog_app_id, origin, browser, armed, state, match_code, needs,
 created_at, expires_at, approved_at, finished_at, key_id, elevated, disclosures}`. `state` is `pending` (waiting for
-approval), `armed` (a Hub slot no App has claimed yet), `claimed` (a native App claimed the slot; confirm its match
+approval), `armed` (a Hub slot no App has claimed yet), `claimed` (a browser or native App claimed the slot; confirm its match
 code), `approved` (the App may fetch its token), `redeemed`, `denied` or `expired`. `needs` names the next step:
-`approve`, `claim`, `confirm`, `redeem` or `""`. `match_code` is shown only while the owner still has to compare it.
+`approve`, `claim`, `confirm`, `redeem` or `""`. `match_code` is always empty in owner responses, for both App and Hub
+requests in every state. Read and type the code from the App or Hub you are setting up; the daemon compares it.
 `disclosures` holds, for every requested scope, `{scope, tier, text}`, where `text` is the required copy from
 [marketplace-design.md section 5.2](marketplace-design.md#52-scope-table) and `tier` is `standard` or `elevated`. The
 daemon supplies this text so the Hub and the CLI show the same words.
 
-Approving needs the match code the App shows; a wrong or missing code is refused with 400. Elevated scopes
+Approving or confirming needs the match code the App shows; a wrong or missing code is refused with 400. If the App
+shows no code or an error, deny the request. If it reports the slot was already claimed, run
+`harness pairing-requests list`; another caller may have claimed it first. If the row is `redeemed`, revoke its
+`key_id` with `harness keys revoke <key_id>`. If it is `approved` or `claimed`, deny it with
+`harness pairing-requests deny <id>`. Never approve a look-alike request or
+confirm a claim using a code copied from an owner list. Elevated scopes
 (`sessions:all`, `approvals`, `remote_control`, `memory_library`, `homelab`) also need `acknowledge_elevated: true`
 (`--acknowledge-elevated`), on approval and when arming. Without it the call is refused with 400. Arming is the
-approval for a Hub slot, so a browser App's claim from the armed origin needs nothing more. A native claim needs the
-confirm, because the slot's id alone does not prove which App claimed it. For a browser slot the id is the only
-thing a caller needs to claim it from the armed origin, so hand it only to that App, as a one-time code. A decision on a request in the wrong state
+scope consent for a Hub slot. Both browser and native claims move to `claimed` and need the owner to type the
+match code shown by the App into `harness pairing-requests confirm <id> --match <code>` before redemption.
+A browser claim and redemption must also send the bound exact `Origin`; a native client can forge that header,
+so origin binding alone does not prove which App claimed the slot. A decision on a request in the wrong state
 answers 409, and an unknown id 404. Approval is a state change only: the key exists only after the App redeems, and it
 then appears in `GET /keys` with the request's name, scopes, origin and `catalog_app_id`. Requests expire 10 minutes
 after they are made, armed or claimed, and 5 minutes after approval.

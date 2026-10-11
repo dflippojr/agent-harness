@@ -5,15 +5,15 @@ One request model for browser and native Apps (docs/app-api.md#zero-touch-pairin
 1. **App-initiated.** The App asks with `POST /api/v1/pair/requests` (public, rate-limited): name, scopes, optional
    `catalog_app_id` and a PKCE S256 `code_challenge`. It gets a request id and a short match code to show.
 2. **Owner approval.** The owner sees the request (`GET /api/admin/v1/pairing-requests`, `harness pairing-requests
-   list`) with each scope's disclosure copy and approves it with the match code, acknowledging elevated scopes
-   separately, or denies it. Approval is a state change only: no secret exists yet.
+   list`) with each scope's disclosure copy and approves it with the match code read from the App, acknowledging
+   elevated scopes separately, or denies it. Approval is a state change only: no secret exists yet.
 3. **Direct delivery.** The App redeems with `POST /api/v1/pair/requests/{id}/token` and its `code_verifier`; the key
    is minted then and returned once. A browser request redeems only from its exact origin, a native one never from a
    browser.
 4. **Hub-initiated.** The owner arms a pre-approved slot (`POST /api/admin/v1/pairing-requests`) for a catalog app id,
    scopes and an optional origin, and hands the App only the slot's id. The App claims it with its challenge
-   (`POST /api/v1/pair/requests/{id}/claim`). A browser claim must come from the armed origin and is approved at
-   once; a native claim gets a match code the owner confirms (`/confirm`) before the token is released.
+   (`POST /api/v1/pair/requests/{id}/claim`). A browser claim must come from the armed origin. Every claim gets a match code
+   the owner confirms (`/confirm`) before the token is released.
 
 A Hub claim (#543, harness/hub_claim.py) is the same request with `kind: "hub"`: it asks for no scopes, is refused
 while a Hub is recorded, is approved or denied only on the daemon host, and redeems to the one `hub` key.
@@ -144,6 +144,15 @@ def _match_code() -> str:
     return f"{secrets.randbelow(10 ** 6):06d}"
 
 
+def _unused_match_code(db) -> str:
+    """Called inside the allocation write, after sweeping expired requests."""
+    used = db.open_pairing_match_codes()
+    code = _match_code()
+    while code in used:
+        code = _match_code()
+    return code
+
+
 def _same_match(row: dict, given: str) -> bool:
     given = re.sub(r"[\s-]", "", given or "")
     return bool(row["match_code"]) and hmac.compare_digest(given.encode(), row["match_code"].encode())
@@ -156,9 +165,9 @@ def owner_view(row: dict, cfg=None) -> dict:
     return {"id": row["id"], "kind": row["kind"], "name": row["name"], "scopes": scopes,
             "catalog_app_id": row["catalog_app_id"] or "", "origin": row["origin"], "browser": bool(row["origin"]),
             "armed": bool(row["armed"]), "state": state,
-            # A Hub claim's code is never shown to the owner: they must read it off the real Hub's screen, or an
-            # attacker's look-alike request could be approved by copying the code from `harness hub status`.
-            "match_code": row["match_code"] if state in (PENDING, CLAIMED) and row["kind"] != HUB else "",
+            # Read the code from the App or Hub being set up: copying it from an owner list could approve a
+            # look-alike request or confirm an attacker's claim on an armed slot.
+            "match_code": "",
             "needs": {PENDING: "approve", ARMED: "claim", CLAIMED: "confirm", APPROVED: "redeem"}.get(state, ""),
             "created_at": row["created_at"], "expires_at": row["expires_at"], "approved_at": row["approved_at"],
             "finished_at": row["finished_at"], "key_id": row["key_id"],
@@ -276,7 +285,7 @@ def register_app(app: FastAPI) -> None:
                 return _refuse(429, "too many pairing requests; wait for the owner or try again later", reason)
             row = {"id": "pr-" + secrets.token_hex(12), "kind": body.kind, "name": name, "scopes": scopes,
                    "catalog_app_id": catalog_app_id, "origin": origin, "source": source, "challenge_hash": challenge,
-                   "match_code": _match_code(), "state": PENDING, "armed": 0, "created_at": now,
+                   "match_code": _unused_match_code(db), "state": PENDING, "armed": 0, "created_at": now,
                    "expires_at": now + APPROVE_TTL_SECONDS, "approved_at": None, "finished_at": None, "key_id": ""}
             db.insert_pairing_request(row)
             credential_audit.record(db, unknown, action, row["id"], "ok", "pairing_request",
@@ -313,10 +322,8 @@ def register_app(app: FastAPI) -> None:
                 credential_audit.record(db, unknown, "pairing_request.claim", "", "denied", "pairing_request",
                                         {"reason": refusal[2]})
                 return _refuse(*refusal)
-            if origin:  # the exact-origin binding is the check: approved at once (decision 2)
-                fields = {"state": APPROVED, "approved_at": now, "expires_at": now + REDEEM_TTL_SECONDS}
-            else:       # a native claim waits for the owner to confirm its match code
-                fields = {"state": CLAIMED, "match_code": _match_code(), "expires_at": now + APPROVE_TTL_SECONDS}
+            # Origin can be forged by a native caller: every claim needs the owner's typed code (#519 decision 2).
+            fields = {"state": CLAIMED, "match_code": _unused_match_code(db), "expires_at": now + APPROVE_TTL_SECONDS}
             if not db.update_pairing_request(rid, (ARMED,), challenge_hash=challenge, **fields):
                 return _refuse(409, "this pairing request cannot be claimed", "not_claimable")
             credential_audit.record(db, unknown, "pairing_request.claim", rid, "ok", "pairing_request",
@@ -460,7 +467,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
     @app.get(base)
     async def list_pairing_requests(request: Request):
-        """Owner view of pairing requests: metadata, match codes and disclosure copy; never a token or verifier."""
+        """Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier."""
         require_admin(request, mgr)
         m = mgr(request)
 
@@ -526,7 +533,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
     @app.post(base + "/{rid}/confirm")
     async def confirm_pairing_request(rid: str, body: ConfirmPairingRequest, request: Request):
-        """Confirm a native App's claim on an armed slot with the match code it shows; then it may redeem."""
+        """Confirm an App's claim on an armed slot with the match code it shows; then it may redeem."""
         key = require_admin(request, mgr)
 
         def check(row):

@@ -442,14 +442,14 @@ ADMIN_COMMANDS = (
      ("name", "origin", "--scopes:list", "--ttl_seconds:int", "--catalog_app_id")),
     ("pairing-codes revoke", "DELETE", "/pairing-codes/{pid}", "revoke an App pairing code", ()),
     ("pairing-requests list", "GET", "/pairing-requests",
-     "list App pairing requests with their match codes and scope disclosures", ()),
+     "list App pairing requests and scope disclosures; read match codes from the App", ()),
     ("pairing-requests arm", "POST", "/pairing-requests", "arm a pre-approved pairing slot for a Hub entry",
      ("catalog_app_id", "--scopes:list", "--origin", "--name", "--acknowledge_elevated:flag")),
     ("pairing-requests approve", "POST", "/pairing-requests/{rid}/approve",
      "approve an App's pairing request with the match code it shows (the App fetches its own token)",
      ("--match", "--acknowledge_elevated:flag")),
     ("pairing-requests confirm", "POST", "/pairing-requests/{rid}/confirm",
-     "confirm a native App's claim on an armed slot with the match code it shows", ("--match",)),
+     "confirm an App's claim on an armed slot with the match code it shows", ("--match",)),
     ("pairing-requests deny", "POST", "/pairing-requests/{rid}/deny", "deny or withdraw an App pairing request", ()),
     ("hub claim-status", "GET", "/hub-claim", "show whether a Hub is claimed, its record and open Hub claim requests", ()),
     ("hub approve", "POST", "/hub-claim/requests/{rid}/approve",
@@ -870,6 +870,14 @@ def _cmd_admin(args) -> int:
         print(json.dumps(result, indent=2))
     if path == "/hub-claim":
         _hub_status_notes(result)
+    if method == "GET" and path == "/pairing-requests" and isinstance(result, list):
+        if any(r.get("kind") == "app" for r in result):
+            print("Read the match code from the App you are setting up; it is not shown here. "
+                  "If the App shows no code or an error, deny the request. "
+                  "Browser and native claims both need harness pairing-requests confirm <id> --match <code>. "
+                  "If the App reports the slot was already claimed, run harness pairing-requests list. "
+                  "If its row is redeemed, revoke its key_id with harness keys revoke <key_id>. "
+                  "If it is approved or claimed, deny it with harness pairing-requests deny <id>.", file=sys.stderr)
     return 0
 
 

@@ -64,7 +64,7 @@ def _ask(client, origin="", scopes=("sessions",), name="Shopping list", headers=
     verifier, challenge = _pkce()
     headers = {**(headers or {}), **({"Origin": origin} if origin else {})}
     r = client.post("/api/v1/pair/requests", headers=headers, json={
-        "name": name, "scopes": list(scopes), "code_challenge": challenge, **extra})
+        "name": name, **({"scopes": list(scopes)} if scopes is not None else {}), "code_challenge": challenge, **extra})
     return r, verifier
 
 
@@ -91,6 +91,111 @@ def _assert_no_secrets(texts, *secrets_seen):
             assert value not in text
 
 
+@pytest.mark.parametrize("kind", ["app", "hub"])
+@pytest.mark.parametrize("origin", ["", ORIGIN])
+@pytest.mark.parametrize("state", [pr.PENDING, pr.ARMED, pr.CLAIMED, pr.APPROVED,
+                                   pr.DENIED, pr.REDEEMED, pr.EXPIRED])
+def test_owner_view_never_exposes_a_match_code_in_any_state(hh, kind, origin, state):
+    client, m = hh
+    asked, _ = _ask(client, origin, kind=kind, scopes=None if kind == "hub" else ("sessions",))
+    assert asked.status_code == 201, asked.text
+    row = m.db.main.get_pairing_request(asked.json()["id"])
+    row["state"] = state
+    owner = pr.owner_view(row, m.cfg)
+    assert owner["match_code"] == ""
+    assert (owner["kind"], owner["state"], owner["origin"], owner["browser"]) == (kind, state, origin, bool(origin))
+    assert "challenge_hash" not in owner and "source" not in owner
+    expected_code = asked.json()["match_code"] if state in (pr.PENDING, pr.CLAIMED) else ""
+    assert pr.app_view(row)["match_code"] == expected_code
+
+
+@pytest.mark.parametrize("first_flow", ["app", "hub", "native_slot", "browser_slot"])
+@pytest.mark.parametrize("second_flow", ["app", "hub", "native_slot", "browser_slot"])
+def test_open_pairing_requests_redraw_duplicate_match_codes(hh, monkeypatch, first_flow, second_flow):
+    client, m = hh
+    codes = iter(["123456", "123456", "654321"])
+    monkeypatch.setattr(pr, "_match_code", lambda: next(codes))
+
+    def allocate(flow):
+        if flow in ("app", "hub"):
+            return _ask(client, kind=flow, scopes=None if flow == "hub" else ("sessions",))[0]
+        origin = ORIGIN if flow == "browser_slot" else ""
+        rid = client.post(BASE, headers=H(OWNER), json={
+            "catalog_app_id": CATALOG_ID, "origin": origin}).json()["id"]
+        return client.post(f"/api/v1/pair/requests/{rid}/claim", headers={"Origin": origin} if origin else {},
+                           json={"code_challenge": _pkce()[1]})
+
+    first, second = allocate(first_flow), allocate(second_flow)
+    assert first.status_code in (200, 201), first.text
+    assert second.status_code in (200, 201), second.text
+    assert first.json()["match_code"] == "123456"
+    assert second.json()["match_code"] == "654321"
+    for response in (first, second):
+        assert m.db.main.get_pairing_request(response.json()["id"])["match_code"] == response.json()["match_code"]
+    assert {row["match_code"] for row in client.get(BASE, headers=H(OWNER)).json()} == {""}
+
+
+def test_match_code_uniqueness_includes_requests_outside_the_owner_list(hh, clock, monkeypatch):
+    client, m = hh
+    codes = iter(["123456", "123456", "654321"])
+    monkeypatch.setattr(pr, "_match_code", lambda: next(codes))
+    first, _ = _ask(client)
+    row = m.db.main.get_pairing_request(first.json()["id"])
+    clock[0] += 1
+    # The owner's newest-100 list is a projection, not the set of codes that must stay unique.
+    for i in range(100):
+        m.db.main.insert_pairing_request({**row, "id": f"pr-finished-{i}", "state": pr.DENIED,
+                                         "source": "", "created_at": clock[0], "finished_at": clock[0]})
+    assert first.json()["id"] not in {r["id"] for r in m.db.main.list_pairing_requests()}
+    second, _ = _ask(client)
+    assert second.status_code == 201 and second.json()["match_code"] == "654321"
+
+
+def test_look_alike_request_cannot_be_approved_with_the_real_apps_code(hh, monkeypatch):
+    client, m = hh
+    codes = iter(["123456", "654321"])
+    monkeypatch.setattr(pr, "_match_code", lambda: next(codes))
+    real, verifier = _ask(client, ORIGIN, catalog_app_id=CATALOG_ID)
+    fake, attacker_verifier = _ask(client, ORIGIN, catalog_app_id=CATALOG_ID)
+    assert real.status_code == fake.status_code == 201
+    rid, fake_id = real.json()["id"], fake.json()["id"]
+    rec = Recorder(client)
+    listed = rec.owner("GET", BASE).json()
+    assert len(listed) == 2 and {r["match_code"] for r in listed} == {""}
+    assert len({(r["name"], r["origin"], r["catalog_app_id"]) for r in listed}) == 1
+    assert rec.owner("POST", f"{BASE}/{fake_id}/approve",
+                     json={"match": real.json()["match_code"]}).status_code == 400
+    assert _redeem(client, fake_id, attacker_verifier, ORIGIN).status_code == 409
+    assert _app_keys(m) == []
+    assert rec.owner("POST", f"{BASE}/{fake_id}/deny").status_code == 200
+    assert rec.owner("POST", f"{BASE}/{rid}/approve", json={"match": real.json()["match_code"]}).status_code == 200
+    assert _redeem(client, rid, verifier, ORIGIN).status_code == 201
+    assert _redeem(client, fake_id, attacker_verifier, ORIGIN).status_code == 403
+    assert len(_app_keys(m)) == 1
+    _assert_no_secrets(rec.texts, real.json()["match_code"], fake.json()["match_code"])
+
+
+def test_hijacked_native_slot_hides_the_attackers_code_and_can_be_withdrawn(hh):
+    client, m = hh
+    rec = Recorder(client)
+    rid = rec.owner("POST", BASE, json={"catalog_app_id": CATALOG_ID}).json()["id"]
+    attacker_verifier, attacker_challenge = _pkce()
+    claimed = client.post(f"/api/v1/pair/requests/{rid}/claim", json={"code_challenge": attacker_challenge})
+    assert claimed.status_code == 200 and claimed.json()["match_code"]
+    # The intended App shows an error instead of a code: the owner must withdraw, never copy the attacker's code.
+    real_claim = client.post(f"/api/v1/pair/requests/{rid}/claim", json={"code_challenge": _pkce()[1]})
+    assert real_claim.status_code == 409
+    listed = next(r for r in rec.owner("GET", BASE).json() if r["id"] == rid)
+    assert listed["state"] == "claimed" and listed["match_code"] == ""
+    assert rec.owner("POST", f"{BASE}/{rid}/confirm", json={"match": ""}).status_code == 400
+    assert _redeem(client, rid, attacker_verifier).status_code == 409
+    withdrawn = rec.owner("POST", f"{BASE}/{rid}/deny")
+    assert withdrawn.status_code == 200 and withdrawn.json()["state"] == "denied"
+    assert _redeem(client, rid, attacker_verifier).status_code == 403
+    assert _app_keys(m) == []
+    _assert_no_secrets(rec.texts, claimed.json()["match_code"], attacker_verifier)
+
+
 def test_browser_request_approve_and_redeem_once(hh):
     client, m = hh
     rec = Recorder(client)
@@ -103,7 +208,7 @@ def test_browser_request_approve_and_redeem_once(hh):
     rid = req["id"]
 
     listed = next(r for r in rec.owner("GET", BASE).json() if r["id"] == rid)
-    assert listed["origin"] == ORIGIN and listed["match_code"] == req["match_code"] and listed["needs"] == "approve"
+    assert listed["origin"] == ORIGIN and listed["match_code"] == "" and listed["needs"] == "approve"
     assert listed["scopes"] == ["sessions"] and listed["catalog_app_id"] == CATALOG_ID and listed["elevated"] == []
     assert listed["disclosures"] == [{"scope": "sessions", "tier": "standard", "text": pr.DISCLOSURES["sessions"]}]
 
@@ -147,7 +252,7 @@ def test_browser_request_approve_and_redeem_once(hh):
                                   "catalog_app_id": CATALOG_ID, "browser": True}
     reasons = {r["metadata"].get("reason") for r in rows if r["outcome"] == "denied"}
     assert {"match_mismatch", "invalid_verifier", "origin_mismatch"} <= reasons
-    _assert_no_secrets(rec.texts, token, verifier)
+    _assert_no_secrets(rec.texts, token, verifier, req["match_code"])
     stored = m.db.main.get_pairing_request(rid)
     assert verifier not in json.dumps(stored) and pr.challenge_of(verifier) not in json.dumps(stored)
 
@@ -260,7 +365,13 @@ def test_hub_armed_browser_slot(hh):
     assert client.post(f"/api/v1/pair/requests/{rid}/claim", json={"code_challenge": challenge}).status_code == 403
     claimed = client.post(f"/api/v1/pair/requests/{rid}/claim", headers={"Origin": ORIGIN},
                           json={"code_challenge": challenge})
-    assert claimed.status_code == 200 and claimed.json()["state"] == "approved"  # exact origin is the check
+    assert claimed.status_code == 200 and claimed.json()["state"] == "claimed"
+    match = claimed.json()["match_code"]
+    assert re.fullmatch(r"\d{6}", match)
+    assert _redeem(client, rid, verifier, ORIGIN).status_code == 409
+    assert rec.owner("POST", f"{BASE}/{rid}/confirm", json={"match": match}).status_code == 200
+    assert _redeem(client, rid, verifier).status_code == 403
+    assert _redeem(client, rid, verifier, OTHER).status_code == 403
     assert client.post(f"/api/v1/pair/requests/{rid}/claim", headers={"Origin": ORIGIN},
                        json={"code_challenge": _pkce()[1]}).status_code == 409   # claimed once
     paired = _redeem(client, rid, verifier, ORIGIN)
@@ -271,6 +382,50 @@ def test_hub_armed_browser_slot(hh):
     _assert_no_secrets(rec.texts, paired.json()["token"], verifier)
     create = _audit(client, "pairing_request.create", outcome="ok")[0]
     assert create["actor_kind"] == "owner" and create["metadata"]["armed"] is True
+
+
+def test_native_caller_forging_browser_origin_cannot_redeem_without_typed_confirmation(hh):
+    client, m = hh
+    rid = client.post(BASE, headers=H(OWNER), json={
+        "catalog_app_id": CATALOG_ID, "origin": ORIGIN, "scopes": ["sessions", "approvals"],
+        "acknowledge_elevated": True}).json()["id"]
+    verifier, challenge = _pkce()
+    client.local_owner = False  # an unauthenticated native HTTP client supplies the browser's Origin
+    claimed = client.post(f"/api/v1/pair/requests/{rid}/claim", headers={"Origin": ORIGIN},
+                          json={"code_challenge": challenge})
+    assert claimed.status_code == 200, claimed.text
+    assert claimed.json()["state"] == "claimed" and claimed.json()["browser"] is True
+    match = claimed.json()["match_code"]
+    assert re.fullmatch(r"\d{6}", match)
+    assert _redeem(client, rid, verifier, ORIGIN).json()["error"]["code"] == "pairing_pending"
+    assert _app_keys(m) == []
+    wrong = "123456" if match != "123456" else "654321"
+    for given in ("", wrong):
+        refused = client.post(f"{BASE}/{rid}/confirm", headers=H(OWNER), json={"match": given})
+        assert refused.status_code == 400 and refused.json()["error"]["code"] == "match_mismatch"
+        assert _redeem(client, rid, verifier, ORIGIN).status_code == 409
+        assert _app_keys(m) == []
+    assert client.post(f"{BASE}/{rid}/confirm", json={"match": match}).status_code == 401
+    assert client.post(f"{BASE}/{rid}/confirm", headers=H(OWNER), json={"match": match}).status_code == 200
+    assert _redeem(client, rid, verifier).status_code == 403
+    assert _redeem(client, rid, verifier, OTHER).status_code == 403
+    assert _app_keys(m) == []
+    paired = _redeem(client, rid, verifier, ORIGIN)
+    assert paired.status_code == 201 and paired.json()["app"]["scopes"] == "sessions approvals"
+    assert len(_app_keys(m)) == 1
+    assert len(_audit(client, "pairing_request.approve", outcome="denied")) == 2
+
+
+@pytest.mark.parametrize("state", ["claimed", "approved", "redeemed"])
+def test_cli_pairing_recovery_notice_includes_finished_requests(monkeypatch, capsys, state):
+    monkeypatch.setattr(cli, "api", lambda *args, **kwargs: [{"kind": "app", "state": state}])
+    args = cli._build_parser().parse_args(["pairing-requests", "list"])
+    assert cli._cmd_admin(args) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == [{"kind": "app", "state": state}]
+    assert "harness pairing-requests list" in output.err
+    assert "harness keys revoke <key_id>" in output.err
+    assert "harness pairing-requests deny <id>" in output.err
 
 
 def test_hub_armed_native_slot_waits_for_the_owner_to_confirm(hh):
@@ -286,7 +441,7 @@ def test_hub_armed_native_slot_waits_for_the_owner_to_confirm(hh):
     match = claimed.json()["match_code"]
     assert re.fullmatch(r"\d{6}", match)
     listed = next(r for r in rec.owner("GET", BASE).json() if r["id"] == rid)
-    assert listed["needs"] == "confirm" and listed["match_code"] == match
+    assert listed["needs"] == "confirm" and listed["match_code"] == ""
     assert _redeem(client, rid, verifier).status_code == 409  # no token before the confirm
     assert rec.owner("POST", f"{BASE}/{rid}/approve", json={"match": match}).status_code == 409
     wrong = "123456" if match != "123456" else "654321"
@@ -297,7 +452,7 @@ def test_hub_armed_native_slot_waits_for_the_owner_to_confirm(hh):
     paired = _redeem(client, rid, verifier)
     assert paired.status_code == 201 and paired.json()["app"]["scopes"] == "sessions approvals"
     assert _redeem(client, rid, verifier).status_code == 400
-    _assert_no_secrets(rec.texts, paired.json()["token"], verifier)
+    _assert_no_secrets(rec.texts, paired.json()["token"], verifier, match)
     assert _audit(client, "pairing_request.approve", outcome="ok")[0]["metadata"]["confirmed"] is True
 
 
@@ -389,6 +544,11 @@ def test_cli_rows_call_the_owner_routes_and_print_no_secret(hh, monkeypatch, cap
     client, _ = hh
     asked, verifier = _ask(client, ORIGIN)
     rid, match = asked.json()["id"], asked.json()["match_code"]
+    slot = client.post(BASE, json={"catalog_app_id": CATALOG_ID}, headers=H(OWNER)).json()["id"]
+    native_verifier, challenge = _pkce()
+    claimed = client.post(f"/api/v1/pair/requests/{slot}/claim", json={"code_challenge": challenge}).json()
+    hub, _ = _ask(client, kind="hub", scopes=None)
+    assert hub.status_code == 201, hub.text
 
     def api(method, path, **kwargs):
         r = client.request(method, PREFIX + path, headers=H(OWNER), **kwargs)
@@ -401,18 +561,29 @@ def test_cli_rows_call_the_owner_routes_and_print_no_secret(hh, monkeypatch, cap
     monkeypatch.delenv("HARNESS_TOKEN", raising=False)
     monkeypatch.setattr(cli, "api", api)
     out = []
+    err = []
     for argv in (["pairing-requests", "list"], ["pairing-requests", "approve", rid, "--match", match],
                  ["pairing-requests", "arm", CATALOG_ID, "--scopes", "sessions", "--origin", ORIGIN]):
         monkeypatch.setattr("sys.argv", ["harness", *argv])
         assert cli.main() == 0
-        out.append(capsys.readouterr().out)
-    assert rid in out[0] and match in out[0] and '"approved"' in out[1] and '"armed"' in out[2]
+        captured = capsys.readouterr()
+        out.append(captured.out)
+        err.append(captured.err)
+    listed = {r["id"]: r for r in json.loads(out[0])}
+    assert listed[rid]["state"] == "pending" and listed[slot]["state"] == "claimed"
+    assert listed[hub.json()["id"]]["kind"] == "hub" and {r["match_code"] for r in listed.values()} == {""}
+    assert '"approved"' in out[1] and '"armed"' in out[2]
+    assert "from the App" in err[0] and "no code or an error, deny" in err[0]
+    assert "slot was already claimed, run harness pairing-requests list" in err[0]
+    assert "redeemed, revoke its key_id with harness keys revoke <key_id>" in err[0]
+    assert "approved or claimed, deny it with harness pairing-requests deny <id>" in err[0]
+    assert "Browser and native claims both need harness pairing-requests confirm" in err[0]
     assert _redeem(client, rid, verifier, ORIGIN).status_code == 201
     slot = json.loads(out[2])["id"]
     monkeypatch.setattr("sys.argv", ["harness", "pairing-requests", "deny", slot])
     assert cli.main() == 0
     out.append(capsys.readouterr().out)
-    _assert_no_secrets(out, verifier)
+    _assert_no_secrets(out + err, verifier, native_verifier, match, claimed["match_code"], hub.json()["match_code"])
 
 
 def test_web_never_calls_the_redeem_route_or_reads_a_token_from_it():
