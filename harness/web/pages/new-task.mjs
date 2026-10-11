@@ -145,8 +145,8 @@ async function viewNew() {
   if (!targets.includes(target)) target = targets[0] || "tower";
   const projectTarget = (name) => projects.find((p) => p.name === name)?.target || "tower";
   let templates = [];
-  const tplSelect = h("select", {});
-  const project = h("select", {});
+  const tplSelect = h("select", { id: "new-task-template" });
+  const project = h("select", { id: "new-task-project" });
   const fillChoices = () => {
     templates = allTemplates.filter((t) => projectTarget(t.project) === target);
     fill(tplSelect, h("option", { value: "" }, templates.length ? "— none —" : "No templates for this machine"),
@@ -185,16 +185,17 @@ async function viewNew() {
   project.addEventListener("change", () => { void showTarget(); showProjectHint(); });
   void showTarget();
   showProjectHint();
-  const newProjectName = h("input", { type: "text", placeholder: "my-project", maxlength: "64", required: true,
+  const newProjectName = h("input", { id: "new-project-name", type: "text", placeholder: "my-project", maxlength: "64", required: true,
     pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
-  const newProjectDescription = h("input", { type: "text", placeholder: "Optional description", maxlength: "240" });
+  const newProjectDescription = h("input", { id: "new-project-description", type: "text", placeholder: "Optional description", maxlength: "240" });
   const newProjectTarget = projectTargetInput(targets, target);
-  const newProjectSource = h("select", {},
+  newProjectTarget.id = "new-project-target";
+  const newProjectSource = h("select", { id: "new-project-source" },
     h("option", { value: "empty" }, "Empty workspace"),
     h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"),
     isMember() ? h("option", { value: "github" }, "Private GitHub repository (my GitHub connection)") : null);
   const githubConnect = h("div");
-  const newProjectRepo = h("input", { type: "text", placeholder: repoPlaceholder(), hidden: true });
+  const newProjectRepo = h("input", { id: "new-project-repo", "aria-label": "Repository", type: "text", placeholder: repoPlaceholder(), hidden: true });
   newProjectSource.addEventListener("change", () => {
     const repoSource = newProjectSource.value !== "empty";
     newProjectRepo.hidden = !repoSource;
@@ -237,12 +238,12 @@ async function viewNew() {
       }
     } },
     h("p", { class: "muted small" }, NEW_PROJECT_NOTE[isMember() ? "member" : "owner"]),
-    h("label", {}, "Name"), newProjectName,
-    h("label", {}, "Description"), newProjectDescription,
-    isMember() ? [] : [h("label", {}, "Runs on"), newProjectTarget],
-    h("label", {}, "Workspace"), newProjectSource, newProjectRepo, githubConnect,
+    h("label", { for: "new-project-name" }, "Name"), newProjectName,
+    h("label", { for: "new-project-description" }, "Description"), newProjectDescription,
+    isMember() ? [] : [h("label", { for: "new-project-target" }, "Runs on"), newProjectTarget],
+    h("label", { for: "new-project-source" }, "Workspace"), newProjectSource, newProjectRepo, githubConnect,
     h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
-  const model = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
+  const model = h("select", { id: "new-task-model" }, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));
   let localModel = model.value;
   model.addEventListener("change", () => {
     localModel = model.value;
@@ -251,7 +252,7 @@ async function viewNew() {
   const gpuHold = () => !!(gpu && (gpu.manual || gpu.state !== "clear"));
   const availableBackends = backends.filter((b) => b.available);
   const defaultBackend = pickDefaultBackend(availableBackends, gpuHold());
-  const backend = h("select", {}, availableBackends.map((b) =>
+  const backend = h("select", { id: "new-task-backend" }, availableBackends.map((b) =>
     h("option", { value: b.name, selected: b.name === defaultBackend }, b.name === "local" ? "Local model" : b.name)));
   backend.value = defaultBackend;
   const backendState = h("div", { class: "muted small", style: "margin-top:6px" });
@@ -289,7 +290,7 @@ async function viewNew() {
   });
   showBackend();
   const prompt = h("textarea", { id: "new-task-prompt", form: "new-task-form", placeholder: "e.g. Clone local:invoice-tools, fix the failing test, and report back." });
-  const title = h("input", { type: "text", placeholder: "Optional; defaults to the first line" });
+  const title = h("input", { id: "new-task-title", type: "text", placeholder: "Optional; defaults to the first line" });
   let selectedGitHub = null;
   const githubState = h("p", { class: "muted small" });
   const githubList = h("div", {});
@@ -406,10 +407,10 @@ async function viewNew() {
       if (!started) start.disabled = false;
     },
   },
-  h("label", {}, "Project"), project, targetState, projectHint,
-  isMember() && availableBackends.length < 2 ? [] : [h("label", {}, "Backend"), backend, holdNotice, backendState],
-  h("label", {}, "Model"), model, modelState,
-  h("label", {}, "Title"), title,
+  h("label", { for: "new-task-project" }, "Project"), project, targetState, projectHint,
+  isMember() && availableBackends.length < 2 ? [] : [h("label", { for: "new-task-backend" }, "Backend"), backend, holdNotice, backendState],
+  h("label", { for: "new-task-model" }, "Model"), model, modelState,
+  h("label", { for: "new-task-title" }, "Title"), title,
   skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,
   h("div", { class: "row", style: "margin-top:18px" },
     isMember() ? null : h("button", {
@@ -420,7 +421,7 @@ async function viewNew() {
     h("span", { class: "spacer" }), start));
   const context = h("div", { class: "new-task-context" },
     targetSwitch ? [h("label", {}, "Runs on"), targetSwitch] : null,
-    allTemplates.length ? [h("label", {}, "Template"), tplSelect] : null, githubPicker);
+    allTemplates.length ? [h("label", { for: "new-task-template" }, "Template"), tplSelect] : null, githubPicker);
   // The prompt remains associated with the settings form even though desktop places it in its own column.
   // DOM order keeps the phone flow: context, prompt, settings, then the submit actions.
   const promptPane = h("div", { class: "new-task-prompt" }, h("label", { for: "new-task-prompt" }, "Prompt"), prompt);

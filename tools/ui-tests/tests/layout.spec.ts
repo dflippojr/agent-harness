@@ -1,8 +1,7 @@
 import { test, expect, openSession, expectDone } from './fixtures';
 
-// Chat landing's 320px overflow is a failed exploratory case, tracked by #591.
-// Its regression assertion belongs with that separate fix, not a skip/retry here.
 const surfaces = [
+  { name: 'Chat landing', route: '/#/chat', ready: '.chat-welcome' },
   { name: 'Agents', route: '/#/agents', ready: '.agent-row' },
   { name: 'New task', route: '/#/new', ready: '.new-task-page' },
   { name: 'Jobs', route: '/#/jobs', ready: '.job-row' },
