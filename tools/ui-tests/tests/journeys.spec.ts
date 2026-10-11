@@ -146,6 +146,8 @@ test('AH-12 chat streams, rename persists and delete persists', async ({ signedI
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Hello UI chat');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.locator('.msg.assistant.final')).toContainText('Hi! This is the fake model.');
+  await page.reload();
+  await expect(page.locator('.msg.assistant.final')).toContainText('Hi! This is the fake model.');
   const title = 'UI chat ' + randomUUID();
   await page.getByRole('button', { name: 'Rename', exact: true }).click();
   const sheet = page.getByRole('dialog', { name: 'Rename chat', exact: true });

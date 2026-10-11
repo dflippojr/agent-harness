@@ -212,10 +212,11 @@ jobs:
   ui-tests:
     runs-on: windows-latest
     timeout-minutes: 20
-    env:
-      HARNESS_UI_INSTANCE_DIR: ${{ runner.temp }}/harness-ui-tests
     steps:
       - uses: actions/checkout@v7
+      - name: Configure disposable instance path
+        run: |
+          "HARNESS_UI_INSTANCE_DIR=$env:RUNNER_TEMP/harness-ui-tests" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"

@@ -270,7 +270,8 @@ readiness signal.
   - Set `use.baseURL` to `http://127.0.0.1:18801`.
   - Use one fixed `<instance-dir>` for start and both teardown paths:
     `process.env.HARNESS_UI_INSTANCE_DIR ?? path.join(os.tmpdir(), 'harness-ui-tests')`. CI sets
-    `HARNESS_UI_INSTANCE_DIR` to `${{ runner.temp }}/harness-ui-tests` for the whole job.
+    `HARNESS_UI_INSTANCE_DIR` to `$RUNNER_TEMP/harness-ui-tests` through `GITHUB_ENV`
+    in an initial setup step, so the test and cleanup steps share the same directory.
   - Because Start refuses a non-empty directory, a leftover from a killed run fails the next start loudly. Run
     Teardown on that directory before starting, both locally and as the first CI step (it is a no-op when the
     directory is absent).

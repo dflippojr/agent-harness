@@ -36,6 +36,8 @@ test('AH-11 job toggle, validation, CRUD, run and audit persist', async ({ signe
   await page.getByRole('button', { name: 'Run now', exact: true }).locator('visible=true').first().click();
   await expect(page).toHaveURL(/#\/s\/[^/]+$/);
   await expectDone(page);
+  await page.reload();
+  await expectDone(page);
   await expect(page.locator('main')).toContainText('Nightly report written to reports/nightly.md. All quiet.');
   await page.goto(jobUrl);
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
