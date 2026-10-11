@@ -283,7 +283,7 @@ class FakeModel:
         if on_progress:  # llama-server's prompt_progress: nothing cached, then the whole prompt read
             await on_progress(0, prompt_tokens, 0)
             await on_progress(prompt_tokens, prompt_tokens, 0)
-        if messages and messages[0].get("role") == "system" and messages[0].get("content") == compaction.SUMMARY_SYSTEM:
+        if messages and messages[0].get("content") == compaction.SUMMARY_SYSTEM:  # a compaction summary request
             return await self._summary(prompt_tokens, on_delta)
         script, index = self.position(messages)
         if script is None:

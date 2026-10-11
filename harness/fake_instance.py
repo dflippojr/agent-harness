@@ -1,11 +1,13 @@
 """A disposable Agent Harness Server in fake model mode, for UI testing without the GPU (#588, docs/ui-testing.md).
 
-    python -m harness.fake_instance [--port 18100] [--web-port 18101] [--fixtures DIR] [--dir DIR] [--keep]
+    python -m harness.fake_instance --dir DIR [--port N] [--web-port N] [--fixtures PATH] [--keep] [--no-seed]
+    python -m harness.fake_instance stop --dir DIR
 
-It writes a throwaway config and data directory (with the marker fake model mode requires), starts the real daemon
-on loopback with the scripted model, serves a separately hosted copy of Agent Harness Web next to it, seeds a few
-sessions, chats and jobs, and prints the URLs and tokens. Ctrl+C stops it and deletes the directory unless --keep.
-Nothing here reads or changes the real config, data, GPU or llama-server.
+Start writes a throwaway config and data directory (with the marker fake model mode requires), starts the real daemon
+on loopback with the scripted model, serves a separately hosted copy of Agent Harness Web next to it, seeds sessions,
+a chat and jobs, waits until they settle and prints a READY line. Ctrl+C stops it and deletes the directory unless
+--keep. `stop` ends the instance recorded in DIR from another shell and deletes DIR; it is safe to repeat. Nothing here
+reads or changes the real config, data, GPU or llama-server.
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ import asyncio
 import html
 import json
 import os
-import shutil
 import signal
 import socket
 import sys
@@ -30,17 +31,18 @@ import yaml
 from . import fake_model
 
 PROJECT = "ui"
+HANDLE = "instance.json"     # in the instance dir: how `stop` finds this instance's process
 CLIENT = {"X-Agent-Harness-Client": "cli/2"}  # the seeding talks as a tool on this machine
-# The scripts in harness/fake_fixtures/ui.yaml these prompts pick, in the order they queue (the slow one last, so it
-# stays Running while the tester looks around).
+SETTLE_SECONDS = 120
+# (title, prompt, status once settled). The prompts pick scripts in harness/fake_fixtures/ui.yaml; runs queue one at
+# a time, in this order.
 SEED_SESSIONS = (
-    ("Tab bar tour", "Hello! Give me a quick tour of the tab bar."),
-    ("Tool rows", "Show tool rows: write, read and search some files."),
-    ("Retry after a model error", "Simulate a retry after a model error."),
-    ("Failed run", "Simulate a failure."),
-    ("Long task with compaction", "Run a long task that triggers compaction."),
-    ("Protected settings", "Edit the protected settings file."),
-    ("Slow running task", "Run a slow task so I can watch it running."),
+    ("Tab bar tour", "Hello! Give me a quick tour of the tab bar.", "done"),
+    ("Tool rows", "Show tool rows: write, read and search some files.", "done"),
+    ("Retry after a model error", "Simulate a retry after a model error.", "done"),
+    ("Failed run", "Simulate a failure.", "failed"),
+    ("Long task with compaction", "Run a long task that triggers compaction.", "done"),
+    ("Protected settings", "Edit the protected settings file.", "waiting_approval"),
 )
 SEED_CHATS = ("Hello from Chat. What can you do?",)
 SEED_JOBS = (
@@ -50,20 +52,33 @@ SEED_JOBS = (
 )
 
 
+class StartError(RuntimeError):
+    pass
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
+def port_free(port: int) -> bool:
+    with socket.socket() as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
 def write_instance(root: Path, port: int) -> tuple[Path, Path]:
     """The throwaway config and data dirs. Optional modules that reach other services are off."""
     config_dir, data_dir = root / "config", root / "data"
-    config_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
-    (root / "repos").mkdir(exist_ok=True)
     (data_dir / fake_model.MARKER).write_text("disposable fake-model instance (python -m harness.fake_instance)\n",
                                               encoding="utf-8")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (root / "repos").mkdir(exist_ok=True)
     config = {
         "listen": {"host": "127.0.0.1", "port": port},
         "data_dir": data_dir.as_posix(),
@@ -99,51 +114,78 @@ def connect_page(server: str, token: str) -> str:
             "for (const k in v) localStorage.setItem(k, v[k]); location.replace('/');</script>")
 
 
-def web_app(server: str, token: str):
+def web_app(server: str, token: str, state: dict):
+    """The separately hosted Web copy, its /connect sign-in page, and /ready (503 until seeded and settled)."""
     from starlette.applications import Starlette
-    from starlette.responses import HTMLResponse
+    from starlette.responses import HTMLResponse, JSONResponse
     from starlette.routing import Mount, Route
     from starlette.staticfiles import StaticFiles
     web = Path(__file__).resolve().parent / "web"
 
     async def connect(_request):
         return HTMLResponse(connect_page(server, token), headers={"Cache-Control": "no-store"})
+
+    async def ready(_request):
+        return JSONResponse(state, status_code=200 if state.get("status") == "ready" else 503,
+                            headers={"Cache-Control": "no-store"})
     # /static too, as the daemon serves it: the manifest and older installs refer to it.
-    return Starlette(routes=[Route("/connect", connect),
+    return Starlette(routes=[Route("/connect", connect), Route("/ready", ready),
                              Mount("/static", StaticFiles(directory=web)),
                              Mount("/", StaticFiles(directory=web, html=True))])
 
 
-async def seed(server: str, token: str) -> list[str]:
-    """Sessions, a chat and jobs through the real API, as the owner. Returns what failed, if anything."""
-    problems = []
-    headers = {"Authorization": f"Bearer {token}", **CLIENT}
-    async with httpx.AsyncClient(base_url=server, headers=headers, timeout=30) as client:
-        for title, prompt in SEED_SESSIONS:
-            r = await client.post("/api/v1/sessions", json={"prompt": prompt, "project": PROJECT, "title": title})
-            if r.status_code != 201:
-                problems.append(f"session {title!r}: HTTP {r.status_code} {r.text[:200]}")
-        for prompt in SEED_CHATS:
-            r = await client.post("/api/admin/v1/chats", json={"prompt": prompt})
-            if r.status_code != 201:
-                problems.append(f"chat: HTTP {r.status_code} {r.text[:200]}")
-        for job in SEED_JOBS:
-            r = await client.post("/api/admin/v1/jobs", json=job)
-            if r.status_code != 201:
-                problems.append(f"job {job['name']!r}: HTTP {r.status_code} {r.text[:200]}")
-    return problems
+async def seed(client: httpx.AsyncClient) -> list[str]:
+    """Sessions, a chat and jobs through the real API, as the owner; then wait for the runs to settle."""
+    problems, expected = [], {}
+    for title, prompt, status in SEED_SESSIONS:
+        r = await client.post("/api/v1/sessions", json={"prompt": prompt, "project": PROJECT, "title": title})
+        if r.status_code != 201:
+            problems.append(f"session {title!r}: HTTP {r.status_code} {r.text[:200]}")
+        else:
+            expected[r.json()["id"]] = (title, status)
+    for prompt in SEED_CHATS:
+        r = await client.post("/api/admin/v1/chats", json={"prompt": prompt})
+        if r.status_code != 201:
+            problems.append(f"chat: HTTP {r.status_code} {r.text[:200]}")
+        else:
+            expected[r.json()["id"]] = ("chat", "done")
+    for job in SEED_JOBS:
+        r = await client.post("/api/admin/v1/jobs", json=job)
+        if r.status_code != 201:
+            problems.append(f"job {job['name']!r}: HTTP {r.status_code} {r.text[:200]}")
+    return problems or await settle(client, expected)
 
 
-def summary(server: str, web: str, token: str, local_token: str, root: Path, fixtures: Path, keep: bool) -> str:
+async def settle(client: httpx.AsyncClient, expected: dict[str, tuple[str, str]]) -> list[str]:
+    deadline = time.monotonic() + SETTLE_SECONDS
+    statuses: dict[str, str] = {}
+    while time.monotonic() < deadline:
+        for sid, (title, _) in expected.items():
+            r = await client.get(f"/api/admin/v1/chats/{sid}" if title == "chat" else f"/api/v1/sessions/{sid}")
+            statuses[sid] = r.json().get("status", "") if r.status_code == 200 else f"HTTP {r.status_code}"
+        if all(statuses[sid] == want for sid, (_, want) in expected.items()):
+            return []
+        await asyncio.sleep(0.25)
+    return [f"{title!r} is {statuses.get(sid)!r}, expected {want!r} after {SETTLE_SECONDS}s"
+            for sid, (title, want) in expected.items() if statuses.get(sid) != want]
+
+
+def write_handle(root: Path, state: dict) -> None:
+    (root / HANDLE).write_text(json.dumps(state, indent=1), encoding="utf-8")
+
+
+def summary(state: dict, token: str, local_token: str, keep: bool) -> str:
     return "\n".join([
         "",
         "Agent Harness fake model instance is up (scripted model, no GPU).",
-        f"  Web (signed in):  {web}/connect",
-        f"  Server:           {server}   (bundled Web there needs the local token header)",
+        f"  Web (signed in):  {state['connect']}",
+        f"  Server:           {state['server']}   (bundled Web there needs the local token header)",
         f"  Owner token:      {token}",
         f"  Local token:      {local_token}   (header X-Agent-Harness-Local-Token)",
-        f"  Fixtures:         {fixtures}",
-        f"  Instance dir:     {root}" + ("   (kept on exit)" if keep else "   (deleted on exit)"),
+        f"  Fixtures:         {state['fixtures']}",
+        f"  Instance dir:     {state['dir']}" + ("   (kept on exit)" if keep else "   (deleted on exit)"),
+        f"  Process:          {state['pid']}   (stop: python -m harness.fake_instance stop --dir \"{state['dir']}\")",
+        "READY " + json.dumps({k: state[k] for k in ("server", "web", "connect", "dir", "pid", "key_id")}),
         "Ctrl+C to stop.",
         "",
     ])
@@ -158,62 +200,110 @@ async def serve(args, root: Path) -> None:
     port = args.port or free_port()
     web_port = args.web_port or free_port()
     server, web = f"http://127.0.0.1:{port}", f"http://127.0.0.1:{web_port}"
+    state = {"status": "starting", "pid": os.getpid(), "server": server, "web": web, "connect": f"{web}/connect",
+             "dir": str(root), "fixtures": str(Path(args.fixtures).resolve()), "started_at": time.time()}
+    write_handle(root, state)
     config_dir, data_dir = write_instance(root, port)
-    os.environ[fake_model.ENV] = str(args.fixtures)
-    cfg = config_mod.load(config_dir, data_dir)
-    manager = Manager(cfg)
-    _, token = manager.db.main.create_api_key("ui-testing", "admin", "owner", origins=[normalize_origin(web)])
-    app = create_app(manager)
-    servers = [uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                                             proxy_headers=False, forwarded_allow_ips="")),
-               uvicorn.Server(uvicorn.Config(web_app(server, token), host="127.0.0.1", port=web_port,
-                                             log_level="warning"))]
+    os.environ[fake_model.ENV] = state["fixtures"]
+    manager = Manager(config_mod.load(config_dir, data_dir))
     try:
+        key, token = manager.db.main.create_api_key("ui-testing", "admin", "owner", origins=[normalize_origin(web)])
+        state["key_id"] = key["id"]  # the actor key_id of this instance's audit rows
+        servers = [uvicorn.Server(uvicorn.Config(create_app(manager), host="127.0.0.1", port=port,
+                                                 log_level="warning", proxy_headers=False, forwarded_allow_ips="")),
+                   uvicorn.Server(uvicorn.Config(web_app(server, token, state), host="127.0.0.1", port=web_port,
+                                                 log_level="warning"))]
         tasks = [asyncio.create_task(s.serve()) for s in servers]
-        while not all(s.started for s in servers):
-            if any(t.done() for t in tasks):
-                await asyncio.gather(*tasks)
-                raise SystemExit("the fake instance did not start")
-            await asyncio.sleep(0.1)
-        problems = [] if args.no_seed else await seed(server, token)
-        print(summary(server, web, token, manager.local_owner_token, root, Path(args.fixtures), args.keep), flush=True)
-        for problem in problems:
-            print(f"  seed failed: {problem}", file=sys.stderr, flush=True)
-        # Ctrl+C reaches whichever server installed its signal handler last: when one stops, stop the other too.
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for s in servers:
-            s.should_exit = True
-        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await _started(servers, tasks)
+            if not args.no_seed:
+                async with httpx.AsyncClient(base_url=server, timeout=30,
+                                             headers={"Authorization": f"Bearer {token}", **CLIENT}) as client:
+                    problems = await seed(client)
+                if problems:
+                    raise StartError("seeding failed: " + "; ".join(problems))
+            state["status"] = "ready"
+            write_handle(root, state)
+            print(summary(state, token, manager.local_owner_token, args.keep), flush=True)
+            # Ctrl+C reaches whichever server installed its signal handler last: when one stops, stop the other too.
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for s in servers:
+                s.should_exit = True
+            await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         manager.db.close()  # releases the SQLite files, so the instance directory can be deleted
 
 
-def remove(root: Path) -> None:
-    for _ in range(10):  # SQLite and log handles can linger a moment on Windows
-        shutil.rmtree(root, ignore_errors=True)
+async def _started(servers, tasks) -> None:
+    while not all(s.started for s in servers):
+        if any(t.done() for t in tasks):
+            raise StartError("a server did not start (see the log above)")
+        await asyncio.sleep(0.1)
+
+
+def remove(root: Path) -> bool:
+    """Delete the instance directory, including the read-only objects of its checkpoint git repositories."""
+    from .clone import _remove_tree
+    for _ in range(10):  # SQLite handles can linger a moment on Windows
+        _remove_tree(root)
         if not root.exists():
-            return
+            return True
         time.sleep(0.5)
-    print(f"could not delete {root}; remove it by hand", file=sys.stderr)
+    return False
+
+
+def owned(root: Path) -> bool:
+    """Whether `root` is a fake-model instance directory this command may delete (or an empty leftover)."""
+    return ((root / "data" / fake_model.MARKER).is_file() or (root / HANDLE).is_file()
+            or (root.is_dir() and not any(root.iterdir())))
+
+
+def stop(root: Path) -> int:
+    """End the instance recorded in `root` and delete `root`. Safe to repeat, and after a partial start."""
+    import psutil
+    root = root.resolve()
+    if not root.exists():
+        print(f"nothing to stop: {root} does not exist")
+        return 0
+    if not owned(root):
+        print(f"refusing: {root} is not a fake-model instance directory", file=sys.stderr)
+        return 2
+    try:
+        pid = int(json.loads((root / HANDLE).read_text(encoding="utf-8"))["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pid = 0
+    if pid and psutil.pid_exists(pid):
+        try:
+            proc = psutil.Process(pid)
+            if "harness.fake_instance" in " ".join(proc.cmdline()):
+                for p in proc.children(recursive=True) + [proc]:
+                    p.kill()
+                psutil.wait_procs([proc], timeout=15)
+                print(f"stopped process {pid}")
+        except psutil.Error as e:
+            print(f"process {pid}: {e}", file=sys.stderr)
+    if not remove(root):
+        print(f"could not delete {root}; is a process still using it?", file=sys.stderr)
+        return 1
+    print(f"deleted {root}")
+    return 0
 
 
 def _interrupt(_sig, _frame):
     raise KeyboardInterrupt
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Disposable Agent Harness Server in fake model mode (UI testing)")
-    ap.add_argument("--port", type=int, default=0, help="server port (default: a free one)")
-    ap.add_argument("--web-port", type=int, default=0, help="port of the separately hosted Web copy (default: free)")
-    ap.add_argument("--fixtures", type=Path, default=fake_model.DEFAULT_FIXTURES,
-                    help="fixture directory or file (default: harness/fake_fixtures)")
-    ap.add_argument("--dir", type=Path, help="instance directory (default: a new temp dir); must be empty or absent")
-    ap.add_argument("--keep", action="store_true", help="keep the instance directory on exit")
-    ap.add_argument("--no-seed", action="store_true", help="start empty")
-    args = ap.parse_args(argv)
+def start(args, ap) -> int:
     fake_model.load_fixtures(args.fixtures)  # fail before creating anything
+    for flag, port in (("--port", args.port), ("--web-port", args.web_port)):
+        if port and not port_free(port):
+            ap.error(f"{flag} {port} is in use; this command never reuses a running server")
     if args.dir is not None and args.dir.exists() and any(args.dir.iterdir()):
-        ap.error(f"{args.dir} is not empty")
+        ap.error(f"{args.dir} is not empty (stop the instance there first: python -m harness.fake_instance stop "
+                 f"--dir {args.dir})")
+    if args.dir is not None:
+        args.dir.mkdir(parents=True, exist_ok=True)
     root = (args.dir or Path(tempfile.mkdtemp(prefix="harness-fake-"))).resolve()
     import logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -221,14 +311,37 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("SIGBREAK", "SIGTERM"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), _interrupt)
+    code = 0
     try:
         asyncio.run(serve(args, root))
     except KeyboardInterrupt:
         pass
+    except StartError as e:
+        print(f"FAILED {e}", file=sys.stderr, flush=True)
+        code = 1
     finally:
-        if not args.keep:
-            remove(root)
-    return 0
+        if not args.keep and not remove(root):
+            print(f"could not delete {root}; remove it by hand", file=sys.stderr)
+    return code
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["stop"]:
+        ap = argparse.ArgumentParser(prog="python -m harness.fake_instance stop",
+                                     description="Stop a fake-model instance and delete its directory")
+        ap.add_argument("--dir", type=Path, required=True, help="the instance directory given to start")
+        return stop(ap.parse_args(argv[1:]).dir)
+    ap = argparse.ArgumentParser(prog="python -m harness.fake_instance",
+                                 description="Disposable Agent Harness Server in fake model mode (UI testing)")
+    ap.add_argument("--port", type=int, default=0, help="server port (default: a free one); refused if in use")
+    ap.add_argument("--web-port", type=int, default=0, help="port of the separately hosted Web copy (default: free)")
+    ap.add_argument("--fixtures", type=Path, default=fake_model.DEFAULT_FIXTURES,
+                    help="fixture directory or file (default: harness/fake_fixtures)")
+    ap.add_argument("--dir", type=Path, help="instance directory (default: a new temp dir); must be empty or absent")
+    ap.add_argument("--keep", action="store_true", help="keep the instance directory on exit")
+    ap.add_argument("--no-seed", action="store_true", help="start empty")
+    return start(ap.parse_args(argv), ap)
 
 
 if __name__ == "__main__":

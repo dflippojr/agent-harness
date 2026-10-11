@@ -1,0 +1,8 @@
+schema_version: 1
+kind: doc-index
+target: readme-docs-index
+title: UI testing with the fake model
+order: 51
+links:
+  - text: 'ui-testing'
+    href: docs/ui-testing.md
