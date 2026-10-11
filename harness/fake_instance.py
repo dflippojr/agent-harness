@@ -87,7 +87,6 @@ def write_instance(root: Path, port: int) -> tuple[Path, Path]:
                     "backup": False, "remote_control": False, "hub": False},
         "jobs": {"enabled": True},
         "search": {"enabled": True},
-        "skills": {"enabled": True, "local_review": False},
         "canary": {"enabled": False},
         "budgets": {"approval_timeout_seconds": 86400},
     }
@@ -277,20 +276,22 @@ def _instance_process(handle: dict):
 
 
 def _kill(proc) -> bool:
-    """Kill the instance and its children. A child that already exited is fine; the instance itself must be gone."""
+    """Kill the instance and its children. One that already exited is fine; all of them must be gone."""
     import psutil
     try:
-        children = proc.children(recursive=True)
+        procs = proc.children(recursive=True) + [proc]
     except psutil.NoSuchProcess:
-        children = []
-    for p in children + [proc]:
+        procs = [proc]
+    for p in procs:
         try:
             p.kill()
         except psutil.NoSuchProcess:
             pass
         except psutil.Error as e:
             print(f"process {p.pid}: {e}", file=sys.stderr)
-    _, alive = psutil.wait_procs([proc], timeout=15)
+    _, alive = psutil.wait_procs(procs, timeout=15)
+    for p in alive:
+        print(f"process {p.pid} is still running", file=sys.stderr)
     if not alive:
         print(f"stopped process {proc.pid}")
     return not alive

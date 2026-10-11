@@ -33,13 +33,13 @@ docstring of [`harness/fake_model.py`](../harness/fake_model.py).
     - The maintenance sweep (scheduled, or Settings → Disk → Cleanup) neither lists nor removes session containers.
     - Only Chat's **Run code** still uses Docker: its own short-lived, mount-less snippet containers, and only if the
       pinned images are present. Otherwise it reports an error.
-  - `tests/test_fake_model.py` covers these guards.
+  - `tests/test_fake_model.py` and `tests/test_fake_instance.py` cover these guards.
 - **Disabled or stubbed integrations.**
   - Model: scripted (stubbed).
   - Off: hosted Claude, Codex and Cursor backends (not configured), notifications (ntfy), backup, homelab, memory
     library, Claude Remote Control, Hub, web search and fetch (SearXNG), images and image edit, inference endpoint,
     GPU guard, canary, telemetry export, GitHub tasks (no token) and Google sign-in.
-  - Jobs, session search and skills (with local review off) stay on because they are local.
+  - Skills are off, because their validator runs Docker. Jobs and session search stay on because they are local.
   - The one outbound request: on first start the Server downloads its pinned secret scanner (gitleaks) from GitHub
     releases into `<dir>/data/tools`. If that download fails, the Server still starts; only push and merge review,
     which no journey uses, then refuse.
