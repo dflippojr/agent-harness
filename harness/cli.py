@@ -449,7 +449,7 @@ ADMIN_COMMANDS = (
      "approve an App's pairing request with the match code it shows (the App fetches its own token)",
      ("--match", "--acknowledge_elevated:flag")),
     ("pairing-requests confirm", "POST", "/pairing-requests/{rid}/confirm",
-     "confirm a native App's claim on an armed slot with the match code it shows", ("--match",)),
+     "confirm an App's claim on an armed slot with the match code it shows", ("--match",)),
     ("pairing-requests deny", "POST", "/pairing-requests/{rid}/deny", "deny or withdraw an App pairing request", ()),
     ("hub claim-status", "GET", "/hub-claim", "show whether a Hub is claimed, its record and open Hub claim requests", ()),
     ("hub approve", "POST", "/hub-claim/requests/{rid}/approve",

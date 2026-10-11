@@ -359,8 +359,8 @@ class Harness:
 
     @classmethod
     def claim_pairing(cls, base_url: str, request_id: str, origin: str = "", timeout: float = 60) -> PairingRequest:
-        """Claim a slot the owner armed from the Hub (they hand the App its id). A native claim returns a
-        `match_code` for the owner to confirm; a browser claim from the armed origin is approved at once."""
+        """Claim a slot the owner armed from the Hub (they hand the App its id). Every claim returns a
+        `match_code` for the owner to confirm; a browser claim must also send the armed origin."""
         cls._require_feature(base_url, "pairing_requests", origin, timeout)
         verifier, challenge = cls._pkce()
         out = cls._pairing_post(base_url, f"/api/v1/pair/requests/{request_id}/claim", {
