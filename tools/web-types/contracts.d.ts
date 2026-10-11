@@ -7,8 +7,13 @@ export interface RequestOptions<M extends HttpMethod = HttpMethod> {
   body?: unknown;
   surface?: Surface;
 }
-export type SessionDetail = components["schemas"]["SessionResponse"];
-export type SessionList = paths["/api/v1/sessions"]["get"]["responses"][200]["content"]["application/json"];
+// api() selects the surface at runtime: shared fields are typed; surface-specific fields require narrowing.
+export type SessionDetail =
+  paths["/api/v1/sessions/{ref}"]["get"]["responses"][200]["content"]["application/json"] |
+  paths["/api/admin/v1/sessions/{ref}"]["get"]["responses"][200]["content"]["application/json"];
+export type SessionList =
+  paths["/api/v1/sessions"]["get"]["responses"][200]["content"]["application/json"] |
+  paths["/api/admin/v1/sessions"]["get"]["responses"][200]["content"]["application/json"];
 export type JobList = paths["/api/admin/v1/jobs"]["get"]["responses"][200]["content"]["application/json"];
 export type AdminDiscovery = paths["/api/admin/v1"]["get"]["responses"][200]["content"]["application/json"];
 export type CronPreview = paths["/api/admin/v1/jobs/preview"]["get"]["responses"][200]["content"]["application/json"];

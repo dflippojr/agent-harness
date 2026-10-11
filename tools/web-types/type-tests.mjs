@@ -15,6 +15,8 @@ export async function checkContracts(api, id) {
   const wrong = session.session_title.toUpperCase();
   // @ts-expect-error Session detail is an object, not a list.
   session.map(() => "");
+  // @ts-expect-error Admin tool objects cannot be assumed to be App tool-name strings.
+  session.app_tools[0].toUpperCase();
   const jobs = await api("/jobs");
   /** @type {string} */
   const cron = jobs[0].cron;

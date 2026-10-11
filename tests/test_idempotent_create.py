@@ -67,6 +67,9 @@ def test_a_retry_after_a_lost_response_returns_the_first_session(tmp_path):
         assert type(first.json()["workspace_removed"]) is int
         sid = first.json()["id"]
         wait_for(lambda: client.get(f"/api/v1/sessions/{sid}", headers=auth).json()["status"] == "done")
+        listed = client.get("/api/v1/sessions", headers=auth).json()[0]
+        assert {"answer", "app_tools", "metadata", "run"} <= listed.keys()
+        assert listed["run"] == {} and listed["app_tools"] == [] and listed["metadata"] == {}
 
         again = _post(client, auth, "order-7", {"metadata": {"order": 7}, "prompt": "plan dinner"})  # key order
         assert again.status_code == 200 and again.headers[idempotency.REPLAYED_HEADER] == "true"

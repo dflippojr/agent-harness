@@ -3,6 +3,8 @@
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
+from pydantic import ValidationError
 
 from harness.api import create_app
 from harness.api_models import SessionResponse, WebSessionResponse
@@ -21,8 +23,16 @@ def test_session_models_preserve_absent_and_additive_fields():
         "chat_summary": "Question — answer", "future_field": {"value": 1},
         "workspace_removed": 0,
     }
-    for model in (SessionResponse, WebSessionResponse):
-        assert model.model_validate(payload).model_dump(exclude_unset=True) == payload
+    assert WebSessionResponse.model_validate(payload).model_dump(exclude_unset=True) == payload
+    expected = {"stop_reason": "", "answer": "", "app_tools": [], "metadata": {}, "failure": None,
+                "last_event_seq": 0, "queue_position": None, **payload}
+    assert SessionResponse.model_validate(payload).model_dump(exclude_unset=True) == expected
+    without_counters = {key: value for key, value in payload.items() if key not in ("run", "totals")}
+    defaulted = SessionResponse.model_validate(without_counters).model_dump(exclude_unset=True)
+    assert defaulted["run"] == defaulted["totals"] == {}
+    assert "pending_approvals" not in defaulted
+    with pytest.raises(ValidationError):
+        SessionResponse.model_validate([])
     # Legacy summaries contain tool objects, while the app surface exposes tool names.
     legacy = {**payload, "app_tools": [{"name": "lookup", "parameters": {}}]}
     assert WebSessionResponse.model_validate(legacy).model_dump(exclude_unset=True) == legacy

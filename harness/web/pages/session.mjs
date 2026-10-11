@@ -689,10 +689,11 @@ async function viewSession(sid, tab, focusApproval) {
   for (const type of SESSION_EVENT_TYPES) {
     tracked[type] = (e) => {
       lastHeardAt = Date.now();
-      const persisted = e.seq !== null && e.seq !== undefined;
-      if (e.seq != null) {
-        if (e.seq <= lastSeq) return;
-        lastSeq = e.seq;
+      const seq = e.seq;
+      const persisted = seq != null;
+      if (persisted) {
+        if (seq <= lastSeq) return;
+        lastSeq = seq;
         if (e.ts) { prevEventAt = lastEventAt; lastEventAt = e.ts * 1000; }
       }
       handlers[type]?.(e);

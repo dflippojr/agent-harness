@@ -22,6 +22,11 @@ export function apiSurface(path, method, { role, hasToken }) {
 export const LAST_ROLE_KEY = "harness.lastRole";
 const CACHED_ROLES = new Set(["owner", "member"]);
 
+/** @param {unknown} role @returns {role is "owner" | "member"} */
+function cachedRole(role) {
+  return typeof role === "string" && CACHED_ROLES.has(role);
+}
+
 // `storage` is localStorage or null; every access is guarded because it can throw in private windows.
 /** @param {{agentHarnessWeb: AgentHarnessWebClient, storage?: Storage | null}} dependencies */
 export function createSession({ agentHarnessWeb, storage = null }) {
@@ -73,7 +78,7 @@ export function createSession({ agentHarnessWeb, storage = null }) {
   function rememberRole(me) {
     if (me?.offline) return;
     try {
-      if (CACHED_ROLES.has(me?.role)) storage?.setItem(LAST_ROLE_KEY, me.role);
+      if (cachedRole(me?.role)) storage?.setItem(LAST_ROLE_KEY, me.role);
       else storage?.removeItem(LAST_ROLE_KEY);
     } catch (_) { /* storage unavailable */ }
   }
@@ -82,7 +87,7 @@ export function createSession({ agentHarnessWeb, storage = null }) {
   function offlineMe() {
     let role = null;
     try { role = storage?.getItem(LAST_ROLE_KEY); } catch (_) { /* storage unavailable */ }
-    return { role: role === "owner" || role === "member" ? role : "offline", offline: true };
+    return { role: cachedRole(role) ? role : "offline", offline: true };
   }
 
   // Resolves (never rejects) to the caller's identity without touching app state, so boot can start it

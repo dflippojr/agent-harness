@@ -1,6 +1,6 @@
 """Response contracts shared by the legacy/admin and app session surfaces."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ProviderFailureResponse(BaseModel):
@@ -79,3 +79,12 @@ class WebSessionResponse(BaseModel):
 class SessionResponse(WebSessionResponse):
     app_tools: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_app_defaults(cls, data):
+        # The original App contract always serialized these defaults. Only newly declared Web fields stay unset.
+        if isinstance(data, dict):
+            return {"stop_reason": "", "totals": {}, "run": {}, "answer": "", "app_tools": [], "metadata": {},
+                    "failure": None, "last_event_seq": 0, "queue_position": None, **data}
+        return data
