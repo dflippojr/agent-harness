@@ -268,7 +268,12 @@ readiness signal.
     18801` from the repository root (`cwd: '../..'`).
   - Use `url: 'http://127.0.0.1:18801/ready'`, `reuseExistingServer: false` and `timeout: 180_000`.
   - Set `use.baseURL` to `http://127.0.0.1:18801`.
-  - Use `<instance-dir>` = `path.join(os.tmpdir(), 'harness-ui-tests-' + process.pid)`, and pass it to Teardown.
+  - Use one fixed `<instance-dir>` for start and both teardown paths:
+    `process.env.HARNESS_UI_INSTANCE_DIR ?? path.join(os.tmpdir(), 'harness-ui-tests')`. CI sets
+    `HARNESS_UI_INSTANCE_DIR` to `${{ runner.temp }}/harness-ui-tests` for the whole job.
+  - Because Start refuses a non-empty directory, a leftover from a killed run fails the next start loudly. Run
+    Teardown on that directory before starting, both locally and as the first CI step (it is a no-op when the
+    directory is absent).
   - The start refuses busy ports, so a collision fails loudly instead of reusing another server.
 - **Fixtures.**
   - A `signedIn` fixture calls `page.goto('/connect')` and waits for `#conn[data-state="live"]`.
@@ -290,7 +295,8 @@ readiness signal.
     1. runs `pip install -r requirements.txt`
     2. uses `actions/setup-node` with Node 20 or later
     3. runs the npm commands above
-    4. runs `python -m harness.fake_instance stop --dir "$env:RUNNER_TEMP\harness-ui-tests"` with `if: always()`
+    4. runs `python -m harness.fake_instance stop --dir "$env:HARNESS_UI_INSTANCE_DIR"` with `if: always()`, the
+       same directory the `webServer` started
   - Never use the tower's self-hosted runner for this public repository.
 - **Never in tests.** Live URLs, `:8100`, a `*.ts.net` origin, the production data directory, or tokens copied
   between runs.
