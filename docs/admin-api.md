@@ -522,7 +522,7 @@ drives them, and every one has a CLI command.
 | --- | --- | --- |
 | `GET /pairing-requests` | `harness pairing-requests list` | requests of the last day, newest first |
 | `POST /pairing-requests/preview` `{scopes}` | `harness pairing-requests preview --scopes ...` | preview daemon disclosure copy before arming (200); no pairing state is created or changed |
-| `POST /pairing-requests` `{catalog_app_id, scopes, origin?, name?, acknowledge_elevated?}` | `harness pairing-requests arm <catalog_app_id> --scopes ... [--origin ...]` | arm a pre-approved slot for a Hub entry (201) |
+| `POST /pairing-requests` `{catalog_app_id, scopes, origin?, name?, acknowledge_elevated?, expected_disclosures_digest?}` | `harness pairing-requests arm <catalog_app_id> --scopes ... [--origin ...]` | arm a pre-approved slot for a Hub entry (201) |
 | `POST /pairing-requests/{id}/approve` `{match, acknowledge_elevated?}` | `harness pairing-requests approve <id> --match <code>` | approve an App-initiated request |
 | `POST /pairing-requests/{id}/confirm` `{match}` | `harness pairing-requests confirm <id> --match <code>` | release a browser or native App's claim on an armed slot |
 | `POST /pairing-requests/{id}/deny` | `harness pairing-requests deny <id>` | deny a request, or withdraw a slot or an unredeemed approval |
@@ -556,7 +556,18 @@ previewed without acknowledgement; arming still requires `acknowledge_elevated`.
 and `admin` (even alongside App scopes), return 400, matching App pairing validation. A missing or malformed
 `scopes` field returns 422. Preview creates no request, slot, match code, token or approval and does not expire or
 otherwise update existing pairing requests. Responses use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
-The Python SDK exposes `Harness.preview_pairing(scopes)` on a client authenticated with an owner/Hub token.
+Preview also returns `X-Disclosures-Digest`, a lowercase SHA-256 of the array serialized as compact UTF-8 JSON
+with sorted object keys, no ASCII escaping, and array order preserved. Send that value as
+`expected_disclosures_digest` when arming. The daemon recomputes and compares it inside the allocation transaction;
+a mismatch returns 409 `disclosures_changed` before any pairing state changes. Show a fresh preview and ask the owner
+to consent again. Omitting the digest (or sending null) preserves the earlier arm behavior.
+Clients should still compare the arm reply's `disclosures` (scope, tier, text, and order) with the preview. If they differ,
+withdraw the slot with `POST /pairing-requests/{id}/deny` and show the new text before asking again. The Hub should
+keep this runtime comparison against the preview when removing its local disclosure table.
+
+The Python SDK exposes `Harness.preview_pairing(scopes)`, `Harness.disclosures_digest(preview)` and
+`Harness.arm_pairing(catalog_app_id, scopes, expected_disclosures_digest=digest)` on an owner/Hub client. The CLI
+preview prints its array on stdout and the digest on stderr; pass it to arm with `--expected-disclosures-digest`.
 
 Approving or confirming needs the match code the App shows; a wrong or missing code is refused with 400. If the App
 shows no code or an error, deny the request. If it reports the slot was already claimed, run

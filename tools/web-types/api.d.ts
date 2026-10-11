@@ -5660,6 +5660,11 @@ export interface components {
             /** Catalog App Id */
             catalog_app_id: string;
             /**
+             * Expected Disclosures Digest
+             * @description SHA-256 from the preview X-Disclosures-Digest header; arm refuses changed disclosures
+             */
+            expected_disclosures_digest?: string | null;
+            /**
              * Name
              * @default
              */
@@ -9449,6 +9454,13 @@ export interface operations {
                     "application/json": unknown;
                 };
             };
+            /** @description disclosures_changed: preview again before arming */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -9476,6 +9488,8 @@ export interface operations {
             /** @description Successful Response */
             200: {
                 headers: {
+                    /** @description SHA-256 of the disclosures; pass as expected_disclosures_digest when arming */
+                    "X-Disclosures-Digest"?: string;
                     [name: string]: unknown;
                 };
                 content: {

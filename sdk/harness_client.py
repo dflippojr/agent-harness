@@ -41,6 +41,7 @@ JSON_MEDIA_TYPE = "application/json"
 SDK_OPERATIONS = {
     "hub_status": ("get", "/api/admin/v1/hub"),
     "preview_pairing": ("post", "/api/admin/v1/pairing-requests/preview"),
+    "arm_pairing": ("post", "/api/admin/v1/pairing-requests"),
     "audit": ("get", "/api/v1/audit"),
     "info": ("get", "/api/v1"), "pair": ("post", "/api/v1/pair"),
     "request_pairing": ("post", "/api/v1/pair/requests"),
@@ -62,6 +63,8 @@ SDK_OPERATIONS = {
 # Keyed off SDK_OPERATIONS so a path only ever spells itself once, in the table above.
 SDK_REQUEST_FIELDS = {
     SDK_OPERATIONS["preview_pairing"]: {"scopes"},
+    SDK_OPERATIONS["arm_pairing"]: {"catalog_app_id", "scopes", "origin", "name", "acknowledge_elevated",
+                                     "expected_disclosures_digest"},
     SDK_OPERATIONS["pair"]: {"code"},
     SDK_OPERATIONS["request_pairing"]: {"name", "kind", "scopes", "catalog_app_id", "code_challenge",
                                         "code_challenge_method"},
@@ -443,8 +446,26 @@ class Harness:
         return resp.json()
 
     def preview_pairing(self, scopes: list[str]) -> list[ScopeDisclosure]:
-        """Owner/Hub-key App scope disclosures before arming; creates no pairing state."""
+        """Owner/Hub-key disclosures. Display them, then pass disclosures_digest(result) to arm_pairing."""
         resp = self.client.post("/api/admin/v1/pairing-requests/preview", json={"scopes": scopes})
+        if resp.status_code >= 400:
+            self._raise_response(resp)
+        return resp.json()
+
+    @staticmethod
+    def disclosures_digest(disclosures: list[ScopeDisclosure]) -> str:
+        """Digest of the preview array, for arm_pairing(expected_disclosures_digest=...)."""
+        canonical = json.dumps(disclosures, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def arm_pairing(self, catalog_app_id: str, scopes: list[str], *, origin: str = "", name: str = "",
+                    acknowledge_elevated: bool = False, expected_disclosures_digest: str | None = None) -> dict:
+        """Owner/Hub-key slot allocation; a stale preview digest raises disclosures_changed (409)."""
+        body = {"catalog_app_id": catalog_app_id, "scopes": scopes, "origin": origin, "name": name,
+                "acknowledge_elevated": acknowledge_elevated}
+        if expected_disclosures_digest is not None:
+            body["expected_disclosures_digest"] = expected_disclosures_digest
+        resp = self.client.post("/api/admin/v1/pairing-requests", json=body)
         if resp.status_code >= 400:
             self._raise_response(resp)
         return resp.json()

@@ -446,7 +446,8 @@ ADMIN_COMMANDS = (
     ("pairing-requests preview", "POST", "/pairing-requests/preview",
      "preview App scope disclosures without arming a pairing slot", ("--scopes:list",)),
     ("pairing-requests arm", "POST", "/pairing-requests", "arm a pre-approved pairing slot for a Hub entry",
-     ("catalog_app_id", "--scopes:list", "--origin", "--name", "--acknowledge_elevated:flag")),
+     ("catalog_app_id", "--scopes:list", "--origin", "--name", "--acknowledge_elevated:flag",
+      "--expected_disclosures_digest")),
     ("pairing-requests approve", "POST", "/pairing-requests/{rid}/approve",
      "approve an App's pairing request with the match code it shows (the App fetches its own token)",
      ("--match", "--acknowledge_elevated:flag")),
@@ -870,6 +871,9 @@ def _cmd_admin(args) -> int:
         print(result or "ok")
     else:
         print(json.dumps(result, indent=2))
+    if path == "/pairing-requests/preview" and isinstance(result, list):
+        from .pairing_requests import disclosures_digest
+        print(f"Disclosures digest: {disclosures_digest(result)}", file=sys.stderr)
     if path == "/hub-claim":
         _hub_status_notes(result)
     if method == "GET" and path == "/pairing-requests" and isinstance(result, list):

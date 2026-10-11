@@ -704,6 +704,19 @@
             "title": "Catalog App Id",
             "type": "string"
           },
+          "expected_disclosures_digest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "SHA-256 from the preview X-Disclosures-Digest header; arm refuses changed disclosures",
+            "title": "Expected Disclosures Digest"
+          },
           "name": {
             "default": "",
             "maxLength": 60,
@@ -6181,6 +6194,9 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "description": "disclosures_changed: preview again before arming"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -6222,7 +6238,16 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Successful Response",
+            "headers": {
+              "X-Disclosures-Digest": {
+                "description": "SHA-256 of the disclosures; pass as expected_disclosures_digest when arming",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {

@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import time
@@ -115,6 +116,9 @@ class ArmPairingRequest(BaseModel):
     origin: str = Field(default="", max_length=500, description="The browser App's exact origin; empty for native")
     name: str = Field(default="", max_length=60)
     acknowledge_elevated: bool = False
+    expected_disclosures_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$",
+        description="SHA-256 from the preview X-Disclosures-Digest header; arm refuses changed disclosures")
 
 
 class PreviewPairingRequest(BaseModel):
@@ -143,6 +147,12 @@ def disclosures(scopes: list[str], cfg=None) -> list[dict]:
              "text": (DISCLOSURES.get(s) or known.get(s, "")).strip() or
                      f"No description was provided for scope {s}. Ask its module publisher what it allows before "
                      "approving."} for s in scopes]
+
+
+def disclosures_digest(values: list[dict]) -> str:
+    """SHA-256 of compact UTF-8 JSON, sorted object keys, preserving disclosure order."""
+    canonical = json.dumps(values, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def challenge_of(verifier: str) -> str:
@@ -490,7 +500,10 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         rows = await m.db.main.awrite(commit)
         return JSONResponse([owner_view(r, m.cfg) for r in rows], headers=NO_STORE)
 
-    @app.post(base + "/preview", response_model=list[ScopeDisclosure])
+    @app.post(base + "/preview", response_model=list[ScopeDisclosure], responses={
+        200: {"headers": {"X-Disclosures-Digest": {
+            "description": "SHA-256 of the disclosures; pass as expected_disclosures_digest when arming",
+            "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}}})
     async def preview_pairing_request(body: PreviewPairingRequest, request: Request):
         """Preview App scope disclosures before arming, without creating or changing pairing state."""
         require_admin(request, mgr)
@@ -499,9 +512,11 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
             scopes = _scopes(body.scopes, m.cfg)
         except ValueError as e:
             raise HarnessError(400, str(e))
-        return JSONResponse(disclosures(scopes.split(), m.cfg), headers=NO_STORE)
+        values = disclosures(scopes.split(), m.cfg)
+        return JSONResponse(values, headers={**NO_STORE, "X-Disclosures-Digest": disclosures_digest(values),
+                                             "Access-Control-Expose-Headers": "X-Disclosures-Digest"})
 
-    @app.post(base, status_code=201)
+    @app.post(base, status_code=201, responses={409: {"description": "disclosures_changed: preview again before arming"}})
     async def arm_pairing_request(body: ArmPairingRequest, request: Request):
         """Arm a pre-approved slot for a Hub entry (#519): no secret; the App claims it with its own challenge."""
         from .apps import normalize_origin
@@ -524,6 +539,10 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
         def commit():
             db, now = m.db.main, clock()
+            values = disclosures(scopes.split(), m.cfg)
+            if body.expected_disclosures_digest is not None and not hmac.compare_digest(
+                    body.expected_disclosures_digest, disclosures_digest(values)):
+                return _refuse(409, "scope disclosures changed; preview them again before arming", "disclosures_changed")
             sweep(db, now)
             row = {"id": "pr-" + secrets.token_hex(12), "kind": "app", "name": body.name.strip() or catalog_app_id,
                    "scopes": scopes, "catalog_app_id": catalog_app_id, "origin": origin, "source": "",
@@ -534,9 +553,12 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                                     {"request_id": row["id"], "scopes": scopes.split(), "catalog_app_id": catalog_app_id,
                                      "browser": bool(origin), "armed": True,
                                      "acknowledged": bool(ELEVATED.intersection(scopes.split()))})
-            return row
-        row = await m.db.main.awrite(commit)
-        return JSONResponse(owner_view(row, m.cfg), status_code=201, headers=NO_STORE)
+            view = owner_view(row, m.cfg)
+            view["disclosures"] = values
+            return {"view": view}
+        out = await m.db.main.awrite(commit)
+        _raise_refusal(out)
+        return JSONResponse(out["view"], status_code=201, headers=NO_STORE)
 
     @app.post(base + "/{rid}/approve")
     async def approve_pairing_request(rid: str, body: ApprovePairingRequest, request: Request):
