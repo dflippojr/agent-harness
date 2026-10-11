@@ -35,6 +35,7 @@
   --media-bg: #111111;       /* behind an image being masked */
   --shadow: rgba(16, 24, 40, .18); /* floating menus, the FAB, jump buttons */
   --shadow-soft: rgba(16, 24, 40, .12);
+  --backdrop: rgba(16, 24, 40, .35); /* modal scrim, independent of the text colour */
   --tap: 44px;       /* the smallest touch target */
   --radius: 12px;
   --row-h: 52px;     /* a Settings row (#512) */
@@ -77,6 +78,7 @@
     --seg-on: #30353e;
     --shadow: rgba(0, 0, 0, .6);
     --shadow-soft: rgba(0, 0, 0, .4);
+    --backdrop: rgba(0, 0, 0, .65);
   }
 }
 html[data-theme="light"] { color-scheme: light; } /* the :root tokens, even on a device set to dark */
@@ -86,7 +88,7 @@ html[data-theme="dark"] {
   --ok: #7cd79a; --warn: #ffc978; --bad: #ff8f8f;
   --ok-bg: #12301f; --warn-bg: #2c2008; --bad-bg: #3a1717; --info-bg: #15284a; --code-bg: #0c0f13;
   --add: #0f2e1b; --del: #3a1414; --switch-off: #3a4049; --seg-on: #30353e;
-  --shadow: rgba(0, 0, 0, .6); --shadow-soft: rgba(0, 0, 0, .4); color-scheme: dark;
+  --shadow: rgba(0, 0, 0, .6); --shadow-soft: rgba(0, 0, 0, .4); --backdrop: rgba(0, 0, 0, .65); color-scheme: dark;
 }
 html[data-theme="midnight"] {
   --bg: #0b1220; --panel: #152038; --panel-2: #1d2d4a; --text: #e8eef8; --muted: #9aacc4; --line: #2a3d5c;
@@ -545,7 +547,7 @@ details.tool > .body { border-top: 1px solid var(--line); padding: 0 12px 12px; 
 .tool-args > summary { display: flex; align-items: center; min-height: var(--tap); cursor: pointer; font-size: 0.78125rem; color: var(--muted); }
 .tool-viewer { position: fixed; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; box-sizing: border-box; display: flex; flex-direction: column; background: var(--bg); color: var(--text); z-index: 20; }
 .tool-viewer:not([open]) { display: none; }
-.tool-viewer::backdrop { background: var(--bg); }
+.tool-viewer::backdrop { background: var(--backdrop); }
 .tool-viewer-head { flex: none; display: flex; align-items: center; gap: 8px; padding: calc(8px + env(safe-area-inset-top, 0px)) 16px 8px; border-bottom: 1px solid var(--line); background: var(--panel); }
 .tool-viewer-head h2 { flex: 1; min-width: 0; margin: 0; font-family: var(--mono); font-size: 0.875rem; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tool-viewer-text { flex: 1; min-height: 0; margin: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px)); overflow: auto; overscroll-behavior: contain; font-family: var(--mono); font-size: 0.8125rem; line-height: 1.5; white-space: pre; background: var(--code-bg); }
@@ -591,7 +593,7 @@ dialog.sheet {
   background: var(--panel); color: var(--text);
   box-shadow: 0 -8px 32px color-mix(in srgb, var(--text) 18%, transparent);
 }
-dialog.sheet::backdrop { background: color-mix(in srgb, var(--text) 35%, transparent); }
+dialog.sheet::backdrop { background: var(--backdrop); }
 .sheet-body { margin: 0; padding: 8px 16px calc(16px + env(safe-area-inset-bottom, 0px)); }
 .sheet-handle { width: 36px; height: 5px; margin: 0 auto 10px; border-radius: 999px; background: var(--line); }
 .sheet-title { margin: 4px 0 6px; font-size: 1.0625rem; font-weight: 650; }
@@ -610,6 +612,21 @@ dialog.sheet::backdrop { background: color-mix(in srgb, var(--text) 35%, transpa
   dialog.sheet { margin: auto; border: 1px solid var(--line); border-radius: 20px; box-shadow: 0 16px 48px color-mix(in srgb, var(--text) 22%, transparent); }
   .sheet-handle { display: none; }
   .sheet-body { padding: 20px; }
+}
+
+/* Desktop 9: sheets and output modal (#566). Narrower layouts keep their existing geometry. */
+@media (min-width: 768px) {
+  .sheet-body { padding: 24px; }
+  .sheet-actions { justify-content: flex-end; flex-wrap: wrap; }
+  .sheet-actions .btn { flex: 0 1 auto; min-height: var(--tap); padding: 0 18px; border-radius: var(--radius); font-size: 0.875rem; }
+  .tool-viewer {
+    inset: 0; margin: auto; width: calc(100% - 64px); max-width: 960px;
+    height: min(720px, calc(100dvh - 64px)); max-height: calc(100dvh - 64px);
+    border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
+    box-shadow: 0 16px 48px var(--shadow);
+  }
+  .tool-viewer-head { padding: 12px 20px; }
+  .tool-viewer-text { padding: 16px 20px; }
 }
 
 .note { font-size: 0.8125rem; color: var(--muted); text-align: center; margin: 12px 0; }
