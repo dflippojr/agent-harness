@@ -75,8 +75,9 @@ def test_preview_requires_a_scope_list(hh, body):
     assert client.post(PREVIEW, headers=H(OWNER), json=body).status_code == 422
 
 
-@pytest.mark.parametrize("body", [{"scopes": ["sessions", "approvals"]}, {"scopes": []}, {"scopes": ["admin"]}, {}])
-def test_preview_leaves_all_database_state_untouched_even_after_expiry(hh, monkeypatch, body):
+@pytest.mark.parametrize("body, status", [({"scopes": ["sessions", "approvals"]}, 200),
+                                         ({"scopes": []}, 400), ({"scopes": ["admin"]}, 400), ({}, 422)])
+def test_preview_leaves_all_database_state_untouched_even_after_expiry(hh, monkeypatch, body, status):
     client, m = hh
     now = [1_900_000_000.0]
     monkeypatch.setattr(pr, "clock", lambda: now[0])
@@ -93,7 +94,7 @@ def test_preview_leaves_all_database_state_untouched_even_after_expiry(hh, monke
     monkeypatch.setattr(pr, "sweep", no_allocation_or_sweep)
     monkeypatch.setattr(pr, "_unused_match_code", no_allocation_or_sweep)
     response = client.post(PREVIEW, headers=H(OWNER), json=body)
-    assert response.status_code in (200, 400, 422), response.text
+    assert response.status_code == status, response.text
     assert list(m.db.main.conn.iterdump()) == before
     if response.status_code == 200:
         assert set(response.json()[0]) == {"scope", "tier", "text"}
