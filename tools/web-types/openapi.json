@@ -6101,7 +6101,7 @@
     },
     "/api/admin/v1/pairing-requests": {
       "get": {
-        "description": "Owner view of pairing requests: metadata, match codes and disclosure copy; never a token or verifier.",
+        "description": "Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier.",
         "operationId": "list_pairing_requests_api_admin_v1_pairing_requests_get",
         "responses": {
           "200": {

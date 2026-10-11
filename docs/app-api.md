@@ -343,8 +343,9 @@ The App makes a PKCE pair (RFC 7636, S256): a random `code_verifier` of 43 to 12
 1. `POST /api/v1/pair/requests` with `{"name", "scopes", "catalog_app_id"?, "code_challenge",
    "code_challenge_method": "S256"}`. No token is needed. The answer (201) is `{id, state: "pending", match_code,
    expires_at, browser}`. Show the 6-digit `match_code` to the user.
-2. The owner approves it with that match code from the standalone Hub or `harness pairing-requests approve <id>
-   --match <code>` (see [admin-api.md](admin-api.md#zero-touch-pairing-requests)), or denies it.
+2. The owner reads that match code from the App and types it into the standalone Hub or
+   `harness pairing-requests approve <id> --match <code>`
+   (see [admin-api.md](admin-api.md#zero-touch-pairing-requests)), or denies it.
 3. `POST /api/v1/pair/requests/{id}/token` with `{"code_verifier"}`. Until the owner approves it answers 409 with
    error code `pairing_pending`, so poll every few seconds. Once approved it mints the `ha-` key and answers (201)
    `{token, app, api_version}`, the same shape as `POST /api/v1/pair`, with `Cache-Control: no-store`. It does so
@@ -361,6 +362,10 @@ URL, as a deep link or text to paste. The App claims the slot with `POST /api/v1
   pairing-requests confirm <id> --match <code>`) before the token is released.
 
 The App then redeems as in step 3.
+
+Owner views, including `harness pairing-requests list`, always leave `match_code` empty. Only the requester receives
+its own code. If the App shows no code or an error, deny the request. If the App reports the slot was already claimed,
+withdraw it with `harness pairing-requests deny <id>`; do not confirm another caller's claim.
 
 **Lifetimes and refusals.** A request has 10 minutes to be approved (or claimed, or confirmed) and 5 minutes after
 approval to be redeemed. A redeemed, denied or expired request is never reused. The redeem refuses a wrong verifier

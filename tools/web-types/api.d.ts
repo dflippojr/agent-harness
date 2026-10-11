@@ -1301,7 +1301,7 @@ export interface paths {
         };
         /**
          * List Pairing Requests
-         * @description Owner view of pairing requests: metadata, match codes and disclosure copy; never a token or verifier.
+         * @description Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier.
          */
         get: operations["list_pairing_requests_api_admin_v1_pairing_requests_get"];
         put?: never;

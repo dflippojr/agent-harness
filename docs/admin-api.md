@@ -529,12 +529,16 @@ Each request reads back as `{id, kind, name, scopes, catalog_app_id, origin, bro
 created_at, expires_at, approved_at, finished_at, key_id, elevated, disclosures}`. `state` is `pending` (waiting for
 approval), `armed` (a Hub slot no App has claimed yet), `claimed` (a native App claimed the slot; confirm its match
 code), `approved` (the App may fetch its token), `redeemed`, `denied` or `expired`. `needs` names the next step:
-`approve`, `claim`, `confirm`, `redeem` or `""`. `match_code` is shown only while the owner still has to compare it.
+`approve`, `claim`, `confirm`, `redeem` or `""`. `match_code` is always empty in owner responses, for both App and Hub
+requests in every state. Read and type the code from the App or Hub you are setting up; the daemon compares it.
 `disclosures` holds, for every requested scope, `{scope, tier, text}`, where `text` is the required copy from
 [marketplace-design.md section 5.2](marketplace-design.md#52-scope-table) and `tier` is `standard` or `elevated`. The
 daemon supplies this text so the Hub and the CLI show the same words.
 
-Approving needs the match code the App shows; a wrong or missing code is refused with 400. Elevated scopes
+Approving or confirming needs the match code the App shows; a wrong or missing code is refused with 400. If the App
+shows no code or an error, deny the request. If it reports the slot was already claimed, withdraw the slot with
+`harness pairing-requests deny <id>`; another caller may have claimed it first. Never approve a look-alike request or
+confirm a claim using a code copied from an owner list. Elevated scopes
 (`sessions:all`, `approvals`, `remote_control`, `memory_library`, `homelab`) also need `acknowledge_elevated: true`
 (`--acknowledge-elevated`), on approval and when arming. Without it the call is refused with 400. Arming is the
 approval for a Hub slot, so a browser App's claim from the armed origin needs nothing more. A native claim needs the

@@ -5,8 +5,8 @@ One request model for browser and native Apps (docs/app-api.md#zero-touch-pairin
 1. **App-initiated.** The App asks with `POST /api/v1/pair/requests` (public, rate-limited): name, scopes, optional
    `catalog_app_id` and a PKCE S256 `code_challenge`. It gets a request id and a short match code to show.
 2. **Owner approval.** The owner sees the request (`GET /api/admin/v1/pairing-requests`, `harness pairing-requests
-   list`) with each scope's disclosure copy and approves it with the match code, acknowledging elevated scopes
-   separately, or denies it. Approval is a state change only: no secret exists yet.
+   list`) with each scope's disclosure copy and approves it with the match code read from the App, acknowledging
+   elevated scopes separately, or denies it. Approval is a state change only: no secret exists yet.
 3. **Direct delivery.** The App redeems with `POST /api/v1/pair/requests/{id}/token` and its `code_verifier`; the key
    is minted then and returned once. A browser request redeems only from its exact origin, a native one never from a
    browser.
@@ -156,9 +156,9 @@ def owner_view(row: dict, cfg=None) -> dict:
     return {"id": row["id"], "kind": row["kind"], "name": row["name"], "scopes": scopes,
             "catalog_app_id": row["catalog_app_id"] or "", "origin": row["origin"], "browser": bool(row["origin"]),
             "armed": bool(row["armed"]), "state": state,
-            # A Hub claim's code is never shown to the owner: they must read it off the real Hub's screen, or an
-            # attacker's look-alike request could be approved by copying the code from `harness hub status`.
-            "match_code": row["match_code"] if state in (PENDING, CLAIMED) and row["kind"] != HUB else "",
+            # Read the code from the App or Hub being set up: copying it from an owner list could approve a
+            # look-alike request or confirm an attacker's claim on an armed native slot.
+            "match_code": "",
             "needs": {PENDING: "approve", ARMED: "claim", CLAIMED: "confirm", APPROVED: "redeem"}.get(state, ""),
             "created_at": row["created_at"], "expires_at": row["expires_at"], "approved_at": row["approved_at"],
             "finished_at": row["finished_at"], "key_id": row["key_id"],
@@ -460,7 +460,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
     @app.get(base)
     async def list_pairing_requests(request: Request):
-        """Owner view of pairing requests: metadata, match codes and disclosure copy; never a token or verifier."""
+        """Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier."""
         require_admin(request, mgr)
         m = mgr(request)
 

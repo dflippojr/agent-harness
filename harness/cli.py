@@ -442,7 +442,7 @@ ADMIN_COMMANDS = (
      ("name", "origin", "--scopes:list", "--ttl_seconds:int", "--catalog_app_id")),
     ("pairing-codes revoke", "DELETE", "/pairing-codes/{pid}", "revoke an App pairing code", ()),
     ("pairing-requests list", "GET", "/pairing-requests",
-     "list App pairing requests with their match codes and scope disclosures", ()),
+     "list App pairing requests and scope disclosures; read match codes from the App", ()),
     ("pairing-requests arm", "POST", "/pairing-requests", "arm a pre-approved pairing slot for a Hub entry",
      ("catalog_app_id", "--scopes:list", "--origin", "--name", "--acknowledge_elevated:flag")),
     ("pairing-requests approve", "POST", "/pairing-requests/{rid}/approve",
@@ -870,6 +870,12 @@ def _cmd_admin(args) -> int:
         print(json.dumps(result, indent=2))
     if path == "/hub-claim":
         _hub_status_notes(result)
+    if method == "GET" and path == "/pairing-requests" and isinstance(result, list):
+        if any(r.get("kind") == "app" and r.get("state") in ("pending", "claimed") for r in result):
+            print("Read the match code from the App you are setting up; it is not shown here. "
+                  "If the App shows no code or an error, deny the request. "
+                  "If the App reports the slot was already claimed, withdraw it with "
+                  "harness pairing-requests deny <id>.", file=sys.stderr)
     return 0
 
 
