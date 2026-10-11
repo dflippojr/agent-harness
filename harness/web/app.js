@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Agent Harness web app: plain ES module, no build step. Hash routes:
 //   #/                       redirects to #/chat (owner) or #/agents
 //   #/chat[/<id>]            Chat home: welcome state, or a durable non-agent conversation

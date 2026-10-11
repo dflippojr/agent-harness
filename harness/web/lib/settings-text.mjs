@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Text for Settings rows. Pure: no DOM.
 
 export function settingValueText(spec) {

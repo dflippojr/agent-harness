@@ -1,17 +1,20 @@
 // Agent Harness Web transport: the PWA can be bundled with Agent Harness Server or hosted independently.
 // Connection settings are intentionally browser-local and never sent anywhere except the chosen Server.
+/** @import { ApiResponse, ClientError, HttpMethod, RequestOptions, Surface } from '../../tools/web-types/contracts.js' */
 
 const BASE_KEY = "harness.daemonUrl";
 const TOKEN_KEY = "harness.ownerToken";
 export const WEB_BUILD_ID = "2026.10.10.1";
 export const WEB_PROTOCOL = 2;
 
+/** @param {string} text */
 function stripTrailingSlashes(text) {
   let end = text.length;
   while (end > 0 && text[end - 1] === "/") end--;
   return text.slice(0, end);
 }
 
+/** @param {unknown} value */
 export function normalizeDaemonUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -27,12 +30,14 @@ export function normalizeDaemonUrl(value) {
 // A request that never reached the server (offline, DNS, Tailscale down). The `offline` code tells it apart from an HTTP
 // error, so boot does not mistake "can't connect" for "not signed in" (#368).
 function unreachable() {
+  /** @type {ClientError} */
   const err = new Error("Can't reach Agent Harness Server. Check Connection settings and Tailscale.");
   err.code = "offline";
   return err;
 }
 
 export class AgentHarnessWebClient {
+  /** @param {Storage} [storage] */
   constructor(storage = window.localStorage) {
     this.storage = storage;
     this.baseUrl = normalizeDaemonUrl(this._get(BASE_KEY));
@@ -41,10 +46,12 @@ export class AgentHarnessWebClient {
     this.csrf = "";
   }
 
+  /** @param {string} key */
   _get(key) {
     try { return this.storage.getItem(key) || ""; } catch (_) { return ""; }
   }
 
+  /** @param {string} baseUrl @param {string} token */
   configure(baseUrl, token) {
     this.baseUrl = normalizeDaemonUrl(baseUrl);
     this.token = String(token || "").trim();
@@ -56,21 +63,33 @@ export class AgentHarnessWebClient {
 
   get independent() { return !!this.baseUrl && this.baseUrl !== location.origin; }
 
+  /** @param {string} path @param {Surface} [surface] */
   url(path, surface = "admin") {
+    /** @type {Partial<Record<Surface, string>>} */
     const prefixes = { app: "/api/v1", admin: "/api/admin/v1" };
     const prefix = prefixes[surface] || "";
     return `${this.baseUrl}${prefix}${path}`;
   }
 
+  /** @param {Record<string, string>} [extra] @returns {Record<string, string>} */
   headers(extra = {}) {
+    /** @type {Record<string, string>} */
     const headers = { ...extra, "X-Agent-Harness-Client": `web/${WEB_PROTOCOL}` };
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     if (this.csrf && !this.independent) headers["X-Agent-Harness-CSRF"] = this.csrf;
     return headers;
   }
 
-  async request(path, { method = "GET", body, surface = "admin" } = {}) {
+  /**
+   * @template {string} P
+   * @template {HttpMethod} [M="GET"]
+   * @param {P} path
+   * @param {RequestOptions<M>} [options]
+   * @returns {Promise<ApiResponse<P, M>>}
+   */
+  async request(path, { method = /** @type {M} */ ("GET"), body, surface = "admin" } = {}) {
     const headers = this.headers();
+    /** @type {RequestInit} */
     const opts = { method, headers, cache: "no-store" };
     if (body !== undefined) {
       if (typeof FormData !== "undefined" && body instanceof FormData) {
@@ -83,10 +102,11 @@ export class AgentHarnessWebClient {
     let resp;
     try { resp = await fetch(this.url(path, surface), opts); }
     catch (_) { throw unreachable(); }
-    if (resp.status === 204) return null;
+    if (resp.status === 204) return /** @type {ApiResponse<P, M>} */ (null);
     const type = resp.headers.get("content-type") || "";
     const data = type.includes("json") ? await resp.json() : await resp.text();
     if (!resp.ok) {
+      /** @type {ClientError} */
       const err = new Error(data?.detail || `HTTP ${resp.status}`);
       err.status = resp.status;
       err.code = data?.error?.code;
@@ -102,6 +122,7 @@ export class AgentHarnessWebClient {
     return this.request("/health", { surface: "" });
   }
 
+  /** @param {string} path @param {Surface} [surface] */
   async blob(path, surface = "admin") {
     let resp;
     try { resp = await fetch(this.url(path, surface), { headers: this.headers(), cache: "no-store" }); }
@@ -117,6 +138,7 @@ export class AgentHarnessWebClient {
   // With a token the page streams via fetch with the Authorization header (openStream's `authorized` path), so no
   // ticket is needed. Tickets are for native EventSource, which a same-origin page cannot use: it sends no Origin
   // header, so the ticket's Origin binding never matches and the stream is refused with 401 (#82).
+  /** @param {string} sessionId @param {number} [after] */
   sessionStreamUrl(sessionId, after = 0) {
     return this.url(`/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`, "app");
   }

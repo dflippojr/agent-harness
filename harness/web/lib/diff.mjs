@@ -1,3 +1,4 @@
+// @ts-nocheck
 // CSS class for a unified-diff line. Pure: no DOM.
 
 export function approvalDiffClass(line) {

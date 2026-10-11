@@ -114,7 +114,8 @@ def test_admin_owner_operations_match_unversioned_catalog(tmp_path):
         assert PREFIX + "/runners/{name}/poll" not in catalog
         openapi = client.get("/openapi.json").json()["paths"]
         assert "/sessions" in openapi
-        assert PREFIX + "/sessions" not in openapi
+        assert PREFIX + "/sessions" in openapi
+        assert openapi[PREFIX + "/sessions"]["get"]["responses"] == openapi["/sessions"]["get"]["responses"]
         assert PREFIX in openapi
         assert "/a/{token}/{decision}" in openapi
         assert PREFIX + "/a/{token}/{decision}" not in openapi

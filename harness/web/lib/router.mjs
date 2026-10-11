@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Hash routing (#258): the pure route rules (what is top level, where a blocked role lands instead) and mountRouter(), which
 // owns go() and route(). mountRouter() receives the shell elements, the page views and the browser globals as arguments,
 // so importing this module touches nothing and works under plain Node. app.js only registers the views.

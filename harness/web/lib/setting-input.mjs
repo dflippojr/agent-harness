@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Input control for one daemon setting; `h` is the DOM builder injected by the caller so this imports under plain Node.
 export function settingInput(h, spec, draft) {
   const current = draft[spec.key] !== undefined ? draft[spec.key] : (spec.pending ?? spec.effective);

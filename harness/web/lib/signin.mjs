@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Household Google sign-in view (#258, issue #64). mountSignIn() receives the shell elements and browser globals as
 // arguments, so importing this module touches nothing and works under plain Node.
 import { h, fill } from "./dom.mjs";

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Chat snippet languages (#85). Pure: no DOM.
 
 // Mirrors harness/snippets.py LANGUAGES; the server validates every run. A fence tag only decides whether a block

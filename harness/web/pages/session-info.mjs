@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Session detail -> Info tab (#258): read-only facts about one session plus the transcript download. The shell
 // (DOM builder, copyBox, download) is injected by app.js so this module imports under plain Node and never
 // reaches into another page.

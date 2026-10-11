@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Client/server protocol compatibility. Pure: no DOM.
 
 // Which side must update when the server's admin protocol range excludes this client (null = compatible).

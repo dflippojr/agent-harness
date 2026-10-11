@@ -1,0 +1,3 @@
+# OpenAPI output must be reproducible across developer and CI machines.
+fastapi==0.143.0
+pydantic==2.14.0

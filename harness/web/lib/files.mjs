@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Daemon-served files (#258): images and downloads that need the owner's credentials. Browser globals arrive through
 // `browser`, so importing this module touches nothing and works under plain Node.
 import { h } from "./dom.mjs";

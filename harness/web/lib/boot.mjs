@@ -1,3 +1,4 @@
+// @ts-nocheck
 // First-load chain (#258): /health and /me start together; /me is a read-only GET whose result is only adopted once /health
 // passes. Resolves after the first route settles (or on any early exit/failure) and always dismisses the boot splash.
 // Everything it touches is an argument, so this imports under plain Node.
