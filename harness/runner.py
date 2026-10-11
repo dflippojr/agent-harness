@@ -89,6 +89,9 @@ END_PENDING = "end_pending"
 RUN_FINISHED = "run_finished"
 INTERRUPTED = ("Error: the daemon restarted while this tool call was running, so its effects are unknown. "
                "Check the workspace state before retrying.")
+# The user-role messages the loop adds itself when a reply has no tool calls (fake_model.py skips them, #588).
+CUT_OFF_NUDGE = "Your reply was cut off by the output limit. Continue, using the tools if needed."
+CONTINUE_NUDGE = "Continue the task using the tools. When you are done, give your final answer."
 QUOTA_CHECK_SECONDS = 30
 READ_ARTIFACT_SCHEMA = {"type": "function", "function": {
     "name": "read_artifact",
@@ -2188,10 +2191,7 @@ class Runner:
             self.bus.emit(sid, "quote_check", {"quotes": quotes})
         elif not completion.tool_calls:
             run["idle"] += 1
-            if completion.finish_reason == "length":
-                nudge = "Your reply was cut off by the output limit. Continue, using the tools if needed."
-            else:
-                nudge = "Continue the task using the tools. When you are done, give your final answer."
+            nudge = CUT_OFF_NUDGE if completion.finish_reason == "length" else CONTINUE_NUDGE
             context.append({"role": "user", "content": nudge})
         else:
             run["idle"] = 0

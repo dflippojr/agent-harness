@@ -46,7 +46,7 @@ from pathlib import Path
 
 import yaml
 
-from . import compaction
+from . import compaction, grounding
 from .llm import Completion, LLMError
 
 log = logging.getLogger("harness.fake_model")
@@ -257,8 +257,10 @@ class FakeModel:
 
     def position(self, messages: list[dict]) -> tuple[Script | None, int]:
         """The script and turn for the next reply. Walks back from the newest message: an assistant message with
-        fake tool calls continues its script; a user message that matches a script starts it; other user messages
-        (the harness's nudges, a compaction summary) are skipped."""
+        fake tool calls continues its script; a user message that matches a script starts it; the user messages the
+        harness adds itself (its nudges, a compaction summary) are skipped; any other user message gets the
+        fallback, so a script never resumes past someone's unmatched message."""
+        from .runner import CONTINUE_NUDGE, CUT_OFF_NUDGE
         for message in reversed(messages):
             role = message.get("role")
             if role == "assistant":
@@ -270,11 +272,11 @@ class FakeModel:
             if role != "user":
                 continue
             text = _text(message)
-            if text.startswith((compaction.SUMMARY_TAG, compaction.STATE_TAG)):
+            if (text.startswith((compaction.SUMMARY_TAG, compaction.STATE_TAG))
+                    or text in (compaction.ROUND_CONTINUE, CONTINUE_NUDGE, CUT_OFF_NUDGE)
+                    or grounding.NUDGE_MARK in text):
                 continue
-            script = self.fixtures.find(text)
-            if script is not None:
-                return script, 0
+            return self.fixtures.find(text), 0
         return None, 0
 
     async def __call__(self, _model, messages: list[dict], tools: list[dict] | None = None, on_delta=None,

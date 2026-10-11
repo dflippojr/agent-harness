@@ -15,6 +15,7 @@ from harness.api import create_app
 from harness.llm import LLMError
 from harness.local_inference import NoWarmer
 from harness.manager import Manager
+from harness.runner import CONTINUE_NUDGE
 from waits import scaled
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -136,8 +137,11 @@ def test_a_compaction_summary_or_nudge_keeps_the_scripts_place(tmp_path):
                 {"role": "user", "content": f"{compaction.SUMMARY_TAG} Earlier work, condensed"},
                 {"role": "assistant", "content": "", "tool_calls": [call]},
                 {"role": "tool", "tool_call_id": call["id"], "content": "ok"},
-                {"role": "user", "content": "Continue the task using the tools."}]
+                {"role": "user", "content": CONTINUE_NUDGE}]
     assert run(fake(None, messages, TOOLS)).content == "Done."
+    # Someone's own unmatched message is not a nudge: the script doesn't resume past it.
+    messages[-1] = {"role": "user", "content": "What time is it?"}
+    assert "No fixture script matches" in run(fake(None, messages, TOOLS)).content
 
 
 def test_follow_ups_pick_a_script_again_and_unmatched_ones_fall_back(tmp_path):
@@ -443,8 +447,27 @@ def wait_session(client, sid, headers, *statuses):
     raise AssertionError(f"session {sid} stayed {s['status']}, wanted {statuses}")
 
 
+def test_sandbox_stop_without_docker_is_a_no_op(monkeypatch, tmp_path):
+    from harness import sandbox
+    from harness.config import SandboxConfig
+
+    async def no_docker(*_args, **_kwargs):
+        raise FileNotFoundError("docker")
+    monkeypatch.setattr(sandbox, "run_cmd", no_docker)
+    run(sandbox.Sandbox("s1", tmp_path, SandboxConfig()).stop())
+
+
 def test_full_stack_approval_and_compaction(monkeypatch, tmp_path):
-    """The real server with the scripted model: an approval the policy asks for, then a run that compacts."""
+    """The real server with the scripted model, on a machine without Docker: an approval the policy asks for, then a
+    run that compacts."""
+    from harness import sandbox
+    real_run_cmd = sandbox.run_cmd
+
+    async def no_docker(args, *rest, **kwargs):
+        if args and args[0] == "docker":
+            raise FileNotFoundError("docker")
+        return await real_run_cmd(args, *rest, **kwargs)
+    monkeypatch.setattr(sandbox, "run_cmd", no_docker)
     config_dir, data_dir = fake_instance.write_instance(tmp_path, 0)
     monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
     m = Manager(config_mod.load(config_dir, data_dir))

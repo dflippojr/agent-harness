@@ -434,7 +434,10 @@ class Sandbox:
     async def stop(self) -> None:
         self._cancel_idle_timer()
         self._idle_stopped = False
-        await run_cmd(["docker", "stop", "-t", "2", self.name], timeout=60)
+        try:
+            await run_cmd(["docker", "stop", "-t", "2", self.name], timeout=60)
+        except FileNotFoundError:  # no Docker CLI on this machine, so no container to stop (fake model mode, #588)
+            pass
 
     async def restart(self) -> None:
         if await self._state() is not None:
