@@ -1,8 +1,9 @@
 """Doc tables derived from code (#500): the API endpoint tables and the settings registry table.
 
-Routes are read statically (AST) from the route registrations, so no daemon import is needed and the whole thing
-runs in well under a second. The settings table imports the real registry (`harness.settings_keys.build_registry`)
-under a pinned docs profile. Nothing here invents text: a route with no `summary=` and no docstring renders `TODO`,
+Routes are read statically (AST) from the route registrations, so no daemon import is needed. Each source is read
+once and only files with route markers are parsed. The settings table imports the real registry
+(`harness.settings_keys.build_registry`) under a pinned docs profile. Nothing here invents text: a route with no
+`summary=` and no docstring renders `TODO`,
 and `build.py --check` lists those as warnings.
 """
 
