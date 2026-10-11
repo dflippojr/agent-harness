@@ -7,7 +7,9 @@ on: the daemon refuses the variable unless its data_dir holds the marker that co
 it, so neither the production config nor a stray environment variable can swap the real model for a script.
 
 Fake mode never touches the GPU: it drops the local-model supervision, image and inference-endpoint modules, so there
-is no warmer, no GPU guard (the manual hold has nothing to act on) and nothing that reads a model's base_url.
+is no warmer, no GPU guard (the manual hold has nothing to act on) and nothing that reads a model's base_url. Nor does
+it touch the Docker engine the real harness shares: sessions get sandbox.NoDockerSandbox, so the shell tools return an
+error, and maintenance leaves session containers alone.
 
 A fixture file (YAML; every ``*.yaml`` / ``*.yml`` in the directory, in name order) looks like:
 

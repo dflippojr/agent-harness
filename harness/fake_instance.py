@@ -258,38 +258,6 @@ def remove(root: Path) -> bool:
     return not root.exists()
 
 
-def _session_ids(root: Path) -> list[str]:
-    """Every session id in the instance's stores (the main one and each App's), read-only."""
-    import sqlite3
-    data = root / "data"
-    ids: list[str] = []
-    for db in [data / "harness.sqlite3", *sorted((data / "apps").glob("*/harness.sqlite3"))]:
-        if not db.is_file():
-            continue
-        try:
-            con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
-            try:
-                ids += [row[0] for row in con.execute("SELECT id FROM sessions")]
-            finally:
-                con.close()
-        except sqlite3.Error:
-            pass
-    return ids
-
-
-def remove_containers(root: Path) -> None:
-    """Remove the sandbox containers of this instance's sessions (`harness-<session id>`, Sandbox.name), which would
-    outlive its directory: a fixture may use run_shell. Only those: the Docker engine is shared with the real
-    harness."""
-    import subprocess
-    names = [f"harness-{sid}" for sid in _session_ids(root)]
-    for i in range(0, len(names), 50):
-        try:  # names without a container just print an error
-            subprocess.run(["docker", "rm", "-f", *names[i:i + 50]], capture_output=True, timeout=120)
-        except (OSError, subprocess.TimeoutExpired):  # no Docker CLI: no containers
-            return
-
-
 def owned(root: Path) -> bool:
     """Whether `root` is a fake-model instance directory this command may delete (or an empty leftover)."""
     return (root / "data" / fake_model.MARKER).is_file() or (root.is_dir() and not any(root.iterdir()))
@@ -346,7 +314,6 @@ def stop(root: Path) -> int:
     if proc is not None and not _kill(proc):
         print(f"could not stop process {proc.pid}; {root} is left in place", file=sys.stderr)
         return 1
-    remove_containers(root)
     if not remove(root):
         print(f"could not delete {root}; is a process still using it?", file=sys.stderr)
         return 1
@@ -384,10 +351,8 @@ def start(args, ap) -> int:
         print(f"FAILED {e}", file=sys.stderr, flush=True)
         code = 1
     finally:
-        if not args.keep:
-            remove_containers(root)
-            if not remove(root):
-                print(f"could not delete {root}; remove it by hand", file=sys.stderr)
+        if not args.keep and not remove(root):
+            print(f"could not delete {root}; remove it by hand", file=sys.stderr)
     return code
 
 

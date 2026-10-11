@@ -36,7 +36,7 @@ from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKEN
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .runner_contract import RemoteWorkspace, RunnerError, NoRunnerHub
 from .disk_watch import AccountLimit, DiskLimits
-from .sandbox import Sandbox, SandboxUnavailable
+from .sandbox import NoDockerSandbox, Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
 from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
@@ -315,7 +315,8 @@ class Runner:
             if project and project.sandbox:
                 sb_cfg = type(sb_cfg)(**{**sb_cfg.__dict__, **project.sandbox})
             sid = s["id"]
-            self._sandboxes[sid] = Sandbox(
+            sandbox_class = NoDockerSandbox if self.cfg.fake_model is not None else Sandbox
+            self._sandboxes[sid] = sandbox_class(
                 sid, Path(s["workspace"]), sb_cfg, project=project.name if project else "",
                 user_id=session_user_id(s),
                 setup=project.setup if project else "", known=self.db.has_tool_result(sid),

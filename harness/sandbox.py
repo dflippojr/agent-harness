@@ -434,10 +434,7 @@ class Sandbox:
     async def stop(self) -> None:
         self._cancel_idle_timer()
         self._idle_stopped = False
-        try:
-            await run_cmd(["docker", "stop", "-t", "2", self.name], timeout=60)
-        except FileNotFoundError:  # no Docker CLI on this machine, so no container to stop (fake model mode, #588)
-            pass
+        await run_cmd(["docker", "stop", "-t", "2", self.name], timeout=60)
 
     async def restart(self) -> None:
         if await self._state() is not None:
@@ -446,3 +443,32 @@ class Sandbox:
 
     async def remove(self) -> None:
         await run_cmd(["docker", "rm", "-f", self.name], timeout=60)
+
+
+NO_DOCKER = ("the shell sandbox is off in fake model mode: this test instance shares the Docker engine with the real "
+             "harness, so it never creates containers (docs/ui-testing.md)")
+
+
+class NoDockerSandbox(Sandbox):
+    """Fake model mode's sandbox (#588). The Docker engine, with its networks, cache volumes and session containers, is
+    shared with the real harness, so a test instance never touches it: a shell command is a tool error, and stopping
+    or removing the container is a no-op. The file tools don't use the sandbox and work as usual."""
+
+    async def exec(self, command: str, timeout: int = 120, network: bool = False) -> tuple[int, str]:
+        from .fileops import ToolError
+        raise ToolError(NO_DOCKER)
+
+    async def stop_if_idle(self) -> bool:
+        return False
+
+    def arm_idle_stop(self) -> None:
+        pass
+
+    async def stop(self) -> None:
+        pass
+
+    async def restart(self) -> None:
+        pass
+
+    async def remove(self) -> None:
+        pass

@@ -423,30 +423,6 @@ def test_stop_ends_the_recorded_instance_process(tmp_path):
         proc.kill()
 
 
-def test_teardown_removes_only_this_instances_sandbox_containers(monkeypatch, tmp_path):
-    import sqlite3
-    import subprocess
-    instance = tmp_path / "instance"
-    fake_instance.write_instance(instance, 0)
-    for db, ids in ((instance / "data" / "harness.sqlite3", ("s1", "s2")),
-                    (instance / "data" / "apps" / "app-x" / "harness.sqlite3", ("s3",))):
-        db.parent.mkdir(parents=True, exist_ok=True)
-        con = sqlite3.connect(db)
-        con.execute("CREATE TABLE sessions (id TEXT)")
-        con.executemany("INSERT INTO sessions VALUES (?)", [(i,) for i in ids])
-        con.commit()
-        con.close()
-
-    def no_docker(args, **kwargs):
-        raise FileNotFoundError("docker")
-    monkeypatch.setattr(subprocess, "run", no_docker)
-    fake_instance.remove_containers(instance)   # no Docker CLI: no containers, no error
-    calls = []
-    monkeypatch.setattr(subprocess, "run", lambda args, **kwargs: calls.append(args))
-    assert fake_instance.stop(instance) == 0 and not instance.exists()
-    assert calls == [["docker", "rm", "-f", "harness-s1", "harness-s2", "harness-s3"]]
-
-
 def test_kill_survives_a_child_that_already_exited(monkeypatch):
     import psutil
     killed = []
@@ -514,27 +490,33 @@ def wait_session(client, sid, headers, *statuses):
     raise AssertionError(f"session {sid} stayed {s['status']}, wanted {statuses}")
 
 
-def test_sandbox_stop_without_docker_is_a_no_op(monkeypatch, tmp_path):
+def test_fake_mode_never_touches_docker(monkeypatch, fake_manager, tmp_path):
+    """The Docker engine is shared with the real harness: a fake session's shell is a tool error, and its stop and
+    remove do nothing."""
     from harness import sandbox
-    from harness.config import SandboxConfig
+    from harness.fileops import ToolError
+    monkeypatch.setattr(sandbox, "run_cmd", fail_on_docker)
+    session = {"id": "s1", "target": "tower", "workspace": str(tmp_path), "project": "ui", "owner_id": "owner"}
+    sb = fake_manager.runner.sandbox(session)
+    assert isinstance(sb, sandbox.NoDockerSandbox)
+    with pytest.raises(ToolError, match="sandbox is off in fake model mode"):
+        run(sb.exec("echo hi"))
+    run(sb.stop())
+    run(sb.restart())
+    run(sb.remove())
+    assert not run(sb.stop_if_idle())
+    sb.arm_idle_stop()
 
-    async def no_docker(*_args, **_kwargs):
-        raise FileNotFoundError("docker")
-    monkeypatch.setattr(sandbox, "run_cmd", no_docker)
-    run(sandbox.Sandbox("s1", tmp_path, SandboxConfig()).stop())
+
+async def fail_on_docker(args, *_rest, **_kwargs):
+    raise AssertionError(f"fake mode ran a docker command: {args}")
 
 
 def test_full_stack_approval_and_compaction(monkeypatch, fake_manager):
-    """The real server with the scripted model, on a machine without Docker: an approval the policy asks for, then a
-    run that compacts."""
+    """The real server with the scripted model, never calling Docker: an approval the policy asks for, then a run that
+    compacts."""
     from harness import sandbox
-    real_run_cmd = sandbox.run_cmd
-
-    async def no_docker(args, *rest, **kwargs):
-        if args and args[0] == "docker":
-            raise FileNotFoundError("docker")
-        return await real_run_cmd(args, *rest, **kwargs)
-    monkeypatch.setattr(sandbox, "run_cmd", no_docker)
+    monkeypatch.setattr(sandbox, "run_cmd", fail_on_docker)
     m = fake_manager
     _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
     headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}

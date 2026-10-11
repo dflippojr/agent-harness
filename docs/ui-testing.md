@@ -27,17 +27,19 @@ docstring of [`harness/fake_model.py`](../harness/fake_model.py).
   - A `fake_model:` key in any YAML file stops the daemon from starting.
   - Fake mode removes the local-model supervision, inference-endpoint and image modules, so there is no warm-up, no
     GPU guard and no llama-server call. The manual GPU hold has no effect on it.
-  - The instance shares the Docker engine with any real harness on the machine. In fake mode the maintenance sweep
-    (scheduled, or Settings → Disk → Cleanup) never removes session containers, so it can't take a live harness's
-    containers for orphans.
+  - The instance never touches the Docker engine that a real harness on the machine shares:
+    - The shell sandbox is off, so `run_shell`, `git_clone` and `verify` return the tool error "the shell sandbox is
+      off in fake model mode". No container, network or cache volume is created.
+    - The maintenance sweep (scheduled, or Settings → Disk → Cleanup) neither lists nor removes session containers.
+    - Only Chat's **Run code** still uses Docker: its own short-lived, mount-less snippet containers, and only if the
+      pinned images are present. Otherwise it reports an error.
   - `tests/test_fake_model.py` covers these guards.
 - **Disabled or stubbed integrations.**
   - Model: scripted (stubbed).
   - Off: hosted Claude, Codex and Cursor backends (not configured), notifications (ntfy), backup, homelab, memory
     library, Claude Remote Control, Hub, web search and fetch (SearXNG), images and image edit, inference endpoint,
     GPU guard, canary, telemetry export, GitHub tasks (no token) and Google sign-in.
-  - On: Docker is used only if a script calls `run_shell`, and the default scripts never do. Jobs, session search and
-    skills (with local review off) stay on because they are local.
+  - Jobs, session search and skills (with local review off) stay on because they are local.
   - The one outbound request: on first start the Server downloads its pinned secret scanner (gitleaks) from GitHub
     releases into `<dir>/data/tools`. If that download fails, the Server still starts; only push and merge review,
     which no journey uses, then refuse.
@@ -306,8 +308,6 @@ What it does:
 - It reads `<dir>/instance.json`.
 - It stops that process and its children, but only if the process's command line is `harness.fake_instance` and its
   start time matches the handle. A reused pid, even one belonging to another instance, is never killed.
-- It removes the sandbox containers of this instance's own sessions (`harness-<session id>`, read from its
-  databases), if any exist and Docker is installed. It removes no other containers.
 - It deletes the directory, including the read-only git checkpoint objects.
 - It works after a partial start:
   - with no handle file

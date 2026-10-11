@@ -1,7 +1,8 @@
 # Default fake-model fixtures for UI testing (#588, docs/ui-testing.md). They cover the mobile redesign surfaces
 # (#506-#515). Scripts are tried in order; `match` is a case-insensitive regex searched in the user's message.
 # Every turn but the last needs tool_calls: the harness ends a run on a reply without them. Only the file tools
-# are used, so nothing here needs Docker. Writes under protected/ ask first in the disposable instance's `ui` project.
+# work: fake mode never touches Docker, so run_shell, git_clone and verify return a tool error. Writes under
+# protected/ ask first in the disposable instance's `ui` project.
 #
 # Prompts that pick each script (the disposable instance seeds most of them):
 #   "Hello ..." / "tab bar"        -> tab-bar-tour          a streamed answer with reasoning (Recent, header, tab bar)
