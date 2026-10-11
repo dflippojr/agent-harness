@@ -264,14 +264,19 @@ def owned(root: Path) -> bool:
 
 def _instance_process(handle: dict):
     """The live process the handle recorded, or None: the pid must still be that same process (its start time
-    matches), so a reused pid, even another instance's, is never killed."""
+    matches), so a reused pid, even another instance's, is never killed. Inspection errors propagate: an
+    unverifiable process is not evidence that the instance exited."""
     import psutil
     try:
-        proc = psutil.Process(int(handle["pid"]))
-        if abs(proc.create_time() - float(handle["pid_created"])) > 0.01:
+        pid, created = int(handle["pid"]), float(handle["pid_created"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    try:
+        proc = psutil.Process(pid)
+        if abs(proc.create_time() - created) > 0.01:
             return None
         return proc if "harness.fake_instance" in " ".join(proc.cmdline()) else None
-    except (KeyError, TypeError, ValueError, psutil.Error):
+    except psutil.NoSuchProcess:
         return None
 
 
@@ -311,9 +316,13 @@ def stop(root: Path) -> int:
         handle = json.loads((root / HANDLE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         handle = {}
-    proc = _instance_process(handle) if isinstance(handle, dict) else None
-    if proc is not None and not _kill(proc):
-        print(f"could not stop process {proc.pid}; {root} is left in place", file=sys.stderr)
+    try:
+        proc = _instance_process(handle) if isinstance(handle, dict) else None
+        if proc is not None and not _kill(proc):
+            print(f"could not stop process {proc.pid}; {root} is left in place", file=sys.stderr)
+            return 1
+    except psutil.Error as e:
+        print(f"could not verify or stop the instance process: {e}; {root} is left in place", file=sys.stderr)
         return 1
     if not remove(root):
         print(f"could not delete {root}; is a process still using it?", file=sys.stderr)

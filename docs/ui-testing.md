@@ -268,14 +268,20 @@ readiness signal.
     18801` from the repository root. The wrapper suppresses stdout so the disposable tokens are never printed in CI.
   - Use `url: 'http://127.0.0.1:18801/ready'`, `reuseExistingServer: false` and `timeout: 180_000`.
   - Set `use.baseURL` to `http://127.0.0.1:18801`.
-  - Use one fixed `<instance-dir>` for start and both teardown paths:
+  - Use one fixed **base directory** for start and all teardown paths:
     `process.env.HARNESS_UI_INSTANCE_DIR ?? path.join(os.tmpdir(), 'harness-ui-tests')`. CI sets
     `HARNESS_UI_INSTANCE_DIR` to `$RUNNER_TEMP/harness-ui-tests` through `GITHUB_ENV`
-    in an initial setup step, so the test and cleanup steps share the same directory.
-  - Because Start refuses a non-empty directory, a leftover from a killed run fails the next start loudly. Run
-    Teardown on that directory before starting, both locally and as the first CI step (it is a no-op when the
-    directory is absent).
-  - The start refuses busy ports, so a collision fails loudly instead of reusing another server.
+    in an initial setup step, so the test and cleanup steps share the same base directory.
+  - `run.mjs` allocates a unique `run-<uuid>` child with an `owner.json` recording its identity and runner pid;
+    the actual fake instance lives in `<base>/run-<uuid>/instance`. It propagates `HARNESS_UI_RUN_ID` to Start
+    and Playwright's global teardown. The npm `finally` teardown uses that same identity, and repeated cleanup
+    is a no-op. A second invocation gets a different directory even with an explicitly shared base.
+  - The separate CI `cleanup.mjs` step recovers those persisted identities only after their runner has exited.
+    Startup also recovers stale runs this way. A live or unreadable owner pid (including a reused live pid)
+    leaves the run untouched. If stopping its recorded instance fails, the handle and ownership record remain.
+    Legacy instances directly in the base directory are preserved; stop them explicitly with the manual command.
+  - The start refuses busy ports, so a competing invocation fails loudly and cleans only its own allocation.
+    It never pre-cleans the other invocation's live instance. Parallel browser suites are not supported.
 - **Fixtures.**
   - A `signedIn` fixture calls `page.goto('/connect')` and waits for `#conn[data-state="live"]`.
   - Mutating specs create their own sessions, jobs and chats with unique names, or run with `workers: 1` against a
@@ -296,8 +302,8 @@ readiness signal.
     1. runs `pip install -r requirements.txt`
     2. uses `actions/setup-node` with Node 20 or later
     3. runs the npm commands above
-    4. runs `python -m harness.fake_instance stop --dir "$env:HARNESS_UI_INSTANCE_DIR"` with `if: always()`, the
-       same directory the `webServer` started
+    4. runs `node tools/ui-tests/cleanup.mjs` with `if: always()` to redact traces and recover the finished run's
+       recorded directory (the existing dependency-install failure fallback has no newly started instance)
   - Never use the tower's self-hosted runner for this public repository.
 - **Never in tests.** Live URLs, `:8100`, a `*.ts.net` origin, the production data directory, or tokens copied
   between runs.
@@ -323,6 +329,14 @@ What it does:
 - It refuses (exit 2) any non-empty directory without the `data/fake-model-instance` marker, so it never deletes
   unrelated files. An `instance.json` alone is not enough.
 - It is safe to repeat. A missing directory prints `nothing to stop` and exits 0.
+- It returns nonzero and preserves the entire directory and handle if recorded process metadata cannot be
+  inspected (for example, `AccessDenied` after an elevated Windows run), or if the owned process or its children
+  cannot be stopped. It does not guess which process to kill or delete files before shutdown is established.
+  Retry from a terminal with permission to inspect/stop that recorded process; do not delete its handle by hand.
+
+For automated UI suites, use `node tools/ui-tests/cleanup.mjs` with the same `HARNESS_UI_INSTANCE_DIR` base rather
+than manually stopping the base directory. Manual `harness.fake_instance stop --dir` still targets an actual
+instance directory, such as `<base>/run-<uuid>/instance`, and intentionally stops that specific instance.
 
 In an interactive terminal, Ctrl+C, Ctrl+Break or SIGTERM do the same: both servers stop, the SQLite files close and
 the directory is deleted, unless you passed `--keep`.
