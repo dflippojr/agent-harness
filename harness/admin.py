@@ -16,6 +16,7 @@ third-party app cannot reach this surface by presenting its own key.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import logging
 import math
 import re
@@ -23,7 +24,7 @@ import re
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import access as access_mod
 from . import audit_context, credential_audit
@@ -37,6 +38,26 @@ ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
 PREFIX = "/api/admin/v1"
+
+
+class AdminOperationResponse(BaseModel):
+    method: str
+    path: str
+
+
+class AdminRootResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    api_version: str
+    server: str
+    release: str
+    build_id: str
+    protocols: dict
+    minimum_clients: dict
+    update_hint: dict
+    scopes: dict[str, str]
+    hub: dict[str, bool]
+    auth: dict[str, str | bool]
+    operations: list[AdminOperationResponse]
 
 # Candidate owner operations from issue #24. Runner poll/results and ntfy token buttons stay
 # off this surface: they use their own credentials, not owner identity.
@@ -298,7 +319,23 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
     matchers = [_template_re(path) for path in paths]
     operations = _collect_operations(app, mgr, paths, cfg)
 
-    @app.get(PREFIX)
+    # Middleware aliases dispatch to the same handlers. Document their versioned URLs without adding runtime routes.
+    original_openapi = app.openapi
+
+    def openapi_with_aliases():
+        schema = original_openapi()
+        for path in sorted(paths):
+            if path in schema["paths"]:
+                alias = deepcopy(schema["paths"][path])
+                for operation in alias.values():
+                    if isinstance(operation, dict) and "operationId" in operation:
+                        operation["operationId"] = "admin_" + operation["operationId"]
+                schema["paths"][PREFIX + path] = alias
+        return schema
+
+    app.openapi = openapi_with_aliases
+
+    @app.get(PREFIX, response_model=AdminRootResponse)
     async def admin_root(request: Request):
         require_admin(request, mgr)
         return {

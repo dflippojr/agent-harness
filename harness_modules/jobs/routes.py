@@ -1,11 +1,12 @@
 """Scheduled jobs and task templates on the owner and admin API."""
 
 import uuid
+from typing import Literal
 
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-from harness.modules import HarnessError, RouteTable, manager, operation_audit
+from harness.modules import HarnessError, RouteTable, WebSessionResponse, manager, operation_audit
 
 NO_SUCH_JOB = "no such job"
 owner_routes = RouteTable()
@@ -31,6 +32,42 @@ class Template(BaseModel):
     prompt: str
 
 
+class JobRunResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str
+    title: str
+    status: str
+    stop_reason: str
+    job_status: str
+    created_at: float
+    updated_at: float
+    answer: str
+
+
+class JobResponse(Job):
+    model_config = ConfigDict(extra="allow")
+    id: str
+    next_run_at: float | None
+    last_run_at: float | None
+    last_session_id: str
+    last_error: str
+    last_skip: str
+    created_at: float
+    updated_at: float
+    recent: list[JobRunResponse]
+
+
+class CronPreviewSuccess(BaseModel):
+    ok: Literal[True]
+    cron: str
+    next: list[float]
+
+
+class CronPreviewError(BaseModel):
+    ok: Literal[False]
+    error: str
+
+
 # scheduled jobs (jobs.py)
 def jobs_on(request: Request):
     m = manager(request)
@@ -44,7 +81,7 @@ def job_view(m, job: dict, runs: int = 1) -> dict:
     return {**job, "enabled": bool(job["enabled"]), "recent": recent}
 
 
-@owner_routes.get("/jobs")
+@owner_routes.get("/jobs", response_model=list[JobResponse])
 async def list_jobs(request: Request):
     m = jobs_on(request)
     if request.state.access.role == "guest":
@@ -52,7 +89,7 @@ async def list_jobs(request: Request):
     return [job_view(m, j) for j in m.db.list_jobs()]
 
 
-@owner_routes.get("/jobs/preview")
+@owner_routes.get("/jobs/preview", response_model=CronPreviewSuccess | CronPreviewError)
 async def preview_cron(cron: str, request: Request, count: int = 3):
     """The next few run times of a schedule, or why it's invalid."""
     import time as _time
@@ -68,7 +105,7 @@ async def preview_cron(cron: str, request: Request, count: int = 3):
     return {"ok": True, "cron": c.expr, "next": times}
 
 
-@owner_routes.post("/jobs", status_code=201)
+@owner_routes.post("/jobs", status_code=201, response_model=JobResponse)
 async def create_job(body: Job, request: Request):
     import time as _time
     from .service import Cron, new_job_id, validate
@@ -88,7 +125,7 @@ async def create_job(body: Job, request: Request):
     return job_view(m, m.db.get_job(job["id"]))
 
 
-@owner_routes.get("/jobs/{jid}")
+@owner_routes.get("/jobs/{jid}", response_model=JobResponse)
 async def get_job(jid: str, request: Request):
     m = jobs_on(request)
     if request.state.access.role == "guest":
@@ -99,7 +136,7 @@ async def get_job(jid: str, request: Request):
     return job_view(m, job, runs=15)
 
 
-@owner_routes.put("/jobs/{jid}")
+@owner_routes.put("/jobs/{jid}", response_model=JobResponse)
 async def update_job(jid: str, body: Job, request: Request):
     import time as _time
     from .service import Cron, validate
@@ -133,7 +170,7 @@ async def delete_job(jid: str, request: Request):
     m.db.write(remove)
 
 
-@owner_routes.post("/jobs/{jid}/run", status_code=201)
+@owner_routes.post("/jobs/{jid}/run", status_code=201, response_model=WebSessionResponse, response_model_exclude_unset=True)
 async def run_job(jid: str, request: Request):
     """Run a job now, outside its schedule (the next scheduled run is unchanged)."""
     m = jobs_on(request)

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Keyboard shortcuts (#571): the shortcut set from #540 and the `?` sheet that lists it. keyAction() is pure: it reads one
 // keydown and says what it asks for. mountKeys() receives the browser globals and the router's go(), so importing this
 // module touches nothing. Shortcuts never fire while focus is in a field, a sheet or a menu, and Approve and Deny have no

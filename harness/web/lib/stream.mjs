@@ -1,13 +1,17 @@
 // Server-sent event streams (#258): the URL guard (pure) and openStream(), an EventSource that survives iOS suspending the app.
 // Browser globals arrive through `browser` (globalThis in the app, a stub under Node), so the module imports under plain Node.
+/** @import { AgentHarnessWebClient } from '../client.mjs' */
+/** @import { ConnectionState, Surface, StreamHandlers, StreamOptions, StreamStop } from '../../../tools/web-types/contracts.js' */
 
 // Ids come from the URL hash, so only the characters the daemon issues (hex, "-", "_") may reach a request path.
 const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** @param {unknown} id */
 export const validId = (id) => typeof id === "string" && SAFE_ID.test(id);
 const STREAM_PATH = /^(?:\/api\/v1|\/api\/admin\/v1)?\/(?:(?:sessions|chats)\/[A-Za-z0-9_-]{1,64}\/events|events|queue)$/;
 const STREAM_QUERY = /^(?:\?[A-Za-z0-9_=&.-]*)?$/;
 
 // Returns a rebuilt same-origin stream URL, or null when it is not a known API stream path (fail closed).
+/** @param {unknown} url @param {string} [base] */
 export function safeStreamUrl(url, base = "") {
   if (typeof url !== "string" || url.length > 2048) return null;
   let rest = url;
@@ -28,6 +32,7 @@ export function safeStreamUrl(url, base = "") {
 // stream was last live, from 0.
 export const RETRY_BASE_MS = 1000;
 export const RETRY_CAP_MS = 30000;
+/** @param {number} attempt @param {() => number} [random] */
 export function retryDelay(attempt, random = Math.random) {
   const ceiling = Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** Math.max(0, attempt));
   return Math.round(ceiling / 2 + random() * (ceiling / 2));
@@ -38,16 +43,21 @@ export const OFFLINE_AFTER = 4;
 // A stream live at least this long that then ends reconnects once at once, without showing Reconnecting.
 export const GRACE_AFTER_MS = 5000;
 
+/** @param {{agentHarnessWeb: AgentHarnessWebClient, isBlocked: () => boolean, setConnState: (state: ConnectionState) => void, ownerSurface: () => Surface, isGuest: () => boolean, browser: typeof globalThis}} dependencies */
 export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSurface, isGuest, browser }) {
+  /** @type {Set<() => void>} */
   const daemonListeners = new Set();
   const notifyDaemonChange = () => { for (const fn of daemonListeners) fn(); };
+  /** @param {() => void} fn */
   const onDaemonChange = (fn) => {
     daemonListeners.add(fn);
     return () => daemonListeners.delete(fn);
   };
   // The same stream's connection state ("live", "reconnecting", "offline"), for a page that reacts to drops (the Agents
   // list refreshes so a gone server shows as a stale list). Pages reuse this stream rather than opening another (#563).
+  /** @type {Set<(state: ConnectionState) => void>} */
   const stateListeners = new Set();
+  /** @param {(state: ConnectionState) => void} fn */
   const onDaemonState = (fn) => {
     stateListeners.add(fn);
     return () => stateListeners.delete(fn);
@@ -55,15 +65,21 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
   // EventSource that survives iOS suspending the app: reconnects from the last seq when visible again.
   // Connection state ("live", "reconnecting", "offline") goes to `onState`; the header chip follows it only for the stream
   // opened with `indicate`, so page streams can close without a false offline state.
+  /** @param {() => string | Promise<string>} urlFor @param {StreamHandlers} handlers @param {StreamOptions} [options] @returns {StreamStop} */
   function openStream(urlFor, handlers, { authorized = false, indicate = false, onState = null } = {}) {
     const { document } = browser;
+    /** @type {EventSource | null} */
     let es = null;
+    /** @type {AbortController | null} */
     let controller = null;
     let closed = false;
-    let retry = null;
+    /** @type {number | undefined} */
+    let retry;
     let generation = 0;
     let attempts = 0;
+    /** @type {ConnectionState | ""} */
     let state = "";
+    /** @param {ConnectionState} next */
     const setState = (next) => {
       if (closed || next === state) return;
       state = next;
@@ -82,6 +98,7 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
     };
     // Every failure path ends here. A stream that had been live a while (a proxy or server restart closing it) gets one
     // quiet reconnect first; otherwise say so and retry on the backoff schedule.
+    /** @param {number} run */
     const fail = (run) => {
       if (closed || run !== generation) return;
       pending = false;
@@ -95,6 +112,7 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
       setState(browserOffline() || attempts >= OFFLINE_AFTER ? "offline" : "reconnecting");
       retry = setTimeout(connect, retryDelay(attempts - 1));
     };
+    /** @param {string} block */
     const dispatch = (block) => {
       let type = "message";
       const data = [];
@@ -107,6 +125,7 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
       try { handlers[type](JSON.parse(data.join("\n"))); }
       catch (e) { console.error(`stream event "${type}" failed`, e); }
     };
+    /** @param {string} url */
     const fetchStream = async (url) => {
       controller = new AbortController();
       const resp = await browser.fetch(url, { headers: agentHarnessWeb.headers(), cache: "no-store", signal: controller.signal });
@@ -155,8 +174,9 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
       };
       for (const [type, fn] of Object.entries(handlers)) {
         source.addEventListener(type, (msg) => {
-          if (msg.data === undefined) return; // the browser's own connection "error" event, handled by onerror
-          fn(JSON.parse(msg.data));
+          const event = /** @type {MessageEvent<string>} */ (msg);
+          if (event.data === undefined) return; // the browser's own connection "error" event, handled by onerror
+          fn(JSON.parse(event.data));
         });
       }
     };
@@ -190,6 +210,7 @@ export function mountStream({ agentHarnessWeb, isBlocked, setConnState, ownerSur
 
   // The app-wide stream behind the header chip. Called on every route: the first call opens it, later ones nudge it to
   // retry now if it is down, so navigating after the server is back does not leave a stale Offline.
+  /** @type {StreamStop | null} */
   let daemon = null;
   function watchDaemonConnection() {
     if (daemon) { daemon.nudge(); return; }

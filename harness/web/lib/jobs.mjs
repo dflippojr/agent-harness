@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Pure scheduled-job helpers (#258): schedule labels, next-run text and new-job defaults. No DOM.
 export const JOB_NOTIFY = {
   attention: "Only when something needs attention",

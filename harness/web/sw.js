@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Service worker: caches the app shell so the app opens instantly (and shows a clear offline state).
 // API responses are never cached: session state must always be live.
 const BUILD_ID = "2026.10.10.1";

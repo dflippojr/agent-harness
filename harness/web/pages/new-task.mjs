@@ -1,3 +1,4 @@
+// @ts-nocheck
 // New task page (#258): project/target pickers, backend and model, GitHub issue picker, skills, templates. The shell
 // (DOM builder, router, auth state) is injected by app.js so this module imports under plain Node and never reaches
 // into another page.

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // In-app sheets that replace the browser's native confirm and prompt dialogs (#513). Each opens a <dialog> as a bottom sheet
 // on phones and a centred card on wide screens, and resolves a Promise: confirmSheet() to true or false, promptSheet() to the
 // entered text or null, formSheet() to { name: value } or null; panelSheet() shows a read-only panel (the keyboard shortcuts)

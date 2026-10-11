@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Show-once secret card (#258, #229): shows a secret exactly once, with a Copy button and a Done button that reloads the
 // card. The clipboard helper is passed in because it toasts through the page; DOM comes from dom.mjs at call time.
 import { h, fill } from "./dom.mjs";

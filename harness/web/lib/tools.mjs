@@ -1,3 +1,4 @@
+// @ts-nocheck
 // One-line text for tool calls and approval cards. Pure: no DOM.
 
 // One-line summary of a tool call for its collapsed row.

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Bundle compatibility and update flow (#258): checks the server's protocol range and newer-bundle hint, shows the
 // blocking "Update required" card and reloads into a new build. mountUpdate() receives the build identity, shell elements
 // and browser globals as arguments (client.mjs touches localStorage on import, so it is not imported here), so importing
