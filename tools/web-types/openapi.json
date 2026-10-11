@@ -704,6 +704,19 @@
             "title": "Catalog App Id",
             "type": "string"
           },
+          "expected_disclosures_digest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "SHA-256 from the preview X-Disclosures-Digest header; arm refuses changed disclosures",
+            "title": "Expected Disclosures Digest"
+          },
           "name": {
             "default": "",
             "maxLength": 60,
@@ -2117,6 +2130,23 @@
         "title": "PickWinner",
         "type": "object"
       },
+      "PreviewPairingRequest": {
+        "properties": {
+          "scopes": {
+            "description": "App scopes to disclose before arming; nonempty, never admin",
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "scopes"
+        ],
+        "title": "PreviewPairingRequest",
+        "type": "object"
+      },
       "ProfileUpdate": {
         "properties": {
           "emoji": {
@@ -2488,6 +2518,33 @@
           "ok"
         ],
         "title": "RunnerResult",
+        "type": "object"
+      },
+      "ScopeDisclosure": {
+        "properties": {
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "tier": {
+            "enum": [
+              "standard",
+              "elevated"
+            ],
+            "title": "Tier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "tier",
+          "text"
+        ],
+        "title": "ScopeDisclosure",
         "type": "object"
       },
       "SecretDismissal": {
@@ -6137,6 +6194,9 @@
             },
             "description": "Successful Response"
           },
+          "409": {
+            "description": "disclosures_changed: preview again before arming"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -6149,6 +6209,58 @@
           }
         },
         "summary": "Arm Pairing Request"
+      }
+    },
+    "/api/admin/v1/pairing-requests/preview": {
+      "post": {
+        "description": "Preview App scope disclosures before arming, without creating or changing pairing state.",
+        "operationId": "preview_pairing_request_api_admin_v1_pairing_requests_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewPairingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ScopeDisclosure"
+                  },
+                  "title": "Response Preview Pairing Request Api Admin V1 Pairing Requests Preview Post",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response",
+            "headers": {
+              "X-Disclosures-Digest": {
+                "description": "SHA-256 of the disclosures; pass as expected_disclosures_digest when arming",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Pairing Request"
       }
     },
     "/api/admin/v1/pairing-requests/{rid}/approve": {
