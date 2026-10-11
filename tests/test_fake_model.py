@@ -22,6 +22,16 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOLS = [{"type": "function", "function": {"name": "write_file", "parameters": {}}}]
 
 
+@pytest.fixture
+def fake_manager(monkeypatch, tmp_path):
+    """A Manager on a fresh disposable-instance config in fake mode; its databases are closed afterwards."""
+    config_dir, data_dir = fake_instance.write_instance(tmp_path / "instance", 0)
+    monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
+    m = Manager(config_mod.load(config_dir, data_dir))
+    yield m
+    m.db.close()
+
+
 def fixtures(tmp_path: Path, text: str) -> Path:
     path = tmp_path / "fixtures.yaml"
     path.write_text(text, encoding="utf-8")
@@ -248,27 +258,23 @@ def test_no_service_script_sets_the_variable():
                 assert fake_model.ENV not in path.read_text(encoding="utf-8", errors="replace"), path
 
 
-def test_apply_drops_everything_that_touches_the_gpu(monkeypatch, tmp_path):
-    config_dir, data_dir = fake_instance.write_instance(tmp_path, 0)
-    monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
-    cfg = config_mod.load(config_dir, data_dir)
+def test_apply_drops_everything_that_touches_the_gpu(fake_manager):
+    m = fake_manager
+    cfg = m.cfg
     assert cfg.fake_model == fake_model.DEFAULT_FIXTURES
     assert list(cfg.models) == [fake_model.MODEL_NAME] and cfg.default_model == fake_model.MODEL_NAME
     assert cfg.models["fake"].base_url == fake_model.UNROUTABLE
     assert cfg.modules.local_model and not any(getattr(cfg.modules, n) for n in fake_model.GPU_SWITCHES)
     assert not cfg.gpu_guard.enabled and not set(cfg.module_packages or ()) & set(fake_model.GPU_PACKAGES)
-    m = Manager(cfg)
     assert isinstance(m.runner.chat, fake_model.FakeModel)
     assert m.guard is None and m.runner.guard is None and isinstance(m.runner.warmer, NoWarmer)
     assert "local_model" not in m.modules and "endpoint" not in m.modules and "images" not in m.modules
 
 
-def test_maintenance_never_removes_containers_from_a_fake_instance(monkeypatch, tmp_path):
+def test_maintenance_never_removes_containers_from_a_fake_instance(monkeypatch, fake_manager):
     """The Docker engine is shared with the real harness, whose session containers this instance doesn't know."""
     from harness import maintenance
-    config_dir, data_dir = fake_instance.write_instance(tmp_path, 0)
-    monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
-    m = Manager(config_mod.load(config_dir, data_dir))
+    m = fake_manager
     calls = []
 
     async def docker(args, *rest, **kwargs):
@@ -278,14 +284,11 @@ def test_maintenance_never_removes_containers_from_a_fake_instance(monkeypatch, 
     report = {"containers_removed": []}
     run(m.maintenance._containers(time.time(), report))
     assert calls == [] and report["containers_removed"] == []
-    m.db.close()
 
 
-def test_disk_usage_without_docker_or_in_fake_mode_lists_no_containers(monkeypatch, tmp_path):
+def test_disk_usage_without_docker_or_in_fake_mode_lists_no_containers(monkeypatch, fake_manager):
     from harness import maintenance
-    config_dir, data_dir = fake_instance.write_instance(tmp_path, 0)
-    monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
-    m = Manager(config_mod.load(config_dir, data_dir))
+    m = fake_manager
     calls = []
 
     async def no_docker(args, *_rest, **_kwargs):
@@ -295,7 +298,6 @@ def test_disk_usage_without_docker_or_in_fake_mode_lists_no_containers(monkeypat
     assert run(m.maintenance._container_sizes()) == [] and calls == []   # fake mode: the real harness's
     m.cfg.fake_model = None
     assert run(m.maintenance._container_sizes()) == [] and calls          # no Docker CLI: none, no error
-    m.db.close()
 
 
 def test_a_bad_fixture_fails_the_start(monkeypatch, tmp_path):
@@ -498,7 +500,7 @@ def test_sandbox_stop_without_docker_is_a_no_op(monkeypatch, tmp_path):
     run(sandbox.Sandbox("s1", tmp_path, SandboxConfig()).stop())
 
 
-def test_full_stack_approval_and_compaction(monkeypatch, tmp_path):
+def test_full_stack_approval_and_compaction(monkeypatch, fake_manager):
     """The real server with the scripted model, on a machine without Docker: an approval the policy asks for, then a
     run that compacts."""
     from harness import sandbox
@@ -509,9 +511,7 @@ def test_full_stack_approval_and_compaction(monkeypatch, tmp_path):
             raise FileNotFoundError("docker")
         return await real_run_cmd(args, *rest, **kwargs)
     monkeypatch.setattr(sandbox, "run_cmd", no_docker)
-    config_dir, data_dir = fake_instance.write_instance(tmp_path, 0)
-    monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
-    m = Manager(config_mod.load(config_dir, data_dir))
+    m = fake_manager
     _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
     headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
     with TestClient(create_app(m)) as client:

@@ -34,6 +34,7 @@ PROJECT = "ui"
 HANDLE = "instance.json"     # in the instance dir: how `stop` finds this instance's process
 CLIENT = {"X-Agent-Harness-Client": "cli/2"}  # the seeding talks as a tool on this machine
 SETTLE_SECONDS = 120
+SHUTDOWN_SECONDS = 5
 # (title, prompt, status once settled). The prompts pick scripts in harness/fake_fixtures/ui.yaml; runs queue one at
 # a time, in this order.
 SEED_SESSIONS = (
@@ -209,10 +210,12 @@ async def serve(args, root: Path) -> None:
     try:
         key, token = manager.db.main.create_api_key("ui-testing", "admin", "owner", origins=[normalize_origin(web)])
         state["key_id"] = key["id"]  # the actor key_id of this instance's audit rows
+        # A bounded graceful shutdown: Web's open event streams would otherwise hold Ctrl+C (and cleanup) forever.
         servers = [uvicorn.Server(uvicorn.Config(create_app(manager), host="127.0.0.1", port=port,
-                                                 log_level="warning", proxy_headers=False, forwarded_allow_ips="")),
+                                                 log_level="warning", proxy_headers=False, forwarded_allow_ips="",
+                                                 timeout_graceful_shutdown=SHUTDOWN_SECONDS)),
                    uvicorn.Server(uvicorn.Config(web_app(server, token, state), host="127.0.0.1", port=web_port,
-                                                 log_level="warning"))]
+                                                 log_level="warning", timeout_graceful_shutdown=SHUTDOWN_SECONDS))]
         tasks = [asyncio.create_task(s.serve()) for s in servers]
         try:
             await _started(servers, tasks)
