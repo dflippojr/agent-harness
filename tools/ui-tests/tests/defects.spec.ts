@@ -71,6 +71,8 @@ test('#603 Chat starter tapped before options load fills the ready composer', as
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(page).toHaveURL(new RegExp('#/chat/[A-Za-z0-9_-]+$'));
     expect(prompts).toEqual([text]);
+    await expect(page.locator('.msg.assistant.final')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Delete', exact: true }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Delete chat', exact: true }).click();
     await expect(page).toHaveURL(new RegExp('#/chat$'));
