@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 
 import pytest
@@ -16,6 +18,7 @@ from harness import cli
 from harness.api import create_app
 from harness.config import RunnerConfig
 from harness.manager import Manager
+from harness_modules.runners import mac_client
 from test_daemon import make_cfg
 
 
@@ -266,3 +269,33 @@ def test_runner_logs_follow_appended_lines(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.sys, "argv", ["harness", "runner", "logs", "--lines", "1", "--follow"])
     assert cli.main() == 130
     assert capsys.readouterr().out == "latest\nfollowed\n"
+
+
+def test_packaged_standalone_cli_preview_prints_disclosures_and_digest(tmp_path):
+    with tarfile.open(fileobj=io.BytesIO(mac_client.package_bytes()), mode="r:gz") as archive:
+        archive.extractall(tmp_path, filter="data")
+    disclosures = [{"scope": "example:read", "tier": "standard", "text": "Read café files."}]
+    probe = """
+import json
+from pathlib import Path
+import sys
+import harness_cli as cli
+cli.HARNESS_HOME = Path(sys.argv[1])
+cli.DEFAULT_CONFIG = cli.HARNESS_HOME / 'client.json'
+cli._local_owner_token = lambda: ''
+values = json.loads(sys.argv[2])
+def api(method, path, **kwargs):
+    assert (method, path, kwargs) == ('POST', '/pairing-requests/preview', {'json': {'scopes': ['example:read']}})
+    return values
+cli.api = api
+sys.argv = ['harness', 'pairing-requests', 'preview', '--scopes', 'example:read']
+raise SystemExit(cli.main())
+"""
+    result = subprocess.run([sys.executable, "-c", probe, str(tmp_path), json.dumps(disclosures)],
+                            cwd=tmp_path / "client", capture_output=True, text=True, encoding="utf-8", timeout=30,
+                            env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == disclosures
+    canonical = json.dumps(disclosures, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    assert result.stderr.strip() == f"Disclosures digest: {digest}"

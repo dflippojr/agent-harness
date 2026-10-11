@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -872,8 +873,9 @@ def _cmd_admin(args) -> int:
     else:
         print(json.dumps(result, indent=2))
     if path == "/pairing-requests/preview" and isinstance(result, list):
-        from .pairing_requests import disclosures_digest
-        print(f"Disclosures digest: {disclosures_digest(result)}", file=sys.stderr)
+        canonical = json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        print(f"Disclosures digest: {digest}", file=sys.stderr)
     if path == "/hub-claim":
         _hub_status_notes(result)
     if method == "GET" and path == "/pairing-requests" and isinstance(result, list):
