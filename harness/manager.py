@@ -159,10 +159,20 @@ class NoNotifier:
 NO_NOTIFIER = NoNotifier()
 
 
+def _fake_model_chat(cfg: Config):
+    """Fake model mode (#588): config.load switched to it, so the scripted fake answers instead of llama-server."""
+    from . import fake_model
+    for line in fake_model.banner(cfg).splitlines():
+        log.warning(line)
+    return fake_model.FakeModel.from_path(cfg.fake_model)
+
+
 class Manager:
     def __init__(self, cfg: Config, db: Database | SessionStores | None = None, chat=llm.chat):
         self.cfg = cfg
         telemetry.configure(cfg.telemetry)
+        if cfg.fake_model is not None and chat is llm.chat:
+            chat = _fake_model_chat(cfg)
         db = db or Database(cfg.db_path)
         # App sessions live in per-App stores under data_dir/apps (#330); everything else in the main store.
         self.db = db if isinstance(db, SessionStores) else SessionStores(db, Path(cfg.data_dir) / "apps")
