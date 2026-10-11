@@ -283,6 +283,14 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   assert.equal(doc.activeElement, paneRows[2], "J goes on from the open session's row");
   key("k"); key("k");
   assert.equal(doc.activeElement, paneRows[0]);
+  // A job marks the row around its link as open, not the link.
+  paneRows[1].removeAttribute("aria-current");
+  paneRows[0].closest = (sel) => (sel === "[aria-current]" ? pane : null);
+  doc.activeElement = doc.body;
+  key("j");
+  assert.equal(doc.activeElement, paneRows[1], "J goes on from the open job's row");
+  delete paneRows[0].closest;
+  key("k");
 
   // An open menu answers its own keys.
   const menu = new El("div", { role: "menu" });

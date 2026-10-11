@@ -168,7 +168,9 @@ export function mountKeys({ browser, go, role }) {
     const pane = document.getElementById("split-list");
     const inPane = pane && shown(pane) ? [...pane.querySelectorAll(ROW_SELECTOR)].filter(shown) : [];
     const rows = inPane.length ? inPane : [...document.getElementById("app").querySelectorAll(ROW_SELECTOR)].filter(shown);
-    const next = stepRow(rows.length, rows.indexOf(document.activeElement), rows.findIndex((r) => r.getAttribute("aria-current")), step);
+    // The open row is the link itself (Agents) or the row around it (a job, beside its Enabled switch).
+    const open = rows.findIndex((r) => r.getAttribute("aria-current") || r.closest?.("[aria-current]"));
+    const next = stepRow(rows.length, rows.indexOf(document.activeElement), open, step);
     if (next < 0) return false;
     rows[next].focus();
     rows[next].scrollIntoView?.({ block: "nearest" });
