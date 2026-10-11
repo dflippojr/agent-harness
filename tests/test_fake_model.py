@@ -132,7 +132,8 @@ def test_turns_stream_and_tool_calls_continue_the_script(tmp_path):
 
 def test_a_compaction_summary_or_nudge_keeps_the_scripts_place(tmp_path):
     fake = model(SCRIPT, tmp_path)
-    call = {"id": "fake-edit-0-0-0123456789ab", "type": "function", "function": {"name": "write_file", "arguments": "{}"}}
+    call = {"id": "fake-edit-0-0-0123456789ab", "type": "function",
+            "function": {"name": "write_file", "arguments": "{}"}}
     messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "edit it"},
                 {"role": "user", "content": f"{compaction.SUMMARY_TAG} Earlier work, condensed"},
                 {"role": "assistant", "content": "", "tool_calls": [call]},
@@ -157,7 +158,8 @@ def test_follow_ups_pick_a_script_again_and_unmatched_ones_fall_back(tmp_path):
 
 def test_an_exhausted_script_ends_the_run(tmp_path):
     fake = model(SCRIPT, tmp_path)
-    call = {"id": "fake-edit-1-0-0123456789ab", "type": "function", "function": {"name": "write_file", "arguments": "{}"}}
+    call = {"id": "fake-edit-1-0-0123456789ab", "type": "function",
+            "function": {"name": "write_file", "arguments": "{}"}}
     out = run(fake(None, [{"role": "user", "content": "edit"}, {"role": "assistant", "content": "",
                                                                  "tool_calls": [call]}], TOOLS))
     assert "has no turn 3" in out.content and not out.tool_calls
@@ -276,6 +278,23 @@ def test_maintenance_never_removes_containers_from_a_fake_instance(monkeypatch, 
     report = {"containers_removed": []}
     run(m.maintenance._containers(time.time(), report))
     assert calls == [] and report["containers_removed"] == []
+    m.db.close()
+
+
+def test_disk_usage_without_docker_or_in_fake_mode_lists_no_containers(monkeypatch, tmp_path):
+    from harness import maintenance
+    config_dir, data_dir = fake_instance.write_instance(tmp_path, 0)
+    monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
+    m = Manager(config_mod.load(config_dir, data_dir))
+    calls = []
+
+    async def no_docker(args, *_rest, **_kwargs):
+        calls.append(args)
+        raise FileNotFoundError("docker")
+    monkeypatch.setattr(maintenance, "run_cmd", no_docker)
+    assert run(m.maintenance._container_sizes()) == [] and calls == []   # fake mode: the real harness's
+    m.cfg.fake_model = None
+    assert run(m.maintenance._container_sizes()) == [] and calls          # no Docker CLI: none, no error
     m.db.close()
 
 

@@ -131,19 +131,20 @@ def web_app(server: str, token: str, state: dict):
 
 async def seed(client: httpx.AsyncClient) -> list[str]:
     """Sessions, a chat and jobs through the real API, as the owner; then wait for the runs to settle."""
-    problems, expected = [], {}
+    problems: list[str] = []
+    expected: dict[str, tuple[str, str, str]] = {}   # id -> (title, status once settled, path to poll)
     for title, prompt, status in SEED_SESSIONS:
         r = await client.post("/api/v1/sessions", json={"prompt": prompt, "project": PROJECT, "title": title})
         if r.status_code != 201:
             problems.append(f"session {title!r}: HTTP {r.status_code} {r.text[:200]}")
         else:
-            expected[r.json()["id"]] = (title, status)
+            expected[r.json()["id"]] = (title, status, f"/api/v1/sessions/{r.json()['id']}")
     for prompt in SEED_CHATS:
         r = await client.post("/api/admin/v1/chats", json={"prompt": prompt})
         if r.status_code != 201:
             problems.append(f"chat: HTTP {r.status_code} {r.text[:200]}")
         else:
-            expected[r.json()["id"]] = ("chat", "done")
+            expected[r.json()["id"]] = (prompt, "done", f"/api/admin/v1/chats/{r.json()['id']}")
     for job in SEED_JOBS:
         r = await client.post("/api/admin/v1/jobs", json=job)
         if r.status_code != 201:
@@ -151,18 +152,18 @@ async def seed(client: httpx.AsyncClient) -> list[str]:
     return problems or await settle(client, expected)
 
 
-async def settle(client: httpx.AsyncClient, expected: dict[str, tuple[str, str]]) -> list[str]:
+async def settle(client: httpx.AsyncClient, expected: dict[str, tuple[str, str, str]]) -> list[str]:
     deadline = time.monotonic() + SETTLE_SECONDS
     statuses: dict[str, str] = {}
     while time.monotonic() < deadline:
-        for sid, (title, _) in expected.items():
-            r = await client.get(f"/api/admin/v1/chats/{sid}" if title == "chat" else f"/api/v1/sessions/{sid}")
+        for sid, (_, _, path) in expected.items():
+            r = await client.get(path)
             statuses[sid] = r.json().get("status", "") if r.status_code == 200 else f"HTTP {r.status_code}"
-        if all(statuses[sid] == want for sid, (_, want) in expected.items()):
+        if all(statuses[sid] == want for sid, (_, want, _) in expected.items()):
             return []
         await asyncio.sleep(0.25)
     return [f"{title!r} is {statuses.get(sid)!r}, expected {want!r} after {SETTLE_SECONDS}s"
-            for sid, (title, want) in expected.items() if statuses.get(sid) != want]
+            for sid, (title, want, _) in expected.items() if statuses.get(sid) != want]
 
 
 def write_handle(root: Path, state: dict) -> None:
@@ -215,7 +216,8 @@ async def serve(args, root: Path) -> None:
         try:
             await _started(servers, tasks)
             if not args.no_seed:
-                async with httpx.AsyncClient(base_url=server, timeout=30,
+                # trust_env=False: a configured HTTP(S)_PROXY must not carry loopback requests elsewhere.
+                async with httpx.AsyncClient(base_url=server, timeout=30, trust_env=False,
                                              headers={"Authorization": f"Bearer {token}", **CLIENT}) as client:
                     problems = await seed(client)
                 if problems:
