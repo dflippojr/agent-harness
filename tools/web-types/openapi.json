@@ -1426,6 +1426,52 @@
         "title": "CreateSession",
         "type": "object"
       },
+      "CronPreviewError": {
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "ok": {
+            "const": false,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "error"
+        ],
+        "title": "CronPreviewError",
+        "type": "object"
+      },
+      "CronPreviewSuccess": {
+        "properties": {
+          "cron": {
+            "title": "Cron",
+            "type": "string"
+          },
+          "next": {
+            "items": {
+              "type": "number"
+            },
+            "title": "Next",
+            "type": "array"
+          },
+          "ok": {
+            "const": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "cron",
+          "next"
+        ],
+        "title": "CronPreviewSuccess",
+        "type": "object"
+      },
       "Decision": {
         "properties": {
           "decision": {
@@ -2623,9 +2669,16 @@
             "type": "number"
           },
           "workspace_removed": {
-            "default": false,
-            "title": "Workspace Removed",
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "default": 0,
+            "title": "Workspace Removed"
           }
         },
         "required": [
@@ -3003,9 +3056,16 @@
             "type": "number"
           },
           "workspace_removed": {
-            "default": false,
-            "title": "Workspace Removed",
-            "type": "boolean"
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "default": 0,
+            "title": "Workspace Removed"
           }
         },
         "required": [
@@ -5474,7 +5534,17 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/CronPreviewSuccess"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CronPreviewError"
+                    }
+                  ],
+                  "title": "Response Preview Cron Jobs Preview Get"
+                }
               }
             },
             "description": "Successful Response"
@@ -12732,7 +12802,17 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/CronPreviewSuccess"
+                    },
+                    {
+                      "$ref": "#/components/schemas/CronPreviewError"
+                    }
+                  ],
+                  "title": "Response Preview Cron Jobs Preview Get"
+                }
               }
             },
             "description": "Successful Response"

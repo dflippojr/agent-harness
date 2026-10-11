@@ -71,7 +71,8 @@ class WebSessionResponse(BaseModel):
     base_branch: str = ""
     review: str = ""
     review_detail: str = ""
-    workspace_removed: bool = False
+    # SQLite returns 0/1, including on raw idempotency replays. Preserve the wire representation.
+    workspace_removed: bool | int = 0
     push_target: str = ""
 
 

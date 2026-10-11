@@ -1,6 +1,7 @@
 """Scheduled jobs and task templates on the owner and admin API."""
 
 import uuid
+from typing import Literal
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
@@ -57,6 +58,17 @@ class JobResponse(Job):
     recent: list[JobRunResponse]
 
 
+class CronPreviewSuccess(BaseModel):
+    ok: Literal[True]
+    cron: str
+    next: list[float]
+
+
+class CronPreviewError(BaseModel):
+    ok: Literal[False]
+    error: str
+
+
 # scheduled jobs (jobs.py)
 def jobs_on(request: Request):
     m = manager(request)
@@ -78,7 +90,7 @@ async def list_jobs(request: Request):
     return [job_view(m, j) for j in m.db.list_jobs()]
 
 
-@owner_routes.get("/jobs/preview")
+@owner_routes.get("/jobs/preview", response_model=CronPreviewSuccess | CronPreviewError)
 async def preview_cron(cron: str, request: Request, count: int = 3):
     """The next few run times of a schedule, or why it's invalid."""
     import time as _time

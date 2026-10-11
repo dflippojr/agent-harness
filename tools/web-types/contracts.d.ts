@@ -11,6 +11,7 @@ export type SessionDetail = components["schemas"]["SessionResponse"];
 export type SessionList = paths["/api/v1/sessions"]["get"]["responses"][200]["content"]["application/json"];
 export type JobList = paths["/api/admin/v1/jobs"]["get"]["responses"][200]["content"]["application/json"];
 export type AdminDiscovery = paths["/api/admin/v1"]["get"]["responses"][200]["content"]["application/json"];
+export type CronPreview = paths["/api/admin/v1/jobs/preview"]["get"]["responses"][200]["content"]["application/json"];
 
 // Only the first response contracts are opted in. Other endpoints remain incremental work.
 type Route<P extends string> = P extends `${infer Path}?${string}` ? Path : P;
@@ -18,6 +19,7 @@ type ResponseFor<P extends string, M extends HttpMethod> =
   P extends "/sessions" ? (M extends "GET" ? SessionList : M extends "POST" ? SessionDetail : any) :
   P extends `/sessions/${infer Ref}` ? (Ref extends `${string}/${string}` ? any : M extends "GET" | "PATCH" | "PUT" ? SessionDetail : any) :
   P extends "/jobs" ? (M extends "GET" ? JobList : M extends "POST" ? components["schemas"]["JobResponse"] : any) :
+  P extends "/jobs/preview" ? (M extends "GET" ? CronPreview : any) :
   P extends `/jobs/${infer Ref}` ? (Ref extends `${string}/${string}` ? any : M extends "DELETE" ? null : components["schemas"]["JobResponse"]) :
   P extends "" ? AdminDiscovery : any;
 export type ApiResponse<P extends string, M extends HttpMethod = "GET"> = ResponseFor<Route<P>, M>;

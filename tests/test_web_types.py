@@ -19,12 +19,16 @@ def test_session_models_preserve_absent_and_additive_fields():
         "title": "Task", "status": "done", "created_at": 1.0, "updated_at": 2.0,
         "totals": {}, "run": {"rate_limits": {"utilization": 0.25, "provider_field": "kept"}},
         "chat_summary": "Question — answer", "future_field": {"value": 1},
+        "workspace_removed": 0,
     }
     for model in (SessionResponse, WebSessionResponse):
         assert model.model_validate(payload).model_dump(exclude_unset=True) == payload
     # Legacy summaries contain tool objects, while the app surface exposes tool names.
     legacy = {**payload, "app_tools": [{"name": "lookup", "parameters": {}}]}
     assert WebSessionResponse.model_validate(legacy).model_dump(exclude_unset=True) == legacy
+    for removed in (0, 1, False, True):
+        dumped = SessionResponse.model_validate({**payload, "workspace_removed": removed}).model_dump(exclude_unset=True)
+        assert type(dumped["workspace_removed"]) is type(removed)
 
 
 def test_openapi_covers_web_contracts_and_static_serving_stays_native(tmp_path):

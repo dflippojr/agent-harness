@@ -5977,6 +5977,28 @@ export interface components {
             /** Title */
             title?: string | null;
         };
+        /** CronPreviewError */
+        CronPreviewError: {
+            /** Error */
+            error: string;
+            /**
+             * Ok
+             * @constant
+             */
+            ok: false;
+        };
+        /** CronPreviewSuccess */
+        CronPreviewSuccess: {
+            /** Cron */
+            cron: string;
+            /** Next */
+            next: number[];
+            /**
+             * Ok
+             * @constant
+             */
+            ok: true;
+        };
         /** Decision */
         Decision: {
             /** Decision */
@@ -6600,9 +6622,9 @@ export interface components {
             updated_at: number;
             /**
              * Workspace Removed
-             * @default false
+             * @default 0
              */
-            workspace_removed?: boolean;
+            workspace_removed?: boolean | number;
         } & {
             [key: string]: unknown;
         };
@@ -6817,9 +6839,9 @@ export interface components {
             updated_at: number;
             /**
              * Workspace Removed
-             * @default false
+             * @default 0
              */
-            workspace_removed?: boolean;
+            workspace_removed?: boolean | number;
         } & {
             [key: string]: unknown;
         };
@@ -8788,7 +8810,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CronPreviewSuccess"] | components["schemas"]["CronPreviewError"];
                 };
             };
             /** @description Validation Error */
@@ -14790,7 +14812,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["CronPreviewSuccess"] | components["schemas"]["CronPreviewError"];
                 };
             };
             /** @description Validation Error */

@@ -64,12 +64,14 @@ def test_a_retry_after_a_lost_response_returns_the_first_session(tmp_path):
         app_id, auth = _key(client, "shop", "sessions")
         first = _post(client, auth, "order-7")
         assert first.status_code == 201 and idempotency.REPLAYED_HEADER not in first.headers
+        assert type(first.json()["workspace_removed"]) is int
         sid = first.json()["id"]
         wait_for(lambda: client.get(f"/api/v1/sessions/{sid}", headers=auth).json()["status"] == "done")
 
         again = _post(client, auth, "order-7", {"metadata": {"order": 7}, "prompt": "plan dinner"})  # key order
         assert again.status_code == 200 and again.headers[idempotency.REPLAYED_HEADER] == "true"
         assert again.json()["id"] == sid and again.json()["status"] == "done"  # its current view
+        assert type(again.json()["workspace_removed"]) is int
         assert m.db.app_session_ids(app_id) == [sid]
         assert _created_events(m, sid) == 1 and _spawned(m) == [sid]
 

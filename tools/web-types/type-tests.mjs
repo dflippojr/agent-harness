@@ -20,6 +20,14 @@ export async function checkContracts(api, id) {
   const cron = jobs[0].cron;
   // @ts-expect-error Wrong job fields cannot be used as strings.
   jobs[0].schedule.toUpperCase();
+  const previewed = await api("/jobs/preview?cron=@daily");
+  if (previewed.ok) {
+    previewed.next.map((time) => time.toFixed(0));
+    // @ts-expect-error Cron preview is not job detail.
+    previewed.id.toUpperCase();
+  } else {
+    previewed.error.toUpperCase();
+  }
   const discovery = await api("");
   /** @type {string} */
   const path = discovery.operations[0].path;
