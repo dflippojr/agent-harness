@@ -33,7 +33,7 @@ from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.25"
+API_VERSION = "1.26"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
@@ -56,6 +56,9 @@ class AdminRootResponse(BaseModel):
     update_hint: dict
     scopes: dict[str, str]
     hub: dict[str, bool]
+    allowed_logins: list[str] = Field(
+        description="The owner's tailnet logins (`allowed_logins` in harness.local.yaml). Empty means no "
+                    "allowlist (open-owner legacy mode); a Hub must then accept no tailnet login.")
     auth: dict[str, str | bool]
     operations: list[AdminOperationResponse]
 
@@ -344,6 +347,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             **compat.metadata(mgr(request).cfg.capabilities()),
             "scopes": {ADMIN_SCOPE: ADMIN_SCOPE_HELP},
             "hub": {"claimed": mgr(request).db.main.hub_claim() is not None},
+            "allowed_logins": list(mgr(request).cfg.allowed_logins),
             "auth": {
                 "tailscale_owner": True,
                 "bearer": f"{OWNER_KIND} token with {ADMIN_SCOPE} scope",

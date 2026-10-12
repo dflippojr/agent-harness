@@ -5427,6 +5427,11 @@ export interface components {
         };
         /** AdminRootResponse */
         AdminRootResponse: {
+            /**
+             * Allowed Logins
+             * @description The owner's tailnet logins (`allowed_logins` in harness.local.yaml). Empty means no allowlist (open-owner legacy mode); a Hub must then accept no tailnet login.
+             */
+            allowed_logins: string[];
             /** Api Version */
             api_version: string;
             /** Auth */

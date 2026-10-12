@@ -231,6 +231,14 @@
       "AdminRootResponse": {
         "additionalProperties": true,
         "properties": {
+          "allowed_logins": {
+            "description": "The owner's tailnet logins (`allowed_logins` in harness.local.yaml). Empty means no allowlist (open-owner legacy mode); a Hub must then accept no tailnet login.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Logins",
+            "type": "array"
+          },
           "api_version": {
             "title": "Api Version",
             "type": "string"
@@ -308,6 +316,7 @@
           "update_hint",
           "scopes",
           "hub",
+          "allowed_logins",
           "auth",
           "operations"
         ],
