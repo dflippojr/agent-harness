@@ -347,6 +347,21 @@ test('#631 Phone landscape keeps Deny and Approve on screen with transcript abov
       return sheetTop - Math.max(bar.bottom, chrome.bottom);
     });
     if (viewport.width > viewport.height) expect(band).toBeGreaterThanOrEqual(80);
+    // The height cap must leave that band even when the sheet fills it and sits on a shown tab bar (phone session pages
+    // hide the bar today, so show it here).
+    const cappedBand = await page.evaluate(() => {
+      const tabBar = document.getElementById('tab-bar')!;
+      const wasHidden = tabBar.hidden, hadTabs = document.body.classList.contains('has-tabs');
+      tabBar.hidden = false;
+      document.body.classList.add('has-tabs');
+      const sheet = document.querySelector('.approval-sheet')!;
+      const band = sheet.getBoundingClientRect().bottom - parseFloat(getComputedStyle(sheet).maxHeight)
+        - document.getElementById('bar')!.getBoundingClientRect().bottom;
+      tabBar.hidden = wasHidden;
+      document.body.classList.toggle('has-tabs', hadTabs);
+      return band;
+    });
+    if (viewport.width > viewport.height) expect(cappedBand).toBeGreaterThanOrEqual(80);
   }
 });
 
