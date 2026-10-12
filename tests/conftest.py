@@ -148,6 +148,8 @@ def local_owner_client():
 FAKE_TAILSCALE_DIR = Path("C:/Program Files/Tailscale")
 FAKE_NODE_IPS = ("100.64.0.1", "fd7a:115c:a1e0::1")  # the daemon host's own Tailscale addresses
 FAKE_PEER_IP = "100.64.0.2"  # another tailnet node, which `tailscale serve` names in X-Forwarded-For
+FAKE_SERVE_CONFIG = {"TCP": {"443": {"HTTPS": True}},  # `tailscale serve` proxies HTTPS to the daemon
+                     "Web": {"tower.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8100"}}}}}
 
 
 def fake_tailscaled_check(**overrides):
@@ -157,7 +159,8 @@ def fake_tailscaled_check(**overrides):
     options = dict(owner=lambda client, server: 4242, exe=lambda pid: str(FAKE_TAILSCALE_DIR / "tailscaled.exe"),
                    dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True, service=lambda: 4242,
                    child_of=lambda pid, parent: False,
-                   self_ips=lambda: FAKE_NODE_IPS, local_ips=lambda: ("127.0.0.1", "::1", *FAKE_NODE_IPS))
+                   tailscale_ips=lambda: FAKE_NODE_IPS, interface_addrs=lambda: ("127.0.0.1", "::1", *FAKE_NODE_IPS),
+                   serve=lambda: FAKE_SERVE_CONFIG)
     options.update(overrides)
     return tailscale_peer.PeerCheck(**options)
 

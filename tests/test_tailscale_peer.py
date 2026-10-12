@@ -12,7 +12,7 @@ from harness.api import create_app
 from harness.llm import Completion
 from harness.manager import Manager
 
-from conftest import FAKE_NODE_IPS, FAKE_PEER_IP, FAKE_TAILSCALE_DIR, fake_tailscaled_check
+from conftest import FAKE_NODE_IPS, FAKE_PEER_IP, FAKE_SERVE_CONFIG, FAKE_TAILSCALE_DIR, fake_tailscaled_check
 from test_daemon import Script, make_cfg
 
 LOGIN = "me@example.com"
@@ -207,10 +207,51 @@ def test_unknown_node_addresses_refuse_every_forwarded_request(tmp_path):
     def unavailable():
         raise FileNotFoundError("tailscale.exe not found")
 
-    client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check(self_ips=unavailable))
+    client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check(tailscale_ips=unavailable))
     with client:
         assert client.get("/me", headers={"Tailscale-User-Login": LOGIN,
                                           "X-Forwarded-For": FAKE_PEER_IP}).status_code == 401
+
+
+def with_tcp_forward(target, where="TCP"):
+    """The fake serve config plus a raw TCP forward (`tailscale serve --tcp`), on the node or in a foreground session
+    or a service."""
+    handler = {"TCP": {"8443": {"TCPForward": target}}}
+    if where == "TCP":
+        return {**FAKE_SERVE_CONFIG, "TCP": {**FAKE_SERVE_CONFIG["TCP"], "8443": {"TCPForward": target}}}
+    if where == "Foreground":
+        return {**FAKE_SERVE_CONFIG, "Foreground": {"session-1": handler}}
+    return {**FAKE_SERVE_CONFIG, "Services": {"svc:harness": handler}}
+
+
+def test_a_raw_tcp_forward_to_the_daemon_port_refuses_every_tailnet_identity(tmp_path):
+    """tailscaled adds no headers on a raw TCP forward, so a tailnet peer could write its own login (#623)."""
+    check = fake_tailscaled_check()
+    client, m = make_client(tmp_path, [LOGIN], check)
+    port = m.cfg.port
+    with client:
+        for config in (with_tcp_forward(f"127.0.0.1:{port}"), with_tcp_forward(f"localhost:{port}", "Foreground"),
+                       with_tcp_forward(f"[::1]:{port}", "Services"), with_tcp_forward("127.0.0.1:not-a-port")):
+            check.serve, check._serve = (lambda c=config: c), None
+            assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
+            assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
+                               headers={"Tailscale-User-Login": LOGIN}).status_code == 401
+        assert m.db.list_api_keys() == []
+        # A raw forward to another port leaves the daemon's HTTPS path alone.
+        check.serve, check._serve = (lambda: with_tcp_forward(f"127.0.0.1:{port + 1}")), None
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()["role"] == "owner"
+
+
+def test_an_unreadable_serve_config_refuses_every_tailnet_identity(tmp_path):
+    def unreadable():
+        raise OSError("LocalAPI access denied")
+
+    check = fake_tailscaled_check(serve=unreadable)
+    client, _ = make_client(tmp_path, [LOGIN], check)
+    with client:
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
+    assert not check.serve_cached()  # a failure is not cached, so the next request asks again
 
 
 # --- the check itself -------------------------------------------------------------------------------------------
@@ -308,7 +349,7 @@ def test_the_node_addresses_are_cached_and_a_failure_is_retried():
             raise OSError("tailscaled not running")
         return FAKE_NODE_IPS
 
-    check = fake_tailscaled_check(self_ips=ips, clock=clock, self_ips_ttl=60)
+    check = fake_tailscaled_check(tailscale_ips=ips, clock=clock, tailscale_ips_ttl=60)
     assert not check.from_other_node([FAKE_PEER_IP.encode()])
     assert check.from_other_node([FAKE_PEER_IP.encode()]) and check.from_other_node([FAKE_PEER_IP.encode()])
     assert len(calls) == 2 and check.own_ips_cached()
@@ -320,7 +361,7 @@ def test_the_node_addresses_are_cached_and_a_failure_is_retried():
 def test_a_changed_node_address_is_refused_before_the_cache_expires():
     """After a profile switch the cached `tailscale ip` addresses are stale, but the adapter already has the new one."""
     current = {"addrs": ("127.0.0.1", *FAKE_NODE_IPS)}
-    check = fake_tailscaled_check(local_ips=lambda: current["addrs"])
+    check = fake_tailscaled_check(interface_addrs=lambda: current["addrs"])
     assert check.from_other_node([FAKE_PEER_IP.encode()])
     current["addrs"] = ("127.0.0.1", "fe80::1%12", FAKE_PEER_IP)  # this node now holds the address
     assert check.own_ips_cached()
@@ -331,7 +372,7 @@ def test_unreadable_interfaces_refuse_the_request():
     def broken():
         raise OSError("no interface table")
 
-    assert not fake_tailscaled_check(local_ips=broken).from_other_node([FAKE_PEER_IP.encode()])
+    assert not fake_tailscaled_check(interface_addrs=broken).from_other_node([FAKE_PEER_IP.encode()])
 
 
 def test_interface_ips_lists_every_address_without_a_zone(monkeypatch):
@@ -360,6 +401,43 @@ def test_node_ips_reads_tailscale_ip_from_the_install_directory(monkeypatch, tmp
     assert seen == [[str(tmp_path / "tailscale.exe"), "ip"]]
     with pytest.raises(FileNotFoundError):
         tailscale_peer.node_ips([tmp_path / "missing"])
+
+
+def test_the_serve_config_is_cached_briefly():
+    clock, calls = Clock(), []
+    check = fake_tailscaled_check(serve=lambda: calls.append(1) or FAKE_SERVE_CONFIG, clock=clock, serve_ttl=5)
+    assert check.headers_from_tailscaled(8100) and check.headers_from_tailscaled(8100)
+    assert len(calls) == 1
+    clock.now += 5
+    assert check.headers_from_tailscaled(8100) and len(calls) == 2
+
+
+def test_raw_forward_to_matches_the_port_on_any_host():
+    assert not tailscale_peer.raw_forward_to(FAKE_SERVE_CONFIG, 8100)
+    assert not tailscale_peer.raw_forward_to({}, 8100)
+    assert tailscale_peer.raw_forward_to(with_tcp_forward("100.75.184.105:8100"), 8100)
+    assert tailscale_peer.raw_forward_to(with_tcp_forward("[fd7a:115c:a1e0::1]:8100", "Services"), 8100)
+    assert not tailscale_peer.raw_forward_to(with_tcp_forward("127.0.0.1:5432"), 8100)
+    assert tailscale_peer.raw_forward_to(with_tcp_forward("127.0.0.1"), 8100)  # no readable port: refuse
+
+
+def test_serve_config_reads_tailscale_serve_status(monkeypatch, tmp_path):
+    (tmp_path / "tailscale.exe").write_bytes(b"")
+    out, seen = {"text": '{"TCP": {"443": {"HTTPS": true}}}'}, []
+
+    def run(args, **kw):
+        seen.append(args)
+        return type("Done", (), {"stdout": out["text"]})()
+
+    monkeypatch.setattr(tailscale_peer.subprocess, "run", run)
+    assert tailscale_peer.serve_config([tmp_path]) == {"TCP": {"443": {"HTTPS": True}}}
+    assert seen == [[str(tmp_path / "tailscale.exe"), "serve", "status", "--json"]]
+    out["text"] = "[]"
+    with pytest.raises(ValueError):
+        tailscale_peer.serve_config([tmp_path])
+    out["text"] = "No serve config"
+    with pytest.raises(ValueError):
+        tailscale_peer.serve_config([tmp_path])
 
 
 def test_strip_identity_removes_every_tailscale_header():

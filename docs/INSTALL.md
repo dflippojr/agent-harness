@@ -450,6 +450,11 @@ sent the request) and removes the identity headers when it is one of this machin
 `tailscale ip` or its network interfaces now), when it is missing or holds more than one address, or when either
 lookup fails. That is why a browser on the server itself gets **401** on the tailnet URL too.
 
+Publish the daemon with an HTTPS proxy (`tailscale serve --bg --https=443 http://127.0.0.1:8100`), never as a raw TCP
+forward (`--tcp` or `--tls-terminated-tcp`). A raw forward passes the caller's bytes through without tailscaled's
+headers, so a tailnet device could name any login. While `tailscale serve status --json` shows any `TCPForward` to the
+daemon's port, or can't be read, the daemon ignores the `Tailscale-*` headers on every request.
+
 A request without a login from tailscaled reached the daemon's loopback listener directly or came from this machine,
 so it must say who it is:
 

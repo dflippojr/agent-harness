@@ -17,6 +17,10 @@ and this node's own Tailscale address names the node's owner, so a local program
 node's own Tailscale addresses, or whose `X-Forwarded-For` is missing or holds more than one value, loses its identity
 headers too.
 
+Nor does tailscaled add those headers on a raw TCP forward (`tailscale serve --tcp` or `--tls-terminated-tcp`): it
+passes the caller's bytes through, so a tailnet peer would write `Tailscale-User-Login` itself. While the node's serve
+config has any raw TCP forward to the daemon's port, or can't be read, no request gets a tailnet identity.
+
 The check is implemented for Windows. Elsewhere the headers are removed unless `listen.trust_unverified_identity_headers`
 is set, which trusts any local process that sends them.
 """
@@ -24,6 +28,7 @@ is set, which trusts any local process that sends them.
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import socket
@@ -46,6 +51,7 @@ SERVICE = "Tailscale"
 TAILSCALE_CLI = "tailscale.exe"
 FORWARDED_FOR = b"x-forwarded-for"
 SELF_IPS_SECONDS = 60.0
+SERVE_SECONDS = 5.0  # only the node's operator changes the serve config, so a short lag after a change is harmless
 
 
 def supported() -> bool:
@@ -116,18 +122,52 @@ def is_tailscaled(exe: str, dirs: list[Path]) -> bool:
     return any(path.parent == Path(os.path.normcase(os.path.realpath(d))) for d in dirs)
 
 
-def node_ips(dirs: list[Path] | None = None) -> frozenset[str]:
-    """This node's own Tailscale addresses, from `tailscale ip` in the install directory. Raises when it can't tell."""
+def _tailscale(args: list[str], dirs: list[Path] | None) -> str:
+    """Run the Tailscale CLI from the install directory, which asks tailscaled's LocalAPI. Raises when it fails."""
     for d in dirs if dirs is not None else install_dirs():
         cli = d / TAILSCALE_CLI
         if cli.is_file():
-            out = subprocess.run([str(cli), "ip"], capture_output=True, text=True, timeout=10, check=True,
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
-            ips = frozenset(str(ipaddress.ip_address(line.strip())) for line in out.splitlines() if line.strip())
-            if not ips:
-                raise RuntimeError("tailscale ip printed no address")
-            return ips
+            return subprocess.run([str(cli), *args], capture_output=True, text=True, timeout=10, check=True,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
     raise FileNotFoundError(f"{TAILSCALE_CLI} not found in the Tailscale install directory")
+
+
+def node_ips(dirs: list[Path] | None = None) -> frozenset[str]:
+    """This node's own Tailscale addresses, from `tailscale ip`. Raises when it can't tell."""
+    out = _tailscale(["ip"], dirs)
+    ips = frozenset(str(ipaddress.ip_address(line.strip())) for line in out.splitlines() if line.strip())
+    if not ips:
+        raise RuntimeError("tailscale ip printed no address")
+    return ips
+
+
+def serve_config(dirs: list[Path] | None = None) -> dict:
+    """The node's serve config, from `tailscale serve status --json`. Raises when it can't be read."""
+    config = json.loads(_tailscale(["serve", "status", "--json"], dirs))
+    if not isinstance(config, dict):
+        raise ValueError("tailscale serve status --json did not print an object")
+    return config
+
+
+def _tcp_forwards(node) -> list:
+    """Every `TCPForward` target in a serve config, wherever it sits: the node's ports, foreground sessions, services."""
+    if isinstance(node, dict):
+        found = [v for k, v in node.items() if k == "TCPForward" and v]
+        return found + [t for k, v in node.items() if k != "TCPForward" for t in _tcp_forwards(v)]
+    if isinstance(node, list):
+        return [t for v in node for t in _tcp_forwards(v)]
+    return []
+
+
+def raw_forward_to(config: dict, port: int) -> bool:
+    """Whether the serve config forwards raw TCP to `port` on any host. A target without a readable port counts."""
+    for target in _tcp_forwards(config):
+        try:
+            if int(str(target).rsplit(":", 1)[-1]) == port:
+                return True
+        except ValueError:
+            return True
+    return False
 
 
 def forwarded_for(scope) -> list[bytes]:
@@ -140,13 +180,16 @@ class PeerCheck:
     tailscaled."""
 
     def __init__(self, *, owner=connection_owner, exe=process_exe, dirs=install_dirs, platform_ok=supported,
-                 service=service_pid, child_of=started_by, local_ips=interface_ips,
-                 self_ips=node_ips, clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS,
-                 self_ips_ttl: float = SELF_IPS_SECONDS):
+                 service=service_pid, child_of=started_by, tailscale_ips=node_ips, interface_addrs=interface_ips,
+                 serve=serve_config, clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS,
+                 tailscale_ips_ttl: float = SELF_IPS_SECONDS, serve_ttl: float = SERVE_SECONDS):
         self.owner, self.exe, self.dirs, self.platform_ok, self.clock = owner, exe, dirs, platform_ok, clock
-        self.service, self.self_ips, self.size, self.ttl, self.self_ips_ttl = service, self_ips, size, ttl, self_ips_ttl
-        self.child_of, self.local_ips = child_of, local_ips
+        self.service, self.child_of, self.serve = service, child_of, serve
+        # The node's Tailscale addresses are cached; its interface addresses are read on every request.
+        self.tailscale_ips, self.interface_addrs = tailscale_ips, interface_addrs
+        self.size, self.ttl, self.tailscale_ips_ttl, self.serve_ttl = size, ttl, tailscale_ips_ttl, serve_ttl
         self._own: tuple[float, frozenset[str]] | None = None
+        self._serve: tuple[float, dict] | None = None
         self._cache: OrderedDict[tuple[str, int], tuple[float, bool]] = OrderedDict()
         self._lock = threading.Lock()
         self.lookups = 0
@@ -194,20 +237,54 @@ class PeerCheck:
         with self._lock:
             return self._own is not None and self.clock() < self._own[0]
 
+    def serve_cached(self) -> bool:
+        with self._lock:
+            return self._serve is not None and self.clock() < self._serve[0]
+
+    def warm(self, client: tuple[str, int] | None) -> bool:
+        """Whether `admits` can answer from its caches alone, without a lookup that blocks."""
+        return (bool(client) and self.cached((str(client[0]), int(client[1]))) is not None
+                and self.own_ips_cached() and self.serve_cached())
+
     def _own_ips(self) -> frozenset[str] | None:
         with self._lock:
             if self._own is not None and self.clock() < self._own[0]:
                 return self._own[1]
         try:
-            ips = frozenset(ip for ip in map(_canonical, self.self_ips()) if ip)
+            ips = frozenset(ip for ip in map(_canonical, self.tailscale_ips()) if ip)
         except Exception as exc:  # noqa: BLE001 - without this node's addresses no request is known to be remote
             log.warning("could not read this node's Tailscale addresses: %s", exc)
             return None
         if not ips:
             return None
         with self._lock:
-            self._own = (self.clock() + self.self_ips_ttl, ips)
+            self._own = (self.clock() + self.tailscale_ips_ttl, ips)
         return ips
+
+    def _serve_config(self) -> dict | None:
+        with self._lock:
+            if self._serve is not None and self.clock() < self._serve[0]:
+                return self._serve[1]
+        try:
+            config = self.serve()
+        except Exception as exc:  # noqa: BLE001 - an unread serve config could hold a raw TCP forward
+            log.warning("could not read this node's tailscale serve config: %s", exc)
+            return None
+        with self._lock:
+            self._serve = (self.clock() + self.serve_ttl, config)
+        return config
+
+    def headers_from_tailscaled(self, port: int) -> bool:
+        """Whether tailscaled writes the identity headers on every path to `port`: false while the serve config
+        forwards raw TCP to it, so the caller's own bytes arrive, or when the config can't be read."""
+        config = self._serve_config()
+        return config is not None and not raw_forward_to(config, port)
+
+    def admits(self, client: tuple[str, int] | None, server: tuple[str, int] | None, forwarded: list[bytes]) -> bool:
+        """Whether a request's Tailscale identity headers count: tailscaled sent them, wrote them itself, and named
+        another tailnet node."""
+        return (self.verify(client, server) and server is not None and self.headers_from_tailscaled(int(server[1]))
+                and self.from_other_node(forwarded))
 
     def from_other_node(self, forwarded: list[bytes]) -> bool:
         """Whether tailscaled forwarded the request from another tailnet node. Call only for a verified tailscaled peer:
@@ -222,7 +299,7 @@ class PeerCheck:
         if own is None or source in own:
             return False
         try:
-            current = {ip for ip in map(_canonical, self.local_ips()) if ip}
+            current = {ip for ip in map(_canonical, self.interface_addrs()) if ip}
         except Exception as exc:  # noqa: BLE001 - without this node's addresses no request is known to be remote
             log.warning("could not read this machine's interface addresses: %s", exc)
             return False
