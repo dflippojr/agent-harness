@@ -9,8 +9,8 @@ the function or class so they survive line drift.
 
 | Paper | What was read | Caveats |
 | --- | --- | --- |
-| **arXiv:2609.00006v1**, Barbaste, Darrigol, Vu, Wiltberger, "Harness Engineering: Anatomy, Architecture, and Evolution of Coding Agents. A Source-Code Study of Eleven Systems" | Full text. Sections 1 to 15 from the arXiv HTML rendering; Section 16 (the 18 recommendations and the 90-line scaffold, Listing 3) from the PDF, extracted locally with `pdftotext`, because the HTML fetch was cut off in Section 15.5. | The listing was confirmed on 2026-10-12: the abstract page shows one version, v1, submitted 15 July 2026, under a September-series identifier. The paper calls itself the second, expanded edition of an April 2026 study. Cited below as "P1 §n". |
-| **arXiv:2609.20804v1**, Fan, Zhang, Ma, Hu, Wang, Song, Liu, Zamani, Wang, "An Empirical Study of Harness Design for Coding Agents" | Full text from the arXiv HTML rendering, including the appendix tables (Tables 10 to 13) and prompt figures (Figures 18 to 31). | Submitted 17 September 2026, one version. Cited below as "P2 §n". |
+| **[arXiv:2609.00006v1](https://arxiv.org/abs/2609.00006v1)**, Barbaste, Darrigol, Vu, Wiltberger, "Harness Engineering: Anatomy, Architecture, and Evolution of Coding Agents. A Source-Code Study of Eleven Systems" ([HTML](https://arxiv.org/html/2609.00006v1), [PDF](https://arxiv.org/pdf/2609.00006v1)) | Full text. Sections 1 to 15 from the arXiv HTML rendering; Section 16 (the 18 recommendations and the 90-line scaffold, Listing 3) from the PDF, extracted locally with `pdftotext`, because the HTML fetch was cut off in Section 15.5. | The listing was confirmed on 2026-10-12: the abstract page shows one version, v1, submitted 15 July 2026, under a September-series identifier. The paper calls itself the second, expanded edition of an April 2026 study. Cited below as "P1 §n". |
+| **[arXiv:2609.20804v1](https://arxiv.org/abs/2609.20804v1)**, Fan, Zhang, Ma, Hu, Wang, Song, Liu, Zamani, Wang, "An Empirical Study of Harness Design for Coding Agents" ([HTML](https://arxiv.org/html/2609.20804v1)) | Full text from the arXiv HTML rendering, including the appendix tables (Tables 10 to 13) and prompt figures (Figures 18 to 31). | Submitted 17 September 2026, one version. Cited below as "P2 §n". |
 
 P1 is descriptive: eleven production harnesses (Claude Code, Codex CLI, Gemini CLI, Mistral Vibe, OpenHands, Aider,
 Mini-SWE-Agent, Hermes, Pi, OpenCode, OpenClaw; P1 §4.1), seven subsystems (P1 §2.3, Table 1), 29 patterns (P1
@@ -160,8 +160,8 @@ masking already covers recovery for anything large.
 
 ### 4.4 Is a bash-only profile plausible for hosted backends?
 
-P2 Finding 5 (P2 §3.2, Figure 7, Tables 3 and 4): bash-only helped only the strongest model and one benchmark
-pairing, and hurt everything else.
+P2 Finding 5 (P2 §3.2, Figure 7, Tables 3 and 4): bash-only helped Nemotron-3 550B on both benchmarks and
+Mistral-Medium-3.5-128B on Terminal-Bench only, and hurt every other model and benchmark combination.
 
 | Model | SWE-Bench, T4 128k, full tools vs bash-only | Terminal-Bench, same |
 | --- | --- | --- |
