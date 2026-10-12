@@ -606,6 +606,13 @@ body:has(.approval-sheet) main { padding-bottom: calc(360px + var(--tabbar-offse
   body:has(.approval-sheet) main { padding-bottom: calc(var(--approval-h, 220px) + 16px); }
   body:has(.approval-sheet) .session-chrome { position: static; }
 }
+/* Too narrow for one row: Deny and Approve stay pinned above a pinned Cancel the whole task. */
+@media (max-width: 479px) and (max-height: 500px) {
+  .approval-sheet > .approval-actions {
+    order: 1; flex-basis: 100%; padding: 8px 0; bottom: calc(var(--tap) + 16px + env(safe-area-inset-bottom, 0px));
+  }
+  .approval-sheet > .approval-cancel { order: 2; flex: 0 0 100%; padding-inline: 0; }
+}
 
 /* In-app confirm and prompt sheets (#513, lib/sheet.mjs): a bottom sheet on phones, a centred card on wide screens. */
 dialog.sheet {

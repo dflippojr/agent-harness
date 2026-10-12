@@ -322,15 +322,17 @@ test('#631 Phone landscape keeps Deny and Approve on screen with transcript abov
   await openSession(page, 'Protected settings');
   const sheet = page.getByRole('region', { name: 'Approval needed', exact: true });
   await expect(sheet).toBeVisible();
-  for (const viewport of [{ width: 667, height: 375 }, { width: 659, height: 393 }, { width: 375, height: 667 }]) {
+  const viewports = [{ width: 667, height: 375 }, { width: 659, height: 393 }, { width: 320, height: 480 }, { width: 375, height: 667 }];
+  for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await expect.poll(() => page.evaluate(() => innerHeight)).toBe(viewport.height);
     await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
-    for (const name of ['✕ Deny', '✓ Approve']) {
+    for (const name of ['✕ Deny', '✓ Approve', 'Cancel the whole task']) {
       const button = sheet.getByRole('button', { name, exact: true });
       const box = await boxOf(button);
       expect(box.top, name).toBeGreaterThanOrEqual(0);
       expect(box.bottom, name).toBeLessThanOrEqual(viewport.height);
+      expect(box.left, name).toBeGreaterThanOrEqual(0);
       expect(box.right, name).toBeLessThanOrEqual(viewport.width);
       expect(await button.evaluate(el => {
         const r = el.getBoundingClientRect();
@@ -384,6 +386,15 @@ test('#632 Chat thread keeps the conversation visible in phone landscape and wit
     await page.mouse.up();
     await message.focus();
   }
+  // In landscape at the latest reply, a growing multi-line draft keeps that reply above the composer.
+  await page.setViewportSize({ width: 667, height: 375 });
+  await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+  await message.fill(['one', 'two', 'three', 'four'].join('\n'));
+  await expect.poll(() => page.evaluate(() => {
+    const last = document.querySelector('.chat-feed')!.lastElementChild!.getBoundingClientRect();
+    return last.bottom <= document.querySelector('.composer')!.getBoundingClientRect().top;
+  })).toBe(true);
+  await message.fill('Partly typed reply');
   await page.setViewportSize({ width: 375, height: 667 });
   await expect.poll(() => page.evaluate(() => document.querySelector('.composer')!.getBoundingClientRect().height)).toBe(portrait);
   await expect(page.locator('.chat-pickers')).toBeVisible();

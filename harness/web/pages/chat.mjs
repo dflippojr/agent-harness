@@ -153,7 +153,10 @@ function trackKeyboard(composer, thread) {
     atEnd = thread && window.innerHeight + window.scrollY >= root.scrollHeight - 24;
   };
   onScroll();
-  const measure = () => root.style.setProperty("--chat-composer-h", `${composer.offsetHeight}px`);
+  const measure = () => {
+    root.style.setProperty("--chat-composer-h", `${composer.offsetHeight}px`);
+    if (atEnd) window.scrollTo({ top: root.scrollHeight });  // a growing draft does not cover the latest message
+  };
   const observer = browser.ResizeObserver ? new browser.ResizeObserver(measure) : null;
   observer?.observe(composer);
   // With the keyboard closed the stylesheet places the composer (above the tab bar, #506); open, it sits on the keyboard.
