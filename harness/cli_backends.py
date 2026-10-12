@@ -15,7 +15,7 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from . import claude_token, cli_domains, credential_sources, end_users, member_keys  # noqa: F401 - these register their sources
 from .config import BackendConfig, SandboxConfig
@@ -922,9 +922,10 @@ def forwarder(backend: BackendConfig) -> str:
 
 
 def forwarder_url(backend: BackendConfig, model_base_url: str) -> str:
-    """The model's OpenAI-compatible URL as the CLI container reaches it: the forwarder, on the model's own port."""
-    port = urlsplit(model_base_url).port or 8090
-    return f"http://{forwarder(backend)}:{port}/v1"
+    """The model's OpenAI-compatible URL as the CLI container reaches it: the forwarder, on the model's own scheme and
+    port (it passes TCP through, so the CLI speaks to the server as the harness does)."""
+    parts = urlsplit(model_base_url)
+    return urlunsplit((parts.scheme, f"{forwarder(backend)}:{parts.port or 8090}", "/v1", "", ""))
 
 
 def cli_route_ready(backend: BackendConfig) -> bool:
