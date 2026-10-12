@@ -438,8 +438,10 @@ install/uninstall.sh --remove-files  # also remove the install directory
 `tailscale serve` adds the caller's tailnet login to every request it forwards. Any other program on the machine, or
 a container that reaches the host's loopback, can send the same `Tailscale-*` headers, so the daemon trusts them only
 when tailscaled is the other end of the connection: it looks the connection up in the OS connection table and checks
-that the owning process is `tailscaled.exe` in the Tailscale install directory (`%ProgramFiles%\Tailscale`). From any
-other process, or when the lookup fails, the daemon removes those headers before it reads them.
+that the owning process is the running `Tailscale` Windows service, and that its executable is `tailscaled.exe` in the
+Tailscale install directory (`%ProgramFiles%\Tailscale`). The path alone is not enough, because any local user can
+start that same tailscaled.exe as a userspace proxy. From any other process, when the service is missing or stopped, or
+when a lookup fails, the daemon removes those headers before it reads them.
 
 tailscaled names a caller by the tailnet address it came from, and this machine's own Tailscale address names the
 machine's owner, so a local program that opens `https://<host>.<tailnet>.ts.net/` would arrive through tailscaled as the

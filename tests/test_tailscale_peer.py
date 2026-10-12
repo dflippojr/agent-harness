@@ -115,14 +115,38 @@ def test_unsupported_platforms_ignore_the_headers_unless_configured(tmp_path):
     assert m.tailscale_peer.lookups == 0
 
 
+def test_the_real_tailscaled_run_by_someone_else_is_not_the_service(tmp_path):
+    """Any local user can start the installed tailscaled.exe in userspace mode as a proxy and pick its headers (#623)."""
+    check = fake_tailscaled_check(owner=lambda client, server: 5151, service=lambda: 4242)
+    client, m = make_client(tmp_path, [LOGIN], check)
+    with client:
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN,
+                                          "X-Forwarded-For": FAKE_PEER_IP}).status_code == 401
+        assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
+                           headers={"Tailscale-User-Login": LOGIN}).status_code == 401
+        assert m.db.list_api_keys() == []
+    assert check.cached(CLIENT) is False
+
+
+def test_a_missing_or_unreadable_service_ignores_the_headers(tmp_path):
+    def missing():
+        raise LookupError("service 'Tailscale' does not exist")
+
+    for service in (missing, lambda: None):  # psutil gives no PID for a stopped service
+        client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check(service=service))
+        with client:
+            assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
+
+
 def test_tailscaled_forwarding_this_node_itself_is_not_the_owner(tmp_path):
     """`tailscale serve` names a local program that connects to this node's tailnet URL as the node's owner (#623)."""
     client, m = make_client(tmp_path, [LOGIN], fake_tailscaled_check())
     with client:
         for own in (*FAKE_NODE_IPS, "::ffff:100.64.0.1"):
             assert client.get("/me", headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": own}).status_code == 401
+        self_node = {"Tailscale-User-Login": LOGIN, "X-Forwarded-For": FAKE_NODE_IPS[0]}
         assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
-                           headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": FAKE_NODE_IPS[0]}).status_code == 401
+                           headers=self_node).status_code == 401
         assert m.db.list_api_keys() == []
         # The local owner token still works for a program on this machine, and the forged name is not shown.
         me = client.get("/me", headers={"Tailscale-User-Login": LOGIN, "Tailscale-User-Name": "Self",
@@ -145,7 +169,8 @@ def test_more_than_one_forwarded_address_is_refused(tmp_path):
                                           "X-Forwarded-For": f"{FAKE_PEER_IP}, 100.64.0.3"}).status_code == 401
         assert client.get("/me", headers=[("Tailscale-User-Login", LOGIN), ("X-Forwarded-For", FAKE_PEER_IP),
                                           ("X-Forwarded-For", "100.64.0.3")]).status_code == 401
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": "nonsense"}).status_code == 401
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN,
+                                          "X-Forwarded-For": "nonsense"}).status_code == 401
 
 
 def test_a_forwarded_address_from_an_unverified_peer_changes_nothing(forged):
@@ -162,7 +187,8 @@ def test_unknown_node_addresses_refuse_every_forwarded_request(tmp_path):
 
     client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check(self_ips=unavailable))
     with client:
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": FAKE_PEER_IP}).status_code == 401
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN,
+                                          "X-Forwarded-For": FAKE_PEER_IP}).status_code == 401
 
 
 # --- the check itself -------------------------------------------------------------------------------------------
@@ -291,6 +317,19 @@ def test_strip_identity_removes_every_tailscale_header():
     tailscale_peer.strip_identity(scope)
     assert scope["headers"] == [(b"host", b"127.0.0.1")]
     assert not tailscale_peer.has_identity(scope)
+
+
+def test_service_pid_asks_for_the_tailscale_service(monkeypatch):
+    asked = []
+
+    class Service:
+        def pid(self):
+            return 7500
+
+    monkeypatch.setattr(tailscale_peer.psutil, "win_service_get", lambda name: asked.append(name) or Service(),
+                        raising=False)
+    assert tailscale_peer.service_pid() == 7500
+    assert asked == ["Tailscale"]
 
 
 def test_install_dirs_follow_program_files(monkeypatch):

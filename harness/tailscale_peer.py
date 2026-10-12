@@ -3,7 +3,9 @@
 `tailscale serve` forwards tailnet requests to the loopback listener and adds `Tailscale-User-Login` and the other
 `Tailscale-*` identity headers. Any other program on this machine, or a container that reaches the host loopback, can
 reach the same listener and send the same headers. So the daemon looks up who owns the other end of the TCP
-connection: the identity headers count only when that process is tailscaled, run from the Tailscale install directory.
+connection: the identity headers count only when that process is the Tailscale Windows service, whose executable is
+tailscaled in the Tailscale install directory. The path alone is not enough: any local user can start that same
+tailscaled.exe in userspace mode as a proxy to the daemon and choose the headers it sends.
 Otherwise they are removed before anything reads them, and the request needs the local owner token or another
 credential (harness/local_owner.py).
 
@@ -38,6 +40,7 @@ HEADER_PREFIX = b"tailscale-"
 CACHE_SIZE = 256
 CACHE_SECONDS = 5.0  # absolute, from the lookup: a closed connection's port can be reused by another process
 TAILSCALED = "tailscaled.exe"
+SERVICE = "Tailscale"
 TAILSCALE_CLI = "tailscale.exe"
 FORWARDED_FOR = b"x-forwarded-for"
 SELF_IPS_SECONDS = 60.0
@@ -82,6 +85,11 @@ def process_exe(pid: int) -> str:
     return psutil.Process(pid).exe()
 
 
+def service_pid() -> int | None:
+    """The PID of the running Tailscale Windows service. Raises when the service is missing or can't be queried."""
+    return psutil.win_service_get(SERVICE).pid()
+
+
 def is_tailscaled(exe: str, dirs: list[Path]) -> bool:
     """The name alone proves nothing: the executable must sit directly in a Tailscale install directory."""
     if not exe:
@@ -111,14 +119,16 @@ def forwarded_for(scope) -> list[bytes]:
 
 
 class PeerCheck:
-    """Whether a connection's peer is tailscaled. Verdicts are cached per (client host, port) for a few seconds so
-    keep-alive requests do not repeat the lookup; a failed lookup is not cached and counts as not tailscaled."""
+    """Whether a connection's peer is the Tailscale service's tailscaled. Verdicts are cached per (client host, port)
+    for a few seconds so keep-alive requests do not repeat the lookup; a failed lookup is not cached and counts as not
+    tailscaled."""
 
     def __init__(self, *, owner=connection_owner, exe=process_exe, dirs=install_dirs, platform_ok=supported,
+                 service=service_pid,
                  self_ips=node_ips, clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS,
                  self_ips_ttl: float = SELF_IPS_SECONDS):
         self.owner, self.exe, self.dirs, self.platform_ok, self.clock = owner, exe, dirs, platform_ok, clock
-        self.self_ips, self.size, self.ttl, self.self_ips_ttl = self_ips, size, ttl, self_ips_ttl
+        self.service, self.self_ips, self.size, self.ttl, self.self_ips_ttl = service, self_ips, size, ttl, self_ips_ttl
         self._own: tuple[float, frozenset[str]] | None = None
         self._cache: OrderedDict[tuple[str, int], tuple[float, bool]] = OrderedDict()
         self._lock = threading.Lock()
@@ -152,7 +162,7 @@ class PeerCheck:
         self.lookups += 1
         try:
             pid = self.owner(key, (str(server[0]), int(server[1])))
-            verdict = bool(pid) and is_tailscaled(self.exe(pid), self.dirs())
+            verdict = bool(pid) and pid == self.service() and is_tailscaled(self.exe(pid), self.dirs())
         except Exception as exc:  # noqa: BLE001 - any failure means the peer is not known to be tailscaled
             log.warning("could not identify the process behind a request with Tailscale identity headers: %s", exc)
             return False
@@ -169,7 +179,7 @@ class PeerCheck:
                 return self._own[1]
         try:
             ips = frozenset(ip for ip in map(_canonical, self.self_ips()) if ip)
-        except Exception as exc:  # noqa: BLE001 - not knowing this node's addresses means no request is known to be remote
+        except Exception as exc:  # noqa: BLE001 - without this node's addresses no request is known to be remote
             log.warning("could not read this node's Tailscale addresses: %s", exc)
             return None
         if not ips:

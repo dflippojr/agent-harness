@@ -149,11 +149,12 @@ FAKE_PEER_IP = "100.64.0.2"  # another tailnet node, which `tailscale serve` nam
 
 
 def fake_tailscaled_check(**overrides):
-    """A peer check whose connection table says every peer is tailscaled from the install directory, on a node whose
-    Tailscale addresses are FAKE_NODE_IPS."""
+    """A peer check whose connection table says every peer is the Tailscale service's tailscaled (PID 4242), on a
+    node whose Tailscale addresses are FAKE_NODE_IPS."""
     from harness import tailscale_peer
     options = dict(owner=lambda client, server: 4242, exe=lambda pid: str(FAKE_TAILSCALE_DIR / "tailscaled.exe"),
-                   dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True, self_ips=lambda: FAKE_NODE_IPS)
+                   dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True, service=lambda: 4242,
+                   self_ips=lambda: FAKE_NODE_IPS)
     options.update(overrides)
     return tailscale_peer.PeerCheck(**options)
 
