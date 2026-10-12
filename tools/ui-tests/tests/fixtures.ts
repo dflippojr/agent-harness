@@ -16,6 +16,15 @@ export async function openSession(page: Page, title: string) {
   await page.locator('a.card[data-split-key]').filter({ has: page.getByRole('heading', { name: title, exact: true }) }).first().click();
   await expect(page.locator('.session-tabs')).toBeVisible();
 }
+// No horizontal overflow at the four reflow widths, each measured after two animation frames.
+export async function expectReflow(page: Page) {
+  for (const width of [320, 375, 768, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await expect.poll(() => page.evaluate(() => innerWidth)).toBe(width);
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+}
 export async function expectDone(page: Page) {
   await expect(page.locator('.session-strip .badge').first()).toHaveText('done');
   await expect(page.locator('main .final').last()).toBeVisible();

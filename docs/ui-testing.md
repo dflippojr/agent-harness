@@ -360,3 +360,16 @@ where they are.
 - Optional disabled modules currently yield 404 probes for `/gpu`, `/models/status`, `/resources`, `/memory`, and `/remote-control`. Record these as expected feature-detection diagnostics in fake mode, separately from unexpected HTTP failures and JavaScript exceptions. No request reaches a GPU or real model provider.
 - Installed iPhone SE descriptors can be 320×568; explicitly use 375×667 while retaining the descriptor UA/DPR/mobile/touch settings. Windows WebKit reports `navigator.maxTouchPoints=0` despite a context with `hasTouch=true`; record both rather than claiming physical touch hardware. Chromium Pixel emulation reports touch=1.
 - Root-font scaling is only a text-size approximation: fixed 16px form text stays 16px. Record that limitation separately from actual 320 CSS px reflow. The desktop breakpoint sweep includes 2560px, and short-screen checks include 1280×600, 1024×500, and phone landscapes.
+
+## Second pass coverage (#625)
+
+- The second pass ran after the mobile redesign (#506–#515) on iPhone SE, iPhone 15, Pixel 7, iPad Mini and desktop, in light and dark. It covered every Settings subpage and Actions tab, chat threads, sheets, rotation mid-flow, the keyboard approximation, short screens and zoom.
+- `tests/redesign.spec.ts` locks in the flows it found passing, in all six projects:
+  - every Settings subpage and Actions tab reflows at 320, 375, 768 and 1440 px, and Back returns to Settings
+  - the chat thread and an existing job's form reflow at the same widths
+  - the Rename chat sheet keeps its draft and focus through portrait → landscape → portrait and closes with Escape, browser Back and a backdrop tap
+  - the session composer and Send stay in view under the header at 60 % height in both orientations
+  - live resize from 1440 to 375 px and back keeps the Delete job sheet open, focus inside it and a partly edited name; Cancel returns focus to Delete, and a reload shows the unsaved name was never stored
+- The pass filed these defects: #626–#634. Their regression tests come with their fixes.
+- WebKit does not focus a button on click, so a sheet opened by a click returns focus to `body` there. Tests open the sheet from the keyboard when they check where focus returns.
+- A Web origin opened without `/connect` (no stored Server URL or token) shows "Demo access — look around only" and an HTTP 404 note. That is the expected state for an unconfigured, separately hosted copy, not a sign-in path.
