@@ -26,8 +26,8 @@ from .bus import EventBus
 from .checkpointer import Checkpointer
 from .checkpoints import MUTATING_TOOLS
 from .cli_backends import (CODEX_TOOLS_ONLY_ITEMS, ELICITATION, ClaudeSession, CliBackendError, CodexSession,
-                           CursorSession)
-from .config import Config, ModelConfig, resolve_tool_output, clamp_tool_limit, module_effective
+                           CursorSession, PrintModeSession, cli_route_ready, forwarder_url)
+from .config import BUILTIN_BACKENDS, Config, ModelConfig, resolve_tool_output, clamp_tool_limit, module_effective
 from .db import Database, finish_then_cancel
 from .mcp_server import MCP_BACKENDS, SPLIT_TOOLS, McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
@@ -268,7 +268,7 @@ class Runner:
         self.user_cancelled: set[str] = set()
         self._unended: set[str] = set()  # live runs whose _end_run has not started
         self._sandboxes: dict[str, Sandbox] = {}
-        self._cli_sessions: dict[str, ClaudeSession | CodexSession | CursorSession] = {}
+        self._cli_sessions: dict[str, ClaudeSession | CodexSession | CursorSession | PrintModeSession] = {}
         self._backend_slots = {name: asyncio.Semaphore(max(1, backend.max_sessions))
                                for name, backend in cfg.backends.items()}
         self._held_slots: dict[str, _HeldSlot] = {}   # a hosted run's backend slot, released around approvals
@@ -284,6 +284,9 @@ class Runner:
         self.cli_factory = ClaudeSession
         self.codex_factory = CodexSession
         self.cursor_factory = CursorSession
+        self.print_mode_factory = PrintModeSession   # every kind: cli backend (#168)
+        self.cli_route_ready = cli_route_ready       # its network and llama-server forwarder exist (Q9)
+        self.gpu_poll_seconds = 1.0                  # how often a local-model CLI turn re-checks a GPU hold
         self._quota_checked: dict[str, float] = {}
         self.checkpointer = Checkpointer(cfg, db, bus)
         self._checkpoints: dict[str, tuple[asyncio.Task, dict]] = {}   # a session's background checkpoint and its stats, until joined
@@ -1232,8 +1235,8 @@ class Runner:
     async def _run_cli(self, sid: str, recovered: bool = False) -> None:
         s = self.db.get_session(sid)
         backend_name = s["backend"]
-        backend = self.cfg.backends[backend_name]
-        if backend_name not in ("claude", "codex", "cursor"):
+        backend = self.cfg.backends.get(backend_name)
+        if backend is None or not (backend.is_cli or backend_name in BUILTIN_BACKENDS):
             raise CliBackendError(f"backend {backend_name!r} is not implemented")
         if recovered:
             await self.bus.aemit(sid, "resumed", {"status": s["status"]})
@@ -1270,6 +1273,7 @@ class Runner:
             finally:
                 self._held_slots.pop(sid, None)
                 self._unreserve(sid)
+                self.generating.discard(sid)  # a local-model CLI turn's lease on the model (#168)
 
     async def _admit_hosted(self, sid: str, s: dict, stack: contextlib.AsyncExitStack) -> None:
         """Take the session's credential lock (onto `stack`) once its member or App is under its running cap (#524),
@@ -1346,12 +1350,14 @@ class Runner:
                 run["token_expiry_warned"] = True
                 self.db.update_session(sid, run=run)
                 await self.bus.aemit(sid, "billing_warning", {"backend": backend_name, "message": note})
-        factory = {"claude": self.cli_factory, "codex": self.codex_factory,
-                   "cursor": self.cursor_factory}[backend_name]
         from dataclasses import replace
         frozen = replace(backend, model=s["model"], effort=s.get("effort") or backend.effort)
-        extra = {}
-        if backend_name in MCP_BACKENDS and backend.mcp and self.mcp_tool_schemas(sid):
+        if backend.is_cli:
+            factory, extra = self.print_mode_factory, await self._print_mode_extra(sid, s, backend_name, frozen)
+        else:
+            factory, extra = {"claude": self.cli_factory, "codex": self.codex_factory,
+                              "cursor": self.cursor_factory}[backend_name], {}
+        if not backend.is_cli and backend_name in MCP_BACKENDS and backend.mcp and self.mcp_tool_schemas(sid):
             extra = {"mcp": self.mcp_relay_factory(session_id=sid, backend=frozen, server=self.mcp_server),
                      "mcp_token": self.mcp_tokens.mint(sid)}
         if self.split_mode(s):
@@ -1382,6 +1388,57 @@ class Runner:
             s = self.db.get_session(sid)
             self.db.update_session(sid, run={**s["run"], "backend_session_id": cli.backend_session_id})
         return cli
+
+    async def _print_mode_extra(self, sid: str, s: dict, name: str, backend) -> dict:
+        """What a kind: cli session needs besides the common arguments: its local model, the forwarder's URL, where
+        its generated config goes, and the per-turn admission. Refuses when the route to llama-server is missing."""
+        model = self.cfg.models.get(s["model"])
+        if model is None:
+            raise CliBackendError(f"{name} runs on the local model; {s['model']!r} is not in models",
+                                  "model_unavailable")
+        if s.get("end_user"):
+            raise CliBackendError(f"{name} has no per-person login")
+        if not await asyncio.to_thread(self.cli_route_ready, backend):
+            raise CliBackendError(f"{name} can't reach the local model: the {backend.network} network or its "
+                                  "llama-server forwarder is missing (ops/cli-llm/compose.yaml)", "backend_unavailable")
+        return {"name": name, "model_config": model, "base_url": forwarder_url(backend, model.base_url),
+                "config_dir": self.cfg.data_dir / "cli-config" / name,
+                "admit": lambda: self._admit_local_cli_turn(sid, model)}
+
+    async def _admit_local_cli_turn(self, sid: str, model: ModelConfig) -> None:
+        """Before each turn of a CLI that runs on the local model (#168 Q7, Q10): the GPU hold, RAM and model load a
+        queued native turn waits on, through the local-model module. Without that module, the server must answer."""
+        self.generating.discard(sid)  # between turns it holds no lease, so a hold isn't kept waiting on it
+        admit = self.modules.local_turn_admission() if self.modules is not None else None
+        if admit is None:
+            if not await self._model_reachable(model):
+                raise CliBackendError(f"the local model server at {model.base_url} isn't reachable",
+                                      "model_unavailable")
+            return
+        refusal = await admit(sid, model)
+        if refusal:
+            raise CliBackendError(*refusal)
+        if self.db.get_session(sid)["status"] == "queued":
+            await self.aset_status(sid, "running")
+
+    async def wait_gpu_clear(self, sid: str) -> None:
+        """Wait in `queued` while the GPU guard holds the GPU; the session hears gpu_paused and gpu_resumed."""
+        if self.guard is None or not self.guard.active:
+            return
+        if self.db.get_session(sid)["status"] != "queued":
+            await self.aset_status(sid, "queued")
+        self.note_gpu_pause(sid)
+        while self.guard is not None and self.guard.active:
+            await asyncio.sleep(self.gpu_poll_seconds)
+
+    @staticmethod
+    async def _model_reachable(model: ModelConfig) -> bool:
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                return (await client.get(f"{model.base_url}/health")).status_code == 200
+        except httpx.HTTPError:
+            return False
 
     def _check_cli_credential(self, credential: dict, use_api_key: bool) -> None:
         if not credential["assignment_id"]:
@@ -1466,14 +1523,14 @@ class Runner:
             return {"policy": assignment["policy"], "key": self._read_secret(path),
                     "source": "app_file" if assignment["secret_ref"] else "subscription",
                     "assignment_id": assignment["id"], "path": path, "marker": self._secret_marker(path)}
-        if app_id and self.db.app_provider_managed(app_id):
+        if app_id and (backend.is_cli or self.db.app_provider_managed(app_id)):  # kind: cli needs a grant (#168)
             return {"policy": "denied", "key": "", "source": "app_file", "assignment_id": "",
                     "path": "", "marker": None}
         path = backend.api_key_file
         return {"policy": backend.auth, "key": self._read_secret(path), "source": "user_file",
                 "assignment_id": "", "path": path, "marker": self._secret_marker(path)}
 
-    async def _send_cli_inbox(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession) -> None:
+    async def _send_cli_inbox(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession | PrintModeSession) -> None:
         """Forward messages received during a CLI run without racing a newer inbox append."""
         queued = list(self.db.get_session(sid)["inbox"])
         if not queued:
@@ -1507,9 +1564,11 @@ class Runner:
                     parts.append(Runner._cli_text(block["content"]))
         return "\n".join(x for x in parts if x)
 
-    async def _handle_cli_event(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession, event: dict,
-                                 tool_names: dict[str, str], recovered: bool = False) -> bool:
+    async def _handle_cli_event(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession | PrintModeSession,
+                                 event: dict, tool_names: dict[str, str], recovered: bool = False) -> bool:
         """Map one hosted-CLI record. Returns true when the run is complete."""
+        if isinstance(cli, PrintModeSession):
+            return await self._handle_print_mode_event(sid, cli, event)
         if isinstance(cli, CodexSession):
             return await self._handle_codex_event(sid, cli, event, tool_names, recovered=recovered)
         if isinstance(cli, CursorSession):
@@ -1686,6 +1745,40 @@ class Runner:
         if cli.last_answer:
             self._emit_assistant(sid, cli.last_answer)
         self._finish_cli_result(sid, combined)
+        return True
+
+    async def _handle_print_mode_event(self, sid: str, cli: PrintModeSession, event: dict) -> bool:
+        """Map a kind: cli backend's parsed events (#168 Q4). Usage is not reported."""
+        type_ = event.get("type")
+        if type_ == "session":
+            if event["id"] != cli.backend_session_id:
+                self._bind_backend_session(sid, cli, event["id"])
+        elif type_ == "text":
+            self.bus.ephemeral(sid, "delta", {"kind": "content", "text": event["text"]})
+        elif type_ == "tool":
+            # The CLI reports a tool once it has run (auto-approved in its container): the call and its result.
+            self._emit_assistant(sid, "", [self._tool_call_entry(event["id"], event["name"], event["input"])])
+            self._record_cli_tool_result(sid, event["id"], event["name"], not event["error"], event["output"])
+        elif type_ == "step":
+            cli.steps += 1
+        elif type_ == "error":
+            raise CliBackendError(f"{cli.name}: {event['message']}")
+        elif type_ == "exit":
+            return await self._print_mode_exit(sid, cli, event)
+        return False
+
+    async def _print_mode_exit(self, sid: str, cli: PrintModeSession, event: dict) -> bool:
+        """A turn's process ended: an error, the next queued turn, or the run's result."""
+        if event.get("code") != 0:
+            detail = f": {event['stderr']}" if event.get("stderr") else ""
+            raise CliBackendError(f"{cli.name} exited with code {event.get('code')}{detail}")
+        if cli.has_followups:
+            await cli.continue_followups()
+            return False
+        if cli.last_answer:
+            self._emit_assistant(sid, cli.last_answer)
+        self._finish_cli_result(sid, {"result": cli.last_answer, "usage": {}, "num_turns": cli.steps,
+                                      "total_cost_usd": 0})
         return True
 
     @staticmethod

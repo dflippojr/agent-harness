@@ -38,6 +38,17 @@ SERVICE_BACKENDS = {
                "network": "harness-cli-cursor"},
 }
 
+
+
+def opencode_backend(model: str) -> dict:
+    """OpenCode on the local model (#168), off until the owner turns it on and starts ops/cli-llm/compose.yaml."""
+    return {"enabled": False, "kind": "cli", "image": "agent-harness-cli:1", "model": model,
+            "command": ["opencode", "run", "--format", "json", "--auto", "-m", "llama/{model}"],
+            "resume_args": ["--session", "{session_id}"], "parser": "opencode_jsonl",
+            "network": "harness-cli-opencode", "volume": "harness-state-opencode", "max_sessions": 1,
+            "permission_mode": "auto"}
+
+
 PROJECTS = """# Projects a session can run under. See the repository's config/projects.yaml for every field
 # (git repos with review branches, homelab tools, MacBook targets, approval rules).
 projects:
@@ -88,8 +99,11 @@ def build(args) -> dict:
         "skills": {"enabled": args.profile == "full" or "skills" in enabled},
         "remote_control": {"enabled": "remote_control" in enabled},
     }
-    if args.profile == "service":
-        result["backends"] = SERVICE_BACKENDS
+    backends = dict(SERVICE_BACKENDS) if args.profile == "service" else {}
+    if local_model:
+        backends["opencode"] = opencode_backend(preset["name"])
+    if backends:
+        result["backends"] = backends
     return result
 
 

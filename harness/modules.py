@@ -235,6 +235,12 @@ class ModuleRuntime:
     def wire_resources(self, guard, warmer) -> None:
         """The resource guard is on: take its RAM check and lazy-load preference."""
 
+    def local_turn_admission(self):
+        """For a module that supervises the local model: an async ``admit(sid, model)`` that a CLI turn on that model
+        awaits first (#168): the GPU hold, RAM admission and the model load a queued native turn waits on. It returns
+        None when admitted, else ``(message, code)``. None here: this module doesn't supervise the model."""
+        return None
+
     def start(self) -> None:
         """Daemon start, on the event loop."""
 
@@ -461,6 +467,9 @@ class ModuleHost:
 
     def model_control(self):
         return next((control for rt in self if (control := rt.model_control()) is not None), None)
+
+    def local_turn_admission(self):
+        return next((admit for rt in self if (admit := rt.local_turn_admission()) is not None), None)
 
     def backup_participant(self):
         """Maintenance takes one backup participant (the image archive today)."""

@@ -30,6 +30,12 @@ POPULAR_MODELS = {
 }
 
 
+# Settings → Backends for a kind: cli backend (#168 Q8, Q5), unless its config gives a card_note.
+CLI_CARD_NOTE = ("Runs without asking for approval inside its sandbox. Uses the local model, which is much weaker "
+                 "than the hosted backends. Usage is not reported.")
+CLI_LOGIN_NOTE = "No login needed (local model)"
+
+
 def billing_warning(cfg, limits: dict | None = None, using_api_key: bool = False) -> str:
     limits = limits or {}
     status = str(limits.get("status") or "").lower()
@@ -179,9 +185,43 @@ def _credential_state(cfg, provider_policy: dict | None, check_auth: bool) -> tu
     return True, cfg.auth, key_ready
 
 
+_route_cache: dict[str, tuple[float, bool]] = {}
+
+
+def cli_route_status(cfg) -> bool:
+    """Whether a kind: cli backend's network and forwarder are up (Q9), cached like a login probe."""
+    from .cli_backends import cli_route_ready
+    now = time.time()
+    cached = _route_cache.get(cfg.network)
+    if cached and cached[0] > now:
+        return cached[1]
+    ok = cli_route_ready(cfg)
+    _route_cache[cfg.network] = (now + _AUTH_TTL, ok)
+    return ok
+
+
+def cli_view(manager, name: str, check_auth: bool = True, app_id: str | None = None) -> dict:
+    """A kind: cli backend (#168): keyless, on the local model, no login and no usage. Invisible to an App until the
+    owner grants it; unavailable while its route to llama-server is missing (Q9) or the local model is off."""
+    cfg = manager.cfg.backends[name]
+    provider_policy = manager.app_provider_status(app_id, name) if app_id is not None else None
+    allowed = provider_policy is None or provider_policy["allowed"]
+    ready = bool(manager.cfg.models) and (cli_route_status(cfg) if check_auth else True)
+    return {
+        "name": name, "kind": "cli", "available": cfg.enabled and allowed and ready, "logged_in": True,
+        "auth": "none", "billing": "local", "model": cfg.model, "effort": "",
+        "limits": {}, "limits_updated_at": None, "today": {}, "week": {}, "usage_by_source": {},
+        "provider_policy": provider_policy, "notice": cfg.card_note or CLI_CARD_NOTE, "login_note": CLI_LOGIN_NOTE,
+        "billing_warning": "", "api_key_available": False, "app_tools_only": False,
+        "popular_models": [{"id": model, "label": model} for model in manager.cfg.models],
+    }
+
+
 def view(manager, name: str, check_auth: bool = True, app_id: str | None = None,
          include_usage: bool = True) -> dict:
     cfg = manager.cfg.backends[name]
+    if cfg.is_cli:
+        return cli_view(manager, name, check_auth, app_id)
     state = manager.db.get_backend_usage(name)
     now = time.time()
     local_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
@@ -242,7 +282,7 @@ def _apply_pref(manager, name: str, spec: dict) -> None:
         if model in manager.cfg.models:
             manager.cfg.default_model = model
     elif name in manager.cfg.backends:
-        if model:
+        if model and (not manager.cfg.backends[name].is_cli or model in manager.cfg.models):
             manager.cfg.backends[name].model = model
         if effort in EFFORTS:
             manager.cfg.backends[name].effort = effort

@@ -243,6 +243,15 @@ if ($EffectiveProfile -eq 'Service') {
         if ($LASTEXITCODE -ne 0) { Die 'starting the provider egress proxies failed' }
     }
 }
+if ($NeedsLocalModel) {
+    # kind: cli backends such as OpenCode (#168, off by default) reach llama-server only through this forwarder.
+    Step 'Local-model route for CLI backends'
+    Act 'start the harness-cli-opencode network and its llama-server forwarder' {
+        $env:LLAMA_PORT = if ($ExistingServer) { ([uri]$ExistingServer).Port } else { $ServerPort }
+        & docker compose -f (Join-Path $AppDir 'ops\cli-llm\compose.yaml') up -d
+        if ($LASTEXITCODE -ne 0) { Die 'starting the CLI backend llama-server forwarder failed' }
+    }
+}
 
 Step 'Configuration'
 $configDir = Join-Path $InstallDir 'config'

@@ -835,6 +835,7 @@ function installCard() {
 
 function backendUsage(b) {
   if (b.name === "local") return "Local Qwen on this PC";
+  if (b.kind === "cli") return `${b.login_note} · ${b.notice}`;
   const limits = b.limits || {};
   const pct = limits.utilization === undefined ? null : Math.round(limits.utilization * 100);
   const period = String(limits.rateLimitType || "limit").replace("seven_day", "7d").replace("five_hour", "5h");
@@ -941,7 +942,8 @@ async function backendsCard() {
     input.addEventListener("change", () => save(input.value.trim()));
     return [sel, input];
   };
-  const BACKEND_TITLES = { local: "Qwen (this PC)", claude: "Claude", codex: "Codex", cursor: "Cursor" };
+  const BACKEND_TITLES = { local: "Qwen (this PC)", claude: "Claude", codex: "Codex", cursor: "Cursor", opencode: "OpenCode" };
+  const noEffort = (b) => b.name === "local" || b.kind === "cli";
   const title = (b) => BACKEND_TITLES[b.name] || b.name;
   const usage = {};
   fill(body, rows.length ? rows.map((b) => {
@@ -952,8 +954,8 @@ async function backendsCard() {
       line,
       isGuest() ? null : h("label", {}, "Default model"),
       isGuest() ? null : modelControl(b),
-      isGuest() || b.name === "local" ? null : h("label", {}, "Effort"),
-      isGuest() || b.name === "local" ? null : effortSelect(b));
+      isGuest() || noEffort(b) ? null : h("label", {}, "Effort"),
+      isGuest() || noEffort(b) ? null : effortSelect(b));
   }) : h("p", { class: "muted small" }, "No backends configured."));
   api("/backends").then((fresh) => {
     for (const b of fresh) {

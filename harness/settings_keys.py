@@ -415,6 +415,8 @@ def _backend_model_set(name: str):
             raise ValueError("model is empty")
         if len(model) > 80:
             raise ValueError("model is too long")
+        if backend.is_cli and model not in cfg.models:  # it runs on the local model (#168)
+            raise ValueError(f"{name} runs on the local model; unknown model {model!r}")
         backend.model = model
     return setter
 

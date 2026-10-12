@@ -1,0 +1,28 @@
+# The route from config-declared CLI backends (kind: cli, #168) to the host's llama-server.
+#   docker compose -f ops/cli-llm/compose.yaml up -d
+# A CLI container joins only `harness-cli-opencode`: internal, no proxy, no route out. Its only other member is this
+# forwarder, which passes exactly one TCP port (the llama-server port in the session model's base_url, 8090 by
+# default; set LLAMA_PORT to change it) to the host and nothing else. The forwarder reaches the host through its own
+# `harness-cli-opencode-host` bridge, which no CLI container joins. It is never on `harness-egress`.
+# The harness finds it as `<network>-llm`; while the network or the forwarder is missing the backend is unavailable.
+name: harness-cli-llm
+
+services:
+  opencode:
+    image: alpine/socat:1.8.0.3
+    container_name: harness-cli-opencode-llm
+    restart: unless-stopped
+    read_only: true
+    mem_limit: 32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    command: ["TCP-LISTEN:${LLAMA_PORT:-8090},fork,reuseaddr", "TCP:host.docker.internal:${LLAMA_PORT:-8090}"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [harness-cli-opencode, harness-cli-opencode-host]
+
+networks:
+  harness-cli-opencode:
+    name: harness-cli-opencode
+    internal: true
+  harness-cli-opencode-host:
+    name: harness-cli-opencode-host

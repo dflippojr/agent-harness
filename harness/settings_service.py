@@ -521,9 +521,11 @@ class SettingsService:
             return bool(self.cfg.modules.local_model and self.cfg.models)
         if backend not in self.cfg.backends or not self.cfg.backends[backend].enabled:
             return False
+        # A kind: cli backend is invisible to every App until the owner grants it, managed or not (#168).
+        needs_grant = self.cfg.backends[backend].is_cli
         if self.db is None:
-            return True
-        if not self.db.app_provider_managed(key["id"]):
+            return not needs_grant
+        if not needs_grant and not self.db.app_provider_managed(key["id"]):
             return True
         return self.db.app_provider_credential(key["id"], backend) is not None
 

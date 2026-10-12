@@ -1,5 +1,5 @@
 # Sandbox image for subscription backends (docs/phase8a-design.md): the normal session sandbox plus the unmodified
-# Claude Code, Codex and Cursor Agent CLIs. Build after the base image:
+# Claude Code, Codex, Cursor Agent and OpenCode CLIs. Build after the base image:
 #   docker build -t agent-harness-sandbox:py312 sandbox
 #   docker build -t agent-harness-cli:1 -f sandbox/cli.Dockerfile sandbox
 # Logins live in per-provider volumes mounted at the CLIs' home directories, never in the image.
@@ -11,6 +11,8 @@ FROM ${SANDBOX_IMAGE}
 
 ARG CLAUDE_CODE_VERSION=2.1.272
 ARG CODEX_VERSION=0.154.0
+# OpenCode (#168) at the version reference/opencode pinned for Phase 0; it runs keyless on the local model.
+ARG OPENCODE_VERSION=1.18.30
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -36,5 +38,11 @@ ENV HOME=/home/agent PATH=/home/agent/.local/bin:$PATH \
 # Cursor publishes only an install script (no pinned packages); it installs into ~/.local/bin.
 RUN curl -fsS https://cursor.com/install | bash \
     && agent --version
+
+# OpenCode installs into ~/.local for the agent user. Its sessions live under XDG_DATA_HOME, which the harness points
+# into a per-domain state volume; its config is generated per session and mounted read-only (harness/cli_backends.py).
+RUN npm install -g --prefix /home/agent/.local --no-fund --no-audit "opencode-ai@${OPENCODE_VERSION}" \
+    && npm cache clean --force \
+    && opencode --version
 
 WORKDIR /workspace

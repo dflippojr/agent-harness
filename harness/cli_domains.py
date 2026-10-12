@@ -53,10 +53,11 @@ class Layout:
     ro_dirs: tuple[str, ...] = ()       # paths under state_dir, mounted as empty read-only directories
     state_subdirs: tuple[str, ...] = ()  # created and handed to the agent user before the first session
     managed_files: tuple[tuple[str, str], ...] = ()  # (absolute path in the container, source file under cli_home/<backend>/)
+    keyless: bool = False               # no login at all (a kind: cli backend on the local model, #168)
 
     @property
     def per_app_login(self) -> bool:
-        return not self.login_dir
+        return not self.login_dir and not self.keyless
 
 
 LAYOUTS = {
@@ -87,6 +88,28 @@ LAYOUTS = {
         ro_files=(("config/permissions.json", "permissions.json"),),
         state_subdirs=("config", "data")),
 }
+
+
+# Every kind: cli backend (#168): its state (sessions, logs) under XDG dirs in one state volume per domain, no login.
+# The rest of HOME, including ~/.config, goes with the container.
+CLI_LAYOUT = Layout(
+    state_dir="/home/agent/.cli-state", login_dir="",
+    env=("XDG_DATA_HOME=/home/agent/.cli-state/data", "XDG_STATE_HOME=/home/agent/.cli-state/state"),
+    state_subdirs=("data", "state"), keyless=True)
+
+
+def layout_of(backend: str, cfg=None) -> Layout:
+    """`backend`'s layout: a built-in CLI's own, or the shared one of a kind: cli backend."""
+    if backend in LAYOUTS:
+        return LAYOUTS[backend]
+    if cfg is not None and getattr(cfg, "is_cli", False):
+        return CLI_LAYOUT
+    raise KeyError(backend)
+
+
+def has_state(backend: str, cfg) -> bool:
+    """Whether `backend` keeps CLI state in per-domain volumes."""
+    return backend in LAYOUTS or bool(getattr(cfg, "is_cli", False))
 
 
 END_USER_BACKENDS = ("claude", "codex")  # the backends an App's end user can sign in to (#365)
@@ -121,8 +144,8 @@ def end_user_volume(backend: str, app_id: str, end_user: str) -> str:
     return f"harness-eu-{backend}-{digest}"
 
 
-def _layout(backend: str, end_user: str) -> Layout:
-    return end_user_layout(backend) if end_user else LAYOUTS[backend]
+def _layout(backend: str, end_user: str, cfg=None) -> Layout:
+    return end_user_layout(backend) if end_user else layout_of(backend, cfg)
 
 
 def domain_slug(app_id: str) -> str:
@@ -135,7 +158,7 @@ def domain_slug(app_id: str) -> str:
 def _stem(backend: str, cfg) -> tuple[str, bool]:
     """The backend's configured Web volume, and whether it has the standard `harness-auth-<backend>` name."""
     volume = cfg.volume
-    return volume, volume == f"harness-auth-{backend}"
+    return volume, volume in (f"harness-auth-{backend}", f"harness-state-{backend}")
 
 
 def state_volume(backend: str, cfg, app_id: str = "") -> str:
@@ -147,7 +170,7 @@ def state_volume(backend: str, cfg, app_id: str = "") -> str:
 
 
 def login_volume(backend: str, cfg, app_id: str = "") -> str:
-    if LAYOUTS[backend].per_app_login:
+    if not layout_of(backend, cfg).login_dir:  # Codex keeps its login in the state; a keyless CLI has none
         return state_volume(backend, cfg, app_id)
     volume, standard = _stem(backend, cfg)
     return f"harness-login-{backend}" if standard else f"{volume}-login"
@@ -162,7 +185,7 @@ def docker_args(backend: str, cfg, app_id: str = "", *, token: bool = False, end
     With `token` (Claude's CLAUDE_CODE_OAUTH_TOKEN, #390) the session has no login volume: nothing can refresh, race
     over or overwrite a shared credential. With `end_user` (#365) the session has that person's own volume and never the
     token."""
-    layout = _layout(backend, end_user)
+    layout = _layout(backend, end_user, cfg)
     token = token and not end_user
     args: list[str] = []
     for item in layout.env:
@@ -186,7 +209,7 @@ def docker_args(backend: str, cfg, app_id: str = "", *, token: bool = False, end
 def probe_args(backend: str, cfg, app_id: str = "", end_user: str = "") -> list[str]:
     """Mounts for a login-status probe: the login only. The CLI's state is a throwaway directory in the container,
     except for an end user's single volume (#365), which holds both."""
-    layout = _layout(backend, end_user)
+    layout = _layout(backend, end_user, cfg)
     if end_user:
         return [*[a for item in layout.env for a in ("-e", item)],
                 "-v", f"{end_user_volume(backend, app_id, end_user)}:{layout.state_dir}"]
@@ -198,7 +221,7 @@ def probe_args(backend: str, cfg, app_id: str = "", end_user: str = "") -> list[
 def prepare_command(backend: str, cfg, app_id: str = "", end_user: str = "") -> list[str]:
     """A throwaway root container that creates the domain's volumes and hands them to the agent user. A volume
     mounted where the image has no directory, and any directory Docker makes for a nested mount, would be root's."""
-    layout = _layout(backend, end_user)
+    layout = _layout(backend, end_user, cfg)
     state = end_user_volume(backend, app_id, end_user) if end_user else state_volume(backend, cfg, app_id)
     args = ["docker", "run", "--rm", "--network", "none", "--user", "0:0", "-v", f"{state}:/state"]
     owned = ["/state", *(f"/state/{d}" for d in layout.state_subdirs)]
@@ -252,10 +275,10 @@ def app_volumes(backends: dict, app_id: str) -> list[str]:
         raise ValueError("Web's CLI volumes are never removed")
     names = []
     for backend, cfg in backends.items():
-        if backend in LAYOUTS:
+        if has_state(backend, cfg):
             names += [state_volume(backend, cfg, app_id), login_volume(backend, cfg, app_id)]
     return list(dict.fromkeys(n for n in names if n not in {login_volume(b, c) for b, c in backends.items()
-                                                           if b in LAYOUTS}))
+                                                           if has_state(b, c)}))
 
 
 async def drop_app_volumes(backends: dict, app_id: str) -> None:
