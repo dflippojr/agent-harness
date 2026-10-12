@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -188,19 +189,140 @@ scripts:
     turns: [{error: {message: "HTTP 400: no"}}]
 """, tmp_path)
     messages = [{"role": "user", "content": "flaky"}]
-    for _ in range(2):
-        with pytest.raises(LLMError, match="boom") as raised:
-            run(fake(None, messages, TOOLS))
-        assert raised.value.retryable
-    assert run(fake(None, messages, TOOLS)).content == "recovered"
-    # Once a call got through, the next session that reaches the same context fails the same way again.
-    with pytest.raises(LLMError, match="boom"):
-        run(fake(None, messages, TOOLS))
+    async def retries():
+        for _ in range(2):
+            with pytest.raises(LLMError, match="boom") as raised:
+                await fake(None, messages, TOOLS)
+            assert raised.value.retryable
+        assert (await fake(None, messages, TOOLS)).content == "recovered"
+        # Success resets the sequence even if the caller reuses its task and messages.
+        with pytest.raises(LLMError, match="boom"):
+            await fake(None, messages, TOOLS)
+
+    run(retries())
     fatal = [{"role": "user", "content": "fatal"}]
     for _ in range(2):   # a fatal error fails every time, so a rerun of the failed session fails the same way
         with pytest.raises(LLMError) as raised:
             run(fake(None, fatal, TOOLS))
         assert not raised.value.retryable
+
+
+async def assert_retry_sequence(fake, messages, times):
+    for _ in range(times):
+        with pytest.raises(LLMError, match="boom") as raised:
+            await fake(None, messages, TOOLS)
+        assert raised.value.retryable
+    assert (await fake(None, messages, TOOLS)).content == "recovered"
+
+
+def test_cancelled_delayed_error_does_not_consume_a_fresh_requests_errors(monkeypatch, tmp_path):
+    fake = model("""scripts: [{name: flaky, match: flaky, turns:
+        [{wait: 60, error: {message: boom, retryable: true, times: 1}, text: recovered}]}]""", tmp_path)
+    messages = [{"role": "user", "content": "flaky"}]
+
+    async def scenario():
+        entered = asyncio.Event()
+        block = True
+
+        async def delay(seconds):
+            assert seconds == 60
+            if block:
+                entered.set()
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(fake_model.asyncio, "sleep", delay)
+        abandoned = asyncio.create_task(fake(None, messages, TOOLS))
+        try:
+            await asyncio.wait_for(entered.wait(), scaled(5))
+        finally:
+            abandoned.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await abandoned
+        block = False
+        assert not fake._failures
+        await assert_retry_sequence(fake, messages, 1)
+        # Keep a strong reference to the cancelled task: cleanup must not wait for garbage collection.
+        assert abandoned.cancelled()
+        assert not any(fake._failures.values())
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("ending", ["cancel", "return", "error"])
+def test_abandoned_retry_backoff_is_cleaned_up(monkeypatch, fake_manager, tmp_path, ending):
+    fake = model("""scripts: [{name: flaky, match: flaky, turns:
+        [{error: {message: boom, retryable: true, times: 2}, text: recovered}]}]""", tmp_path)
+    messages = [{"role": "user", "content": "flaky"}]
+    runner = fake_manager.runner
+    runner.chat = fake
+    retries = []
+
+    async def capture(_sid, kind, data):
+        if kind == "llm_retry":
+            retries.append(data["attempt"])
+
+    monkeypatch.setattr(runner.bus, "aemit", capture)
+    stream = SimpleNamespace(on_delta=None, flush=lambda: None)
+
+    async def scenario():
+        entered = asyncio.Event()
+
+        async def backoff(seconds):
+            if seconds == 2:
+                entered.set()
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(fake_model.asyncio, "sleep", backoff)
+
+        async def request():
+            try:
+                await runner._call_with_retries("synthetic", None, messages, TOOLS, stream, None,
+                                               {"invalid_tool_calls": 0})
+            except asyncio.CancelledError:
+                if ending == "cancel":
+                    raise
+                if ending == "error":
+                    raise RuntimeError("run terminated") from None
+
+        abandoned = asyncio.create_task(request())
+        try:
+            await asyncio.wait_for(entered.wait(), scaled(5))
+            assert retries == [1, 2]
+        finally:
+            abandoned.cancel()
+            if ending == "return":
+                await abandoned
+            else:
+                error = asyncio.CancelledError if ending == "cancel" else RuntimeError
+                with pytest.raises(error):
+                    await abandoned
+        assert not fake._failures
+        await assert_retry_sequence(fake, messages, 2)
+        assert abandoned.done() and not any(fake._failures.values())
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("times", [1, 3])
+def test_identical_requests_have_independent_interleaved_retries(tmp_path, times):
+    fake = model(f"""scripts: [{{name: flaky, match: flaky, turns:
+        [{{error: {{message: boom, retryable: true, times: {times}}}, text: recovered}}]}}]""", tmp_path)
+    messages = [{"role": "user", "content": "flaky"}]
+
+    async def scenario():
+        barrier = asyncio.Barrier(2)
+
+        async def request():
+            for _ in range(times):
+                with pytest.raises(LLMError, match="boom"):
+                    await fake(None, messages, TOOLS)
+                await barrier.wait()
+            assert (await fake(None, messages, TOOLS)).content == "recovered"
+
+        await asyncio.wait_for(asyncio.gather(request(), request()), scaled(5))
+        assert not fake._failures
+
+    run(scenario())
 
 
 def test_summary_requests_get_the_fixture_summary_and_no_tool_calls(tmp_path):
