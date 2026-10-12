@@ -19,7 +19,9 @@ headers too.
 
 Nor does tailscaled add those headers on a raw TCP forward (`tailscale serve --tcp` or `--tls-terminated-tcp`): it
 passes the caller's bytes through, so a tailnet peer would write `Tailscale-User-Login` itself. While the node's serve
-config has any raw TCP forward to the daemon's port, or can't be read, no request gets a tailnet identity.
+config has any raw TCP forward to the daemon's port, or can't be read, no request gets a tailnet identity. The config is
+read with each new connection's lookup, never from a separate cache: a raw forward opens its own connection from
+tailscaled, so it always meets the config as it is now.
 
 The check is implemented for Windows. Elsewhere the headers are removed unless `listen.trust_unverified_identity_headers`
 is set, which trusts any local process that sends them.
@@ -51,7 +53,6 @@ SERVICE = "Tailscale"
 TAILSCALE_CLI = "tailscale.exe"
 FORWARDED_FOR = b"x-forwarded-for"
 SELF_IPS_SECONDS = 60.0
-SERVE_SECONDS = 5.0  # only the node's operator changes the serve config, so a short lag after a change is harmless
 
 
 def supported() -> bool:
@@ -175,21 +176,20 @@ def forwarded_for(scope) -> list[bytes]:
 
 
 class PeerCheck:
-    """Whether a connection's peer is the Tailscale service's tailscaled. Verdicts are cached per (client host, port)
-    for a few seconds so keep-alive requests do not repeat the lookup; a failed lookup is not cached and counts as not
-    tailscaled."""
+    """Whether a connection's peer is the Tailscale service's tailscaled, on a node whose serve config has no raw TCP
+    forward to the daemon. Verdicts are cached per (client host, port) for a few seconds so keep-alive requests do not
+    repeat the lookup; a failed lookup is not cached and counts as not tailscaled."""
 
     def __init__(self, *, owner=connection_owner, exe=process_exe, dirs=install_dirs, platform_ok=supported,
                  service=service_pid, child_of=started_by, tailscale_ips=node_ips, interface_addrs=interface_ips,
                  serve=serve_config, clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS,
-                 tailscale_ips_ttl: float = SELF_IPS_SECONDS, serve_ttl: float = SERVE_SECONDS):
+                 tailscale_ips_ttl: float = SELF_IPS_SECONDS):
         self.owner, self.exe, self.dirs, self.platform_ok, self.clock = owner, exe, dirs, platform_ok, clock
         self.service, self.child_of, self.serve = service, child_of, serve
         # The node's Tailscale addresses are cached; its interface addresses are read on every request.
         self.tailscale_ips, self.interface_addrs = tailscale_ips, interface_addrs
-        self.size, self.ttl, self.tailscale_ips_ttl, self.serve_ttl = size, ttl, tailscale_ips_ttl, serve_ttl
+        self.size, self.ttl, self.tailscale_ips_ttl = size, ttl, tailscale_ips_ttl
         self._own: tuple[float, frozenset[str]] | None = None
-        self._serve: tuple[float, dict] | None = None
         self._cache: OrderedDict[tuple[str, int], tuple[float, bool]] = OrderedDict()
         self._lock = threading.Lock()
         self.lookups = 0
@@ -226,6 +226,13 @@ class PeerCheck:
         except Exception as exc:  # noqa: BLE001 - any failure means the peer is not known to be tailscaled
             log.warning("could not identify the process behind a request with Tailscale identity headers: %s", exc)
             return False
+        if verdict:
+            # Read now, with this connection: a raw forward's connection is always new, so it never meets a stale config.
+            try:
+                verdict = not raw_forward_to(self.serve(), int(server[1]))
+            except Exception as exc:  # noqa: BLE001 - an unread serve config could hold a raw TCP forward
+                log.warning("could not read this node's tailscale serve config: %s", exc)
+                return False
         self._remember(key, verdict)
         return verdict
 
@@ -236,15 +243,6 @@ class PeerCheck:
     def own_ips_cached(self) -> bool:
         with self._lock:
             return self._own is not None and self.clock() < self._own[0]
-
-    def serve_cached(self) -> bool:
-        with self._lock:
-            return self._serve is not None and self.clock() < self._serve[0]
-
-    def warm(self, client: tuple[str, int] | None) -> bool:
-        """Whether `admits` can answer from its caches alone, without a lookup that blocks."""
-        return (bool(client) and self.cached((str(client[0]), int(client[1]))) is not None
-                and self.own_ips_cached() and self.serve_cached())
 
     def _own_ips(self) -> frozenset[str] | None:
         with self._lock:
@@ -261,30 +259,10 @@ class PeerCheck:
             self._own = (self.clock() + self.tailscale_ips_ttl, ips)
         return ips
 
-    def _serve_config(self) -> dict | None:
-        with self._lock:
-            if self._serve is not None and self.clock() < self._serve[0]:
-                return self._serve[1]
-        try:
-            config = self.serve()
-        except Exception as exc:  # noqa: BLE001 - an unread serve config could hold a raw TCP forward
-            log.warning("could not read this node's tailscale serve config: %s", exc)
-            return None
-        with self._lock:
-            self._serve = (self.clock() + self.serve_ttl, config)
-        return config
-
-    def headers_from_tailscaled(self, port: int) -> bool:
-        """Whether tailscaled writes the identity headers on every path to `port`: false while the serve config
-        forwards raw TCP to it, so the caller's own bytes arrive, or when the config can't be read."""
-        config = self._serve_config()
-        return config is not None and not raw_forward_to(config, port)
-
     def admits(self, client: tuple[str, int] | None, server: tuple[str, int] | None, forwarded: list[bytes]) -> bool:
         """Whether a request's Tailscale identity headers count: tailscaled sent them, wrote them itself, and named
-        another tailnet node."""
-        return (self.verify(client, server) and server is not None and self.headers_from_tailscaled(int(server[1]))
-                and self.from_other_node(forwarded))
+        another tailnet node. It may run a lookup that blocks."""
+        return self.verify(client, server) and self.from_other_node(forwarded)
 
     def from_other_node(self, forwarded: list[bytes]) -> bool:
         """Whether tailscaled forwarded the request from another tailnet node. Call only for a verified tailscaled peer:

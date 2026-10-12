@@ -330,11 +330,8 @@ async def _identity_from_tailscaled(request: Request, m: Manager) -> None:
     check = m.tailscale_peer
     if check.platform_ok():
         # X-Forwarded-For counts only once the check knows tailscaled set it.
-        client, server, forwarded = scope.get("client"), scope.get("server"), tailscale_peer.forwarded_for(scope)
-        if check.warm(client):
-            trusted = check.admits(client, server, forwarded)
-        else:
-            trusted = await asyncio.to_thread(check.admits, client, server, forwarded)
+        trusted = await asyncio.to_thread(check.admits, scope.get("client"), scope.get("server"),
+                                          tailscale_peer.forwarded_for(scope))
     else:
         trusted = m.cfg.trust_unverified_identity_headers
     if not trusted:

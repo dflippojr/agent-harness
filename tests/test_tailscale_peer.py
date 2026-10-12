@@ -232,13 +232,15 @@ def test_a_raw_tcp_forward_to_the_daemon_port_refuses_every_tailnet_identity(tmp
     with client:
         for config in (with_tcp_forward(f"127.0.0.1:{port}"), with_tcp_forward(f"localhost:{port}", "Foreground"),
                        with_tcp_forward(f"[::1]:{port}", "Services"), with_tcp_forward("127.0.0.1:not-a-port")):
-            check.serve, check._serve = (lambda c=config: c), None
+            check.serve = lambda c=config: c
+            check._cache.clear()  # a raw forward arrives on a new connection
             assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
             assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
                                headers={"Tailscale-User-Login": LOGIN}).status_code == 401
         assert m.db.list_api_keys() == []
         # A raw forward to another port leaves the daemon's HTTPS path alone.
-        check.serve, check._serve = (lambda: with_tcp_forward(f"127.0.0.1:{port + 1}")), None
+        check.serve = lambda: with_tcp_forward(f"127.0.0.1:{port + 1}")
+        check._cache.clear()
         assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()["role"] == "owner"
 
 
@@ -251,7 +253,7 @@ def test_an_unreadable_serve_config_refuses_every_tailnet_identity(tmp_path):
     with client:
         assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
         assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-    assert not check.serve_cached()  # a failure is not cached, so the next request asks again
+    assert check.lookups == 2  # a failure is not cached, so the next request asks again
 
 
 # --- the check itself -------------------------------------------------------------------------------------------
@@ -403,13 +405,14 @@ def test_node_ips_reads_tailscale_ip_from_the_install_directory(monkeypatch, tmp
         tailscale_peer.node_ips([tmp_path / "missing"])
 
 
-def test_the_serve_config_is_cached_briefly():
-    clock, calls = Clock(), []
-    check = fake_tailscaled_check(serve=lambda: calls.append(1) or FAKE_SERVE_CONFIG, clock=clock, serve_ttl=5)
-    assert check.headers_from_tailscaled(8100) and check.headers_from_tailscaled(8100)
-    assert len(calls) == 1
-    clock.now += 5
-    assert check.headers_from_tailscaled(8100) and len(calls) == 2
+def test_a_new_connection_reads_the_serve_config_as_it_is_now():
+    """No separate cache: a raw forward added after an HTTPS request is seen by the forward's own, new connection."""
+    config = {"now": FAKE_SERVE_CONFIG}
+    check = fake_tailscaled_check(serve=lambda: config["now"])
+    assert check.verify(CLIENT, SERVER)
+    config["now"] = with_tcp_forward(f"127.0.0.1:{SERVER[1]}")
+    assert check.verify(CLIENT, SERVER)  # the HTTPS connection already verified: tailscaled writes its headers
+    assert not check.verify(("127.0.0.1", 51299), SERVER)  # the raw forward's connection
 
 
 def test_raw_forward_to_matches_the_port_on_any_host():
