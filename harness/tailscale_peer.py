@@ -147,7 +147,7 @@ def _tailscale(args: list[str], dirs: list[Path] | None) -> str:
     for d in dirs if dirs is not None else install_dirs():
         cli = d / TAILSCALE_CLI
         if cli.is_file():
-            return subprocess.run([str(cli), *args], capture_output=True, text=True, timeout=10, check=True,
+            return subprocess.run([str(cli), *args], capture_output=True, encoding="utf-8", timeout=10, check=True,
                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
     raise FileNotFoundError(f"{TAILSCALE_CLI} not found in the Tailscale install directory")
 
@@ -242,7 +242,8 @@ class PeerCheck:
         key = (str(client[0]), int(client[1]))
         hit = self.cached(key)
         if hit is not None:
-            return hit
+            # A raw forward seen since this connection was approved withdraws the approval too.
+            return hit and not self.raw_forward_seen
         self.lookups += 1
         try:
             pid = self.owner(key, (str(server[0]), int(server[1])))

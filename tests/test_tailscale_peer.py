@@ -285,6 +285,18 @@ def test_a_removed_raw_forward_keeps_refusing_until_the_daemon_restarts(tmp_path
     assert fake_tailscaled_check(serve=lambda: config["now"]).verify(CLIENT, SERVER)  # a restarted daemon
 
 
+def test_a_raw_forward_seen_on_another_connection_withdraws_cached_approvals(tmp_path):
+    """A stream opened through a raw forward while the mapping was absent was approved and cached; once another
+    connection's lookup sees the forward, that cached approval no longer counts."""
+    config = {"now": FAKE_SERVE_CONFIG}
+    check = fake_tailscaled_check(serve=lambda: config["now"])
+    assert check.verify(CLIENT, SERVER)
+    config["now"] = with_tcp_forward("127.0.0.1:8100")
+    assert not check.verify(("127.0.0.1", 51299), SERVER)
+    assert not check.verify(CLIENT, SERVER)
+    assert check.lookups == 2
+
+
 def test_an_unreadable_serve_config_refuses_every_tailnet_identity(tmp_path):
     def unreadable():
         raise OSError("LocalAPI access denied")
@@ -471,6 +483,7 @@ def test_serve_config_reads_tailscale_serve_status(monkeypatch, tmp_path):
 
     def run(args, **kw):
         seen.append(args)
+        assert kw["encoding"] == "utf-8"  # Go prints UTF-8 whatever the console code page is
         return type("Done", (), {"stdout": out["text"]})()
 
     monkeypatch.setattr(tailscale_peer.subprocess, "run", run)
