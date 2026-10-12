@@ -22,7 +22,7 @@ from . import review_comments
 from .changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, changes_from_diffs, published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
 from .local_inference import NoWarmer
-from .config import Config
+from .config import BUILTIN_BACKENDS, Config
 from .app_stores import EVERY_APP, SessionStores
 from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
@@ -408,8 +408,9 @@ class Manager:
         models = [m["id"] for m in v.get("popular_models", [])]
         if v["model"] and v["model"] not in models:
             models.insert(0, v["model"])
+        local = v.get("kind") == "cli"  # a kind: cli backend runs the local model: no effort levels (#168)
         return {"name": name, "models": models, "model": v["model"],
-                "efforts": ["low", "medium", "high"], "effort": v["effort"] or "",
+                "efforts": [] if local else ["low", "medium", "high"], "effort": "" if local else v["effort"] or "",
                 "notice": v["notice"], "billing_warning": v["billing_warning"],
                 "limits": v.get("limits") or {}}
 
@@ -421,8 +422,8 @@ class Manager:
         if local["available"]:
             backends.append({"name": "local", "models": list(self.cfg.models), "model": self.cfg.default_model,
                              "efforts": [], "effort": "", "notice": local["notice"], "billing_warning": ""})
-        for name in self.cfg.backends:
-            if name in ("claude", "codex", "cursor"):
+        for name, backend in self.cfg.backends.items():
+            if name in BUILTIN_BACKENDS or getattr(backend, "is_cli", False):
                 v = view(self, name)
                 if v["available"] and v["logged_in"]:
                     backends.append(self._hosted_chat_option(name, v))
@@ -789,6 +790,13 @@ class Manager:
         model = model or backend_cfg.model
         if not model:
             raise HarnessError(400, f"backend {backend!r} has no model configured")
+        if backend_cfg.is_cli:  # it runs on the local model (#168): one of `models:`, and no effort
+            if model not in self.cfg.models:
+                raise HarnessError(400, f"backend {backend!r} runs on the local model; unknown model {model!r}"
+                                        + (f"; known: {', '.join(self.cfg.models)}" if self.cfg.models else ""))
+            if app is not None:
+                self._check_app_provider(app, backend, model)
+            return model, ""
         effort = effort or backend_cfg.effort
         if effort and effort not in ("low", "medium", "high"):
             raise HarnessError(400, "effort must be low, medium, or high")
@@ -807,7 +815,8 @@ class Manager:
                                TOOLS_ONLY_UNSUPPORTED)
 
     def _check_app_provider(self, app: dict, backend: str, model: str) -> None:
-        if not self.db.app_provider_managed(app["id"]):
+        # A kind: cli backend is invisible to every App until the owner grants it, managed or not (#168).
+        if not self.db.app_provider_managed(app["id"]) and not self._needs_grant(backend):
             return
         credential = self.db.app_provider_credential(app["id"], backend)
         if credential is None:
@@ -824,7 +833,7 @@ class Manager:
                                     + (f", {', '.join(self.cfg.backends)}" if self.cfg.backends else ""))
         if not backend_cfg.enabled:
             raise HarnessError(400, f"backend {backend!r} is disabled")
-        if backend not in ("claude", "codex", "cursor"):
+        if not backend_cfg.is_cli and backend not in BUILTIN_BACKENDS:
             raise HarnessError(400, f"backend {backend!r} is not built yet")
         if target != "tower":
             raise HarnessError(400, f"backend {backend!r} only runs on the tower")
@@ -1868,7 +1877,8 @@ class Manager:
         from . import cli_domains
         backend = s.get("backend") or "local"
         conversation = str((s.get("run") or {}).get("backend_session_id") or "")
-        if backend not in cli_domains.LAYOUTS or backend not in self.cfg.backends or not conversation:
+        if backend not in self.cfg.backends or not cli_domains.has_state(backend, self.cfg.backends[backend]) \
+                or not conversation:
             return
         await cli_domains.erase_history(backend, self.cfg.backends[backend], s.get("app_id") or "", conversation)
 
@@ -2057,12 +2067,17 @@ class Manager:
         return self.smart_approvals_status()
 
     # owner-managed app provider credentials (issue #29)
+    def _needs_grant(self, backend: str) -> bool:
+        cfg = self.cfg.backends.get(backend)
+        return cfg is not None and cfg.is_cli
+
     def app_provider_status(self, app_id: str, backend: str) -> dict:
         managed = self.db.app_provider_managed(app_id)
         row = self.db.app_provider_credential(app_id, backend)
         if row is None:
-            return {"managed": managed, "allowed": not managed, "policy": "server_default", "models": [],
-                    "credential_source": "server_default", "available": not managed}
+            allowed = not managed and not self._needs_grant(backend)
+            return {"managed": managed, "allowed": allowed, "policy": "server_default", "models": [],
+                    "credential_source": "server_default", "available": allowed}
         path = self.cfg.provider_secret_files.get(row["secret_ref"], "") if row["secret_ref"] else ""
         needs_file = row["policy"] in ("api_key", "subscription_then_api_key")
         return {"managed": True, "allowed": True, "policy": row["policy"], "models": row["models"],
@@ -2078,6 +2093,9 @@ class Manager:
             raise HarnessError(400, f"unknown or disabled backend {backend!r}")
         if policy not in ("subscription", "api_key", "subscription_then_api_key"):
             raise HarnessError(400, "policy must be subscription, api_key, or subscription_then_api_key")
+        if self._needs_grant(backend) and (policy != "subscription" or secret_ref.strip()):
+            raise HarnessError(400, f"{backend} runs on the local model with no key: grant it with the "
+                                    "subscription policy and no secret_ref")
         secret_ref = secret_ref.strip()
         if policy == "subscription":
             if secret_ref:

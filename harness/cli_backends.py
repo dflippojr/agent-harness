@@ -11,10 +11,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import threading
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit, urlunsplit
 
 from . import claude_token, cli_domains, credential_sources, end_users, member_keys  # noqa: F401 - these register their sources
 from .config import BackendConfig, SandboxConfig
@@ -615,7 +617,81 @@ class CodexSession:
                 await self.mcp.stop()
 
 
-class CursorSession:
+class TurnProcess:
+    """One print-mode process per turn (Cursor Agent, kind: cli backends): its reader threads, the follow-ups queued
+    while it runs, and closing it. A subclass sets `process`, `_events`, `_stderr`, `_threads` and `_followups`."""
+
+    def _spawn(self, argv: list[str], env: dict) -> None:
+        loop = asyncio.get_running_loop()
+        self._events = asyncio.Queue()
+        self._stderr = []
+        process = self._popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=env,
+        )
+        self.process = process
+        events = self._events
+
+        def stdout_reader() -> None:
+            assert process.stdout is not None
+            try:
+                for line in process.stdout:
+                    loop.call_soon_threadsafe(events.put_nowait, line)
+            finally:
+                loop.call_soon_threadsafe(events.put_nowait, None)
+
+        def stderr_reader() -> None:
+            assert process.stderr is not None
+            self._stderr.extend(process.stderr)
+
+        self._threads = [threading.Thread(target=stdout_reader, daemon=True),
+                         threading.Thread(target=stderr_reader, daemon=True)]
+        for thread in self._threads:
+            thread.start()
+
+    async def _next_line(self, timeout: float | None) -> str | None | bool:
+        """The next stdout line, None once the process has ended, or False on a timeout."""
+        try:
+            return await asyncio.wait_for(self._events.get(), timeout) if timeout else await self._events.get()
+        except asyncio.TimeoutError:
+            return False
+
+    async def send(self, item: dict) -> None:
+        content = item.get("content") if isinstance(item, dict) else None
+        if not isinstance(content, str):
+            raise CliBackendError("follow-up was not text")
+        self._followups.append(content)
+
+    @property
+    def has_followups(self) -> bool:
+        return bool(self._followups)
+
+    async def _take_followups(self) -> str:
+        """Close the finished turn and return the queued messages as the next turn's prompt."""
+        prompts, self._followups = self._followups, []
+        await self._close_process(terminate=False)
+        if self._command_override is None:
+            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+        return "Messages received while the prior turn was running:\n\n" + "\n\n".join(prompts)
+
+    async def _close_process(self, terminate: bool) -> None:
+        proc = self.process
+        self.process = None
+        if proc is not None and proc.poll() is None:
+            if terminate:
+                proc.terminate()
+            try:
+                await asyncio.to_thread(proc.wait, 2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                await asyncio.to_thread(proc.wait)
+        for thread in self._threads:
+            await asyncio.to_thread(thread.join, 0.5)
+        self._threads = []
+
+
+class CursorSession(TurnProcess):
     """A sequence of Cursor Agent print-mode processes sharing one chat id.
 
     Cursor's headless CLI has no live stdin protocol. Messages received while a
@@ -700,62 +776,21 @@ class CursorSession:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
             await ready_domain("cursor", self.backend, self.app_id, self.api_key)
 
-    def _spawn(self, prompt: str) -> None:
-        loop = asyncio.get_running_loop()
-        self._events = asyncio.Queue()
-        self._stderr = []
+    def _turn(self, prompt: str) -> None:
         child_env = os.environ.copy()
         if self.api_key:
             child_env["CURSOR_API_KEY"] = self.api_key
-        process = self._popen(
-            self.command(prompt), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=child_env,
-        )
-        self.process = process
-        events = self._events
-
-        def stdout_reader() -> None:
-            assert process.stdout is not None
-            try:
-                for line in process.stdout:
-                    loop.call_soon_threadsafe(events.put_nowait, line)
-            finally:
-                loop.call_soon_threadsafe(events.put_nowait, None)
-
-        def stderr_reader() -> None:
-            assert process.stderr is not None
-            self._stderr.extend(process.stderr)
-
-        self._threads = [threading.Thread(target=stdout_reader, daemon=True),
-                         threading.Thread(target=stderr_reader, daemon=True)]
-        for thread in self._threads:
-            thread.start()
+        self._spawn(self.command(prompt), child_env)
 
     async def initialize(self, prompt: str) -> None:
         first_prompt = prompt if self.backend_session_id else f"{self.system_prompt}\n\nUser task:\n{prompt}"
-        self._spawn(first_prompt)
+        self._turn(first_prompt)
 
     def user_message(self, content: str) -> dict:
         return {"type": "cursor_followup", "content": content}
 
-    async def send(self, item: dict) -> None:
-        content = item.get("content") if isinstance(item, dict) else None
-        if not isinstance(content, str):
-            raise CliBackendError("Cursor follow-up was not text")
-        self._followups.append(content)
-
-    @property
-    def has_followups(self) -> bool:
-        return bool(self._followups)
-
     async def continue_followups(self) -> None:
-        prompts, self._followups = self._followups, []
-        await self._close_process(terminate=False)
-        if self._command_override is None:
-            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
-        prompt = "Messages received while the prior turn was running:\n\n" + "\n\n".join(prompts)
-        self._spawn(prompt)
+        self._turn(await self._take_followups())
 
     def combined_result(self, result: dict) -> dict:
         raw = result.get("usage") if isinstance(result.get("usage"), dict) else {}
@@ -778,9 +813,8 @@ class CursorSession:
                 "num_turns": self._result_turns, "total_cost_usd": self._result_cost}
 
     async def receive(self, timeout: float | None = None) -> dict | None:
-        try:
-            line = await asyncio.wait_for(self._events.get(), timeout) if timeout else await self._events.get()
-        except asyncio.TimeoutError:
+        line = await self._next_line(timeout)
+        if line is False:
             return None
         if line is None:
             code = self.process.poll() if self.process is not None else None
@@ -794,22 +828,262 @@ class CursorSession:
             raise CliBackendError("Cursor Agent JSONL event was not an object")
         return value
 
-    async def _close_process(self, terminate: bool) -> None:
-        proc = self.process
-        self.process = None
-        if proc is not None and proc.poll() is None:
-            if terminate:
-                proc.terminate()
+    async def stop(self) -> None:
+        await self._close_process(terminate=True)
+        if self._command_override is None:
+            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+
+
+# --- config-declared print-mode CLIs (#168) -------------------------------------------------------------------------
+
+class OpencodeJsonl:
+    """`opencode run --format json` (OpenCode 1.18.30) records as print-mode events.
+
+    Each line is one object with a top-level `sessionID`. `text` parts carry the assistant's words, grouped by
+    `part.messageID` (the last message's text is the answer); `tool_use` arrives once a tool has finished, with
+    `part.state.status` `completed` or `error`; `step_finish` closes one model step; `error` ends the turn in error.
+    Lines that are not JSON objects (a warning OpenCode prints, a partial line) are skipped.
+    """
+
+    # The managed config dir outranks every other config source but macOS MDM (config/managed.ts in 1.18.30), so
+    # neither the workspace's opencode.json nor its .opencode/ can turn the denials back on.
+    config_target = "/etc/opencode/opencode.json"
+    env = ("OPENCODE_DISABLE_PROJECT_CONFIG=1", "OPENCODE_DISABLE_AUTOUPDATE=1")
+
+    def __init__(self) -> None:
+        self._texts: dict[str, list[str]] = {}
+
+    @staticmethod
+    def config(model, base_url: str) -> str:
+        """The opencode.json for a session, from the harness `models:` entry (Q6). The `question` denial is required:
+        a headless question would hang the turn."""
+        return json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "autoupdate": False,
+            "share": "disabled",
+            "provider": {"llama": {
+                "npm": "@ai-sdk/openai-compatible", "name": "llama-server (agent-harness)",
+                "options": {"baseURL": base_url, "apiKey": "local"},
+                "models": {model.name: {"name": model.name, "tool_call": True, "reasoning": True,
+                                        "limit": {"context": model.context_tokens, "output": model.max_tokens}}},
+            }},
+            "permission": {"*": "allow", "webfetch": "deny", "websearch": "deny", "question": "deny"},
+        }, indent=2)
+
+    @staticmethod
+    def erase_args(session_id: str) -> list[str]:
+        """Delete one session from OpenCode's own store (a lookup by id, whatever the project)."""
+        return ["opencode", "session", "delete", session_id]
+
+    @staticmethod
+    def erase_missing(output: str, session_id: str) -> bool:
+        """Whether a failed delete only means the session is already gone: OpenCode 1.18.30 prints exactly
+        `Error: Session not found: <id>` (in colour). Any other failure, such as no opencode in the image, is real."""
+        return f"Session not found: {session_id}" in re.sub(r"\x1b\[[0-9;]*m", "", output)
+
+    @property
+    def answer(self) -> str:
+        """The text of the last assistant message that had any."""
+        return "\n".join(list(self._texts.values())[-1]).strip() if self._texts else ""
+
+    def parse(self, line: str) -> list[dict]:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(event, dict):
+            return []
+        out: list[dict] = []
+        if isinstance(event.get("sessionID"), str) and event["sessionID"]:
+            out.append({"type": "session", "id": event["sessionID"]})
+        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+        type_ = event.get("type")
+        if type_ == "text" and isinstance(part.get("text"), str) and part["text"]:
+            self._texts.setdefault(str(part.get("messageID") or ""), []).append(part["text"])
+            out.append({"type": "text", "text": part["text"]})
+        elif type_ == "tool_use":
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            failed = state.get("status") == "error"
+            output = state.get("error") if failed else state.get("output")
+            out.append({"type": "tool", "id": str(part.get("callID") or part.get("id") or ""),
+                        "name": str(part.get("tool") or "tool"), "status": str(state.get("status") or ""),
+                        "error": failed, "input": state.get("input") if isinstance(state.get("input"), dict) else {},
+                        "output": output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)})
+        elif type_ == "step_finish":
+            out.append({"type": "step"})
+        elif type_ == "error":
+            error = event.get("error") if isinstance(event.get("error"), dict) else {}
+            data = error.get("data") if isinstance(error.get("data"), dict) else {}
+            message = str(data.get("message") or "OpenCode reported an error")
+            out.append({"type": "error", "message": f"{error.get('name') or 'Error'}: {message}"[:1000]})
+        return out
+
+
+PRINT_MODE_PARSERS: dict[str, type] = {"opencode_jsonl": OpencodeJsonl}
+
+
+def forwarder(backend: BackendConfig) -> str:
+    """The container on a kind: cli backend's internal network that forwards one port to the host's llama-server
+    (ops/cli-llm/compose.yaml). It is the network's only other member."""
+    return f"{backend.network}-llm"
+
+
+def forwarder_url(backend: BackendConfig, model_base_url: str) -> str:
+    """The model's OpenAI-compatible URL as the CLI container reaches it: the forwarder, on the model's own scheme and
+    port (it passes TCP through, so the CLI speaks to the server as the harness does). A URL without a port uses its
+    scheme's default, as the installer's forwarder does."""
+    parts = urlsplit(model_base_url)
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return urlunsplit((parts.scheme, f"{forwarder(backend)}:{port}", "/v1", "", ""))
+
+
+def cli_route_ready(backend: BackendConfig) -> bool:
+    """Whether the backend's internal network exists and its forwarder runs (Q9: otherwise it is unavailable)."""
+    def ok(args: list[str], expect: str = "") -> bool:
+        try:
+            result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=15,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0 and (not expect or result.stdout.strip() == expect)
+    return (ok(["network", "inspect", "--format", "{{.Internal}}", backend.network], "true")
+            and ok(["inspect", "--format", "{{.State.Running}}", forwarder(backend)], "true"))
+
+
+class PrintModeSession(TurnProcess):
+    """A config-declared headless CLI (`kind: cli`, #168): one ``docker run --rm`` per turn, as CursorSession.
+
+    The argv comes from config: `command` with {model} and {session_id} filled in per element (never through a
+    shell), `resume_args` once the CLI has a session id, then ``--`` and the prompt as the last element. Messages
+    that arrive mid-turn are queued and become the next turn on the same CLI session. Auto-approve runs inside the
+    container: a workspace-only mount, the backend's own internal network with no proxy and no route out, no key.
+    `admit` (the runner's) runs before every turn: the GPU hold, RAM and the model load (Q7, Q10).
+    """
+
+    def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig, sandbox: SandboxConfig,
+                 system_prompt: str, model: str = "", backend_session_id: str = "", api_key: str = "",
+                 popen: Callable = subprocess.Popen, command: list[str] | None = None, app_id: str = "",
+                 name: str = "", model_config=None, base_url: str = "", config_dir: Path | None = None,
+                 admit: Callable | None = None):
+        self.session_id = session_id
+        self.app_id = app_id
+        self.name = name
+        self.workspace = workspace.resolve()
+        self.backend = backend
+        self.sandbox = sandbox
+        self.system_prompt = system_prompt
+        self.model = model or backend.model
+        self.model_config = model_config
+        self.base_url = base_url
+        self.backend_session_id = backend_session_id
+        self.container = f"harness-{session_id}-{name}"
+        self.parser = PRINT_MODE_PARSERS[backend.parser]()
+        self._config_dir = config_dir
+        self._admit = admit
+        self._popen = popen
+        self._command_override = command
+        self.process: subprocess.Popen | None = None
+        self._events: asyncio.Queue[str | None] = asyncio.Queue()
+        self._parsed: list[dict] = []
+        self._stderr: list[str] = []
+        self._threads: list[threading.Thread] = []
+        self._followups: list[str] = []
+        self.steps = 0
+
+    @property
+    def config_file(self) -> Path | None:
+        """The generated CLI config on the host, mounted read-only (None when the parser has none)."""
+        if self._config_dir is None or not getattr(self.parser, "config_target", ""):
+            return None
+        return self._config_dir / f"{self.session_id}.json"
+
+    @property
+    def last_answer(self) -> str:
+        return self.parser.answer
+
+    def _fill(self, item: str) -> str:
+        return item.replace("{model}", self.model).replace("{session_id}", self.backend_session_id)
+
+    def cli_args(self, prompt: str) -> list[str]:
+        """The CLI's own argv: command, resume args on a follow-up turn, then `-- <prompt>`."""
+        args = [self._fill(item) for item in self.backend.command]
+        if self.backend_session_id:
+            args += [self._fill(item) for item in self.backend.resume_args]
+        return [*args, "--", prompt]
+
+    def command(self, prompt: str = "") -> list[str]:
+        if self._command_override is not None:
+            return [*self._command_override, *self.cli_args(prompt)]
+        args = [
+            "docker", "run", "--rm", "--name", self.container,
+            "--label", f"agent-harness.session={self.session_id}",
+            "--network", self.backend.network,  # internal; its only other member forwards to llama-server
+            *cli_domains.docker_args(self.name, self.backend, self.app_id),
+            *[a for item in getattr(self.parser, "env", ()) for a in ("-e", item)],
+        ]
+        if self.config_file is not None:
+            args += ["--mount", f"type=bind,source={self.config_file},target={self.parser.config_target},readonly"]
+        return [
+            *args,
+            "--mount", f"type=bind,source={self.workspace},target=/workspace",
+            "-w", WORKSPACE,
+            "--memory", self.sandbox.memory,
+            "--cpus", str(self.sandbox.cpus),
+            "--pids-limit", str(self.sandbox.pids),
+            "--security-opt", "no-new-privileges",
+            "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD", "--cap-drop", "AUDIT_WRITE",
+            self.backend.image,
+            *self.cli_args(prompt),
+        ]
+
+    async def start(self) -> None:
+        if self._command_override is None:
+            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
             try:
-                await asyncio.to_thread(proc.wait, 2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                await asyncio.to_thread(proc.wait)
-        for thread in self._threads:
-            await asyncio.to_thread(thread.join, 0.5)
-        self._threads = []
+                await cli_domains.prepare(self.name, self.backend, self.app_id)
+            except RuntimeError as e:
+                raise CliBackendError(str(e)) from e
+        target = self.config_file
+        if target is not None and self.model_config is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(self.parser.config(self.model_config, self.base_url), encoding="utf-8")
+
+    async def _turn(self, prompt: str) -> None:
+        if self._admit is not None:
+            await self._admit()
+        self._parsed = []
+        self._spawn(self.command(prompt), os.environ.copy())
+
+    async def initialize(self, prompt: str) -> None:
+        first_prompt = prompt if self.backend_session_id else f"{self.system_prompt}\n\nUser task:\n{prompt}"
+        await self._turn(first_prompt)
+
+    def user_message(self, content: str) -> dict:
+        return {"type": "print_mode_followup", "content": content}
+
+    async def continue_followups(self) -> None:
+        await self._turn(await self._take_followups())
+
+    async def receive(self, timeout: float | None = None) -> dict | None:
+        """The next event: the parser's, or `exit` once the process has ended. A line the parser skips is None."""
+        if self._parsed:
+            return self._parsed.pop(0)
+        line = await self._next_line(timeout)
+        if line is False:
+            return None
+        if line is None:
+            proc = self.process
+            code = await asyncio.to_thread(proc.wait) if proc is not None else None
+            for thread in self._threads:
+                await asyncio.to_thread(thread.join, 0.5)
+            return {"type": "exit", "code": code, "stderr": "".join(self._stderr).strip()[-2000:]}
+        self._parsed = self.parser.parse(line)
+        return self._parsed.pop(0) if self._parsed else None
 
     async def stop(self) -> None:
         await self._close_process(terminate=True)
         if self._command_override is None:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+        target = self.config_file
+        if target is not None:
+            target.unlink(missing_ok=True)

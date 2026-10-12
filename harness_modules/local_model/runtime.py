@@ -41,6 +41,32 @@ class LocalModelRuntime(ModuleRuntime):
         m.runner.ram = guard.memory
         m.modules.wire_resources(guard, warmer)
 
+    def local_turn_admission(self):
+        return self.admit_local_turn if self.service is not None else None
+
+    async def admit_local_turn(self, sid, model):
+        """A CLI turn on the local model (#168 Q7, Q10): wait out a GPU hold in `queued`, wait for RAM as a parked
+        model's load does, then load it. Admitted, the session holds the guard's lease (runner.generating) until its
+        run ends or its next turn, so a hold drains the turn before stopping the server."""
+        m = self.manager
+        runner = m.runner
+        while True:
+            await runner.wait_gpu_clear(sid)
+            await runner._memory_wait(sid, model)
+            runner.generating.add(sid)
+            await self.service.ensure_loaded(model)
+            if m.guard is not None and m.guard.active:  # a hold began while the model was loading
+                runner.generating.discard(sid)
+                continue
+            if self.service.parked(model):
+                runner.generating.discard(sid)
+                if runner.model_load_low():
+                    return "RAM on the server is low; the local model won't load now", "low_memory"
+                if self.service.blocked():
+                    return "the GPU guard has the GPU for other work; the local model can't load now", "gpu_held"
+                return "the local model did not load", "model_unavailable"
+            return None
+
     def _gpu_paused(self, reasons):
         m = self.manager
         m.modules.gpu_hold()

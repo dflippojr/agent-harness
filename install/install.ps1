@@ -230,17 +230,30 @@ Act 'docker build -t agent-harness-sandbox:py312 sandbox' {
     & docker build -q -t agent-harness-sandbox:py312 (Join-Path $AppDir 'sandbox')
     if ($LASTEXITCODE -ne 0) { Die 'building the sandbox image failed' }
 }
-if ($EffectiveProfile -eq 'Service') {
-    Step 'Hosted-provider CLI image and egress proxies'
+if ($EffectiveProfile -eq 'Service' -or $NeedsLocalModel) {
+    # Service backends and the generated OpenCode entry (#168, written whenever the local model is) both run in it.
+    Step 'CLI backend image'
     Act 'docker build -t agent-harness-cli:1 -f sandbox/cli.Dockerfile sandbox' {
         & docker build -q -t agent-harness-cli:1 -f (Join-Path $AppDir 'sandbox\cli.Dockerfile') (Join-Path $AppDir 'sandbox')
-        if ($LASTEXITCODE -ne 0) { Die 'building the hosted-provider CLI image failed' }
+        if ($LASTEXITCODE -ne 0) { Die 'building the CLI backend image failed' }
     }
+}
+if ($EffectiveProfile -eq 'Service') {
+    Step 'Hosted-provider egress proxies'
     Act 'create harness-egress network and start provider allowlist proxies' {
         & docker network inspect harness-egress *> $null
         if ($LASTEXITCODE -ne 0) { & docker network create harness-egress | Out-Null }
         & docker compose -f (Join-Path $AppDir 'ops\egress\compose.yaml') up -d --build
         if ($LASTEXITCODE -ne 0) { Die 'starting the provider egress proxies failed' }
+    }
+}
+if ($NeedsLocalModel) {
+    # kind: cli backends such as OpenCode (#168, off by default) reach llama-server only through this forwarder.
+    Step 'Local-model route for CLI backends'
+    Act 'start the harness-cli-opencode network and its llama-server forwarder' {
+        $env:LLAMA_PORT = if ($ExistingServer) { ([uri]$ExistingServer).Port } else { $ServerPort }
+        & docker compose -f (Join-Path $AppDir 'ops\cli-llm\compose.yaml') up -d
+        if ($LASTEXITCODE -ne 0) { Die 'starting the CLI backend llama-server forwarder failed' }
     }
 }
 

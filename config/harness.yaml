@@ -125,6 +125,22 @@ backends:
     volume: harness-auth-cursor
     network: harness-cli-cursor
     api_key_file: D:/Agents/harness/secrets/cursor-api-key
+  # A config-declared print-mode CLI (#168, docs/cli-backends.md): OpenCode on the local llama-server, keyless.
+  # Each turn is one `docker run` of `command`; follow-ups resume with `resume_args`. Needs the
+  # harness-cli-opencode network and its forwarder: docker compose -f ops/cli-llm/compose.yaml up -d.
+  # Invisible to every App until the owner grants it (subscription policy, no key).
+  opencode:
+    enabled: false
+    kind: cli
+    image: agent-harness-cli:1
+    model: qwen3.6-35b-a3b            # one of models:
+    command: [opencode, run, --format, json, --auto, -m, "llama/{model}"]
+    resume_args: [--session, "{session_id}"]
+    parser: opencode_jsonl
+    network: harness-cli-opencode
+    volume: harness-state-opencode
+    max_sessions: 1                   # one llama-server slot
+    permission_mode: auto             # display only: OpenCode auto-approves inside its container
 
 # Homelab tools for projects with `homelab: true` (harness/homelab.py). The daemon runs these on the host;
 # agents only name a service from this allowlist. Restarts always need approval.

@@ -111,6 +111,59 @@ class BackendConfig:
     # container has the token and no workspace; shell and file work goes through the harness MCP server onto the
     # session sandbox. Claude Code and Codex only, and it needs `mcp`.
     tool_mode: str = "builtin"
+    # "" is a built-in backend keyed by its name. "cli" (#168) is a config-declared headless print-mode CLI: one
+    # `docker run` of `command` per turn, follow-ups resumed with `resume_args`, output mapped by the named `parser`.
+    # v1 runs keyless on the local model only: no proxy, no API key, billing local, no login.
+    kind: str = ""
+    command: list[str] = field(default_factory=list)  # argv after the image; placeholders {model} {session_id}
+    resume_args: list[str] = field(default_factory=list)  # added from the second turn on, before `-- <prompt>`
+    parser: str = ""      # a parser registered in cli_backends.PRINT_MODE_PARSERS
+    card_note: str = ""   # Settings → Backends text
+
+    @property
+    def is_cli(self) -> bool:
+        return self.kind == "cli"
+
+
+BUILTIN_BACKENDS = ("claude", "codex", "cursor")
+BACKEND_KINDS = ("", "cli")
+CLI_PLACEHOLDERS = ("{model}", "{session_id}", "{prompt}")
+_PLACEHOLDER = re.compile(r"\{[^{}]*\}")
+
+
+def _validate_cli_backend(name: str, spec: dict, backend: BackendConfig) -> None:
+    """Check a `kind: cli` entry and pin the fields that don't apply to a keyless local backend (#168 Q5)."""
+    where = f"backends.{name}"
+    for key in ("proxy", "api_key_file", "oauth_token_file"):
+        if spec.get(key):
+            raise ValueError(f"{where}.{key}: a kind: cli backend runs on the local model only in v1; a provider "
+                             "proxy or key needs its own issue and a recorded provider-policy review first")
+    if not backend.image or not backend.network or not backend.parser:
+        raise ValueError(f"{where}: kind: cli needs image, network and parser")
+    if not spec.get("volume"):  # the default is Claude's state volume; a CLI must never mount another backend's
+        raise ValueError(f"{where}: kind: cli needs its own volume, such as harness-state-{name}")
+    from .cli_backends import PRINT_MODE_PARSERS
+    if backend.parser not in PRINT_MODE_PARSERS:
+        raise ValueError(f"{where}.parser must be one of {', '.join(PRINT_MODE_PARSERS)}")
+    command = [str(item) for item in backend.command]
+    if not command:
+        raise ValueError(f"{where}.command is empty")
+    if command[-2:] == ["--", "{prompt}"]:  # the prompt always goes last, after `--`, whether or not it is written
+        command = command[:-2]
+    for item in command + [str(a) for a in backend.resume_args]:
+        for token in _PLACEHOLDER.findall(item):
+            if token not in CLI_PLACEHOLDERS:
+                raise ValueError(f"{where}: unknown placeholder {token}; use {', '.join(CLI_PLACEHOLDERS)}")
+            if token == "{prompt}":
+                raise ValueError(f"{where}: {{prompt}} may only be the last element, after --")
+        if item == "--":
+            raise ValueError(f"{where}: -- may only come right before {{prompt}} at the end of command")
+    backend.command = command
+    backend.resume_args = [str(a) for a in backend.resume_args]
+    backend.proxy = backend.api_key_file = backend.oauth_token_file = ""
+    backend.oauth_token_apps = []
+    backend.billing, backend.auth = "local", "none"
+    backend.mcp, backend.tool_mode = False, "builtin"
 
 
 @dataclass
@@ -949,8 +1002,15 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
 
     homelab = _load_homelab(raw, selected)
     runners = _load_runners(raw, selected)
-    backends = {name: BackendConfig(**(spec or {})) for name, spec in (raw.get("backends") or {}).items()}
+    raw_backends = raw.get("backends") or {}
+    backends = {name: BackendConfig(**(spec or {})) for name, spec in raw_backends.items()}
     for name, backend in backends.items():
+        if backend.kind not in BACKEND_KINDS:
+            raise ValueError(f"backends.{name}.kind must be empty (built-in) or cli")
+        if backend.is_cli:
+            if name == "local" or name in BUILTIN_BACKENDS:
+                raise ValueError(f"backends.{name}: a built-in backend name can't be kind: cli")
+            _validate_cli_backend(name, raw_backends[name] or {}, backend)
         if backend.tool_mode not in TOOL_MODES:
             raise ValueError(f"backends.{name}.tool_mode must be one of {', '.join(TOOL_MODES)}")
         if backend.tool_mode == "split" and (name not in ("claude", "codex") or not backend.mcp):
