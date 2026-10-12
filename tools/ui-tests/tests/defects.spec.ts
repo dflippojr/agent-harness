@@ -271,20 +271,19 @@ test('#628 Refresh diagnostics is a 44px target clear of its neighbours', async 
     await page.goto('/#/actions/resources');
     const refresh = page.getByRole('button', { name: 'Refresh diagnostics', exact: true });
     await expect(refresh).toBeVisible();
-    const { box, gaps } = await refresh.evaluate(el => {
+    const { box, neighbours } = await refresh.evaluate(el => {
       const rect = (node: Element) => {
         const r = node.getBoundingClientRect();
         return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
       };
-      const own = rect(el);
       const card = el.closest('.card') || el.parentElement!.parentElement!;
       const others = [...card.querySelectorAll('button, a, input, select, textarea, summary')]
-        .filter(other => other !== el && other.getClientRects().length).map(rect);
-      return { box: own, gaps: others.map(o => Math.max(o.left - own.right, own.left - o.right, o.top - own.bottom, own.top - o.bottom)) };
+        .filter(other => other !== el && other.getClientRects().length);
+      return { box: rect(el), neighbours: others.map(rect) };
     });
     expect(box.width).toBeGreaterThanOrEqual(44);
     expect(box.height).toBeGreaterThanOrEqual(44);
-    for (const gap of gaps) expect(gap).toBeGreaterThanOrEqual(8);
+    for (const neighbour of neighbours) expect(gapBetween(box, neighbour)).toBeGreaterThanOrEqual(8);
   }
 });
 
@@ -374,6 +373,16 @@ test('#632 Chat thread keeps the conversation visible in phone landscape and wit
         feed: Math.min(feed.bottom, composer.top) - Math.max(feed.top, header.bottom) >= 40,
       };
     })).toEqual({ belowHeader: true, controls: true, feed: true });
+    // Pressing Send keeps focus in the field, so the typing layout does not move Send before the release lands.
+    const send = page.getByRole('button', { name: 'Send', exact: true });
+    const before = await boxOf(send);
+    await page.mouse.move(before.left + before.width / 2, before.top + before.height / 2);
+    await page.mouse.down();
+    await expect(message).toBeFocused();
+    expect(await boxOf(send)).toEqual(before);
+    await page.mouse.move(1, 1);
+    await page.mouse.up();
+    await message.focus();
   }
   await page.setViewportSize({ width: 375, height: 667 });
   await expect.poll(() => page.evaluate(() => document.querySelector('.composer')!.getBoundingClientRect().height)).toBe(portrait);

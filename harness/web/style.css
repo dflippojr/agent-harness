@@ -1071,7 +1071,7 @@ body.has-tabs .composer { bottom: var(--tabbar-offset); padding-bottom: 8px; }
    phone tab bar yields, so the conversation keeps room between the bar and the composer. */
 @media (max-height: 500px) {
   body.chat-page:has(.chat-composer textarea:focus) .chat-pickers { display: none; }
-  body.chat-page:has(.chat-composer textarea:focus) main { padding-bottom: calc(var(--tap) + 32px); }
+  body.chat-page:has(.chat-composer textarea:focus) main { padding-bottom: calc(var(--chat-composer-h, 60px) + 16px); }
 }
 @media (max-height: 500px) and (max-width: 767px) {
   body.chat-page:has(.chat-composer textarea:focus) #tab-bar { display: none; }

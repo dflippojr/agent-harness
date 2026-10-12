@@ -141,15 +141,21 @@ function readChatChoice() {
   try { return JSON.parse(localStorage.getItem(CHAT_CHOICE_KEY) || "null") || {}; } catch (_) { return {}; }
 }
 
-// Keeps the fixed composer above the on-screen keyboard (iOS does not resize the layout viewport). When the viewport
-// shrinks (the keyboard, or turning to landscape) with the latest message in view, it stays in view (#632).
-function trackKeyboard(composer) {
+// Keeps the fixed composer above the on-screen keyboard (iOS does not resize the layout viewport). In a thread, when the
+// viewport shrinks (the keyboard, or turning to landscape) with the latest message in view, it stays in view (#632).
+// --chat-composer-h lets a short viewport's transcript padding follow the composer as the draft grows.
+function trackKeyboard(composer, thread) {
   const vv = window.visualViewport;
   if (!vv) return () => {};
-  let atEnd = true;
+  const root = document.documentElement;
+  let atEnd = false;
   const onScroll = () => {
-    atEnd = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 24;
+    atEnd = thread && window.innerHeight + window.scrollY >= root.scrollHeight - 24;
   };
+  onScroll();
+  const measure = () => root.style.setProperty("--chat-composer-h", `${composer.offsetHeight}px`);
+  const observer = browser.ResizeObserver ? new browser.ResizeObserver(measure) : null;
+  observer?.observe(composer);
   // With the keyboard closed the stylesheet places the composer (above the tab bar, #506); open, it sits on the keyboard.
   const update = () => {
     const keyboard = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
@@ -157,13 +163,15 @@ function trackKeyboard(composer) {
   };
   const resize = () => {
     update();
-    if (atEnd) window.scrollTo({ top: document.documentElement.scrollHeight });
+    if (atEnd) window.scrollTo({ top: root.scrollHeight });
   };
   vv.addEventListener("resize", resize);
   vv.addEventListener("scroll", update);
   window.addEventListener("scroll", onScroll, { passive: true });
   update();
   return () => {
+    observer?.disconnect();
+    root.style.removeProperty("--chat-composer-h");
     vv.removeEventListener("resize", resize);
     vv.removeEventListener("scroll", update);
     window.removeEventListener("scroll", onScroll);
@@ -215,6 +223,9 @@ function chatComposer(options, session) {
   modelSelect.addEventListener("change", syncEffort);
   syncEffort();
 
+  // Pressing Send or Cancel keeps focus (and the on-screen keyboard) in the field, so a short viewport's typing layout
+  // does not shift under the pointer between press and release (#632).
+  for (const button of [send, cancel]) button.addEventListener("mousedown", (ev) => ev.preventDefault());
   input.addEventListener("input", () => { input.style.height = "44px"; input.style.height = `${Math.min(160, input.scrollHeight)}px`; });
   const el = h("div", { class: "composer chat-composer" }, h("div", { class: "inner", style: "flex-direction:column;align-items:stretch" },
     notice,
@@ -297,7 +308,7 @@ async function viewChat(id) {
   ui = chatComposer(options, session);
   document.body.append(ui.el);
   if (pendingStarter !== null) ui.input.value = pendingStarter;
-  const stopKeyboard = trackKeyboard(ui.el);
+  const stopKeyboard = trackKeyboard(ui.el, Boolean(session));
   onLeave(() => { ui.el.remove(); stopKeyboard(); });
 
   if (!session && !options.backends.length) {
