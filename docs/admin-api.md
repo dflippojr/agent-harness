@@ -55,6 +55,13 @@ methods, the Agent Harness Server `capabilities`, and the versioned `operations`
 It also publishes the first-party protocol ranges and update hints described in [`compatibility.md`](compatibility.md),
 and `hub: {claimed}`, whether a [Hub](#hub-claim) is claimed (a boolean only).
 
+`allowed_logins` (#620) lists the owner's tailnet logins, the `allowed_logins` entries of `harness.local.yaml`, so
+the [Hub](#hub-claim) can accept a tailnet sign-in only for a login the daemon also treats as the owner. It is
+read-only and comes from the daemon's config at the time of the request. An empty list means no owner allowlist is
+set (open-owner legacy mode, where every tailnet login is the owner); a Hub must then accept no tailnet login and keep
+its one-time sign-in link. Only owner credentials (including the Hub's key) reach discovery: App and device keys get
+403 here and their `GET /api/v1` and `/api/v1/me` never carry it. The CLI shows it with `harness capabilities`.
+
 ## Endpoint index
 
 Generated from the route registrations and the owner routes listed in `ADMIN_PATHS` and each module's `admin_paths` (`scripts/docs/build.py`; do not edit between the markers). Every route here needs owner credentials. `TODO` marks a handler with no docstring.
@@ -724,6 +731,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.26 | 2026-10-12 | `GET /api/admin/v1` adds `allowed_logins` (#620): the owner's tailnet logins from `harness.local.yaml`, read-only, for the Hub's tailnet sign-in (dflippojr/agent-harness-hub#8). Shown by `harness capabilities`. |
 | 1.25 | 2026-10-11 | Read-only `POST /pairing-requests/preview` (#604), CLI `harness pairing-requests preview --scopes ...`, SDK `Harness.preview_pairing(scopes)`: shared daemon App scope disclosures before arming, including module fallback copy and elevated tiers, without pairing side effects. |
 | 1.24 | 2026-10-10 | Optional read-only `GET /hub` inventory (#520), `harness hub status`, SDK `Harness.hub_status()`, strict local entries and state/error metrics. The claim CLI view is now `harness hub claim-status`. |
 | 1.23 | 2026-10-09 | Exclusive Hub claim (#543, see [Hub claim](#hub-claim)): `GET /hub-claim`, and the host-only `POST /hub-claim/requests/{id}/approve`, `/deny` and `POST /hub-claim/release` (owner credentials plus the `X-Agent-Harness-Hub-Approval` secret from `<data_dir>/hub-approval.secret`). The Hub's key is an owner token with role `hub`; `GET /keys` adds `role`; `DELETE /keys/{id}` on it answers 409; `POST /keys` refuses `kind: "hub"` and `role`. `GET /api/admin/v1` adds `hub.claimed`. Audit `hub.claim.*` and `hub.release` rows, `actor_kind` `hub`. CLI `harness hub claim-status`, `approve`, `deny` and `release` |

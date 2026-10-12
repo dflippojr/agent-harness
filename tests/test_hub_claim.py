@@ -23,7 +23,7 @@ from harness.db import Database
 import sdk.harness_client as sdk_module
 from sdk.harness_client import Harness
 
-from test_household import household
+from test_household import OWNER, household
 from test_management_parity import _mounted_owner_routes, _owner_app
 
 HUB_ORIGIN = "https://hub.example"
@@ -626,3 +626,25 @@ def test_cli_status_shows_origins_and_approve_warns_on_several_claims(hh, monkey
     assert cli._cmd_admin(parser.parse_args(["hub", "approve", rid, "--match", match])) == 0
     err = capsys.readouterr().err
     assert "2 Hub claims are pending" in err and f"* {rid}" in err and look_alike.json()["id"] in err
+
+
+def test_hub_key_reads_the_owners_allowed_logins_and_app_keys_do_not(hh):
+    """#620: discovery lists `allowed_logins` for the Hub's tailnet sign-in; App and device keys never see it."""
+    client, m = hh
+    m.cfg.allowed_logins = [OWNER, "owner-phone@example.com"]
+    token, _, _ = _claim(client, m)
+    root = client.get(PREFIX, headers=_bearer(token, HUB_ORIGIN))
+    assert root.status_code == 200, root.text
+    assert root.json()["allowed_logins"] == [OWNER, "owner-phone@example.com"]
+    assert client.get(PREFIX).json()["allowed_logins"] == [OWNER, "owner-phone@example.com"]
+    m.cfg.allowed_logins = []                       # read per request; empty means no allowlist
+    assert client.get(PREFIX, headers=_bearer(token, HUB_ORIGIN)).json()["allowed_logins"] == []
+    m.cfg.allowed_logins = [OWNER]
+
+    app = client.post("/keys", json={"name": "an app", "kind": "app", "scopes": ["sessions"]}).json()["key"]
+    device = client.post("/keys", json={"name": "a device", "scopes": ["inference"]}).json()["key"]
+    for secret in (app, device):
+        assert client.get(PREFIX, headers=_bearer(secret)).status_code == 403
+        assert client.get(f"{PREFIX}/me", headers=_bearer(secret)).status_code == 403
+        for path in ("/api/v1", "/api/v1/me"):
+            assert "allowed_logins" not in client.get(path, headers=_bearer(secret)).text
