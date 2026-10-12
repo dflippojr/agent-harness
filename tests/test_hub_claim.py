@@ -642,9 +642,11 @@ def test_hub_key_reads_the_owners_allowed_logins_and_app_keys_do_not(hh):
     m.cfg.allowed_logins = [OWNER]
 
     app = client.post("/keys", json={"name": "an app", "kind": "app", "scopes": ["sessions"]}).json()["key"]
-    device = client.post("/keys", json={"name": "a device", "scopes": ["inference"]}).json()["key"]
+    device = client.post("/keys", json={"name": "a device", "scopes": ["inference", "sessions"]}).json()["key"]
     for secret in (app, device):
         assert client.get(PREFIX, headers=_bearer(secret)).status_code == 403
         assert client.get(f"{PREFIX}/me", headers=_bearer(secret)).status_code == 403
         for path in ("/api/v1", "/api/v1/me"):
-            assert "allowed_logins" not in client.get(path, headers=_bearer(secret)).text
+            r = client.get(path, headers=_bearer(secret))
+            assert r.status_code == 200, r.text
+            assert "allowed_logins" not in r.json() and "allowed_logins" not in r.text
