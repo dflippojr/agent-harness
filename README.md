@@ -341,6 +341,7 @@ gives up the GPU.
 | Configuration registry | [config-registry](docs/config-registry.md) |
 | Web client deployment | [web](docs/web.md) |
 | UI testing with the fake model | [ui-testing](docs/ui-testing.md) |
+| Harness-design gap report (arXiv 2609.00006, 2609.20804) | [harness-design-gap-report](docs/harness-design-gap-report.md) |
 | Mac client and version compatibility | [mac-client](docs/mac-client.md) · [compatibility](docs/compatibility.md) |
 | CI/CD and trust boundaries | [CI-CD](docs/CI-CD.md) |
 <!-- generated:end readme-docs-index -->
