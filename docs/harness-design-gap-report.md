@@ -80,7 +80,7 @@ The harness's minimal path is a native local session with no toolkits enabled: `
 
 Net: the harness adds nothing the paper's corpus calls superfluous, and it lacks one scaffold feature (context-file
 discovery). The additions to question are the always-on schemas for `update_notes` and `verify` (F9) and the
-unmeasured recoverability of masked results (F2, Section 4.3).
+recoverability of masked results, measured only daemon-wide today (F2, Section 4.3).
 
 ## 4. P2 (2609.20804) findings against compaction and the tool surface
 
@@ -130,10 +130,12 @@ models seldom use".
 What transfers to the harness, and what does not:
 
 - **The window regime is the same.** The native local model runs at 65,536 tokens (`config/harness.yaml:58-63`),
-  P2's 64k cell, where recall averaged 0.07 calls per task. The harness has no measurement of its own:
-  `read_artifact` calls are not counted anywhere (no metric in `harness/metrics.py`, no field in `turn_metrics`).
-  The only proxy is the replay's "needed again" column, 1 of 9 masked items (`docs/jev-compaction-study.md:67`),
-  on transcripts that predate masking.
+  P2's 64k cell, where recall averaged 0.07 calls per task. The harness's only measurement is the daemon-wide
+  `harness_tool_calls_total` counter, labelled by tool and outcome (`harness/metrics.py:153`), which says whether
+  `read_artifact` is ever called but not per session, per masked result, or whether one slice was followed by
+  another of the same digest; there is no field for it in `turn_metrics` or session totals. The only per-item
+  data is the replay's "needed again" column, 1 of 9 masked items (`docs/jev-compaction-study.md:67`), on
+  transcripts that predate masking.
 - **The harness masks far more than P2 elided.** P2's T2 stubbed only middle-region observations once the window
   bound. The harness replaces every used successful result over 2000 chars on every turn, so the share of the
   model's past that sits behind a receipt is much larger, and the recovery path matters more in principle than in
@@ -148,8 +150,9 @@ What transfers to the harness, and what does not:
   (`harness/compaction.py:21`) does the opposite: keep every intermediate value the task needs. The harness's design is the
   safer one if recall is rarely used, and P2's numbers support keeping it.
 
-Decision for this report: keep masking and `read_artifact` as they are, add the missing count (F2), and revisit
-once the count exists. If `read_artifact` stays near zero over a run of ordinary sessions, the receipt can shrink
+Decision for this report: keep masking and `read_artifact` as they are, add the per-session count and slice
+analysis (F2), and revisit once they exist. If `read_artifact` stays near zero over a run of ordinary sessions
+(the aggregate counter can already say whether it is zero daemon-wide), the receipt can shrink
 (drop the argument preview and digest) and the schema can move behind deferred loading (F9); if it is used, P2's
 finding did not transfer and the mask minimum can come down. For #637, P2's result argues against any new rule
 that stores what it removes (the draft "superseded file reads" rule should drop the older read, not archive it);
@@ -217,8 +220,13 @@ P2 Finding 1 (P2 §3.2, Tables 3 and 4, Figure 3): the managed-minus-unmanaged g
 and 2.7 points at 32k, 64k, 96k and 128k, and unmanaged overflow fell from 78.7% to 8.7%. At the harness's 64k
 local window compaction is load-bearing (about 16 points by P2's numbers), which is consistent with Phase 0, where
 OpenCode's compaction at 32k lost `log_correlation` for both models (`docs/phase0-results.md:127-130`). Hosted
-sessions never run `_maybe_compact` (`harness/runner.py:984-985, 1236`); they rely on the vendor CLI's compaction at a
-200k window, where P2 says the choice of strategy matters little. No change is proposed there.
+sessions never run `_maybe_compact` (`harness/runner.py:984-985, 1236`). Claude Code, Codex and Cursor rely on the
+vendor CLI's compaction at the vendor model's window (200k or more), where P2 says the choice of strategy matters
+little, and no change is proposed there. The OpenCode `kind: cli` backend is different: it is off by default
+(`config/harness.yaml:132-133`) and `OpencodeJsonl.config` hands it the local model's 65,536-token window
+(`harness/cli_backends.py:868`), so its sessions depend on OpenCode's own auto-compaction at the same small window,
+the configuration that lost `log_correlation` in Phase 0 at 32k. That is a reason to keep OpenCode a test target
+rather than a default, not a reason to add harness-side compaction: the CLI owns its history.
 
 ## 5. Ranked follow-ups
 
@@ -250,11 +258,12 @@ beats the free change; (c) the "superseded file reads" rule drops the older read
 Section 4.3; (d) the head-and-tail rule should report how often a tool is re-run with the same arguments after
 trimming, the "needed again" proxy from `docs/jev-compaction-study.md`. Everything else in #637 stands.
 
-**F2, #639 (compaction and edit telemetry).** Add three counters to the per-turn metrics payload and session
+**F2, #639 (compaction and edit telemetry).** Add three counts to the per-turn metrics payload and session
 totals: `read_artifact` calls (and whether the slice was later followed by a second slice of the same digest),
-`edit_file` failures with the `exactly once` error, and compaction passes that ended at the elide tier. Export them
-as Prometheus counters next to `harness_compaction_total` and show the first two in the session's efficiency
-summary. No behaviour change. This is the measurement Section 4.3 and Rec. 5 both need; without it the harness
+`edit_file` failures with the `exactly once` error, and compaction passes that ended at the elide tier. Export the
+last two as Prometheus counters next to `harness_compaction_total`; `read_artifact` already has a daemon-wide
+label in `harness_tool_calls_total` and needs only the per-session fields. Show `read_artifact` calls and edit
+mismatches in the session's efficiency summary. No behaviour change. This is the measurement Section 4.3 and Rec. 5 both need; without it the harness
 cannot say whether its recoverability or its exact-match contract is paying off, and P2 shows the answer is
 model-specific. Mechanical, fully specified, `ready`.
 
