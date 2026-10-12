@@ -409,6 +409,21 @@ test('#632 Chat thread keeps the conversation visible in phone landscape and wit
     const last = document.querySelector('.chat-feed')!.lastElementChild!.getBoundingClientRect();
     return last.bottom <= document.querySelector('.composer')!.getBoundingClientRect().top;
   })).toBe(true);
+  // A keyboard that shrinks only the visual viewport (iOS) lifts the composer; the latest reply still clears it at the end.
+  await page.evaluate(() => {
+    const vv = visualViewport!;
+    Object.defineProperty(vv, 'height', { configurable: true, get: () => innerHeight - 150 });
+    vv.dispatchEvent(new Event('resize'));
+  });
+  await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+  await expect.poll(() => page.evaluate(() => {
+    const last = document.querySelector('.chat-feed')!.lastElementChild!.getBoundingClientRect();
+    return last.bottom <= document.querySelector('.composer')!.getBoundingClientRect().top;
+  })).toBe(true);
+  await page.evaluate(() => {
+    delete (visualViewport as unknown as { height?: number }).height;
+    visualViewport!.dispatchEvent(new Event('resize'));
+  });
   await message.fill('Partly typed reply');
   await page.setViewportSize({ width: 375, height: 667 });
   await expect.poll(() => page.evaluate(() => document.querySelector('.composer')!.getBoundingClientRect().height)).toBe(portrait);

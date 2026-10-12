@@ -143,7 +143,8 @@ function readChatChoice() {
 
 // Keeps the fixed composer above the on-screen keyboard (iOS does not resize the layout viewport). In a thread, when the
 // viewport shrinks (the keyboard, or turning to landscape) with the latest message in view, it stays in view (#632).
-// --chat-composer-h lets a short viewport's transcript padding follow the composer as the draft grows.
+// --chat-composer-h and --chat-keyboard-h let a short viewport's transcript padding follow the composer as the draft
+// grows and clear a keyboard that shrinks only the visual viewport.
 function trackKeyboard(composer, thread) {
   const vv = window.visualViewport;
   if (!vv) return () => {};
@@ -163,6 +164,7 @@ function trackKeyboard(composer, thread) {
   const update = () => {
     const keyboard = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
     composer.style.bottom = keyboard ? `${keyboard}px` : "";
+    root.style.setProperty("--chat-keyboard-h", `${keyboard}px`);
   };
   const resize = () => {
     update();
@@ -175,6 +177,7 @@ function trackKeyboard(composer, thread) {
   return () => {
     observer?.disconnect();
     root.style.removeProperty("--chat-composer-h");
+    root.style.removeProperty("--chat-keyboard-h");
     vv.removeEventListener("resize", resize);
     vv.removeEventListener("scroll", update);
     window.removeEventListener("scroll", onScroll);
