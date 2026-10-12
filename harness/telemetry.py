@@ -194,7 +194,7 @@ def enable_asyncio_debug() -> bool:
 
 SPAN_NAMES = frozenset({"session", "idle", "turn", "chat", "execute_tool", "approval_wait", "sandbox_exec",
                         "gpu_slot_wait", "compaction", "image_job", "hosted_cli_turn", "run_setup", "run_end",
-                        "checkpoint"})
+                        "checkpoint", "completion_commit"})
 # The privacy allowlist: any other key is dropped. Never prompts, arguments, outputs, paths or error text.
 ALLOWED_ATTRIBUTES = frozenset({
     "harness.session_id", "harness.backend", "harness.status", "harness.recovered", "harness.turn",
