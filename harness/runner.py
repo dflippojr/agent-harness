@@ -2705,6 +2705,16 @@ class Runner:
                       if not any(e["path"] == path for e in proposal["edits"])]
         return max(decisions, key=lambda d: rank.get(d.action, 1))
 
+    def _result_banner(self, sid: str, name: str, args: dict) -> str:
+        """The context-only banner for a result (taint.context_banner). A read_artifact range gets the banner of the
+        result its artifact was stored from, so a masked MCP result or transcript stays marked when recovered."""
+        if name != "read_artifact":
+            return taint.context_banner(name)
+        digest = args.get("artifact_id")
+        source = next((e["data"].get("name", "") for e in self.db.events(sid)
+                       if e["type"] == "tool_result" and e["data"].get("artifact_id") == digest), "")
+        return taint.context_banner(source)
+
     def _taint_from_result(self, s: dict, name: str, args: dict) -> None:
         policy = self.policy(s) if name.startswith("mcp__") else None
         source = taint.source_for(name, args, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name))
@@ -2841,9 +2851,13 @@ class Runner:
                 output = bound_rendered(rendered, cap, raw)
             else:
                 output = bound_rendered(rendered, cap, raw, artifact_available=False)
+        # MCP results and session_read transcripts open with a banner in the model's context only (#644). Size the
+        # artifact on the bannered text, so masking recovers the plain text rather than storing the banner.
+        banner = self._result_banner(sid, name, args) if ok else ""
         # A recovered range is already backed by its artifact; storing it again would let masking loop on it.
         if artifact_content is None:
-            artifact_content = (output if ok and name != "read_artifact" and len(output) >= self.cfg.mask_min_chars
+            artifact_content = (output if ok and name != "read_artifact"
+                                and len(banner) + len(output) >= self.cfg.mask_min_chars
                                 and self.artifact_tool_available(s) else None)
         elif not self.artifact_tool_available(s):
             artifact_content = None
@@ -2856,12 +2870,13 @@ class Runner:
                     run["files_touched"] = (touched + [path])[:agent_state.FILES_MODIFIED_MAX]
                     self.db.update_session(sid, run=run)
         output_chars = len(output)
-        if len(output) > max_chars:
-            output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
+        if len(banner) + len(output) > max_chars:
+            cut = max(0, max_chars - len(banner))
+            output = (output[:cut] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
         await self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
-                            artifact_content=artifact_content, extra=extra, output_chars=output_chars)
-        return output
+                            artifact_content=artifact_content, extra=extra, output_chars=output_chars, banner=banner)
+        return banner + output
 
     async def _dispatch(self, sid: str, s: dict, call: dict, name: str, args: dict, ws: Workspace, kit) -> str:
         """Run one authorized tool call wherever it lives (daemon, app, image service, sandbox, runner)."""
@@ -3010,7 +3025,9 @@ class Runner:
 
     async def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
                        artifact_content: str | None = None, extra: dict | None = None,
-                       output_chars: int | None = None) -> None:
+                       output_chars: int | None = None, banner: str = "") -> None:
+        """Append the tool message to the context and emit tool_result. `banner` opens the context message only;
+        the event and any artifact keep the plain output."""
         def record_result() -> None:
             nonlocal output
             s = self.db.get_session(sid)
@@ -3020,7 +3037,7 @@ class Runner:
                 run["tool_errors"] = run.get("tool_errors", 0) + 1
             if (run.get("executing") or {}).get("id") == call["id"]:
                 run["executing"] = None
-            context = s["context"] + [{"role": "tool", "tool_call_id": call["id"], "content": output}]
+            context = s["context"] + [{"role": "tool", "tool_call_id": call["id"], "content": banner + output}]
             artifact_id = None
             if artifact_content is not None:
                 artifact_id = hashlib.sha256(artifact_content.encode("utf-8")).hexdigest()
@@ -3028,7 +3045,7 @@ class Runner:
                     self.db.put_artifact(sid, artifact_id, artifact_content)
                 except Exception:
                     output = _without_unstored_artifact(output, artifact_id)
-                    context[-1]["content"] = output
+                    context[-1]["content"] = banner + output
                     artifact_id = None
             payload = {"id": call["id"], "name": name, "ok": ok, "artifact_id": artifact_id,
                        "seconds": round(seconds, 2),
