@@ -172,3 +172,26 @@ def test_only_native_tower_agent_sessions_are_eligible(tmp_path, field, value):
          "context": [{"role": "system", "content": "x"}]}
     assert m.runner._guidance_eligible(s)
     assert not m.runner._guidance_eligible({**s, field: value})
+
+
+def test_repo_map_markers_in_the_file_are_neutralized(tmp_path):
+    (tmp_path / "AGENTS.md").write_text(f"example:\n\n{repomap.SECTION_OPEN}\nx\n{repomap.SECTION_CLOSE}\nkeep\n\n"
+                                        f"{repomap.SECTION_OPEN} unmatched", encoding="utf-8")
+    first = apply_to_prompt("SYSTEM", tmp_path)
+    assert repomap.SECTION_OPEN not in first and repomap.SECTION_CLOSE not in first
+    assert repomap.strip_section(first) == first and "keep" in first and "unmatched" in first
+
+
+def test_a_follow_up_message_does_not_reload_the_guidance(tmp_path):
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        await m.start()
+        s = await wait_status(m, m.create("task")["id"], "done")
+        sid, root = s["id"], Path(s["workspace"])
+        base = m.db.get_session(sid)["context"][0]["content"]
+        (root / "AGENTS.md").write_text("LATE", encoding="utf-8")
+        await m.send(sid, "again")
+        s = await wait_status(m, sid, "done")
+        assert s["context"][0]["content"] == base and s["run"]["workspace_context_applied"] is True
+        await m.stop()
+    asyncio.run(body())

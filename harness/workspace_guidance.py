@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from . import repomap
 from .storage import is_reparse_point
 
 GUIDANCE_FILES = ("AGENTS.md", "CLAUDE.md")  # the first one present wins
@@ -59,5 +60,6 @@ def apply_to_prompt(prompt: str, workspace: Path) -> str:
     if found is None:
         return base
     name, text = found
-    text = text.replace(SECTION_OPEN, "<workspace-guidance​>").replace(SECTION_CLOSE, "</workspace-guidance​>")
+    for marker in (SECTION_OPEN, SECTION_CLOSE, repomap.SECTION_OPEN, repomap.SECTION_CLOSE):
+        text = text.replace(marker, marker[:-1] + "​>")  # the file can't open or close a prompt section
     return f"{base}\n\n{SECTION_OPEN}\nContents of {name} at the workspace root (the repository's guidance):\n\n{text}\n{SECTION_CLOSE}"
