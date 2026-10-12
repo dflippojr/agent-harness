@@ -237,11 +237,25 @@ def test_a_raw_tcp_forward_to_the_daemon_port_refuses_every_tailnet_identity(tmp
             assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
             assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
                                headers={"Tailscale-User-Login": LOGIN}).status_code == 401
+            check.raw_forward_seen = False  # as after a restart, to try the next config
         assert m.db.list_api_keys() == []
         # A raw forward to another port leaves the daemon's HTTPS path alone.
         check.serve = lambda: with_tcp_forward(f"127.0.0.1:{port + 1}")
         check._cache.clear()
         assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()["role"] == "owner"
+
+
+def test_a_removed_raw_forward_keeps_refusing_until_the_daemon_restarts(tmp_path):
+    """tailscaled keeps a raw-forwarded stream open after its mapping is removed, so a peer could hold one and send a
+    forged login later; only a daemon restart closes it."""
+    config = {"now": with_tcp_forward("127.0.0.1:8100")}
+    check = fake_tailscaled_check(serve=lambda: config["now"])
+    assert not check.verify(CLIENT, SERVER)
+    config["now"] = FAKE_SERVE_CONFIG  # the owner removes the forward and keeps HTTPS
+    check._cache.clear()  # the held stream's refusal expires
+    assert not check.verify(CLIENT, SERVER)
+    assert not check.verify(("127.0.0.1", 51299), SERVER)
+    assert fake_tailscaled_check(serve=lambda: config["now"]).verify(CLIENT, SERVER)  # a restarted daemon
 
 
 def test_an_unreadable_serve_config_refuses_every_tailnet_identity(tmp_path):

@@ -21,7 +21,9 @@ Nor does tailscaled add those headers on a raw TCP forward (`tailscale serve --t
 passes the caller's bytes through, so a tailnet peer would write `Tailscale-User-Login` itself. While the node's serve
 config has any raw TCP forward to the daemon's port, or can't be read, no request gets a tailnet identity. The config is
 read with each new connection's lookup, never from a separate cache: a raw forward opens its own connection from
-tailscaled, so it always meets the config as it is now.
+tailscaled, so it always meets the config as it is now. Once a raw forward to the daemon's port has been seen, tailnet
+identity stays refused until the daemon restarts, even after the forward is removed: tailscaled keeps a forwarded
+stream open after its mapping goes, and only the restart closes it.
 
 The check is implemented for Windows. Elsewhere the headers are removed unless `listen.trust_unverified_identity_headers`
 is set, which trusts any local process that sends them.
@@ -192,6 +194,7 @@ class PeerCheck:
         self._own: tuple[float, frozenset[str]] | None = None
         self._cache: OrderedDict[tuple[str, int], tuple[float, bool]] = OrderedDict()
         self._lock = threading.Lock()
+        self.raw_forward_seen = False  # stays set until the daemon restarts and drops every connection
         self.lookups = 0
 
     def cached(self, client: tuple[str, int]) -> bool | None:
@@ -229,12 +232,23 @@ class PeerCheck:
         if verdict:
             # Read now, with this connection: a raw forward's connection is always new, so it never meets a stale config.
             try:
-                verdict = not raw_forward_to(self.serve(), int(server[1]))
+                verdict = not self._raw_forward(int(server[1]))
             except Exception as exc:  # noqa: BLE001 - an unread serve config could hold a raw TCP forward
                 log.warning("could not read this node's tailscale serve config: %s", exc)
                 return False
         self._remember(key, verdict)
         return verdict
+
+    def _raw_forward(self, port: int) -> bool:
+        """Whether a raw TCP forward to `port` is in the serve config now, or was at any lookup since the daemon started:
+        a stream it opened outlives its removal."""
+        if self.raw_forward_seen:
+            return True
+        if raw_forward_to(self.serve(), port):
+            self.raw_forward_seen = True
+            log.warning("tailscale serve forwards raw TCP to the daemon's port %s, so tailnet identity is refused until "
+                        "that forward is removed and the daemon restarts", port)
+        return self.raw_forward_seen
 
     def _from_service(self, pid: int) -> bool:
         service = self.service()
