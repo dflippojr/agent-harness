@@ -603,7 +603,7 @@ body:has(.approval-sheet) main { padding-bottom: calc(360px + var(--tabbar-offse
   .approval-sheet > .approval-cancel { order: 1; flex: 0 0 auto; width: auto; box-sizing: content-box; padding-inline: 8px; }
   .approval-sheet > .approval-actions { order: 2; flex: 1 1 0; gap: 8px; padding-left: 8px; }
   .approval-actions .btn { min-height: var(--tap); }
-  body:has(.approval-sheet) main { padding-bottom: calc(var(--approval-h, 220px) + 16px); }
+  body:has(.approval-sheet) main { padding-bottom: calc(var(--approval-h, 220px) + 16px + var(--tabbar-offset, 0px)); }
   body:has(.approval-sheet) .session-chrome { position: static; }
 }
 /* Too narrow for one row: Deny and Approve stay pinned above a pinned Cancel the whole task. */
