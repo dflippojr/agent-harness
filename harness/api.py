@@ -320,8 +320,9 @@ def _cross_site_refused(request: Request, m: Manager, info: _OriginInfo) -> bool
 
 
 async def _identity_from_tailscaled(request: Request, m: Manager) -> None:
-    """Drop the Tailscale identity headers unless tailscaled sent them (harness/tailscale_peer.py). This runs before
-    anything reads a header, so a forged login can't select a member, a guest, or open owner mode."""
+    """Drop the Tailscale identity headers unless tailscaled sent them for another tailnet node
+    (harness/tailscale_peer.py). This runs before anything reads a header, so a forged login can't select a member, a
+    guest, or open owner mode, and a program on this machine can't become the owner through `tailscale serve`."""
     scope = request.scope
     if not tailscale_peer.has_identity(scope):
         return
@@ -332,6 +333,13 @@ async def _identity_from_tailscaled(request: Request, m: Manager) -> None:
             trusted = await asyncio.to_thread(check.verify, client, server)
         else:
             trusted = check.verify(client, server)
+        # X-Forwarded-For is read only here, once tailscaled is known to have set it.
+        if trusted:
+            forwarded = tailscale_peer.forwarded_for(scope)
+            if check.own_ips_cached():
+                trusted = check.from_other_node(forwarded)
+            else:
+                trusted = await asyncio.to_thread(check.from_other_node, forwarded)
     else:
         trusted = m.cfg.trust_unverified_identity_headers
     if not trusted:

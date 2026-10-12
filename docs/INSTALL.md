@@ -439,8 +439,17 @@ install/uninstall.sh --remove-files  # also remove the install directory
 a container that reaches the host's loopback, can send the same `Tailscale-*` headers, so the daemon trusts them only
 when tailscaled is the other end of the connection: it looks the connection up in the OS connection table and checks
 that the owning process is `tailscaled.exe` in the Tailscale install directory (`%ProgramFiles%\Tailscale`). From any
-other process, or when the lookup fails, the daemon removes those headers before it reads them. A request without a
-login from tailscaled reached the daemon's loopback listener directly, so it must say who it is:
+other process, or when the lookup fails, the daemon removes those headers before it reads them.
+
+tailscaled names a caller by the tailnet address it came from, and this machine's own Tailscale address names the
+machine's owner, so a local program that opens `https://<host>.<tailnet>.ts.net/` would arrive through tailscaled as the
+owner. The daemon therefore also reads the `X-Forwarded-For` address that tailscaled sets (and only when tailscaled
+sent the request) and removes the identity headers when it is one of this machine's own Tailscale addresses (from
+`tailscale ip`), when it is missing or holds more than one address, or when `tailscale ip` fails. That is why a
+browser on the server itself gets **401** on the tailnet URL too.
+
+A request without a login from tailscaled reached the daemon's loopback listener directly or came from this machine,
+so it must say who it is:
 
 - The owner's own tools send the **local owner token** in the `X-Agent-Harness-Local-Token` header. The daemon
   creates it on first start at `data_dir/local-owner.token` and keeps it across restarts; keep `data_dir` readable
@@ -455,8 +464,8 @@ Approving, denying or releasing the standalone Hub's claim needs one more secret
 `data_dir/hub-approval.secret` at every start, and `harness hub approve`, `deny` and `release` read it, so they work only
 on the daemon host as the daemon's account ([admin-api.md](admin-api.md#hub-claim)).
 
-Everything else gets **401**. A browser on the server itself should use the tailnet URL rather than
-`http://127.0.0.1:8100`.
+Everything else gets **401**. A browser on the server itself has no tailnet identity either way, so open Web from another
+tailnet device.
 
 The tailscaled check is implemented on Windows. On other platforms the daemon ignores the `Tailscale-*` headers, so
 tailnet devices get **401** unless you set `listen.trust_unverified_identity_headers: true` in `harness.local.yaml`.

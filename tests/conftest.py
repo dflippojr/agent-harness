@@ -126,6 +126,9 @@ def local_owner_client():
                 and "host" not in self.headers):
             request.url = request.url.copy_with(host="127.0.0.1", port=manager.cfg.port)
             request.headers["Host"] = f"127.0.0.1:{manager.cfg.port}"
+        # A request with a Tailscale login stands in for `tailscale serve`, which names the calling node.
+        if "tailscale-user-login" in request.headers and "x-forwarded-for" not in request.headers:
+            request.headers["X-Forwarded-For"] = FAKE_PEER_IP
         token = getattr(manager, "local_owner_token", "")
         # Like the CLI, it sends no local token with another credential; a browser preflight never carries one.
         if (token and getattr(self, "local_owner", True) and local_owner.HEADER not in request.headers
@@ -141,13 +144,16 @@ def local_owner_client():
 
 
 FAKE_TAILSCALE_DIR = Path("C:/Program Files/Tailscale")
+FAKE_NODE_IPS = ("100.64.0.1", "fd7a:115c:a1e0::1")  # the daemon host's own Tailscale addresses
+FAKE_PEER_IP = "100.64.0.2"  # another tailnet node, which `tailscale serve` names in X-Forwarded-For
 
 
 def fake_tailscaled_check(**overrides):
-    """A peer check whose connection table says every peer is tailscaled from the install directory."""
+    """A peer check whose connection table says every peer is tailscaled from the install directory, on a node whose
+    Tailscale addresses are FAKE_NODE_IPS."""
     from harness import tailscale_peer
     options = dict(owner=lambda client, server: 4242, exe=lambda pid: str(FAKE_TAILSCALE_DIR / "tailscaled.exe"),
-                   dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True)
+                   dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True, self_ips=lambda: FAKE_NODE_IPS)
     options.update(overrides)
     return tailscale_peer.PeerCheck(**options)
 

@@ -7,6 +7,13 @@ connection: the identity headers count only when that process is tailscaled, run
 Otherwise they are removed before anything reads them, and the request needs the local owner token or another
 credential (harness/local_owner.py).
 
+tailscaled on its own is not enough. `tailscale serve` names the caller by looking up the connection's source address,
+and this node's own Tailscale address names the node's owner, so a local program that connects to
+`https://<host>.<tailnet>.ts.net/` arrives through tailscaled as the owner. tailscaled puts that source address alone in
+`X-Forwarded-For` (it replaces any value the caller sent), so a verified request whose forwarded address is one of this
+node's own Tailscale addresses, or whose `X-Forwarded-For` is missing or holds more than one value, loses its identity
+headers too.
+
 The check is implemented for Windows. Elsewhere the headers are removed unless `listen.trust_unverified_identity_headers`
 is set, which trusts any local process that sends them.
 """
@@ -16,6 +23,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -30,6 +38,9 @@ HEADER_PREFIX = b"tailscale-"
 CACHE_SIZE = 256
 CACHE_SECONDS = 5.0  # absolute, from the lookup: a closed connection's port can be reused by another process
 TAILSCALED = "tailscaled.exe"
+TAILSCALE_CLI = "tailscale.exe"
+FORWARDED_FOR = b"x-forwarded-for"
+SELF_IPS_SECONDS = 60.0
 
 
 def supported() -> bool:
@@ -42,16 +53,19 @@ def install_dirs() -> list[Path]:
     return [Path(root) / "Tailscale" for root in sorted(r for r in roots if r)]
 
 
-def _same_ip(a: str, b: str) -> bool:
+def _canonical(ip: str) -> str | None:
     try:
-        x, y = ipaddress.ip_address(a), ipaddress.ip_address(b)
+        addr = ipaddress.ip_address(ip.strip())
     except ValueError:
-        return False
-    if isinstance(x, ipaddress.IPv6Address) and x.ipv4_mapped:
-        x = x.ipv4_mapped
-    if isinstance(y, ipaddress.IPv6Address) and y.ipv4_mapped:
-        y = y.ipv4_mapped
-    return x == y
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return str(addr)
+
+
+def _same_ip(a: str, b: str) -> bool:
+    x = _canonical(a)
+    return x is not None and x == _canonical(b)
 
 
 def connection_owner(client: tuple[str, int], server: tuple[str, int]) -> int | None:
@@ -78,14 +92,34 @@ def is_tailscaled(exe: str, dirs: list[Path]) -> bool:
     return any(path.parent == Path(os.path.normcase(os.path.realpath(d))) for d in dirs)
 
 
+def node_ips(dirs: list[Path] | None = None) -> frozenset[str]:
+    """This node's own Tailscale addresses, from `tailscale ip` in the install directory. Raises when it can't tell."""
+    for d in dirs if dirs is not None else install_dirs():
+        cli = d / TAILSCALE_CLI
+        if cli.is_file():
+            out = subprocess.run([str(cli), "ip"], capture_output=True, text=True, timeout=10, check=True,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            ips = frozenset(str(ipaddress.ip_address(line.strip())) for line in out.splitlines() if line.strip())
+            if not ips:
+                raise RuntimeError("tailscale ip printed no address")
+            return ips
+    raise FileNotFoundError(f"{TAILSCALE_CLI} not found in the Tailscale install directory")
+
+
+def forwarded_for(scope) -> list[bytes]:
+    return [v for n, v in scope.get("headers") or () if n.lower() == FORWARDED_FOR]
+
+
 class PeerCheck:
     """Whether a connection's peer is tailscaled. Verdicts are cached per (client host, port) for a few seconds so
     keep-alive requests do not repeat the lookup; a failed lookup is not cached and counts as not tailscaled."""
 
     def __init__(self, *, owner=connection_owner, exe=process_exe, dirs=install_dirs, platform_ok=supported,
-                 clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS):
+                 self_ips=node_ips, clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS,
+                 self_ips_ttl: float = SELF_IPS_SECONDS):
         self.owner, self.exe, self.dirs, self.platform_ok, self.clock = owner, exe, dirs, platform_ok, clock
-        self.size, self.ttl = size, ttl
+        self.self_ips, self.size, self.ttl, self.self_ips_ttl = self_ips, size, ttl, self_ips_ttl
+        self._own: tuple[float, frozenset[str]] | None = None
         self._cache: OrderedDict[tuple[str, int], tuple[float, bool]] = OrderedDict()
         self._lock = threading.Lock()
         self.lookups = 0
@@ -124,6 +158,36 @@ class PeerCheck:
             return False
         self._remember(key, verdict)
         return verdict
+
+    def own_ips_cached(self) -> bool:
+        with self._lock:
+            return self._own is not None and self.clock() < self._own[0]
+
+    def _own_ips(self) -> frozenset[str] | None:
+        with self._lock:
+            if self._own is not None and self.clock() < self._own[0]:
+                return self._own[1]
+        try:
+            ips = frozenset(ip for ip in map(_canonical, self.self_ips()) if ip)
+        except Exception as exc:  # noqa: BLE001 - not knowing this node's addresses means no request is known to be remote
+            log.warning("could not read this node's Tailscale addresses: %s", exc)
+            return None
+        if not ips:
+            return None
+        with self._lock:
+            self._own = (self.clock() + self.self_ips_ttl, ips)
+        return ips
+
+    def from_other_node(self, forwarded: list[bytes]) -> bool:
+        """Whether tailscaled forwarded the request from another tailnet node. Call only for a verified tailscaled peer:
+        the forwarded address must be one address, and not one of this node's own."""
+        if len(forwarded) != 1:
+            return False
+        source = _canonical(forwarded[0].decode("latin-1"))
+        if source is None:
+            return False
+        own = self._own_ips()
+        return own is not None and source not in own
 
 
 def default_check() -> PeerCheck:

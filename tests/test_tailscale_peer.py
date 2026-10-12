@@ -12,7 +12,7 @@ from harness.api import create_app
 from harness.llm import Completion
 from harness.manager import Manager
 
-from conftest import FAKE_TAILSCALE_DIR, fake_tailscaled_check
+from conftest import FAKE_NODE_IPS, FAKE_PEER_IP, FAKE_TAILSCALE_DIR, fake_tailscaled_check
 from test_daemon import Script, make_cfg
 
 LOGIN = "me@example.com"
@@ -115,6 +115,56 @@ def test_unsupported_platforms_ignore_the_headers_unless_configured(tmp_path):
     assert m.tailscale_peer.lookups == 0
 
 
+def test_tailscaled_forwarding_this_node_itself_is_not_the_owner(tmp_path):
+    """`tailscale serve` names a local program that connects to this node's tailnet URL as the node's owner (#623)."""
+    client, m = make_client(tmp_path, [LOGIN], fake_tailscaled_check())
+    with client:
+        for own in (*FAKE_NODE_IPS, "::ffff:100.64.0.1"):
+            assert client.get("/me", headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": own}).status_code == 401
+        assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
+                           headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": FAKE_NODE_IPS[0]}).status_code == 401
+        assert m.db.list_api_keys() == []
+        # The local owner token still works for a program on this machine, and the forged name is not shown.
+        me = client.get("/me", headers={"Tailscale-User-Login": LOGIN, "Tailscale-User-Name": "Self",
+                                        "X-Forwarded-For": FAKE_NODE_IPS[0], local_owner.HEADER: m.local_owner_token})
+        assert me.json()["role"] == "owner" and me.json().get("name") != "Self"
+
+
+def test_tailscaled_forwarding_another_tailnet_node_is_accepted(tmp_path):
+    client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check())
+    with client:
+        for peer in (FAKE_PEER_IP, "fd7a:115c:a1e0::2"):
+            me = client.get("/me", headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": peer})
+            assert me.json()["role"] == "owner"
+
+
+def test_more_than_one_forwarded_address_is_refused(tmp_path):
+    client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check())
+    with client:
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN,
+                                          "X-Forwarded-For": f"{FAKE_PEER_IP}, 100.64.0.3"}).status_code == 401
+        assert client.get("/me", headers=[("Tailscale-User-Login", LOGIN), ("X-Forwarded-For", FAKE_PEER_IP),
+                                          ("X-Forwarded-For", "100.64.0.3")]).status_code == 401
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": "nonsense"}).status_code == 401
+
+
+def test_a_forwarded_address_from_an_unverified_peer_changes_nothing(forged):
+    client, m = forged
+    for source in (FAKE_PEER_IP, FAKE_NODE_IPS[0]):
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": source}).status_code == 401
+    assert m.tailscale_peer.lookups == 1  # the connection's verdict, cached; the node's addresses were never read
+    assert not m.tailscale_peer.own_ips_cached()
+
+
+def test_unknown_node_addresses_refuse_every_forwarded_request(tmp_path):
+    def unavailable():
+        raise FileNotFoundError("tailscale.exe not found")
+
+    client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check(self_ips=unavailable))
+    with client:
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN, "X-Forwarded-For": FAKE_PEER_IP}).status_code == 401
+
+
 # --- the check itself -------------------------------------------------------------------------------------------
 
 class Clock:
@@ -189,6 +239,49 @@ def test_the_connection_table_matches_the_peer_socket_not_the_daemon_socket(monk
     assert tailscale_peer.connection_owner(CLIENT, SERVER) == 3
     assert tailscale_peer.connection_owner(("::1", 51234), SERVER) is None
     assert tailscale_peer.connection_owner(("testclient", 50000), SERVER) is None
+
+
+def test_the_forwarded_address_must_be_one_address_of_another_node():
+    check = fake_tailscaled_check()
+    assert check.from_other_node([FAKE_PEER_IP.encode()])
+    assert not check.from_other_node([])  # missing
+    assert not check.from_other_node([b"100.64.0.1"])
+    assert not check.from_other_node([b"100.64.0.2", b"100.64.0.3"])
+    assert not check.from_other_node([b"100.64.0.2,100.64.0.3"])
+    assert not check.from_other_node([b""])
+
+
+def test_the_node_addresses_are_cached_and_a_failure_is_retried():
+    clock, calls = Clock(), []
+
+    def ips():
+        calls.append(clock.now)
+        if len(calls) == 1:
+            raise OSError("tailscaled not running")
+        return FAKE_NODE_IPS
+
+    check = fake_tailscaled_check(self_ips=ips, clock=clock, self_ips_ttl=60)
+    assert not check.from_other_node([FAKE_PEER_IP.encode()])
+    assert check.from_other_node([FAKE_PEER_IP.encode()]) and check.from_other_node([FAKE_PEER_IP.encode()])
+    assert len(calls) == 2 and check.own_ips_cached()
+    clock.now += 60
+    assert not check.own_ips_cached()
+    assert check.from_other_node([FAKE_PEER_IP.encode()]) and len(calls) == 3
+
+
+def test_node_ips_reads_tailscale_ip_from_the_install_directory(monkeypatch, tmp_path):
+    (tmp_path / "tailscale.exe").write_bytes(b"")
+    seen = []
+
+    def run(args, **kw):
+        seen.append(args)
+        return type("Done", (), {"stdout": "100.75.184.105\nfd7a:115c:a1e0::8c31:b86a\n"})()
+
+    monkeypatch.setattr(tailscale_peer.subprocess, "run", run)
+    assert tailscale_peer.node_ips([tmp_path]) == {"100.75.184.105", "fd7a:115c:a1e0::8c31:b86a"}
+    assert seen == [[str(tmp_path / "tailscale.exe"), "ip"]]
+    with pytest.raises(FileNotFoundError):
+        tailscale_peer.node_ips([tmp_path / "missing"])
 
 
 def test_strip_identity_removes_every_tailscale_header():
