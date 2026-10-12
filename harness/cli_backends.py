@@ -22,7 +22,7 @@ from . import claude_token, cli_domains, credential_sources, end_users, member_k
 from .config import BackendConfig, SandboxConfig
 from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides, mcp_config
 from .sandbox import run_cmd
-from .storage import is_reparse_point
+from .workspace_guidance import GUIDANCE_LIMIT, cap, read_workspace_file
 
 # The bind-mount target every provider CLI runs in, and the proxy env every container needs.
 WORKSPACE = "/workspace"
@@ -44,28 +44,15 @@ SPLIT_NOTE = ("\n\nYour shell and file tools are the harness tools mcp__harness_
 # Project instructions Claude Code would load from the workspace itself. `--setting-sources user` drops them along with
 # the project settings (#531), so the session's system prompt carries them instead.
 PROJECT_MEMORY_FILES = ("CLAUDE.md", ".claude/CLAUDE.md")
-PROJECT_MEMORY_LIMIT = 16_000  # characters: the prompt travels on the docker command line
+PROJECT_MEMORY_LIMIT = GUIDANCE_LIMIT  # characters: the prompt travels on the docker command line
 
 
 def project_memory(workspace: Path) -> str:
     """The workspace's CLAUDE.md files as a system prompt section, or "". A file reached through a link is skipped:
     it is read on the host, where a link could point anywhere."""
-    sections = []
-    for name in PROJECT_MEMORY_FILES:
-        parts = name.split("/")
-        path = workspace.joinpath(*parts)
-        try:
-            if any(is_reparse_point(workspace.joinpath(*parts[:i + 1])) for i in range(len(parts))) \
-                    or not path.is_file():
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            continue
-        if text:
-            sections.append(f"Contents of {WORKSPACE}/{name} (project instructions):\n\n{text}")
-    body = "\n\n".join(sections)
-    if len(body) > PROJECT_MEMORY_LIMIT:
-        body = body[:PROJECT_MEMORY_LIMIT] + f"\n\n[truncated: read the files in {WORKSPACE} for the rest]"
+    sections = [f"Contents of {WORKSPACE}/{name} (project instructions):\n\n{text}"
+                for name in PROJECT_MEMORY_FILES if (text := read_workspace_file(workspace, name))]
+    body = cap("\n\n".join(sections), PROJECT_MEMORY_LIMIT, f"read the files in {WORKSPACE} for the rest")
     return "\n\n" + body if body else ""
 
 

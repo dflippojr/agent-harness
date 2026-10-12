@@ -62,7 +62,8 @@ projects:
     description: Empty workspace on the MacBook
     target: macbook
 
-  # Example of a project with its own instructions and a sensitive-path gate:
+  # Example of a project with its own instructions and a sensitive-path gate. Native sessions also read the repo's
+  # AGENTS.md (else CLAUDE.md) and add it after these instructions (docs/compaction.md):
   # memory-library:
   #   description: Personal memory library
   #   repo: D:/Agents/repos/agent-memory-library

@@ -80,6 +80,29 @@ not increment round-reset accounting. A successful reset keeps the pinned
 head, injects the tagged state (including derived `files_modified`), a fixed
 next-step message, and the latest tool-call exchange.
 
+## Workspace guidance and repo map
+
+Native (local-model) agent sessions on the tower carry the repository's own
+guidance file in their system prompt (#642): `AGENTS.md` at the workspace
+root, or `CLAUDE.md` when there is no non-empty `AGENTS.md`. Nested files,
+`.claude/CLAUDE.md` and user-scope files are not read. The text is capped at
+16,000 characters, the same cap hosted Claude uses for `CLAUDE.md`, and a file
+reached through a symlink or junction is skipped. It goes after the project
+`instructions` and any skills, inside a `<workspace-guidance>` section whose
+first line names the file. With the experimental repo map on, the map follows
+it.
+
+Both are added once, at the session's first run after the clone, and refreshed
+only by a successful round reset, so the prompt prefix stays cache-stable
+within a round. An edit to `AGENTS.md` mid-round reaches the model at the next
+reset. Hosted backends are unchanged: Claude gets `CLAUDE.md` through
+`--append-system-prompt` and Codex reads `AGENTS.md` itself.
+
+The file is trusted like the rest of the workspace, as the repo map is: reading
+it does not taint the session. A project whose repo is untrusted should be
+treated as untrusted as a whole. Because the harness's own repository has an
+`AGENTS.md`, native sessions on an agent-harness project now see it.
+
 ## Delegated edits
 
 `delegate_edit(paths, instruction, task_id?)` keeps file contents out of the
