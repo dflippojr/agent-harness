@@ -322,8 +322,8 @@ def _cross_site_refused(request: Request, m: Manager, info: _OriginInfo) -> bool
 async def _identity_from_tailscaled(request: Request, m: Manager) -> None:
     """Drop the Tailscale identity headers unless tailscaled sent them for another tailnet node
     (harness/tailscale_peer.py). This runs before anything reads a header, so a forged login can't select a member, a
-    guest, or open owner mode, a program on this machine can't become the owner through `tailscale serve`, and a raw TCP
-    forward can't carry a caller's own headers."""
+    guest, or open owner mode, and a program on this machine can't become the owner through `tailscale serve`. A raw TCP
+    forward to the daemon is caught only while it is still in the serve config (harness/tailscale_peer.py)."""
     scope = request.scope
     if not tailscale_peer.has_identity(scope):
         return

@@ -452,10 +452,12 @@ lookup fails. That is why a browser on the server itself gets **401** on the tai
 
 Publish the daemon with an HTTPS proxy (`tailscale serve --bg --https=443 http://127.0.0.1:8100`), never as a raw TCP
 forward (`--tcp` or `--tls-terminated-tcp`). A raw forward passes the caller's bytes through without tailscaled's
-headers, so a tailnet device could name any login. While `tailscale serve status --json` shows any `TCPForward` to the
-daemon's port, or can't be read, the daemon ignores the `Tailscale-*` headers on every request. Once it has seen such a
-forward it keeps ignoring them until it restarts, because tailscaled keeps a forwarded connection open after the forward
-is removed: remove the forward, then restart the daemon.
+headers, so a tailnet device could name any login. The daemon does not prevent this. It has a best-effort check: it
+reads `tailscale serve status --json` for each new connection, and ignores the `Tailscale-*` headers when the config
+can't be read or has a `TCPForward` to the daemon's port, and from then until the daemon restarts (remove the forward,
+then restart the daemon). It catches only a forward still in place when a request arrives. tailscaled keeps a forwarded
+connection open after the forward is removed, so anything able to change this machine's serve config can open a
+connection through a raw forward, remove the forward, and then send any login, and the daemon will accept it.
 
 A request without a login from tailscaled reached the daemon's loopback listener directly or came from this machine,
 so it must say who it is:

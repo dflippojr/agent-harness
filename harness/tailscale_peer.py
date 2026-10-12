@@ -18,12 +18,13 @@ node's own Tailscale addresses, or whose `X-Forwarded-For` is missing or holds m
 headers too.
 
 Nor does tailscaled add those headers on a raw TCP forward (`tailscale serve --tcp` or `--tls-terminated-tcp`): it
-passes the caller's bytes through, so a tailnet peer would write `Tailscale-User-Login` itself. While the node's serve
-config has any raw TCP forward to the daemon's port, or can't be read, no request gets a tailnet identity. The config is
-read with each new connection's lookup, never from a separate cache: a raw forward opens its own connection from
-tailscaled, so it always meets the config as it is now. Once a raw forward to the daemon's port has been seen, tailnet
-identity stays refused until the daemon restarts, even after the forward is removed: tailscaled keeps a forwarded
-stream open after its mapping goes, and only the restart closes it.
+passes the caller's bytes through, so a tailnet peer would write `Tailscale-User-Login` itself. This module does not
+prevent that; publish the daemon only through the HTTPS proxy. It has a best-effort check: each new connection's lookup
+reads the serve config, and refuses tailnet identity when the config can't be read or has a raw TCP forward to the
+daemon's port, and from then until the daemon restarts. It catches only a forward still in place when a lookup runs.
+tailscaled keeps a forwarded stream open after its mapping is removed, so anything able to change this node's serve
+config can add a raw forward, open a connection through it, remove the forward, and only then send forged headers; that
+connection's lookup sees a clean config and admits them. The owner accepted that risk (#623).
 
 The check is implemented for Windows. Elsewhere the headers are removed unless `listen.trust_unverified_identity_headers`
 is set, which trusts any local process that sends them.
@@ -178,9 +179,10 @@ def forwarded_for(scope) -> list[bytes]:
 
 
 class PeerCheck:
-    """Whether a connection's peer is the Tailscale service's tailscaled, on a node whose serve config has no raw TCP
-    forward to the daemon. Verdicts are cached per (client host, port) for a few seconds so keep-alive requests do not
-    repeat the lookup; a failed lookup is not cached and counts as not tailscaled."""
+    """Whether a connection's peer is the Tailscale service's tailscaled, on a node whose serve config showed no raw TCP
+    forward to the daemon at any lookup (a best-effort check; see the module docstring). Verdicts are cached per
+    (client host, port) for a few seconds so keep-alive requests do not repeat the lookup; a failed lookup is not cached
+    and counts as not tailscaled."""
 
     def __init__(self, *, owner=connection_owner, exe=process_exe, dirs=install_dirs, platform_ok=supported,
                  service=service_pid, child_of=started_by, tailscale_ips=node_ips, interface_addrs=interface_ips,
@@ -230,7 +232,8 @@ class PeerCheck:
             log.warning("could not identify the process behind a request with Tailscale identity headers: %s", exc)
             return False
         if verdict:
-            # Read now, with this connection: a raw forward's connection is always new, so it never meets a stale config.
+            # Read now, with this connection. This sees a raw forward only while it is still in the config: a stream
+            # opened through one that has since been removed looks clean here (see the module docstring).
             try:
                 verdict = not self._raw_forward(int(server[1]))
             except Exception as exc:  # noqa: BLE001 - an unread serve config could hold a raw TCP forward
@@ -240,8 +243,8 @@ class PeerCheck:
         return verdict
 
     def _raw_forward(self, port: int) -> bool:
-        """Whether a raw TCP forward to `port` is in the serve config now, or was at any lookup since the daemon started:
-        a stream it opened outlives its removal."""
+        """Whether a raw TCP forward to `port` is in the serve config now, or was at any lookup since the daemon started.
+        A forward added and removed between lookups is never seen."""
         if self.raw_forward_seen:
             return True
         if raw_forward_to(self.serve(), port):
