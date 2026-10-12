@@ -25,6 +25,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -54,6 +55,13 @@ def install_dirs() -> list[Path]:
     """Where the Tailscale installer puts tailscaled on Windows."""
     roots = {os.environ.get(name) for name in ("ProgramW6432", "ProgramFiles")}
     return [Path(root) / "Tailscale" for root in sorted(r for r in roots if r)]
+
+
+def interface_ips() -> frozenset[str]:
+    """Every address on this machine's network interfaces now, the Tailscale adapter's among them. Read on each request,
+    so an address that changed after `tailscale ip` was cached still counts as this node's own."""
+    return frozenset(a.address.split("%", 1)[0] for addrs in psutil.net_if_addrs().values() for a in addrs
+                     if a.family in (socket.AF_INET, socket.AF_INET6))
 
 
 def _canonical(ip: str) -> str | None:
@@ -124,11 +132,12 @@ class PeerCheck:
     tailscaled."""
 
     def __init__(self, *, owner=connection_owner, exe=process_exe, dirs=install_dirs, platform_ok=supported,
-                 service=service_pid,
+                 service=service_pid, local_ips=interface_ips,
                  self_ips=node_ips, clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS,
                  self_ips_ttl: float = SELF_IPS_SECONDS):
         self.owner, self.exe, self.dirs, self.platform_ok, self.clock = owner, exe, dirs, platform_ok, clock
         self.service, self.self_ips, self.size, self.ttl, self.self_ips_ttl = service, self_ips, size, ttl, self_ips_ttl
+        self.local_ips = local_ips
         self._own: tuple[float, frozenset[str]] | None = None
         self._cache: OrderedDict[tuple[str, int], tuple[float, bool]] = OrderedDict()
         self._lock = threading.Lock()
@@ -190,14 +199,22 @@ class PeerCheck:
 
     def from_other_node(self, forwarded: list[bytes]) -> bool:
         """Whether tailscaled forwarded the request from another tailnet node. Call only for a verified tailscaled peer:
-        the forwarded address must be one address, and not one of this node's own."""
+        the forwarded address must be one address, and not one of this node's own: not a cached `tailscale ip` address
+        and not an address on one of its interfaces now."""
         if len(forwarded) != 1:
             return False
         source = _canonical(forwarded[0].decode("latin-1"))
         if source is None:
             return False
         own = self._own_ips()
-        return own is not None and source not in own
+        if own is None or source in own:
+            return False
+        try:
+            current = {ip for ip in map(_canonical, self.local_ips()) if ip}
+        except Exception as exc:  # noqa: BLE001 - without this node's addresses no request is known to be remote
+            log.warning("could not read this machine's interface addresses: %s", exc)
+            return False
+        return source not in current
 
 
 def default_check() -> PeerCheck:

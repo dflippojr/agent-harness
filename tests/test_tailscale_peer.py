@@ -295,6 +295,36 @@ def test_the_node_addresses_are_cached_and_a_failure_is_retried():
     assert check.from_other_node([FAKE_PEER_IP.encode()]) and len(calls) == 3
 
 
+def test_a_changed_node_address_is_refused_before_the_cache_expires():
+    """After a profile switch the cached `tailscale ip` addresses are stale, but the adapter already has the new one."""
+    current = {"addrs": ("127.0.0.1", *FAKE_NODE_IPS)}
+    check = fake_tailscaled_check(local_ips=lambda: current["addrs"])
+    assert check.from_other_node([FAKE_PEER_IP.encode()])
+    current["addrs"] = ("127.0.0.1", "fe80::1%12", FAKE_PEER_IP)  # this node now holds the address
+    assert check.own_ips_cached()
+    assert not check.from_other_node([FAKE_PEER_IP.encode()])
+
+
+def test_unreadable_interfaces_refuse_the_request():
+    def broken():
+        raise OSError("no interface table")
+
+    assert not fake_tailscaled_check(local_ips=broken).from_other_node([FAKE_PEER_IP.encode()])
+
+
+def test_interface_ips_lists_every_address_without_a_zone(monkeypatch):
+    import socket
+
+    class Addr:
+        def __init__(self, family, address):
+            self.family, self.address = family, address
+
+    table = {"Tailscale": [Addr(socket.AF_INET, "100.75.184.105"), Addr(socket.AF_INET6, "fe80::1%12")],
+             "Ethernet": [Addr(-1, "aa-bb-cc-dd-ee-ff"), Addr(socket.AF_INET, "192.168.1.5")]}
+    monkeypatch.setattr(tailscale_peer.psutil, "net_if_addrs", lambda: table)
+    assert tailscale_peer.interface_ips() == {"100.75.184.105", "fe80::1", "192.168.1.5"}
+
+
 def test_node_ips_reads_tailscale_ip_from_the_install_directory(monkeypatch, tmp_path):
     (tmp_path / "tailscale.exe").write_bytes(b"")
     seen = []

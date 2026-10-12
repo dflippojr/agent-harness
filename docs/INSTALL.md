@@ -446,9 +446,9 @@ when a lookup fails, the daemon removes those headers before it reads them.
 tailscaled names a caller by the tailnet address it came from, and this machine's own Tailscale address names the
 machine's owner, so a local program that opens `https://<host>.<tailnet>.ts.net/` would arrive through tailscaled as the
 owner. The daemon therefore also reads the `X-Forwarded-For` address that tailscaled sets (and only when tailscaled
-sent the request) and removes the identity headers when it is one of this machine's own Tailscale addresses (from
-`tailscale ip`), when it is missing or holds more than one address, or when `tailscale ip` fails. That is why a
-browser on the server itself gets **401** on the tailnet URL too.
+sent the request) and removes the identity headers when it is one of this machine's own addresses (from
+`tailscale ip` or its network interfaces now), when it is missing or holds more than one address, or when either
+lookup fails. That is why a browser on the server itself gets **401** on the tailnet URL too.
 
 A request without a login from tailscaled reached the daemon's loopback listener directly or came from this machine,
 so it must say who it is:

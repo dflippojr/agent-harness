@@ -154,7 +154,7 @@ def fake_tailscaled_check(**overrides):
     from harness import tailscale_peer
     options = dict(owner=lambda client, server: 4242, exe=lambda pid: str(FAKE_TAILSCALE_DIR / "tailscaled.exe"),
                    dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True, service=lambda: 4242,
-                   self_ips=lambda: FAKE_NODE_IPS)
+                   self_ips=lambda: FAKE_NODE_IPS, local_ips=lambda: ("127.0.0.1", "::1", *FAKE_NODE_IPS))
     options.update(overrides)
     return tailscale_peer.PeerCheck(**options)
 
