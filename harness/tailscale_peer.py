@@ -3,8 +3,9 @@
 `tailscale serve` forwards tailnet requests to the loopback listener and adds `Tailscale-User-Login` and the other
 `Tailscale-*` identity headers. Any other program on this machine, or a container that reaches the host loopback, can
 reach the same listener and send the same headers. So the daemon looks up who owns the other end of the TCP
-connection: the identity headers count only when that process is the Tailscale Windows service, whose executable is
-tailscaled in the Tailscale install directory. The path alone is not enough: any local user can start that same
+connection: the identity headers count only when that process is the Tailscale Windows service, or the tailscaled
+child it starts to run the network (`tailscaled.exe /subproc`, which owns the socket), and its executable is tailscaled
+in the Tailscale install directory. The path alone is not enough: any local user can start that same
 tailscaled.exe in userspace mode as a proxy to the daemon and choose the headers it sends.
 Otherwise they are removed before anything reads them, and the request needs the local owner token or another
 credential (harness/local_owner.py).
@@ -98,6 +99,13 @@ def service_pid() -> int | None:
     return psutil.win_service_get(SERVICE).pid()
 
 
+def started_by(pid: int, parent: int) -> bool:
+    """Whether `parent` started `pid`. The child must be newer than the parent, so a recycled parent PID can't match.
+    Only an administrator can create a process with the SYSTEM service as its parent."""
+    child = psutil.Process(pid)
+    return child.ppid() == parent and child.create_time() >= psutil.Process(parent).create_time()
+
+
 def is_tailscaled(exe: str, dirs: list[Path]) -> bool:
     """The name alone proves nothing: the executable must sit directly in a Tailscale install directory."""
     if not exe:
@@ -132,12 +140,12 @@ class PeerCheck:
     tailscaled."""
 
     def __init__(self, *, owner=connection_owner, exe=process_exe, dirs=install_dirs, platform_ok=supported,
-                 service=service_pid, local_ips=interface_ips,
+                 service=service_pid, child_of=started_by, local_ips=interface_ips,
                  self_ips=node_ips, clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS,
                  self_ips_ttl: float = SELF_IPS_SECONDS):
         self.owner, self.exe, self.dirs, self.platform_ok, self.clock = owner, exe, dirs, platform_ok, clock
         self.service, self.self_ips, self.size, self.ttl, self.self_ips_ttl = service, self_ips, size, ttl, self_ips_ttl
-        self.local_ips = local_ips
+        self.child_of, self.local_ips = child_of, local_ips
         self._own: tuple[float, frozenset[str]] | None = None
         self._cache: OrderedDict[tuple[str, int], tuple[float, bool]] = OrderedDict()
         self._lock = threading.Lock()
@@ -171,12 +179,16 @@ class PeerCheck:
         self.lookups += 1
         try:
             pid = self.owner(key, (str(server[0]), int(server[1])))
-            verdict = bool(pid) and pid == self.service() and is_tailscaled(self.exe(pid), self.dirs())
+            verdict = bool(pid) and self._from_service(pid) and is_tailscaled(self.exe(pid), self.dirs())
         except Exception as exc:  # noqa: BLE001 - any failure means the peer is not known to be tailscaled
             log.warning("could not identify the process behind a request with Tailscale identity headers: %s", exc)
             return False
         self._remember(key, verdict)
         return verdict
+
+    def _from_service(self, pid: int) -> bool:
+        service = self.service()
+        return bool(service) and (pid == service or self.child_of(pid, service))
 
     def own_ips_cached(self) -> bool:
         with self._lock:

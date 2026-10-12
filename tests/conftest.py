@@ -108,7 +108,8 @@ def pinned_scanner(monkeypatch, gitleaks_tools):
 @pytest.fixture(autouse=True, scope="session")
 def local_owner_client():
     """A test client speaks for the owner on this machine: it sends the daemon's local owner token, as the CLI does.
-    A test of a caller without it sets `client.local_owner = False`."""
+    A test of a caller without it sets `client.local_owner = False`. A request with a Tailscale login gets another
+    node's `X-Forwarded-For`, as `tailscale serve` adds; a test without it sets `client.serve_forwarded = False`."""
     from starlette.testclient import TestClient
     from harness import local_owner
 
@@ -127,7 +128,8 @@ def local_owner_client():
             request.url = request.url.copy_with(host="127.0.0.1", port=manager.cfg.port)
             request.headers["Host"] = f"127.0.0.1:{manager.cfg.port}"
         # A request with a Tailscale login stands in for `tailscale serve`, which names the calling node.
-        if "tailscale-user-login" in request.headers and "x-forwarded-for" not in request.headers:
+        if (getattr(self, "serve_forwarded", True) and "tailscale-user-login" in request.headers
+                and "x-forwarded-for" not in request.headers):
             request.headers["X-Forwarded-For"] = FAKE_PEER_IP
         token = getattr(manager, "local_owner_token", "")
         # Like the CLI, it sends no local token with another credential; a browser preflight never carries one.
@@ -154,6 +156,7 @@ def fake_tailscaled_check(**overrides):
     from harness import tailscale_peer
     options = dict(owner=lambda client, server: 4242, exe=lambda pid: str(FAKE_TAILSCALE_DIR / "tailscaled.exe"),
                    dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True, service=lambda: 4242,
+                   child_of=lambda pid, parent: False,
                    self_ips=lambda: FAKE_NODE_IPS, local_ips=lambda: ("127.0.0.1", "::1", *FAKE_NODE_IPS))
     options.update(overrides)
     return tailscale_peer.PeerCheck(**options)

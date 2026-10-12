@@ -128,6 +128,25 @@ def test_the_real_tailscaled_run_by_someone_else_is_not_the_service(tmp_path):
     assert check.cached(CLIENT) is False
 
 
+def test_the_network_child_the_service_starts_is_tailscaled(tmp_path):
+    """The service supervises a `tailscaled.exe /subproc` child, and that child owns Serve's socket (PIDs 7500 and
+    10312 on the tower with tailscaled 1.102.4)."""
+    spawned = []
+
+    def child_of(pid, parent):
+        spawned.append((pid, parent))
+        return (pid, parent) == (10312, 7500)
+
+    check = fake_tailscaled_check(owner=lambda client, server: 10312, service=lambda: 7500, child_of=child_of)
+    client, _ = make_client(tmp_path, [LOGIN], check)
+    with client:
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()["role"] == "owner"
+    assert spawned == [(10312, 7500)]
+    # Not the service's own child: the real tailscaled.exe started by some other process.
+    assert not fake_tailscaled_check(owner=lambda client, server: 5151, service=lambda: 7500,
+                                     child_of=child_of).verify(CLIENT, SERVER)
+
+
 def test_a_missing_or_unreadable_service_ignores_the_headers(tmp_path):
     def missing():
         raise LookupError("service 'Tailscale' does not exist")
@@ -165,6 +184,9 @@ def test_tailscaled_forwarding_another_tailnet_node_is_accepted(tmp_path):
 def test_more_than_one_forwarded_address_is_refused(tmp_path):
     client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check())
     with client:
+        client.serve_forwarded = False
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401  # missing
+        client.serve_forwarded = True
         assert client.get("/me", headers={"Tailscale-User-Login": LOGIN,
                                           "X-Forwarded-For": f"{FAKE_PEER_IP}, 100.64.0.3"}).status_code == 401
         assert client.get("/me", headers=[("Tailscale-User-Login", LOGIN), ("X-Forwarded-For", FAKE_PEER_IP),
@@ -360,6 +382,25 @@ def test_service_pid_asks_for_the_tailscale_service(monkeypatch):
                         raising=False)
     assert tailscale_peer.service_pid() == 7500
     assert asked == ["Tailscale"]
+
+
+def test_started_by_needs_the_parent_pid_and_a_newer_child(monkeypatch):
+    procs = {10312: (7500, 200.0), 5151: (7500, 50.0), 6000: (1252, 300.0), 7500: (1252, 100.0)}
+
+    class Proc:
+        def __init__(self, pid):
+            self.parent, self.created = procs[pid]
+
+        def ppid(self):
+            return self.parent
+
+        def create_time(self):
+            return self.created
+
+    monkeypatch.setattr(tailscale_peer.psutil, "Process", Proc)
+    assert tailscale_peer.started_by(10312, 7500)
+    assert not tailscale_peer.started_by(5151, 7500)  # older than the service: its parent PID was recycled
+    assert not tailscale_peer.started_by(6000, 7500)
 
 
 def test_install_dirs_follow_program_files(monkeypatch):
