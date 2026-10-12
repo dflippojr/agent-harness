@@ -1,0 +1,8 @@
+schema_version: 1
+kind: doc-index
+target: readme-docs-index
+title: Harness-design gap report (arXiv 2609.00006, 2609.20804)
+order: 52
+links:
+  - text: 'harness-design-gap-report'
+    href: docs/harness-design-gap-report.md
