@@ -1,5 +1,5 @@
 import { test, expect, openSession, expectDone } from './fixtures';
-import type { Locator } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 
 async function expectHitTarget(target: Locator) {
   await target.scrollIntoViewIfNeeded();
@@ -191,5 +191,238 @@ test('#593 Tool output actions work through portrait-landscape-portrait without 
         await expect(viewer).toHaveCount(0);
       }
     }
+  }
+});
+
+type Box = { left: number; top: number; right: number; bottom: number; width: number; height: number };
+const boxOf = (target: Locator) => target.evaluate(el => {
+  const r = el.getBoundingClientRect();
+  return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+});
+// The clear space between two boxes: horizontal for side-by-side boxes, vertical for stacked ones.
+const gapBetween = (a: Box, b: Box) => Math.max(b.left - a.right, a.left - b.right, b.top - a.bottom, a.top - b.bottom);
+function expectTargets(boxes: Box[], label: string) {
+  for (const [index, box] of boxes.entries()) {
+    expect(box.width, `${label} ${index} width`).toBeGreaterThanOrEqual(44);
+    expect(box.height, `${label} ${index} height`).toBeGreaterThanOrEqual(44);
+    for (const other of boxes.slice(index + 1)) expect(gapBetween(box, other), `${label} ${index} gap`).toBeGreaterThanOrEqual(8);
+  }
+}
+const noPageOverflow = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
+async function openSeededChat(page: Page) {
+  await page.goto('/#/chat');
+  await page.getByRole('region', { name: 'Recent chats', exact: true })
+    .getByRole('link', { name: /^Hello from Chat\. What can you do\?/ }).first().click();
+  await expect(page.locator('.chat-feed')).toContainText('Hi! This is the fake model.');
+}
+
+test('#626 Actions sub-tabs keep whole-word labels, 44px targets and 8px gaps', async ({ signedIn: page }) => {
+  await page.goto('/#/actions/resources');
+  const tabs = page.getByRole('tablist', { name: 'Server settings', exact: true });
+  await expect(tabs.getByRole('tab', { name: 'Resources', exact: true })).toHaveAttribute('aria-selected', 'true');
+  for (const width of [320, 375, 412]) {
+    await page.setViewportSize({ width, height: 800 });
+    await expect.poll(() => page.evaluate(() => innerWidth)).toBe(width);
+    const measured = await page.locator('.resources-tabs button').evaluateAll(els => els.map(el => {
+      const r = el.getBoundingClientRect();
+      // A word broken across lines has one client rect per line.
+      const broken: string[] = [];
+      for (const node of el.childNodes) {
+        if (node.nodeType !== Node.TEXT_NODE) continue;
+        for (const match of node.textContent!.matchAll(/\S+/g)) {
+          const range = document.createRange();
+          range.setStart(node, match.index!);
+          range.setEnd(node, match.index! + match[0].length);
+          if (range.getClientRects().length !== 1) broken.push(match[0]);
+        }
+      }
+      const box = { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+      return { box, fits: el.scrollWidth <= el.clientWidth, broken };
+    }));
+    expect(measured.length).toBeGreaterThanOrEqual(2);
+    for (const tab of measured) {
+      expect(tab.fits).toBe(true);
+      expect(tab.broken).toEqual([]);
+    }
+    expectTargets(measured.map(tab => tab.box), `tab at ${width}px`);
+    await expect.poll(() => noPageOverflow(page)).toBe(true);
+  }
+  await tabs.getByRole('tab', { name: 'Disk', exact: true }).click();
+  await expect(page).toHaveURL(/#\/actions\/disk$/);
+});
+
+test('#627 Largest workspaces rows are 44px links 8px apart', async ({ signedIn: page }) => {
+  const links = page.locator('.disk-facts p:text-is("Largest workspaces") + ul a');
+  for (const width of [375, 412]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.goto('/#/actions/disk');
+    await expect(links.first()).toBeVisible();
+    expectTargets(await Promise.all((await links.all()).map(boxOf)), `workspace at ${width}px`);
+    await expect.poll(() => noPageOverflow(page)).toBe(true);
+  }
+  const href = await links.first().getAttribute('href');
+  await links.first().click();
+  await expect.poll(() => new URL(page.url()).hash).toBe(href);
+});
+
+test('#628 Refresh diagnostics is a 44px target clear of its neighbours', async ({ signedIn: page }) => {
+  for (const width of [375, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/#/actions/resources');
+    const refresh = page.getByRole('button', { name: 'Refresh diagnostics', exact: true });
+    await expect(refresh).toBeVisible();
+    const { box, gaps } = await refresh.evaluate(el => {
+      const rect = (node: Element) => {
+        const r = node.getBoundingClientRect();
+        return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+      };
+      const own = rect(el);
+      const card = el.closest('.card') || el.parentElement!.parentElement!;
+      const others = [...card.querySelectorAll('button, a, input, select, textarea, summary')]
+        .filter(other => other !== el && other.getClientRects().length).map(rect);
+      return { box: own, gaps: others.map(o => Math.max(o.left - own.right, own.left - o.right, o.top - own.bottom, own.top - o.bottom)) };
+    });
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    for (const gap of gaps) expect(gap).toBeGreaterThanOrEqual(8);
+  }
+});
+
+test('#629 Rewind here and Fork from here are 44px targets at least 8px apart', async ({ signedIn: page }) => {
+  await openSession(page, 'Tool rows');
+  await expectDone(page);
+  const checkpoint = page.locator('.note.checkpoint').first();
+  for (const width of [320, 375, 412, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    await checkpoint.scrollIntoViewIfNeeded();
+    const rewind = checkpoint.getByRole('button', { name: 'Rewind here', exact: true });
+    const fork = checkpoint.getByRole('button', { name: 'Fork from here', exact: true });
+    await expect(rewind).toBeVisible();
+    expectTargets([await boxOf(rewind), await boxOf(fork)], `checkpoint action at ${width}px`);
+  }
+});
+
+test('#630 Cancel the whole task sits at least 8px below the phone decision buttons', async ({ signedIn: page }, info) => {
+  test.skip(!info.project.use.isMobile, 'phone approval sheet');
+  await openSession(page, 'Protected settings');
+  const sheet = page.getByRole('region', { name: 'Approval needed', exact: true });
+  await expect(sheet).toBeVisible();
+  const cancel = await boxOf(sheet.getByRole('button', { name: 'Cancel the whole task', exact: true }));
+  expect(cancel.height).toBeGreaterThanOrEqual(44);
+  const decisions = await sheet.locator('.approval-actions button').all();
+  expect(decisions).toHaveLength(2);
+  for (const button of decisions) {
+    const box = await boxOf(button);
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(cancel.top - box.bottom).toBeGreaterThanOrEqual(8);
+  }
+});
+
+test('#631 Phone landscape keeps Deny and Approve on screen with transcript above the sheet', async ({ signedIn: page }, info) => {
+  test.skip(!info.project.use.isMobile, 'phone approval sheet');
+  await openSession(page, 'Protected settings');
+  const sheet = page.getByRole('region', { name: 'Approval needed', exact: true });
+  await expect(sheet).toBeVisible();
+  for (const viewport of [{ width: 667, height: 375 }, { width: 659, height: 393 }, { width: 375, height: 667 }]) {
+    await page.setViewportSize(viewport);
+    await expect.poll(() => page.evaluate(() => innerHeight)).toBe(viewport.height);
+    await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+    for (const name of ['✕ Deny', '✓ Approve']) {
+      const button = sheet.getByRole('button', { name, exact: true });
+      const box = await boxOf(button);
+      expect(box.top, name).toBeGreaterThanOrEqual(0);
+      expect(box.bottom, name).toBeLessThanOrEqual(viewport.height);
+      expect(box.right, name).toBeLessThanOrEqual(viewport.width);
+      expect(await button.evaluate(el => {
+        const r = el.getBoundingClientRect();
+        return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+      }), name).toBe(true);
+    }
+    // Transcript between the header (the bar, plus the session chrome while it is pinned on screen) and the sheet.
+    const band = await page.evaluate(() => {
+      const bar = document.getElementById('bar')!.getBoundingClientRect();
+      const chrome = document.querySelector('.session-chrome')!.getBoundingClientRect();
+      const sheetTop = document.querySelector('.approval-sheet')!.getBoundingClientRect().top;
+      return sheetTop - Math.max(bar.bottom, chrome.bottom);
+    });
+    if (viewport.width > viewport.height) expect(band).toBeGreaterThanOrEqual(80);
+  }
+});
+
+test('#632 Chat thread keeps the conversation visible in phone landscape and with the keyboard up', async ({ signedIn: page }, info) => {
+  test.skip(!info.project.name.startsWith('iphone-se'), 'iPhone SE geometry');
+  await openSeededChat(page);
+  const message = page.getByRole('textbox', { name: 'Message', exact: true });
+  await message.fill('Partly typed reply');
+  await message.focus();
+  const portrait = await page.evaluate(() => document.querySelector('.composer')!.getBoundingClientRect().height);
+  for (const viewport of [{ width: 667, height: 375 }, { width: 667, height: 225 }]) {
+    await page.setViewportSize(viewport);
+    await expect.poll(() => page.evaluate(() => innerHeight)).toBe(viewport.height);
+    await expect(message).toBeFocused();
+    await expect(message).toHaveValue('Partly typed reply');
+    await expect.poll(() => page.evaluate(() => {
+      const header = document.getElementById('bar')!.getBoundingClientRect();
+      const composer = document.querySelector('.composer')!.getBoundingClientRect();
+      const feed = document.querySelector('.chat-feed')!.getBoundingClientRect();
+      const send = [...document.querySelectorAll('.composer button')].find(b => b.textContent!.trim() === 'Send')!.getBoundingClientRect();
+      const field = document.querySelector('.composer textarea')!.getBoundingClientRect();
+      const inside = (r: DOMRect) => r.top >= composer.top && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth;
+      return {
+        belowHeader: composer.top >= header.bottom,
+        controls: inside(send) && inside(field),
+        feed: Math.min(feed.bottom, composer.top) - Math.max(feed.top, header.bottom) >= 40,
+      };
+    })).toEqual({ belowHeader: true, controls: true, feed: true });
+  }
+  await page.setViewportSize({ width: 375, height: 667 });
+  await expect.poll(() => page.evaluate(() => document.querySelector('.composer')!.getBoundingClientRect().height)).toBe(portrait);
+  await expect(page.locator('.chat-pickers')).toBeVisible();
+  await expect(page.locator('#tab-bar')).toBeVisible();
+});
+
+test('#633 The page behind an open sheet does not scroll', async ({ signedIn: page }, info) => {
+  await openSeededChat(page);
+  await page.setViewportSize({ width: info.project.use.viewport!.width, height: 420 });
+  await page.evaluate(() => scrollTo(0, 0));
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollHeight > innerHeight)).toBe(true);
+  // Mobile WebKit has no wheel events; there the lock is the root's overflow, which also stops touch scrolling.
+  const wheel = info.project.name.startsWith('iphone') ? null : async () => {
+    await page.mouse.move(info.project.use.viewport!.width / 2, 160);
+    await page.mouse.wheel(0, 300);
+  };
+  const rootOverflow = () => page.evaluate(() => getComputedStyle(document.documentElement).overflowY);
+  for (const name of ['Delete', 'Rename']) {
+    await page.getByRole('button', { name, exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect.poll(rootOverflow).toBe('hidden');
+    if (wheel) {
+      await wheel();
+      await page.waitForTimeout(300);
+      expect(await page.evaluate(() => scrollY)).toBe(0);
+    }
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(rootOverflow).not.toBe('hidden');
+    if (wheel) await wheel();
+    else await page.evaluate(() => scrollBy(0, 300));
+    await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(0);
+    await page.evaluate(() => scrollTo(0, 0));
+  }
+});
+
+test('#634 Phone jump buttons keep 8px from the session tabs and the Session menu', async ({ signedIn: page }, info) => {
+  test.skip(!info.project.use.isMobile, 'phone jump buttons');
+  await openSession(page, 'Tool rows');
+  await expectDone(page);
+  for (const viewport of [{ width: 375, height: 667 }, { width: 667, height: 375 }]) {
+    await page.setViewportSize(viewport);
+    await page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight / 2));
+    const jump = page.locator('.jump:visible').first();
+    await expect(jump).toBeVisible();
+    const jumpBox = await boxOf(jump);
+    const others = [page.getByRole('button', { name: 'Session menu', exact: true }), ...await page.locator('.session-tabs button').all()];
+    for (const other of others) expect(gapBetween(jumpBox, await boxOf(other))).toBeGreaterThanOrEqual(8);
   }
 });

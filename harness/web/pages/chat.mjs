@@ -141,19 +141,33 @@ function readChatChoice() {
   try { return JSON.parse(localStorage.getItem(CHAT_CHOICE_KEY) || "null") || {}; } catch (_) { return {}; }
 }
 
-// Keeps the fixed composer above the on-screen keyboard (iOS does not resize the layout viewport).
+// Keeps the fixed composer above the on-screen keyboard (iOS does not resize the layout viewport). When the viewport
+// shrinks (the keyboard, or turning to landscape) with the latest message in view, it stays in view (#632).
 function trackKeyboard(composer) {
   const vv = window.visualViewport;
   if (!vv) return () => {};
+  let atEnd = true;
+  const onScroll = () => {
+    atEnd = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 24;
+  };
   // With the keyboard closed the stylesheet places the composer (above the tab bar, #506); open, it sits on the keyboard.
   const update = () => {
     const keyboard = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
     composer.style.bottom = keyboard ? `${keyboard}px` : "";
   };
-  vv.addEventListener("resize", update);
+  const resize = () => {
+    update();
+    if (atEnd) window.scrollTo({ top: document.documentElement.scrollHeight });
+  };
+  vv.addEventListener("resize", resize);
   vv.addEventListener("scroll", update);
+  window.addEventListener("scroll", onScroll, { passive: true });
   update();
-  return () => { vv.removeEventListener("resize", update); vv.removeEventListener("scroll", update); };
+  return () => {
+    vv.removeEventListener("resize", resize);
+    vv.removeEventListener("scroll", update);
+    window.removeEventListener("scroll", onScroll);
+  };
 }
 
 function chatComposer(options, session) {
