@@ -110,7 +110,8 @@ def new_run(carry: dict | None = None) -> dict:
     """Counters for one run. Notes and the token calibration belong to the session, so they carry over."""
     run = {"turns": 0, "tool_calls": 0, "invalid_tool_calls": 0, "tool_errors": 0, "prompt_tokens": 0,
            "completion_tokens": 0, "idle": 0, "executing": None, "started_at": time.time()}
-    for key in ("notes", "chars_per_token", "backend_session_id", "rate_limits", "state", "trace"):
+    for key in ("notes", "chars_per_token", "backend_session_id", "rate_limits", "state", "trace",
+                "workspace_context_applied", "repo_map_applied"):  # the prompt's workspace text waits for a reset
         if carry and key in carry:
             run[key] = carry[key]
     return run
@@ -1141,7 +1142,7 @@ class Runner:
             s = self.db.get_session(sid)
             await self._prepare_repo(s)
             self._snapshot_git_baseline(sid)
-            self._repo_map_at_start(sid)
+            self._workspace_context_at_start(sid)
             if self.modules is not None:
                 await self.modules.prepare_session(s)
         if s["status"] != "waiting_approval":  # _resolve_calls waits without holding the GPU
@@ -3111,26 +3112,36 @@ class Runner:
         """True when this session's run carries schema-valid state from a successful update_state."""
         return agent_state.is_valid_state((s.get("run") or {}).get("state"))
 
-    def _repo_map_eligible(self, s: dict) -> bool:
-        """Experiment (#264): only local-model agent sessions on the tower, with the switch on, get a map."""
-        return (self.cfg.repo_map.enabled and s.get("kind", "agent") == "agent" and s.get("target") == "tower"
+    def _guidance_eligible(self, s: dict) -> bool:
+        """Local-model agent sessions on the tower read the workspace's AGENTS.md or CLAUDE.md (#642)."""
+        return (s.get("kind", "agent") == "agent" and s.get("target") == "tower"
                 and s.get("backend", "local") == "local" and not s.get("workspace_removed")
                 and bool(s.get("context")))
 
-    def _with_repo_map(self, s: dict, context: list) -> list:
-        """`context` with its system message carrying a fresh map (or none, if the map is empty)."""
-        from . import repomap
+    def _repo_map_eligible(self, s: dict) -> bool:
+        """Experiment (#264): only local-model agent sessions on the tower, with the switch on, get a map."""
+        return self.cfg.repo_map.enabled and self._guidance_eligible(s)
+
+    def _with_workspace_context(self, s: dict, context: list) -> list:
+        """`context` with its system message carrying a fresh guidance section and, with the switch on, a fresh
+        repo map after it (each left out when empty)."""
+        from . import repomap, workspace_guidance
         system = context[0]
-        content = repomap.apply_to_prompt(system["content"], Path(s["workspace"]), self.cfg.repo_map.budget_tokens)
+        workspace = Path(s["workspace"])
+        content = workspace_guidance.apply_to_prompt(repomap.strip_section(system["content"]), workspace)
+        if self._repo_map_eligible(s):
+            content = repomap.apply_to_prompt(content, workspace, self.cfg.repo_map.budget_tokens)
         return context if content == system["content"] else [{**system, "content": content}, *context[1:]]
 
-    def _repo_map_at_start(self, sid: str) -> None:
-        """Append the map once, the first time a session runs; later changes only come from a round reset."""
+    def _workspace_context_at_start(self, sid: str) -> None:
+        """Add the workspace guidance and map once, the first time a session runs, after the clone; later changes
+        only come from a round reset."""
         s = self.db.get_session(sid)
-        if not self._repo_map_eligible(s) or s["run"].get("repo_map_applied"):
+        run = s["run"]
+        if not self._guidance_eligible(s) or run.get("workspace_context_applied") or run.get("repo_map_applied"):
             return
-        context = self._with_repo_map(s, s["context"])
-        self.db.update_session(sid, context=context, run={**s["run"], "repo_map_applied": True})
+        context = self._with_workspace_context(s, s["context"])
+        self.db.update_session(sid, context=context, run={**s["run"], "workspace_context_applied": True})
 
     def _snapshot_git_baseline(self, sid: str) -> None:
         s = self.db.get_session(sid)
@@ -3164,8 +3175,8 @@ class Runner:
         payload = agent_state.inject_payload(s["run"].get("state"), self._files_modified(s),
                                              self.cfg.state_max_chars)
         new_context = compaction.apply_round_reset(context, payload)
-        if self._repo_map_eligible(s):  # the one place the map is refreshed after the start
-            new_context = self._with_repo_map(s, new_context)
+        if self._guidance_eligible(s):  # the one place the guidance and map are refreshed after the start
+            new_context = self._with_workspace_context(s, new_context)
         after = compaction.estimate_tokens(new_context, cpt) + overhead
         run = {**self.db.get_session(sid)["run"]}
         run.pop("pending_round_reset", None)

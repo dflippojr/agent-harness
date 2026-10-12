@@ -87,11 +87,11 @@ def test_harness_off_leaves_system_prompt_unchanged(tmp_path):
         sid = s["id"]
         (root / "core.py").write_text("class Engine: pass\n", encoding="utf-8")
         before = m.db.get_session(sid)["context"][0]["content"]
-        m.runner._repo_map_at_start(sid)
+        m.runner._workspace_context_at_start(sid)
         m.runner._round_reset(m.db.get_session(sid), m.db.get_session(sid)["context"], 0, 3.0, 0)
         after = m.db.get_session(sid)["context"][0]["content"]
         assert after == before and repomap.SECTION_OPEN not in after
-        assert "repo_map_applied" not in m.db.get_session(sid)["run"]
+        assert "repo_map_applied" not in m.db.get_session(sid)["run"]  # the flag is workspace_context_applied now
         await m.stop()
     asyncio.run(body())
 
@@ -103,21 +103,21 @@ def test_harness_on_adds_map_once_and_refreshes_only_on_reset(tmp_path):
         s, root = await _session(m)
         sid = s["id"]
         run = {**m.db.get_session(sid)["run"]}
-        run.pop("repo_map_applied", None)
+        run.pop("workspace_context_applied", None)
         m.db.update_session(sid, run=run)
         base = m.db.get_session(sid)["context"][0]["content"]  # the unmapped prompt this session started with
         assert base == SYSTEM_PROMPT
         (root / "core.py").write_text("class Engine:\n    def run(self): pass\n", encoding="utf-8")
         (root / "use.py").write_text("from core import Engine\n\ndef go():\n    return Engine()\n", encoding="utf-8")
 
-        m.runner._repo_map_at_start(sid)
+        m.runner._workspace_context_at_start(sid)
         first = m.db.get_session(sid)["context"][0]["content"]
         assert first.count(repomap.SECTION_OPEN) == 1 and "class Engine" in first
         assert repomap.strip_section(first) == m.db.get_session(sid)["context"][0]["content"].split("\n\n" + repomap.SECTION_OPEN)[0]
 
         # Files change mid-round: nothing refreshes the map, neither a second start nor ordinary turns.
         (root / "new.py").write_text("def brand_new(): pass\n", encoding="utf-8")
-        m.runner._repo_map_at_start(sid)
+        m.runner._workspace_context_at_start(sid)
         assert m.db.get_session(sid)["context"][0]["content"] == first
 
         # A round reset is the one refresh, and it keeps exactly one section.
