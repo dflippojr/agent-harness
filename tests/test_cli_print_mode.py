@@ -541,3 +541,37 @@ def test_missing_route_makes_the_session_unavailable(tmp_path):
         assert not state.exists()
         await m.stop()
     asyncio.run(body())
+
+
+# --- review fixes: erase and the inference gate ----------------------------------------------------------------------
+
+def test_erasing_an_opencode_session_deletes_it_offline_from_its_domain_volume():
+    from harness import cli_domains
+    backend = opencode_backend()
+    command = cli_domains.erase_command("opencode", backend, "app-1", "ses_f5f0271e7ffeGkAS0Wj99tPl6U")
+    assert command[:7] == ["docker", "run", "--rm", "--network", "none", "--user", "1000:1000"]
+    assert ["-v", "harness-cli-opencode-app-app-1:/home/agent/.cli-state"] == command[
+        command.index("-v"):command.index("-v") + 2]
+    assert command[-4:] == ["opencode", "session", "delete", "ses_f5f0271e7ffeGkAS0Wj99tPl6U"]
+    with pytest.raises(ValueError):
+        cli_domains.erase_command("opencode", backend, "", "x; rm -rf /")
+
+
+def test_an_image_job_waits_for_a_running_opencode_turn(tmp_path):
+    async def body():
+        m, _, state = _opencode_manager(tmp_path, "cancel")  # the turn runs until cancelled
+        await m.start()
+        sid = m.create("x", backend="opencode")["id"]
+        await wait_status(m, sid, "running")
+        for _ in range(200):
+            if state.exists():
+                break
+            await asyncio.sleep(0.02)
+        exclusive = asyncio.create_task(m.runner.gate.acquire_exclusive())
+        await asyncio.sleep(0.3)
+        assert not exclusive.done()  # it can't stop llama-server under the turn
+        await m.cancel(sid)
+        slot = await asyncio.wait_for(exclusive, 10)
+        await slot.release()
+        await m.stop()
+    asyncio.run(body())

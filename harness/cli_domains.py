@@ -253,6 +253,14 @@ def erase_command(backend: str, cfg, app_id: str, conversation_id: str) -> list[
     from . import cli_erase
     if not cli_erase.SAFE_ID.fullmatch(conversation_id):
         raise ValueError(f"unsafe {backend} conversation id {conversation_id!r}")
+    if getattr(cfg, "is_cli", False):  # a kind: cli backend deletes its own session (#168), offline
+        from .cli_backends import PRINT_MODE_PARSERS
+        layout = CLI_LAYOUT
+        parser = PRINT_MODE_PARSERS[cfg.parser]
+        return ["docker", "run", "--rm", "--network", "none", "--user", AGENT_UID,
+                *[a for item in (*layout.env, *getattr(parser, "env", ())) for a in ("-e", item)],
+                "-v", f"{state_volume(backend, cfg, app_id)}:{layout.state_dir}", cfg.image,
+                *parser.erase_args(conversation_id)]
     return ["docker", "run", "--rm", "-i", "--network", "none", "--user", AGENT_UID,
             "-v", f"{state_volume(backend, cfg, app_id)}:{cli_erase.STATE_DIR}", cfg.image,
             "python3", "-", conversation_id]
@@ -264,6 +272,8 @@ async def erase_history(backend: str, cfg, app_id: str, conversation_id: str) ->
     source = Path(cli_erase.__file__).read_text(encoding="utf-8")  # the script goes in on stdin
     code, out, err = await run_cmd(erase_command(backend, cfg, app_id, conversation_id), timeout=120,
                                    input_=source)
+    if code != 0 and getattr(cfg, "is_cli", False) and "not found" in (err or out).lower():
+        return  # nothing left of it
     if code != 0:
         raise RuntimeError(f"could not erase {backend} history {conversation_id}: {(err or out).strip()[:300]}")
     log.info("erased %s history %s (%s items)", backend, conversation_id, out.strip())

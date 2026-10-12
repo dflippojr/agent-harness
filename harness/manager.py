@@ -423,7 +423,7 @@ class Manager:
             backends.append({"name": "local", "models": list(self.cfg.models), "model": self.cfg.default_model,
                              "efforts": [], "effort": "", "notice": local["notice"], "billing_warning": ""})
         for name, backend in self.cfg.backends.items():
-            if backend.is_cli or name in BUILTIN_BACKENDS:
+            if name in BUILTIN_BACKENDS or getattr(backend, "is_cli", False):
                 v = view(self, name)
                 if v["available"] and v["logged_in"]:
                     backends.append(self._hosted_chat_option(name, v))
@@ -1877,7 +1877,8 @@ class Manager:
         from . import cli_domains
         backend = s.get("backend") or "local"
         conversation = str((s.get("run") or {}).get("backend_session_id") or "")
-        if backend not in cli_domains.LAYOUTS or backend not in self.cfg.backends or not conversation:
+        if backend not in self.cfg.backends or not cli_domains.has_state(backend, self.cfg.backends[backend]) \
+                or not conversation:
             return
         await cli_domains.erase_history(backend, self.cfg.backends[backend], s.get("app_id") or "", conversation)
 

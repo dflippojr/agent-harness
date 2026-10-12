@@ -616,7 +616,81 @@ class CodexSession:
                 await self.mcp.stop()
 
 
-class CursorSession:
+class TurnProcess:
+    """One print-mode process per turn (Cursor Agent, kind: cli backends): its reader threads, the follow-ups queued
+    while it runs, and closing it. A subclass sets `process`, `_events`, `_stderr`, `_threads` and `_followups`."""
+
+    def _spawn(self, argv: list[str], env: dict) -> None:
+        loop = asyncio.get_running_loop()
+        self._events = asyncio.Queue()
+        self._stderr = []
+        process = self._popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=env,
+        )
+        self.process = process
+        events = self._events
+
+        def stdout_reader() -> None:
+            assert process.stdout is not None
+            try:
+                for line in process.stdout:
+                    loop.call_soon_threadsafe(events.put_nowait, line)
+            finally:
+                loop.call_soon_threadsafe(events.put_nowait, None)
+
+        def stderr_reader() -> None:
+            assert process.stderr is not None
+            self._stderr.extend(process.stderr)
+
+        self._threads = [threading.Thread(target=stdout_reader, daemon=True),
+                         threading.Thread(target=stderr_reader, daemon=True)]
+        for thread in self._threads:
+            thread.start()
+
+    async def _next_line(self, timeout: float | None) -> str | None | bool:
+        """The next stdout line, None once the process has ended, or False on a timeout."""
+        try:
+            return await asyncio.wait_for(self._events.get(), timeout) if timeout else await self._events.get()
+        except asyncio.TimeoutError:
+            return False
+
+    async def send(self, item: dict) -> None:
+        content = item.get("content") if isinstance(item, dict) else None
+        if not isinstance(content, str):
+            raise CliBackendError("follow-up was not text")
+        self._followups.append(content)
+
+    @property
+    def has_followups(self) -> bool:
+        return bool(self._followups)
+
+    async def _take_followups(self) -> str:
+        """Close the finished turn and return the queued messages as the next turn's prompt."""
+        prompts, self._followups = self._followups, []
+        await self._close_process(terminate=False)
+        if self._command_override is None:
+            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+        return "Messages received while the prior turn was running:\n\n" + "\n\n".join(prompts)
+
+    async def _close_process(self, terminate: bool) -> None:
+        proc = self.process
+        self.process = None
+        if proc is not None and proc.poll() is None:
+            if terminate:
+                proc.terminate()
+            try:
+                await asyncio.to_thread(proc.wait, 2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                await asyncio.to_thread(proc.wait)
+        for thread in self._threads:
+            await asyncio.to_thread(thread.join, 0.5)
+        self._threads = []
+
+
+class CursorSession(TurnProcess):
     """A sequence of Cursor Agent print-mode processes sharing one chat id.
 
     Cursor's headless CLI has no live stdin protocol. Messages received while a
@@ -701,62 +775,21 @@ class CursorSession:
             await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
             await ready_domain("cursor", self.backend, self.app_id, self.api_key)
 
-    def _spawn(self, prompt: str) -> None:
-        loop = asyncio.get_running_loop()
-        self._events = asyncio.Queue()
-        self._stderr = []
+    def _turn(self, prompt: str) -> None:
         child_env = os.environ.copy()
         if self.api_key:
             child_env["CURSOR_API_KEY"] = self.api_key
-        process = self._popen(
-            self.command(prompt), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=child_env,
-        )
-        self.process = process
-        events = self._events
-
-        def stdout_reader() -> None:
-            assert process.stdout is not None
-            try:
-                for line in process.stdout:
-                    loop.call_soon_threadsafe(events.put_nowait, line)
-            finally:
-                loop.call_soon_threadsafe(events.put_nowait, None)
-
-        def stderr_reader() -> None:
-            assert process.stderr is not None
-            self._stderr.extend(process.stderr)
-
-        self._threads = [threading.Thread(target=stdout_reader, daemon=True),
-                         threading.Thread(target=stderr_reader, daemon=True)]
-        for thread in self._threads:
-            thread.start()
+        self._spawn(self.command(prompt), child_env)
 
     async def initialize(self, prompt: str) -> None:
         first_prompt = prompt if self.backend_session_id else f"{self.system_prompt}\n\nUser task:\n{prompt}"
-        self._spawn(first_prompt)
+        self._turn(first_prompt)
 
     def user_message(self, content: str) -> dict:
         return {"type": "cursor_followup", "content": content}
 
-    async def send(self, item: dict) -> None:
-        content = item.get("content") if isinstance(item, dict) else None
-        if not isinstance(content, str):
-            raise CliBackendError("Cursor follow-up was not text")
-        self._followups.append(content)
-
-    @property
-    def has_followups(self) -> bool:
-        return bool(self._followups)
-
     async def continue_followups(self) -> None:
-        prompts, self._followups = self._followups, []
-        await self._close_process(terminate=False)
-        if self._command_override is None:
-            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
-        prompt = "Messages received while the prior turn was running:\n\n" + "\n\n".join(prompts)
-        self._spawn(prompt)
+        self._turn(await self._take_followups())
 
     def combined_result(self, result: dict) -> dict:
         raw = result.get("usage") if isinstance(result.get("usage"), dict) else {}
@@ -779,9 +812,8 @@ class CursorSession:
                 "num_turns": self._result_turns, "total_cost_usd": self._result_cost}
 
     async def receive(self, timeout: float | None = None) -> dict | None:
-        try:
-            line = await asyncio.wait_for(self._events.get(), timeout) if timeout else await self._events.get()
-        except asyncio.TimeoutError:
+        line = await self._next_line(timeout)
+        if line is False:
             return None
         if line is None:
             code = self.process.poll() if self.process is not None else None
@@ -794,21 +826,6 @@ class CursorSession:
         if not isinstance(value, dict):
             raise CliBackendError("Cursor Agent JSONL event was not an object")
         return value
-
-    async def _close_process(self, terminate: bool) -> None:
-        proc = self.process
-        self.process = None
-        if proc is not None and proc.poll() is None:
-            if terminate:
-                proc.terminate()
-            try:
-                await asyncio.to_thread(proc.wait, 2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                await asyncio.to_thread(proc.wait)
-        for thread in self._threads:
-            await asyncio.to_thread(thread.join, 0.5)
-        self._threads = []
 
     async def stop(self) -> None:
         await self._close_process(terminate=True)
@@ -851,6 +868,11 @@ class OpencodeJsonl:
             }},
             "permission": {"*": "allow", "webfetch": "deny", "websearch": "deny", "question": "deny"},
         }, indent=2)
+
+    @staticmethod
+    def erase_args(session_id: str) -> list[str]:
+        """Delete one session from OpenCode's own store (a lookup by id, whatever the project)."""
+        return ["opencode", "session", "delete", session_id]
 
     @property
     def answer(self) -> str:
@@ -918,7 +940,7 @@ def cli_route_ready(backend: BackendConfig) -> bool:
             and ok(["inspect", "--format", "{{.State.Running}}", forwarder(backend)], "true"))
 
 
-class PrintModeSession:
+class PrintModeSession(TurnProcess):
     """A config-declared headless CLI (`kind: cli`, #168): one ``docker run --rm`` per turn, as CursorSession.
 
     The argv comes from config: `command` with {model} and {session_id} filled in per element (never through a
@@ -1019,34 +1041,8 @@ class PrintModeSession:
     async def _turn(self, prompt: str) -> None:
         if self._admit is not None:
             await self._admit()
-        loop = asyncio.get_running_loop()
-        self._events = asyncio.Queue()
         self._parsed = []
-        self._stderr = []
-        process = self._popen(
-            self.command(prompt), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=os.environ.copy(),
-        )
-        self.process = process
-        events = self._events
-
-        def stdout_reader() -> None:
-            assert process.stdout is not None
-            try:
-                for line in process.stdout:
-                    loop.call_soon_threadsafe(events.put_nowait, line)
-            finally:
-                loop.call_soon_threadsafe(events.put_nowait, None)
-
-        def stderr_reader() -> None:
-            assert process.stderr is not None
-            self._stderr.extend(process.stderr)
-
-        self._threads = [threading.Thread(target=stdout_reader, daemon=True),
-                         threading.Thread(target=stderr_reader, daemon=True)]
-        for thread in self._threads:
-            thread.start()
+        self._spawn(self.command(prompt), os.environ.copy())
 
     async def initialize(self, prompt: str) -> None:
         first_prompt = prompt if self.backend_session_id else f"{self.system_prompt}\n\nUser task:\n{prompt}"
@@ -1055,30 +1051,15 @@ class PrintModeSession:
     def user_message(self, content: str) -> dict:
         return {"type": "print_mode_followup", "content": content}
 
-    async def send(self, item: dict) -> None:
-        content = item.get("content") if isinstance(item, dict) else None
-        if not isinstance(content, str):
-            raise CliBackendError(f"{self.name} follow-up was not text")
-        self._followups.append(content)
-
-    @property
-    def has_followups(self) -> bool:
-        return bool(self._followups)
-
     async def continue_followups(self) -> None:
-        prompts, self._followups = self._followups, []
-        await self._close_process(terminate=False)
-        if self._command_override is None:
-            await run_cmd(["docker", "rm", "-f", self.container], timeout=30)
-        await self._turn("Messages received while the prior turn was running:\n\n" + "\n\n".join(prompts))
+        await self._turn(await self._take_followups())
 
     async def receive(self, timeout: float | None = None) -> dict | None:
         """The next event: the parser's, or `exit` once the process has ended. A line the parser skips is None."""
         if self._parsed:
             return self._parsed.pop(0)
-        try:
-            line = await asyncio.wait_for(self._events.get(), timeout) if timeout else await self._events.get()
-        except asyncio.TimeoutError:
+        line = await self._next_line(timeout)
+        if line is False:
             return None
         if line is None:
             proc = self.process
@@ -1088,21 +1069,6 @@ class PrintModeSession:
             return {"type": "exit", "code": code, "stderr": "".join(self._stderr).strip()[-2000:]}
         self._parsed = self.parser.parse(line)
         return self._parsed.pop(0) if self._parsed else None
-
-    async def _close_process(self, terminate: bool) -> None:
-        proc = self.process
-        self.process = None
-        if proc is not None and proc.poll() is None:
-            if terminate:
-                proc.terminate()
-            try:
-                await asyncio.to_thread(proc.wait, 2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                await asyncio.to_thread(proc.wait)
-        for thread in self._threads:
-            await asyncio.to_thread(thread.join, 0.5)
-        self._threads = []
 
     async def stop(self) -> None:
         await self._close_process(terminate=True)

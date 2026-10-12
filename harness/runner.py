@@ -287,6 +287,7 @@ class Runner:
         self.print_mode_factory = PrintModeSession   # every kind: cli backend (#168)
         self.cli_route_ready = cli_route_ready       # its network and llama-server forwarder exist (Q9)
         self.gpu_poll_seconds = 1.0                  # how often a local-model CLI turn re-checks a GPU hold
+        self._cli_turns: dict = {}                   # a local-model CLI turn's agent lease on the inference gate
         self._quota_checked: dict[str, float] = {}
         self.checkpointer = Checkpointer(cfg, db, bus)
         self._checkpoints: dict[str, tuple[asyncio.Task, dict]] = {}   # a session's background checkpoint and its stats, until joined
@@ -1273,7 +1274,7 @@ class Runner:
             finally:
                 self._held_slots.pop(sid, None)
                 self._unreserve(sid)
-                self.generating.discard(sid)  # a local-model CLI turn's lease on the model (#168)
+                await self._release_cli_turn(sid)  # a local-model CLI turn's leases on the model (#168)
 
     async def _admit_hosted(self, sid: str, s: dict, stack: contextlib.AsyncExitStack) -> None:
         """Take the session's credential lock (onto `stack`) once its member or App is under its running cap (#524),
@@ -1408,18 +1409,33 @@ class Runner:
     async def _admit_local_cli_turn(self, sid: str, model: ModelConfig) -> None:
         """Before each turn of a CLI that runs on the local model (#168 Q7, Q10): the GPU hold, RAM and model load a
         queued native turn waits on, through the local-model module. Without that module, the server must answer."""
-        self.generating.discard(sid)  # between turns it holds no lease, so a hold isn't kept waiting on it
+        await self._release_cli_turn(sid)  # between turns it holds no lease, so a hold isn't kept waiting on it
         admit = self.modules.local_turn_admission() if self.modules is not None else None
-        if admit is None:
-            if not await self._model_reachable(model):
-                raise CliBackendError(f"the local model server at {model.base_url} isn't reachable",
-                                      "model_unavailable")
-            return
-        refusal = await admit(sid, model)
-        if refusal:
-            raise CliBackendError(*refusal)
+        while True:
+            if admit is None:
+                if not await self._model_reachable(model):
+                    raise CliBackendError(f"the local model server at {model.base_url} isn't reachable",
+                                          "model_unavailable")
+            else:
+                refusal = await admit(sid, model)
+                if refusal:
+                    raise CliBackendError(*refusal)
+            # The whole turn is one agent turn on the inference gate: an image job (exclusive) waits for it instead
+            # of stopping llama-server under it. A hold or an unload while it waited for the gate: admit again.
+            turn = await self.gate.agent_turn()
+            if (self.guard is None or not self.guard.active) and not self.warmer.parked(model):
+                break
+            await turn.release()
+            self.generating.discard(sid)
+        self._cli_turns[sid] = turn
         if self.db.get_session(sid)["status"] == "queued":
             await self.aset_status(sid, "running")
+
+    async def _release_cli_turn(self, sid: str) -> None:
+        self.generating.discard(sid)
+        turn = self._cli_turns.pop(sid, None)
+        if turn is not None:
+            await turn.release()
 
     async def wait_gpu_clear(self, sid: str) -> None:
         """Wait in `queued` while the GPU guard holds the GPU; the session hears gpu_paused and gpu_resumed."""

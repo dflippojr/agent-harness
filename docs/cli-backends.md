@@ -42,7 +42,8 @@ Each turn is one `docker run --rm` of `command` (as Cursor's print mode is). The
 - the sandbox memory, CPU and pids limits, `no-new-privileges`, dropped capabilities and the session label.
 
 The first turn's events carry the CLI's session id, stored as `run.backend_session_id`. Messages that arrive mid-turn
-are queued and sent as the next turn with `resume_args`. Cancel and stop remove the container.
+are queued and sent as the next turn with `resume_args`. Cancel and stop remove the container. Erasing a session runs the parser's `erase_args` (`opencode session delete
+<id>`) in a throwaway, network-less container on the session's state volume.
 
 OpenCode auto-approves (`--auto`) inside that container; branch review is the outside check. Its config is generated
 per session from the harness `models:` entry and mounted read-only at `/etc/opencode/opencode.json`, OpenCode's
@@ -69,8 +70,9 @@ host only; the MacBook runner is out of scope.
 the runner asks the local-model module (`ModuleRuntime.local_turn_admission`) to admit it: the turn waits in `queued`
 while the GPU guard holds the GPU (the session gets `gpu_paused` and `gpu_resumed`), waits for RAM like a parked
 model's load, then loads a parked model with `ensure_loaded`. A model that can't load fails the session with
-`low_memory` or `gpu_held`. While a turn runs it holds the guard's lease, so a new hold drains it first; a turn cut
-off because llama-server stopped fails with no retry. Without the local-model module the server must answer
+`low_memory` or `gpu_held`. While a turn runs it holds the guard's lease, so a new hold drains it first, and one
+agent turn on the inference gate, so an image job waits for it rather than stopping llama-server under it (endpoint
+requests wait for it too). A turn cut off because llama-server stopped anyway fails with no retry. Without the local-model module the server must answer
 `/health`, or the session fails saying so.
 
 ## Apps
