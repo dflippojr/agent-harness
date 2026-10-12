@@ -224,24 +224,25 @@ def with_tcp_forward(target, where="TCP"):
     return {**FAKE_SERVE_CONFIG, "Services": {"svc:harness": handler}}
 
 
-def test_a_raw_tcp_forward_to_the_daemon_port_refuses_every_tailnet_identity(tmp_path):
+@pytest.mark.parametrize("target, where", [("127.0.0.1:{port}", "TCP"), ("localhost:{port}", "Foreground"),
+                                           ("[::1]:{port}", "Services"), ("127.0.0.1:not-a-port", "TCP")])
+def test_a_raw_tcp_forward_to_the_daemon_port_refuses_every_tailnet_identity(tmp_path, target, where):
     """tailscaled adds no headers on a raw TCP forward, so a tailnet peer could write its own login (#623)."""
     check = fake_tailscaled_check()
     client, m = make_client(tmp_path, [LOGIN], check)
-    port = m.cfg.port
+    check.serve = lambda: with_tcp_forward(target.format(port=m.cfg.port), where)
     with client:
-        for config in (with_tcp_forward(f"127.0.0.1:{port}"), with_tcp_forward(f"localhost:{port}", "Foreground"),
-                       with_tcp_forward(f"[::1]:{port}", "Services"), with_tcp_forward("127.0.0.1:not-a-port")):
-            check.serve = lambda c=config: c
-            check._cache.clear()  # a raw forward arrives on a new connection
-            assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-            assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
-                               headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-            check.raw_forward_seen = False  # as after a restart, to try the next config
-        assert m.db.list_api_keys() == []
-        # A raw forward to another port leaves the daemon's HTTPS path alone.
-        check.serve = lambda: with_tcp_forward(f"127.0.0.1:{port + 1}")
-        check._cache.clear()
+        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
+        assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
+                           headers={"Tailscale-User-Login": LOGIN}).status_code == 401
+    assert m.db.list_api_keys() == []
+
+
+def test_a_raw_tcp_forward_to_another_port_leaves_the_daemon_alone(tmp_path):
+    check = fake_tailscaled_check()
+    client, m = make_client(tmp_path, [LOGIN], check)
+    check.serve = lambda: with_tcp_forward(f"127.0.0.1:{m.cfg.port + 1}")
+    with client:
         assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()["role"] == "owner"
 
 
