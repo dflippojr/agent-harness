@@ -459,6 +459,13 @@ then restart the daemon). It catches only a forward still in place when a reques
 connection open after the forward is removed, so anything able to change this machine's serve config can open a
 connection through a raw forward, remove the forward, and then send any login, and the daemon will accept it.
 
+A raw forward is not the only way tailscaled hands a tailnet device's own bytes to the daemon. When this machine
+advertises a subnet route (`tailscale up --advertise-routes`), tailscaled ends a routed connection itself and opens a
+new one from its own socket, so with `listen.host` set to `0.0.0.0` or a LAN address, a device that reaches the daemon
+at a routed address could name any login. The daemon therefore accepts the `Tailscale-*` headers only on a connection
+to a loopback address, such as the `http://127.0.0.1:8100` that `tailscale serve` proxies to, and ignores them on any
+other address. Keep the HTTPS proxy's target on loopback.
+
 A request without a login from tailscaled reached the daemon's loopback listener directly or came from this machine,
 so it must say who it is:
 

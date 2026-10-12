@@ -181,6 +181,32 @@ def test_tailscaled_forwarding_another_tailnet_node_is_accepted(tmp_path):
             assert me.json()["role"] == "owner"
 
 
+def test_a_subnet_routed_connection_to_a_non_loopback_address_is_refused(tmp_path):
+    """tailscaled opens a subnet-routed connection from its own socket, so a verified peer on a routed address can
+    carry a tailnet device's own headers (#623). Only the loopback listener `tailscale serve` proxies to counts."""
+    assert tailscale_peer.PeerCheck().server_ok is tailscale_peer.is_loopback
+    check = fake_tailscaled_check(server_ok=tailscale_peer.is_loopback)
+    for server in (("192.168.1.5", 8100), ("100.64.0.1", 8100), ("0.0.0.0", 8100), ("fe80::1", 8100),
+                   ("tower", 8100), ("", 8100), (None, 8100)):
+        assert not check.admits(CLIENT, server, [FAKE_PEER_IP.encode()])
+    assert check.lookups == 0
+    for port, server in enumerate((SERVER, ("::1", 8100), ("127.0.0.2", 8100), ("::ffff:127.0.0.1", 8100)), 51000):
+        assert check.admits(("127.0.0.1", port), server, [FAKE_PEER_IP.encode()])
+
+    client, m = make_client(tmp_path, [LOGIN], fake_tailscaled_check())
+    with client:
+        # The device writes its own bytes, so it can name the loopback Host the guard expects.
+        routed = TestClient(client.app, base_url=f"http://192.168.1.5:{m.cfg.port}", client=CLIENT)
+        routed.local_owner = False
+        owner = {"Tailscale-User-Login": LOGIN, "X-Forwarded-For": FAKE_PEER_IP}
+        loopback_host = {"Host": f"127.0.0.1:{m.cfg.port}"}
+        assert routed.get("/me", headers={**owner, **loopback_host}).status_code == 401
+        assert routed.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
+                           headers={**owner, **loopback_host}).status_code == 401
+        assert m.db.list_api_keys() == []
+        assert client.get("/me", headers=owner).json()["role"] == "owner"
+
+
 def test_more_than_one_forwarded_address_is_refused(tmp_path):
     client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check())
     with client:

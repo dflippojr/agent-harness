@@ -26,6 +26,12 @@ tailscaled keeps a forwarded stream open after its mapping is removed, so anythi
 config can add a raw forward, open a connection through it, remove the forward, and only then send forged headers; that
 connection's lookup sees a clean config and admits them. The owner accepted that risk (#623).
 
+A raw forward is not the only way tailscaled passes a peer's own bytes on. When this node advertises a subnet route,
+tailscaled ends a routed TCP connection itself and opens a new one from its own socket to the target, so a tailnet
+device that reaches the daemon at a routed address (with `listen.host` set to `0.0.0.0` or a LAN address) would pass
+every check above. `tailscale serve` proxies to the loopback address the daemon is published on, so the identity
+headers count only on a connection whose server address is loopback; a missing or non-loopback one refuses them.
+
 The check is implemented for Windows. Elsewhere the headers are removed unless `listen.trust_unverified_identity_headers`
 is set, which trusts any local process that sends them.
 """
@@ -42,6 +48,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import psutil
@@ -56,6 +63,9 @@ SERVICE = "Tailscale"
 TAILSCALE_CLI = "tailscale.exe"
 FORWARDED_FOR = b"x-forwarded-for"
 SELF_IPS_SECONDS = 60.0
+# The lookups block (the connection table, the CLI), so they run on their own few threads: a burst of tailnet
+# connections waits here instead of filling the thread pool the rest of the daemon shares.
+EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tailscale-peer")
 
 
 def supported() -> bool:
@@ -88,6 +98,12 @@ def _canonical(ip: str) -> str | None:
 def _same_ip(a: str, b: str) -> bool:
     x = _canonical(a)
     return x is not None and x == _canonical(b)
+
+
+def is_loopback(ip) -> bool:
+    """Whether `ip` is a loopback address. A host name or anything else that isn't an address is not."""
+    canonical = _canonical(str(ip)) if ip else None
+    return canonical is not None and ipaddress.ip_address(canonical).is_loopback
 
 
 def connection_owner(client: tuple[str, int], server: tuple[str, int]) -> int | None:
@@ -179,17 +195,17 @@ def forwarded_for(scope) -> list[bytes]:
 
 
 class PeerCheck:
-    """Whether a connection's peer is the Tailscale service's tailscaled, on a node whose serve config showed no raw TCP
-    forward to the daemon at any lookup (a best-effort check; see the module docstring). Verdicts are cached per
-    (client host, port) for a few seconds so keep-alive requests do not repeat the lookup; a failed lookup is not cached
-    and counts as not tailscaled."""
+    """Whether a connection's peer is the Tailscale service's tailscaled, on the daemon's loopback address, on a node
+    whose serve config showed no raw TCP forward to the daemon at any lookup (a best-effort check; see the module
+    docstring). Verdicts are cached per (client host, port) for a few seconds so keep-alive requests do not repeat the
+    lookup; a failed lookup is not cached and counts as not tailscaled."""
 
     def __init__(self, *, owner=connection_owner, exe=process_exe, dirs=install_dirs, platform_ok=supported,
                  service=service_pid, child_of=started_by, tailscale_ips=node_ips, interface_addrs=interface_ips,
-                 serve=serve_config, clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS,
+                 serve=serve_config, server_ok=is_loopback, clock=time.monotonic, size: int = CACHE_SIZE, ttl: float = CACHE_SECONDS,
                  tailscale_ips_ttl: float = SELF_IPS_SECONDS):
         self.owner, self.exe, self.dirs, self.platform_ok, self.clock = owner, exe, dirs, platform_ok, clock
-        self.service, self.child_of, self.serve = service, child_of, serve
+        self.service, self.child_of, self.serve, self.server_ok = service, child_of, serve, server_ok
         # The node's Tailscale addresses are cached; its interface addresses are read on every request.
         self.tailscale_ips, self.interface_addrs = tailscale_ips, interface_addrs
         self.size, self.ttl, self.tailscale_ips_ttl = size, ttl, tailscale_ips_ttl
@@ -219,6 +235,9 @@ class PeerCheck:
 
     def verify(self, client: tuple[str, int] | None, server: tuple[str, int] | None) -> bool:
         if not client or not server or not self.platform_ok():
+            return False
+        if not self.server_ok(server[0]):
+            # A subnet-routed connection also comes from tailscaled's own socket, on the routed address.
             return False
         key = (str(client[0]), int(client[1]))
         hit = self.cached(key)

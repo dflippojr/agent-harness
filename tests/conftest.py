@@ -152,6 +152,13 @@ FAKE_SERVE_CONFIG = {"TCP": {"443": {"HTTPS": True}},  # `tailscale serve` proxi
                      "Web": {"tower.example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8100"}}}}}
 
 
+def served_by_tailscale(host) -> bool:
+    """TestClient puts its URL's host in scope["server"]. A tailnet URL stands in for `tailscale serve`, which connects
+    to the daemon's loopback listener."""
+    from harness import tailscale_peer
+    return tailscale_peer.is_loopback(host) or str(host).endswith(".ts.net")
+
+
 def fake_tailscaled_check(**overrides):
     """A peer check whose connection table says every peer is the Tailscale service's tailscaled (PID 4242), on a
     node whose Tailscale addresses are FAKE_NODE_IPS."""
@@ -160,7 +167,7 @@ def fake_tailscaled_check(**overrides):
                    dirs=lambda: [FAKE_TAILSCALE_DIR], platform_ok=lambda: True, service=lambda: 4242,
                    child_of=lambda pid, parent: False,
                    tailscale_ips=lambda: FAKE_NODE_IPS, interface_addrs=lambda: ("127.0.0.1", "::1", *FAKE_NODE_IPS),
-                   serve=lambda: FAKE_SERVE_CONFIG)
+                   serve=lambda: FAKE_SERVE_CONFIG, server_ok=served_by_tailscale)
     options.update(overrides)
     return tailscale_peer.PeerCheck(**options)
 
