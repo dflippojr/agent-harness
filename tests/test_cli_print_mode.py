@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -147,10 +148,11 @@ def _load(tmp_path, backends: dict):
     ({"command": ["opencode", "{home}"]}, "unknown placeholder {home}"),
     ({"command": ["opencode", "--", "x"]}, "-- may only come right before"),
     ({"kind": "plugin"}, "kind must be empty"),
+    ({"volume": ""}, "needs its own volume"),  # never the default, Claude's state volume
 ])
 def test_cli_backend_config_validation_rejects(tmp_path, bad, message):
     spec = {"kind": "cli", "image": "agent-harness-cli:1", "model": "qwen", "command": COMMAND,
-            "parser": "opencode_jsonl", "network": "harness-cli-opencode", **bad}
+            "parser": "opencode_jsonl", "network": "harness-cli-opencode", "volume": "harness-state-opencode", **bad}
     with pytest.raises(ValueError) as e:
         _load(tmp_path, {"opencode": spec})
     assert message in str(e.value)
@@ -159,13 +161,29 @@ def test_cli_backend_config_validation_rejects(tmp_path, bad, message):
 def test_cli_backend_config_pins_keyless_local_fields(tmp_path):
     cfg = _load(tmp_path, {"opencode": {
         "kind": "cli", "image": "agent-harness-cli:1", "model": "qwen", "command": [*COMMAND, "--", "{prompt}"],
-        "parser": "opencode_jsonl", "network": "harness-cli-opencode"}})
+        "parser": "opencode_jsonl", "network": "harness-cli-opencode", "volume": "harness-state-opencode"}})
     backend = cfg.backends["opencode"]
     assert backend.command == COMMAND
     assert (backend.proxy, backend.api_key_file, backend.billing, backend.auth, backend.mcp) == (
         "", "", "local", "none", False)
     with pytest.raises(ValueError):
         _load(tmp_path, {"claude": {"kind": "cli", "command": COMMAND, "parser": "opencode_jsonl"}})
+
+
+def test_cli_backend_without_a_volume_never_mounts_claudes(tmp_path):
+    with pytest.raises(ValueError, match="needs its own volume"):
+        _load(tmp_path, {"opencode": {"kind": "cli", "image": "agent-harness-cli:1", "model": "qwen",
+                                      "command": COMMAND, "parser": "opencode_jsonl",
+                                      "network": "harness-cli-opencode"}})
+
+
+@pytest.mark.parametrize("base_url, expected", [
+    ("http://127.0.0.1:8091", "http://harness-cli-opencode-llm:8091/v1"),
+    ("http://localhost", "http://harness-cli-opencode-llm:80/v1"),
+    ("https://llm.example/v1", "https://harness-cli-opencode-llm:443/v1"),
+])
+def test_forwarder_url_uses_the_schemes_default_port(base_url, expected):
+    assert forwarder_url(opencode_backend(), base_url) == expected
 
 
 def test_setup_config_writes_a_disabled_opencode_entry(tmp_path):
@@ -330,7 +348,7 @@ def test_opencode_run_maps_events_and_binds_the_session(tmp_path):
         assert events(m, s["id"], "assistant")[-1]["content"] == s["answer"]
         record = json.loads(state.read_text(encoding="utf-8").splitlines()[0])
         assert record["argv"][-2] == "--" and "User task:\nfix it" in record["prompt"]
-        assert made[0]["model"] == "fake" and made[0]["base_url"] == "http://harness-cli-opencode-llm:8090/v1"
+        assert made[0]["model"] == "fake" and made[0]["base_url"] == "http://harness-cli-opencode-llm:80/v1"
         await m.stop()
     asyncio.run(body())
 
@@ -575,3 +593,17 @@ def test_an_image_job_waits_for_a_running_opencode_turn(tmp_path):
         await slot.release()
         await m.stop()
     asyncio.run(body())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows installer")
+@pytest.mark.parametrize("profile", ["Full", "Service"])
+def test_windows_installer_builds_the_cli_image_for_opencode_and_service(tmp_path, profile):
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-File", str(root / "install/install.ps1"),
+                             "-InstallDir", str(tmp_path / "install"), "-Profile", profile,
+                             *(["-ExistingServer", "http://localhost"] if profile == "Full" else []), "-DryRun",
+                             "-NoTasks"],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "[dry run] docker build -t agent-harness-cli:1" in result.stdout
+    assert ("==> Local-model route for CLI backends" in result.stdout) == (profile == "Full")

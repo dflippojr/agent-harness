@@ -230,12 +230,16 @@ Act 'docker build -t agent-harness-sandbox:py312 sandbox' {
     & docker build -q -t agent-harness-sandbox:py312 (Join-Path $AppDir 'sandbox')
     if ($LASTEXITCODE -ne 0) { Die 'building the sandbox image failed' }
 }
-if ($EffectiveProfile -eq 'Service') {
-    Step 'Hosted-provider CLI image and egress proxies'
+if ($EffectiveProfile -eq 'Service' -or $NeedsLocalModel) {
+    # Service backends and the generated OpenCode entry (#168, written whenever the local model is) both run in it.
+    Step 'CLI backend image'
     Act 'docker build -t agent-harness-cli:1 -f sandbox/cli.Dockerfile sandbox' {
         & docker build -q -t agent-harness-cli:1 -f (Join-Path $AppDir 'sandbox\cli.Dockerfile') (Join-Path $AppDir 'sandbox')
-        if ($LASTEXITCODE -ne 0) { Die 'building the hosted-provider CLI image failed' }
+        if ($LASTEXITCODE -ne 0) { Die 'building the CLI backend image failed' }
     }
+}
+if ($EffectiveProfile -eq 'Service') {
+    Step 'Hosted-provider egress proxies'
     Act 'create harness-egress network and start provider allowlist proxies' {
         & docker network inspect harness-egress *> $null
         if ($LASTEXITCODE -ne 0) { & docker network create harness-egress | Out-Null }

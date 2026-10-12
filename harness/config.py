@@ -140,6 +140,8 @@ def _validate_cli_backend(name: str, spec: dict, backend: BackendConfig) -> None
                              "proxy or key needs its own issue and a recorded provider-policy review first")
     if not backend.image or not backend.network or not backend.parser:
         raise ValueError(f"{where}: kind: cli needs image, network and parser")
+    if not spec.get("volume"):  # the default is Claude's state volume; a CLI must never mount another backend's
+        raise ValueError(f"{where}: kind: cli needs its own volume, such as harness-state-{name}")
     from .cli_backends import PRINT_MODE_PARSERS
     if backend.parser not in PRINT_MODE_PARSERS:
         raise ValueError(f"{where}.parser must be one of {', '.join(PRINT_MODE_PARSERS)}")

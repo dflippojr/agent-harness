@@ -923,9 +923,11 @@ def forwarder(backend: BackendConfig) -> str:
 
 def forwarder_url(backend: BackendConfig, model_base_url: str) -> str:
     """The model's OpenAI-compatible URL as the CLI container reaches it: the forwarder, on the model's own scheme and
-    port (it passes TCP through, so the CLI speaks to the server as the harness does)."""
+    port (it passes TCP through, so the CLI speaks to the server as the harness does). A URL without a port uses its
+    scheme's default, as the installer's forwarder does."""
     parts = urlsplit(model_base_url)
-    return urlunsplit((parts.scheme, f"{forwarder(backend)}:{parts.port or 8090}", "/v1", "", ""))
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return urlunsplit((parts.scheme, f"{forwarder(backend)}:{port}", "/v1", "", ""))
 
 
 def cli_route_ready(backend: BackendConfig) -> bool:
