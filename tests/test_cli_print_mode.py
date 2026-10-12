@@ -575,6 +575,30 @@ def test_erasing_an_opencode_session_deletes_it_offline_from_its_domain_volume()
         cli_domains.erase_command("opencode", backend, "", "x; rm -rf /")
 
 
+# OpenCode 1.18.30's own stderr for `opencode session delete` of an id it does not have.
+MISSING = "\x1b[91m\x1b[1mError: \x1b[0mSession not found: ses_f5f0271e7ffeGone000000\n"
+NO_CLI = 'docker: Error response from daemon: ... exec: "opencode": executable file not found in $PATH\n'
+
+
+@pytest.mark.parametrize("result, erased", [
+    ((0, "", ""), True),
+    ((1, "", MISSING), True),  # already gone
+    ((127, "", NO_CLI), False),  # an image without opencode: the history is still there
+    ((1, "", MISSING.replace("ses_f5f0271e7ffeGone000000", "ses_f5f0271e7ffeOther00000")), False),
+])
+def test_erase_history_treats_only_opencodes_missing_session_as_gone(monkeypatch, result, erased):
+    from harness import cli_domains
+    async def run_cmd(*_args, **_kwargs):
+        return result
+    monkeypatch.setattr(cli_domains, "run_cmd", run_cmd)
+    erase = cli_domains.erase_history("opencode", opencode_backend(), "app-1", "ses_f5f0271e7ffeGone000000")
+    if erased:
+        asyncio.run(erase)
+    else:
+        with pytest.raises(RuntimeError, match="could not erase opencode history"):
+            asyncio.run(erase)
+
+
 def test_an_image_job_waits_for_a_running_opencode_turn(tmp_path):
     async def body():
         m, _, state = _opencode_manager(tmp_path, "cancel")  # the turn runs until cancelled

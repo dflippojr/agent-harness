@@ -272,8 +272,10 @@ async def erase_history(backend: str, cfg, app_id: str, conversation_id: str) ->
     source = Path(cli_erase.__file__).read_text(encoding="utf-8")  # the script goes in on stdin
     code, out, err = await run_cmd(erase_command(backend, cfg, app_id, conversation_id), timeout=120,
                                    input_=source)
-    if code != 0 and getattr(cfg, "is_cli", False) and "not found" in (err or out).lower():
-        return  # nothing left of it
+    if code != 0 and getattr(cfg, "is_cli", False):
+        from .cli_backends import PRINT_MODE_PARSERS
+        if PRINT_MODE_PARSERS[cfg.parser].erase_missing(f"{err}\n{out}", conversation_id):
+            return  # nothing left of it
     if code != 0:
         raise RuntimeError(f"could not erase {backend} history {conversation_id}: {(err or out).strip()[:300]}")
     log.info("erased %s history %s (%s items)", backend, conversation_id, out.strip())

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -873,6 +874,12 @@ class OpencodeJsonl:
     def erase_args(session_id: str) -> list[str]:
         """Delete one session from OpenCode's own store (a lookup by id, whatever the project)."""
         return ["opencode", "session", "delete", session_id]
+
+    @staticmethod
+    def erase_missing(output: str, session_id: str) -> bool:
+        """Whether a failed delete only means the session is already gone: OpenCode 1.18.30 prints exactly
+        `Error: Session not found: <id>` (in colour). Any other failure, such as no opencode in the image, is real."""
+        return f"Session not found: {session_id}" in re.sub(r"\x1b\[[0-9;]*m", "", output)
 
     @property
     def answer(self) -> str:
