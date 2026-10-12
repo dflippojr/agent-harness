@@ -1,14 +1,4 @@
-import { test, expect, openSession, expectDone } from './fixtures';
-import type { Page } from '@playwright/test';
-
-async function expectReflow(page: Page) {
-  for (const width of [320, 375, 768, 1440]) {
-    await page.setViewportSize({ width, height: 900 });
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    await expect.poll(() => page.evaluate(() => innerWidth)).toBe(width);
-    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  }
-}
+import { test, expect, openSession, expectDone, expectReflow } from './fixtures';
 
 const surfaces = [
   { name: 'Chat landing', route: '/#/chat', ready: '.chat-welcome' },

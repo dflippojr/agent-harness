@@ -1,17 +1,8 @@
 // Second pass (#625) over the mobile redesign (#506-#515): flows the #589 suite did not cover.
-import { test, expect, openSession, expectDone } from './fixtures';
+import { test, expect, openSession, expectDone, expectReflow } from './fixtures';
 import type { Page } from '@playwright/test';
 
 const settle = (page: Page) => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-
-async function expectReflow(page: Page) {
-  for (const width of [320, 375, 768, 1440]) {
-    await page.setViewportSize({ width, height: 900 });
-    await settle(page);
-    await expect.poll(() => page.evaluate(() => innerWidth)).toBe(width);
-    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  }
-}
 
 // The contract's 60% height stands in for an on-screen keyboard; landscape swaps the project's portrait viewport.
 function rotations(page: Page) {
