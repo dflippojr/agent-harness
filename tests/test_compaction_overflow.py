@@ -162,13 +162,30 @@ scripts:
     asyncio.run(body())
 
 
-def test_prior_notes_that_use_up_the_budget_leave_no_excerpt():
-    messages = _summarized()
-    budget = len(compaction.PRIOR_NOTES.format(prior=FIRST)) - 10   # the notes alone are over it
-    text = _prompt(compaction.summary_request(messages, 2, len(messages) - 2, max_chars=budget))
-    assert FIRST in text
-    assert text.endswith("Conversation excerpt:\n[earliest part omitted]\n")
-    assert "result 0" not in text
+def test_prior_notes_over_the_budget_leave_half_of_it_to_the_newer_messages():
+    """8,192 tokens at 3 characters each, and a ~12,000-character earlier summary (#654 review): the newer
+    messages are removed once summarized, so the summarizer must still see the newest of them."""
+    head = [{"role": "system", "content": "sys"}, {"role": "user", "content": "sum the CSVs"}]
+    prior = "## Findings\n" + "count=17 in data/a.csv\n" * 520 + "## Next steps\nsum data/b.csv"
+    tail = [{"role": "user", "content": "correction: skip data/c.csv"}, {"role": "assistant", "content": "ok"}]
+    messages = compaction.apply_summary(head, 2, 2, prior) + _turns(8, 4000) + tail
+    budget = int(0.45 * 8192 * 3)
+    assert len(prior) > budget
+    text = _prompt(compaction.summary_request(messages, 2, len(messages), max_chars=budget))
+    block, _, excerpt = text.partition("Conversation excerpt:\n")
+    assert "correction: skip data/c.csv" in excerpt
+    assert len(excerpt) >= budget // 2 - len("[earliest part omitted]\n")
+    assert "prior notes shortened" in block
+    assert "## Findings" in block and "sum data/b.csv" in block   # the start and the next steps stay
+    prior_block = block[block.index("Prior notes"):]
+    assert len(prior_block) + len(excerpt) <= budget + len("[earliest part omitted]\n")   # within the same total
+
+
+def test_shorten_keeps_both_ends_within_the_limit():
+    assert compaction._shorten("abc", 3) == "abc"
+    short = compaction._shorten("a" * 500 + "b" * 500, 200)
+    assert len(short) <= 200 and short.startswith("a") and short.endswith("b")
+    assert "1000 characters" in compaction._shorten("x" * 1000, 0)
 
 
 def test_a_summary_quoting_the_notes_heading_is_kept_whole():

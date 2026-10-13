@@ -83,7 +83,9 @@ from the end of the message; when that doesn't match either, the whole body
 goes into the block, since repeating stale notes is better than dropping
 findings. The excerpt's budget (45% of the context
 window) shrinks by the block's size, so the request stays within the same
-total.
+total. The newer messages are removed once summarized, so the block never
+takes more than half of that budget from them: a longer block keeps its start
+and end and loses its middle, marked as shortened.
 
 ## Overflow compaction
 

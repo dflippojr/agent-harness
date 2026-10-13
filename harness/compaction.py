@@ -224,17 +224,29 @@ def prior_summary(message: dict, known: str = "", notes: str = "", known_notes: 
     return body.strip()
 
 
+def _shorten(text: str, limit: int) -> str:
+    """`text` within `limit` characters, keeping its start and end (the oldest requests and the next steps)."""
+    if len(text) <= limit:
+        return text
+    marker = f"\n[... {len(text)} characters of prior notes shortened; the middle is omitted ...]\n"
+    keep = max(0, limit - len(marker))
+    return text[:keep // 2] + marker + text[len(text) - (keep - keep // 2):]
+
+
 def summary_request(messages: list[dict], start: int, end: int, max_chars: int, known: str = "",
                     notes: str = "", known_notes: str = "") -> list[dict]:
-    """An earlier summary at the start of the span goes whole into its own prior-notes block, instead of being the
-    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`. `known`, `notes`,
-    `known_notes`: see prior_summary."""
+    """An earlier summary at the start of the span goes into its own prior-notes block, instead of being the
+    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`. The newer messages are removed
+    once summarized, so the block never takes more than half the budget from them: a longer one loses its middle.
+    `known`, `notes`, `known_notes`: see prior_summary."""
     task = messages[1]["content"] if _head_len(messages) == 2 else "(not available)"
     prior = prior_summary(messages[start], known, notes, known_notes) if start < end else None
     block = ""
     if prior is not None:
-        block = PRIOR_NOTES.format(prior=prior)
         start += 1
+        wanted = len(render_excerpt(messages[start:end], max_chars))
+        room = max_chars - min(wanted, max_chars // 2) - len(PRIOR_NOTES.format(prior=""))
+        block = PRIOR_NOTES.format(prior=_shorten(prior, room))
     excerpt = render_excerpt(messages[start:end], max(0, max_chars - len(block)))
     return [
         {"role": "system", "content": SUMMARY_SYSTEM},
