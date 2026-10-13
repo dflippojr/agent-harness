@@ -617,6 +617,7 @@ def test_budget_and_finish_tool(tmp_path):
 
 def test_compaction_summarizes_long_context(tmp_path):
     cfg = make_cfg(tmp_path, context_tokens=8000)
+    cfg.stuck_stop_after = cfg.stuck_invalid_after = 0  # eight unknown-tool calls stand in for real tools
     big = "line of output\n" * 400  # ~6K chars per result
 
     def step(msgs):
@@ -633,8 +634,8 @@ def test_compaction_summarizes_long_context(tmp_path):
         # Stand-in tool so the test doesn't need Docker: unknown tools return an error of known size.
         orig = m.runner._record_result
 
-        async def padded(sid, c, name, output, ok, seconds=0.0):
-            await orig(sid, c, name, output + big, ok, seconds)
+        async def padded(sid, c, name, output, ok, seconds=0.0, **kwargs):
+            await orig(sid, c, name, output + big, ok, seconds, **kwargs)
         m.runner._record_result = padded
         await m.start()
         s = await wait_status(m, m.create("long task")["id"], "done", timeout=20)
