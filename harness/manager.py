@@ -2032,11 +2032,43 @@ class Manager:
             # issue #63: the member's own push destination (owner/repo), shown in the push confirmation
             from .github_auth import display_repo
             out["push_target"] = display_repo(github["source_url"])
+        pull_request_url = self._pull_request_url(s, project, github)
+        if pull_request_url:
+            out["pull_request_url"] = pull_request_url
         if s["target"] != "tower":
             out["target_online"] = self.hub.online(s["target"])
         if s["status"] == "waiting_approval":
             out["pending_approvals"] = [public_approval(a) for a in self.db.pending_approvals(s["id"])]
         return out
+
+    @staticmethod
+    def _pull_request_url(s: dict, project, github: dict | None) -> str:
+        """Issue #665: after a push to GitHub, the page that opens (or shows) the PR for the session branch. A compare
+        URL needs no token; it carries only the session title and, for issue sessions, `Closes #N`, never agent text."""
+        from urllib.parse import quote, urlencode
+        from . import github_tasks
+        if s.get("review") != "pushed" or not s.get("branch") or project is None:
+            return ""
+        # The member push goes to the stored source URL, not the managed local repository (issue #63).
+        source = github["source_url"] if github is not None else project.repo
+        repo = github_tasks.repository(source or "")
+        if not repo:
+            return ""
+        meta = s.get("app_metadata") or {}
+        item = meta.get("github_item") or {}
+        if str(item.get("repo") or "").lower() != repo.lower() or not isinstance(item.get("number"), int):
+            item = {}
+        if item.get("kind") == "pr":
+            # The push updated that PR's head branch.
+            return f"https://github.com/{repo}/pull/{item['number']}"
+        base = meta.get("github_base_branch") or s.get("base_branch") or ""
+        if not base:
+            return ""
+        query = {"expand": "1", "title": str(s.get("title") or "")[:200]}
+        if item.get("kind") == "issue":
+            query["body"] = f"Closes #{item['number']}"
+        return (f"https://github.com/{repo}/compare/{quote(base, safe='/')}...{quote(s['branch'], safe='/')}?"
+                + urlencode(query, quote_via=quote))
 
     async def list_summaries(self, rows: list[dict]) -> list[dict]:
         """`list_summary` for each listed row, off the event loop (issue #667). The queue positions are read here,
