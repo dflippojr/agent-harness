@@ -556,11 +556,12 @@ async function viewSession(sid, tab, focusApproval) {
       if (d.totals) totals = d.totals;
       if (d.tokens_after) ctxUsed = d.tokens_after;
       renderHead();
-      const text = d.tier === "round_reset"
+      const why = d.reason === "overflow" ? "Prompt too long for the model server, retrying. " : "";
+      const text = why + (d.tier === "round_reset"
         ? `Round reset: ~${fmtTokens(d.tokens_before)} → ~${fmtTokens(d.tokens_after)} tokens`
         : d.tier === "summary"
         ? `Context condensed: ~${fmtTokens(d.tokens_before)} → ~${fmtTokens(d.tokens_after)} tokens (${d.summarized_messages} messages summarized)`
-        : `Trimmed old tool output: ~${fmtTokens(d.tokens_before)} → ~${fmtTokens(d.tokens_after)} tokens`;
+        : `Trimmed old tool output: ~${fmtTokens(d.tokens_before)} → ~${fmtTokens(d.tokens_after)} tokens`);
       if (compactNote) {
         const c = compactNote;
         compactNote = null;

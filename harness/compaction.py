@@ -16,12 +16,23 @@ import json
 
 SUMMARY_TAG = "[Context summary]"
 STATE_TAG = "[Task state]"
+NOTES_HEADING = "## Your saved notes (kept verbatim)"
+SUMMARY_CONTINUE = "Continue from here; don't redo work that is already done."
 ROUND_CONTINUE = ("Continue from the saved state. Do not repeat a command that already failed with the "
                   "same arguments unless the inputs have changed.")
 
 SUMMARY_SYSTEM = """You write handoff notes for an AI agent whose earlier conversation is being removed to free context.
 The agent keeps its original task and its most recent turns; your notes replace everything in between.
 Be specific and factual. Keep exact file paths, commands, error messages, numbers, and names. Don't invent anything."""
+
+# Goes ahead of the excerpt when an earlier summary exists (arXiv 2609.20804 Fig. 18: update, don't restate).
+PRIOR_NOTES = """Prior notes (written at an earlier compaction; they cover the work before the excerpt below). Update
+them rather than restating them: keep every fact that still holds with its exact values, correct what the excerpt
+changed, and add what is new.
+
+{prior}
+
+"""
 
 SUMMARY_PROMPT = """Write handoff notes for the conversation excerpt below. Use these sections:
 
@@ -40,7 +51,7 @@ What remains to finish the task.
 The agent's original task (it keeps this verbatim; don't repeat it, but use it to judge what matters):
 {task}
 
-Conversation excerpt:
+{prior}Conversation excerpt:
 {excerpt}"""
 
 
@@ -186,12 +197,31 @@ def render_excerpt(messages: list[dict], max_chars: int) -> str:
     return text
 
 
+def prior_summary(message: dict) -> str | None:
+    """The summary in a message apply_summary wrote, without its framing or the saved notes (apply_summary adds
+    those again); None for any other message."""
+    content = message.get("content") or ""
+    if message.get("role") != "user" or not content.startswith(SUMMARY_TAG):
+        return None
+    body = content.partition("\n\n")[2]
+    for marker in (NOTES_HEADING, SUMMARY_CONTINUE):
+        body = body.split("\n\n" + marker, 1)[0]
+    return body.strip()
+
+
 def summary_request(messages: list[dict], start: int, end: int, max_chars: int) -> list[dict]:
+    """An earlier summary at the start of the span goes whole into its own prior-notes block, instead of being the
+    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`."""
     task = messages[1]["content"] if _head_len(messages) == 2 else "(not available)"
-    excerpt = render_excerpt(messages[start:end], max_chars)
+    prior = prior_summary(messages[start]) if start < end else None
+    block = ""
+    if prior is not None:
+        block = PRIOR_NOTES.format(prior=prior)
+        start += 1
+    excerpt = render_excerpt(messages[start:end], max(0, max_chars - len(block)))
     return [
         {"role": "system", "content": SUMMARY_SYSTEM},
-        {"role": "user", "content": SUMMARY_PROMPT.format(task=task, excerpt=excerpt)},
+        {"role": "user", "content": SUMMARY_PROMPT.format(task=task, prior=block, excerpt=excerpt)},
     ]
 
 
@@ -199,8 +229,8 @@ def apply_summary(messages: list[dict], _start: int, end: int, summary: str, not
     head = [m for m in messages[:_head_len(messages)] if not (m.get("content") or "").startswith(SUMMARY_TAG)]
     text = f"{SUMMARY_TAG} Earlier work in this session, condensed:\n\n{summary.strip()}"
     if notes.strip():
-        text += f"\n\n## Your saved notes (kept verbatim)\n{notes.strip()}"
-    note = {"role": "user", "content": text + "\n\nContinue from here; don't redo work that is already done."}
+        text += f"\n\n{NOTES_HEADING}\n{notes.strip()}"
+    note = {"role": "user", "content": f"{text}\n\n{SUMMARY_CONTINUE}"}
     return head + [note] + messages[end:]
 
 

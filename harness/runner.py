@@ -2191,7 +2191,18 @@ class Runner:
 
         run = s["run"]
         tools = self.tool_schemas(s, ws)
-        completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache, run)
+        try:
+            completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache,
+                                                       run)
+        except llm.LLMError as e:
+            if not llm.is_context_overflow(e):
+                raise
+            # The size estimate was short: compact now and try once more; a second failure ends the run as before.
+            s = await self._compact_on_overflow(s)
+            run = s["run"]
+            tools = self.tool_schemas(s, ws)
+            completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache,
+                                                       run)
         with telemetry.span("completion_commit"):
             stream.flush()
             if completion.cache_tokens is None and cache_box["seen"]:
@@ -3223,16 +3234,32 @@ class Runner:
             s = self.db.get_session(sid)
         if before < self.cfg.elide_at * n:
             return s
+        return await self._elide_and_summarize(s, context, before, cpt, overhead)
+
+    async def _compact_on_overflow(self, s: dict) -> dict:
+        """The model server rejected the prompt as too long: one summary pass whatever `summarize_at` says."""
+        cpt = s["run"].get("chars_per_token", 3.0)
+        overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
+        before = compaction.estimate_tokens(s["context"], cpt) + overhead
+        return await self._elide_and_summarize(s, s["context"], before, cpt, overhead, overflow=True)
+
+    async def _elide_and_summarize(self, s: dict, context: list, before: int, cpt: float, overhead: int,
+                                   overflow: bool = False) -> dict:
+        sid = s["id"]
+        n = self.cfg.models[s["model"]].context_tokens
         with telemetry.span("compaction", {"harness.tokens_before": before}) as span:
             context, _ = compaction.elide(context)
             after = compaction.estimate_tokens(context, cpt) + overhead
             data = {"tier": "elide", "tokens_before": before, "tokens_after": after}
-            if after >= self.cfg.summarize_at * n:
+            if overflow:
+                data["reason"] = "overflow"
+            if overflow or after >= self.cfg.summarize_at * n:
                 split = compaction.split_for_summary(context, keep_chars=int(self.cfg.keep_recent * n * cpt))
                 if split:
                     context = await self._summarize_context(s, context, split, data, before, cpt, overhead)
             data["context_tokens"] = n
-            span.set({"harness.compaction_tier": data["tier"], "harness.tokens_after": data.get("tokens_after")})
+            span.set({"harness.compaction_tier": data["tier"], "harness.tokens_after": data.get("tokens_after"),
+                      "harness.compaction_reason": data.get("reason", "threshold")})
 
             def compact() -> None:
                 self.db.update_session(sid, context=context)
