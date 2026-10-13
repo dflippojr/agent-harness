@@ -64,6 +64,42 @@ This payload does **not** include `tokens_before`, `tokens_after`, or
 The web UI, CLI, and Markdown transcript render a mask event as a one-line
 note using `tokens_saved` only.
 
+## Summaries build on the previous one
+
+A summary replaces the older turns with one `[Context summary]` message
+right after the pinned system prompt and task. The next summary request does
+not fold that message into the conversation excerpt, where it would be the
+first thing cut when the excerpt is over its budget. It goes whole into a
+separate **Prior notes** block ahead of the excerpt, and the prompt tells the
+summarizer to update those notes rather than restate them (#640). The block
+holds the summary text only: the saved `update_notes` text is appended again
+by the new summary message itself. The runner keeps the last summary's text
+in `run["summary"]` (and the notes it was framed with in
+`run["summary_notes"]`), carried into follow-up runs like the notes, and uses
+it when the message is exactly what that summary produced, so a summary that
+quotes the saved-notes heading is not cut short and a rewind that restored a
+different summary is not mistaken for it. Otherwise only the exact saved-notes text is cut
+from the end of the message; when that doesn't match either, the whole body
+goes into the block, since repeating stale notes is better than dropping
+findings. The excerpt's budget (45% of the context
+window) shrinks by the block's size, so the request stays within the same
+total. The newer messages are removed once summarized, so the block never
+takes more than half of that budget from them: a longer block keeps its start
+and end and loses its middle, marked as shortened.
+
+## Overflow compaction
+
+Compaction normally runs before a model call, on an estimated size. When the
+estimate is short and llama-server rejects the prompt (HTTP 400 with
+`request (N tokens) exceeds the available context size (M tokens), try
+increasing it`, the message of the pinned b10950 build; the match is
+`llm.CONTEXT_OVERFLOW`), the runner runs one forced elide-and-summary pass,
+whatever `summarize_at` says, and retries the call once. The pass emits a
+`compaction` event like a threshold one plus `reason: "overflow"`; its `tier`
+is `summary`, or `elide` when there was too little to summarize or the
+summary call failed. If the retry is rejected too, the run fails as it did
+before. Other HTTP 400 errors are not retried.
+
 ## Round reset
 
 After masking, compaction may **reset** the conversation instead of eliding or
