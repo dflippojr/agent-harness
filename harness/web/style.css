@@ -410,7 +410,7 @@ body .jump { z-index: 9; }
 .btn.bad { color: var(--bad); }
 .btn.bad.solid { background: var(--bad); border-color: var(--bad); color: var(--bg); }
 .btn:disabled { opacity: .5; cursor: default; }
-.btn.small { min-height: var(--tap); padding: 0 12px; font-size: 0.875rem; }
+.btn.small { min-width: var(--tap); min-height: var(--tap); padding: 0 12px; font-size: 0.875rem; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .row.end { justify-content: flex-end; }
 .spacer { flex: 1; }
@@ -492,9 +492,12 @@ textarea.memory-editor {
   line-height: 1.45;
 }
 
-.tabs { display: flex; gap: 4px; background: var(--panel-2); padding: 3px; border-radius: 10px; margin: 4px 0 12px; }
+.tabs { display: flex; gap: 8px; background: var(--panel-2); padding: 3px; border-radius: 10px; margin: 4px 0 12px; }
 .tabs button { flex: 1; min-width: 0; min-height: var(--tap); border: 0; background: none; padding: 8px; border-radius: 8px; cursor: pointer; font-weight: 500; color: var(--muted); overflow-wrap: break-word; }
 .tabs button.on { background: var(--seg-on); color: var(--text); box-shadow: 0 1px 2px var(--shadow-soft); }
+/* Actions sub-tabs (#626) wrap whole tabs onto a second row on phones instead of breaking a label mid-word. */
+.resources-tabs { flex-wrap: wrap; }
+.resources-tabs button { flex: 1 1 auto; min-width: auto; overflow-wrap: normal; }
 
 /* transcript */
 .ev { margin: 10px 0; overflow-wrap: anywhere; }
@@ -579,12 +582,38 @@ body.has-tabs .approval-sheet { padding-bottom: 12px; }
 .approval-what { margin: 0 0 8px; font-size: 0.875rem; color: var(--muted); overflow-wrap: anywhere; }
 .approval-sheet input { margin: 8px 0; width: 100%; min-height: var(--tap); box-sizing: border-box; }
 .approval-note-toggle { display: flex; align-items: center; min-height: var(--tap); width: 100%; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
-.approval-cancel { display: flex; align-items: center; justify-content: center; min-height: var(--tap); width: 100%; margin-top: 4px; border: 0; background: none; color: var(--muted); font: inherit; font-size: 0.875rem; cursor: pointer; }
+.approval-cancel { display: flex; align-items: center; justify-content: center; min-height: var(--tap); width: 100%; margin-top: 8px; border: 0; background: none; color: var(--muted); font: inherit; font-size: 0.875rem; cursor: pointer; }
 .approval-actions { display: flex; gap: 10px; margin-top: 8px; }
 .approval-actions .btn { flex: 1; min-height: 50px; border-radius: 14px; font-weight: 650; font-size: 1rem; }
 .approval-deny { background: none; border: 1.5px solid var(--bad); color: var(--bad); }
 .approval-approve { background: var(--ok-solid); border: 1.5px solid var(--ok-solid); color: var(--on-solid); }
 body:has(.approval-sheet) main { padding-bottom: calc(360px + var(--tabbar-offset)); }
+/* Phone landscape (#631): the sheet leaves room for the transcript under the bar, its content scrolls, and the decision
+   row (Cancel the whole task, Deny, Approve) stays pinned at its foot. */
+@media (max-width: 767px) and (max-height: 500px) {
+  .approval-sheet {
+    display: flex; flex-wrap: wrap; align-items: center; padding-top: 8px; padding-bottom: 0;
+    max-height: calc(100vh - var(--bar-h, 52px) - 96px - var(--tabbar-offset, 0px));
+    max-height: calc(100dvh - var(--bar-h, 52px) - 96px - var(--tabbar-offset, 0px));
+  }
+  .approval-sheet > * { flex: 0 0 100%; min-width: 0; }
+  .approval-sheet > :is(.approval-actions, .approval-cancel) {
+    position: sticky; bottom: 0; z-index: 1; margin: 0; padding: 8px 0 calc(8px + env(safe-area-inset-bottom, 0px));
+    background: var(--panel);
+  }
+  .approval-sheet > .approval-cancel { order: 1; flex: 0 0 auto; width: auto; box-sizing: content-box; padding-inline: 8px; }
+  .approval-sheet > .approval-actions { order: 2; flex: 1 1 0; gap: 8px; padding-left: 8px; }
+  .approval-actions .btn { min-height: var(--tap); }
+  body:has(.approval-sheet) main { padding-bottom: calc(var(--approval-h, 220px) + 16px + var(--tabbar-offset, 0px)); }
+  body:has(.approval-sheet) .session-chrome { position: static; }
+}
+/* Too narrow for one row: Deny and Approve stay pinned above a pinned Cancel the whole task. */
+@media (max-width: 479px) and (max-height: 500px) {
+  .approval-sheet > .approval-actions {
+    order: 1; flex-basis: 100%; padding: 8px 0; bottom: calc(var(--tap) + 16px + env(safe-area-inset-bottom, 0px));
+  }
+  .approval-sheet > .approval-cancel { order: 2; flex: 0 0 100%; padding-inline: 0; }
+}
 
 /* In-app confirm and prompt sheets (#513, lib/sheet.mjs): a bottom sheet on phones, a centred card on wide screens. */
 dialog.sheet {
@@ -614,6 +643,9 @@ dialog.sheet::backdrop { background: var(--backdrop); }
   .sheet-body { padding: 20px; }
 }
 
+/* The page behind an open sheet stays put (#633), as it does behind the tool output viewer. */
+html:has(dialog.sheet[open]) { overflow: hidden; }
+
 /* Desktop 9: sheets and output modal (#566). Narrower layouts keep their existing geometry. */
 @media (min-width: 768px) {
   .sheet-body { padding: 24px; }
@@ -631,6 +663,7 @@ dialog.sheet::backdrop { background: var(--backdrop); }
 
 .note { font-size: 0.8125rem; color: var(--muted); text-align: center; margin: 12px 0; }
 .note.bad { color: var(--bad); }
+.checkpoint-actions { display: inline-flex; flex-wrap: wrap; justify-content: center; gap: 8px; vertical-align: middle; }
 .status-line { text-align: center; font-size: 0.8125rem; margin: 14px 0; }
 
 .composer[hidden] { display: none; }
@@ -895,6 +928,7 @@ dialog.sheet::backdrop { background: var(--backdrop); }
   .session-chrome .session-strip { height: var(--tap); padding-right: 112px; }
   body.session-page .jump { top: var(--bar-h, 52px); bottom: auto; margin: 0; }
   body.session-page .jump-top { right: calc(max(16px, env(safe-area-inset-right, 0px)) + var(--tap) + 8px); }
+  .tabs.session-tabs { margin-top: 6px; }  /* 8 px between the jump buttons and the tabs (#634) */
 }
 .session-title-edit {
   flex: 1; min-width: 0; min-height: var(--tap); margin: -4px 0; padding: 0 10px; box-sizing: border-box;
@@ -961,6 +995,12 @@ a.quote-source { text-decoration: underline; text-decoration-style: dotted; text
 .disk-meter { display: flex; justify-content: space-between; gap: 8px; margin: 0 0 8px; font-variant-numeric: tabular-nums; }
 .disk-facts { margin: 0; }
 .disk-facts p { margin: 4px 0; }
+/* Largest workspaces (#627): each row is a full-width 44 px link. */
+.disk-workspaces { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 0; padding: 0; list-style: none; }
+.disk-workspaces a {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: var(--tap); padding: 0 12px;
+  border-radius: 10px; background: var(--panel-2); font-variant-numeric: tabular-nums;
+}
 .app-icon-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 8px 0 10px; }
 .app-icon-choice {
   margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
@@ -1035,6 +1075,16 @@ a.quote-source { text-decoration: underline; text-decoration-style: dotted; text
 .chat-composer textarea { font-size: 1rem; } /* 16px+ keeps iOS from zooming on focus */
 body.chat-page main { padding-bottom: calc(190px + max(var(--tabbar-offset), env(safe-area-inset-bottom, 0px))); }
 body.has-tabs .composer { bottom: var(--tabbar-offset); padding-bottom: 8px; }
+/* Short viewports (#632: phone landscape, or the on-screen keyboard): while you type, the model pickers fold away and the
+   phone tab bar yields, so the conversation keeps room between the bar and the composer. */
+@media (max-height: 500px) {
+  body.chat-page:has(.chat-composer textarea:focus) .chat-pickers { display: none; }
+  body.chat-page:has(.chat-composer textarea:focus) main { padding-bottom: calc(var(--chat-composer-h, 60px) + var(--chat-keyboard-h, 0px) + 16px); }
+}
+@media (max-height: 500px) and (max-width: 767px) {
+  body.chat-page:has(.chat-composer textarea:focus) #tab-bar { display: none; }
+  body.chat-page.has-tabs:has(.chat-composer textarea:focus) .composer { bottom: 0; padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 8px); }
+}
 .recent-chats-section { margin-top: 24px; text-align: left; }
 .recent-chats a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .discovery-roots { width: 100%; min-width: 0; font-size: 1rem; }

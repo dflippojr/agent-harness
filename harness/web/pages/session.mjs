@@ -603,7 +603,7 @@ async function viewSession(sid, tab, focusApproval) {
       // Hosted CLI sessions keep their own state, which can't be truncated: Fork (with a transcript digest) only.
       const local = !session.backend || session.backend === "local";
       if (isMember()) { add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved`)); return; } // owner API only
-      add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved `,
+      add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved `, h("span", { class: "checkpoint-actions" },
         local ? h("button", {
           class: "btn small", type: "button", title: "Restore the workspace and the agent's context to this point. Packages, processes and files outside the workspace are not undone.",
           onclick: async (ev) => {
@@ -611,7 +611,7 @@ async function viewSession(sid, tab, focusApproval) {
             if (await confirmSheet({ title: `Rewind to checkpoint ${turn}?`, message: "Later file changes are undone (the transcript keeps them).",
               confirmLabel: "Rewind", destructive: true })) void act(btn, "rewind");
           },
-        }, "Rewind here") : null, " ",
+        }, "Rewind here") : null,
         h("button", {
           class: "btn small", type: "button", title: "Start a new session from this point, on its own branch",
           onclick: async (ev) => {
@@ -620,7 +620,7 @@ async function viewSession(sid, tab, focusApproval) {
               message: "Starts a new session from this point, on its own branch.", confirmLabel: "Fork", validate: sheets.required("an instruction") });
             if (prompt?.trim()) void act(btn, "fork", { prompt });
           },
-        }, "Fork from here")));
+        }, "Fork from here"))));
     },
     rewound: (e) => add(h("p", { class: "note" }, `Rewound to checkpoint ${e.data.turn}: the workspace and context are as they were then; later turns above are kept for the record`)),
     forked: (e) => add(h("p", { class: "note" }, "Forked from ", h("a", { href: `#/s/${e.data.parent}` }, e.data.parent),

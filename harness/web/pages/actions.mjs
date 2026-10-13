@@ -640,7 +640,8 @@ export function mountActions({ $app, h, fill, append, api, setHeader, toast, go,
           backupLine(u.backup),
           isGuest() ? null : imageArchiveBlock(u.image_archive, load),
           top.length ? h("p", { class: "muted small", style: "margin-top:10px" }, "Largest workspaces") : null,
-          top.length ? h("ul", { class: "small" }, top.map((w) => h("li", {}, h("a", { href: `#/s/${w.session}/info` }, w.session), ` ${mb(w.mb)}`))) : null);
+          top.length ? h("ul", { class: "small disk-workspaces" }, top.map((w) => h("li", {},
+            h("a", { href: `#/s/${w.session}/info` }, h("span", {}, w.session), h("span", { class: "muted" }, mb(w.mb)))))) : null);
         fill(body,
           device("Tower", u.free_gb, u.total_gb, towerExtra),
           (u.runners || []).map((r) => {
