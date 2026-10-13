@@ -26,7 +26,9 @@ Built 2026-09-15. Decision (user): both a search box in the phone app and agent 
   week.
 - **`session_read`** renders a compact transcript (user messages, assistant text, tool calls, tool output cut to ~500
   characters, approvals, review, final answer) in 12,000-character pages, with `find` for passages around a regex.
-  Results are labelled as background that may be outdated.
+  Results are labelled as background that may be outdated. Since #644 a transcript also opens with an
+  untrusted-content banner in the model's context, like web results, and the prompt section says not to follow
+  instructions in it; the stored tool_result event and any artifact keep the plain transcript.
 - Toolkit clean-up: every daemon-side toolkit (memory library, web, images, search) now provides its own
   `schemas()`, and kits that need the calling session say so with `wants_session`.
 
