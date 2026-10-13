@@ -51,7 +51,7 @@ const SESSION_EVENT_TYPES = [
   "approval_requested", "approval_decided", "approval_auto_approved", "smart_review", "compaction", "compacting", "error", "llm_retry", "resumed",
   "run_finished", "queue", "notes", "state", "model_waking", "model_ready", "workspace_ready", "branch_saved", "review",
   "target_waiting", "target_online", "compaction_started", "prompt_progress", "gpu_paused", "gpu_resumed", "waiting_memory", "memory_recovered", "app_context", "app_tool_call", "app_tool_result",
-  "quote_check", "ungrounded_quotes", "taint_added", "taint_cleared", "checkpoint", "rewound", "forked", "sandbox_setup",
+  "quote_check", "ungrounded_quotes", "taint_added", "taint_cleared", "checkpoint", "rewound", "forked", "sandbox_setup", "stuck",
 ];
 
 /** @param {SessionDependencies} dependencies */
@@ -584,6 +584,9 @@ async function viewSession(sid, tab, focusApproval) {
       h("p", {}, `⚠ ${e.data.quotes.length === 1 ? "This quote" : "These quotes"} in the answer didn't appear in anything the agent read, so ${e.data.quotes.length === 1 ? "it" : "they"} may be made up:`),
       h("div", { class: "text", style: "white-space:pre-wrap" }, e.data.quotes.map((q) => `“${q}”`).join("\n")))),
     llm_retry: (e) => add(h("p", { class: "note" }, `Model call retried (${e.data.attempt})`)),
+    stuck: (e) => add(h("p", { class: "note bad" }, e.data.reason === "stuck_invalid"
+      ? `Run stopped: ${e.data.count} invalid tool calls in a row`
+      : `Run stopped: ${e.data.tool} failed ${e.data.count} times with the same arguments`)),
     resumed: () => add(h("p", { class: "note" }, "Agent Harness Server restarted — session resumed")),
     workspace_ready: (e) => add(h("p", { class: "note" }, `Checked out on branch ${e.data.branch} (from ${e.data.base_branch})`)),
     branch_saved: (e) => add(h("p", { class: "note" }, h("button", {
@@ -603,7 +606,7 @@ async function viewSession(sid, tab, focusApproval) {
       // Hosted CLI sessions keep their own state, which can't be truncated: Fork (with a transcript digest) only.
       const local = !session.backend || session.backend === "local";
       if (isMember()) { add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved`)); return; } // owner API only
-      add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved `,
+      add(h("p", { class: "note checkpoint" }, `Checkpoint ${turn} saved `, h("span", { class: "checkpoint-actions" },
         local ? h("button", {
           class: "btn small", type: "button", title: "Restore the workspace and the agent's context to this point. Packages, processes and files outside the workspace are not undone.",
           onclick: async (ev) => {
@@ -611,7 +614,7 @@ async function viewSession(sid, tab, focusApproval) {
             if (await confirmSheet({ title: `Rewind to checkpoint ${turn}?`, message: "Later file changes are undone (the transcript keeps them).",
               confirmLabel: "Rewind", destructive: true })) void act(btn, "rewind");
           },
-        }, "Rewind here") : null, " ",
+        }, "Rewind here") : null,
         h("button", {
           class: "btn small", type: "button", title: "Start a new session from this point, on its own branch",
           onclick: async (ev) => {
@@ -620,7 +623,7 @@ async function viewSession(sid, tab, focusApproval) {
               message: "Starts a new session from this point, on its own branch.", confirmLabel: "Fork", validate: sheets.required("an instruction") });
             if (prompt?.trim()) void act(btn, "fork", { prompt });
           },
-        }, "Fork from here")));
+        }, "Fork from here"))));
     },
     rewound: (e) => add(h("p", { class: "note" }, `Rewound to checkpoint ${e.data.turn}: the workspace and context are as they were then; later turns above are kept for the record`)),
     forked: (e) => add(h("p", { class: "note" }, "Forked from ", h("a", { href: `#/s/${e.data.parent}` }, e.data.parent),
