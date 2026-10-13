@@ -1172,16 +1172,17 @@ class Manager:
         workspace = self._new_workspace(False, "tower", owner_id, new_sid, app_id=app_id)
         # A hosted parent's CLI state can't be forked, and another backend can't read the parent's saved context:
         # both start from a transcript digest.
-        hosted = parent.get("backend", "local") != "local" or (choice is not None and not choice["same"])
+        use_digest = parent.get("backend", "local") != "local" or (choice is not None and not choice["same"])
         try:
             git_fields = await asyncio.to_thread(cp.prepare_fork, parent, int(turn), new_sid, workspace)
             saved_context, carried = await asyncio.to_thread(cp.store(parent).load_turn, int(turn))
-            if hosted:
+            if use_digest:
                 digest = await asyncio.to_thread(cp.summary, parent, int(turn))
-                context = [parent["context"][0], {"role": "user", "content": (
-                    "You are continuing earlier work from a checkpoint. The workspace is exactly as it was then. "
-                    f"Summary of the earlier conversation:\n\n{digest}\n\nNew instruction:\n{prompt}")}]
-                base_context = context[:1]
+                earlier = ("You are continuing earlier work from a checkpoint. The workspace is exactly as it was then. "
+                           f"Summary of the earlier conversation:\n\n{digest}")
+                context = [parent["context"][0], {"role": "user", "content": f"{earlier}\n\nNew instruction:\n{prompt}"}]
+                # The fork's own checkpoint keeps the digest, so a local fork rewound to it still knows the earlier work.
+                base_context = [parent["context"][0], {"role": "user", "content": earlier}]
             else:
                 base_context = saved_context
                 context = base_context + [{"role": "user", "content": prompt}]
@@ -1208,7 +1209,7 @@ class Manager:
         if not git_fields:
             session["branch"] = ""
         forked = {"parent": sid, "turn": int(turn)}
-        if hosted:
+        if use_digest:
             forked["summary_note"] = (
                 f"moved from {parent.get('backend', 'local')}: started from a transcript digest, no model call" if moved
                 else "hosted session: a fresh CLI session started from a transcript digest, no model call")

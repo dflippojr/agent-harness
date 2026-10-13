@@ -84,6 +84,19 @@ def test_local_fork_to_hosted_uses_the_digest_and_same_backend_keeps_the_saved_c
     asyncio.run(body())
 
 
+def test_hosted_fork_to_local_keeps_the_digest_in_its_checkpoint(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        m.db.update_session(s["id"], backend="claude", model="claude-opus-5")
+        fork = await finished(m, (await m.fork(s["id"], 1, "carry on locally", backend="local"))["id"])
+        assert fork["backend"] == "local" and fork["model"] == s["model"]
+        rewound = await m.rewind(fork["id"], 1)       # back to where the fork started: the earlier work is still known
+        assert "Summary of the earlier conversation" in rewound["context"][1]["content"]
+        assert "carry on locally" not in rewound["context"][1]["content"]
+
+    asyncio.run(body())
+
+
 def test_rerun_on_another_backend(tmp_path):
     async def body():
         m, s = await started(tmp_path)
