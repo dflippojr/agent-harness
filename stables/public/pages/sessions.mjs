@@ -49,9 +49,13 @@ async function viewList(pane = null) {
   }
 
   // The first page always holds every active session (#663); "Show older" adds the next page by the server's cursor.
-  // Every load reads all `olderPages` again from the top, so no shown row keeps an old status or falls between pages.
+  // Every load reads all its older pages again from the top, so no shown row keeps an old status or falls between pages.
+  // The button follows from the counts: wanted > shown is loading, or Retry once a load has failed; any load that
+  // succeeds settles both.
   let sessions = [];
-  let olderPages = 0;
+  let olderPages = 0;  // older pages shown
+  let olderWanted = 0;  // older pages asked for: one more than shown while Show older loads
+  let olderFailed = false;
   let nextBefore = null;
   let targets = [];
   const sessionsPath = (target, before) => {
@@ -113,25 +117,18 @@ async function viewList(pane = null) {
         !ask && s.chat_summary ? h("p", { class: "agent-preview" }, s.chat_summary) : null),
       h("span", { class: "agent-chev", html: CHEVRON_SVG }));
   };
-  let loadingOlder = false;
-  const showOlder = async (button) => {
-    if (loadingOlder || !nextBefore) return;
-    loadingOlder = true;
-    button.disabled = true;
-    button.textContent = "Loading…";
-    const asked = sessionTarget;
-    olderPages++;
-    try {
-      await render();
-    } catch (e) {
-      console.error("loading older sessions failed", e);
-      // A machine switch meanwhile reset the count to its own pages; only this machine's click is taken back.
-      if (asked === sessionTarget && olderPages > 0) olderPages--;
-      button.disabled = false;
-      button.textContent = "Couldn't load older sessions. Retry";
-    } finally {
-      loadingOlder = false;
-    }
+  const showOlder = () => {
+    if (!nextBefore || (olderWanted > olderPages && !olderFailed)) return undefined;  // a page is on its way
+    olderWanted = olderPages + 1;
+    olderFailed = false;
+    renderSessions();
+    return refreshNow();
+  };
+  const olderButton = () => {
+    if (!nextBefore) return null;
+    const loading = olderWanted > olderPages && !olderFailed;
+    const label = olderFailed ? "Couldn't load older sessions. Retry" : loading ? "Loading…" : "Show older";
+    return h("button", { type: "button", class: "btn secondary agent-more", disabled: loading, onclick: showOlder }, label);
   };
   const renderSessions = () => {
     const visible = shown();
@@ -143,13 +140,13 @@ async function viewList(pane = null) {
     }
     const groups = groupSessions(visible);
     // The group is part of the key: a failure that ages out of Needs you moves without any field changing.
-    const keys = groups.flatMap((g) => g.sessions.map((s) => `${g.key}\0${sessionCardKey(s)}`)).join("\n") + `\n${olderPages}\0${nextBefore || ""}`;
+    const keys = groups.flatMap((g) => g.sessions.map((s) => `${g.key}\0${sessionCardKey(s)}`)).join("\n") + `\n${olderPages}\0${olderWanted}\0${olderFailed}\0${nextBefore || ""}`;
     if (list.dataset.keys === keys && list.querySelector("a.agent-row")) return;
     list.dataset.keys = keys;
     fill(list, groups.map((g) => h("section", { class: `agent-group ${g.key}`, "aria-label": g.label },
       h("h2", { class: "agent-sec" }, g.label, g.key === "recent" ? null : h("span", { class: "agent-count" }, String(g.sessions.length))),
       h("div", { class: "agent-list" }, g.sessions.map(sessionRow)))),
-    nextBefore ? h("button", { type: "button", class: "btn secondary agent-more", onclick: (e) => showOlder(e.currentTarget) }, "Show older") : null);
+    olderButton());
     pane?.paint();
   };
   const renderTargetSwitch = () => {
@@ -162,10 +159,13 @@ async function viewList(pane = null) {
         sessionTarget = target;
         try { localStorage.setItem("harness.sessionTarget", target); } catch (_) { /* private mode */ }
         renderTargetSwitch();
-        // The server filters by machine (#663), so the pages loaded so far belong to the old choice.
+        // The server filters by machine (#663), so the rows shown so far belong to the old choice.
         sessions = [];
-        olderPages = 0;
+        olderPages = olderWanted = 0;
+        olderFailed = false;
         nextBefore = null;
+        delete list.dataset.keys;
+        fill(list, h("p", { class: "empty" }, "Loading…"));
         void refreshNow();
       },
     }, target === "all" ? "All" : targetName(target))));
@@ -214,8 +214,17 @@ async function viewList(pane = null) {
   const render = async () => {
     const run = ++listRun;
     const asked = sessionTarget;
-    const [loaded, queue, gpu, projects] = await Promise.all([loadSessions(asked, olderPages), api("/queue"),
-      isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
+    let loaded, queue, gpu, projects;
+    try {
+      [loaded, queue, gpu, projects] = await Promise.all([loadSessions(asked, olderWanted), api("/queue"),
+        isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
+    } catch (e) {
+      if (!gone && run === listRun && olderWanted > olderPages) {  // the page Show older asked for: offer Retry
+        olderFailed = true;
+        renderSessions();
+      }
+      throw e;
+    }
     if (gone || run !== listRun) return;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
       .sort(compareTargets);
@@ -225,7 +234,8 @@ async function viewList(pane = null) {
     }
     sessions = loaded.rows;
     nextBefore = loaded.next;
-    olderPages = Math.min(olderPages, loaded.pages);  // fewer pages than before: the list got shorter
+    olderPages = olderWanted = loaded.pages;  // fewer than asked for when the list got shorter
+    olderFailed = false;
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
     fill(queueNote,

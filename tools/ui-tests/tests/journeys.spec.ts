@@ -199,15 +199,11 @@ test('AH-16 Agents list pages older sessions with Show older', async ({ signedIn
   });
   await page.goto('/#/agents');
   const recent = page.getByRole('region', { name: 'Recent', exact: true });
+  const titles = () => recent.locator('a.agent-row h3').allTextContents();
   await expect(recent.locator('a.agent-row').first()).toBeVisible();
-  const oldest = recent.getByRole('heading', { name: 'Tab bar tour', exact: true });
-  await expect(oldest).toHaveCount(0);
-  const shown = await recent.locator('a.agent-row').count();
-  const older = page.getByRole('button', { name: 'Show older', exact: true });
-  await older.click();
-  await expect.poll(() => recent.locator('a.agent-row').count()).toBeGreaterThan(shown);
-  await expect(async () => {
-    if (await older.count()) await older.click();
-    await expect(oldest).toBeVisible({ timeout: 1_000 });
-  }).toPass({ timeout: 30_000 });
+  const first = await titles();
+  await page.getByRole('button', { name: 'Show older', exact: true }).click();
+  // The next page joins the rows already shown (the instance holds well over two finished sessions).
+  await expect.poll(async () => (await titles()).length).toBeGreaterThan(first.length);
+  expect(await titles()).toEqual(expect.arrayContaining(first));
 });

@@ -31,7 +31,7 @@ const api = async (path, { onHeaders, surface } = {}) => {
   if (path.startsWith("/sessions")) surfaces.add(surface);
   const headers = new Map();
   let body = [];
-  if (gates[path]) await gates[path];
+  if (gates[path]) await (typeof gates[path] === "function" ? gates[path]() : gates[path]);
   if (server[path]) {
     body = server[path][0];
     if (server[path][1]) headers.set("X-Next-Before", server[path][1]);
@@ -43,9 +43,10 @@ const api = async (path, { onHeaders, surface } = {}) => {
 const gates = {};  // path -> a promise the request waits on (and fails with, if it rejects)
 let painted = [];
 let changed = null;
+const left = [];
 let switchKids = [];
 const page = mountSessions({
-  $app: "APP", h: el, api, ownerSurface: () => "admin", append() {}, setHeader() {}, showListAction() {}, onLeave() {},
+  $app: "APP", h: el, api, ownerSurface: () => "admin", append() {}, setHeader() {}, showListAction() {}, onLeave: (fn) => left.push(fn),
   fill: (target, ...n) => {
     if (target?.attrs?.role === "group") switchKids = n.flat(Infinity);
     else if (target?.attrs?.class === "agent-groups") painted = n.flat(Infinity);
@@ -133,5 +134,50 @@ const first = showOlderButton();
 await first.attrs.onclick({ currentTarget: first });
 assert.ok(calls.slice(count).includes("/sessions?target=macbook&before=c-mac"), "the MacBook list still pages");
 assert.deepEqual(rowIds(section("Recent")), ["mac2", "mac1"]);
+// Review on #677, again: the button follows from the pages wanted and shown, so no late answer can undo a newer one.
+switchKids.find((n) => text(n) === "All").attrs.onclick();
+await sleep(20);
+console.error = () => {};
+// (1) A daemon refresh loads the asked-for page before the click's own request fails: the page stays.
+let failFirst;
+let asked = 0;
+gates["/sessions?before=c-new2"] = () => (asked++ === 0 ? new Promise((_, reject) => { failFirst = reject; }) : Promise.resolve());
+const clicked = showOlderButton().attrs.onclick();
+assert.equal(text(showOlderButton()), "Loading…");
+assert.equal(showOlderButton().attrs.disabled, true);
+changed();
+await sleep(350);
+failFirst(new Error("late"));
+await clicked;
+assert.equal(text(showOlderButton()), "Show older", "the late failure changes nothing");
+delete gates["/sessions?before=c-new2"];
+let mark = calls.length;
+changed();
+await sleep(350);
+assert.ok(calls.slice(mark).includes("/sessions?before=c-new2"), "later refreshes still read the older page");
+// (2) A refresh that fails while Show older's page is on its way offers Retry instead of leaving "Loading…".
+let releaseOlder;
+gates["/sessions?before=c-wait"] = new Promise((resolve) => { releaseOlder = resolve; });
+const held = showOlderButton().attrs.onclick();
+gates["/sessions"] = () => Promise.reject(new Error("HTTP 502"));
+changed();
+await sleep(350);
+assert.equal(text(showOlderButton()), "Couldn't load older sessions. Retry");
+assert.equal(showOlderButton().attrs.disabled, false);
+delete gates["/sessions"];
+releaseOlder();
+await held;
+delete gates["/sessions?before=c-wait"];
+await showOlderButton().attrs.onclick();
+assert.deepEqual(rowIds(section("Recent")), ["new1", "new2", "old1", "old2"], "Retry loads the page");
+// (3) A machine switch clears the old machine's rows at once, even when the new machine's list fails to load.
+gates["/sessions?target=macbook"] = () => Promise.reject(new Error("HTTP 502"));
+switchKids.find((n) => text(n) === "MacBook").attrs.onclick();
+await sleep(20);
+assert.equal(text(painted[0]), "Loading…");
+assert.deepEqual(painted.flatMap(nodes).filter((n) => n.attrs?.class === "agent-row"), []);
+delete gates["/sessions?target=macbook"];
+console.error = errors;
 assert.deepEqual([...surfaces], ["admin"], "every page comes from the owner route, which holds the active sessions");
+for (const fn of left) fn();  // stops the stale note's ticking, which the failures above started
 console.log("ok");
