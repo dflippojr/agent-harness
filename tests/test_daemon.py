@@ -362,6 +362,36 @@ def test_repeated_failing_call_is_nudged_then_ends_the_run_stuck_repeat(tmp_path
     asyncio.run(body())
 
 
+def test_a_saved_stuck_stop_runs_no_pending_call_after_restart(tmp_path):
+    """#643: a crash after the stopping result is saved but before the rest of the turn is skipped must not run (or
+    finish on) the calls still pending when the daemon restarts."""
+    cfg = make_cfg(tmp_path)
+    script = Script([Completion(content="unreachable")])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        s = m.create("go")
+        m.tasks[s["id"]].cancel()
+        await asyncio.sleep(0.05)
+        s = m.db.get_session(s["id"])
+        calls = [call("read_file", 0, path="missing.txt"), call("write_file", 1, path="a.txt", content="x"),
+                 call("finish", 2, answer="done")]
+        ctx = s["context"] + [{"role": "assistant", "content": "", "tool_calls": calls},
+                              {"role": "tool", "tool_call_id": calls[0]["id"], "content": "Error: not found"}]
+        run = s["run"] | {"stuck": {"failures": {}, "invalid_streak": 0,
+                                    "stop": {"reason": "stuck_repeat", "tool": "read_file", "count": 8}}}
+        m.db.update_session(s["id"], context=ctx, run=run, status="running")
+        m2 = Manager(cfg, db=m.db, chat=script)
+        await m2.start()
+        s = await wait_status(m2, s["id"], "done")
+        assert s["stop_reason"] == "stuck_repeat"
+        assert not (Path(s["workspace"]) / "a.txt").exists()
+        outputs = [r["output"] for r in events(m2, s["id"], "tool_result")]
+        assert outputs == ["Not run: the run stopped because it was stuck."] * 2
+        await m2.stop()
+    asyncio.run(body())
+
+
 def test_cancel_and_follow_up_message(tmp_path):
     cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "action": "ask"}])
     script = Script([Completion(tool_calls=[call("write_file", 0, path="a", content="x")]),

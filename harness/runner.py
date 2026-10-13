@@ -2332,15 +2332,16 @@ class Runner:
         mutated: list[str] = []     # mutating tools that ran this turn (or started to), whatever their outcome
         try:
             for i, call in enumerate(pending):
+                # Checked before each call, so a stop saved before a daemon restart runs nothing more either.
+                if stuck.stop_reason(self.db.get_session(sid)["run"]):   # `_budget_reason` ends the run next
+                    await self._skip_rest(sid, pending[i:], "Not run: the run stopped because it was stuck.")
+                    return False
                 done, used = await self._resolve_call(s, call, pending[i + 1:], executing, budget, mutated)
                 if done is not None:
                     return done
                 if used is not None:
                     budget -= used
                     s = self.db.get_session(sid)
-                if stuck.stop_reason(self.db.get_session(sid)["run"]):   # `_budget_reason` ends the run next
-                    await self._skip_rest(sid, pending[i + 1:], "Not run: the run stopped because it was stuck.")
-                    return False
             return False
         finally:
             if mutated:     # in the background: the next model call does not need it (see `_join_checkpoint`)
