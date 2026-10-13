@@ -2011,12 +2011,12 @@ class Manager:
             return ""
         return "url" if projects.is_url(project.repo) else "local"
 
-    def summary(self, s: dict) -> dict:
+    def summary(self, s: dict, positions: dict[str, int] | None = None) -> dict:
         out = {k: v for k, v in s.items() if k not in ("context", "inbox")}
         # Sessions from before the activity counts (#639) have no such keys; zero them so the response always carries them.
         out["totals"] = {**efficiency.empty_activity(), **(s.get("totals") or {})}
         out["failure"] = self._failure(s)
-        out["queue_position"] = self.scheduler.positions().get(s["id"])
+        out["queue_position"] = (self.scheduler.positions() if positions is None else positions).get(s["id"])
         model = self.cfg.models.get(s["model"])
         out["context_used"] = (s.get("run") or {}).get("context_tokens", 0)
         out["context_limit"] = model.context_tokens if model else 0
@@ -2038,16 +2038,24 @@ class Manager:
             out["pending_approvals"] = [public_approval(a) for a in self.db.pending_approvals(s["id"])]
         return out
 
-    def list_summary(self, s: dict) -> dict:
+    async def list_summaries(self, rows: list[dict]) -> list[dict]:
+        """`list_summary` for each listed row, off the event loop (issue #667). The queue positions are read here,
+        on the loop, where the scheduler changes them."""
+        positions = self.scheduler.positions()
+        return await asyncio.to_thread(lambda: [self.list_summary(s, positions) for s in rows])
+
+    def list_summary(self, s: dict, positions: dict[str, int] | None = None) -> dict:
         """Session-card view shared by the owner UI and first-party app API client."""
-        item = self.summary(s)
-        full = self.db.get_session(s["id"])
-        user_messages = [" ".join(e["data"].get("content", "").split()) for e in self.db.events(s["id"])
-                         if e["type"] == "user_message" and e["data"].get("content", "").strip()]
+        item = self.summary(s, positions)
+        bits = self.db.session_card_bits(s["id"])
+        user_messages = [" ".join(text.split()) for text in bits["asks"] if text.strip()]
         asks = " · ".join(text[:90] + ("…" if len(text) > 90 else "") for text in user_messages[:3])
         if len(user_messages) > 3:
             asks += f" · {len(user_messages) - 3} more follow-up{'s' if len(user_messages) > 4 else ''}"
-        answer = " ".join((full["answer"] or "").split())
+        answer = " ".join(bits["answer"].split())
+        if len(answer) <= 110 and bits["answer_length"] > len(bits["answer"]):
+            # The prefix was mostly whitespace, so it can't tell whether the outcome needs its "…": read it all.
+            answer = " ".join(self.db.session_card_bits(s["id"], bits["answer_length"])["answer"].split())
         if answer:
             outcome = answer[:110] + ("…" if len(answer) > 110 else "")
             item["chat_summary"] = f"{asks} — {outcome}" if asks else outcome

@@ -1183,7 +1183,7 @@ async def list_sessions(request: Request, limit: int = 50):
     m = mgr(request)
     key = auth(request, "sessions")
     if key.get("kind") == "member":
-        return [m.list_summary(r) for r in m.db.list_sessions(limit, owner_id=key["user_id"])]
+        return await m.list_summaries(m.db.list_sessions(limit, owner_id=key["user_id"]))
     if owner_key(key) or SESSIONS_ALL in key["scope_set"]:  # the owner's sessions, and an App's own (#330)
         mine = m.db.scope(calling_app(key)).list_sessions(limit * 5, owner_id="owner")
     else:  # this App's own store only
@@ -1191,7 +1191,7 @@ async def list_sessions(request: Request, limit: int = 50):
     if key.get("kind") == "app":  # an App's tools-only sessions are listed to that App alone (#329)
         mine += m.db.for_app(key["id"]).list_sessions(limit * 5, owner_id="owner", kind=TOOLS_ONLY)
         mine.sort(key=lambda r: r["created_at"], reverse=True)
-    return [m.list_summary(r) for r in mine[:limit]]
+    return await m.list_summaries(mine[:limit])
 
 
 @route_table.get("/api/v1/sessions/{ref}", response_model=SessionResponse, response_model_exclude_unset=True)

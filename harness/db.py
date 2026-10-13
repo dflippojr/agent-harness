@@ -1143,6 +1143,18 @@ class Database:
         return [_row(r) for r in rows]
 
     @_reads
+    def session_card_bits(self, sid: str, answer_chars: int = 400) -> dict:
+        """What a session-list card needs (issue #667): the answer's first `answer_chars` characters and its full
+        length, and the contents of the session's user messages, oldest first. It reads no other event's data."""
+        with self.lock:
+            row = self.conn.execute("SELECT substr(answer, 1, ?) AS answer, length(answer) AS answer_length "
+                                    "FROM sessions WHERE id = ?", (answer_chars, sid)).fetchone()
+            rows = self.conn.execute("SELECT json_extract(data, '$.content') AS content FROM events "
+                                     "WHERE session_id = ? AND type = 'user_message' ORDER BY seq", (sid,)).fetchall()
+        return {"answer": (row["answer"] if row else None) or "", "answer_length": (row["answer_length"] if row else 0) or 0,
+                "asks": [r["content"] if isinstance(r["content"], str) else "" for r in rows]}
+
+    @_reads
     def last_event_seq(self, sid: str) -> int:
         with self.lock:
             row = self.conn.execute("SELECT MAX(seq) AS seq FROM events WHERE session_id = ?", (sid,)).fetchone()
