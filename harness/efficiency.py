@@ -18,7 +18,8 @@ ACTIVITY_KEYS = ("read_artifact_calls", "read_artifact_repeats", "edit_mismatche
 EDIT_MISMATCH = "must appear exactly once"
 BAD_ARGUMENTS = "Error: bad arguments for "  # argument validation refused the call before the tool ran (runner)
 INVALID_ARGUMENTS = "Error: tool arguments were not a valid JSON object"  # unparseable arguments, never ran (runner)
-REJECTED_PREFIXES = (BAD_ARGUMENTS, INVALID_ARGUMENTS)
+UNKNOWN_TOOL = "Error: unknown tool "  # not a tool this session has (disabled by policy, say), never ran (runner)
+REJECTED_PREFIXES = (BAD_ARGUMENTS, INVALID_ARGUMENTS, UNKNOWN_TOOL)
 
 _INTERRUPTED_MARK = "the daemon restarted while this tool call was running"
 

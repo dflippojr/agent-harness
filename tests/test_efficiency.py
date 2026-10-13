@@ -588,6 +588,16 @@ def test_read_artifact_with_unparseable_arguments_is_not_a_call():
     assert turn_counts(events)["read_artifact_calls"] == 0  # refused before the tool ran
 
 
+def test_read_artifact_the_session_does_not_have_is_not_a_call():
+    digest = "a" * 64
+    events = [
+        _assistant(1, "r1", "read_artifact", _read_artifact_args(digest)),
+        _call("r1", "read_artifact", _read_artifact_args(digest)),
+        _result("r1", "read_artifact", False, "Error: unknown tool 'read_artifact'. Available: read_file."),
+    ]
+    assert turn_counts(events)["read_artifact_calls"] == 0  # disabled by policy, so refused before it ran
+
+
 def test_recovery_that_reads_like_a_rejection_still_counts():
     digest = "a" * 64
     events = []

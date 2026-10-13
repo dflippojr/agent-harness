@@ -2436,12 +2436,12 @@ class Runner:
             if await self._authorize(s, call, name, args, ws) is None:
                 # The policy allows the hosted alias (mcp__harness__<tool>), but it is no local tool name: answer it
                 # so the call is resolved instead of left pending.
-                await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
+                await self._record_result(sid, call, name, f"{efficiency.UNKNOWN_TOOL}'{name}'. Available: "
                                                      f"{', '.join(schemas)}.", ok=False)
             return None, None
         if name not in schemas:
             self._bump(sid, "invalid_tool_calls")
-            await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
+            await self._record_result(sid, call, name, f"{efficiency.UNKNOWN_TOOL}'{name}'. Available: "
                                                  f"{', '.join(schemas)}.", ok=False)
             return None, None
         try:
@@ -2450,7 +2450,7 @@ class Runner:
             args = validator(name, args) if validator is not None else validate_args(schemas[name], args)
         except ToolError as e:
             self._bump(sid, "invalid_tool_calls")
-            await self._record_result(sid, call, name, f"Error: bad arguments for {name}: {e}", ok=False)
+            await self._record_result(sid, call, name, f"{efficiency.BAD_ARGUMENTS}{name}: {e}", ok=False)
             return None, None
 
         with telemetry.tool_span(name, call["id"]) as span:
