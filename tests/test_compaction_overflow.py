@@ -161,3 +161,12 @@ scripts:
         assert any("exceeds the available context size" in e.get("message", "") for e in events(m, s["id"], "error"))
         await m.stop()
     asyncio.run(body())
+
+
+def test_prior_notes_that_use_up_the_budget_leave_no_excerpt():
+    messages = _summarized()
+    budget = len(compaction.PRIOR_NOTES.format(prior=FIRST)) - 10   # the notes alone are over it
+    text = _prompt(compaction.summary_request(messages, 2, len(messages) - 2, max_chars=budget))
+    assert FIRST in text
+    assert text.endswith("Conversation excerpt:\n[earliest part omitted]\n")
+    assert "result 0" not in text

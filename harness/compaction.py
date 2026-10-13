@@ -193,7 +193,7 @@ def render_excerpt(messages: list[dict], max_chars: int) -> str:
     text = "\n\n".join(parts)
     if len(text) > max_chars:
         # Keep the newest material; the oldest is the least likely to matter.
-        text = "[earliest part omitted]\n" + text[-max_chars:]
+        text = "[earliest part omitted]\n" + text[len(text) - max(0, max_chars):]  # not text[-0:]: that keeps it all
     return text
 
 
