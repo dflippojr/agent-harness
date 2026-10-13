@@ -59,7 +59,7 @@ ARMS = (Arm("baseline", False), Arm("trim", True), Arm("config-only (0.55/0.80)"
 @dataclass
 class Result:
     chars_sent: int = 0
-    summary_chars: int = 0
+    summary_request_chars: int = 0
     summary_calls: int = 0
     passes: int = 0
     elide_only: int = 0
@@ -196,7 +196,7 @@ def _compact(context: list[dict], arm: Arm, outcomes: dict, mask: bool, turn: in
         return context
     request = compaction.summary_request(context, *split, max_chars=int(0.45 * n * CHARS_PER_TOKEN))
     result.summary_calls += 1
-    result.summary_chars += sum(compaction.message_chars(m) for m in request)
+    result.summary_request_chars += sum(compaction.message_chars(m) for m in request)
     return compaction.apply_summary(context, *split, SUMMARY)
 
 
@@ -218,7 +218,7 @@ def replay(steps: list[Step], arm: Arm, mask: bool = True, n: int = CONTEXT_TOKE
     later = [(turn, _sig(s.name, s.args)) for turn, s in enumerate(steps)]
     result.needed_again = sum(1 for at, sig in result.head_tail
                               if any(sig == other and at <= turn < at + NEEDED_AGAIN_TURNS for turn, other in later))
-    result.chars_sent += result.summary_chars
+    result.chars_sent += result.summary_request_chars
     return result
 
 

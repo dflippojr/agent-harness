@@ -64,6 +64,12 @@ def test_strip_noise_drops_ansi_carriage_return_overwrites_and_progress_runs():
     assert tools(out)[0] == compaction.strip_noise(raw) and saved > 0
 
 
+def test_file_reads_keep_their_noise_like_lines():
+    text = "before: 10% #####\nafter: 90% #####\n\x1b[1mbold\x1b[0m\n" * 10
+    out, saved = trim(session(turn(1, "read_file", text, path="notes.txt")), only(strip_noise=True))
+    assert tools(out)[0] == text and saved == 0
+
+
 def test_a_trailing_carriage_return_keeps_its_line():
     assert compaction.strip_noise("fatal: compilation failed\r\nnext\r") == "fatal: compilation failed\nnext"
 

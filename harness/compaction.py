@@ -271,9 +271,12 @@ def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
 
 
 def _cleaned(text: str, name: str, rules: TrimRules) -> str:
+    """Terminal output only: a file's own lines can look like progress bars or carry escapes on purpose."""
+    if name not in COMMAND_TOOLS:
+        return text
     if rules.strip_noise:
         text = strip_noise(text)
-    if rules.head_tail and name in COMMAND_TOOLS:
+    if rules.head_tail:
         text = head_and_tail(text, rules.head_lines, rules.tail_lines)
     return text
 
