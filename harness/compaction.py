@@ -198,25 +198,29 @@ def render_excerpt(messages: list[dict], max_chars: int) -> str:
     return text
 
 
-def prior_summary(message: dict, known: str = "") -> str | None:
+def prior_summary(message: dict, known: str = "", notes: str = "") -> str | None:
     """The summary in a message apply_summary wrote, without its framing or the saved notes (apply_summary adds
-    those again); None for any other message. `known` is the summary text the runner kept: used when the message
-    still holds it, since a summary may itself quote the notes heading. Otherwise the framing is cut from the end."""
+    those again); None for any other message. `known` is the summary text the runner kept and `notes` the saved
+    notes: a summary may itself quote the notes heading, so only these exact texts are cut. Without a match the
+    whole body is kept: repeating stale notes is better than dropping findings."""
     content = message.get("content") or ""
     if message.get("role") != "user" or not content.startswith(SUMMARY_HEADER):
         return None
     if known.strip() and content.startswith(f"{SUMMARY_HEADER}{known.strip()}\n\n"):
         return known.strip()
     body = content[len(SUMMARY_HEADER):].removesuffix(f"\n\n{SUMMARY_CONTINUE}")
-    before, found, _ = body.rpartition(f"\n\n{NOTES_HEADING}\n")
-    return (before if found else body).strip()
+    if notes.strip():
+        body = body.removesuffix(f"\n\n{NOTES_HEADING}\n{notes.strip()}")
+    return body.strip()
 
 
-def summary_request(messages: list[dict], start: int, end: int, max_chars: int, known: str = "") -> list[dict]:
+def summary_request(messages: list[dict], start: int, end: int, max_chars: int, known: str = "",
+                    notes: str = "") -> list[dict]:
     """An earlier summary at the start of the span goes whole into its own prior-notes block, instead of being the
-    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`. `known`: see prior_summary."""
+    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`. `known`, `notes`: see
+    prior_summary."""
     task = messages[1]["content"] if _head_len(messages) == 2 else "(not available)"
-    prior = prior_summary(messages[start], known) if start < end else None
+    prior = prior_summary(messages[start], known, notes) if start < end else None
     block = ""
     if prior is not None:
         block = PRIOR_NOTES.format(prior=prior)

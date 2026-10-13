@@ -40,7 +40,7 @@ def test_the_previous_summary_survives_an_over_budget_excerpt():
     messages = _summarized(notes="keep me")
     start, end = 2, len(messages) - 2
     budget = 8000
-    text = _prompt(compaction.summary_request(messages, start, end, max_chars=budget))
+    text = _prompt(compaction.summary_request(messages, start, end, max_chars=budget, notes="keep me"))
     prior, _, excerpt = text.partition("Conversation excerpt:\n")
     assert "Prior notes" in prior and "Update" in prior
     assert FIRST in prior                                   # verbatim, ahead of the excerpt
@@ -177,8 +177,29 @@ def test_a_summary_quoting_the_notes_heading_is_kept_whole():
     for notes in ("", "my notes"):
         message = compaction.apply_summary(head + _turns(2, 10), 2, 6, quoting, notes=notes)[2]
         assert compaction.prior_summary(message, known=quoting) == quoting
-    # Without the kept text the framing is still cut from the end, so appended notes go and the summary stays.
-    message = compaction.apply_summary(head, 2, 2, FIRST, notes=f"x\n\n{compaction.NOTES_HEADING}\ny")[2]
+    # Without the kept text only the exact saved notes are cut, so a quoted heading never drops what follows it.
+    quoted = f"x\n\n{compaction.NOTES_HEADING}\ny"
+    message = compaction.apply_summary(head, 2, 2, FIRST, notes=quoted)[2]
+    assert compaction.prior_summary(message, notes=quoted) == FIRST
     assert compaction.prior_summary(message).startswith(FIRST)
+    for notes in ("", "my notes"):
+        message = compaction.apply_summary(head, 2, 2, quoting, notes=notes)[2]
+        assert compaction.prior_summary(message, notes=notes) == quoting
+        assert compaction.prior_summary(message, notes="edited since").startswith(quoting)
     # Kept text from another summary (a round reset dropped that one) is not used.
     assert compaction.prior_summary(compaction.apply_summary(head, 2, 2, FIRST)[2], known="stale") == FIRST
+
+
+def test_a_follow_up_run_keeps_the_summary_that_quotes_the_notes_heading():
+    """Continuing a finished session starts a new run; the kept summary text comes with it (#654 review)."""
+    from harness.runner import new_run
+    tail = "in it\n## Next steps\nedit it"
+    quoting = f"## Findings\nthe template has\n\n{compaction.NOTES_HEADING}\n{tail}"
+    head = [{"role": "system", "content": "sys"}, {"role": "user", "content": "task"}]
+    messages = compaction.apply_summary(head + _turns(2, 10), 2, 6, quoting) + _turns(4, 100)
+    run = new_run(carry={"summary": quoting, "notes": ""})
+    assert run["summary"] == quoting
+    for kept in (run, {}):  # {}: a session from before the carry-over still keeps the quoted heading's tail
+        text = _prompt(compaction.summary_request(messages, 2, len(messages) - 2, max_chars=100000,
+                                                  known=kept.get("summary", ""), notes=kept.get("notes", "")))
+        assert tail in text.partition("Conversation excerpt:")[0]

@@ -110,7 +110,7 @@ def new_run(carry: dict | None = None) -> dict:
     """Counters for one run. Notes and the token calibration belong to the session, so they carry over."""
     run = {"turns": 0, "tool_calls": 0, "invalid_tool_calls": 0, "tool_errors": 0, "prompt_tokens": 0,
            "completion_tokens": 0, "idle": 0, "executing": None, "started_at": time.time()}
-    for key in ("notes", "chars_per_token", "backend_session_id", "rate_limits", "state", "trace",
+    for key in ("notes", "summary", "chars_per_token", "backend_session_id", "rate_limits", "state", "trace",
                 "workspace_context_applied", "repo_map_applied"):  # the prompt's workspace text waits for a reset
         if carry and key in carry:
             run[key] = carry[key]
@@ -3297,7 +3297,7 @@ class Runner:
         await self.bus.aemit(sid, "compaction_started", {"messages": end - start, "tokens_before": before,
                                                   "context_tokens": n})
         request = compaction.summary_request(context, start, end, max_chars=int(0.45 * n * cpt),
-                                             known=s["run"].get("summary", ""))
+                                             known=s["run"].get("summary", ""), notes=s["run"].get("notes", ""))
         written = {"tokens": 0, "last": 0.0}
 
         async def writing(kind: str, text: str) -> None:

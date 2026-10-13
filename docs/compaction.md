@@ -74,9 +74,12 @@ separate **Prior notes** block ahead of the excerpt, and the prompt tells the
 summarizer to update those notes rather than restate them (#640). The block
 holds the summary text only: the saved `update_notes` text is appended again
 by the new summary message itself. The runner keeps the last summary's text
-in `run["summary"]` and uses it when the message still holds it, so a summary
-that quotes the saved-notes heading is not cut short; otherwise the framing is
-cut from the end of the message. The excerpt's budget (45% of the context
+in `run["summary"]`, carried into follow-up runs like the notes, and uses it
+when the message still holds it, so a summary that quotes the saved-notes
+heading is not cut short. Otherwise only the exact saved-notes text is cut
+from the end of the message; when that doesn't match either, the whole body
+goes into the block, since repeating stale notes is better than dropping
+findings. The excerpt's budget (45% of the context
 window) shrinks by the block's size, so the request stays within the same
 total.
 
