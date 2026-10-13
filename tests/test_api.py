@@ -75,13 +75,60 @@ def test_github_routes_serve_owner_and_build_prompt(tmp_path, monkeypatch):
         assert client.get("/github/projects/ghp/items/5", headers=oh).json()["number"] == 5
         made = client.post("/github/sessions", json={"prompt": "x", "project": "ghp", "number": 6}, headers=oh)
         assert made.status_code == 201
-        assert seen["app_metadata"] == {"github_base_branch": "feat/x"}
+        assert seen["app_metadata"] == {"github_base_branch": "feat/x",
+                                        "github_item": {"repo": "o/r", "kind": "pr", "number": 6}}
         assert "EXTERNAL CONTENT" in seen["prompt"] and seen["title"] == "T"
         # A PR on a remote runner project is refused; an issue is fine.
         bad = client.post("/github/sessions", json={"prompt": "x", "project": "remote", "number": 6}, headers=oh)
         assert bad.status_code == 400
         ok = client.post("/github/sessions", json={"prompt": "x", "project": "remote", "number": 5}, headers=oh)
         assert ok.status_code == 201
+
+
+def test_pushed_session_links_to_github_pull_request(tmp_path):
+    """#665: a GitHub push offers GitHub's compare page with the title and `Closes #N`, or the PR it updated."""
+    from urllib.parse import parse_qs, urlsplit
+    from harness.config import Project
+    client, m, _ = make_client(tmp_path, [Completion(content="hi")])
+    m.cfg.projects["ghp"] = Project(name="ghp", repo="https://github.com/o/r.git")
+    m.cfg.projects["gitlab"] = Project(name="gitlab", repo="https://gitlab.com/o/r")
+    oh = {"Tailscale-User-Login": LOGIN}
+    with client:
+        sid = client.post("/sessions", json={"prompt": "hi"}, headers=oh).json()["id"]
+        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+
+        def url(project="ghp", review="pushed", item=None, base="", title="Fix A & B #2 now"):
+            meta = {"github_base_branch": base, **({"github_item": item} if item else {})}
+            m.db.update_session(sid, project=project, review=review, branch="agent/abc", base_branch="main",
+                                title=title, app_metadata=meta)
+            return client.get(f"/sessions/{sid}", headers=oh).json().get("pull_request_url")
+
+        issue = url(item={"repo": "o/r", "kind": "issue", "number": 5})
+        assert issue.startswith("https://github.com/o/r/compare/main...agent/abc?expand=1&title=")
+        assert "title=Fix%20A%20%26%20B%20%232%20now" in issue and issue.endswith("&body=Closes%20%235")
+        query = parse_qs(urlsplit(issue).query)
+        assert query == {"expand": ["1"], "title": ["Fix A & B #2 now"], "body": ["Closes #5"]}
+        # A PR session pushed its own branch, so the compare page targets the PR's head branch, without `Closes`.
+        assert url(item={"repo": "o/r", "kind": "pr", "number": 6}, base="feat/x") == (
+            "https://github.com/o/r/compare/feat/x...agent/abc?expand=1&title=Fix%20A%20%26%20B%20%232%20now")
+        plain = url()
+        assert plain == "https://github.com/o/r/compare/main...agent/abc?expand=1&title=Fix%20A%20%26%20B%20%232%20now"
+        assert parse_qs(urlsplit(url(title="x" * 300)).query)["title"] == ["x" * 200]
+        # An item from another repository (the project URL changed) is not trusted for `Closes #N`.
+        assert "body" not in url(item={"repo": "o/other", "kind": "issue", "number": 5})
+        # App session metadata is caller-supplied; a malformed item is ignored instead of breaking the summary.
+        for bad in ("reference", ["o/r", 5], {"repo": "o/r", "kind": "issue", "number": "5"}):
+            assert "body" not in url(item=bad)
+        assert "/compare/main...agent/abc?" in url(base=5)
+        assert url(project="scratch") is None
+        assert url(project="gitlab") is None
+        assert url(review="") is None
+        assert url(review="merged") is None
+        # A member's push goes to their stored GitHub source URL, not the managed local repository.
+        m.cfg.projects["local"] = Project(name="local", repo=str(tmp_path / "managed"))
+        m._member_github_project = lambda s, project: {"source_url": "https://github.com/alice/repo.git"}
+        assert url(project="local") == ("https://github.com/alice/repo/compare/main...agent/abc"
+                                        "?expand=1&title=Fix%20A%20%26%20B%20%232%20now")
 
 
 def test_web_app_and_guard(tmp_path):
