@@ -3266,6 +3266,7 @@
     },
     "/api/admin/v1": {
       "get": {
+        "description": "Return the API version, capabilities, hub claim state, owner logins, and the operations it serves.",
         "operationId": "admin_root_api_admin_v1_get",
         "responses": {
           "200": {
@@ -3284,6 +3285,7 @@
     },
     "/api/admin/v1/accounts": {
       "get": {
+        "description": "List household member accounts with quotas, disk usage, and Google sign-in state.",
         "operationId": "list_accounts_api_admin_v1_accounts_get",
         "responses": {
           "200": {
@@ -3298,6 +3300,7 @@
         "summary": "List Accounts"
       },
       "post": {
+        "description": "Create a household member account; needs an explicit owner allowlist, and a login can hold only one role.",
         "operationId": "create_account_api_admin_v1_accounts_post",
         "requestBody": {
           "content": {
@@ -3334,6 +3337,7 @@
     },
     "/api/admin/v1/accounts/audit": {
       "get": {
+        "description": "List recent account audit rows, newest first; `limit` is clamped to 1 through 500.",
         "operationId": "account_audit_api_admin_v1_accounts_audit_get",
         "parameters": [
           {
@@ -3372,6 +3376,7 @@
     },
     "/api/admin/v1/accounts/{user_id}": {
       "get": {
+        "description": "Return one household member's account with disk usage and Google sign-in state; 404 for other ids.",
         "operationId": "get_account_api_admin_v1_accounts__user_id__get",
         "parameters": [
           {
@@ -3407,6 +3412,7 @@
         "summary": "Get Account"
       },
       "patch": {
+        "description": "Update the fields sent for a household member; raising `max_running` can start a waiting session now.",
         "operationId": "update_account_api_admin_v1_accounts__user_id__patch",
         "parameters": [
           {
@@ -3454,6 +3460,7 @@
     },
     "/api/admin/v1/accounts/{user_id}/github-connection/reset": {
       "post": {
+        "description": "Erase a member's GitHub credential and stop their Git work, leaving them disconnected; `confirm` must be true.",
         "operationId": "reset_member_github_api_admin_v1_accounts__user_id__github_connection_reset_post",
         "parameters": [
           {
@@ -3501,6 +3508,7 @@
     },
     "/api/admin/v1/accounts/{user_id}/google": {
       "delete": {
+        "description": "Unlink a member's Google account, cancel any pending link code, and end their Web sessions; `confirm` must be true.",
         "operationId": "google_unlink_api_admin_v1_accounts__user_id__google_delete",
         "parameters": [
           {
@@ -3548,6 +3556,7 @@
     },
     "/api/admin/v1/accounts/{user_id}/google/invitation": {
       "delete": {
+        "description": "Cancel a member's pending link code; the call succeeds even when none is pending.",
         "operationId": "google_invite_cancel_api_admin_v1_accounts__user_id__google_invitation_delete",
         "parameters": [
           {
@@ -3583,6 +3592,7 @@
         "summary": "Google Invite Cancel"
       },
       "post": {
+        "description": "Create a one-time link code, replacing any pending one; 409 if the member is linked or disabled, and it expires in 15 minutes.",
         "operationId": "google_invite_api_admin_v1_accounts__user_id__google_invitation_post",
         "parameters": [
           {
@@ -3620,6 +3630,7 @@
     },
     "/api/admin/v1/accounts/{user_id}/google/revoke-sessions": {
       "post": {
+        "description": "Sign the member out of all Web sessions, leaving the Google link in place; returns the number revoked.",
         "operationId": "google_revoke_api_admin_v1_accounts__user_id__google_revoke_sessions_post",
         "parameters": [
           {
@@ -3657,6 +3668,7 @@
     },
     "/api/admin/v1/apps/erasures": {
       "get": {
+        "description": "List revoked Apps and devices still waiting for their store and folder to be erased, soonest first.",
         "operationId": "app_erasures_api_admin_v1_apps_erasures_get",
         "responses": {
           "200": {
@@ -3757,6 +3769,7 @@
     },
     "/api/admin/v1/apps/{app_id}/restore": {
       "post": {
+        "description": "Undo an App's revoke within its erasure grace and return a new key; 404 after the grace.",
         "operationId": "restore_app_api_admin_v1_apps__app_id__restore_post",
         "parameters": [
           {
@@ -3794,6 +3807,7 @@
     },
     "/api/admin/v1/apps/{app_id}/retention": {
       "put": {
+        "description": "Set an App's default session retention in days, or null to keep sessions until deleted; 404 for an unknown id.",
         "operationId": "set_app_retention_api_admin_v1_apps__app_id__retention_put",
         "parameters": [
           {
@@ -4008,6 +4022,7 @@
     },
     "/api/admin/v1/backends": {
       "get": {
+        "description": "Local and hosted backends with their model and sign-in state; `auth=skip` skips the sign-in checks.",
         "operationId": "admin_backends_backends_get",
         "responses": {
           "200": {
@@ -4072,6 +4087,7 @@
     },
     "/api/admin/v1/chats": {
       "get": {
+        "description": "The caller's chats, newest first, up to `limit` (1 to 200, default 50).",
         "operationId": "admin_list_chats_chats_get",
         "parameters": [
           {
@@ -4108,6 +4124,7 @@
         "summary": "List Chats"
       },
       "post": {
+        "description": "Starts a chat and returns before its first reply finishes; backend, model and effort are optional.",
         "operationId": "admin_create_chat_chats_post",
         "requestBody": {
           "content": {
@@ -4144,6 +4161,7 @@
     },
     "/api/admin/v1/chats/options": {
       "get": {
+        "description": "Backends, models and efforts a new chat can start with, and the default backend.",
         "operationId": "admin_chat_options_chats_options_get",
         "responses": {
           "200": {
@@ -4160,6 +4178,7 @@
     },
     "/api/admin/v1/chats/snippet-languages": {
       "get": {
+        "description": "Languages the snippet runner supports, with their aliases and size limits.",
         "operationId": "admin_snippet_languages_chats_snippet_languages_get",
         "responses": {
           "200": {
@@ -4176,6 +4195,7 @@
     },
     "/api/admin/v1/chats/{ref}": {
       "delete": {
+        "description": "Deletes an idle chat and its workspace; 409 while a reply or snippet is running.",
         "operationId": "admin_delete_chat_chats__ref__delete",
         "parameters": [
           {
@@ -4211,6 +4231,7 @@
         "summary": "Delete Chat"
       },
       "get": {
+        "description": "Current state of one chat.",
         "operationId": "admin_get_chat_chats__ref__get",
         "parameters": [
           {
@@ -4246,6 +4267,7 @@
         "summary": "Get Chat"
       },
       "patch": {
+        "description": "Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.",
         "operationId": "admin_rename_chat_chats__ref__patch",
         "parameters": [
           {
@@ -4291,6 +4313,7 @@
         "summary": "Rename Chat"
       },
       "put": {
+        "description": "Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.",
         "operationId": "admin_rename_chat_chats__ref__put",
         "parameters": [
           {
@@ -4338,6 +4361,7 @@
     },
     "/api/admin/v1/chats/{ref}/cancel": {
       "post": {
+        "description": "Stops a chat's running reply and returns once it has ended; 409 when no reply is active.",
         "operationId": "admin_cancel_chat_chats__ref__cancel_post",
         "parameters": [
           {
@@ -4375,6 +4399,7 @@
     },
     "/api/admin/v1/chats/{ref}/events": {
       "get": {
+        "description": "Server-sent events for one chat, replaying events after `after`; `follow=false` ends after the replay.",
         "operationId": "admin_chat_events_chats__ref__events_get",
         "parameters": [
           {
@@ -4432,6 +4457,7 @@
     },
     "/api/admin/v1/chats/{ref}/messages": {
       "post": {
+        "description": "Sends a chat message and returns before the reply finishes; snippets run since the last message are included.",
         "operationId": "admin_send_chat_message_chats__ref__messages_post",
         "parameters": [
           {
@@ -4527,6 +4553,7 @@
     },
     "/api/admin/v1/chats/{ref}/snippets/{run_id}/cancel": {
       "post": {
+        "description": "Asks a running snippet to stop; 409 if it is not running, and the final result arrives as a snippet_result event.",
         "operationId": "admin_cancel_snippet_chats__ref__snippets__run_id__cancel_post",
         "parameters": [
           {
@@ -4573,6 +4600,7 @@
     },
     "/api/admin/v1/config": {
       "get": {
+        "description": "Return every admin setting with the active and pending revisions and restart state; the ETag is the active revision.",
         "operationId": "admin_config_api_admin_v1_config_get",
         "responses": {
           "200": {
@@ -4587,6 +4615,7 @@
         "summary": "Admin Config"
       },
       "patch": {
+        "description": "Change settings; restart-only ones wait for a restart, `dry_run` previews without saving, and a stale `revision` returns 409.",
         "operationId": "admin_patch_api_admin_v1_config_patch",
         "requestBody": {
           "content": {
@@ -4623,6 +4652,7 @@
     },
     "/api/admin/v1/config/restart": {
       "post": {
+        "description": "Restart into the pending or active config with `confirm` true; the process exits after responding, or 409 if unsupervised.",
         "operationId": "admin_restart_api_admin_v1_config_restart_post",
         "requestBody": {
           "content": {
@@ -4659,6 +4689,7 @@
     },
     "/api/admin/v1/config/rollback": {
       "post": {
+        "description": "Restore the previous confirmed config; needs `confirm` true unless `dry_run` is set, and 409 when there is none.",
         "operationId": "admin_rollback_api_admin_v1_config_rollback_post",
         "requestBody": {
           "content": {
@@ -4695,6 +4726,7 @@
     },
     "/api/admin/v1/config/schema": {
       "get": {
+        "description": "Describe each admin setting's type, bounds, default, and apply mode, and whether a supervised restart is available.",
         "operationId": "admin_schema_api_admin_v1_config_schema_get",
         "responses": {
           "200": {
@@ -4711,6 +4743,7 @@
     },
     "/api/admin/v1/config/validate": {
       "post": {
+        "description": "Plan proposed admin changes without saving or applying them; invalid changes return 400 and a stale `revision` returns 409.",
         "operationId": "admin_validate_api_admin_v1_config_validate_post",
         "requestBody": {
           "content": {
@@ -4764,6 +4797,7 @@
     },
     "/api/admin/v1/github-member-auth": {
       "get": {
+        "description": "Return GitHub sign-in state and each member's coarse status; `refresh` forces a fresh preflight check.",
         "operationId": "github_member_auth_api_admin_v1_github_member_auth_get",
         "parameters": [
           {
@@ -4800,6 +4834,7 @@
         "summary": "Github Member Auth"
       },
       "put": {
+        "description": "Turn member GitHub sign-in on or off; enabling needs GitHub configured (409 otherwise), and disabling keeps credentials.",
         "operationId": "set_github_member_auth_api_admin_v1_github_member_auth_put",
         "requestBody": {
           "content": {
@@ -4836,6 +4871,7 @@
     },
     "/api/admin/v1/github/projects/{project}/items": {
       "get": {
+        "description": "Open issues and pull requests, 30 per page; results are cached for 60 seconds.",
         "operationId": "admin_github_items_github_projects__project__items_get",
         "parameters": [
           {
@@ -4893,6 +4929,7 @@
     },
     "/api/admin/v1/github/projects/{project}/items/{number}": {
       "get": {
+        "description": "One open issue or PR with its body and, for a PR, its line comments; closed and fork PRs are refused.",
         "operationId": "admin_github_item_github_projects__project__items__number__get",
         "parameters": [
           {
@@ -4939,6 +4976,7 @@
     },
     "/api/admin/v1/github/sessions": {
       "post": {
+        "description": "Starts a session from a GitHub issue or PR, whose text becomes the untrusted prompt; PR tasks need a tower project.",
         "operationId": "admin_create_github_session_github_sessions_post",
         "requestBody": {
           "content": {
@@ -4975,6 +5013,7 @@
     },
     "/api/admin/v1/google-signin": {
       "get": {
+        "description": "Return Google sign-in configuration and readiness; `refresh` re-runs the OpenID discovery check, not the cached result.",
         "operationId": "google_status_api_admin_v1_google_signin_get",
         "parameters": [
           {
@@ -5013,6 +5052,7 @@
     },
     "/api/admin/v1/gpu": {
       "get": {
+        "description": "Return the resource guard's state, the model's status, and the default load-now duration.",
         "operationId": "admin_gpu_gpu_get",
         "responses": {
           "200": {
@@ -5231,6 +5271,7 @@
     },
     "/api/admin/v1/images": {
       "get": {
+        "description": "List gallery images newest first, up to the limit (default 60), with the service status.",
         "operationId": "admin_list_images_images_get",
         "parameters": [
           {
@@ -5267,6 +5308,7 @@
         "summary": "List Images"
       },
       "post": {
+        "description": "Queue an image generation and return its job; the image is not ready until its status is done.",
         "operationId": "admin_create_image_images_post",
         "requestBody": {
           "content": {
@@ -5320,6 +5362,7 @@
     },
     "/api/admin/v1/images/uploads": {
       "post": {
+        "description": "Store an uploaded photo as a finished gallery image, once image editing is set up.",
         "operationId": "admin_upload_image_images_uploads_post",
         "requestBody": {
           "content": {
@@ -5373,6 +5416,7 @@
     },
     "/api/admin/v1/images/{iid}": {
       "delete": {
+        "description": "Delete an image and its files, cancelling it first if it is still queued or running.",
         "operationId": "admin_delete_image_images__iid__delete",
         "parameters": [
           {
@@ -5408,6 +5452,7 @@
         "summary": "Delete Image"
       },
       "get": {
+        "description": "Return an image's JSON record, its PNG for ids ending in .png (404 until done), or its edit inputs for .source.png and .mask.png.",
         "operationId": "admin_get_image_images__iid__get",
         "parameters": [
           {
@@ -5445,6 +5490,7 @@
     },
     "/api/admin/v1/images/{iid}/cancel": {
       "post": {
+        "description": "Cancel a queued or running image and wait until a running one stops; finished images are returned as they are.",
         "operationId": "admin_cancel_image_images__iid__cancel_post",
         "parameters": [
           {
@@ -5482,6 +5528,7 @@
     },
     "/api/admin/v1/images/{iid}/edit": {
       "post": {
+        "description": "Queue a masked edit of a finished image and return the queued job before it runs.",
         "operationId": "admin_edit_image_images__iid__edit_post",
         "parameters": [
           {
@@ -5529,6 +5576,7 @@
     },
     "/api/admin/v1/images/{iid}/upscale": {
       "post": {
+        "description": "Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job.",
         "operationId": "admin_upscale_image_images__iid__upscale_post",
         "parameters": [
           {
@@ -5576,6 +5624,7 @@
     },
     "/api/admin/v1/jobs": {
       "get": {
+        "description": "List scheduled jobs, each with its most recent run.",
         "operationId": "admin_list_jobs_jobs_get",
         "responses": {
           "200": {
@@ -5596,6 +5645,7 @@
         "summary": "List Jobs"
       },
       "post": {
+        "description": "Create a scheduled job after validating it; its next run is set from the cron schedule.",
         "operationId": "admin_create_job_jobs_post",
         "requestBody": {
           "content": {
@@ -5692,6 +5742,7 @@
     },
     "/api/admin/v1/jobs/{jid}": {
       "delete": {
+        "description": "Delete a scheduled job and record the deletion in the audit log.",
         "operationId": "admin_delete_job_jobs__jid__delete",
         "parameters": [
           {
@@ -5722,6 +5773,7 @@
         "summary": "Delete Job"
       },
       "get": {
+        "description": "Return one scheduled job with its 15 most recent runs.",
         "operationId": "admin_get_job_jobs__jid__get",
         "parameters": [
           {
@@ -5759,6 +5811,7 @@
         "summary": "Get Job"
       },
       "put": {
+        "description": "Replace a scheduled job's settings after validation and recompute its next run.",
         "operationId": "admin_update_job_jobs__jid__put",
         "parameters": [
           {
@@ -5848,6 +5901,7 @@
     },
     "/api/admin/v1/keys": {
       "get": {
+        "description": "Key metadata only; a key's secret is returned once, by the create response.",
         "operationId": "admin_list_keys_keys_get",
         "responses": {
           "200": {
@@ -5862,6 +5916,7 @@
         "summary": "List Keys"
       },
       "post": {
+        "description": "Mints an API key and returns its secret only in this response; a Hub's owner-kind request gets 403.",
         "operationId": "admin_create_key_keys_post",
         "responses": {
           "201": {
@@ -5878,6 +5933,7 @@
     },
     "/api/admin/v1/keys/{kid}": {
       "delete": {
+        "description": "Revokes one key; an unknown or already revoked id returns 404, and the Hub's own key returns 409.",
         "operationId": "admin_revoke_key_keys__kid__delete",
         "parameters": [
           {
@@ -5910,6 +5966,7 @@
     },
     "/api/admin/v1/maintenance": {
       "get": {
+        "description": "Disk usage of session workspaces and checkpoints, and of the data volume.",
         "operationId": "admin_maintenance_maintenance_get",
         "responses": {
           "200": {
@@ -5926,6 +5983,7 @@
     },
     "/api/admin/v1/maintenance/backup": {
       "post": {
+        "description": "Write a dated backup of the database, transcripts, and config, wait for it, then prune old backups.",
         "operationId": "admin_maintenance_backup_maintenance_backup_post",
         "responses": {
           "200": {
@@ -5942,6 +6000,7 @@
     },
     "/api/admin/v1/maintenance/cleanup": {
       "post": {
+        "description": "Runs a cleanup pass now, after any pass in progress, and returns what it removed.",
         "operationId": "admin_maintenance_cleanup_maintenance_cleanup_post",
         "responses": {
           "200": {
@@ -5958,6 +6017,7 @@
     },
     "/api/admin/v1/maintenance/image-archive/retention/apply": {
       "post": {
+        "description": "Delete the archived images from a preview if its confirmation still matches; a missing or stale one returns 409.",
         "operationId": "admin_image_archive_retention_apply_maintenance_image_archive_retention_apply_post",
         "requestBody": {
           "content": {
@@ -5994,6 +6054,7 @@
     },
     "/api/admin/v1/maintenance/image-archive/retention/preview": {
       "post": {
+        "description": "Preview the archived images that retention would delete, with the confirmation to pass to apply.",
         "operationId": "admin_image_archive_retention_preview_maintenance_image_archive_retention_preview_post",
         "responses": {
           "200": {
@@ -6010,6 +6071,7 @@
     },
     "/api/admin/v1/me": {
       "get": {
+        "description": "Caller's identity, role and capabilities, plus disk and queue usage where the account has it.",
         "operationId": "admin_me_me_get",
         "responses": {
           "200": {
@@ -6080,6 +6142,7 @@
     },
     "/api/admin/v1/models": {
       "get": {
+        "description": "Configured models with their context sizes; one is marked as the default.",
         "operationId": "admin_models_models_get",
         "responses": {
           "200": {
@@ -6096,6 +6159,7 @@
     },
     "/api/admin/v1/models/status": {
       "get": {
+        "description": "Report each model's load state and how long its current warm-up has been running.",
         "operationId": "admin_models_status_models_status_get",
         "responses": {
           "200": {
@@ -6129,6 +6193,7 @@
     },
     "/api/admin/v1/notify/test": {
       "post": {
+        "description": "Send a test push notification; it reports sent even when delivery fails after retries.",
         "operationId": "admin_notify_test_notify_test_post",
         "responses": {
           "200": {
@@ -6160,6 +6225,7 @@
         "summary": "Pairing Codes"
       },
       "post": {
+        "description": "Mint a single-use pairing code bound to one origin; it is returned only here and expires after its TTL.",
         "operationId": "admin_create_pairing_code_pairing_codes_post",
         "requestBody": {
           "content": {
@@ -6196,6 +6262,7 @@
     },
     "/api/admin/v1/pairing-codes/{pid}": {
       "delete": {
+        "description": "Expire an unused pairing code now; 404 when no such code is still active.",
         "operationId": "admin_revoke_pairing_code_pairing_codes__pid__delete",
         "parameters": [
           {
@@ -6469,6 +6536,7 @@
     },
     "/api/admin/v1/profile": {
       "get": {
+        "description": "The profile icon and the list of icons to choose from.",
         "operationId": "admin_profile_profile_get",
         "responses": {
           "200": {
@@ -6483,6 +6551,7 @@
         "summary": "Profile"
       },
       "put": {
+        "description": "Sets the profile icon; the emoji must be one of the listed choices.",
         "operationId": "admin_update_profile_profile_put",
         "requestBody": {
           "content": {
@@ -6519,6 +6588,7 @@
     },
     "/api/admin/v1/projects": {
       "get": {
+        "description": "Projects visible to the caller, or an empty list for a read-only demo session.",
         "operationId": "admin_projects_projects_get",
         "responses": {
           "200": {
@@ -6533,6 +6603,7 @@
         "summary": "Projects"
       },
       "post": {
+        "description": "Creates a project with an empty workspace or a repo cloned per session; `github` clones use the caller's GitHub sign-in.",
         "operationId": "admin_create_project_projects_post",
         "requestBody": {
           "content": {
@@ -6569,6 +6640,7 @@
     },
     "/api/admin/v1/provider-credentials": {
       "get": {
+        "description": "List provider grants, including revoked ones, newest first; `available` shows whether a key-based grant's secret file exists.",
         "operationId": "provider_credentials_api_admin_v1_provider_credentials_get",
         "responses": {
           "200": {
@@ -6583,6 +6655,7 @@
         "summary": "Provider Credentials"
       },
       "post": {
+        "description": "Grant an App a provider backend, revoking its previous grant for that backend; key-based policies need a configured `secret_ref`.",
         "operationId": "set_provider_credential_api_admin_v1_provider_credentials_post",
         "requestBody": {
           "content": {
@@ -6619,6 +6692,7 @@
     },
     "/api/admin/v1/provider-credentials/{credential_id}": {
       "delete": {
+        "description": "Revoke an active provider grant; an unknown or already revoked id returns 404.",
         "operationId": "revoke_provider_credential_api_admin_v1_provider_credentials__credential_id__delete",
         "parameters": [
           {
@@ -6651,6 +6725,7 @@
     },
     "/api/admin/v1/queue": {
       "get": {
+        "description": "Queue positions of the caller's queued agent sessions, in queue order.",
         "operationId": "admin_queue_queue_get",
         "responses": {
           "200": {
@@ -6667,6 +6742,7 @@
     },
     "/api/admin/v1/remote-control": {
       "get": {
+        "description": "Report whether Remote Control is enabled and each project's state.",
         "operationId": "admin_rc_status_remote_control_get",
         "responses": {
           "200": {
@@ -6683,6 +6759,7 @@
     },
     "/api/admin/v1/remote-control/discovery/scans": {
       "post": {
+        "description": "Start a background folder scan, or return the scan already running; poll the scan for results.",
         "operationId": "start_api_admin_v1_remote_control_discovery_scans_post",
         "responses": {
           "200": {
@@ -6699,6 +6776,7 @@
     },
     "/api/admin/v1/remote-control/discovery/scans/{scan_id}": {
       "delete": {
+        "description": "Ask a folder scan to stop and return its current view, which may still show it running.",
         "operationId": "cancel_api_admin_v1_remote_control_discovery_scans__scan_id__delete",
         "parameters": [
           {
@@ -6734,6 +6812,7 @@
         "summary": "Cancel"
       },
       "get": {
+        "description": "Return a folder scan's progress and candidates; an expired or unknown scan returns 404.",
         "operationId": "status_api_admin_v1_remote_control_discovery_scans__scan_id__get",
         "parameters": [
           {
@@ -6771,6 +6850,7 @@
     },
     "/api/admin/v1/remote-control/discovery/scans/{scan_id}/candidates/{candidate_id}/promote": {
       "post": {
+        "description": "Add a scanned folder as a managed folder; the confirmed path and markers must match the scan exactly.",
         "operationId": "promote_api_admin_v1_remote_control_discovery_scans__scan_id__candidates__candidate_id__promote_post",
         "parameters": [
           {
@@ -6827,6 +6907,7 @@
     },
     "/api/admin/v1/remote-control/folders/{slug}": {
       "delete": {
+        "description": "Remove a managed folder; returns 409 while its Remote Control server or trust window is open.",
         "operationId": "remove_api_admin_v1_remote_control_folders__slug__delete",
         "parameters": [
           {
@@ -6864,6 +6945,7 @@
     },
     "/api/admin/v1/remote-control/{project}": {
       "post": {
+        "description": "Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder.",
         "operationId": "admin_rc_launch_remote_control__project__post",
         "parameters": [
           {
@@ -6901,6 +6983,7 @@
     },
     "/api/admin/v1/remote-control/{project}/stop": {
       "post": {
+        "description": "Stop a project's Remote Control server and its child processes; 404 if none was started.",
         "operationId": "admin_rc_stop_remote_control__project__stop_post",
         "parameters": [
           {
@@ -6938,6 +7021,7 @@
     },
     "/api/admin/v1/remote-control/{project}/trust": {
       "post": {
+        "description": "Open a Claude console window in a project so the user can accept workspace trust; Windows only.",
         "operationId": "admin_rc_trust_remote_control__project__trust_post",
         "parameters": [
           {
@@ -6975,6 +7059,7 @@
     },
     "/api/admin/v1/resources": {
       "get": {
+        "description": "Return the resource guard's state, the model's status, and the default load-now duration.",
         "operationId": "admin_gpu_resources_get",
         "responses": {
           "200": {
@@ -7078,6 +7163,7 @@
         "summary": "Runner Pairing Codes"
       },
       "post": {
+        "description": "Create a one-time Mac pairing code, returned only in this response, that expires after its lifetime.",
         "operationId": "admin_create_runner_pairing_code_runner_pairing_codes_post",
         "requestBody": {
           "content": {
@@ -7114,6 +7200,7 @@
     },
     "/api/admin/v1/runner-pairing-codes/{pid}": {
       "delete": {
+        "description": "Revoke an unused, unexpired pairing code; 404 if no such code is active.",
         "operationId": "admin_revoke_runner_pairing_code_runner_pairing_codes__pid__delete",
         "parameters": [
           {
@@ -7146,6 +7233,7 @@
     },
     "/api/admin/v1/runners": {
       "get": {
+        "description": "List each runner's presence, compatibility, pending requests, and whether remote update is supported.",
         "operationId": "admin_runners_runners_get",
         "responses": {
           "200": {
@@ -7162,6 +7250,7 @@
     },
     "/api/admin/v1/runners/{name}/update": {
       "post": {
+        "description": "Ask an online Mac runner to update itself and wait for the outcome; 409 if offline, too old, or failed.",
         "operationId": "admin_runner_update_runners__name__update_post",
         "parameters": [
           {
@@ -7258,6 +7347,7 @@
     },
     "/api/admin/v1/sessions": {
       "get": {
+        "description": "Session cards for the caller's agent sessions, newest first; `limit` defaults to 50.",
         "operationId": "admin_list_sessions_sessions_get",
         "parameters": [
           {
@@ -7300,6 +7390,7 @@
         "summary": "List Sessions"
       },
       "post": {
+        "description": "Starts an agent session and returns before its run finishes.",
         "operationId": "admin_create_session_sessions_post",
         "requestBody": {
           "content": {
@@ -7338,6 +7429,7 @@
     },
     "/api/admin/v1/sessions/{ref}": {
       "get": {
+        "description": "Current state of one session, with its queue position and any pending approvals.",
         "operationId": "admin_get_session_sessions__ref__get",
         "parameters": [
           {
@@ -7375,6 +7467,7 @@
         "summary": "Get Session"
       },
       "patch": {
+        "description": "Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.",
         "operationId": "admin_patch_session_sessions__ref__patch",
         "parameters": [
           {
@@ -7420,6 +7513,7 @@
         "summary": "Patch Session"
       },
       "put": {
+        "description": "Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.",
         "operationId": "admin_patch_session_sessions__ref__put",
         "parameters": [
           {
@@ -7467,6 +7561,7 @@
     },
     "/api/admin/v1/sessions/{ref}/approvals": {
       "get": {
+        "description": "Pending approvals for the session, or every approval when `all` is true.",
         "operationId": "admin_approvals_sessions__ref__approvals_get",
         "parameters": [
           {
@@ -7514,6 +7609,7 @@
     },
     "/api/admin/v1/sessions/{ref}/approvals/{approval_id}": {
       "post": {
+        "description": "Approves or denies an approval; `pending` works only when exactly one is waiting, and a decided one returns 409.",
         "operationId": "admin_decide_sessions__ref__approvals__approval_id__post",
         "parameters": [
           {
@@ -7570,6 +7666,7 @@
     },
     "/api/admin/v1/sessions/{ref}/cancel": {
       "post": {
+        "description": "Stops an active session and returns once its run has ended; 409 when nothing is active.",
         "operationId": "admin_cancel_sessions__ref__cancel_post",
         "parameters": [
           {
@@ -7607,6 +7704,7 @@
     },
     "/api/admin/v1/sessions/{ref}/changes": {
       "get": {
+        "description": "The session's git diff by repository, with its secret-scan result; a removed workspace returns no repositories.",
         "operationId": "admin_changes_sessions__ref__changes_get",
         "parameters": [
           {
@@ -7644,6 +7742,7 @@
     },
     "/api/admin/v1/sessions/{ref}/checkpoints": {
       "get": {
+        "description": "Checkpoints by turn, with flags for whether rewind and fork are allowed here.",
         "operationId": "admin_session_checkpoints_sessions__ref__checkpoints_get",
         "parameters": [
           {
@@ -7681,6 +7780,7 @@
     },
     "/api/admin/v1/sessions/{ref}/checkpoints/{turn}/fork": {
       "post": {
+        "description": "Starts a new session from this checkpoint with a non-blank prompt, and returns before its run finishes.",
         "operationId": "admin_fork_checkpoint_sessions__ref__checkpoints__turn__fork_post",
         "parameters": [
           {
@@ -7737,6 +7837,7 @@
     },
     "/api/admin/v1/sessions/{ref}/checkpoints/{turn}/rewind": {
       "post": {
+        "description": "Rewinds the session to this checkpoint; 409 while it runs, and hosted CLI sessions cannot rewind.",
         "operationId": "admin_rewind_checkpoint_sessions__ref__checkpoints__turn__rewind_post",
         "parameters": [
           {
@@ -7841,6 +7942,7 @@
     },
     "/api/admin/v1/sessions/{ref}/messages": {
       "post": {
+        "description": "Sends a follow-up and returns before the reply finishes; a running session reads it before its next model call.",
         "operationId": "admin_send_message_sessions__ref__messages_post",
         "parameters": [
           {
@@ -7926,6 +8028,7 @@
     },
     "/api/admin/v1/sessions/{ref}/rerun": {
       "post": {
+        "description": "Starts a new session repeating this one's original prompt, project, model and taint; 409 for App tools-only sessions.",
         "operationId": "admin_rerun_sessions__ref__rerun_post",
         "parameters": [
           {
@@ -7963,6 +8066,7 @@
     },
     "/api/admin/v1/sessions/{ref}/review-comments": {
       "get": {
+        "description": "Draft line comments on the session's Changes diff, not yet sent to the agent.",
         "operationId": "admin_review_comments_sessions__ref__review_comments_get",
         "parameters": [
           {
@@ -7998,6 +8102,7 @@
         "summary": "Review Comments"
       },
       "post": {
+        "description": "Saves a draft line comment on the Changes diff; nothing reaches the agent until the drafts are sent.",
         "operationId": "admin_add_review_comment_sessions__ref__review_comments_post",
         "parameters": [
           {
@@ -8083,6 +8188,7 @@
     },
     "/api/admin/v1/sessions/{ref}/review-comments/{comment_id}": {
       "delete": {
+        "description": "Removes one draft line comment; 404 if no draft has that id.",
         "operationId": "admin_delete_review_comment_sessions__ref__review_comments__comment_id__delete",
         "parameters": [
           {
@@ -8266,6 +8372,7 @@
     },
     "/api/admin/v1/sessions/{ref}/taint/clear": {
       "post": {
+        "description": "Clears the session's untrusted-source taint and records the clear.",
         "operationId": "admin_clear_taint_sessions__ref__taint_clear_post",
         "parameters": [
           {
@@ -8303,6 +8410,7 @@
     },
     "/api/admin/v1/sessions/{ref}/transcript": {
       "get": {
+        "description": "The session's transcript as plain text.",
         "operationId": "admin_get_transcript_sessions__ref__transcript_get",
         "parameters": [
           {
@@ -8342,6 +8450,7 @@
     },
     "/api/admin/v1/skills": {
       "get": {
+        "description": "List proposals and installed skills; returns empty lists with enabled false when the module is off.",
         "operationId": "admin_skills_overview_skills_get",
         "responses": {
           "200": {
@@ -8358,6 +8467,7 @@
     },
     "/api/admin/v1/skills/enabled": {
       "get": {
+        "description": "List installed skills that are enabled; returns an empty list when the module is off.",
         "operationId": "admin_skills_enabled_skills_enabled_get",
         "responses": {
           "200": {
@@ -8374,6 +8484,7 @@
     },
     "/api/admin/v1/skills/proposals/{pid}": {
       "delete": {
+        "description": "Delete a proposal and its draft files; 409 if it has been installed.",
         "operationId": "admin_skill_delete_draft_skills_proposals__pid__delete",
         "parameters": [
           {
@@ -8404,6 +8515,7 @@
         "summary": "Skill Delete Draft"
       },
       "get": {
+        "description": "Return one proposal, including its body; 404 if no proposal has that id.",
         "operationId": "admin_skill_proposal_skills_proposals__pid__get",
         "parameters": [
           {
@@ -8441,6 +8553,7 @@
     },
     "/api/admin/v1/skills/proposals/{pid}/install": {
       "post": {
+        "description": "Install a proposal whose content hash matches the reviewed bytes; 409 if the hash is stale, rejected, or fails validation.",
         "operationId": "admin_skill_install_skills_proposals__pid__install_post",
         "parameters": [
           {
@@ -8488,6 +8601,7 @@
     },
     "/api/admin/v1/skills/proposals/{pid}/reject": {
       "post": {
+        "description": "Reject a proposal and block its content hash; an installed proposal must be uninstalled first.",
         "operationId": "admin_skill_reject_skills_proposals__pid__reject_post",
         "parameters": [
           {
@@ -8535,6 +8649,7 @@
     },
     "/api/admin/v1/skills/proposals/{pid}/reopen": {
       "post": {
+        "description": "Reopen a rejected proposal and lift its content-hash block; it returns to validated or draft.",
         "operationId": "admin_skill_reopen_skills_proposals__pid__reopen_post",
         "parameters": [
           {
@@ -8572,6 +8687,7 @@
     },
     "/api/admin/v1/skills/proposals/{pid}/review": {
       "post": {
+        "description": "Queue an advisory hosted review that uses reviewer quota and returns before it runs; 400 if none is configured.",
         "operationId": "admin_skill_hosted_review_skills_proposals__pid__review_post",
         "parameters": [
           {
@@ -8609,6 +8725,7 @@
     },
     "/api/admin/v1/skills/{slug}/disable": {
       "post": {
+        "description": "Turn an installed skill off without changing its version or project allowlist.",
         "operationId": "admin_skill_disable_skills__slug__disable_post",
         "parameters": [
           {
@@ -8646,6 +8763,7 @@
     },
     "/api/admin/v1/skills/{slug}/enable": {
       "post": {
+        "description": "Turn an installed skill on without changing its version or project allowlist.",
         "operationId": "admin_skill_enable_skills__slug__enable_post",
         "parameters": [
           {
@@ -8683,6 +8801,7 @@
     },
     "/api/admin/v1/skills/{slug}/export": {
       "get": {
+        "description": "Return the installed skill's current version as an exportable bundle with its content hash.",
         "operationId": "admin_skill_export_skills__slug__export_get",
         "parameters": [
           {
@@ -8720,6 +8839,7 @@
     },
     "/api/admin/v1/skills/{slug}/projects": {
       "put": {
+        "description": "Replace the projects an installed skill is allowed in; unknown project names get 400.",
         "operationId": "admin_skill_projects_skills__slug__projects_put",
         "parameters": [
           {
@@ -8767,6 +8887,7 @@
     },
     "/api/admin/v1/skills/{slug}/rollback": {
       "post": {
+        "description": "Roll an installed skill back to its previous version; 409 when no older version exists.",
         "operationId": "admin_skill_rollback_skills__slug__rollback_post",
         "parameters": [
           {
@@ -8804,6 +8925,7 @@
     },
     "/api/admin/v1/skills/{slug}/uninstall": {
       "post": {
+        "description": "Remove an installed skill's files and project allowlist.",
         "operationId": "admin_skill_uninstall_skills__slug__uninstall_post",
         "parameters": [
           {
@@ -8841,6 +8963,7 @@
     },
     "/api/admin/v1/smart-approvals": {
       "get": {
+        "description": "Smart-approval status and the 20 most recent reviews.",
         "operationId": "admin_smart_approvals_smart_approvals_get",
         "responses": {
           "200": {
@@ -8855,6 +8978,7 @@
         "summary": "Smart Approvals"
       },
       "put": {
+        "description": "Sets the smart-approval mode; any mode but off needs smart_approvals configured in harness.yaml.",
         "operationId": "admin_update_smart_approvals_smart_approvals_put",
         "requestBody": {
           "content": {
@@ -8891,6 +9015,7 @@
     },
     "/api/admin/v1/templates": {
       "get": {
+        "description": "List saved task templates.",
         "operationId": "admin_list_templates_templates_get",
         "responses": {
           "200": {
@@ -8905,6 +9030,7 @@
         "summary": "List Templates"
       },
       "post": {
+        "description": "Create a task template after checking its name, prompt, project, backend, and model.",
         "operationId": "admin_create_template_templates_post",
         "requestBody": {
           "content": {
@@ -8941,6 +9067,7 @@
     },
     "/api/admin/v1/templates/{tid}": {
       "delete": {
+        "description": "Delete a saved task template.",
         "operationId": "admin_delete_template_templates__tid__delete",
         "parameters": [
           {
@@ -8971,6 +9098,7 @@
         "summary": "Delete Template"
       },
       "put": {
+        "description": "Replace a task template's fields after the same checks as create; returns 404 if it does not exist.",
         "operationId": "admin_update_template_templates__tid__put",
         "parameters": [
           {
@@ -9018,6 +9146,7 @@
     },
     "/api/v1": {
       "get": {
+        "description": "Server version, scopes, models, backends and features; the projects list is always empty, so fetch projects separately.",
         "operationId": "api_root_api_v1_get",
         "responses": {
           "200": {
@@ -9036,6 +9165,7 @@
     },
     "/api/v1/audit": {
       "get": {
+        "description": "Audit records visible to this caller, newest first; pass next_before_id as before_id for the next page.",
         "operationId": "scoped_audit_api_v1_audit_get",
         "parameters": [
           {
@@ -9202,6 +9332,7 @@
     },
     "/api/v1/auth/google/start": {
       "post": {
+        "description": "Start a Google sign-in, link, or invite attempt bound to this browser and return its authorization URL; invite needs a link code.",
         "operationId": "google_start_api_v1_auth_google_start_post",
         "requestBody": {
           "content": {
@@ -9238,6 +9369,7 @@
     },
     "/api/v1/auth/logout": {
       "post": {
+        "description": "End this browser's Web session and clear its cookie; a request with an active session must send the CSRF token.",
         "operationId": "logout_api_v1_auth_logout_post",
         "responses": {
           "200": {
@@ -9254,6 +9386,7 @@
     },
     "/api/v1/auth/session": {
       "get": {
+        "description": "Report Google sign-in availability and this browser's sign-in state; the CSRF token appears only with a session.",
         "operationId": "auth_session_api_v1_auth_session_get",
         "responses": {
           "200": {
@@ -9270,6 +9403,7 @@
     },
     "/api/v1/backends": {
       "get": {
+        "description": "Each configured backend's availability, login state, limits and usage; some callers see only the local backend.",
         "operationId": "backends_api_v1_backends_get",
         "responses": {
           "200": {
@@ -9292,6 +9426,7 @@
     },
     "/api/v1/config": {
       "get": {
+        "description": "Return this App's settings with configured and effective values, the revision, and any daemon cap that applies.",
         "operationId": "app_config_api_v1_config_get",
         "responses": {
           "200": {
@@ -9306,6 +9441,7 @@
         "summary": "App Config"
       },
       "patch": {
+        "description": "Change this App's settings; a stale `revision` returns 409, and `dry_run` returns the plan without saving.",
         "operationId": "app_patch_api_v1_config_patch",
         "requestBody": {
           "content": {
@@ -9342,6 +9478,7 @@
     },
     "/api/v1/config/schema": {
       "get": {
+        "description": "Describe the App settings and mark the ones this App cannot write.",
         "operationId": "app_schema_api_v1_config_schema_get",
         "responses": {
           "200": {
@@ -9358,6 +9495,7 @@
     },
     "/api/v1/end-users/{end_user}/logins/{backend}": {
       "delete": {
+        "description": "Sign the end user out of this backend: their running sessions there stop, and their stored CLI login and state are deleted.",
         "operationId": "unlink_end_user_login_api_v1_end_users__end_user__logins__backend__delete",
         "parameters": [
           {
@@ -9397,6 +9535,7 @@
         "summary": "Unlink End User Login"
       },
       "get": {
+        "description": "Whether the end user's login for this backend is linked, plus any sign-in attempt in progress.",
         "operationId": "end_user_login_status_api_v1_end_users__end_user__logins__backend__get",
         "parameters": [
           {
@@ -9544,6 +9683,7 @@
     },
     "/api/v1/events": {
       "get": {
+        "description": "Live-only server-sent stream of selected session events; nothing is replayed and sequence numbers are omitted.",
         "operationId": "api_events_api_v1_events_get",
         "responses": {
           "200": {
@@ -9560,6 +9700,7 @@
     },
     "/api/v1/images": {
       "post": {
+        "description": "Queue an image generation and return the job with a PNG URL that works once the image is done.",
         "operationId": "app_image_api_v1_images_post",
         "requestBody": {
           "content": {
@@ -9596,6 +9737,7 @@
     },
     "/api/v1/images/{iid}": {
       "get": {
+        "description": "Return an image's status and upscales, or its PNG (404 until done) for an id ending in .png; uploads and edits return 404.",
         "operationId": "app_image_status_api_v1_images__iid__get",
         "parameters": [
           {
@@ -9633,6 +9775,7 @@
     },
     "/api/v1/images/{iid}/upscale": {
       "post": {
+        "description": "Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job.",
         "operationId": "app_image_upscale_api_v1_images__iid__upscale_post",
         "parameters": [
           {
@@ -9714,6 +9857,7 @@
     },
     "/api/v1/me/api-keys/{backend}": {
       "delete": {
+        "description": "Remove the stored key; running sessions on that backend stop and their CLI state is deleted.",
         "operationId": "api_member_key_delete_api_v1_me_api_keys__backend__delete",
         "parameters": [
           {
@@ -9787,6 +9931,7 @@
     },
     "/api/v1/me/api-keys/{backend}/test": {
       "post": {
+        "description": "Validate the stored key with one cheap provider call; 409 when no key is stored.",
         "operationId": "api_member_key_test_api_v1_me_api_keys__backend__test_post",
         "parameters": [
           {
@@ -9824,6 +9969,7 @@
     },
     "/api/v1/me/github-connection": {
       "delete": {
+        "description": "Erase the stored GitHub credentials and disconnect; a failed erase is retried at startup.",
         "operationId": "api_github_disconnect_api_v1_me_github_connection_delete",
         "responses": {
           "200": {
@@ -9838,6 +9984,7 @@
         "summary": "Api Github Disconnect"
       },
       "get": {
+        "description": "GitHub connection state; the device code appears only while a sign-in is in progress.",
         "operationId": "api_github_connection_api_v1_me_github_connection_get",
         "responses": {
           "200": {
@@ -9854,6 +10001,7 @@
     },
     "/api/v1/me/github-connection/cancel": {
       "post": {
+        "description": "Cancel a GitHub sign-in in progress, if any, and return the connection status.",
         "operationId": "api_github_cancel_api_v1_me_github_connection_cancel_post",
         "responses": {
           "200": {
@@ -9870,6 +10018,7 @@
     },
     "/api/v1/me/github-connection/connect": {
       "post": {
+        "description": "Start a GitHub device sign-in, or resume the live one; the sign-in runs in the background and returns the device code if one is ready.",
         "operationId": "api_github_connect_api_v1_me_github_connection_connect_post",
         "responses": {
           "200": {
@@ -9886,6 +10035,7 @@
     },
     "/api/v1/me/google": {
       "delete": {
+        "description": "Unlink this account's Google link, end its Web sessions, and clear this browser's cookie; `confirm` must be true.",
         "operationId": "my_google_unlink_api_v1_me_google_delete",
         "requestBody": {
           "content": {
@@ -9920,6 +10070,7 @@
         "summary": "My Google Unlink"
       },
       "get": {
+        "description": "Return this account's Google link state; `unlink_removes_this_device` is set when this device signed in with Google.",
         "operationId": "my_google_api_v1_me_google_get",
         "responses": {
           "200": {
@@ -9936,6 +10087,7 @@
     },
     "/api/v1/models": {
       "get": {
+        "description": "Configured models with their context sizes; the default model is flagged.",
         "operationId": "api_models_api_v1_models_get",
         "responses": {
           "200": {
@@ -9952,6 +10104,7 @@
     },
     "/api/v1/models/status": {
       "get": {
+        "description": "Report each model's load state and how long its current warm-up has been running.",
         "operationId": "api_models_status_api_v1_models_status_get",
         "responses": {
           "200": {
@@ -9968,6 +10121,7 @@
     },
     "/api/v1/models/warm": {
       "post": {
+        "description": "Start loading the default model if it is asleep, without waiting; an App gets 409 if the GPU is held or RAM is low.",
         "operationId": "api_models_warm_api_v1_models_warm_post",
         "responses": {
           "200": {
@@ -9984,6 +10138,7 @@
     },
     "/api/v1/pair": {
       "post": {
+        "description": "Redeem a single-use pairing code from this browser's origin for a token, returned once; a spent, expired or other-origin code gets 400.",
         "operationId": "pair_browser_api_v1_pair_post",
         "requestBody": {
           "content": {
@@ -10171,6 +10326,7 @@
     },
     "/api/v1/profile": {
       "get": {
+        "description": "The profile emoji or its default; the choices list is always empty.",
         "operationId": "api_profile_api_v1_profile_get",
         "responses": {
           "200": {
@@ -10187,6 +10343,7 @@
     },
     "/api/v1/projects": {
       "get": {
+        "description": "The account's catalog projects, with repository URLs withheld.",
         "operationId": "api_projects_api_v1_projects_get",
         "responses": {
           "200": {
@@ -10201,6 +10358,7 @@
         "summary": "Api Projects"
       },
       "post": {
+        "description": "Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected.",
         "operationId": "api_create_project_api_v1_projects_post",
         "requestBody": {
           "content": {
@@ -10239,6 +10397,7 @@
     },
     "/api/v1/queue": {
       "get": {
+        "description": "Queue positions of the caller's sessions for the GPU slot, where 0 holds it and 1 and up are waiting.",
         "operationId": "api_queue_api_v1_queue_get",
         "responses": {
           "200": {
@@ -10255,6 +10414,7 @@
     },
     "/api/v1/remote-control": {
       "get": {
+        "description": "Report whether Remote Control is enabled and each project's state.",
         "operationId": "app_rc_status_api_v1_remote_control_get",
         "responses": {
           "200": {
@@ -10271,6 +10431,7 @@
     },
     "/api/v1/remote-control/{project}": {
       "post": {
+        "description": "Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder.",
         "operationId": "app_rc_launch_api_v1_remote_control__project__post",
         "parameters": [
           {
@@ -10308,6 +10469,7 @@
     },
     "/api/v1/remote-control/{project}/stop": {
       "post": {
+        "description": "Stop a project's Remote Control server and its child processes; 404 if none was started.",
         "operationId": "app_rc_stop_api_v1_remote_control__project__stop_post",
         "parameters": [
           {
@@ -10384,6 +10546,7 @@
     },
     "/api/v1/search": {
       "get": {
+        "description": "Full-text search over past sessions, falling back to any-term matches when no session has every term; limit caps at 50.",
         "operationId": "api_search_api_v1_search_get",
         "parameters": [
           {
@@ -10442,6 +10605,7 @@
     },
     "/api/v1/sessions": {
       "get": {
+        "description": "Recent sessions, newest first; limit caps the count (default 50).",
         "operationId": "list_sessions_api_v1_sessions_get",
         "parameters": [
           {
@@ -10484,6 +10648,7 @@
         "summary": "List Sessions"
       },
       "post": {
+        "description": "Queue a session and return it before it runs; a retried Idempotency-Key replays the first (200), and a different request with that key gets 409.",
         "operationId": "create_session_api_v1_sessions_post",
         "parameters": [
           {
@@ -10597,6 +10762,7 @@
         "summary": "Delete Session"
       },
       "get": {
+        "description": "One session's summary with its answer, registered tool names and metadata.",
         "operationId": "get_session_api_v1_sessions__ref__get",
         "parameters": [
           {
@@ -10634,6 +10800,7 @@
         "summary": "Get Session"
       },
       "patch": {
+        "description": "Set the session's title; a blank title or one over 120 characters gets 400.",
         "operationId": "patch_session_api_v1_sessions__ref__patch",
         "parameters": [
           {
@@ -10681,6 +10848,7 @@
         "summary": "Patch Session"
       },
       "put": {
+        "description": "Set the session's title; a blank title or one over 120 characters gets 400.",
         "operationId": "patch_session_api_v1_sessions__ref__put",
         "parameters": [
           {
@@ -10730,6 +10898,7 @@
     },
     "/api/v1/sessions/{ref}/approvals": {
       "get": {
+        "description": "Approvals in this session that still await a decision.",
         "operationId": "approvals_api_v1_sessions__ref__approvals_get",
         "parameters": [
           {
@@ -10773,6 +10942,7 @@
     },
     "/api/v1/sessions/{ref}/approvals/{approval_id}": {
       "post": {
+        "description": "Approve or deny one tool-call approval; an already decided one returns 409 and another decision value 400.",
         "operationId": "decide_api_v1_sessions__ref__approvals__approval_id__post",
         "parameters": [
           {
@@ -10831,6 +11001,7 @@
     },
     "/api/v1/sessions/{ref}/cancel": {
       "post": {
+        "description": "Stop an active session and return it once its run has ended; a session that is not active gets 409.",
         "operationId": "cancel_api_v1_sessions__ref__cancel_post",
         "parameters": [
           {
@@ -10870,6 +11041,7 @@
     },
     "/api/v1/sessions/{ref}/changes": {
       "get": {
+        "description": "The session's file diffs with secret-scan results; a removed workspace returns no repos.",
         "operationId": "api_changes_api_v1_sessions__ref__changes_get",
         "parameters": [
           {
@@ -10907,6 +11079,7 @@
     },
     "/api/v1/sessions/{ref}/context": {
       "post": {
+        "description": "Send context blocks to the session as information, not user instructions, restarting a finished session; 400 when empty or over 60,000 characters.",
         "operationId": "add_context_api_v1_sessions__ref__context_post",
         "parameters": [
           {
@@ -10956,6 +11129,7 @@
     },
     "/api/v1/sessions/{ref}/events": {
       "get": {
+        "description": "Replays events after sequence `after` (or Last-Event-ID), then streams live unless follow is false; a stream ticket can replace the bearer token.",
         "operationId": "events_api_v1_sessions__ref__events_get",
         "parameters": [
           {
@@ -11053,6 +11227,7 @@
     },
     "/api/v1/sessions/{ref}/messages": {
       "post": {
+        "description": "Send a user message; an active session reads it before its next model call, a finished one restarts queued, and a removed workspace gets 409.",
         "operationId": "send_api_v1_sessions__ref__messages_post",
         "parameters": [
           {
@@ -11102,6 +11277,7 @@
     },
     "/api/v1/sessions/{ref}/rerun": {
       "post": {
+        "description": "Start a new queued session with this one's prompt, project and model; tools-only sessions get 409.",
         "operationId": "rerun_session_api_v1_sessions__ref__rerun_post",
         "parameters": [
           {
@@ -11141,6 +11317,7 @@
     },
     "/api/v1/sessions/{ref}/review-comments": {
       "get": {
+        "description": "The session's draft review comments, which are not yet sent.",
         "operationId": "api_review_comments_api_v1_sessions__ref__review_comments_get",
         "parameters": [
           {
@@ -11176,6 +11353,7 @@
         "summary": "Api Review Comments"
       },
       "post": {
+        "description": "Save a draft line comment; drafts reach the agent only when sent, and an invalid comment gets 400.",
         "operationId": "api_add_review_comment_api_v1_sessions__ref__review_comments_post",
         "parameters": [
           {
@@ -11223,6 +11401,7 @@
     },
     "/api/v1/sessions/{ref}/review-comments/send": {
       "post": {
+        "description": "Send all draft review comments as one follow-up message, then clear the drafts; 400 when there are none.",
         "operationId": "api_send_review_comments_api_v1_sessions__ref__review_comments_send_post",
         "parameters": [
           {
@@ -11260,6 +11439,7 @@
     },
     "/api/v1/sessions/{ref}/review-comments/{comment_id}": {
       "delete": {
+        "description": "Delete one draft review comment; 404 when no draft has that id.",
         "operationId": "api_delete_review_comment_api_v1_sessions__ref__review_comments__comment_id__delete",
         "parameters": [
           {
@@ -11301,6 +11481,7 @@
     },
     "/api/v1/sessions/{ref}/review/{action}": {
       "post": {
+        "description": "Merge, push or discard the session's git branch; 409 while it is still running, 400 without a git branch.",
         "operationId": "api_review_api_v1_sessions__ref__review__action__post",
         "parameters": [
           {
@@ -11347,6 +11528,7 @@
     },
     "/api/v1/sessions/{ref}/secret-findings/fix": {
       "post": {
+        "description": "Draft fix comments for open secret findings, or ask the agent to rewrite older commits; 409 when there is no finished secret scan.",
         "operationId": "api_secret_findings_fix_api_v1_sessions__ref__secret_findings_fix_post",
         "parameters": [
           {
@@ -11441,6 +11623,7 @@
     },
     "/api/v1/sessions/{ref}/tool_calls": {
       "get": {
+        "description": "Tool calls the agent made to this session's app tools, filtered by status (default pending), oldest first; an empty status lists all.",
         "operationId": "tool_calls_api_v1_sessions__ref__tool_calls_get",
         "parameters": [
           {
@@ -11494,6 +11677,7 @@
     },
     "/api/v1/sessions/{ref}/tool_calls/{call_id}": {
       "post": {
+        "description": "Return the result for one pending app tool call and resume the run waiting on it; 409 when no such call is pending.",
         "operationId": "tool_result_api_v1_sessions__ref__tool_calls__call_id__post",
         "parameters": [
           {
@@ -11552,6 +11736,7 @@
     },
     "/api/v1/sessions/{ref}/transcript": {
       "get": {
+        "description": "The session's transcript as Markdown text, opening with its title, status and totals.",
         "operationId": "api_transcript_api_v1_sessions__ref__transcript_get",
         "parameters": [
           {
@@ -11589,6 +11774,7 @@
     },
     "/backends": {
       "get": {
+        "description": "Local and hosted backends with their model and sign-in state; `auth=skip` skips the sign-in checks.",
         "operationId": "backends_backends_get",
         "responses": {
           "200": {
@@ -11653,6 +11839,7 @@
     },
     "/chats": {
       "get": {
+        "description": "The caller's chats, newest first, up to `limit` (1 to 200, default 50).",
         "operationId": "list_chats_chats_get",
         "parameters": [
           {
@@ -11689,6 +11876,7 @@
         "summary": "List Chats"
       },
       "post": {
+        "description": "Starts a chat and returns before its first reply finishes; backend, model and effort are optional.",
         "operationId": "create_chat_chats_post",
         "requestBody": {
           "content": {
@@ -11725,6 +11913,7 @@
     },
     "/chats/options": {
       "get": {
+        "description": "Backends, models and efforts a new chat can start with, and the default backend.",
         "operationId": "chat_options_chats_options_get",
         "responses": {
           "200": {
@@ -11741,6 +11930,7 @@
     },
     "/chats/snippet-languages": {
       "get": {
+        "description": "Languages the snippet runner supports, with their aliases and size limits.",
         "operationId": "snippet_languages_chats_snippet_languages_get",
         "responses": {
           "200": {
@@ -11757,6 +11947,7 @@
     },
     "/chats/{ref}": {
       "delete": {
+        "description": "Deletes an idle chat and its workspace; 409 while a reply or snippet is running.",
         "operationId": "delete_chat_chats__ref__delete",
         "parameters": [
           {
@@ -11792,6 +11983,7 @@
         "summary": "Delete Chat"
       },
       "get": {
+        "description": "Current state of one chat.",
         "operationId": "get_chat_chats__ref__get",
         "parameters": [
           {
@@ -11827,6 +12019,7 @@
         "summary": "Get Chat"
       },
       "patch": {
+        "description": "Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.",
         "operationId": "rename_chat_chats__ref__patch",
         "parameters": [
           {
@@ -11872,6 +12065,7 @@
         "summary": "Rename Chat"
       },
       "put": {
+        "description": "Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.",
         "operationId": "rename_chat_chats__ref__put",
         "parameters": [
           {
@@ -11919,6 +12113,7 @@
     },
     "/chats/{ref}/cancel": {
       "post": {
+        "description": "Stops a chat's running reply and returns once it has ended; 409 when no reply is active.",
         "operationId": "cancel_chat_chats__ref__cancel_post",
         "parameters": [
           {
@@ -11956,6 +12151,7 @@
     },
     "/chats/{ref}/events": {
       "get": {
+        "description": "Server-sent events for one chat, replaying events after `after`; `follow=false` ends after the replay.",
         "operationId": "chat_events_chats__ref__events_get",
         "parameters": [
           {
@@ -12013,6 +12209,7 @@
     },
     "/chats/{ref}/messages": {
       "post": {
+        "description": "Sends a chat message and returns before the reply finishes; snippets run since the last message are included.",
         "operationId": "send_chat_message_chats__ref__messages_post",
         "parameters": [
           {
@@ -12108,6 +12305,7 @@
     },
     "/chats/{ref}/snippets/{run_id}/cancel": {
       "post": {
+        "description": "Asks a running snippet to stop; 409 if it is not running, and the final result arrives as a snippet_result event.",
         "operationId": "cancel_snippet_chats__ref__snippets__run_id__cancel_post",
         "parameters": [
           {
@@ -12154,6 +12352,7 @@
     },
     "/compare": {
       "post": {
+        "description": "Starts one prompt on 2 to 4 backends in a git project, each on its own branch; pick a winner afterwards.",
         "operationId": "create_compare_compare_post",
         "requestBody": {
           "content": {
@@ -12190,6 +12389,7 @@
     },
     "/compare/{group}": {
       "get": {
+        "description": "Members of a compare group with their status, cost and the start of each answer.",
         "operationId": "get_compare_compare__group__get",
         "parameters": [
           {
@@ -12227,6 +12427,7 @@
     },
     "/compare/{group}/discard": {
       "post": {
+        "description": "Discards each group member not already merged, pushed or discarded.",
         "operationId": "discard_compare_compare__group__discard_post",
         "parameters": [
           {
@@ -12264,6 +12465,7 @@
     },
     "/compare/{group}/pick": {
       "post": {
+        "description": "Merges or pushes the winner and optionally discards the rest; retrying after a partial failure is safe.",
         "operationId": "pick_compare_compare__group__pick_post",
         "parameters": [
           {
@@ -12328,6 +12530,7 @@
     },
     "/github/projects/{project}/items": {
       "get": {
+        "description": "Open issues and pull requests, 30 per page; results are cached for 60 seconds.",
         "operationId": "github_items_github_projects__project__items_get",
         "parameters": [
           {
@@ -12385,6 +12588,7 @@
     },
     "/github/projects/{project}/items/{number}": {
       "get": {
+        "description": "One open issue or PR with its body and, for a PR, its line comments; closed and fork PRs are refused.",
         "operationId": "github_item_github_projects__project__items__number__get",
         "parameters": [
           {
@@ -12431,6 +12635,7 @@
     },
     "/github/sessions": {
       "post": {
+        "description": "Starts a session from a GitHub issue or PR, whose text becomes the untrusted prompt; PR tasks need a tower project.",
         "operationId": "create_github_session_github_sessions_post",
         "requestBody": {
           "content": {
@@ -12467,6 +12672,7 @@
     },
     "/gpu": {
       "get": {
+        "description": "Return the resource guard's state, the model's status, and the default load-now duration.",
         "operationId": "gpu_gpu_get",
         "responses": {
           "200": {
@@ -12538,6 +12744,7 @@
     },
     "/health": {
       "get": {
+        "description": "Liveness check that also reports the build commit and configuration revision.",
         "operationId": "health_health_get",
         "responses": {
           "200": {
@@ -12554,6 +12761,7 @@
     },
     "/images": {
       "get": {
+        "description": "List gallery images newest first, up to the limit (default 60), with the service status.",
         "operationId": "list_images_images_get",
         "parameters": [
           {
@@ -12590,6 +12798,7 @@
         "summary": "List Images"
       },
       "post": {
+        "description": "Queue an image generation and return its job; the image is not ready until its status is done.",
         "operationId": "create_image_images_post",
         "requestBody": {
           "content": {
@@ -12643,6 +12852,7 @@
     },
     "/images/uploads": {
       "post": {
+        "description": "Store an uploaded photo as a finished gallery image, once image editing is set up.",
         "operationId": "upload_image_images_uploads_post",
         "requestBody": {
           "content": {
@@ -12696,6 +12906,7 @@
     },
     "/images/{iid}": {
       "delete": {
+        "description": "Delete an image and its files, cancelling it first if it is still queued or running.",
         "operationId": "delete_image_images__iid__delete",
         "parameters": [
           {
@@ -12731,6 +12942,7 @@
         "summary": "Delete Image"
       },
       "get": {
+        "description": "Return an image's JSON record, its PNG for ids ending in .png (404 until done), or its edit inputs for .source.png and .mask.png.",
         "operationId": "get_image_images__iid__get",
         "parameters": [
           {
@@ -12768,6 +12980,7 @@
     },
     "/images/{iid}/cancel": {
       "post": {
+        "description": "Cancel a queued or running image and wait until a running one stops; finished images are returned as they are.",
         "operationId": "cancel_image_images__iid__cancel_post",
         "parameters": [
           {
@@ -12805,6 +13018,7 @@
     },
     "/images/{iid}/edit": {
       "post": {
+        "description": "Queue a masked edit of a finished image and return the queued job before it runs.",
         "operationId": "edit_image_images__iid__edit_post",
         "parameters": [
           {
@@ -12852,6 +13066,7 @@
     },
     "/images/{iid}/upscale": {
       "post": {
+        "description": "Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job.",
         "operationId": "upscale_image_images__iid__upscale_post",
         "parameters": [
           {
@@ -12899,6 +13114,7 @@
     },
     "/jobs": {
       "get": {
+        "description": "List scheduled jobs, each with its most recent run.",
         "operationId": "list_jobs_jobs_get",
         "responses": {
           "200": {
@@ -12919,6 +13135,7 @@
         "summary": "List Jobs"
       },
       "post": {
+        "description": "Create a scheduled job after validating it; its next run is set from the cron schedule.",
         "operationId": "create_job_jobs_post",
         "requestBody": {
           "content": {
@@ -13015,6 +13232,7 @@
     },
     "/jobs/{jid}": {
       "delete": {
+        "description": "Delete a scheduled job and record the deletion in the audit log.",
         "operationId": "delete_job_jobs__jid__delete",
         "parameters": [
           {
@@ -13045,6 +13263,7 @@
         "summary": "Delete Job"
       },
       "get": {
+        "description": "Return one scheduled job with its 15 most recent runs.",
         "operationId": "get_job_jobs__jid__get",
         "parameters": [
           {
@@ -13082,6 +13301,7 @@
         "summary": "Get Job"
       },
       "put": {
+        "description": "Replace a scheduled job's settings after validation and recompute its next run.",
         "operationId": "update_job_jobs__jid__put",
         "parameters": [
           {
@@ -13171,6 +13391,7 @@
     },
     "/keys": {
       "get": {
+        "description": "Key metadata only; a key's secret is returned once, by the create response.",
         "operationId": "list_keys_keys_get",
         "responses": {
           "200": {
@@ -13185,6 +13406,7 @@
         "summary": "List Keys"
       },
       "post": {
+        "description": "Mints an API key and returns its secret only in this response; a Hub's owner-kind request gets 403.",
         "operationId": "create_key_keys_post",
         "responses": {
           "201": {
@@ -13201,6 +13423,7 @@
     },
     "/keys/{kid}": {
       "delete": {
+        "description": "Revokes one key; an unknown or already revoked id returns 404, and the Hub's own key returns 409.",
         "operationId": "revoke_key_keys__kid__delete",
         "parameters": [
           {
@@ -13233,6 +13456,7 @@
     },
     "/maintenance": {
       "get": {
+        "description": "Disk usage of session workspaces and checkpoints, and of the data volume.",
         "operationId": "maintenance_maintenance_get",
         "responses": {
           "200": {
@@ -13249,6 +13473,7 @@
     },
     "/maintenance/backup": {
       "post": {
+        "description": "Write a dated backup of the database, transcripts, and config, wait for it, then prune old backups.",
         "operationId": "maintenance_backup_maintenance_backup_post",
         "responses": {
           "200": {
@@ -13265,6 +13490,7 @@
     },
     "/maintenance/cleanup": {
       "post": {
+        "description": "Runs a cleanup pass now, after any pass in progress, and returns what it removed.",
         "operationId": "maintenance_cleanup_maintenance_cleanup_post",
         "responses": {
           "200": {
@@ -13281,6 +13507,7 @@
     },
     "/maintenance/image-archive/retention/apply": {
       "post": {
+        "description": "Delete the archived images from a preview if its confirmation still matches; a missing or stale one returns 409.",
         "operationId": "image_archive_retention_apply_maintenance_image_archive_retention_apply_post",
         "requestBody": {
           "content": {
@@ -13317,6 +13544,7 @@
     },
     "/maintenance/image-archive/retention/preview": {
       "post": {
+        "description": "Preview the archived images that retention would delete, with the confirmation to pass to apply.",
         "operationId": "image_archive_retention_preview_maintenance_image_archive_retention_preview_post",
         "responses": {
           "200": {
@@ -13333,6 +13561,7 @@
     },
     "/me": {
       "get": {
+        "description": "Caller's identity, role and capabilities, plus disk and queue usage where the account has it.",
         "operationId": "me_me_get",
         "responses": {
           "200": {
@@ -13403,6 +13632,7 @@
     },
     "/models": {
       "get": {
+        "description": "Configured models with their context sizes; one is marked as the default.",
         "operationId": "models_models_get",
         "responses": {
           "200": {
@@ -13419,6 +13649,7 @@
     },
     "/models/status": {
       "get": {
+        "description": "Report each model's load state and how long its current warm-up has been running.",
         "operationId": "models_status_models_status_get",
         "responses": {
           "200": {
@@ -13452,6 +13683,7 @@
     },
     "/notify/test": {
       "post": {
+        "description": "Send a test push notification; it reports sent even when delivery fails after retries.",
         "operationId": "notify_test_notify_test_post",
         "responses": {
           "200": {
@@ -13483,6 +13715,7 @@
         "summary": "Pairing Codes"
       },
       "post": {
+        "description": "Mint a single-use pairing code bound to one origin; it is returned only here and expires after its TTL.",
         "operationId": "create_pairing_code_pairing_codes_post",
         "requestBody": {
           "content": {
@@ -13519,6 +13752,7 @@
     },
     "/pairing-codes/{pid}": {
       "delete": {
+        "description": "Expire an unused pairing code now; 404 when no such code is still active.",
         "operationId": "revoke_pairing_code_pairing_codes__pid__delete",
         "parameters": [
           {
@@ -13551,6 +13785,7 @@
     },
     "/profile": {
       "get": {
+        "description": "The profile icon and the list of icons to choose from.",
         "operationId": "profile_profile_get",
         "responses": {
           "200": {
@@ -13565,6 +13800,7 @@
         "summary": "Profile"
       },
       "put": {
+        "description": "Sets the profile icon; the emoji must be one of the listed choices.",
         "operationId": "update_profile_profile_put",
         "requestBody": {
           "content": {
@@ -13601,6 +13837,7 @@
     },
     "/projects": {
       "get": {
+        "description": "Projects visible to the caller, or an empty list for a read-only demo session.",
         "operationId": "projects_projects_get",
         "responses": {
           "200": {
@@ -13615,6 +13852,7 @@
         "summary": "Projects"
       },
       "post": {
+        "description": "Creates a project with an empty workspace or a repo cloned per session; `github` clones use the caller's GitHub sign-in.",
         "operationId": "create_project_projects_post",
         "requestBody": {
           "content": {
@@ -13651,6 +13889,7 @@
     },
     "/queue": {
       "get": {
+        "description": "Queue positions of the caller's queued agent sessions, in queue order.",
         "operationId": "queue_queue_get",
         "responses": {
           "200": {
@@ -13667,6 +13906,7 @@
     },
     "/remote-control": {
       "get": {
+        "description": "Report whether Remote Control is enabled and each project's state.",
         "operationId": "rc_status_remote_control_get",
         "responses": {
           "200": {
@@ -13683,6 +13923,7 @@
     },
     "/remote-control/{project}": {
       "post": {
+        "description": "Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder.",
         "operationId": "rc_launch_remote_control__project__post",
         "parameters": [
           {
@@ -13720,6 +13961,7 @@
     },
     "/remote-control/{project}/stop": {
       "post": {
+        "description": "Stop a project's Remote Control server and its child processes; 404 if none was started.",
         "operationId": "rc_stop_remote_control__project__stop_post",
         "parameters": [
           {
@@ -13757,6 +13999,7 @@
     },
     "/remote-control/{project}/trust": {
       "post": {
+        "description": "Open a Claude console window in a project so the user can accept workspace trust; Windows only.",
         "operationId": "rc_trust_remote_control__project__trust_post",
         "parameters": [
           {
@@ -13794,6 +14037,7 @@
     },
     "/resources": {
       "get": {
+        "description": "Return the resource guard's state, the model's status, and the default load-now duration.",
         "operationId": "gpu_resources_get",
         "responses": {
           "200": {
@@ -13897,6 +14141,7 @@
         "summary": "Runner Pairing Codes"
       },
       "post": {
+        "description": "Create a one-time Mac pairing code, returned only in this response, that expires after its lifetime.",
         "operationId": "create_runner_pairing_code_runner_pairing_codes_post",
         "requestBody": {
           "content": {
@@ -13933,6 +14178,7 @@
     },
     "/runner-pairing-codes/{pid}": {
       "delete": {
+        "description": "Revoke an unused, unexpired pairing code; 404 if no such code is active.",
         "operationId": "revoke_runner_pairing_code_runner_pairing_codes__pid__delete",
         "parameters": [
           {
@@ -13965,6 +14211,7 @@
     },
     "/runners": {
       "get": {
+        "description": "List each runner's presence, compatibility, pending requests, and whether remote update is supported.",
         "operationId": "runners_runners_get",
         "responses": {
           "200": {
@@ -13981,6 +14228,7 @@
     },
     "/runners/{name}/poll": {
       "post": {
+        "description": "Long-poll for requests queued to this runner; returns when work arrives or the hold ends.",
         "operationId": "runner_poll_runners__name__poll_post",
         "parameters": [
           {
@@ -14028,6 +14276,7 @@
     },
     "/runners/{name}/results": {
       "post": {
+        "description": "Report one request's result; accepted is false if it is no longer pending, and 413 for results over 16 MiB.",
         "operationId": "runner_result_runners__name__results_post",
         "parameters": [
           {
@@ -14075,6 +14324,7 @@
     },
     "/runners/{name}/update": {
       "post": {
+        "description": "Ask an online Mac runner to update itself and wait for the outcome; 409 if offline, too old, or failed.",
         "operationId": "runner_update_runners__name__update_post",
         "parameters": [
           {
@@ -14171,6 +14421,7 @@
     },
     "/sessions": {
       "get": {
+        "description": "Session cards for the caller's agent sessions, newest first; `limit` defaults to 50.",
         "operationId": "list_sessions_sessions_get",
         "parameters": [
           {
@@ -14213,6 +14464,7 @@
         "summary": "List Sessions"
       },
       "post": {
+        "description": "Starts an agent session and returns before its run finishes.",
         "operationId": "create_session_sessions_post",
         "requestBody": {
           "content": {
@@ -14251,6 +14503,7 @@
     },
     "/sessions/{ref}": {
       "get": {
+        "description": "Current state of one session, with its queue position and any pending approvals.",
         "operationId": "get_session_sessions__ref__get",
         "parameters": [
           {
@@ -14288,6 +14541,7 @@
         "summary": "Get Session"
       },
       "patch": {
+        "description": "Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.",
         "operationId": "patch_session_sessions__ref__patch",
         "parameters": [
           {
@@ -14333,6 +14587,7 @@
         "summary": "Patch Session"
       },
       "put": {
+        "description": "Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.",
         "operationId": "patch_session_sessions__ref__put",
         "parameters": [
           {
@@ -14380,6 +14635,7 @@
     },
     "/sessions/{ref}/approvals": {
       "get": {
+        "description": "Pending approvals for the session, or every approval when `all` is true.",
         "operationId": "approvals_sessions__ref__approvals_get",
         "parameters": [
           {
@@ -14427,6 +14683,7 @@
     },
     "/sessions/{ref}/approvals/{approval_id}": {
       "post": {
+        "description": "Approves or denies an approval; `pending` works only when exactly one is waiting, and a decided one returns 409.",
         "operationId": "decide_sessions__ref__approvals__approval_id__post",
         "parameters": [
           {
@@ -14483,6 +14740,7 @@
     },
     "/sessions/{ref}/cancel": {
       "post": {
+        "description": "Stops an active session and returns once its run has ended; 409 when nothing is active.",
         "operationId": "cancel_sessions__ref__cancel_post",
         "parameters": [
           {
@@ -14520,6 +14778,7 @@
     },
     "/sessions/{ref}/changes": {
       "get": {
+        "description": "The session's git diff by repository, with its secret-scan result; a removed workspace returns no repositories.",
         "operationId": "changes_sessions__ref__changes_get",
         "parameters": [
           {
@@ -14557,6 +14816,7 @@
     },
     "/sessions/{ref}/checkpoints": {
       "get": {
+        "description": "Checkpoints by turn, with flags for whether rewind and fork are allowed here.",
         "operationId": "session_checkpoints_sessions__ref__checkpoints_get",
         "parameters": [
           {
@@ -14594,6 +14854,7 @@
     },
     "/sessions/{ref}/checkpoints/{turn}/fork": {
       "post": {
+        "description": "Starts a new session from this checkpoint with a non-blank prompt, and returns before its run finishes.",
         "operationId": "fork_checkpoint_sessions__ref__checkpoints__turn__fork_post",
         "parameters": [
           {
@@ -14650,6 +14911,7 @@
     },
     "/sessions/{ref}/checkpoints/{turn}/rewind": {
       "post": {
+        "description": "Rewinds the session to this checkpoint; 409 while it runs, and hosted CLI sessions cannot rewind.",
         "operationId": "rewind_checkpoint_sessions__ref__checkpoints__turn__rewind_post",
         "parameters": [
           {
@@ -14754,6 +15016,7 @@
     },
     "/sessions/{ref}/messages": {
       "post": {
+        "description": "Sends a follow-up and returns before the reply finishes; a running session reads it before its next model call.",
         "operationId": "send_message_sessions__ref__messages_post",
         "parameters": [
           {
@@ -14839,6 +15102,7 @@
     },
     "/sessions/{ref}/rerun": {
       "post": {
+        "description": "Starts a new session repeating this one's original prompt, project, model and taint; 409 for App tools-only sessions.",
         "operationId": "rerun_sessions__ref__rerun_post",
         "parameters": [
           {
@@ -14876,6 +15140,7 @@
     },
     "/sessions/{ref}/review-comments": {
       "get": {
+        "description": "Draft line comments on the session's Changes diff, not yet sent to the agent.",
         "operationId": "review_comments_sessions__ref__review_comments_get",
         "parameters": [
           {
@@ -14911,6 +15176,7 @@
         "summary": "Review Comments"
       },
       "post": {
+        "description": "Saves a draft line comment on the Changes diff; nothing reaches the agent until the drafts are sent.",
         "operationId": "add_review_comment_sessions__ref__review_comments_post",
         "parameters": [
           {
@@ -14996,6 +15262,7 @@
     },
     "/sessions/{ref}/review-comments/{comment_id}": {
       "delete": {
+        "description": "Removes one draft line comment; 404 if no draft has that id.",
         "operationId": "delete_review_comment_sessions__ref__review_comments__comment_id__delete",
         "parameters": [
           {
@@ -15179,6 +15446,7 @@
     },
     "/sessions/{ref}/taint/clear": {
       "post": {
+        "description": "Clears the session's untrusted-source taint and records the clear.",
         "operationId": "clear_taint_sessions__ref__taint_clear_post",
         "parameters": [
           {
@@ -15216,6 +15484,7 @@
     },
     "/sessions/{ref}/transcript": {
       "get": {
+        "description": "The session's transcript as plain text.",
         "operationId": "get_transcript_sessions__ref__transcript_get",
         "parameters": [
           {
@@ -15255,6 +15524,7 @@
     },
     "/skills": {
       "get": {
+        "description": "List proposals and installed skills; returns empty lists with enabled false when the module is off.",
         "operationId": "skills_overview_skills_get",
         "responses": {
           "200": {
@@ -15271,6 +15541,7 @@
     },
     "/skills/enabled": {
       "get": {
+        "description": "List installed skills that are enabled; returns an empty list when the module is off.",
         "operationId": "skills_enabled_skills_enabled_get",
         "responses": {
           "200": {
@@ -15287,6 +15558,7 @@
     },
     "/skills/proposals/{pid}": {
       "delete": {
+        "description": "Delete a proposal and its draft files; 409 if it has been installed.",
         "operationId": "skill_delete_draft_skills_proposals__pid__delete",
         "parameters": [
           {
@@ -15317,6 +15589,7 @@
         "summary": "Skill Delete Draft"
       },
       "get": {
+        "description": "Return one proposal, including its body; 404 if no proposal has that id.",
         "operationId": "skill_proposal_skills_proposals__pid__get",
         "parameters": [
           {
@@ -15354,6 +15627,7 @@
     },
     "/skills/proposals/{pid}/install": {
       "post": {
+        "description": "Install a proposal whose content hash matches the reviewed bytes; 409 if the hash is stale, rejected, or fails validation.",
         "operationId": "skill_install_skills_proposals__pid__install_post",
         "parameters": [
           {
@@ -15401,6 +15675,7 @@
     },
     "/skills/proposals/{pid}/reject": {
       "post": {
+        "description": "Reject a proposal and block its content hash; an installed proposal must be uninstalled first.",
         "operationId": "skill_reject_skills_proposals__pid__reject_post",
         "parameters": [
           {
@@ -15448,6 +15723,7 @@
     },
     "/skills/proposals/{pid}/reopen": {
       "post": {
+        "description": "Reopen a rejected proposal and lift its content-hash block; it returns to validated or draft.",
         "operationId": "skill_reopen_skills_proposals__pid__reopen_post",
         "parameters": [
           {
@@ -15485,6 +15761,7 @@
     },
     "/skills/proposals/{pid}/review": {
       "post": {
+        "description": "Queue an advisory hosted review that uses reviewer quota and returns before it runs; 400 if none is configured.",
         "operationId": "skill_hosted_review_skills_proposals__pid__review_post",
         "parameters": [
           {
@@ -15522,6 +15799,7 @@
     },
     "/skills/{slug}/disable": {
       "post": {
+        "description": "Turn an installed skill off without changing its version or project allowlist.",
         "operationId": "skill_disable_skills__slug__disable_post",
         "parameters": [
           {
@@ -15559,6 +15837,7 @@
     },
     "/skills/{slug}/enable": {
       "post": {
+        "description": "Turn an installed skill on without changing its version or project allowlist.",
         "operationId": "skill_enable_skills__slug__enable_post",
         "parameters": [
           {
@@ -15596,6 +15875,7 @@
     },
     "/skills/{slug}/export": {
       "get": {
+        "description": "Return the installed skill's current version as an exportable bundle with its content hash.",
         "operationId": "skill_export_skills__slug__export_get",
         "parameters": [
           {
@@ -15633,6 +15913,7 @@
     },
     "/skills/{slug}/projects": {
       "put": {
+        "description": "Replace the projects an installed skill is allowed in; unknown project names get 400.",
         "operationId": "skill_projects_skills__slug__projects_put",
         "parameters": [
           {
@@ -15680,6 +15961,7 @@
     },
     "/skills/{slug}/rollback": {
       "post": {
+        "description": "Roll an installed skill back to its previous version; 409 when no older version exists.",
         "operationId": "skill_rollback_skills__slug__rollback_post",
         "parameters": [
           {
@@ -15717,6 +15999,7 @@
     },
     "/skills/{slug}/uninstall": {
       "post": {
+        "description": "Remove an installed skill's files and project allowlist.",
         "operationId": "skill_uninstall_skills__slug__uninstall_post",
         "parameters": [
           {
@@ -15754,6 +16037,7 @@
     },
     "/smart-approvals": {
       "get": {
+        "description": "Smart-approval status and the 20 most recent reviews.",
         "operationId": "smart_approvals_smart_approvals_get",
         "responses": {
           "200": {
@@ -15768,6 +16052,7 @@
         "summary": "Smart Approvals"
       },
       "put": {
+        "description": "Sets the smart-approval mode; any mode but off needs smart_approvals configured in harness.yaml.",
         "operationId": "update_smart_approvals_smart_approvals_put",
         "requestBody": {
           "content": {
@@ -15804,6 +16089,7 @@
     },
     "/templates": {
       "get": {
+        "description": "List saved task templates.",
         "operationId": "list_templates_templates_get",
         "responses": {
           "200": {
@@ -15818,6 +16104,7 @@
         "summary": "List Templates"
       },
       "post": {
+        "description": "Create a task template after checking its name, prompt, project, backend, and model.",
         "operationId": "create_template_templates_post",
         "requestBody": {
           "content": {
@@ -15854,6 +16141,7 @@
     },
     "/templates/{tid}": {
       "delete": {
+        "description": "Delete a saved task template.",
         "operationId": "delete_template_templates__tid__delete",
         "parameters": [
           {
@@ -15884,6 +16172,7 @@
         "summary": "Delete Template"
       },
       "put": {
+        "description": "Replace a task template's fields after the same checks as create; returns 404 if it does not exist.",
         "operationId": "update_template_templates__tid__put",
         "parameters": [
           {
@@ -15931,6 +16220,7 @@
     },
     "/v1/capabilities": {
       "get": {
+        "description": "Describe the endpoint's routes, models, features, and GPU state; a disabled endpoint returns 401.",
         "operationId": "v1_capabilities_v1_capabilities_get",
         "responses": {
           "200": {
@@ -15947,6 +16237,7 @@
     },
     "/v1/models": {
       "get": {
+        "description": "List the models the endpoint serves; 404 while the endpoint is disabled.",
         "operationId": "v1_models_v1_models_get",
         "responses": {
           "200": {
