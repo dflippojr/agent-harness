@@ -32,7 +32,7 @@ from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, ho
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
-from . import audit_context, operation_audit, namespace_audit, checkpoints, llm, member_keys, projects, secret_scan, telemetry, efficiency
+from . import audit_context, operation_audit, namespace_audit, checkpointer, checkpoints, llm, member_keys, projects, secret_scan, telemetry, efficiency
 
 log = logging.getLogger("harness.manager")
 
@@ -1177,7 +1177,10 @@ class Manager:
             git_fields = await asyncio.to_thread(cp.prepare_fork, parent, int(turn), new_sid, workspace)
             saved_context, carried = await asyncio.to_thread(cp.store(parent).load_turn, int(turn))
             if use_digest:
-                digest = await asyncio.to_thread(cp.summary, parent, int(turn))
+                # A local parent's saved context is its whole conversation, a fork's inherited start included; a hosted
+                # parent keeps no usable context, so its digest comes from its event log.
+                digest = (checkpointer.context_summary(saved_context) if parent.get("backend", "local") == "local"
+                          else await asyncio.to_thread(cp.summary, parent, int(turn)))
                 earlier = ("You are continuing earlier work from a checkpoint. The workspace is exactly as it was then. "
                            f"Summary of the earlier conversation:\n\n{digest}")
                 context = [parent["context"][0], {"role": "user", "content": f"{earlier}\n\nNew instruction:\n{prompt}"}]

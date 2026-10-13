@@ -19,6 +19,22 @@ log = logging.getLogger("harness.checkpointer")
 RECLAIM_EVERY = 10
 
 
+def _clip(parts: list[str], limit: int) -> str:
+    text = "\n".join(parts)
+    return text if len(text) <= limit else "…" + text[-limit:]
+
+
+def context_summary(context: list[dict], limit: int = 6000) -> str:
+    """`Checkpointer.summary` from a local session's saved context, which (unlike its event log) still holds what a
+    fork inherited from its own parent (#664)."""
+    parts = []
+    for message in context:
+        content = message.get("content")
+        if message.get("role") in ("user", "assistant") and isinstance(content, str) and content.strip():
+            parts.append(f"{'User' if message['role'] == 'user' else 'Agent'}: {content.strip()}")
+    return _clip(parts, limit)
+
+
 @dataclass
 class Restored:
     """A rewind whose files are restored but not yet recorded: `saved` is the checkpoint's (context, run fields);
@@ -325,5 +341,4 @@ class Checkpointer:
                 parts.append(f"User: {str(d['content']).strip()}")
             elif e["type"] == "assistant" and str(d.get("content") or "").strip():
                 parts.append(f"Agent: {str(d['content']).strip()}")
-        text = "\n".join(parts)
-        return text if len(text) <= limit else "…" + text[-limit:]
+        return _clip(parts, limit)

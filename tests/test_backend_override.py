@@ -97,6 +97,18 @@ def test_hosted_fork_to_local_keeps_the_digest_in_its_checkpoint(tmp_path):
     asyncio.run(body())
 
 
+def test_a_forks_inherited_task_reaches_another_backend(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        child = await finished(m, (await m.fork(s["id"], 1, "Continue the task."))["id"])
+        moved = m.db.get_session((await m.fork(child["id"], 1, "Continue the task.", backend="codex"))["id"])
+        digest = moved["context"][1]["content"]
+        assert "User: go" in digest            # the original task, from the child's saved context, not its event log
+        await finished(m, moved["id"])
+
+    asyncio.run(body())
+
+
 def test_rerun_on_another_backend(tmp_path):
     async def body():
         m, s = await started(tmp_path)
