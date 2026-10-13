@@ -365,6 +365,16 @@ def test_client_prefix_can_overlap_the_harness_alias(tmp_path, fake_transport):
             m.runner._taint_from_result(final, name, {})
             assert m.db.get_session(s["id"])["taint"][0]["origin"] == name
             assert taint.source_for("mcp__harness__read_file", {}) is None
+            # #644: the configured server's tool is bannered; the harness's own alias is not.
+            mcp_banner = taint.banner("MCP tool result") + "\n"
+            assert m.runner._result_banner(final, name, {}) == mcp_banner
+            assert m.runner._result_banner(final, "mcp__harness__read_file", {}) == ""
+            # Identical outputs share an artifact: any untrusted result it was stored from marks its recovery.
+            digest = "b" * 64
+            for tool in ("read_file", name):
+                m.bus.emit(s["id"], "tool_result", {"id": tool, "name": tool, "ok": True, "artifact_id": digest})
+            assert m.runner._result_banner(final, "read_artifact", {"artifact_id": digest}) == mcp_banner
+            assert m.runner._result_banner(final, "read_artifact", {"artifact_id": "c" * 64}) == ""
         finally:
             await m.stop()
     asyncio.run(body())

@@ -30,10 +30,11 @@ def is_mcp_tool(name: str) -> bool:
     return name.startswith("mcp__") and not name.startswith("mcp__harness__")
 
 
-def context_banner(name: str) -> str:
+def context_banner(name: str, *, mcp_client: bool = False) -> str:
     """The banner prefixed to this tool's result in the model's context only (#644): MCP results and session_read
-    transcripts. Stored events and artifacts keep the plain text. Web tools put theirs in the output itself."""
-    if is_mcp_tool(name):
+    transcripts. Stored events and artifacts keep the plain text. Web tools put theirs in the output itself.
+    `mcp_client` marks a configured server's tool, which may sit under mcp__harness__ (a server named harness__x)."""
+    if mcp_client or is_mcp_tool(name):
         return banner("MCP tool result") + "\n"
     if name == SESSION_READ:
         return banner("session transcript") + "\n"

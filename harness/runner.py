@@ -2705,15 +2705,20 @@ class Runner:
                       if not any(e["path"] == path for e in proposal["edits"])]
         return max(decisions, key=lambda d: rank.get(d.action, 1))
 
-    def _result_banner(self, sid: str, name: str, args: dict) -> str:
-        """The context-only banner for a result (taint.context_banner). A read_artifact range gets the banner of the
-        result its artifact was stored from, so a masked MCP result or transcript stays marked when recovered."""
+    def _context_banner(self, s: dict, name: str) -> str:
+        policy = self.policy(s) if name.startswith("mcp__") else None
+        return taint.context_banner(name, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name))
+
+    def _result_banner(self, s: dict, name: str, args: dict) -> str:
+        """The context-only banner for a result (taint.context_banner). A read_artifact range gets the banner of any
+        result its artifact was stored from (identical outputs share one), so a masked MCP result or transcript stays
+        marked when recovered."""
         if name != "read_artifact":
-            return taint.context_banner(name)
+            return self._context_banner(s, name)
         digest = args.get("artifact_id")
-        source = next((e["data"].get("name", "") for e in self.db.events(sid)
-                       if e["type"] == "tool_result" and e["data"].get("artifact_id") == digest), "")
-        return taint.context_banner(source)
+        sources = {e["data"].get("name", "") for e in self.db.events(s["id"])
+                   if e["type"] == "tool_result" and e["data"].get("artifact_id") == digest}
+        return next((b for b in sorted(self._context_banner(s, n) for n in sources) if b), "")
 
     def _taint_from_result(self, s: dict, name: str, args: dict) -> None:
         policy = self.policy(s) if name.startswith("mcp__") else None
@@ -2853,7 +2858,7 @@ class Runner:
                 output = bound_rendered(rendered, cap, raw, artifact_available=False)
         # MCP results and session_read transcripts open with a banner in the model's context only (#644). Size the
         # artifact on the bannered text, so masking recovers the plain text rather than storing the banner.
-        banner = self._result_banner(sid, name, args) if ok else ""
+        banner = self._result_banner(s, name, args) if ok else ""
         # A recovered range is already backed by its artifact; storing it again would let masking loop on it.
         if artifact_content is None:
             artifact_content = (output if ok and name != "read_artifact"
