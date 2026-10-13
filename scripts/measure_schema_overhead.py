@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 from typing import cast
 
@@ -72,8 +73,15 @@ PROFILES = [
 ]
 
 
+def load_config():
+    """The YAML config, loaded against an empty throwaway data_dir: loading applies (and may recover) the managed
+    overlay in data_dir, which must never be touched by a measurement."""
+    with tempfile.TemporaryDirectory() as data_dir:
+        return config_mod.load(data_dir=Path(data_dir))
+
+
 def main() -> None:
-    cfg = config_mod.load()
+    cfg = load_config()
     windows = sorted({m.context_tokens for m in cfg.models.values()})
     by_kit = kits(cfg)
     print("| Toolkit | Schemas | Characters | Est. tokens |")
