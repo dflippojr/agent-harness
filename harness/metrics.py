@@ -102,6 +102,11 @@ def _core_rows(db) -> dict:
             "COALESCE(SUM(json_extract(data, '$.recomputed_tokens')), 0) FROM events "
             "WHERE type = 'turn_metrics' AND json_extract(data, '$.cache_tokens') IS NOT NULL"
         ).fetchone()
+        activity = db.conn.execute(
+            "SELECT COALESCE(SUM(json_extract(data, '$.edit_mismatches')), 0), "
+            "COALESCE(SUM(json_extract(data, '$.elide_only_compactions')), 0) FROM events "
+            "WHERE type = 'turn_metrics' AND json_extract(data, '$.edit_mismatches') IS NOT NULL"
+        ).fetchone()
         approvals = db.conn.execute(
             "SELECT status, COUNT(*), COALESCE(SUM(decided_at - created_at), 0) FROM approvals GROUP BY status"
         ).fetchall()
@@ -109,8 +114,8 @@ def _core_rows(db) -> dict:
             "SELECT status, stop_reason, COUNT(*) FROM sessions WHERE status IN ('done', 'failed', 'cancelled') "
             "GROUP BY 1, 2").fetchall()
     return {"by_status": by_status, "tokens": tokens, "tools": tools, "kinds": kinds, "round_resets": round_resets,
-            "dead_end": dead_end, "correlated": correlated, "cache_row": cache_row, "approvals": approvals,
-            "finished": finished}
+            "dead_end": dead_end, "correlated": correlated, "cache_row": cache_row, "activity": activity,
+            "approvals": approvals, "finished": finished}
 
 
 def _cached_core_rows(db) -> dict:
@@ -128,6 +133,7 @@ def _core_metrics(m: Manager, out: _Out, db) -> dict:
     by_status, tokens, tools, kinds = rows["by_status"], rows["tokens"], rows["tools"], rows["kinds"]
     round_resets, dead_end, correlated = rows["round_resets"], rows["dead_end"], rows["correlated"]
     cache_row, approvals, finished = rows["cache_row"], rows["approvals"], rows["finished"]
+    edit_mismatches, elide_only = rows["activity"]
     out.metric("harness_up", "gauge", "The harness daemon is answering.", [({}, 1)])
     out.metric("harness_sessions", "gauge", "Sessions by current status.",
                [({"status": s}, by_status.get(s, 0)) for s in STATUSES])
@@ -164,6 +170,12 @@ def _core_metrics(m: Manager, out: _Out, db) -> dict:
     out.metric("harness_compaction_correlated_retries_total", "counter",
                "Dead-end retries within 5 model turns after elide, summary, or round_reset. Unit: retries.",
                [({"tier": tier}, correlated[tier]) for tier in ("elide", "summary", "round_reset")])
+    out.metric("harness_edit_mismatch_total", "counter",
+               "edit_file calls rejected because old_text did not match exactly once. Unit: calls.",
+               [({}, edit_mismatches)])
+    out.metric("harness_compaction_elide_only_total", "counter",
+               "Compaction passes that elide brought under summarize_at, so no summary call. Unit: passes.",
+               [({}, elide_only)])
     out.metric("harness_prompt_cache_tokens_total", "counter",
                "llama-server prompt tokens served from cache versus recomputed (native loop only). Unit: tokens.",
                [({"kind": "cached"}, cache_row[0]), ({"kind": "recomputed"}, cache_row[1])])

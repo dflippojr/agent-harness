@@ -2243,12 +2243,13 @@ class Runner:
         pending = (s.get("run") or {}).get("pending_turn_metrics")
         if not pending:
             return
-        retries, correlated = efficiency.turn_increments(self.db.events(sid))
+        counts = efficiency.turn_counts(self.db.events(sid))
         run = {k: v for k, v in s["run"].items() if k != "pending_turn_metrics"}
-        payload = {**pending, "dead_end_retries": retries, "compaction_correlated_retries": correlated}
+        payload = {**pending, **counts}
 
         def emit_turn_metrics() -> None:
-            self.db.update_session(sid, run=run)
+            totals = efficiency.add_activity(self.db.get_session(sid)["totals"], counts)
+            self.db.update_session(sid, run=run, totals=totals)
             self.bus.emit(sid, "turn_metrics", payload)
         self.db.for_session(sid).write(emit_turn_metrics)
 
@@ -3226,7 +3227,9 @@ class Runner:
         with telemetry.span("compaction", {"harness.tokens_before": before}) as span:
             context, _ = compaction.elide(context)
             after = compaction.estimate_tokens(context, cpt) + overhead
-            data = {"tier": "elide", "tokens_before": before, "tokens_after": after}
+            # Under summarize_at after elide alone: no summary call, so the pass is elide-only (#639).
+            data = {"tier": "elide", "tokens_before": before, "tokens_after": after,
+                    "summary_averted": after < self.cfg.summarize_at * n}
             if after >= self.cfg.summarize_at * n:
                 split = compaction.split_for_summary(context, keep_chars=int(self.cfg.keep_recent * n * cpt))
                 if split:

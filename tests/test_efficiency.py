@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from harness import compaction, efficiency
 from harness.admin import PREFIX
 from harness.api import create_app
-from harness.efficiency import canonical_args, compose, session_payload, turn_increments
+from harness.efficiency import add_activity, canonical_args, compose, session_payload, turn_counts, turn_increments
 from harness.llm import Completion, _apply_chunk
 from harness.manager import Manager
 from harness.metrics import render
@@ -259,6 +259,90 @@ def test_session_payload_nulls_without_new_fields():
     assert payload["aggregate"]["largest_tool_output_by_tool"] == {"run_shell": 50, "read_file": 12}
 
 
+def _read_artifact_args(digest):
+    return {"artifact_id": digest}
+
+
+def test_activity_counts_per_turn_and_repeats_across_turns():
+    digest, other = "a" * 64, "b" * 64
+    edit_args = {"path": "a.txt", "old_text": "one", "new_text": "two"}
+    first = [
+        _assistant(1, "r1", "read_artifact", _read_artifact_args(digest)),
+        _call("r1", "read_artifact", _read_artifact_args(digest)),
+        _result("r1", "read_artifact", True, "recovered"),
+        _assistant(2, "e1", "edit_file", edit_args),
+        _call("e1", "edit_file", edit_args),
+        _result("e1", "edit_file", False, "Error: old_text must appear exactly once, found 2 occurrences"),
+        _ev("compaction", 6, tier="elide", tokens_before=100, tokens_after=40, summary_averted=True),
+    ]
+    counts = turn_counts(first)
+    assert counts["read_artifact_calls"] == 1
+    assert counts["read_artifact_repeats"] == 0
+    assert counts["edit_mismatches"] == 1
+    assert counts["elide_only_compactions"] == 1
+    assert counts["dead_end_retries"] == 0
+
+    second = first + [_ev("turn_metrics", 10, turn=1, **counts)] + [
+        _assistant(3, "r2", "read_artifact", _read_artifact_args(digest)),
+        _call("r2", "read_artifact", _read_artifact_args(digest)),
+        _result("r2", "read_artifact", True, "recovered again"),
+        _assistant(4, "r3", "read_artifact", _read_artifact_args(other)),
+        _call("r3", "read_artifact", _read_artifact_args(other)),
+        _result("r3", "read_artifact", False, "Error: artifact not found"),
+        _assistant(5, "r4", "read_artifact", _read_artifact_args(digest)),
+        _call("r4", "read_artifact", _read_artifact_args(digest), decision="deny"),
+        _result("r4", "read_artifact", False, "Error: blocked by policy (not allowed). Don't retry this."),
+        _assistant(6, "e2", "edit_file", edit_args),
+        _call("e2", "edit_file", edit_args),
+        _result("e2", "edit_file", True, "edited"),
+        _assistant(7, "e3", "edit_file", {"path": "missing.txt", "old_text": "x", "new_text": "y"}),
+        _call("e3", "edit_file", {"path": "missing.txt", "old_text": "x", "new_text": "y"}),
+        _result("e3", "edit_file", False, "Error: no such file: missing.txt"),
+        _ev("compaction", 20, tier="elide", tokens_before=100, tokens_after=90),
+    ]
+    counts = turn_counts(second)
+    assert counts["read_artifact_calls"] == 2  # r2 and r3; the denied r4 is not a call that ran
+    assert counts["read_artifact_repeats"] == 1  # r2 re-reads the digest recovered in the first turn
+    assert counts["edit_mismatches"] == 0  # e2 succeeded; e3 failed for another reason
+    assert counts["elide_only_compactions"] == 0  # the second elide left the context above summarize_at
+
+    # A recovered digest that another turn re-reads is a repeat even after its own turn_metrics row.
+    third = second + [_ev("turn_metrics", 30, turn=2, **counts), _assistant(8, "r5", "read_artifact",
+                                                                               _read_artifact_args(digest)),
+                      _call("r5", "read_artifact", _read_artifact_args(digest)),
+                      _result("r5", "read_artifact", True, "again")]
+    counts = turn_counts(third)
+    assert counts["read_artifact_calls"] == 1
+    assert counts["read_artifact_repeats"] == 1
+
+
+def test_elide_only_needs_the_summary_averted_flag():
+    events = [_ev("compaction", 1, tier="elide", tokens_before=100, tokens_after=90),
+              _ev("compaction", 2, tier="summary", tokens_before=100, tokens_after=20, summary_averted=False)]
+    assert turn_counts(events)["elide_only_compactions"] == 0
+
+
+def test_add_activity_accumulates_into_totals_and_session_payload_sums_rows():
+    totals = add_activity({"turns": 2, "prompt_tokens": 10}, {"read_artifact_calls": 2, "edit_mismatches": 1})
+    assert totals == {"turns": 2, "prompt_tokens": 10, "read_artifact_calls": 2, "read_artifact_repeats": 0,
+                      "edit_mismatches": 1, "elide_only_compactions": 0}
+    assert add_activity(totals, {"read_artifact_calls": 1})["read_artifact_calls"] == 3
+
+    row = {"dead_end_retries": 0, "compaction_correlated_retries": efficiency.empty_correlated()}
+    assert session_payload("s1", [_ev("turn_metrics", 1, turn=1, **row)])["aggregate"]["edit_mismatches"] is None
+    events = [
+        _ev("turn_metrics", 1, turn=1, **row, read_artifact_calls=2, read_artifact_repeats=1, edit_mismatches=0,
+            elide_only_compactions=1),
+        _ev("turn_metrics", 2, turn=2, **row, read_artifact_calls=1, read_artifact_repeats=0, edit_mismatches=1,
+            elide_only_compactions=0),
+    ]
+    aggregate = session_payload("s1", events)["aggregate"]
+    assert aggregate["read_artifact_calls"] == 3
+    assert aggregate["read_artifact_repeats"] == 1
+    assert aggregate["edit_mismatches"] == 1
+    assert aggregate["elide_only_compactions"] == 1
+
+
 def test_apply_chunk_cache_from_first_progress_only():
     async def body():
         out = Completion()
@@ -355,6 +439,65 @@ def test_elide_correlates_retry_and_mask_does_not(tmp_path):
         assert 'harness_compaction_correlated_retries_total{tier="elide"} 1' in text
         await m.stop()
     asyncio.run(body())
+
+
+def test_native_loop_counts_read_artifact_edit_mismatch_and_elide_only(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.elide_at = 0       # every pass elides...
+    cfg.summarize_at = 99  # ...and that is always enough, so each one is elide-only
+    cfg.reset_at = 99
+    live = {}
+
+    def recovered_digest() -> str:
+        """The artifact of the big read_file result: the digest the model would copy from its receipt."""
+        results = events(live["m"], live["sid"], "tool_result")
+        return next(r["artifact_id"] for r in results if r["name"] == "read_file" and r["ok"])
+
+    script = Script([
+        Completion(tool_calls=[call("write_file", 0, path="big.txt", content="z" * 25000),
+                               call("write_file", 1, path="a.txt", content="one one")],
+                   prompt_tokens=40, completion_tokens=3),
+        Completion(tool_calls=[call("read_file", 2, path="big.txt"),
+                               call("edit_file", 3, path="a.txt", old_text="one", new_text="two")],
+                   prompt_tokens=50, completion_tokens=3),
+        lambda _messages: Completion(tool_calls=[call("read_artifact", 4, artifact_id=recovered_digest())],
+                                     prompt_tokens=60, completion_tokens=3),
+        lambda _messages: Completion(tool_calls=[call("read_artifact", 5, artifact_id=recovered_digest())],
+                                     prompt_tokens=70, completion_tokens=3),
+        Completion(content="done", prompt_tokens=80, completion_tokens=2),
+    ])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        await m.start()
+        sid = m.create("recover and edit")["id"]
+        live.update(m=m, sid=sid)
+        await wait_status(m, sid, "done")
+        totals = m.db.get_session(sid)["totals"]
+        assert totals["read_artifact_calls"] == 2
+        assert totals["read_artifact_repeats"] == 1
+        assert totals["edit_mismatches"] == 1
+        elides = [c for c in events(m, sid, "compaction") if c["tier"] == "elide"]
+        assert elides and all(c["summary_averted"] for c in elides)
+        assert totals["elide_only_compactions"] == len(elides)
+        rows = events(m, sid, "turn_metrics")
+        assert sum(row["read_artifact_calls"] for row in rows) == 2
+        assert sum(row["edit_mismatches"] for row in rows) == 1
+        text = render(m)
+        assert "harness_edit_mismatch_total 1" in text
+        assert f"harness_compaction_elide_only_total {len(elides)}" in text
+        aggregate = session_payload(sid, m.db.events(sid))["aggregate"]
+        assert aggregate["read_artifact_calls"] == 2
+        assert aggregate["read_artifact_repeats"] == 1
+        assert aggregate["edit_mismatches"] == 1
+        await m.stop()
+        return sid, m
+
+    sid, m = asyncio.run(body())
+    with TestClient(create_app(m)) as client:
+        session = client.get(f"{PREFIX}/sessions/{sid}").json()
+        assert session["totals"]["read_artifact_calls"] == 2
+        assert session["totals"]["edit_mismatches"] == 1
 
 
 def test_metrics_survive_manager_restart(tmp_path):
