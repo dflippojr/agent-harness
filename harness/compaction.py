@@ -198,15 +198,25 @@ def render_excerpt(messages: list[dict], max_chars: int) -> str:
     return text
 
 
-def prior_summary(message: dict, known: str = "", notes: str = "") -> str | None:
+def summary_content(summary: str, notes: str = "") -> str:
+    """The text of the message apply_summary writes for `summary` and the saved `notes`."""
+    text = f"{SUMMARY_HEADER}{summary.strip()}"
+    if notes.strip():
+        text += f"\n\n{NOTES_HEADING}\n{notes.strip()}"
+    return f"{text}\n\n{SUMMARY_CONTINUE}"
+
+
+def prior_summary(message: dict, known: str = "", notes: str = "", known_notes: str = "") -> str | None:
     """The summary in a message apply_summary wrote, without its framing or the saved notes (apply_summary adds
-    those again); None for any other message. `known` is the summary text the runner kept and `notes` the saved
-    notes: a summary may itself quote the notes heading, so only these exact texts are cut. Without a match the
-    whole body is kept: repeating stale notes is better than dropping findings."""
+    those again); None for any other message. A summary may itself quote the notes heading, so nothing is cut at a
+    heading: `known` (the summary text the runner kept, written with `known_notes`) is used only when the message
+    is exactly what apply_summary wrote for it, since a rewind can restore a different summary; otherwise only the
+    current saved `notes` are cut from the end. Without a match the whole body is kept: repeating stale notes is
+    better than dropping findings."""
     content = message.get("content") or ""
     if message.get("role") != "user" or not content.startswith(SUMMARY_HEADER):
         return None
-    if known.strip() and content.startswith(f"{SUMMARY_HEADER}{known.strip()}\n\n"):
+    if known.strip() and content == summary_content(known, known_notes):
         return known.strip()
     body = content[len(SUMMARY_HEADER):].removesuffix(f"\n\n{SUMMARY_CONTINUE}")
     if notes.strip():
@@ -215,12 +225,12 @@ def prior_summary(message: dict, known: str = "", notes: str = "") -> str | None
 
 
 def summary_request(messages: list[dict], start: int, end: int, max_chars: int, known: str = "",
-                    notes: str = "") -> list[dict]:
+                    notes: str = "", known_notes: str = "") -> list[dict]:
     """An earlier summary at the start of the span goes whole into its own prior-notes block, instead of being the
-    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`. `known`, `notes`: see
-    prior_summary."""
+    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`. `known`, `notes`,
+    `known_notes`: see prior_summary."""
     task = messages[1]["content"] if _head_len(messages) == 2 else "(not available)"
-    prior = prior_summary(messages[start], known, notes) if start < end else None
+    prior = prior_summary(messages[start], known, notes, known_notes) if start < end else None
     block = ""
     if prior is not None:
         block = PRIOR_NOTES.format(prior=prior)
@@ -234,11 +244,7 @@ def summary_request(messages: list[dict], start: int, end: int, max_chars: int, 
 
 def apply_summary(messages: list[dict], _start: int, end: int, summary: str, notes: str = "") -> list[dict]:
     head = [m for m in messages[:_head_len(messages)] if not (m.get("content") or "").startswith(SUMMARY_TAG)]
-    text = f"{SUMMARY_HEADER}{summary.strip()}"
-    if notes.strip():
-        text += f"\n\n{NOTES_HEADING}\n{notes.strip()}"
-    note = {"role": "user", "content": f"{text}\n\n{SUMMARY_CONTINUE}"}
-    return head + [note] + messages[end:]
+    return head + [{"role": "user", "content": summary_content(summary, notes)}] + messages[end:]
 
 
 def apply_round_reset(messages: list[dict], payload: dict) -> list[dict]:

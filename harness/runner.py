@@ -110,8 +110,8 @@ def new_run(carry: dict | None = None) -> dict:
     """Counters for one run. Notes and the token calibration belong to the session, so they carry over."""
     run = {"turns": 0, "tool_calls": 0, "invalid_tool_calls": 0, "tool_errors": 0, "prompt_tokens": 0,
            "completion_tokens": 0, "idle": 0, "executing": None, "started_at": time.time()}
-    for key in ("notes", "summary", "chars_per_token", "backend_session_id", "rate_limits", "state", "trace",
-                "workspace_context_applied", "repo_map_applied"):  # the prompt's workspace text waits for a reset
+    for key in ("notes", "summary", "summary_notes", "chars_per_token", "backend_session_id", "rate_limits",
+                "state", "trace", "workspace_context_applied", "repo_map_applied"):  # the prompt's workspace text waits for a reset
         if carry and key in carry:
             run[key] = carry[key]
     return run
@@ -3263,8 +3263,9 @@ class Runner:
 
             def compact() -> None:
                 if data["tier"] == "summary":  # the next summary request quotes it as the prior notes
-                    self.db.update_session(sid, context=context,
-                                           run={**self.db.get_session(sid)["run"], "summary": data["summary"]})
+                    run = {**self.db.get_session(sid)["run"], "summary": data["summary"],
+                           "summary_notes": s["run"].get("notes", "")}  # what apply_summary framed it with
+                    self.db.update_session(sid, context=context, run=run)
                 else:
                     self.db.update_session(sid, context=context)
                 self.bus.emit(sid, "compaction", data)
@@ -3297,7 +3298,8 @@ class Runner:
         await self.bus.aemit(sid, "compaction_started", {"messages": end - start, "tokens_before": before,
                                                   "context_tokens": n})
         request = compaction.summary_request(context, start, end, max_chars=int(0.45 * n * cpt),
-                                             known=s["run"].get("summary", ""), notes=s["run"].get("notes", ""))
+                                             known=s["run"].get("summary", ""), notes=s["run"].get("notes", ""),
+                                             known_notes=s["run"].get("summary_notes", ""))
         written = {"tokens": 0, "last": 0.0}
 
         async def writing(kind: str, text: str) -> None:

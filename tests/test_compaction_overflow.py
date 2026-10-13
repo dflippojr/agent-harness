@@ -176,7 +176,7 @@ def test_a_summary_quoting_the_notes_heading_is_kept_whole():
     head = [{"role": "system", "content": "sys"}, {"role": "user", "content": "task"}]
     for notes in ("", "my notes"):
         message = compaction.apply_summary(head + _turns(2, 10), 2, 6, quoting, notes=notes)[2]
-        assert compaction.prior_summary(message, known=quoting) == quoting
+        assert compaction.prior_summary(message, known=quoting, known_notes=notes) == quoting
     # Without the kept text only the exact saved notes are cut, so a quoted heading never drops what follows it.
     quoted = f"x\n\n{compaction.NOTES_HEADING}\ny"
     message = compaction.apply_summary(head, 2, 2, FIRST, notes=quoted)[2]
@@ -190,6 +190,16 @@ def test_a_summary_quoting_the_notes_heading_is_kept_whole():
     assert compaction.prior_summary(compaction.apply_summary(head, 2, 2, FIRST)[2], known="stale") == FIRST
 
 
+def test_kept_text_that_only_starts_a_restored_summary_is_not_used():
+    """A rewind can restore a longer summary that begins with the kept text and a blank line (#654 review)."""
+    head = [{"role": "system", "content": "sys"}, {"role": "user", "content": "task"}]
+    kept = "## Findings\ncount=17"
+    restored = f"{kept}\n\n## Next steps\nsum data/b.csv"
+    for notes in ("", "my notes"):
+        message = compaction.apply_summary(head, 2, 2, restored, notes=notes)[2]
+        assert compaction.prior_summary(message, known=kept, notes=notes, known_notes=notes) == restored
+
+
 def test_a_follow_up_run_keeps_the_summary_that_quotes_the_notes_heading():
     """Continuing a finished session starts a new run; the kept summary text comes with it (#654 review)."""
     from harness.runner import new_run
@@ -197,9 +207,10 @@ def test_a_follow_up_run_keeps_the_summary_that_quotes_the_notes_heading():
     quoting = f"## Findings\nthe template has\n\n{compaction.NOTES_HEADING}\n{tail}"
     head = [{"role": "system", "content": "sys"}, {"role": "user", "content": "task"}]
     messages = compaction.apply_summary(head + _turns(2, 10), 2, 6, quoting) + _turns(4, 100)
-    run = new_run(carry={"summary": quoting, "notes": ""})
-    assert run["summary"] == quoting
+    run = new_run(carry={"summary": quoting, "summary_notes": "", "notes": ""})
+    assert run["summary"] == quoting and run["summary_notes"] == ""
     for kept in (run, {}):  # {}: a session from before the carry-over still keeps the quoted heading's tail
         text = _prompt(compaction.summary_request(messages, 2, len(messages) - 2, max_chars=100000,
-                                                  known=kept.get("summary", ""), notes=kept.get("notes", "")))
+                                                  known=kept.get("summary", ""), notes=kept.get("notes", ""),
+                                                  known_notes=kept.get("summary_notes", "")))
         assert tail in text.partition("Conversation excerpt:")[0]
