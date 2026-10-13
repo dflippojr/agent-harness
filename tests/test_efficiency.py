@@ -576,3 +576,53 @@ def test_metrics_survive_manager_restart(tmp_path):
 def test_admin_catalog_lists_session_metrics():
     from harness.admin import ADMIN_PATHS
     assert "/sessions/{ref}/metrics" in ADMIN_PATHS
+
+
+def test_read_artifact_with_unparseable_arguments_is_not_a_call():
+    events = [
+        _assistant(1, "r1", "read_artifact", []),
+        _call("r1", "read_artifact", []),
+        _result("r1", "read_artifact", False, "Error: tool arguments were not a valid JSON object "
+                                              "(arguments must be a JSON object)."),
+    ]
+    assert turn_counts(events)["read_artifact_calls"] == 0  # refused before the tool ran
+
+
+def test_recovery_that_reads_like_a_rejection_still_counts():
+    digest = "a" * 64
+    events = []
+    for n, call_id in enumerate(("r1", "r2")):
+        events += [_assistant(n, call_id, "read_artifact", _read_artifact_args(digest)),
+                   _call(call_id, "read_artifact", _read_artifact_args(digest)),
+                   _result(call_id, "read_artifact", True, "Error: bad arguments for run_shell: an old log line")]
+    counts = turn_counts(events)
+    assert counts["read_artifact_calls"] == 2
+    assert counts["read_artifact_repeats"] == 1
+
+
+def test_hosted_run_end_adds_no_native_retry_metrics(tmp_path):
+    cfg = make_cfg(tmp_path)
+    script = Script([Completion(content="done", prompt_tokens=10, completion_tokens=2)])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        await m.start()
+        sid = m.create("hosted retries")["id"]
+        await wait_status(m, sid, "done")
+        before = len(events(m, sid, "turn_metrics"))
+        m.db.update_session(sid, backend="claude")
+        args = {"command": "false"}
+
+        def hosted_retries() -> None:  # a hosted Bash call that failed, then the same call again
+            for call_id in ("b1", "b2"):
+                m.runner.bus.emit(sid, "tool_call", {"id": call_id, "name": "Bash", "args": args, "decision": "allow"})
+                m.runner.bus.emit(sid, "tool_result", {"id": call_id, "name": "Bash", "ok": False, "output": "exit 1"})
+        m.db.for_session(sid).write(hosted_retries)
+        assert efficiency.turn_counts(m.db.events(sid))["dead_end_retries"] == 1
+        m.runner._emit_turn_metrics(sid, final=True)
+        assert len(events(m, sid, "turn_metrics")) == before
+        assert session_payload(sid, m.db.events(sid))["aggregate"]["dead_end_retries"] in (None, 0)
+        assert "harness_dead_end_retries_total 1" not in render(m)
+        await m.stop()
+
+    asyncio.run(body())

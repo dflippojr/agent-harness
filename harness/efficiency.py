@@ -17,6 +17,8 @@ DELEGATE_TOOLS = frozenset({"delegate"})
 ACTIVITY_KEYS = ("read_artifact_calls", "read_artifact_repeats", "edit_mismatches", "elide_only_compactions")
 EDIT_MISMATCH = "must appear exactly once"
 BAD_ARGUMENTS = "Error: bad arguments for "  # argument validation refused the call before the tool ran (runner)
+INVALID_ARGUMENTS = "Error: tool arguments were not a valid JSON object"  # unparseable arguments, never ran (runner)
+REJECTED_PREFIXES = (BAD_ARGUMENTS, INVALID_ARGUMENTS)
 
 _INTERRUPTED_MARK = "the daemon restarted while this tool call was running"
 
@@ -215,8 +217,8 @@ class RetryTracker:
     def _count_activity(self, name: str, args, data: dict) -> None:
         """A read_artifact call counts; a repeat is a successful recovery of a digest already recovered. An edit_file
         call counts as a mismatch when it failed because old_text did not match exactly once."""
-        if str(data.get("output") or "").startswith(BAD_ARGUMENTS):
-            return  # rejected before the tool ran, so not a call that ran
+        if not data.get("ok") and str(data.get("output") or "").startswith(REJECTED_PREFIXES):
+            return  # rejected before the tool ran, so not a call that ran (a recovered text may start the same way)
         if name == "read_artifact":
             self.activity["read_artifact_calls"] += 1
             if data.get("ok"):

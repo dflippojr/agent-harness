@@ -2241,8 +2241,8 @@ class Runner:
     def _emit_turn_metrics(self, sid: str, final: bool = False) -> None:
         s = self.db.get_session(sid)
         pending = (s.get("run") or {}).get("pending_turn_metrics")
-        if not pending and not final:
-            return
+        if not pending and (not final or s.get("backend", "local") != "local"):
+            return  # hosted runs have no native turns: their retry aggregate stays null
         counts = efficiency.turn_counts(self.db.events(sid))
         if not pending:
             # The run ended after a compaction or a tool result that no model turn committed (the next call failed or
@@ -2415,7 +2415,7 @@ class Runner:
                 raise ValueError("arguments must be a JSON object")
         except ValueError as e:
             self._bump(sid, "invalid_tool_calls")
-            await self._record_result(sid, call, name, f"Error: tool arguments were not a valid JSON object ({e}).",
+            await self._record_result(sid, call, name, f"{efficiency.INVALID_ARGUMENTS} ({e}).",
                                 ok=False)
             return None, None
 
