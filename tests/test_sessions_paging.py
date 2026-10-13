@@ -143,3 +143,8 @@ def test_cross_origin_web_can_read_the_page_cursor(tmp_path):
         assert response.headers["Access-Control-Allow-Origin"] == "https://web.example"
         assert response.headers["X-Next-Before"] == f"{BASE + 3!r}:s003"
         assert "X-Next-Before" in response.headers["Access-Control-Expose-Headers"]
+
+
+def test_a_zero_limit_is_an_empty_page_not_an_error(db):
+    _seed(db, 3)
+    assert db.session_page(0, owner_id="owner") == ([], None)

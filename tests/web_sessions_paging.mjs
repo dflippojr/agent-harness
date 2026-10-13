@@ -31,6 +31,7 @@ const api = async (path, { onHeaders, surface } = {}) => {
   if (path.startsWith("/sessions")) surfaces.add(surface);
   const headers = new Map();
   let body = [];
+  if (gates[path]) await gates[path];
   if (server[path]) {
     body = server[path][0];
     if (server[path][1]) headers.set("X-Next-Before", server[path][1]);
@@ -39,6 +40,7 @@ const api = async (path, { onHeaders, surface } = {}) => {
   onHeaders?.({ get: (name) => headers.get(name) ?? null });
   return body;
 };
+const gates = {};  // path -> a promise the request waits on (and fails with, if it rejects)
 let painted = [];
 let changed = null;
 let switchKids = [];
@@ -111,5 +113,25 @@ await fresh.attrs.onclick({ currentTarget: fresh });
 const next = showOlderButton();
 assert.ok(next !== fresh && !next.disabled && text(next) === "Show older", "not left disabled on Loading…");
 assert.deepEqual(rowIds(section("Recent")), ["new1", "new2"]);
+// Review on #677: an older page that fails after a machine switch does not take back a click of the new machine's list.
+let failOlder;
+gates["/sessions?before=c-wait"] = new Promise((_, reject) => { failOlder = reject; });
+const errors = console.error;
+console.error = () => {};
+server["/sessions?target=macbook"] = [[row("mac2", "done", 30, "macbook")], "c-mac"];
+server["/sessions?target=macbook&before=c-mac"] = [[row("mac1", "done", 40, "macbook")], null];
+const pending = next.attrs.onclick({ currentTarget: next });
+await sleep(10);
+switchKids.find((n) => text(n) === "MacBook").attrs.onclick();
+await sleep(20);
+failOlder(new Error("HTTP 502"));
+await pending;
+console.error = errors;
+delete gates["/sessions?before=c-wait"];
+const count = calls.length;
+const first = showOlderButton();
+await first.attrs.onclick({ currentTarget: first });
+assert.ok(calls.slice(count).includes("/sessions?target=macbook&before=c-mac"), "the MacBook list still pages");
+assert.deepEqual(rowIds(section("Recent")), ["mac2", "mac1"]);
 assert.deepEqual([...surfaces], ["admin"], "every page comes from the owner route, which holds the active sessions");
 console.log("ok");

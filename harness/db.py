@@ -880,7 +880,7 @@ class Database:
                 (*page_params, limit + 1)).fetchall()
             active = self._active_sessions(where, params) if include_active else []
         page = [_row(r) for r in rows[:limit]]
-        cursor = (page[-1]["created_at"], page[-1]["id"]) if len(rows) > limit else None
+        cursor = (page[-1]["created_at"], page[-1]["id"]) if page and len(rows) > limit else None
         return merge_newest_first(page, active), cursor
 
     @_reads

@@ -119,12 +119,14 @@ async function viewList(pane = null) {
     loadingOlder = true;
     button.disabled = true;
     button.textContent = "Loading…";
+    const asked = sessionTarget;
     olderPages++;
     try {
       await render();
     } catch (e) {
       console.error("loading older sessions failed", e);
-      olderPages--;
+      // A machine switch meanwhile reset the count to its own pages; only this machine's click is taken back.
+      if (asked === sessionTarget && olderPages > 0) olderPages--;
       button.disabled = false;
       button.textContent = "Couldn't load older sessions. Retry";
     } finally {
