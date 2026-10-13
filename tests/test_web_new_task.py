@@ -64,9 +64,12 @@ def test_tool_profile_choice_shows_for_supporting_backends_and_is_sent():
     if not node:
         pytest.skip("node isn't installed")
     tests = Path(__file__).resolve().parent
-    script = (tests / "web_new_task.mjs").read_text(encoding="utf-8").replace(
-        '{ name: "claude", available: true }',
-        '{ name: "claude", available: true, tool_profiles: ["default", "bash-only"] }') + r'''
+    script = r'''
+globalThis.newTaskFixture = {
+  backends: [{ name: "local", available: true }, { name: "claude", available: true, tool_profiles: ["default", "bash-only"] }],
+  onPost: (_path, body) => { globalThis.sent = body; return { id: "s1" }; },
+};
+''' + (tests / "web_new_task.mjs").read_text(encoding="utf-8") + r'''
 const walk = (n) => n && typeof n === "object" ? [n, ...(n.kids || []).flatMap(walk)] : [];
 const nodes = appended.flatMap(walk);
 const select = nodes.find((n) => n.attrs.id === "new-task-tool-profile");
@@ -79,14 +82,10 @@ const settings = nodes.find((n) => n.attrs.class === "new-task-settings");
 settings.querySelectorAll = () => [];
 nodes.find((n) => n.attrs.id === "new-task-prompt").value = "do it";
 select.value = "bash-only";
-const realCalls = calls.length;
 await settings.attrs.onsubmit({ preventDefault() {} });
-assert.ok(calls.length > realCalls);
+assert.equal(globalThis.sent.tool_profile, "bash-only");
+assert.equal(globalThis.sent.backend, "claude");
 '''
-    script = script.replace("const api = async (path) => {\n  calls.push(path);",
-                            "const api = async (path, opts) => {\n  calls.push(path);\n"
-                            "  if (opts?.body) { globalThis.sent = opts.body; return { id: \"s1\" }; }")
-    script += 'assert.equal(globalThis.sent.tool_profile, "bash-only");\nassert.equal(globalThis.sent.backend, "claude");\n'
     result = subprocess.run([node, "--input-type=module", "-e", script], cwd=tests,
                             capture_output=True, text=True, encoding="utf-8", timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr

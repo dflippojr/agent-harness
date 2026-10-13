@@ -12,7 +12,8 @@
 bash-only gains depended on the benchmark, so the two are never pooled. `success` is the owner's grade; without it a
 run that ended `done` counts as a success. A run with `expected_files` is a localisation failure when it changed none
 of them, the failure mode that grew under bash-only in the paper (Table 10). Changed files come from the entry's own
-`files_changed`, else the files the harness saw the run write plus, with `--workspaces`, the session workspace's diff.
+`files_changed`, else the files the harness saw the run write plus, with `--workspaces`, the session workspace's diff
+(or, in a workspace with no git repository, the files written since the session was created).
 `--db` is the main store, which holds the usage log; each session is read from the store that holds it (Web's,
 `apps/app-web/harness.sqlite3` beside it, or an App's), or from the main store before the Web store migration. Every
 database is opened read-only. `--runs` reads ready-made rows (the same fields plus `tool_profile`,
@@ -35,10 +36,14 @@ def _norm(path: str) -> str:
     return str(path).replace("\\", "/").removeprefix("./").removeprefix("/workspace/")
 
 
-def workspace_files(workspace: Path, base_commit: str | None = None) -> set[str]:
-    """Files the session's workspace changed against the commit its branch started from, as the diff viewer shows."""
-    from harness.changes import repo_diffs
+def workspace_files(workspace: Path, base_commit: str | None = None, since: float = 0.0) -> set[str]:
+    """Files the session's workspace changed: against the commit its branch started from, as the diff viewer shows,
+    or, in a workspace with no git repository, every file written since the session was created."""
+    from harness.changes import SKIP, find_repos, repo_diffs
     from harness.review_comments import parse_diff
+    if not find_repos(workspace.resolve()):
+        return {p.relative_to(workspace).as_posix() for p in workspace.rglob("*")
+                if p.is_file() and not SKIP & set(p.relative_to(workspace).parts) and p.stat().st_mtime >= since}
     out: set[str] = set()
     for repo in repo_diffs(workspace, base_commit or None):
         prefix = "" if repo["path"] == "." else repo["path"] + "/"
@@ -60,15 +65,16 @@ def session_stores(db_path: Path) -> list[Path]:
     return [p for p in (web, *others) if p.is_file()] + [Path(db_path)]
 
 
-def _find_session(stores: list[sqlite3.Connection], sid: str) -> sqlite3.Row | None:
-    query = "SELECT tool_profile, backend, model, status, run, workspace, base_commit FROM sessions WHERE id = ?"
+def _find_session(stores: list[sqlite3.Connection], sid: str) -> dict | None:
+    """The session's row from the first store that holds it. An App store left dormant since the upgrade has not run
+    the tool profile migration yet: its sessions read back `default`, as the migration would make them."""
     for conn in stores:
         try:
-            row = conn.execute(query, (sid,)).fetchone()
+            row = conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
         except sqlite3.OperationalError:  # a store with no sessions table
             continue
         if row is not None:
-            return row
+            return {"tool_profile": "default", "base_commit": "", **dict(row)}
     return None
 
 
@@ -91,7 +97,7 @@ def rows_from_db(db_path: Path, manifest: dict, workspaces: bool = False) -> lis
             if changed is None:
                 changed = set(run.get("files_touched") or [])
                 if workspaces and s["workspace"] and Path(s["workspace"]).is_dir():
-                    changed |= workspace_files(Path(s["workspace"]), s["base_commit"])
+                    changed |= workspace_files(Path(s["workspace"]), s["base_commit"], s["created_at"])
             rows.append({**entry, "tool_profile": s["tool_profile"], "backend": s["backend"], "model": s["model"],
                          "status": s["status"], "prompt_tokens": usage["p"], "completion_tokens": usage["c"],
                          "cost_usd": usage["cost"], "files_changed": sorted(changed)})

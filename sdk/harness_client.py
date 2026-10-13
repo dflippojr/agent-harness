@@ -128,6 +128,8 @@ class BackendStatus(TypedDict, total=False):
     notice: str
     billing_warning: str
     usage_by_source: dict[str, dict]
+    usage_by_profile: dict[str, dict]  # the week's usage per tool profile (#638)
+    tool_profiles: list[str]  # what create_session's tool_profile accepts on this backend
     provider_policy: dict | None
 
 
@@ -156,6 +158,7 @@ class Session(TypedDict, total=False):
     last_event_seq: int
     app_tools: list[str]
     metadata: dict
+    tool_profile: str
 
 
 class Event(TypedDict, total=False):

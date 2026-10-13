@@ -622,6 +622,8 @@ class Manager:
 
     def member_keys_status(self, user_id: str) -> dict:
         status = self.member_keys.status(user_id)
+        for key in status["keys"]:  # what the new-task form may offer on this key (#638)
+            key["tool_profiles"] = list(tool_profiles.supported(key["backend"], self.cfg.backends.get(key["backend"])))
         from .backend_state import billing_warning
         status["billing_warning"] = billing_warning(None, using_api_key=True)
         status["usage"] = {b: self._member_usage(user_id, b) for b in member_keys.BACKENDS}

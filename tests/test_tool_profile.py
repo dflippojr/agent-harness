@@ -288,3 +288,41 @@ def test_comparison_reads_sessions_from_the_web_store_and_usage_from_the_main_st
     assert compare.main(["--db", str(tmp_path / "harness.sqlite3"), "--tasks", str(tasks), "--json"]) == 0
     [shell, _] = json.loads(capsys.readouterr().out)
     assert (shell["tool_profile"], shell["prompt_tokens"], shell["cost_usd"]) == ("bash-only", 700, 0.35)
+
+
+def test_comparison_reads_a_dormant_app_store_that_has_not_migrated_yet(tmp_path, capsys):
+    Database(tmp_path / "harness.sqlite3").close()
+    store = tmp_path / "apps" / "app-abc" / "harness.sqlite3"
+    app = Database(store)
+    app.insert_session({"id": "s-app", "title": "t", "project": "p", "target": "tower", "model": "m",
+                        "backend": "claude", "status": "done", "workspace": "", "created_at": 1.0, "updated_at": 1.0,
+                        "context": [], "run": {}})
+    app.close()
+    import sqlite3
+    conn = sqlite3.connect(store)
+    conn.execute("ALTER TABLE sessions DROP COLUMN tool_profile")  # as before the 0059 migration ran
+    conn.commit()
+    conn.close()
+    tasks = tmp_path / "tasks.json"
+    tasks.write_text(json.dumps({"runs": [{"session_id": "s-app", "task": "logs", "task_type": "shell"}]}),
+                     encoding="utf-8")
+    assert compare.main(["--db", str(tmp_path / "harness.sqlite3"), "--tasks", str(tasks), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["tool_profile"] == "default"
+
+
+def test_workspace_files_without_git_are_the_files_written_since_the_session_began(tmp_path):
+    import os
+    (tmp_path / "old.txt").write_text("before", encoding="utf-8")
+    os.utime(tmp_path / "old.txt", (1.0, 1.0))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "new.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "new.pyc").write_bytes(b"")
+    assert compare.workspace_files(tmp_path, "", since=100.0) == {"src/new.py"}
+
+
+def test_member_keys_say_which_profiles_each_backend_takes(tmp_path):
+    m, _ = _manager(tmp_path)
+    m.cfg.backends["codex"].tool_mode = "split"
+    keys = {k["backend"]: k["tool_profiles"] for k in m.member_keys_status("u1")["keys"]}
+    assert keys == {"claude": ["default", "bash-only"], "codex": ["default", "bash-only"]}

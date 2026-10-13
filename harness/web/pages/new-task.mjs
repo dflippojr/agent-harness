@@ -127,7 +127,7 @@ async function memberBackends() {
   try {
     const st = await api("/me/api-keys");
     return [local, ...st.keys.filter((k) => k.configured).map((k) => ({
-      name: k.backend, available: true, model: "", billing_warning: st.billing_warning }))];
+      name: k.backend, available: true, model: "", billing_warning: st.billing_warning, tool_profiles: k.tool_profiles }))];
   } catch { return [local]; }
 }
 
