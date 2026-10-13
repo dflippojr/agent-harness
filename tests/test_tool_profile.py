@@ -339,3 +339,13 @@ def test_idempotency_digest_is_unchanged_for_the_default_profile():
     assert record is not None and record["request_digest"] == idempotency.request_digest(before)
     bash = _idempotency_record(key, CreateAppSession(prompt="hi", backend="claude", tool_profile="bash-only"), "k1")
     assert bash is not None and bash["request_digest"] != record["request_digest"]
+
+
+def test_workspace_files_without_a_base_include_commits_the_run_made_in_its_own_repository(tmp_path):
+    import subprocess
+    git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "-C", str(tmp_path)]
+    subprocess.run(git[:5] + ["init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "app.py").write_text("x = 1", encoding="utf-8")
+    subprocess.run(git + ["add", "app.py"], check=True)
+    subprocess.run(git + ["commit", "-qm", "made by the run"], check=True)
+    assert compare.workspace_files(tmp_path, "", since=0.0) == {"app.py"}
