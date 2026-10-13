@@ -526,7 +526,8 @@ class Runner:
         except (ToolError, OSError, UnicodeError) as e:
             return f"Error: {e}", False
         self._taint_from_result(s, name, args)  # MCP results are untrusted content like the native tools' (#262)
-        return (output.text if isinstance(output, ToolOutput) else str(output)), True
+        # The hosted model gets the native loop's context-only banner (#653); _record_cli_tool_result drops it again.
+        return self._context_banner(s, name) + (output.text if isinstance(output, ToolOutput) else str(output)), True
 
     def _shell_within_budget(self, s: dict, args: dict) -> dict:
         """`run_shell` args whose timeout does not outlast a member's or an App's run budget (#524)."""
@@ -1645,6 +1646,9 @@ class Runner:
 
     def _record_cli_tool_result(self, sid: str, call_id: str, name: str, ok: bool, output: str,
                                 seconds: float = 0) -> None:
+        bare = mcp_harness_tool(name)
+        if ok and bare:  # mcp_call's banner is for the model only: the event keeps the plain result (#653)
+            output = output.removeprefix(self._context_banner(self.db.get_session(sid), bare))
 
         def record_cli_tool_result() -> None:
             run = self.db.get_session(sid)["run"]
