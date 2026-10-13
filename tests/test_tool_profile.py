@@ -349,3 +349,24 @@ def test_workspace_files_without_a_base_include_commits_the_run_made_in_its_own_
     subprocess.run(git + ["add", "app.py"], check=True)
     subprocess.run(git + ["commit", "-qm", "made by the run"], check=True)
     assert compare.workspace_files(tmp_path, "", since=0.0) == {"app.py"}
+
+
+def test_workspace_files_skip_untouched_files_of_a_repository_cloned_during_the_run(tmp_path):
+    import os
+    import subprocess
+    import time
+    origin = tmp_path / "origin"
+    git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=t"]
+    subprocess.run(git + ["init", "-q", str(origin)], check=True)
+    (origin / "expected.py").write_text("x = 1", encoding="utf-8")
+    (origin / "other.py").write_text("y = 1", encoding="utf-8")
+    subprocess.run(git + ["-C", str(origin), "add", "."], check=True)
+    old = {**os.environ, "GIT_COMMITTER_DATE": "2020-01-01T00:00:00Z", "GIT_AUTHOR_DATE": "2020-01-01T00:00:00Z"}
+    subprocess.run(git + ["-C", str(origin), "commit", "-qm", "upstream"], check=True, env=old)
+    started = time.time() - 1  # the session began long after the upstream commit
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    subprocess.run(git + ["clone", "-q", str(origin), str(ws / "repo")], check=True)
+    (ws / "repo" / "other.py").write_text("y = 2", encoding="utf-8")
+    (ws / "notes.txt").write_text("outside git", encoding="utf-8")
+    assert compare.workspace_files(ws, "", since=started) == {"repo/other.py", "notes.txt"}

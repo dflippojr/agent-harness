@@ -13,7 +13,7 @@ bash-only gains depended on the benchmark, so the two are never pooled. `success
 run that ended `done` counts as a success. A run with `expected_files` is a localisation failure when it changed none
 of them, the failure mode that grew under bash-only in the paper (Table 10). Changed files come from the entry's own
 `files_changed`, else the files the harness saw the run write plus, with `--workspaces`, the session workspace's diff
-(plus, when the session has no recorded base commit, the files written since it was created).
+(outside any git repository, the files written since the session was created).
 `--db` is the main store, which holds the usage log; each session is read from the store that holds it (Web's,
 `apps/app-web/harness.sqlite3` beside it, or an App's), or from the main store before the Web store migration. Every
 database is opened read-only. `--runs` reads ready-made rows (the same fields plus `tool_profile`,
@@ -37,20 +37,37 @@ def _norm(path: str) -> str:
     return str(path).replace("\\", "/").removeprefix("./").removeprefix("/workspace/")
 
 
+def _repo_files(repo: Path, workspace: Path, base_commit: str | None, since: float) -> set[str]:
+    """Paths one repository changed, relative to it: tracked changes against its base plus untracked files. A
+    repository the run created itself (its first commit is newer than the session) is compared with the empty tree,
+    so the commits it made count; a cloned one with its upstream, as the diff viewer does."""
+    from harness.changes import EMPTY_TREE, _base_commit
+    from harness.projects import git
+
+    def run(*args: str) -> list[str]:
+        return git(repo, *args, timeout=60, check=False).out.splitlines()
+    first = run("log", "--reverse", "--format=%ct", "HEAD")[:1]
+    created = not base_commit and bool(first) and float(first[0]) >= since
+    base = EMPTY_TREE if created else _base_commit(repo, workspace, base_commit)
+    tracked = run("diff", "--name-only", "--no-renames", base) if base else []
+    return set(tracked + run("ls-files", "--others", "--exclude-standard"))
+
+
 def workspace_files(workspace: Path, base_commit: str | None = None, since: float = 0.0) -> set[str]:
-    """Files the session's workspace changed: against the commit its branch started from, as the diff viewer shows.
-    Without a recorded base (a scratch workspace, or a repository the run created itself, whose commits the diff
-    against HEAD would hide) it adds every file written since the session was created."""
-    from harness.changes import SKIP, find_repos, repo_diffs
-    from harness.review_comments import parse_diff
+    """Files the session's workspace changed. Inside a git repository: its diff (`_repo_files`). Outside any
+    repository there is nothing to diff against, so every file written since the session was created counts."""
+    from harness.changes import SKIP, find_repos
+    root = workspace.resolve()
+    repos = find_repos(root)
     out: set[str] = set()
-    if find_repos(workspace.resolve()):
-        for repo in repo_diffs(workspace, base_commit or None):
-            prefix = "" if repo["path"] == "." else repo["path"] + "/"
-            out |= {prefix + f["name"] for f in parse_diff(repo["diff"])}
-    if not base_commit:
-        out |= {p.relative_to(workspace).as_posix() for p in workspace.rglob("*")
-                if p.is_file() and not SKIP & set(p.relative_to(workspace).parts) and p.stat().st_mtime >= since}
+    for repo in repos:
+        prefix = "" if repo == root else repo.relative_to(root).as_posix() + "/"
+        out |= {prefix + name for name in _repo_files(repo, root, base_commit, since)}
+    for path in root.rglob("*"):
+        rel = path.relative_to(root)
+        if (path.is_file() and not SKIP & set(rel.parts) and path.stat().st_mtime >= since
+                and not any(path.is_relative_to(repo) for repo in repos)):
+            out.add(rel.as_posix())
     return out
 
 
