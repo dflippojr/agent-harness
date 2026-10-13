@@ -48,9 +48,10 @@ async function viewList(pane = null) {
     showListAction("#/new", "+ New task");
   }
 
-  // The first page always holds every active session (#663); "Show older" appends finished ones by the server's cursor.
+  // The first page always holds every active session (#663); "Show older" adds the next page by the server's cursor.
+  // Every load reads all `olderPages` again from the top, so no shown row keeps an old status or falls between pages.
   let sessions = [];
-  let older = [];
+  let olderPages = 0;
   let nextBefore = null;
   let targets = [];
   const sessionsPath = (before) => {
@@ -61,12 +62,25 @@ async function viewList(pane = null) {
     return qs ? `/sessions?${qs}` : "/sessions";
   };
   // The owner route pages and filters by machine; a member's App-surface list does neither, so filter here too.
-  const shown = () => {
-    const ids = new Set(sessions.map((s) => s.id));
-    return [...sessions, ...older.filter((s) => !ids.has(s.id))]
-      .filter((s) => sessionTarget === "all" || s.target === sessionTarget);
-  };
+  const shown = () => sessions.filter((s) => sessionTarget === "all" || s.target === sessionTarget);
   const listOptions = (onNext) => ({ surface: ownerSurface(), onHeaders: (headers) => onNext(headers.get("X-Next-Before")) });
+  // The first page and `olderPages` more, each row once (a later page can repeat an active row of the first).
+  const loadSessions = async () => {
+    const byId = new Map();
+    const read = async (before) => {
+      let next = null;
+      const page = await api(sessionsPath(before), listOptions((cursor) => { next = cursor; }));
+      for (const s of page) if (!byId.has(s.id)) byId.set(s.id, s);
+      return next;
+    };
+    let next = await read(null);
+    let pages = 0;
+    while (next && pages < olderPages) {
+      next = await read(next);
+      pages++;
+    }
+    return { rows: [...byId.values()], next, pages };
+  };
   const targetName = (target) => target === "tower" ? "Tower" : TARGET_LABEL[target] || target;
   const sessionCardKey = (s) => [
     s.id, s.title, s.status, s.updated_at, s.chat_summary, s.queue_position, s.review, s.job_status,
@@ -105,16 +119,12 @@ async function viewList(pane = null) {
     loadingOlder = true;
     button.disabled = true;
     button.textContent = "Loading…";
-    const asked = sessionTarget;
-    let next = null;
+    olderPages++;
     try {
-      const page = await api(sessionsPath(nextBefore), listOptions((cursor) => { next = cursor; }));
-      if (gone || asked !== sessionTarget) return;  // left, or the machine changed meanwhile
-      older = [...older, ...page];
-      nextBefore = next;
-      renderSessions();
+      await render();
     } catch (e) {
       console.error("loading older sessions failed", e);
+      olderPages--;
       button.disabled = false;
       button.textContent = "Couldn't load older sessions. Retry";
     } finally {
@@ -131,7 +141,7 @@ async function viewList(pane = null) {
     }
     const groups = groupSessions(visible);
     // The group is part of the key: a failure that ages out of Needs you moves without any field changing.
-    const keys = groups.flatMap((g) => g.sessions.map((s) => `${g.key}\0${sessionCardKey(s)}`)).join("\n") + (nextBefore ? "\nmore" : "");
+    const keys = groups.flatMap((g) => g.sessions.map((s) => `${g.key}\0${sessionCardKey(s)}`)).join("\n") + `\n${olderPages}\0${nextBefore || ""}`;
     if (list.dataset.keys === keys && list.querySelector("a.agent-row")) return;
     list.dataset.keys = keys;
     fill(list, groups.map((g) => h("section", { class: `agent-group ${g.key}`, "aria-label": g.label },
@@ -152,7 +162,7 @@ async function viewList(pane = null) {
         renderTargetSwitch();
         // The server filters by machine (#663), so the pages loaded so far belong to the old choice.
         sessions = [];
-        older = [];
+        olderPages = 0;
         nextBefore = null;
         void refreshNow();
       },
@@ -202,9 +212,7 @@ async function viewList(pane = null) {
   const render = async () => {
     const run = ++listRun;
     const asked = sessionTarget;
-    let next = null;
-    const [freshSessions, queue, gpu, projects] = await Promise.all([
-      api(sessionsPath(), listOptions((cursor) => { next = cursor; })), api("/queue"),
+    const [loaded, queue, gpu, projects] = await Promise.all([loadSessions(), api("/queue"),
       isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
     if (gone || run !== listRun) return;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
@@ -213,8 +221,9 @@ async function viewList(pane = null) {
       sessionTarget = "all";
       return render();
     }
-    sessions = freshSessions;
-    if (!older.length) nextBefore = next;  // once older pages show, the cursor goes on from the last of them
+    sessions = loaded.rows;
+    nextBefore = loaded.next;
+    olderPages = Math.min(olderPages, loaded.pages);  // fewer pages than before: the list got shorter
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
     fill(queueNote,
