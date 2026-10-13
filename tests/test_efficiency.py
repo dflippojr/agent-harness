@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi.testclient import TestClient
 
@@ -241,6 +242,7 @@ def test_session_payload_nulls_without_new_fields():
         "elide": None, "summary": None, "round_reset": None}
     assert payload["aggregate"]["largest_tool_output_chars"] is None
     assert payload["aggregate"]["largest_tool_output_by_tool"] == {}
+    assert payload["aggregate"]["schema_tokens"] is None
 
     events.append(_result("b", "run_shell", False, "x" * 50, output_chars=50))
     events.append(_result("c", "read_file", True, "y" * 12, output_chars=12))
@@ -248,10 +250,13 @@ def test_session_payload_nulls_without_new_fields():
                       composition={"system_state": 10, "tool_outputs": 20, "file_contents": 5,
                                    "reasoning_other": 5},
                       estimated=False, cache_tokens=8, recomputed_tokens=32,
-                      dead_end_retries=2,
+                      schema_tokens=30, schema_count=4, dead_end_retries=2,
                       compaction_correlated_retries={"elide": 1, "summary": 0, "round_reset": 0}))
     payload = session_payload("s1", events)
     assert payload["turns"][0]["cache_tokens"] == 8
+    assert payload["turns"][0]["schema_tokens"] == 30
+    assert payload["turns"][0]["schema_count"] == 4
+    assert payload["aggregate"]["schema_tokens"] == 30
     assert payload["turns"][0]["estimated"] is False
     assert payload["aggregate"]["dead_end_retries"] == 2
     assert payload["aggregate"]["compaction_correlated_retries"]["elide"] == 1
@@ -275,6 +280,38 @@ def test_apply_chunk_cache_from_first_progress_only():
         out = Completion()
         await _apply_chunk({"prompt_progress": {"processed": 50, "total": 100}}, out, {}, None, None)
         assert out.cache_tokens is None  # omitted cache is -1, never the processed fallback
+    asyncio.run(body())
+
+
+def test_schema_overhead_counts_schemas_and_estimates_tokens():
+    tools = [{"type": "function", "function": {"name": "a" * 40}}, {"type": "function", "function": {"name": "b"}}]
+    chars = len(json.dumps(tools))
+    assert efficiency.schema_overhead(tools, 3.0) == {"schema_tokens": int(chars / 3.0), "schema_count": 2}
+    assert efficiency.schema_overhead(tools, 0) == {"schema_tokens": int(chars / 3.0), "schema_count": 2}
+    assert efficiency.schema_overhead([], 2.5) == {"schema_tokens": 0, "schema_count": 0}
+
+
+def test_native_loop_records_schema_overhead_per_turn_and_in_totals(tmp_path):
+    script = Script([
+        Completion(tool_calls=[call("list_files", 0)], prompt_tokens=50, completion_tokens=3),
+        Completion(content="done", prompt_tokens=60, completion_tokens=2),
+    ])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        await m.start()
+        s = await wait_status(m, m.create("list")["id"], "done")
+        expected = efficiency.schema_overhead(m.runner.tool_schemas(s, m.runner.workspace(s)), 3.0)
+        rows = events(m, s["id"], "turn_metrics")
+        assert len(rows) == 2
+        assert expected["schema_count"] >= 12 and expected["schema_tokens"] > 0
+        for row in rows:
+            assert row["schema_count"] == expected["schema_count"]
+            assert row["schema_tokens"] == expected["schema_tokens"]
+        assert s["totals"]["schema_tokens"] == 2 * expected["schema_tokens"]
+        payload = session_payload(s["id"], m.db.events(s["id"]))
+        assert payload["aggregate"]["schema_tokens"] == 2 * expected["schema_tokens"]
+        await m.stop()
     asyncio.run(body())
 
 

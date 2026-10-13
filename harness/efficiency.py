@@ -78,6 +78,11 @@ def _is_system_state(message: dict) -> bool:
     return content.startswith(compaction.STATE_TAG) or content.startswith(compaction.SUMMARY_TAG)
 
 
+def schema_overhead(tools: list[dict], chars_per_token: float) -> dict:
+    """Per-turn tool-schema overhead (#645): the schemas are part of every prompt but not of the context list."""
+    return {"schema_tokens": int(len(json.dumps(tools)) / (chars_per_token or 3.0)), "schema_count": len(tools)}
+
+
 def compose(context: list[dict], schema_chars: int, chars_per_token: float,
             prompt_tokens: int | None) -> dict:
     """Estimate prompt composition on the context actually sent (after `_maybe_compact`).
@@ -236,6 +241,7 @@ def _max_output_chars(events: list[dict]) -> tuple[int | None, dict[str, int]]:
 def session_payload(session_id: str, events: list[dict]) -> dict:
     turns = []
     retries = None
+    schema_tokens = None
     correlated = None
     for event in events:
         if event["type"] != "turn_metrics":
@@ -250,7 +256,11 @@ def session_payload(session_id: str, events: list[dict]) -> dict:
             "estimated": data.get("estimated"),
             "cache_tokens": data.get("cache_tokens"),
             "recomputed_tokens": data.get("recomputed_tokens"),
+            "schema_tokens": data.get("schema_tokens"),
+            "schema_count": data.get("schema_count"),
         })
+        if data.get("schema_tokens") is not None:
+            schema_tokens = (schema_tokens or 0) + int(data["schema_tokens"])
         if "dead_end_retries" in data:
             retries = (retries or 0) + int(data.get("dead_end_retries") or 0)
             row = data.get("compaction_correlated_retries") or {}
@@ -269,5 +279,6 @@ def session_payload(session_id: str, events: list[dict]) -> dict:
             "compaction_correlated_retries": correlated,
             "largest_tool_output_chars": largest,
             "largest_tool_output_by_tool": by_tool,
+            "schema_tokens": schema_tokens,
         },
     }

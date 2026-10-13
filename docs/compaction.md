@@ -129,6 +129,57 @@ when a proposal for it is applied. Delegate tokens are added to session totals
 don't count against the run's completion budget. Only local-model agent
 sessions on the tower with a workspace are offered these tools.
 
+## Tool-schema overhead
+
+Every model call sends the session's full tool list, and those schemas take
+window space that is not in the context list. Each `turn_metrics` event
+records `schema_count` and `schema_tokens` (the schemas' JSON characters
+divided by the session's `chars_per_token`, the same estimate compaction uses
+for its thresholds); session totals add `schema_tokens` per turn, and the
+session metrics API sums it in `aggregate.schema_tokens`.
+
+Measured with `python scripts/measure_schema_overhead.py` on 2026-10-12 against
+the checked-in config (no model, chars per token 3.0, 64K window). Real token
+counts are usually a little lower, since JSON tokenizes at more than three
+characters per token.
+
+| Toolkit | Schemas | Est. tokens |
+| --- | ---: | ---: |
+| Core (`list_files` to `finish`, including `verify` and `update_notes`) | 12 | 1850 |
+| `read_artifact` | 1 | 172 |
+| `delegate_edit` and `apply_delegated_edit` | 2 | 510 |
+| Web | 2 | 360 |
+| Memory library (writes on) | 5 | 792 |
+| Session search | 2 | 379 |
+| Homelab | 6 | 878 |
+| Images | 1 | 442 |
+| Skills | 1 | 438 |
+| Remote control | 1 | 226 |
+
+| Profile | Schemas | Est. tokens | Share of 64K |
+| --- | ---: | ---: | ---: |
+| Chat session (web) | 2 | 360 | 0.5% |
+| Hosted split mode, harness MCP tools (+ web, session search) | 10 | 1731 | 2.6% |
+| Default tower agent (core, `read_artifact`, delegate pair) | 15 | 2533 | 3.9% |
+| + web, session search | 19 | 3272 | 5.0% |
+| + web, session search, memory (writes on) | 24 | 4065 | 6.2% |
+| Every built-in toolkit | 33 | 6050 | 9.2% |
+
+Hosted CLIs (Claude Code, Codex) add their own built-in tools and defer them
+themselves; the hosted row counts only what the harness serves over MCP, and
+their windows are larger than 64K. MCP client catalogues (up to 128 tools per
+session) depend on the configured servers and are not in the table; a
+session's `turn_metrics` show their real cost.
+
+Deferred loading (#645 phase 2) was not built. The schemas it would defer
+(`update_notes` 92 tokens, `verify` without checks 155, memory writes 395,
+homelab 878) save 0.4% of the window in the default profile and at most 2.3%
+with every toolkit on, before the cost of a `tool_search` schema. Local
+sessions also keep the tool list in llama.cpp's cached prompt prefix, so it
+costs window space but is not recomputed each turn, while adding a deferred
+schema mid-run would change that prefix. Revisit if a session's
+`schema_tokens` show a large MCP catalogue.
+
 ## Research backlog
 
 [Context Language Models](context-language-models-research.md) is a concept to investigate (2026-10-01); the note describes a proposed comparison with the current implementation.
