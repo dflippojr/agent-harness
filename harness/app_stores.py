@@ -61,8 +61,8 @@ _BY_SESSION = frozenset({
     "get_session", "get_session_for_user", "session_brief", "add_checkpoint", "checkpoints",
     "show_checkpoints_through", "delete_checkpoints", "put_artifact", "read_artifact", "full_artifact",
     "add_review_comment", "list_review_comments", "add_secret_dismissal", "secret_dismissals",
-    "delete_review_comments", "insert_event", "events", "pushed_heads", "last_event_seq", "approval_for_call",
-    "approvals", "insert_app_tool_call", "get_app_tool_call", "app_tool_calls", "finish_app_tool_call",
+    "delete_review_comments", "insert_event", "events", "pushed_heads", "last_event_seq", "session_card_bits",
+    "approval_for_call", "approvals", "insert_app_tool_call", "get_app_tool_call", "app_tool_calls", "finish_app_tool_call",
 })
 # The by-session calls above that write. An erased App session's id leaves the index, so they would land in the main
 # store (the owner's): they are refused for it instead.

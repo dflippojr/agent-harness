@@ -1143,6 +1143,29 @@ class Database:
         return [_row(r) for r in rows]
 
     @_reads
+    def session_card_bits(self, sid: str, answer_chars: int = 400) -> dict:
+        """What a session-list card needs (issue #667): the answer's first `answer_chars` characters and its full
+        length, and the contents of the session's user messages, oldest first. It reads no other event's data.
+        SQLite's text functions stop at a NUL character, so a value holding one is read whole and cut here instead."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT substr(answer, 1, ?) AS answer, length(answer) AS answer_length, "
+                "CASE WHEN instr(CAST(answer AS BLOB), x'00') THEN answer END AS whole FROM sessions WHERE id = ?",
+                (answer_chars, sid)).fetchone()
+            rows = self.conn.execute(
+                "SELECT json_extract(data, '$.content') AS content, "
+                "CASE WHEN instr(data, '\\u0000') THEN data END AS whole FROM events "
+                "WHERE session_id = ? AND type = 'user_message' ORDER BY seq", (sid,)).fetchall()
+        if row is None:
+            answer, length = "", 0
+        elif row["whole"] is not None:
+            answer, length = row["whole"][:answer_chars], len(row["whole"])
+        else:
+            answer, length = row["answer"] or "", row["answer_length"] or 0
+        asks = [json.loads(r["whole"]).get("content") if r["whole"] is not None else r["content"] for r in rows]
+        return {"answer": answer, "answer_length": length, "asks": [a if isinstance(a, str) else "" for a in asks]}
+
+    @_reads
     def last_event_seq(self, sid: str) -> int:
         with self.lock:
             row = self.conn.execute("SELECT MAX(seq) AS seq FROM events WHERE session_id = ?", (sid,)).fetchone()

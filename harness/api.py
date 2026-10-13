@@ -687,7 +687,7 @@ async def queue(request: Request):
 @api_router.get("/sessions", response_model=list[WebSessionResponse], response_model_exclude_unset=True)
 async def list_sessions(request: Request, limit: int = 50):
     m = mgr(request)
-    return [m.list_summary(s) for s in m.db.list_sessions(limit, owner_id=owner_id(request))]
+    return await m.list_summaries(m.db.list_sessions(limit, owner_id=owner_id(request)))
 
 
 @api_router.post("/sessions", status_code=201, response_model=WebSessionResponse, response_model_exclude_unset=True)
