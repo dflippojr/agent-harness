@@ -553,6 +553,11 @@ async function viewSession(sid, tab, focusApproval) {
           `Replaced old tool outputs with recoverable receipts (~${fmtTokens(d.tokens_saved)} tokens saved)`));
         return;
       }
+      if (d.tier === "trim") {
+        add(h("p", { class: "note" },
+          `Removed repeated, stale and noisy tool output (~${fmtTokens(d.tokens_saved)} tokens saved)`));
+        return;
+      }
       if (d.totals) totals = d.totals;
       if (d.tokens_after) ctxUsed = d.tokens_after;
       renderHead();

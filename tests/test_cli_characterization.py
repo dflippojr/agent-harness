@@ -508,6 +508,12 @@ def test_print_event_mask_compaction(capsys):
     assert out.strip() == "Replaced old tool outputs with recoverable receipts (~4200 tokens saved)"
 
 
+def test_print_event_trim_compaction(capsys):
+    cli._print_event("compaction", {"tier": "trim", "tokens_saved": 900, "characters_saved": 2700}, args_ns())
+    out = plain(capsys.readouterr().out)
+    assert out.strip() == "Removed repeated, stale and noisy tool output (~900 tokens saved)"
+
+
 def test_print_event_elide_compaction_unchanged(capsys):
     cli._print_event("compaction", {"tier": "elide", "tokens_before": 100, "tokens_after": 50}, args_ns())
     out = plain(capsys.readouterr().out)

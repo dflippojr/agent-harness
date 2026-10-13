@@ -191,6 +191,13 @@ compaction:
   summarize_at: 0.65   # still above this after eliding: summarize older turns
   keep_recent: 0.20    # fraction of context kept verbatim after a summary
   state_max_chars: 8000  # cap on serialized update_state object
+  trim:                  # free rules on older tool results, before elide and summary (#637, docs/compaction.md)
+    strip_noise: true      # ANSI escapes, carriage-return overwrites, runs of progress-bar lines
+    head_tail: true        # long run_shell/verify/git_clone output keeps its first and last lines
+    head_lines: 40
+    tail_lines: 60
+    superseded_reads: true # drop a read_file result once the file is read again (same arguments) or written
+    dedupe: true           # a repeated identical result becomes a "same as above" note
 
 # Experiment (#264, docs/repo-map-study.md): ranked repository map appended to local-model system prompts, refreshed
 # only on a round reset. Off by default; needs `pip install -r requirements-repomap.txt`.

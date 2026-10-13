@@ -1,5 +1,6 @@
 """Context compaction.
 
+Tier 0 (free): rule-based trimming of older tool results (noise, long command output, stale reads, repeats).
 Tier 1 (free): strip old reasoning and shorten old tool outputs.
 Tier 2 (one model call): replace older turns with handoff notes, keeping the system prompt, the original task,
 and recent turns verbatim.
@@ -13,6 +14,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
+from dataclasses import dataclass
 
 SUMMARY_TAG = "[Context summary]"
 STATE_TAG = "[Task state]"
@@ -137,18 +140,210 @@ def elide(messages: list[dict], keep_last: int = 6, max_chars: int = 1500) -> tu
     return out, saved
 
 
+# Tier 0 (free, #637): rule-based trimming ahead of elide and summary. Each rule rewrites the content of older tool
+# results and never removes a message, so every tool result keeps its call (arXiv 2609.20804: cheap elision before
+# the summary call is what cut summary calls). Running trim on its output changes nothing.
+
+# Escape sequences other than erase-in-line (ESC[K, ESC[0K, ESC[1K, ESC[2K), which _terminal_line applies.
+ANSI = re.compile(r"\x1b\[(?![0-2]?K)[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+CURSOR = re.compile(r"(\r|\x1b\[[0-2]?K)")
+PROGRESS = re.compile(r"\d{1,3}(?:\.\d+)?%")
+PROGRESS_BAR = re.compile(r"[#=█▉▊▋▌▍▎▏░▒▓━─>]{5,}")
+COMMAND_TOOLS = frozenset({"run_shell", "verify", "git_clone"})
+FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+DEDUPE_MIN_CHARS = 200  # a "same as above" note is shorter than this, so notes are never collapsed themselves
+SAME_AS_BELOW = "[Same output as a later {name} result below; this older copy was removed.]"
+SUPERSEDED = "[Older read of {path} removed: the file was read again or changed later in this session.]"
+OUTPUT_CUT = "[output cut at "  # the runner's note on a result cut to fit the turn's budget
+LINES_OMITTED = "[... {count} lines omitted: older command output keeps its first {head} and last {tail} lines ...]"
+
+
+@dataclass(frozen=True)
+class TrimRules:
+    """Switches for each trim rule (`compaction.trim` in config/harness.yaml); all on by default."""
+    strip_noise: bool = True
+    head_tail: bool = True
+    head_lines: int = 40
+    tail_lines: int = 60
+    superseded_reads: bool = True
+    dedupe: bool = True
+
+    @property
+    def any(self) -> bool:
+        return self.strip_noise or self.head_tail or self.superseded_reads or self.dedupe
+
+
+def recent_start(messages: list[dict], keep_chars: int) -> int:
+    """First index of the tail kept verbatim: the newest turn, plus older messages while they fit in `keep_chars`
+    (the tail split_for_summary would keep)."""
+    head = _head_len(messages)
+    start = max(last_turn_start(messages), head)
+    kept = sum(message_chars(m) for m in messages[start:])
+    while start > head and kept + message_chars(messages[start - 1]) <= keep_chars:
+        start -= 1
+        kept += message_chars(messages[start])
+    return start
+
+
+def strip_noise(text: str) -> str:
+    """Drop ANSI escapes, keep what a terminal would show of carriage returns and erased lines, and keep only the last
+    of a run of progress-bar lines."""
+    text = ANSI.sub("", text).replace("\r\n", "\n")
+    lines = [_terminal_line(line) if "\r" in line or "\x1b" in line else line for line in text.split("\n")]
+    out: list[str] = []
+    for line in lines:
+        if _is_progress(line) and out and _is_progress(out[-1]):
+            out[-1] = line
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _terminal_line(line: str) -> str:
+    """What a terminal shows of one line: a carriage return moves the cursor to the start, text overwrites only its
+    own width, and erase-in-line clears from the cursor to the end (0), the start to the cursor (1) or all of it (2)."""
+    shown, cursor = "", 0
+    for token in CURSOR.split(line):
+        if token == "\r":
+            cursor = 0
+        elif token.startswith("\x1b"):
+            mode = token[2:-1] or "0"
+            if mode == "0":
+                shown = shown[:cursor]
+            elif mode == "1":
+                shown = " " * cursor + shown[cursor:]
+            else:
+                shown = " " * cursor
+        elif token:
+            shown = shown[:cursor] + token + shown[cursor + len(token):]
+            cursor += len(token)
+    return shown.rstrip(" ")
+
+
+def _is_progress(line: str) -> bool:
+    return bool(PROGRESS.search(line) and PROGRESS_BAR.search(line))
+
+
+def head_and_tail(text: str, head: int, tail: int) -> str:
+    lines = text.split("\n")
+    if len(lines) <= head + tail + 1:
+        return text
+    marker = LINES_OMITTED.format(count=len(lines) - head - tail, head=head, tail=tail)
+    return "\n".join(lines[:head] + [marker] + (lines[-tail:] if tail else []))
+
+
+def _norm_path(path) -> str:
+    """Workspace-relative form, as fileops.normalize_path reads it: only the /workspace prefix is dropped, so other
+    absolute paths stay distinct from relative ones. Only `.` segments and repeated slashes collapse; a path with a
+    `..` segment gets no key (""), since a symlink can make it name a different file than the lexical form."""
+    if not path:
+        return ""
+    text = str(path).strip().replace("\\", "/")
+    if text == "/workspace" or text.startswith("/workspace/"):
+        text = text[len("/workspace"):].lstrip("/") or "."
+    parts = [part for part in text.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        return ""
+    return ("/" if text.startswith("/") else "") + "/".join(parts) or "."
+
+
+def _calls(messages: list[dict]) -> dict:
+    """tool_call_id -> (tool name, parsed arguments)."""
+    out = {}
+    for m in messages:
+        for call in (m.get("tool_calls") or []) if m.get("role") == "assistant" else []:
+            fn = call.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (TypeError, ValueError):
+                args = {}
+            out[call.get("id")] = (fn.get("name", ""), args if isinstance(args, dict) else {})
+    return out
+
+
+def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
+    """Indexes of read_file results made stale by a later read of the same file with the same arguments, or by a
+    later write or edit of it, where the later call is known to have succeeded: a failed reread keeps the older
+    contents, and a call without an outcome (one inherited by a fork, say) changes nothing. A reread cut to fit the
+    turn's budget replaces nothing either."""
+    stale: set[int] = set()
+    newer_reads: set[tuple] = set()
+    changed: set[str] = set()
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") != "tool":
+            continue
+        call_id = m.get("tool_call_id")
+        name, args = calls.get(call_id, ("", {}))
+        path = _norm_path(args.get("path"))
+        if not path:
+            continue
+        succeeded = (outcomes.get(call_id) or {}).get("ok") is True
+        if name in FILE_WRITE_TOOLS and succeeded:
+            changed.add(path)
+        elif name == "read_file":
+            key = (path, json.dumps({k: v for k, v in args.items() if k != "path"}, sort_keys=True))
+            if path in changed or key in newer_reads:
+                stale.add(i)
+            if succeeded and OUTPUT_CUT not in (m.get("content") or ""):  # a cut reread lacks the older tail
+                newer_reads.add(key)
+    return stale
+
+
+def _cleaned(text: str, name: str, rules: TrimRules) -> str:
+    """Terminal output only: a file's own lines can look like progress bars or carry escapes on purpose."""
+    if name not in COMMAND_TOOLS:
+        return text
+    if rules.strip_noise:
+        text = strip_noise(text)
+    if rules.head_tail:
+        text = head_and_tail(text, rules.head_lines, rules.tail_lines)
+    return text
+
+
+def trim(messages: list[dict], rules: TrimRules, keep_chars: int,
+         outcomes: dict | None = None) -> tuple[list[dict], int]:
+    """Tier 0. Returns (new messages, characters saved). The system prompt, the task and the tail recent_start keeps
+    are never touched, nor are receipts (masking owns those) or results the model has not read yet. `outcomes` maps
+    tool_call_id to its tool_result event data; a write that failed does not make a read stale."""
+    out = copy.deepcopy(messages)
+    if not rules.any:
+        return out, 0
+    cutoff = recent_start(out, keep_chars)
+    calls = _calls(out)
+    stale = _superseded(out, calls, outcomes or {}) if rules.superseded_reads else set()
+    # Newest first, so dedupe keeps the newest copy: a summary removes the oldest messages, so it can never remove
+    # the copy and keep a note that points to it. Copies in the kept tail count without being changed.
+    seen: set[str] = set()
+    saved = 0
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
+        text = m.get("content") or ""
+        if m.get("role") != "tool" or text.startswith(RECEIPT_PREFIX):
+            continue
+        name, args = calls.get(m.get("tool_call_id"), ("", {}))
+        if i in stale and i < cutoff:
+            new = SUPERSEDED.format(path=_norm_path(args.get("path")))
+        else:
+            # A note may only point to a copy that reads the same as the trimmed result: the kept tail is not cleaned.
+            new = _cleaned(text, name, rules) if i < cutoff else text
+            # File reads are left to superseded_reads: a later pass could drop the copy a note points to.
+            if rules.dedupe and name != "read_file" and len(new) >= DEDUPE_MIN_CHARS:
+                if new in seen and i < cutoff:
+                    new = SAME_AS_BELOW.format(name=name or "tool")
+                seen.add(new)
+        if i < cutoff and len(new) < len(text):
+            saved += len(text) - len(new)
+            m["content"] = new
+    return out, saved
+
+
 def split_for_summary(messages: list[dict], keep_chars: int) -> tuple[int, int] | None:
     """Pick [start, end) of messages to summarize. The kept tail never starts with a tool result, and always
     includes the newest turn: summarizing results the model hasn't read yet would make the summarizer do the
     work (badly) instead of the agent."""
     start = _head_len(messages)
-    end = last_turn_start(messages)
-    kept = sum(message_chars(m) for m in messages[end:])
-    while end > start:
-        kept += message_chars(messages[end - 1])
-        if kept > keep_chars:
-            break
-        end -= 1
+    end = recent_start(messages, keep_chars)
     # Never keep an orphaned tool result: its assistant call must stay with it.
     while end < len(messages) and messages[end]["role"] == "tool":
         end += 1

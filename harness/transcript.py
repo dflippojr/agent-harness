@@ -101,6 +101,9 @@ def _r_compaction(at: str, d: dict, last_content: str) -> list[str]:
     if d.get("tier") == "mask":
         saved = int(d.get("tokens_saved") or 0)
         return [f"#### {at} · Replaced old tool outputs with recoverable receipts (~{saved} tokens saved)", ""]
+    if d.get("tier") == "trim":
+        saved = int(d.get("tokens_saved") or 0)
+        return [f"#### {at} · Removed repeated, stale and noisy tool output (~{saved} tokens saved)", ""]
     if d.get("tier") == "round_reset":
         return [f"#### {at} · Round reset: ~{d['tokens_before']} → ~{d['tokens_after']} tokens", ""]
     lines = [f"#### {at} · Context compaction ({d['tier']}): ~{d['tokens_before']} → "
