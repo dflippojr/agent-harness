@@ -2061,7 +2061,8 @@ class Manager:
         if (not isinstance(item, dict) or str(item.get("repo") or "").lower() != repo.lower()
                 or not isinstance(item.get("number"), int)):
             item = {}
-        base = meta.get("github_base_branch") or s.get("base_branch") or ""
+        override = meta.get("github_base_branch")
+        base = (override if isinstance(override, str) else "") or s.get("base_branch") or ""
         if not base:
             return ""
         query = {"expand": "1", "title": str(s.get("title") or "")[:200]}

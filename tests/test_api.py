@@ -119,6 +119,7 @@ def test_pushed_session_links_to_github_pull_request(tmp_path):
         # App session metadata is caller-supplied; a malformed item is ignored instead of breaking the summary.
         for bad in ("reference", ["o/r", 5], {"repo": "o/r", "kind": "issue", "number": "5"}):
             assert "body" not in url(item=bad)
+        assert "/compare/main...agent/abc?" in url(base=5)
         assert url(project="scratch") is None
         assert url(project="gitlab") is None
         assert url(review="") is None
