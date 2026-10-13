@@ -42,7 +42,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .db import Database
+from .db import Database, merge_newest_first
 from .sqlite_backup import backup_sqlite
 
 log = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ _ENDED = ("done", "failed", "cancelled")
 # pass "" (the owner and members: the main store only) or the App's id (the main store plus that App's own).
 EVERY_APP = "*"
 # Lists, searches and id lookups that take `with_app`; `scope(app_id)` fills it in.
-_SCOPED = frozenset({"list_sessions", "search_events", "find_session_ids", "pending_approvals"})
+_SCOPED = frozenset({"list_sessions", "session_page", "active_sessions", "search_events", "find_session_ids", "pending_approvals"})
 _APP_ERROR = "app_error:"  # meta key prefix: an App's failed-session count and last error (metadata, main store)
 # Agent Harness Web's reserved App id (#330 decision 4). Its store holds every session with no App (the owner's and
 # members'); it has no token, is never revoked or erased, and its sessions keep their owner's folders (`storage`).
@@ -676,15 +676,34 @@ class SessionStores:
             return sorted({e["app_id"] for e in self._sessions.values() if pred(e)})
 
     def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent",
-                      with_app: str | None = None) -> list[dict]:
-        rows = self.web.list_sessions(limit, owner_id=owner_id, kind=kind)
+                      with_app: str | None = None, *, before: tuple[float, str] | None = None,
+                      target: str | None = None, include_active: bool = False) -> list[dict]:
+        return self.session_page(limit, owner_id, kind, with_app, before=before, target=target,
+                                 include_active=include_active)[0]
+
+    def session_page(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent",
+                     with_app: str | None = None, *, before: tuple[float, str] | None = None,
+                     target: str | None = None,
+                     include_active: bool = False) -> tuple[list[dict], tuple[float, str] | None]:
+        """`Database.session_page` across Web's store and the App stores the scope reaches: one page of the newest
+        rows of them all, and the active ones of each (#663)."""
         apps = self._reach(None, with_app, lambda e: e["kind"] == kind
                            and (owner_id is None or e["owner_id"] == owner_id))
         if not apps:
-            return rows
-        for app_id in apps:
-            rows += self._call(app_id, "list_sessions", limit, owner_id=owner_id, kind=kind)
-        return sorted(rows, key=lambda r: r["created_at"], reverse=True)[:limit]
+            return self.web.session_page(limit, owner_id, kind, before=before, target=target,
+                                         include_active=include_active)
+        pages, active, more = [], [], False
+        for store in (self.web, *(self.for_app(a) for a in apps)):
+            rows, cursor = store.session_page(limit, owner_id, kind, before=before, target=target)
+            pages += rows
+            more = more or cursor is not None
+            if include_active:
+                active += store.active_sessions(owner_id, kind, target)
+        merged = merge_newest_first(pages)
+        page = merged[:limit]
+        more = more or len(merged) > limit
+        cursor = (page[-1]["created_at"], page[-1]["id"]) if more and page else None
+        return merge_newest_first(page, active), cursor
 
     def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600, user_id: str | None = None,
                       app_id: str | None = None, session_kind: str | None = "agent",

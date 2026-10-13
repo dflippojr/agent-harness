@@ -419,6 +419,29 @@ AND_OWNER = " AND owner_id = ?"
 AND_APP = " AND app_id = ?"
 AND_KIND = " AND kind = ?"
 AND_JOIN = " AND "
+_SESSION_LIST_COLUMNS = (
+    "SELECT id, project, target, model, backend, title, status, stop_reason, created_at, updated_at, totals, "
+    "branch, review, workspace_removed, app_id, job_id, job_status, owner_id FROM sessions")
+
+
+def _session_filter(owner_id: str | None, kind: str, target: str | None) -> tuple[str, list]:
+    where, params = " WHERE kind = ?", [kind]
+    if owner_id is not None:
+        where += AND_OWNER
+        params.append(owner_id)
+    if target is not None:
+        where += " AND target = ?"
+        params.append(target)
+    return where, params
+
+
+def merge_newest_first(*lists: list[dict]) -> list[dict]:
+    """Session rows of several lists once each, newest first by (created_at, id): the order a page cursor follows."""
+    seen: dict[str, dict] = {}
+    for rows in lists:
+        for r in rows:
+            seen.setdefault(r["id"], r)
+    return sorted(seen.values(), key=lambda r: (r["created_at"], r["id"]), reverse=True)
 
 APP_SETTINGS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -832,16 +855,50 @@ class Database:
         return [r["id"] for r in rows]
 
     @_reads
-    def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent") -> list[dict]:
-        """Sessions of one conversation kind, newest first. Agent lists never include Chat and vice versa."""
-        where = " WHERE kind = ?" + (AND_OWNER if owner_id is not None else "")
-        params = (kind, owner_id, limit) if owner_id is not None else (kind, limit)
+    def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent", *,
+                      before: tuple[float, str] | None = None, target: str | None = None,
+                      include_active: bool = False) -> list[dict]:
+        """Sessions of one conversation kind, newest first. Agent lists never include Chat and vice versa.
+        `before` is a `(created_at, id)` keyset cursor; `include_active` adds every active session or one with a
+        pending approval, whatever its age (#663)."""
+        return self.session_page(limit, owner_id, kind, before=before, target=target,
+                                 include_active=include_active)[0]
+
+    @_reads
+    def session_page(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent", *,
+                     before: tuple[float, str] | None = None, target: str | None = None,
+                     include_active: bool = False) -> tuple[list[dict], tuple[float, str] | None]:
+        """`list_sessions` and the cursor of the next older page, None when this page is the last (#663)."""
+        where, params = _session_filter(owner_id, kind, target)
+        page_where, page_params = where, list(params)
+        if before is not None:
+            page_where += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            page_params += [before[0], before[0], before[1]]
         with self.lock:
             rows = self.conn.execute(
-                "SELECT id, project, target, model, backend, title, status, stop_reason, created_at, updated_at, totals, "
-                "branch, review, workspace_removed, app_id, job_id, job_status, owner_id FROM sessions" + where +
-                " ORDER BY created_at DESC LIMIT ?", params
-            ).fetchall()
+                _SESSION_LIST_COLUMNS + page_where + " ORDER BY created_at DESC, id DESC LIMIT ?",
+                (*page_params, limit + 1)).fetchall()
+            active = self._active_sessions(where, params) if include_active else []
+        page = [_row(r) for r in rows[:limit]]
+        cursor = (page[-1]["created_at"], page[-1]["id"]) if len(rows) > limit else None
+        return merge_newest_first(page, active), cursor
+
+    @_reads
+    def active_sessions(self, owner_id: str | None = None, kind: str = "agent",
+                        target: str | None = None) -> list[dict]:
+        """Every session that is running, queued or parked, or has a pending approval, newest first (#663)."""
+        where, params = _session_filter(owner_id, kind, target)
+        with self.lock:
+            return self._active_sessions(where, params)
+
+    def _active_sessions(self, where: str, params: list) -> list[dict]:
+        from .runner import ACTIVE
+        marks = ",".join("?" * len(ACTIVE))
+        rows = self.conn.execute(
+            _SESSION_LIST_COLUMNS + where + f" AND status IN ({marks}) UNION "
+            + _SESSION_LIST_COLUMNS + where
+            + " AND id IN (SELECT session_id FROM approvals WHERE status = 'pending')"
+            " ORDER BY created_at DESC, id DESC", (*params, *ACTIVE, *params)).fetchall()
         return [_row(r) for r in rows]
 
     @_reads
