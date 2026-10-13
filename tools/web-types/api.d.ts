@@ -6074,6 +6074,10 @@ export interface components {
         };
         /** ForkRequest */
         ForkRequest: {
+            /** Backend */
+            backend?: string | null;
+            /** Model */
+            model?: string | null;
             /** Prompt */
             prompt: string;
         };
@@ -6458,6 +6462,13 @@ export interface components {
             utilization?: number | null;
         } & {
             [key: string]: unknown;
+        };
+        /** RerunRequest */
+        RerunRequest: {
+            /** Backend */
+            backend?: string | null;
+            /** Model */
+            model?: string | null;
         };
         /** ReviewComment */
         ReviewComment: {
@@ -10892,7 +10903,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RerunRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             201: {
@@ -16579,7 +16594,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RerunRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             201: {
