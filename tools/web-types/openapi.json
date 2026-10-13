@@ -6203,7 +6203,7 @@
     },
     "/api/admin/v1/notify/test": {
       "post": {
-        "description": "Send a test push notification; it reports sent even when delivery fails after retries.",
+        "description": "Send a test push notification through ntfy.",
         "operationId": "admin_notify_test_notify_test_post",
         "responses": {
           "200": {
@@ -13713,7 +13713,7 @@
     },
     "/notify/test": {
       "post": {
-        "description": "Send a test push notification; it reports sent even when delivery fails after retries.",
+        "description": "Send a test push notification through ntfy.",
         "operationId": "notify_test_notify_test_post",
         "responses": {
           "200": {

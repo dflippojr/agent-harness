@@ -152,7 +152,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/models` | owner (`admin` scope) | Configured models with their context sizes; one is marked as the default. | `harness/api.py` `models` |
 | GET | `/api/admin/v1/models/status` | owner (`admin` scope) | Report each model's load state and how long its current warm-up has been running. | `harness_modules/local_model/routes.py` `models_status` |
 | POST | `/api/admin/v1/models/warm` | owner (`admin` scope) | Load the default model if it's asleep. The web app calls this when it opens. | `harness_modules/local_model/routes.py` `models_warm` |
-| POST | `/api/admin/v1/notify/test` | owner (`admin` scope) | Send a test push notification; it reports sent even when delivery fails after retries. | `harness_modules/notifications/routes.py` `notify_test` |
+| POST | `/api/admin/v1/notify/test` | owner (`admin` scope) | Send a test push notification through ntfy. | `harness_modules/notifications/routes.py` `notify_test` |
 | GET | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | Owner view. Codes themselves are shown only by the create response. | `harness/apps.py` `pairing_codes` |
 | POST | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | Mint a single-use pairing code bound to one origin; it is returned only here and expires after its TTL. | `harness/apps.py` `create_pairing_code` |
 | DELETE | `/api/admin/v1/pairing-codes/{pid}` | owner (`admin` scope) | Expire an unused pairing code now; 404 when no such code is still active. | `harness/apps.py` `revoke_pairing_code` |

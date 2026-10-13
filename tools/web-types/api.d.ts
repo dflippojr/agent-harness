@@ -1440,7 +1440,7 @@ export interface paths {
         put?: never;
         /**
          * Notify Test
-         * @description Send a test push notification; it reports sent even when delivery fails after retries.
+         * @description Send a test push notification through ntfy.
          */
         post: operations["admin_notify_test_notify_test_post"];
         delete?: never;
@@ -5000,7 +5000,7 @@ export interface paths {
         put?: never;
         /**
          * Notify Test
-         * @description Send a test push notification; it reports sent even when delivery fails after retries.
+         * @description Send a test push notification through ntfy.
          */
         post: operations["notify_test_notify_test_post"];
         delete?: never;
