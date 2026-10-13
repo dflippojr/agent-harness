@@ -57,6 +57,7 @@ class CreateSession(BaseModel):
     model: str | None = None
     title: str | None = None
     skills: list[str] | None = None
+    tool_profile: str = "default"  # or "bash-only" on a hosted backend that can restrict its tools (#638)
 
 
 class CreateGitHubSession(CreateSession):
@@ -694,7 +695,7 @@ async def create_session(body: CreateSession, request: Request):
     m = mgr(request)
     s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
                  model=body.model, title=body.title, owner_id=owner_id(request), skills=body.skills,
-                 context=operation_audit.request_context(request, m))
+                 tool_profile=body.tool_profile, context=operation_audit.request_context(request, m))
     return m.summary(s)
 
 
@@ -734,6 +735,7 @@ async def create_github_session(body: CreateGitHubSession, request: Request):
     s = m.create(prompt, project=body.project, target=body.target, backend=body.backend,
                  model=body.model, title=source["title"], owner_id=owner_id(request),
                  skills=body.skills, app_metadata={"github_base_branch": source["base_branch"]},
+                 tool_profile=body.tool_profile,
                  taint=taint.add([], "github", f"GitHub {repo} #{body.number}"))
     return m.summary(s)
 

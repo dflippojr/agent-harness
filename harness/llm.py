@@ -18,6 +18,17 @@ class LLMError(Exception):
         self.retryable = retryable
 
 
+# llama-server b10950 (the pinned build) answers a prompt longer than its context with HTTP 400, type
+# exceed_context_size_error and the message "request (%d tokens) exceeds the available context size (%d tokens),
+# try increasing it" (checked in its llama-server-impl.dll).
+CONTEXT_OVERFLOW = "exceeds the available context size"
+
+
+def is_context_overflow(error: LLMError) -> bool:
+    message = str(error)
+    return not error.retryable and message.startswith("HTTP 400") and CONTEXT_OVERFLOW in message
+
+
 @dataclass
 class Completion:
     content: str = ""

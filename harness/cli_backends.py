@@ -39,6 +39,16 @@ CLAUDE_SPLIT_TOOLS = "Task,TodoWrite"
 SPLIT_NOTE = ("\n\nYour shell and file tools are the harness tools mcp__harness__run_shell, read_file, write_file, "
               "edit_file, search and list_files. They act on the project workspace; this container has no "
               "workspace of its own.")
+# Split mode under the bash-only tool profile (#638): the harness serves run_shell and no file tools.
+BASH_ONLY_SPLIT_NOTE = ("\n\nYour only workspace tool is the harness tool mcp__harness__run_shell. It acts on the "
+                        "project workspace; read, search and edit files with shell commands. This container has no "
+                        "workspace of its own.")
+# Claude Code builtin mode under the bash-only tool profile (#638): Bash and nothing else.
+CLAUDE_BASH_ONLY_TOOLS = "Bash"
+
+
+def split_note(tool_profile: str) -> str:
+    return BASH_ONLY_SPLIT_NOTE if tool_profile == "bash-only" else SPLIT_NOTE
 
 
 # Project instructions Claude Code would load from the workspace itself. `--setting-sources user` drops them along with
@@ -109,8 +119,10 @@ class ClaudeSession:
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
                  api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = "", split: bool = False):
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = "", split: bool = False,
+                 tool_profile: str = "default"):
         self.session_id = session_id
+        self.tool_profile = tool_profile  # "bash-only" (#638): --tools Bash, or run_shell alone in split mode
         self.app_id = app_id  # the session's domain: "" for Web, else its App (#371)
         self.end_user = end_user  # the App's end user whose own login this session runs on (#365)
         self.workspace = workspace.resolve()
@@ -161,14 +173,16 @@ class ClaudeSession:
             # settings in the workspace's .claude/ could set env, helpers or permissions the session never asked for.
             "--setting-sources", "user",
             "--system-prompt" if self.tools_only else "--append-system-prompt",
-            self.system_prompt + (SPLIT_NOTE if self.split else project_memory(self.workspace)),
+            self.system_prompt + (split_note(self.tool_profile) if self.split else project_memory(self.workspace)),
         ]
         if self.tools_only:
             # "" turns off every built-in tool (Bash, Read, Edit, WebFetch, Task...); MCP tools stay. Skills and slash
             # commands go too. can_use_tool still sees every call and denies anything but the App's tools.
             args += ["--tools", "", "--disable-slash-commands"]
         elif self.split:
-            args += ["--tools", CLAUDE_SPLIT_TOOLS]
+            args += ["--tools", CLAUDE_SPLIT_TOOLS]  # under bash-only the harness MCP server narrows instead
+        elif self.tool_profile == "bash-only":
+            args += ["--tools", CLAUDE_BASH_ONLY_TOOLS]
         if self.backend_session_id:
             args += ["--resume", self.backend_session_id]
         # Only the harness server, or none: --strict-mcp-config ignores any .mcp.json the workspace brings along and
@@ -333,8 +347,10 @@ class CodexSession:
     def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
                  sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
                  api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = "", split: bool = False):
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = "", split: bool = False,
+                 tool_profile: str = "default"):
         self.session_id = session_id
+        self.tool_profile = tool_profile  # "bash-only" (#638): split mode only, where the MCP server serves run_shell
         self.app_id = app_id
         self.end_user = end_user
         self.workspace = workspace.resolve()
@@ -512,7 +528,8 @@ class CodexSession:
             result = await self._request("thread/resume", {**common, "threadId": self.backend_session_id})
         elif self.split:
             result = await self._request("thread/start", {
-                **common, "developerInstructions": self.system_prompt + SPLIT_NOTE, "environments": []})
+                **common, "developerInstructions": self.system_prompt + split_note(self.tool_profile),
+                "environments": []})
         elif self.tools_only:
             # The App's prompt replaces Codex's coding-agent instructions, as --system-prompt does for Claude Code.
             result = await self._request("thread/start", {**common, "baseInstructions": self.system_prompt,

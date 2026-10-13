@@ -16,12 +16,24 @@ import json
 
 SUMMARY_TAG = "[Context summary]"
 STATE_TAG = "[Task state]"
+SUMMARY_HEADER = f"{SUMMARY_TAG} Earlier work in this session, condensed:\n\n"
+NOTES_HEADING = "## Your saved notes (kept verbatim)"
+SUMMARY_CONTINUE = "Continue from here; don't redo work that is already done."
 ROUND_CONTINUE = ("Continue from the saved state. Do not repeat a command that already failed with the "
                   "same arguments unless the inputs have changed.")
 
 SUMMARY_SYSTEM = """You write handoff notes for an AI agent whose earlier conversation is being removed to free context.
 The agent keeps its original task and its most recent turns; your notes replace everything in between.
 Be specific and factual. Keep exact file paths, commands, error messages, numbers, and names. Don't invent anything."""
+
+# Goes ahead of the excerpt when an earlier summary exists (arXiv 2609.20804 Fig. 18: update, don't restate).
+PRIOR_NOTES = """Prior notes (written at an earlier compaction; they cover the work before the excerpt below). Update
+them rather than restating them: keep every fact that still holds with its exact values, correct what the excerpt
+changed, and add what is new.
+
+{prior}
+
+"""
 
 SUMMARY_PROMPT = """Write handoff notes for the conversation excerpt below. Use these sections:
 
@@ -40,7 +52,7 @@ What remains to finish the task.
 The agent's original task (it keeps this verbatim; don't repeat it, but use it to judge what matters):
 {task}
 
-Conversation excerpt:
+{prior}Conversation excerpt:
 {excerpt}"""
 
 
@@ -182,26 +194,69 @@ def render_excerpt(messages: list[dict], max_chars: int) -> str:
     text = "\n\n".join(parts)
     if len(text) > max_chars:
         # Keep the newest material; the oldest is the least likely to matter.
-        text = "[earliest part omitted]\n" + text[-max_chars:]
+        text = "[earliest part omitted]\n" + text[len(text) - max(0, max_chars):]  # not text[-0:]: that keeps it all
     return text
 
 
-def summary_request(messages: list[dict], start: int, end: int, max_chars: int) -> list[dict]:
+def summary_content(summary: str, notes: str = "") -> str:
+    """The text of the message apply_summary writes for `summary` and the saved `notes`."""
+    text = f"{SUMMARY_HEADER}{summary.strip()}"
+    if notes.strip():
+        text += f"\n\n{NOTES_HEADING}\n{notes.strip()}"
+    return f"{text}\n\n{SUMMARY_CONTINUE}"
+
+
+def prior_summary(message: dict, known: str = "", notes: str = "", known_notes: str = "") -> str | None:
+    """The summary in a message apply_summary wrote, without its framing or the saved notes (apply_summary adds
+    those again); None for any other message. A summary may itself quote the notes heading, so nothing is cut at a
+    heading: `known` (the summary text the runner kept, written with `known_notes`) is used only when the message
+    is exactly what apply_summary wrote for it, since a rewind can restore a different summary; otherwise only the
+    current saved `notes` are cut from the end. Without a match the whole body is kept: repeating stale notes is
+    better than dropping findings."""
+    content = message.get("content") or ""
+    if message.get("role") != "user" or not content.startswith(SUMMARY_HEADER):
+        return None
+    if known.strip() and content == summary_content(known, known_notes):
+        return known.strip()
+    body = content[len(SUMMARY_HEADER):].removesuffix(f"\n\n{SUMMARY_CONTINUE}")
+    if notes.strip():
+        body = body.removesuffix(f"\n\n{NOTES_HEADING}\n{notes.strip()}")
+    return body.strip()
+
+
+def _shorten(text: str, limit: int) -> str:
+    """`text` within `limit` characters, keeping its start and end (the oldest requests and the next steps)."""
+    if len(text) <= limit:
+        return text
+    marker = f"\n[... {len(text)} characters of prior notes shortened; the middle is omitted ...]\n"
+    keep = max(0, limit - len(marker))
+    return text[:keep // 2] + marker + text[len(text) - (keep - keep // 2):]
+
+
+def summary_request(messages: list[dict], start: int, end: int, max_chars: int, known: str = "",
+                    notes: str = "", known_notes: str = "") -> list[dict]:
+    """An earlier summary at the start of the span goes into its own prior-notes block, instead of being the
+    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`. The newer messages are removed
+    once summarized, so the block never takes more than half the budget from them: a longer one loses its middle.
+    `known`, `notes`, `known_notes`: see prior_summary."""
     task = messages[1]["content"] if _head_len(messages) == 2 else "(not available)"
-    excerpt = render_excerpt(messages[start:end], max_chars)
+    prior = prior_summary(messages[start], known, notes, known_notes) if start < end else None
+    block = ""
+    if prior is not None:
+        start += 1
+        wanted = len(render_excerpt(messages[start:end], max_chars))
+        room = max_chars - min(wanted, max_chars // 2) - len(PRIOR_NOTES.format(prior=""))
+        block = PRIOR_NOTES.format(prior=_shorten(prior, room))
+    excerpt = render_excerpt(messages[start:end], max(0, max_chars - len(block)))
     return [
         {"role": "system", "content": SUMMARY_SYSTEM},
-        {"role": "user", "content": SUMMARY_PROMPT.format(task=task, excerpt=excerpt)},
+        {"role": "user", "content": SUMMARY_PROMPT.format(task=task, prior=block, excerpt=excerpt)},
     ]
 
 
 def apply_summary(messages: list[dict], _start: int, end: int, summary: str, notes: str = "") -> list[dict]:
     head = [m for m in messages[:_head_len(messages)] if not (m.get("content") or "").startswith(SUMMARY_TAG)]
-    text = f"{SUMMARY_TAG} Earlier work in this session, condensed:\n\n{summary.strip()}"
-    if notes.strip():
-        text += f"\n\n## Your saved notes (kept verbatim)\n{notes.strip()}"
-    note = {"role": "user", "content": text + "\n\nContinue from here; don't redo work that is already done."}
-    return head + [note] + messages[end:]
+    return head + [{"role": "user", "content": summary_content(summary, notes)}] + messages[end:]
 
 
 def apply_round_reset(messages: list[dict], payload: dict) -> list[dict]:

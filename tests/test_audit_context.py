@@ -44,6 +44,8 @@ def test_legacy_rows_survive_migration(tmp_path):
     db.conn.execute("DROP TABLE pairing_requests")  # and before pairing requests (#519)
     db.conn.execute("DROP TABLE idempotency_keys")  # and before idempotent creates (#462)
     db.conn.execute("DROP TABLE hub_claim")  # and before the Hub claim (#543)
+    db.conn.execute("ALTER TABLE sessions DROP COLUMN tool_profile")  # and before tool profiles (#638)
+    db.conn.execute("ALTER TABLE usage DROP COLUMN tool_profile")
     db.conn.execute("ALTER TABLE api_keys DROP COLUMN role")
     db.conn.execute("DROP TABLE account_audit")
     db.conn.execute("CREATE TABLE account_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL,"

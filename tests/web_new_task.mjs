@@ -13,12 +13,16 @@ const browser = {
   setInterval: (f) => { timers.push(f); return timers.length; }, clearInterval() {},
 };
 const calls = [];
-const api = async (path) => {
+// A test that extends this script can set globalThis.newTaskFixture first: `backends` replaces the backend list and
+// `onPost(path, body)` answers requests that carry a body.
+const fixture = globalThis.newTaskFixture || {};
+const api = async (path, opts) => {
   calls.push(path);
+  if (opts?.body && fixture.onPost) return fixture.onPost(path, opts.body);
   if (path === "/projects") return [{ name: "scratch", description: "", target: "tower" }];
   if (path === "/models") return [{ name: "m1", default: true }];
   if (path === "/templates") return [{ id: "t1", name: "Tpl", project: "scratch", prompt: "do it", backend: "local" }];
-  if (path.startsWith("/backends")) return [{ name: "local", available: true }, { name: "claude", available: true }];
+  if (path.startsWith("/backends")) return fixture.backends || [{ name: "local", available: true }, { name: "claude", available: true }];
   if (path === "/gpu") return { manual: true, manual_remaining_seconds: 120, state: "clear" };
   if (path === "/skills/enabled") return [];
   return [];

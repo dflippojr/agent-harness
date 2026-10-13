@@ -64,6 +64,42 @@ This payload does **not** include `tokens_before`, `tokens_after`, or
 The web UI, CLI, and Markdown transcript render a mask event as a one-line
 note using `tokens_saved` only.
 
+## Summaries build on the previous one
+
+A summary replaces the older turns with one `[Context summary]` message
+right after the pinned system prompt and task. The next summary request does
+not fold that message into the conversation excerpt, where it would be the
+first thing cut when the excerpt is over its budget. It goes whole into a
+separate **Prior notes** block ahead of the excerpt, and the prompt tells the
+summarizer to update those notes rather than restate them (#640). The block
+holds the summary text only: the saved `update_notes` text is appended again
+by the new summary message itself. The runner keeps the last summary's text
+in `run["summary"]` (and the notes it was framed with in
+`run["summary_notes"]`), carried into follow-up runs like the notes, and uses
+it when the message is exactly what that summary produced, so a summary that
+quotes the saved-notes heading is not cut short and a rewind that restored a
+different summary is not mistaken for it. Otherwise only the exact saved-notes text is cut
+from the end of the message; when that doesn't match either, the whole body
+goes into the block, since repeating stale notes is better than dropping
+findings. The excerpt's budget (45% of the context
+window) shrinks by the block's size, so the request stays within the same
+total. The newer messages are removed once summarized, so the block never
+takes more than half of that budget from them: a longer block keeps its start
+and end and loses its middle, marked as shortened.
+
+## Overflow compaction
+
+Compaction normally runs before a model call, on an estimated size. When the
+estimate is short and llama-server rejects the prompt (HTTP 400 with
+`request (N tokens) exceeds the available context size (M tokens), try
+increasing it`, the message of the pinned b10950 build; the match is
+`llm.CONTEXT_OVERFLOW`), the runner runs one forced elide-and-summary pass,
+whatever `summarize_at` says, and retries the call once. The pass emits a
+`compaction` event like a threshold one plus `reason: "overflow"`; its `tier`
+is `summary`, or `elide` when there was too little to summarize or the
+summary call failed. If the retry is rejected too, the run fails as it did
+before. Other HTTP 400 errors are not retried.
+
 ## Round reset
 
 After masking, compaction may **reset** the conversation instead of eliding or
@@ -128,6 +164,57 @@ when a proposal for it is applied. Delegate tokens are added to session totals
 (not as turns) and tallied in `delegate_tokens` on the run and in totals; they
 don't count against the run's completion budget. Only local-model agent
 sessions on the tower with a workspace are offered these tools.
+
+## Tool-schema overhead
+
+Every model call sends the session's full tool list, and those schemas take
+window space that is not in the context list. Each `turn_metrics` event
+records `schema_count` and `schema_tokens` (the schemas' JSON characters
+divided by the session's `chars_per_token`, the same estimate compaction uses
+for its thresholds); session totals add `schema_tokens` per turn, and the
+session metrics API sums it in `aggregate.schema_tokens`.
+
+Measured with `python scripts/measure_schema_overhead.py` on 2026-10-12 against
+the checked-in config (no model, chars per token 3.0, 64K window). Real token
+counts are usually a little lower, since JSON tokenizes at more than three
+characters per token.
+
+| Toolkit | Schemas | Est. tokens |
+| --- | ---: | ---: |
+| Core (`list_files` to `finish`, including `verify` and `update_notes`) | 12 | 1850 |
+| `read_artifact` | 1 | 172 |
+| `delegate_edit` and `apply_delegated_edit` | 2 | 510 |
+| Web | 2 | 360 |
+| Memory library (writes on) | 5 | 792 |
+| Session search | 2 | 379 |
+| Homelab | 6 | 878 |
+| Images | 1 | 442 |
+| Skills | 1 | 438 |
+| Remote control | 1 | 226 |
+
+| Profile | Schemas | Est. tokens | Share of 64K |
+| --- | ---: | ---: | ---: |
+| Chat session (web) | 2 | 360 | 0.5% |
+| Hosted split mode, harness MCP tools (+ web, session search) | 10 | 1731 | 2.6% |
+| Default tower agent (core, `read_artifact`, delegate pair) | 15 | 2533 | 3.9% |
+| + web, session search | 19 | 3272 | 5.0% |
+| + web, session search, memory (writes on) | 24 | 4065 | 6.2% |
+| Every built-in toolkit | 33 | 6050 | 9.2% |
+
+Hosted CLIs (Claude Code, Codex) add their own built-in tools and defer them
+themselves; the hosted row counts only what the harness serves over MCP, and
+their windows are larger than 64K. MCP client catalogues (up to 128 tools per
+session) depend on the configured servers and are not in the table; a
+session's `turn_metrics` show their real cost.
+
+Deferred loading (#645 phase 2) was not built. The schemas it would defer
+(`update_notes` 92 tokens, `verify` without checks 155, memory writes 395,
+homelab 878) save 0.4% of the window in the default profile and at most 2.3%
+with every toolkit on, before the cost of a `tool_search` schema. Local
+sessions also keep the tool list in llama.cpp's cached prompt prefix, so it
+costs window space but is not recomputed each turn, while adding a deferred
+schema mid-run would change that prefix. Revisit if a session's
+`schema_tokens` show a large MCP catalogue.
 
 ## Counters
 

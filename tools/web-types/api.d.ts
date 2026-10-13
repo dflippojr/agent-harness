@@ -5726,6 +5726,14 @@ export interface components {
             today?: {
                 [key: string]: unknown;
             };
+            /** Tool Profiles */
+            tool_profiles?: string[];
+            /** Usage By Profile */
+            usage_by_profile?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
             /** Usage By Source */
             usage_by_source?: {
                 [key: string]: {
@@ -5865,6 +5873,12 @@ export interface components {
             /** Title */
             title?: string | null;
             /**
+             * Tool Profile
+             * @description `default`, or `bash-only` to leave a hosted Claude Code or split-mode Codex session a shell and no file tools. Backends that can't restrict their tools refuse it with tool_profile_unsupported.
+             * @default default
+             */
+            tool_profile?: string;
+            /**
              * Tools
              * @default []
              */
@@ -5929,6 +5943,11 @@ export interface components {
             target?: string | null;
             /** Title */
             title?: string | null;
+            /**
+             * Tool Profile
+             * @default default
+             */
+            tool_profile?: string;
         };
         /** CreatePairingRequest */
         CreatePairingRequest: {
@@ -6006,6 +6025,11 @@ export interface components {
             target?: string | null;
             /** Title */
             title?: string | null;
+            /**
+             * Tool Profile
+             * @default default
+             */
+            tool_profile?: string;
         };
         /** CronPreviewError */
         CronPreviewError: {
@@ -6667,6 +6691,11 @@ export interface components {
             target: string;
             /** Title */
             title: string;
+            /**
+             * Tool Profile
+             * @default default
+             */
+            tool_profile?: string;
             totals?: components["schemas"]["TokenTotalsResponse"];
             /** Updated At */
             updated_at: number;
@@ -6904,6 +6933,11 @@ export interface components {
             target: string;
             /** Title */
             title: string;
+            /**
+             * Tool Profile
+             * @default default
+             */
+            tool_profile?: string;
             totals?: components["schemas"]["TokenTotalsResponse"];
             /** Updated At */
             updated_at: number;

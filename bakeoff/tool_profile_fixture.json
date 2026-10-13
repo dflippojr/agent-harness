@@ -1,0 +1,25 @@
+{
+  "note": "Synthetic rows for #638: no real runs, accounts or costs. The same four tasks under each profile.",
+  "runs": [
+    {"session_id": "fx-d-shell1", "task": "count-log-errors", "task_type": "shell", "tool_profile": "default",
+     "success": true, "prompt_tokens": 41200, "completion_tokens": 2100, "cost_usd": 0.1552, "files_changed": []},
+    {"session_id": "fx-d-shell2", "task": "rotate-backups", "task_type": "shell", "tool_profile": "default",
+     "success": false, "prompt_tokens": 58800, "completion_tokens": 3900, "cost_usd": 0.2349, "files_changed": []},
+    {"session_id": "fx-d-edit1", "task": "fix-flaky-test", "task_type": "edit", "tool_profile": "default",
+     "success": true, "prompt_tokens": 96400, "completion_tokens": 5200, "cost_usd": 0.3672,
+     "expected_files": ["tests/test_cache.py"], "files_changed": ["tests/test_cache.py"]},
+    {"session_id": "fx-d-edit2", "task": "rename-config-key", "task_type": "edit", "tool_profile": "default",
+     "success": true, "prompt_tokens": 120300, "completion_tokens": 7400, "cost_usd": 0.4719,
+     "expected_files": ["app/config.py", "docs/config.md"], "files_changed": ["app/config.py", "docs/config.md"]},
+    {"session_id": "fx-b-shell1", "task": "count-log-errors", "task_type": "shell", "tool_profile": "bash-only",
+     "success": true, "prompt_tokens": 22700, "completion_tokens": 1500, "cost_usd": 0.0906, "files_changed": []},
+    {"session_id": "fx-b-shell2", "task": "rotate-backups", "task_type": "shell", "tool_profile": "bash-only",
+     "success": true, "prompt_tokens": 31900, "completion_tokens": 2600, "cost_usd": 0.1347, "files_changed": []},
+    {"session_id": "fx-b-edit1", "task": "fix-flaky-test", "task_type": "edit", "tool_profile": "bash-only",
+     "success": false, "prompt_tokens": 61500, "completion_tokens": 3300, "cost_usd": 0.2340,
+     "expected_files": ["tests/test_cache.py"], "files_changed": ["app/cache.py"]},
+    {"session_id": "fx-b-edit2", "task": "rename-config-key", "task_type": "edit", "tool_profile": "bash-only",
+     "success": true, "prompt_tokens": 70800, "completion_tokens": 4100, "cost_usd": 0.2739,
+     "expected_files": ["app/config.py", "docs/config.md"], "files_changed": ["./app/config.py"]}
+  ]
+}

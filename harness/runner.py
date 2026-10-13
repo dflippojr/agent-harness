@@ -20,7 +20,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, stuck, taint, telemetry
+from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, stuck, taint, telemetry, tool_profiles
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -110,8 +110,8 @@ def new_run(carry: dict | None = None) -> dict:
     """Counters for one run. Notes and the token calibration belong to the session, so they carry over."""
     run = {"turns": 0, "tool_calls": 0, "invalid_tool_calls": 0, "tool_errors": 0, "prompt_tokens": 0,
            "completion_tokens": 0, "idle": 0, "executing": None, "started_at": time.time()}
-    for key in ("notes", "chars_per_token", "backend_session_id", "rate_limits", "state", "trace",
-                "workspace_context_applied", "repo_map_applied"):  # the prompt's workspace text waits for a reset
+    for key in ("notes", "summary", "summary_notes", "chars_per_token", "backend_session_id", "rate_limits",
+                "state", "trace", "workspace_context_applied", "repo_map_applied"):  # the prompt's workspace text waits for a reset
         if carry and key in carry:
             run[key] = carry[key]
     return run
@@ -471,8 +471,16 @@ class Runner:
         known = s["model"] in self.cfg.models
         return self.workspace(s if known else {**s, "model": self.cfg.default_model})
 
+    @staticmethod
+    def split_tool_names(s: dict) -> frozenset[str]:
+        """The split-mode tools this session gets: all of SPLIT_TOOLS, or only run_shell under bash-only (#638)."""
+        if s.get("tool_profile") == tool_profiles.BASH_ONLY:
+            return tool_profiles.BASH_ONLY_SPLIT_TOOLS
+        return frozenset(SPLIT_TOOLS)
+
     def split_schemas(self, s: dict) -> list[dict]:
-        return [t for t in self.split_workspace(s).schemas() if t["function"]["name"] in SPLIT_TOOLS]
+        names = self.split_tool_names(s)
+        return [t for t in self.split_workspace(s).schemas() if t["function"]["name"] in names]
 
     def mcp_tool_schemas(self, sid: str) -> list[dict]:
         """The daemon tools a hosted Claude Code or Codex session may call over MCP: web, session search, memory
@@ -526,7 +534,8 @@ class Runner:
         except (ToolError, OSError, UnicodeError) as e:
             return f"Error: {e}", False
         self._taint_from_result(s, name, args)  # MCP results are untrusted content like the native tools' (#262)
-        return (output.text if isinstance(output, ToolOutput) else str(output)), True
+        # The hosted model gets the native loop's context-only banner (#653); _record_cli_tool_result drops it again.
+        return self._context_banner(s, name) + (output.text if isinstance(output, ToolOutput) else str(output)), True
 
     def _shell_within_budget(self, s: dict, args: dict) -> dict:
         """`run_shell` args whose timeout does not outlast a member's or an App's run budget (#524)."""
@@ -1371,6 +1380,14 @@ class Runner:
                 raise CliBackendError(f"{backend_name} split mode needs the harness MCP server, which is off for this "
                                       "session", "split_unavailable")
             extra["split"] = True
+        if s.get("tool_profile", tool_profiles.DEFAULT) != tool_profiles.DEFAULT:
+            # Checked at creation; checked again here because the backend's config can change while a session waits.
+            # Never run the CLI with its full tools in place of the profile it was started with.
+            reason = tool_profiles.refusal(backend_name, backend, s["tool_profile"], s.get("kind", "agent"))
+            if reason or (backend_name == "codex" and not self.split_mode(s)):
+                raise CliBackendError(reason or f"tool_profile {s['tool_profile']} needs Codex in split mode",
+                                      tool_profiles.UNSUPPORTED)
+            extra["tool_profile"] = s["tool_profile"]
         if s.get("kind") == TOOLS_ONLY:
             # Never run a hosted CLI with its built-in tools here: Claude Code gets --tools "", Codex no environment
             # and every other built-in tool off, and only the App's tools over MCP (the approval path still denies
@@ -1645,6 +1662,9 @@ class Runner:
 
     def _record_cli_tool_result(self, sid: str, call_id: str, name: str, ok: bool, output: str,
                                 seconds: float = 0) -> None:
+        bare = mcp_harness_tool(name)
+        if ok and bare:  # mcp_call's banner is for the model only: the event keeps the plain result (#653)
+            output = output.removeprefix(self._context_banner(self.db.get_session(sid), bare))
 
         def record_cli_tool_result() -> None:
             run = self.db.get_session(sid)["run"]
@@ -2158,7 +2178,8 @@ class Runner:
             self._flag_end_pending(sid, status)
             self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, cost,
                                  str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
-                                 str(run.get("credential_source") or "subscription"), s.get("end_user") or "")
+                                 str(run.get("credential_source") or "subscription"), s.get("end_user") or "",
+                                 s.get("tool_profile") or tool_profiles.DEFAULT)
             if failed:
                 self.bus.emit(sid, "error", failure)
             self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})
@@ -2194,7 +2215,18 @@ class Runner:
 
         run = s["run"]
         tools = self.tool_schemas(s, ws)
-        completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache, run)
+        try:
+            completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache,
+                                                       run)
+        except llm.LLMError as e:
+            if not llm.is_context_overflow(e):
+                raise
+            # The size estimate was short: compact now and try once more; a second failure ends the run as before.
+            s = await self._compact_on_overflow(s)
+            run = s["run"]
+            tools = self.tool_schemas(s, ws)
+            completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache,
+                                                       run)
         with telemetry.span("completion_commit"):
             stream.flush()
             if completion.cache_tokens is None and cache_box["seen"]:
@@ -2239,6 +2271,7 @@ class Runner:
             "estimated": composed["estimated"],
             "cache_tokens": cache,
             "recomputed_tokens": efficiency.recomputed_tokens(completion.prompt_tokens, cache),
+            **efficiency.schema_overhead(tools, run.get("chars_per_token", 3.0)),
         }
 
     def _emit_turn_metrics(self, sid: str, final: bool = False) -> None:
@@ -2277,6 +2310,7 @@ class Runner:
                  "prompt_tps": round(completion.prompt_tps, 1), "gen_tps": round(completion.gen_tps, 1)}
         context = s["context"] + [msg]
         totals = self._add_totals(s["totals"], completion)
+        totals["schema_tokens"] = totals.get("schema_tokens", 0) + run["pending_turn_metrics"]["schema_tokens"]
         event["totals"] = totals
         self.last_completion = {"model": model.name, "prompt_tps": completion.prompt_tps, "gen_tps": completion.gen_tps,
                                 "at": time.time()}
@@ -3244,7 +3278,7 @@ class Runner:
         n = model.context_tokens
         cpt = s["run"].get("chars_per_token", 3.0)
         # Tool schemas are part of every prompt but not of the context list.
-        overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
+        overhead = efficiency.schema_overhead(self.tool_schemas(s, self.workspace(s)), cpt)["schema_tokens"]
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
         context, artifacts, masked_chars = s["context"], {}, 0
         if self.artifact_tool_available(s):  # a receipt tells the model to call read_artifact
@@ -3272,21 +3306,43 @@ class Runner:
             s = self.db.get_session(sid)
         if before < self.cfg.elide_at * n:
             return s
+        return await self._elide_and_summarize(s, context, before, cpt, overhead)
+
+    async def _compact_on_overflow(self, s: dict) -> dict:
+        """The model server rejected the prompt as too long: one summary pass whatever `summarize_at` says."""
+        cpt = s["run"].get("chars_per_token", 3.0)
+        overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
+        before = compaction.estimate_tokens(s["context"], cpt) + overhead
+        return await self._elide_and_summarize(s, s["context"], before, cpt, overhead, overflow=True)
+
+    async def _elide_and_summarize(self, s: dict, context: list, before: int, cpt: float, overhead: int,
+                                   overflow: bool = False) -> dict:
+        sid = s["id"]
+        n = self.cfg.models[s["model"]].context_tokens
         with telemetry.span("compaction", {"harness.tokens_before": before}) as span:
             context, _ = compaction.elide(context)
             after = compaction.estimate_tokens(context, cpt) + overhead
-            # Under summarize_at after elide alone: no summary call, so the pass is elide-only (#639).
+            # Under summarize_at after elide alone: no summary call, so the pass is elide-only (#639). An overflow
+            # always summarizes.
             data = {"tier": "elide", "tokens_before": before, "tokens_after": after,
-                    "summary_averted": after < self.cfg.summarize_at * n}
-            if after >= self.cfg.summarize_at * n:
+                    "summary_averted": not overflow and after < self.cfg.summarize_at * n}
+            if overflow:
+                data["reason"] = "overflow"
+            if overflow or after >= self.cfg.summarize_at * n:
                 split = compaction.split_for_summary(context, keep_chars=int(self.cfg.keep_recent * n * cpt))
                 if split:
                     context = await self._summarize_context(s, context, split, data, before, cpt, overhead)
             data["context_tokens"] = n
-            span.set({"harness.compaction_tier": data["tier"], "harness.tokens_after": data.get("tokens_after")})
+            span.set({"harness.compaction_tier": data["tier"], "harness.tokens_after": data.get("tokens_after"),
+                      "harness.compaction_reason": data.get("reason", "threshold")})
 
             def compact() -> None:
-                self.db.update_session(sid, context=context)
+                if data["tier"] == "summary":  # the next summary request quotes it as the prior notes
+                    run = {**self.db.get_session(sid)["run"], "summary": data["summary"],
+                           "summary_notes": s["run"].get("notes", "")}  # what apply_summary framed it with
+                    self.db.update_session(sid, context=context, run=run)
+                else:
+                    self.db.update_session(sid, context=context)
                 self.bus.emit(sid, "compaction", data)
             await self.db.for_session(s["id"]).awrite(compact)
         return self.db.get_session(sid)
@@ -3316,7 +3372,9 @@ class Runner:
         # Persisted, so a client that opens the session mid-summary still shows it.
         await self.bus.aemit(sid, "compaction_started", {"messages": end - start, "tokens_before": before,
                                                   "context_tokens": n})
-        request = compaction.summary_request(context, start, end, max_chars=int(0.45 * n * cpt))
+        request = compaction.summary_request(context, start, end, max_chars=int(0.45 * n * cpt),
+                                             known=s["run"].get("summary", ""), notes=s["run"].get("notes", ""),
+                                             known_notes=s["run"].get("summary_notes", ""))
         written = {"tokens": 0, "last": 0.0}
 
         async def writing(kind: str, text: str) -> None:

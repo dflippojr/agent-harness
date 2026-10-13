@@ -127,7 +127,7 @@ async function memberBackends() {
   try {
     const st = await api("/me/api-keys");
     return [local, ...st.keys.filter((k) => k.configured).map((k) => ({
-      name: k.backend, available: true, model: "", billing_warning: st.billing_warning }))];
+      name: k.backend, available: true, model: "", billing_warning: st.billing_warning, tool_profiles: k.tool_profiles }))];
   } catch { return [local]; }
 }
 
@@ -265,6 +265,13 @@ async function viewNew() {
     h("a", { href: "#/actions/resources" }, "Actions → Resources"),
     ")");
   const modelState = h("div", { class: "muted small", style: "margin-top:6px" });
+  // Tool profile (#638): offered only where the backend lists more than the default (Claude Code, split-mode Codex).
+  const toolProfile = h("select", { id: "new-task-tool-profile" },
+    h("option", { value: "default" }, "Default tools"),
+    h("option", { value: "bash-only" }, "Bash only (strong hosted models)"));
+  const toolProfileNote = h("div", { class: "muted small", style: "margin-top:6px" },
+    "Bash only leaves the model a shell and no file read or edit tools. It can cost less on strong models and does worse on weaker ones.");
+  const toolProfileField = h("div", {}, field("new-task-tool-profile", "Tools", toolProfile, toolProfileNote));
   const start = h("button", { class: "btn primary", type: "submit" }, "Start");
   const syncHoldUi = () => {
     const queued = gpuHold() && backend.value === "local";
@@ -284,6 +291,9 @@ async function viewNew() {
     }
     model.disabled = !isLocal;
     modelState.hidden = !isLocal;
+    const bashOnly = (b?.tool_profiles || []).includes("bash-only");
+    toolProfileField.hidden = !bashOnly;
+    if (!bashOnly) toolProfile.value = "default";
     backendState.textContent = b?.billing_warning || "";
     backendState.classList.toggle("bad", !!b?.billing_warning);
     syncHoldUi();
@@ -406,6 +416,7 @@ async function viewNew() {
       const selectedSkills = [...form.querySelectorAll("input.skill-opt:checked")].map((el) => el.value);
       const started = await startSession({ prompt: prompt.value, project: project.value, backend: backend.value,
         model: backend.value === "local" ? model.value : null, title: title.value || null, skills: selectedSkills,
+        tool_profile: toolProfile.value,
         ...(selectedGitHub ? { number: selectedGitHub.number } : {}) }, draftKey,
         selectedGitHub ? "/github/sessions" : "/sessions");
       if (!started) start.disabled = false;
@@ -413,7 +424,7 @@ async function viewNew() {
   },
   field("new-task-project", "Project", project), targetState, projectHint,
   isMember() && availableBackends.length < 2 ? [] : field("new-task-backend", "Backend", backend, holdNotice, backendState),
-  field("new-task-model", "Model", model), modelState,
+  field("new-task-model", "Model", model), modelState, toolProfileField,
   field("new-task-title", "Title", title),
   skillBoxes.length ? [h("label", {}, "Skills"), h("p", { class: "muted small" }, "Checked skills are injected for this session (exact include list). Skills allowlisted for the selected project start checked; uncheck to exclude them. They stay frozen even if you disable them later."), ...skillBoxes] : null,
   h("div", { class: "row", style: "margin-top:18px" },

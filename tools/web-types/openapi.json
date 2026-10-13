@@ -821,6 +821,21 @@
             "title": "Today",
             "type": "object"
           },
+          "tool_profiles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tool Profiles",
+            "type": "array"
+          },
+          "usage_by_profile": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Usage By Profile",
+            "type": "object"
+          },
           "usage_by_source": {
             "additionalProperties": {
               "additionalProperties": true,
@@ -1150,6 +1165,12 @@
             ],
             "title": "Title"
           },
+          "tool_profile": {
+            "default": "default",
+            "description": "`default`, or `bash-only` to leave a hosted Claude Code or split-mode Codex session a shell and no file tools. Backends that can't restrict their tools refuse it with tool_profile_unsupported.",
+            "title": "Tool Profile",
+            "type": "string"
+          },
           "tools": {
             "default": [],
             "items": {
@@ -1291,6 +1312,11 @@
               }
             ],
             "title": "Title"
+          },
+          "tool_profile": {
+            "default": "default",
+            "title": "Tool Profile",
+            "type": "string"
           }
         },
         "required": [
@@ -1440,6 +1466,11 @@
               }
             ],
             "title": "Title"
+          },
+          "tool_profile": {
+            "default": "default",
+            "title": "Tool Profile",
+            "type": "string"
           }
         },
         "required": [
@@ -2727,6 +2758,11 @@
             "title": "Title",
             "type": "string"
           },
+          "tool_profile": {
+            "default": "default",
+            "title": "Tool Profile",
+            "type": "string"
+          },
           "totals": {
             "$ref": "#/components/schemas/TokenTotalsResponse"
           },
@@ -3132,6 +3168,11 @@
           },
           "title": {
             "title": "Title",
+            "type": "string"
+          },
+          "tool_profile": {
+            "default": "default",
+            "title": "Tool Profile",
             "type": "string"
           },
           "totals": {
