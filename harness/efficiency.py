@@ -13,6 +13,13 @@ from . import compaction
 CORRELATION_K = 5
 CORRELATION_TIERS = ("elide", "summary", "round_reset")
 DELEGATE_TOOLS = frozenset({"delegate"})
+# Per-turn activity counts (#639), summed into session totals and the session aggregate.
+ACTIVITY_KEYS = ("read_artifact_calls", "read_artifact_repeats", "edit_mismatches", "elide_only_compactions")
+EDIT_MISMATCH = "must appear exactly once"
+BAD_ARGUMENTS = "Error: bad arguments for "  # argument validation refused the call before the tool ran (runner)
+INVALID_ARGUMENTS = "Error: tool arguments were not a valid JSON object"  # unparseable arguments, never ran (runner)
+UNKNOWN_TOOL = "Error: unknown tool "  # not a tool this session has (disabled by policy, say), never ran (runner)
+REJECTED_PREFIXES = (BAD_ARGUMENTS, INVALID_ARGUMENTS, UNKNOWN_TOOL)
 
 _INTERRUPTED_MARK = "the daemon restarted while this tool call was running"
 
@@ -130,8 +137,23 @@ def empty_correlated() -> dict[str, int]:
     return {tier: 0 for tier in CORRELATION_TIERS}
 
 
+def empty_activity() -> dict[str, int]:
+    return {key: 0 for key in ACTIVITY_KEYS}
+
+
+def artifact_id_of(args) -> str:
+    """The `artifact_id` of a read_artifact call's arguments (dict or JSON string); "" when there is none."""
+    parsed = args
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return ""
+    return str(parsed.get("artifact_id") or "") if isinstance(parsed, dict) else ""
+
+
 class RetryTracker:
-    """Replay native-loop events to count this turn's dead-end and compaction-correlated retries."""
+    """Replay native-loop events to count this turn's dead-end and compaction-correlated retries, and its activity."""
 
     def __init__(self):
         self.calls: dict = {}
@@ -141,6 +163,8 @@ class RetryTracker:
         self._pass_window: dict | None = None
         self.dead_end_retries = 0
         self.correlated = empty_correlated()
+        self.activity = empty_activity()
+        self.recovered: set[str] = set()  # digests a read_artifact call has recovered; spans turns, so never reset
 
     def replay(self, events: list[dict]) -> None:
         for event in events:
@@ -165,6 +189,7 @@ class RetryTracker:
             self._pass_window = None
             self.dead_end_retries = 0
             self.correlated = empty_correlated()
+            self.activity = empty_activity()
 
     def _register(self, call_id, name, args, decision) -> None:
         if not call_id:
@@ -179,6 +204,8 @@ class RetryTracker:
 
     def _on_compaction(self, data: dict) -> None:
         tier = data.get("tier")
+        if tier == "elide" and data.get("summary_averted"):
+            self.activity["elide_only_compactions"] += 1
         if tier not in CORRELATION_TIERS:
             return
         if self._pass_window is not None:
@@ -188,12 +215,30 @@ class RetryTracker:
         self.windows.append(window)
         self._pass_window = window
 
+    def _count_activity(self, name: str, args, data: dict) -> None:
+        """A read_artifact call counts; a repeat is a successful recovery of a digest already recovered. An edit_file
+        call counts as a mismatch when it failed because old_text did not match exactly once."""
+        if not data.get("ok") and str(data.get("output") or "").startswith(REJECTED_PREFIXES):
+            return  # rejected before the tool ran, so not a call that ran (a recovered text may start the same way)
+        if name == "read_artifact":
+            self.activity["read_artifact_calls"] += 1
+            if data.get("ok"):
+                digest = artifact_id_of(args)
+                if digest in self.recovered:
+                    self.activity["read_artifact_repeats"] += 1
+                self.recovered.add(digest)
+        elif name == "edit_file" and not data.get("ok") and EDIT_MISMATCH in (data.get("output") or ""):
+            self.activity["edit_mismatches"] += 1
+
     def _on_result(self, data: dict) -> None:
         call = self.calls.get(data.get("id"))
         if call is None:
             return
-        key = retry_key(call.get("name") or data.get("name") or "", call.get("args"))
+        name = call.get("name") or data.get("name") or ""
+        key = retry_key(name, call.get("args"))
         skipped = _is_skipped_result(data, call)
+        if not skipped:
+            self._count_activity(name, call.get("args"), data)
         if key in self.failures and not skipped:
             self.dead_end_retries += 1
             for window in self.windows:
@@ -209,11 +254,32 @@ class RetryTracker:
             self.failures.add(key)
 
 
-def turn_increments(events: list[dict]) -> tuple[int, dict[str, int]]:
-    """Dead-end and correlated retry increments since the last `turn_metrics` event."""
+def turn_counts(events: list[dict]) -> dict:
+    """Increments since the last `turn_metrics` event: dead-end and correlated retries, then the activity counts."""
     tracker = RetryTracker()
     tracker.replay(events)
-    return tracker.dead_end_retries, dict(tracker.correlated)
+    return {"dead_end_retries": tracker.dead_end_retries, "compaction_correlated_retries": dict(tracker.correlated),
+            **tracker.activity}
+
+
+def has_increments(counts: dict) -> bool:
+    """Whether `turn_counts` found a retry or activity since the last turn_metrics row (correlated retries only
+    ever follow a dead-end retry, so they need no check of their own)."""
+    return bool(counts["dead_end_retries"] or any(counts[key] for key in ACTIVITY_KEYS))
+
+
+def add_activity(totals: dict, counts: dict) -> dict:
+    """Session totals with one turn's activity counts added (#639)."""
+    totals = dict(totals)
+    for key in ACTIVITY_KEYS:
+        totals[key] = totals.get(key, 0) + int(counts.get(key) or 0)
+    return totals
+
+
+def turn_increments(events: list[dict]) -> tuple[int, dict[str, int]]:
+    """Dead-end and correlated retry increments since the last `turn_metrics` event."""
+    counts = turn_counts(events)
+    return counts["dead_end_retries"], counts["compaction_correlated_retries"]
 
 
 def _max_output_chars(events: list[dict]) -> tuple[int | None, dict[str, int]]:
@@ -237,6 +303,7 @@ def session_payload(session_id: str, events: list[dict]) -> dict:
     turns = []
     retries = None
     correlated = None
+    activity = None
     for event in events:
         if event["type"] != "turn_metrics":
             continue
@@ -258,6 +325,10 @@ def session_payload(session_id: str, events: list[dict]) -> dict:
                 correlated = empty_correlated()
             for tier in CORRELATION_TIERS:
                 correlated[tier] += int(row.get(tier) or 0)
+        if "read_artifact_calls" in data:
+            activity = activity or empty_activity()
+            for key in ACTIVITY_KEYS:
+                activity[key] += int(data.get(key) or 0)
     if correlated is None:
         correlated = {tier: None for tier in CORRELATION_TIERS}
     largest, by_tool = _max_output_chars(events)
@@ -269,5 +340,6 @@ def session_payload(session_id: str, events: list[dict]) -> dict:
             "compaction_correlated_retries": correlated,
             "largest_tool_output_chars": largest,
             "largest_tool_output_by_tool": by_tool,
+            **(activity or {key: None for key in ACTIVITY_KEYS}),
         },
     }

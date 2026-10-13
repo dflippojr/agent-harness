@@ -255,7 +255,8 @@ def render(db: Database, sid: str) -> str:
         f"- Session `{s['id']}` · project `{s['project']}` · target `{s['target']}` · model `{s['model']}`",
         f"- Created {created} · status **{s['status']}** ({s['stop_reason'] or '-'})",
         f"- Totals: {totals.get('turns', 0)} model turns, {totals.get('prompt_tokens', 0)} prompt tokens, "
-        f"{totals.get('completion_tokens', 0)} completion tokens",
+        f"{totals.get('completion_tokens', 0)} completion tokens, {totals.get('read_artifact_calls', 0)} read_artifact "
+        f"calls, {totals.get('edit_mismatches', 0)} edit mismatches",
     ]
     frozen = s.get("skills") or []
     if frozen:

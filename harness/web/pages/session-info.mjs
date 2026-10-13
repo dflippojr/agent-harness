@@ -12,6 +12,7 @@ export function mountSessionInfo({ $app, h, append, copyBox, downloadDaemonFile 
       ["Project", s.project], ["Target", s.target], ["Backend", s.backend || "local"], ["Model", s.model],
       ["Created", new Date(s.created_at * 1000).toLocaleString()], ["Updated", new Date(s.updated_at * 1000).toLocaleString()],
       ["Model turns", t.turns || 0], ["Prompt tokens", t.prompt_tokens || 0], ["Completion tokens", t.completion_tokens || 0],
+      ["read_artifact calls", t.read_artifact_calls || 0], ["Edit mismatches", t.edit_mismatches || 0],
       ["Workspace", s.workspace_removed ? `${s.workspace} (removed)` : s.workspace],
     ];
     if (s.branch) rows.push(["Branch", s.base_branch ? `${s.branch} from ${s.base_branch}` : s.branch], ["Review", s.review || "pending"]);

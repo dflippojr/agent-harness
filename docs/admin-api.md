@@ -687,7 +687,11 @@ come from persisted `turn_metrics` events, kept as long as the session's events.
     "dead_end_retries": 2,
     "compaction_correlated_retries": {"elide": 1, "summary": 0, "round_reset": 0},
     "largest_tool_output_chars": 48000,
-    "largest_tool_output_by_tool": {"read_file": 48000, "run_shell": 1200}
+    "largest_tool_output_by_tool": {"read_file": 48000, "run_shell": 1200},
+    "read_artifact_calls": 3,
+    "read_artifact_repeats": 1,
+    "edit_mismatches": 2,
+    "elide_only_compactions": 4
   }
 }
 ```
@@ -697,6 +701,19 @@ only). Older sessions without `turn_metrics` / `output_chars` also report null r
 true when the server omitted `prompt_tokens` and the four buckets are unscaled char estimates; when `prompt_tokens`
 is present the buckets are scaled to sum to it. Codex/Claude cache fields are deliberately unused. Delegate calls
 are ignored until #157.
+
+The activity counts (#639) are the same in each `turn_metrics` row and in the session's `totals` (`GET /sessions/{ref}`):
+
+| Field | Counts |
+| --- | --- |
+| `read_artifact_calls` | `read_artifact` calls that ran, including failed ones (argument-validation rejections, policy-blocked and denied calls do not count) |
+| `read_artifact_repeats` | successful `read_artifact` calls for a digest this session had already recovered successfully |
+| `edit_mismatches` | `edit_file` calls that failed with `old_text must appear exactly once` |
+| `elide_only_compactions` | compaction passes that ended at the `elide` tier with the context under `summarize_at` and no summary call |
+
+A pass that no model turn committed (the next call failed or was cancelled) is kept in a turn row with only `turn` and the
+activity fields, so the totals still hold it. Older sessions report 0 in `totals` and null in the aggregate. The Prometheus `harness_edit_mismatch_total` and
+`harness_compaction_elide_only_total` counters sum the same turn-level fields.
 
 `tool_result.output_chars` is Unicode code points of the result before the 20,000-character event truncation.
 Failed outputs count. `largest_tool_output_by_tool` is session-API only (never a Prometheus label).
@@ -714,6 +731,8 @@ surfaces never read (#330); `GET /keys` carries each App's counts instead. The s
 | --- | --- | --- | --- | --- |
 | `harness_dead_end_retries_total` | counter | retries | none | `sum(harness_dead_end_retries_total)` |
 | `harness_compaction_correlated_retries_total` | counter | retries | `tier=elide\|summary\|round_reset` | `sum by (tier) (harness_compaction_correlated_retries_total)` |
+| `harness_edit_mismatch_total` | counter | calls | none | `sum(harness_edit_mismatch_total)` |
+| `harness_compaction_elide_only_total` | counter | passes | none | `sum(harness_compaction_elide_only_total)` |
 | `harness_prompt_cache_tokens_total` | counter | tokens | `kind=cached\|recomputed` | `sum by (kind) (harness_prompt_cache_tokens_total)` |
 
 Cache series stay 0 until a native llama-server session records `cache_tokens` (first prompt-progress chunk of the
@@ -733,6 +752,7 @@ restart). The typed allowlist, persistence, recovery, and error codes are docume
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.27 | 2026-10-12 | Session `totals` adds `read_artifact_calls`, `read_artifact_repeats`, `edit_mismatches` and `elide_only_compactions` (#639), also in each `turn_metrics` row and the `/sessions/{ref}/metrics` aggregate; Prometheus `harness_edit_mismatch_total` and `harness_compaction_elide_only_total` |
 | 1.26 | 2026-10-12 | `GET /api/admin/v1` adds `allowed_logins` (#620): the owner's tailnet logins from `harness.local.yaml`, read-only, for the Hub's tailnet sign-in (dflippojr/agent-harness-hub#8). Shown by `harness capabilities`. |
 | 1.25 | 2026-10-11 | Read-only `POST /pairing-requests/preview` (#604), CLI `harness pairing-requests preview --scopes ...`, SDK `Harness.preview_pairing(scopes)`: shared daemon App scope disclosures before arming, including module fallback copy and elevated tiers, without pairing side effects. |
 | 1.24 | 2026-10-10 | Optional read-only `GET /hub` inventory (#520), `harness hub status`, SDK `Harness.hub_status()`, strict local entries and state/error metrics. The claim CLI view is now `harness hub claim-status`. |

@@ -14,6 +14,10 @@ class TokenTotalsResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    read_artifact_calls: int = 0
+    read_artifact_repeats: int = 0
+    edit_mismatches: int = 0
+    elide_only_compactions: int = 0
 
 
 class RateLimitsResponse(BaseModel):
