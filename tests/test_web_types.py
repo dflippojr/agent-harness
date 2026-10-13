@@ -72,7 +72,7 @@ def test_openapi_covers_web_contracts_and_static_serving_stays_native(tmp_path):
 
 
 def test_every_openapi_operation_has_a_description(tmp_path):
-    """#666: FastAPI uses a handler's docstring as its operation description, so a blank one shows nothing."""
+    """#666: every operation needs a docstring (FastAPI's description) or a summary=, so none shows blank."""
     manager = Manager(make_cfg(tmp_path))
     try:
         paths = create_app(manager).openapi()["paths"]
@@ -80,5 +80,6 @@ def test_every_openapi_operation_has_a_description(tmp_path):
         manager.db.close()
     methods = {"get", "put", "post", "delete", "patch"}
     blank = [f"{method.upper()} {path}" for path, item in paths.items() for method, op in item.items()
-             if method in methods and not str(op.get("description", "")).strip()]
+             if method in methods
+             and not (str(op.get("description", "")).strip() or str(op.get("summary", "")).strip())]
     assert blank == []
