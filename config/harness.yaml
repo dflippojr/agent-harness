@@ -180,6 +180,9 @@ budgets:
   max_run_seconds: 3600            # a member's or an App's run ends after this long running (0 = no limit)
   app_max_running: 2               # per App, unless the owner set its own caps (PUT /apps/{id}/limits)
   app_max_queued: 4                # queued or parked; past it the App gets 429 app_queue_full
+  stuck_nudge_after: 3             # the Nth identical failing tool call is told repeating it will not work (0 = off)
+  stuck_stop_after: 8              # ... and the Mth ends the run: stuck_repeat (0 = off)
+  stuck_invalid_after: 5           # this many invalid tool calls in a row end the run: stuck_invalid (0 = off)
 
 compaction:
   mask_min_chars: 2000  # replace used successful tool results with recoverable receipts

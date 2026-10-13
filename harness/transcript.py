@@ -7,6 +7,7 @@ import logging
 import time
 from pathlib import Path
 
+from . import stuck
 from .db import Database
 
 log = logging.getLogger("harness.transcript")
@@ -115,6 +116,10 @@ def _r_error(at: str, d: dict, last_content: str, kind: str = "error") -> list[s
 
 def _r_llm_retry(at: str, d: dict, last_content: str) -> list[str]:
     return _r_error(at, d, last_content, "llm_retry")
+
+
+def _r_stuck(at: str, d: dict, last_content: str) -> list[str]:
+    return [f"> {at} · {stuck.describe(d)}", ""]
 
 
 def _r_model_waking(at: str, d: dict, last_content: str) -> list[str]:
@@ -226,7 +231,7 @@ _RENDERERS = {
     "approval_requested": _r_approval_requested, "approval_decided": _r_approval_decided,
     "approval_auto_approved": _r_approval_auto_approved, "smart_review": _r_smart_review,
     "tool_result": _r_tool_result, "snippet_started": _r_snippet_started, "snippet_result": _r_snippet_result,
-    "compaction": _r_compaction, "error": _r_error, "llm_retry": _r_llm_retry,
+    "compaction": _r_compaction, "error": _r_error, "llm_retry": _r_llm_retry, "stuck": _r_stuck,
     "model_waking": _r_model_waking, "model_ready": _r_model_ready, "compaction_started": _r_compaction_started,
     "target_waiting": _r_target_waiting, "target_online": _r_target_online, "app_context": _r_app_context,
     "app_tool_call": _r_app_tool_call, "app_tool_result": _r_app_tool_result, "gpu_paused": _r_gpu_paused,

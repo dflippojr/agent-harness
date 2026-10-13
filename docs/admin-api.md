@@ -301,7 +301,9 @@ shows what is set, what applies and what counts against it; `PUT` with `max_runn
 gives its hosted backend slot (and the GPU) to others and takes it back after the decision. Pending approvals are
 denied after `budgets.approval_timeout_seconds` and their run ends (`stop_reason` `approval_expired`); members' and
 Apps' runs end after `budgets.max_run_seconds` spent running (`budget_time`). The owner's own runs have no time
-budget.
+budget. Every local-model run ends at `budgets.stuck_stop_after` identical failing tool calls (`stuck_repeat`, a
+nudge in the result from `budgets.stuck_nudge_after`) or `budgets.stuck_invalid_after` invalid calls in a row
+(`stuck_invalid`), each with a `stuck` event (#643).
 
 Member GitHub sign-in ([`member-github-auth.md`](member-github-auth.md)): `GET /api/admin/v1/github-member-auth`
 returns `configured`, `enabled`, the last preflight result, and each member's coarse `status` and `last_used_at`

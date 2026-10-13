@@ -320,6 +320,78 @@ def test_retries_invalid_calls_and_bad_args(tmp_path):
     asyncio.run(body())
 
 
+def test_consecutive_invalid_calls_end_the_run_stuck_invalid(tmp_path):
+    """#643: five invalid calls in a row end the run; a valid call between them resets the count."""
+    def bad(i: int) -> Completion:
+        return Completion(tool_calls=[call(f"nope{i}", i)])
+
+    script = Script([bad(0), bad(1), bad(2), bad(3), Completion(tool_calls=[call("list_files", 4)]),
+                     bad(5), bad(6), bad(7), bad(8), Completion(tool_calls=[call("nope9", 9), call("list_files", 10)]),
+                     Completion(content="unreachable")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        await m.start()
+        s = m.create("go")
+        s = await wait_status(m, s["id"], "done")
+        assert s["stop_reason"] == "stuck_invalid"
+        assert events(m, s["id"], "stuck") == [{"reason": "stuck_invalid", "tool": "nope9", "count": 5}]
+        outputs = [r["output"] for r in events(m, s["id"], "tool_result")]
+        assert outputs[-1] == "Not run: the run stopped because it was stuck."   # the rest of the turn is skipped
+        assert s["run"]["invalid_tool_calls"] == 9
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_repeated_failing_call_is_nudged_then_ends_the_run_stuck_repeat(tmp_path):
+    """#643: the same failing call gets a nudge from the third time and ends the run at the eighth."""
+    script = Script([Completion(tool_calls=[call("read_file", i, path="missing.txt")]) for i in range(8)]
+                    + [Completion(content="unreachable")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        await m.start()
+        s = m.create("go")
+        s = await wait_status(m, s["id"], "done")
+        assert s["stop_reason"] == "stuck_repeat"
+        outputs = [r["output"] for r in events(m, s["id"], "tool_result")]
+        assert len(outputs) == 8
+        assert "will not work" not in outputs[1] and "failed 3 times" in outputs[2]
+        assert events(m, s["id"], "stuck") == [{"reason": "stuck_repeat", "tool": "read_file", "count": 8}]
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_a_saved_stuck_stop_runs_no_pending_call_after_restart(tmp_path):
+    """#643: a crash after the stopping result is saved but before the rest of the turn is skipped must not run (or
+    finish on) the calls still pending when the daemon restarts."""
+    cfg = make_cfg(tmp_path)
+    script = Script([Completion(content="unreachable")])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        s = m.create("go")
+        m.tasks[s["id"]].cancel()
+        await asyncio.sleep(0.05)
+        s = m.db.get_session(s["id"])
+        calls = [call("read_file", 0, path="missing.txt"), call("write_file", 1, path="a.txt", content="x"),
+                 call("finish", 2, answer="done")]
+        ctx = s["context"] + [{"role": "assistant", "content": "", "tool_calls": calls},
+                              {"role": "tool", "tool_call_id": calls[0]["id"], "content": "Error: not found"}]
+        run = s["run"] | {"stuck": {"failures": {}, "invalid_streak": 0,
+                                    "stop": {"reason": "stuck_repeat", "tool": "read_file", "count": 8}}}
+        m.db.update_session(s["id"], context=ctx, run=run, status="running")
+        m2 = Manager(cfg, db=m.db, chat=script)
+        await m2.start()
+        s = await wait_status(m2, s["id"], "done")
+        assert s["stop_reason"] == "stuck_repeat"
+        assert not (Path(s["workspace"]) / "a.txt").exists()
+        outputs = [r["output"] for r in events(m2, s["id"], "tool_result")]
+        assert outputs == ["Not run: the run stopped because it was stuck."] * 2
+        await m2.stop()
+    asyncio.run(body())
+
+
 def test_cancel_and_follow_up_message(tmp_path):
     cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "action": "ask"}])
     script = Script([Completion(tool_calls=[call("write_file", 0, path="a", content="x")]),
@@ -575,6 +647,7 @@ def test_budget_and_finish_tool(tmp_path):
 
 def test_compaction_summarizes_long_context(tmp_path):
     cfg = make_cfg(tmp_path, context_tokens=8000)
+    cfg.stuck_stop_after = cfg.stuck_invalid_after = 0  # eight unknown-tool calls stand in for real tools
     big = "line of output\n" * 400  # ~6K chars per result
 
     def step(msgs):
@@ -591,8 +664,8 @@ def test_compaction_summarizes_long_context(tmp_path):
         # Stand-in tool so the test doesn't need Docker: unknown tools return an error of known size.
         orig = m.runner._record_result
 
-        async def padded(sid, c, name, output, ok, seconds=0.0):
-            await orig(sid, c, name, output + big, ok, seconds)
+        async def padded(sid, c, name, output, ok, seconds=0.0, **kwargs):
+            await orig(sid, c, name, output + big, ok, seconds, **kwargs)
         m.runner._record_result = padded
         await m.start()
         s = await wait_status(m, m.create("long task")["id"], "done", timeout=20)
