@@ -72,8 +72,11 @@ def test_file_reads_keep_their_noise_like_lines():
 
 def test_a_trailing_carriage_return_keeps_its_line():
     assert compaction.strip_noise("fatal: compilation failed\r\nnext\r") == "fatal: compilation failed\nnext"
-    # A shorter overwrite replaces only its own width, as on a terminal.
+    # A shorter overwrite replaces only its own width, as on a terminal, unless the line is erased first.
     assert compaction.strip_noise("FATAL: missing config.json\r!") == "!ATAL: missing config.json"
+    assert compaction.strip_noise("FAIL: dependency missing\r\x1b[2KOK") == "OK"
+    assert compaction.strip_noise("FAIL: dependency missing\r\x1b[32mOK\x1b[K") == "OK"
+    assert compaction.strip_noise("building\x1b[1K") == ""
 
 
 def test_a_percentage_without_a_bar_is_not_progress_noise():
@@ -184,6 +187,17 @@ def test_a_copy_in_the_kept_tail_is_the_one_kept():
     keep = sum(compaction.message_chars(m) for m in messages[4:])
     out, _ = trim(messages, only(dedupe=True), keep_chars=keep)
     assert tools(out)[:2] == [compaction.SAME_AS_BELOW.format(name="run_shell"), status]
+
+
+def test_an_older_copy_only_collapses_into_a_tail_copy_that_reads_the_same():
+    """The kept tail is not cleaned, so a plain older log is not a duplicate of a noisy newer one."""
+    plain = "error: link failed\n" * 20
+    old = turn(1, "run_shell", plain, command="make")
+    recent = turn(2, "run_shell", "\x1b[31m" + plain + "\x1b[0m", command="make")
+    messages = HEAD + old + recent + turn(99, "list_files", "a.txt", path=".")
+    keep = sum(compaction.message_chars(m) for m in messages[4:])
+    out, _ = trim(messages, keep_chars=keep)
+    assert tools(out)[0] == plain
 
 
 def test_identical_reads_of_different_files_are_not_deduped():

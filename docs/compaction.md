@@ -168,9 +168,9 @@ The same window without masking (`--context 32768 --no-mask`: chat sessions or
 | exploration (170 turns) | config-only (0.55/0.80) | 8,707,067 | 3 | 81 | 78/81 (96%) | 0 | 0 / 0 |
 | exploration (170 turns) | trim + 0.55/0.80 | 7,346,742 | 0 | 18 | 18/18 (100%) | 144,917 | 0 / 0 |
 | build failures (150 turns) | baseline | 7,166,762 | 3 | 67 | 64/67 (95%) | 0 | 0 / 0 |
-| build failures (150 turns) | trim | 6,976,328 | 1 | 63 | 62/63 (98%) | 679,509 | 44 / 43 |
+| build failures (150 turns) | trim | 7,001,116 | 1 | 63 | 62/63 (98%) | 668,934 | 49 / 48 |
 | build failures (150 turns) | config-only (0.55/0.80) | 7,894,933 | 2 | 89 | 87/89 (97%) | 0 | 0 / 0 |
-| build failures (150 turns) | trim + 0.55/0.80 | 7,830,133 | 1 | 82 | 81/82 (98%) | 673,416 | 45 / 44 |
+| build failures (150 turns) | trim + 0.55/0.80 | 7,839,126 | 1 | 82 | 81/82 (98%) | 664,951 | 49 / 48 |
 
 What the numbers say (2026-10-13):
 
@@ -185,7 +185,7 @@ What the numbers say (2026-10-13):
   characters: a summary resets the context to a small size, so averting one
   leaves the later prompts larger.
 - **Without masking, trim cuts summary calls on every transcript** (5 to 2, 4 to
-  0, 3 to 1) and sends 3-7% fewer characters. That beats the config-only arm,
+  0, 3 to 1) and sends 2-7% fewer characters. That beats the config-only arm,
   which saves fewer summary calls (5 to 3, 4 to 3, 3 to 2) and sends 10-11% more
   characters because the context sits higher between passes. Trim plus the
   wider gap makes the fewest summary calls but sends more than trim alone.

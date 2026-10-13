@@ -144,7 +144,9 @@ def elide(messages: list[dict], keep_last: int = 6, max_chars: int = 1500) -> tu
 # results and never removes a message, so every tool result keeps its call (arXiv 2609.20804: cheap elision before
 # the summary call is what cut summary calls). Running trim on its output changes nothing.
 
-ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+# Escape sequences other than erase-in-line (ESC[K, ESC[0K, ESC[1K, ESC[2K), which _terminal_line applies.
+ANSI = re.compile(r"\x1b\[(?![0-2]?K)[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+CURSOR = re.compile(r"(\r|\x1b\[[0-2]?K)")
 PROGRESS = re.compile(r"\d{1,3}(?:\.\d+)?%")
 PROGRESS_BAR = re.compile(r"[#=█▉▊▋▌▍▎▏░▒▓━─>]{5,}")
 COMMAND_TOOLS = frozenset({"run_shell", "verify", "git_clone"})
@@ -153,7 +155,7 @@ DEDUPE_MIN_CHARS = 200  # a "same as above" note is shorter than this, so notes 
 SAME_AS_BELOW = "[Same output as a later {name} result below; this older copy was removed.]"
 SUPERSEDED = "[Older read of {path} removed: the file was read again or changed later in this session.]"
 OUTPUT_CUT = "[output cut at "  # the runner's note on a result cut to fit the turn's budget
-LINES_OMITTED ="[... {count} lines omitted: older command output keeps its first {head} and last {tail} lines ...]"
+LINES_OMITTED = "[... {count} lines omitted: older command output keeps its first {head} and last {tail} lines ...]"
 
 
 @dataclass(frozen=True)
@@ -184,10 +186,10 @@ def recent_start(messages: list[dict], keep_chars: int) -> int:
 
 
 def strip_noise(text: str) -> str:
-    """Drop ANSI escapes, keep what a terminal would show of carriage-return overwrites, and keep only the last of a
-    run of progress-bar lines."""
+    """Drop ANSI escapes, keep what a terminal would show of carriage returns and erased lines, and keep only the last
+    of a run of progress-bar lines."""
     text = ANSI.sub("", text).replace("\r\n", "\n")
-    lines = [_overwritten(line) if "\r" in line else line for line in text.split("\n")]
+    lines = [_terminal_line(line) if "\r" in line or "\x1b" in line else line for line in text.split("\n")]
     out: list[str] = []
     for line in lines:
         if _is_progress(line) and out and _is_progress(out[-1]):
@@ -197,13 +199,25 @@ def strip_noise(text: str) -> str:
     return "\n".join(out)
 
 
-def _overwritten(line: str) -> str:
-    """What a terminal shows: each carriage return moves the cursor to the start of the line, and the next segment
-    overwrites only as many characters as it has."""
-    shown = ""
-    for part in line.split("\r"):
-        shown = part + shown[len(part):]
-    return shown
+def _terminal_line(line: str) -> str:
+    """What a terminal shows of one line: a carriage return moves the cursor to the start, text overwrites only its
+    own width, and erase-in-line clears from the cursor to the end (0), the start to the cursor (1) or all of it (2)."""
+    shown, cursor = "", 0
+    for token in CURSOR.split(line):
+        if token == "\r":
+            cursor = 0
+        elif token.startswith("\x1b"):
+            mode = token[2:-1] or "0"
+            if mode == "0":
+                shown = shown[:cursor]
+            elif mode == "1":
+                shown = " " * cursor + shown[cursor:]
+            else:
+                shown = " " * cursor
+        elif token:
+            shown = shown[:cursor] + token + shown[cursor + len(token):]
+            cursor += len(token)
+    return shown.rstrip(" ")
 
 
 def _is_progress(line: str) -> bool:
@@ -311,7 +325,8 @@ def trim(messages: list[dict], rules: TrimRules, keep_chars: int,
         if i in stale and i < cutoff:
             new = SUPERSEDED.format(path=_norm_path(args.get("path")))
         else:
-            new = _cleaned(text, name, rules)
+            # A note may only point to a copy that reads the same as the trimmed result: the kept tail is not cleaned.
+            new = _cleaned(text, name, rules) if i < cutoff else text
             # File reads are left to superseded_reads: a later pass could drop the copy a note points to.
             if rules.dedupe and name != "read_file" and len(new) >= DEDUPE_MIN_CHARS:
                 if new in seen and i < cutoff:
