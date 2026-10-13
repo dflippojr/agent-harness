@@ -90,8 +90,9 @@ def test_baseline_is_frozen_at_45():
     # the real steps are valid and gap-free from 0046: 0046_session_taint (#262), 0047_canary_results (#265),
     # 0048_canary_note (#316), 0049_checkpoints (#261), 0050_app_retention (#330), 0051_end_users (#365),
     # 0052_member_api_keys (#393), 0053_audit_context (#467), 0054_namespace_audit (#471), 0055_catalog_app_id (#518),
-    # 0056_pairing_requests (#519), 0057_hub_claim (#543), 0058_idempotency_keys (#462), 0059_tool_profile (#638)
-    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59]
+    # 0056_pairing_requests (#519), 0057_hub_claim (#543), 0058_idempotency_keys (#462), 0059_tool_profile (#638),
+    # 0060_endpoint_requests_key (#669), 0061_sessions_list_index (#663)
+    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61]
 
 
 def test_fresh_database_matches_pre_versioning_build(tmp_path):
@@ -345,3 +346,15 @@ def test_fresh_database_gets_session_taint_column(tmp_path):
     assert _version(path) == migrations.latest_version(shipped)
     assert info["taint"]["notnull"] == 1 and info["taint"]["dflt_value"] == "'[]'"
     assert not (tmp_path / "pre-migration").exists()
+
+
+def test_key_listing_counts_each_keys_requests_through_the_key_index(tmp_path):
+    """#669: the request count in the key listing searches `endpoint_requests` by `key_id`, not scanning every row of
+    the table, which is never pruned."""
+    from harness.db import _API_KEY_LISTING
+    db = Database(tmp_path / "harness.db", migrations=_REAL_DISCOVER())
+    plan = db.conn.execute("EXPLAIN QUERY PLAN " + _API_KEY_LISTING + " AND k.id = ?", ("k-1",)).fetchall()
+    db.close()
+    details = [row[-1] for row in plan]
+    assert any(d.startswith("SEARCH r USING") and "endpoint_requests_key (key_id=?)" in d for d in details), details
+    assert not any(d.startswith("SCAN r") or d.startswith("SCAN endpoint_requests") for d in details), details

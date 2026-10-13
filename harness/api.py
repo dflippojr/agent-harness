@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import mimetypes
 import os
 import sqlite3
@@ -394,10 +395,10 @@ async def _access_guard(request: Request, call_next):
     if warnings:
         response.headers["X-Agent-Harness-Audit-Warning"] = "audit_gap"
         response.headers["Access-Control-Expose-Headers"] = "X-Agent-Harness-Audit-Warning"
-    if info.cross_origin_api and idempotency.REPLAYED_HEADER in response.headers:
-        exposed = response.headers.get("Access-Control-Expose-Headers", "")
-        response.headers["Access-Control-Expose-Headers"] = ", ".join(
-            header for header in (exposed, idempotency.REPLAYED_HEADER) if header)
+    for header in (idempotency.REPLAYED_HEADER, NEXT_BEFORE):
+        if info.cross_origin_api and header in response.headers:
+            exposed = response.headers.get("Access-Control-Expose-Headers", "")
+            response.headers["Access-Control-Expose-Headers"] = ", ".join(h for h in (exposed, header) if h)
     if compatibility and compatibility["state"] == "transition":
         response.headers["X-Agent-Harness-Deprecation"] = "missing_client_version"
         response.headers["Warning"] = '299 agent-harness "client version header will be required after this transition release"'
@@ -699,11 +700,33 @@ async def queue(request: Request):
     return out
 
 
+NEXT_BEFORE = "X-Next-Before"
+
+
+def _page_cursor(before: str) -> tuple[float, str] | None:
+    """`before` as `<created_at>:<id>`, the value of an earlier page's `X-Next-Before`; "" is the first page."""
+    if not before:
+        return None
+    created_at, sep, sid = before.partition(":")
+    try:
+        cursor = float(created_at), sid
+    except ValueError:
+        cursor = None
+    if not sep or not sid or cursor is None or not math.isfinite(cursor[0]):
+        raise HarnessError(400, "before must be the X-Next-Before value of an earlier page")
+    return cursor
+
+
 @api_router.get("/sessions", response_model=list[WebSessionResponse], response_model_exclude_unset=True)
-async def list_sessions(request: Request, limit: int = 50):
-    """Session cards for the caller's agent sessions, newest first; `limit` defaults to 50."""
+async def list_sessions(request: Request, response: Response, limit: int = 50, before: str = "", target: str = ""):
+    """One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that
+    is active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663)."""
     m = mgr(request)
-    return await m.list_summaries(m.db.list_sessions(limit, owner_id=owner_id(request)))
+    rows, cursor = m.db.session_page(max(1, min(limit, 200)), owner_id=owner_id(request), before=_page_cursor(before),
+                                     target=target or None, include_active=not before)
+    if cursor is not None:
+        response.headers[NEXT_BEFORE] = f"{cursor[0]!r}:{cursor[1]}"
+    return await m.list_summaries(rows)
 
 
 @api_router.post("/sessions", status_code=201, response_model=WebSessionResponse, response_model_exclude_unset=True)
@@ -754,7 +777,9 @@ async def create_github_session(body: CreateGitHubSession, request: Request):
     prompt = github_tasks.prompt(source)
     s = m.create(prompt, project=body.project, target=body.target, backend=body.backend,
                  model=body.model, title=source["title"], owner_id=owner_id(request),
-                 skills=body.skills, app_metadata={"github_base_branch": source["base_branch"]},
+                 skills=body.skills,
+                 app_metadata={"github_base_branch": source["base_branch"],
+                               "github_item": {"repo": repo, "kind": source["kind"], "number": body.number}},
                  tool_profile=body.tool_profile,
                  taint=taint.add([], "github", f"GitHub {repo} #{body.number}"))
     return m.summary(s)

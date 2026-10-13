@@ -2049,7 +2049,8 @@ export interface paths {
         };
         /**
          * List Sessions
-         * @description Session cards for the caller's agent sessions, newest first; `limit` defaults to 50.
+         * @description One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that
+         *     is active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663).
          */
         get: operations["admin_list_sessions_sessions_get"];
         put?: never;
@@ -5415,7 +5416,8 @@ export interface paths {
         };
         /**
          * List Sessions
-         * @description Session cards for the caller's agent sessions, newest first; `limit` defaults to 50.
+         * @description One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that
+         *     is active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663).
          */
         get: operations["list_sessions_sessions_get"];
         put?: never;
@@ -7529,6 +7531,11 @@ export interface components {
             /** Project */
             project: string;
             /**
+             * Pull Request Url
+             * @default
+             */
+            pull_request_url?: string;
+            /**
              * Push Target
              * @default
              */
@@ -7770,6 +7777,11 @@ export interface components {
             pending_approvals?: components["schemas"]["ApprovalResponse"][];
             /** Project */
             project: string;
+            /**
+             * Pull Request Url
+             * @default
+             */
+            pull_request_url?: string;
             /**
              * Push Target
              * @default
@@ -11255,6 +11267,8 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                before?: string;
+                target?: string;
             };
             header?: never;
             path?: never;
@@ -16942,6 +16956,8 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                before?: string;
+                target?: string;
             };
             header?: never;
             path?: never;

@@ -14,7 +14,7 @@ export { FAILED_NEEDS_YOU_SECONDS, SESSION_GROUPS, sessionGroup, groupSessions }
 const LAPTOP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M2 19h20"/></svg>';
 const CHEVRON_SVG = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
 
-export function mountSessions({ $app, h, fill, append, api, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
+export function mountSessions({ $app, h, fill, append, api, ownerSurface = () => "admin", setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, onDaemonChange, onDaemonState, browser }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, localStorage } = browser;
@@ -48,8 +48,43 @@ async function viewList(pane = null) {
     showListAction("#/new", "+ New task");
   }
 
+  // The first page always holds every active session (#663); "Show older" adds the next page by the server's cursor.
+  // Every load reads all its older pages again from the top, so no shown row keeps an old status or falls between pages.
+  // The button follows from the counts: wanted > shown is loading, or Retry once a load has failed; any load that
+  // succeeds settles both.
   let sessions = [];
+  let olderPages = 0;  // older pages shown
+  let olderWanted = 0;  // older pages asked for: one more than shown while Show older loads
+  let olderFailed = false;
+  let nextBefore = null;
   let targets = [];
+  const sessionsPath = (target, before) => {
+    const query = new URLSearchParams();
+    if (target !== "all") query.set("target", target);
+    if (before) query.set("before", before);
+    const qs = query.toString();
+    return qs ? `/sessions?${qs}` : "/sessions";
+  };
+  // The owner route pages and filters by machine; a member's App-surface list does neither, so filter here too.
+  const shown = () => sessions.filter((s) => sessionTarget === "all" || s.target === sessionTarget);
+  const listOptions = (onNext) => ({ surface: ownerSurface(), onHeaders: (headers) => onNext(headers.get("X-Next-Before")) });
+  // The first page of `target` and `olderWanted` more, each row once (a later page can repeat an active row of the first).
+  const loadSessions = async (target, olderWanted) => {
+    const byId = new Map();
+    const read = async (before) => {
+      let next = null;
+      const page = await api(sessionsPath(target, before), listOptions((cursor) => { next = cursor; }));
+      for (const s of page) if (!byId.has(s.id)) byId.set(s.id, s);
+      return next;
+    };
+    let next = await read(null);
+    let pages = 0;
+    while (next && pages < olderWanted) {
+      next = await read(next);
+      pages++;
+    }
+    return { rows: [...byId.values()], next, pages };
+  };
   const targetName = (target) => target === "tower" ? "Tower" : TARGET_LABEL[target] || target;
   const sessionCardKey = (s) => [
     s.id, s.title, s.status, s.updated_at, s.chat_summary, s.queue_position, s.review, s.job_status,
@@ -82,26 +117,36 @@ async function viewList(pane = null) {
         !ask && s.chat_summary ? h("p", { class: "agent-preview" }, s.chat_summary) : null),
       h("span", { class: "agent-chev", html: CHEVRON_SVG }));
   };
+  const showOlder = () => {
+    if (!nextBefore || (olderWanted > olderPages && !olderFailed)) return undefined;  // a page is on its way
+    olderWanted = olderPages + 1;
+    olderFailed = false;
+    renderSessions();
+    return refreshNow();
+  };
+  const olderButton = () => {
+    if (!nextBefore) return null;
+    const loading = olderWanted > olderPages && !olderFailed;
+    const label = olderFailed ? "Couldn't load older sessions. Retry" : loading ? "Loading…" : "Show older";
+    return h("button", { type: "button", class: "btn secondary agent-more", disabled: loading, onclick: showOlder }, label);
+  };
   const renderSessions = () => {
-    const visible = sessionTarget === "all" ? sessions : sessions.filter((s) => s.target === sessionTarget);
-    if (!sessions.length) {
-      delete list.dataset.keys;
-      fill(list, h("p", { class: "empty" }, "No sessions yet. Start one with “New task”."));
-      return;
-    }
+    const visible = shown();
     if (!visible.length) {
       delete list.dataset.keys;
-      fill(list, h("p", { class: "empty" }, `No sessions on the ${targetName(sessionTarget)} yet.`));
+      fill(list, h("p", { class: "empty" }, sessionTarget === "all" ? "No sessions yet. Start one with “New task”."
+        : `No sessions on the ${targetName(sessionTarget)} yet.`));
       return;
     }
     const groups = groupSessions(visible);
     // The group is part of the key: a failure that ages out of Needs you moves without any field changing.
-    const keys = groups.flatMap((g) => g.sessions.map((s) => `${g.key}\0${sessionCardKey(s)}`)).join("\n");
+    const keys = groups.flatMap((g) => g.sessions.map((s) => `${g.key}\0${sessionCardKey(s)}`)).join("\n") + `\n${olderPages}\0${olderWanted}\0${olderFailed}\0${nextBefore || ""}`;
     if (list.dataset.keys === keys && list.querySelector("a.agent-row")) return;
     list.dataset.keys = keys;
     fill(list, groups.map((g) => h("section", { class: `agent-group ${g.key}`, "aria-label": g.label },
       h("h2", { class: "agent-sec" }, g.label, g.key === "recent" ? null : h("span", { class: "agent-count" }, String(g.sessions.length))),
-      h("div", { class: "agent-list" }, g.sessions.map(sessionRow)))));
+      h("div", { class: "agent-list" }, g.sessions.map(sessionRow)))),
+    olderButton());
     pane?.paint();
   };
   const renderTargetSwitch = () => {
@@ -110,10 +155,18 @@ async function viewList(pane = null) {
     fill(targetSwitch, ["all", ...targets].map((target) => h("button", {
       type: "button", class: target === sessionTarget ? "on" : "", "aria-pressed": target === sessionTarget,
       onclick: () => {
+        if (target === sessionTarget) return;
         sessionTarget = target;
         try { localStorage.setItem("harness.sessionTarget", target); } catch (_) { /* private mode */ }
         renderTargetSwitch();
-        renderSessions();
+        // The server filters by machine (#663), so the rows shown so far belong to the old choice.
+        sessions = [];
+        olderPages = olderWanted = 0;
+        olderFailed = false;
+        nextBefore = null;
+        delete list.dataset.keys;
+        fill(list, h("p", { class: "empty" }, "Loading…"));
+        void refreshNow();
       },
     }, target === "all" ? "All" : targetName(target))));
   };
@@ -157,12 +210,32 @@ async function viewList(pane = null) {
   search.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
   if (searchQuery.trim()) void runSearch();
 
+  let listRun = 0;  // only the latest load paints: a machine switch can start one while another is on its way
   const render = async () => {
-    const [freshSessions, queue, gpu, projects] = await Promise.all([
-      api("/sessions"), api("/queue"), isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
-    sessions = freshSessions;
+    const run = ++listRun;
+    const asked = sessionTarget;
+    let loaded, queue, gpu, projects;
+    try {
+      [loaded, queue, gpu, projects] = await Promise.all([loadSessions(asked, olderWanted), api("/queue"),
+        isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
+    } catch (e) {
+      if (!gone && run === listRun && olderWanted > olderPages) {  // the page Show older asked for: offer Retry
+        olderFailed = true;
+        renderSessions();
+      }
+      throw e;
+    }
+    if (gone || run !== listRun) return;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
       .sort(compareTargets);
+    if (asked !== "all" && !targets.includes(asked)) {  // a remembered machine that is gone: load every machine's
+      sessionTarget = "all";
+      return render();
+    }
+    sessions = loaded.rows;
+    nextBefore = loaded.next;
+    olderPages = olderWanted = loaded.pages;  // fewer than asked for when the list got shorter
+    olderFailed = false;
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
     fill(queueNote,

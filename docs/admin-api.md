@@ -188,7 +188,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/runners` | owner (`admin` scope) | List each runner's presence, compatibility, pending requests, and whether remote update is supported. | `harness_modules/runners/routes.py` `runners` |
 | POST | `/api/admin/v1/runners/{name}/update` | owner (`admin` scope) | Ask an online Mac runner to update itself and wait for the outcome; 409 if offline, too old, or failed. | `harness_modules/runners/routes.py` `runner_update` |
 | GET | `/api/admin/v1/search` | owner (`admin` scope) | Full-text search over past sessions. Passages mark matches with \u0002 ... \u0003. | `harness_modules/search/routes.py` `search_sessions` |
-| GET | `/api/admin/v1/sessions` | owner (`admin` scope) | Session cards for the caller's agent sessions, newest first; `limit` defaults to 50. | `harness/api.py` `list_sessions` |
+| GET | `/api/admin/v1/sessions` | owner (`admin` scope) | One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that is active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663). | `harness/api.py` `list_sessions` |
 | POST | `/api/admin/v1/sessions` | owner (`admin` scope) | Starts an agent session and returns before its run finishes. | `harness/api.py` `create_session` |
 | GET | `/api/admin/v1/sessions/{ref}` | owner (`admin` scope) | Current state of one session, with its queue position and any pending approvals. | `harness/api.py` `get_session` |
 | PATCH | `/api/admin/v1/sessions/{ref}` | owner (`admin` scope) | Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters. | `harness/api.py` `patch_session` |

@@ -413,6 +413,36 @@ def test_undo_during_the_grace_keeps_everything_and_issues_a_new_token(tmp_path)
         wait_for(lambda: _done(client, sid2, new))
 
 
+def test_the_retention_route_and_an_undone_revoke_read_one_key_not_the_whole_list(tmp_path, monkeypatch):
+    """#669: both return the key as `GET /keys` lists it, and neither lists every key to find it."""
+    cfg = make_cfg(tmp_path)
+    m = Manager(cfg, chat=Script([Completion(content="ok")]))
+    client = TestClient(create_app(m))
+    with client:
+        a_id, _ = _key(client, "app-a", "sessions")
+        _key(client, "app-b", "sessions")
+
+        def listed() -> dict:
+            return {k["id"]: k for k in client.get("/keys").json()}[a_id]
+
+        def no_listing(self, *args, **kwargs):
+            raise AssertionError("listed every key to return one")
+
+        monkeypatch.setattr(Database, "list_api_keys", no_listing)
+        retention = client.put(f"/api/admin/v1/apps/{a_id}/retention", json={"retention_days": 90})
+        monkeypatch.undo()
+        assert retention.status_code == 200 and retention.json() == listed()
+
+        assert client.delete(f"/keys/{a_id}").status_code == 204
+        monkeypatch.setattr(Database, "list_api_keys", no_listing)
+        restored = client.post(f"/api/admin/v1/apps/{a_id}/restore")
+        monkeypatch.undo()
+        # The restore answers with the main store's row, as it always has: no App store metadata.
+        main_row = {k["id"]: k for k in m.db.main.list_api_keys()}[a_id]
+        assert restored.status_code == 200
+        assert {k: v for k, v in restored.json().items() if k != "key"} == main_row
+
+
 def test_the_apps_own_settings_survive_an_undone_revoke_and_go_with_the_erasure(tmp_path):
     cfg = make_cfg(tmp_path)
     m = Manager(cfg, chat=Script([Completion(content="ok")]))
