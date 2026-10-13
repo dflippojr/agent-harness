@@ -109,6 +109,29 @@ def test_a_forks_inherited_task_reaches_another_backend(tmp_path):
     asyncio.run(body())
 
 
+def test_a_hosted_forks_inherited_task_reaches_the_next_backend(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        hosted = await finished(m, (await m.fork(s["id"], 1, "Continue the task.", backend="claude"))["id"])
+        moved = m.db.get_session((await m.fork(hosted["id"], 1, "Continue the task.", backend="codex"))["id"])
+        assert "User: go" in moved["context"][1]["content"]   # inherited, though the Claude fork's log starts later
+        await finished(m, moved["id"])
+
+    asyncio.run(body())
+
+
+def test_a_digest_fork_uses_the_checkpoints_system_prompt(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        saved = s["context"][0]
+        m.db.update_session(s["id"], context=[{"role": "system", "content": "newer guidance"}, *s["context"][1:]])
+        moved = m.db.get_session((await m.fork(s["id"], 1, "on codex", backend="codex"))["id"])
+        assert moved["context"][0] == saved
+        await finished(m, moved["id"])
+
+    asyncio.run(body())
+
+
 def test_rerun_on_another_backend(tmp_path):
     async def body():
         m, s = await started(tmp_path)

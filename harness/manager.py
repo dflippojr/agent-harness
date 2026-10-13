@@ -45,6 +45,7 @@ UNSETTLED_SEND = ("the last rewind of this session failed and its files could no
 REVIEW_BUSY = "the agent is still working; wait for the run to end or cancel it"
 ACCOUNT_DISABLED = "this household account is disabled"
 BACKEND_OVERRIDE_UNSUPPORTED = "backend_override_unsupported"
+DIGEST_PREAMBLE = "You are continuing earlier work from a checkpoint. The workspace is exactly as it was then."
 
 
 @dataclass
@@ -1158,6 +1159,25 @@ class Manager:
         return {"backend": backend, "model": model, "effort": effort or "", "same": same,
                 "tool_profile": tool_profiles.DEFAULT if reset else profile, "profile_reset": profile if reset else ""}
 
+    @staticmethod
+    def _digest_context(parent: dict, saved_context: list, log_digest: str, prompt: str) -> tuple[list, list]:
+        """A digest fork's (context, saved checkpoint context): the checkpoint's system prompt, then the earlier work.
+        A local parent's saved context is its whole conversation, a fork's inherited start included. A hosted
+        parent's digest comes from its event log (`log_digest`), which starts at its own fork, so the summary it
+        inherited (its first message) goes first."""
+        system = saved_context[0] if saved_context and saved_context[0].get("role") == "system" else parent["context"][0]
+        if parent.get("backend", "local") == "local":
+            digest = checkpointer.context_summary(saved_context)
+        else:
+            first = saved_context[1].get("content") if len(saved_context) > 1 else ""
+            inherited = first if parent.get("parent_id") and isinstance(first, str) and first.startswith(DIGEST_PREAMBLE) else ""
+            digest = "\n".join(part for part in (checkpointer.context_summary(
+                [{"role": "user", "content": inherited}], limit=3000), log_digest) if part)
+        earlier = f"{DIGEST_PREAMBLE} Summary of the earlier conversation:\n\n{digest}"
+        context = [system, {"role": "user", "content": f"{earlier}\n\nNew instruction:\n{prompt}"}]
+        # The fork's own checkpoint keeps the digest, so a local fork rewound to it still knows the earlier work.
+        return context, [system, {"role": "user", "content": earlier}]
+
     async def _fork(self, sid: str, turn: int, prompt: str, choice: dict | None = None) -> str:
         """`fork` while it holds the parent; returns the new session's id, recorded but not yet started."""
         parent = self.db.get_session(sid)
@@ -1177,15 +1197,9 @@ class Manager:
             git_fields = await asyncio.to_thread(cp.prepare_fork, parent, int(turn), new_sid, workspace)
             saved_context, carried = await asyncio.to_thread(cp.store(parent).load_turn, int(turn))
             if use_digest:
-                # A local parent's saved context is its whole conversation, a fork's inherited start included; a hosted
-                # parent keeps no usable context, so its digest comes from its event log.
-                digest = (checkpointer.context_summary(saved_context) if parent.get("backend", "local") == "local"
-                          else await asyncio.to_thread(cp.summary, parent, int(turn)))
-                earlier = ("You are continuing earlier work from a checkpoint. The workspace is exactly as it was then. "
-                           f"Summary of the earlier conversation:\n\n{digest}")
-                context = [parent["context"][0], {"role": "user", "content": f"{earlier}\n\nNew instruction:\n{prompt}"}]
-                # The fork's own checkpoint keeps the digest, so a local fork rewound to it still knows the earlier work.
-                base_context = [parent["context"][0], {"role": "user", "content": earlier}]
+                log_digest = "" if parent.get("backend", "local") == "local" else await asyncio.to_thread(
+                    cp.summary, parent, int(turn))
+                context, base_context = self._digest_context(parent, saved_context, log_digest, prompt)
             else:
                 base_context = saved_context
                 context = base_context + [{"role": "user", "content": prompt}]
