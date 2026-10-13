@@ -257,3 +257,34 @@ def test_comparison_reads_the_harness_database(tmp_path, capsys):
     default, bash = summary[("edit", "default")], summary[("edit", "bash-only")]
     assert (default["successes"], default["prompt_tokens"], default["cost_usd"]) == (1, 1500, 0.75)
     assert (default["localisation_failures"], bash["localisation_failures"], bash["successes"]) == (0, 1, 0)
+
+
+def test_rerun_keeps_the_tool_profile(tmp_path):
+    async def body():
+        m, _ = _manager(tmp_path)
+        await m.start()
+        sid = m.create("x", backend="claude", tool_profile="bash-only")["id"]
+        await wait_status(m, sid, "failed")
+        again = m.rerun(sid)
+        assert again["id"] != sid and again["tool_profile"] == "bash-only"
+        await wait_status(m, again["id"], "failed")
+        await asyncio.gather(*m.tasks.values())
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_comparison_reads_sessions_from_the_web_store_and_usage_from_the_main_store(tmp_path, capsys):
+    main = Database(tmp_path / "harness.sqlite3")
+    main.record_usage("claude", "s-web", "", 700, 70, 0.35, "subscription", tool_profile="bash-only")
+    main.close()
+    web = Database(tmp_path / "apps" / "app-web" / "harness.sqlite3")
+    web.insert_session({"id": "s-web", "title": "t", "project": "p", "target": "tower", "model": "m",
+                        "backend": "claude", "status": "done", "workspace": "", "created_at": 1.0, "updated_at": 1.0,
+                        "context": [], "tool_profile": "bash-only", "run": {}})
+    web.close()
+    tasks = tmp_path / "tasks.json"
+    tasks.write_text(json.dumps({"runs": [{"session_id": "s-web", "task": "logs", "task_type": "shell"}]}),
+                     encoding="utf-8")
+    assert compare.main(["--db", str(tmp_path / "harness.sqlite3"), "--tasks", str(tasks), "--json"]) == 0
+    [shell, _] = json.loads(capsys.readouterr().out)
+    assert (shell["tool_profile"], shell["prompt_tokens"], shell["cost_usd"]) == ("bash-only", 700, 0.35)

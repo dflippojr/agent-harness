@@ -1200,6 +1200,7 @@ class Manager:
                            app_tools=[AppTool.model_validate(tool) for tool in (s.get("app_tools") or [])],
                            app_context="", app_metadata=s.get("app_metadata"),
                            retention_days=s.get("retention_days"), end_user=s.get("end_user", ""),
+                           tool_profile=s.get("tool_profile") or tool_profiles.DEFAULT,
                            taint=list(s.get("taint") or []))  # the replayed prompt carries the same untrusted input
         namespace_audit.record(self.db, s, context, "session.rerun")
         return result

@@ -162,7 +162,7 @@ The owner runs this; CI never makes hosted calls.
    ```
 
 4. Run `python -m bakeoff.tool_profile_compare --db D:/Agents/harness/harness.sqlite3 --tasks tasks.json --workspaces`
-   on the server (the database opens read-only; `--json` prints the summary as JSON). `--workspaces` adds each
+   on the server. `--db` is the main store, which holds the usage log; each session is read from Web's or its App's store beside it. Every database opens read-only, and `--json` prints the summary as JSON. `--workspaces` adds each
    workspace's diff to the files a run changed, so keep the workspaces until you have run it, or give each entry its
    own `files_changed`.
 

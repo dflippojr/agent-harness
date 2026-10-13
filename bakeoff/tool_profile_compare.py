@@ -1,6 +1,6 @@
 """Compare hosted runs by tool profile (#638): tokens, cost, success and localisation failures, per task type.
 
-    python -m bakeoff.tool_profile_compare --db D:/Agents/harness/data/harness.sqlite3 --tasks tasks.json [--workspaces]
+    python -m bakeoff.tool_profile_compare --db D:/Agents/harness/harness.sqlite3 --tasks tasks.json [--workspaces]
     python -m bakeoff.tool_profile_compare --runs bakeoff/tool_profile_fixture.json [--json]
 
 `--tasks` names the runs to compare, one entry per session:
@@ -13,7 +13,9 @@ bash-only gains depended on the benchmark, so the two are never pooled. `success
 run that ended `done` counts as a success. A run with `expected_files` is a localisation failure when it changed none
 of them, the failure mode that grew under bash-only in the paper (Table 10). Changed files come from the entry's own
 `files_changed`, else the files the harness saw the run write plus, with `--workspaces`, the session workspace's diff.
-The database is opened read-only. `--runs` reads ready-made rows (the same fields plus `tool_profile`,
+`--db` is the main store, which holds the usage log; each session is read from the store that holds it (Web's,
+`apps/app-web/harness.sqlite3` beside it, or an App's), or from the main store before the Web store migration. Every
+database is opened read-only. `--runs` reads ready-made rows (the same fields plus `tool_profile`,
 `prompt_tokens`, `completion_tokens` and `cost_usd`) instead, as the fixture does.
 """
 
@@ -33,29 +35,55 @@ def _norm(path: str) -> str:
     return str(path).replace("\\", "/").removeprefix("./").removeprefix("/workspace/")
 
 
-def workspace_files(workspace: Path) -> set[str]:
-    """Files the session's workspace changed against its base, as the diff viewer shows them."""
+def workspace_files(workspace: Path, base_commit: str | None = None) -> set[str]:
+    """Files the session's workspace changed against the commit its branch started from, as the diff viewer shows."""
     from harness.changes import repo_diffs
     from harness.review_comments import parse_diff
     out: set[str] = set()
-    for repo in repo_diffs(workspace):
+    for repo in repo_diffs(workspace, base_commit or None):
         prefix = "" if repo["path"] == "." else repo["path"] + "/"
         out |= {prefix + f["name"] for f in parse_diff(repo["diff"])}
     return out
 
 
-def rows_from_db(db_path: Path, manifest: dict, workspaces: bool = False) -> list[dict]:
-    """One row per manifest entry, with the session's profile, status and summed usage from the harness database."""
-    conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
+def _open(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    return conn
+
+
+def session_stores(db_path: Path) -> list[Path]:
+    """Where sessions can live (#330): Web's store first, then each App's, then the main store itself."""
+    apps = Path(db_path).resolve().parent / "apps"
+    web = apps / "app-web" / "harness.sqlite3"
+    others = sorted(p for p in apps.glob("*/harness.sqlite3") if p != web) if apps.is_dir() else []
+    return [p for p in (web, *others) if p.is_file()] + [Path(db_path)]
+
+
+def _find_session(stores: list[sqlite3.Connection], sid: str) -> sqlite3.Row | None:
+    query = "SELECT tool_profile, backend, model, status, run, workspace, base_commit FROM sessions WHERE id = ?"
+    for conn in stores:
+        try:
+            row = conn.execute(query, (sid,)).fetchone()
+        except sqlite3.OperationalError:  # a store with no sessions table
+            continue
+        if row is not None:
+            return row
+    return None
+
+
+def rows_from_db(db_path: Path, manifest: dict, workspaces: bool = False) -> list[dict]:
+    """One row per manifest entry: the session's profile and status from its store, its summed usage from the main
+    store's usage log."""
+    conn = _open(db_path)
+    stores = [_open(p) for p in session_stores(db_path)]
     rows = []
     try:
         for entry in manifest.get("runs", []):
             sid = entry["session_id"]
-            s = conn.execute("SELECT tool_profile, backend, model, status, run, workspace FROM sessions WHERE id = ?",
-                             (sid,)).fetchone()
+            s = _find_session(stores, sid)
             if s is None:
-                raise SystemExit(f"session {sid} is not in {db_path}")
+                raise SystemExit(f"session {sid} is in no store beside {db_path}")
             usage = conn.execute("SELECT COALESCE(SUM(prompt_tokens),0) p, COALESCE(SUM(completion_tokens),0) c, "
                                  "COALESCE(SUM(cost_usd),0) cost FROM usage WHERE session_id = ?", (sid,)).fetchone()
             run = json.loads(s["run"] or "{}")
@@ -63,12 +91,13 @@ def rows_from_db(db_path: Path, manifest: dict, workspaces: bool = False) -> lis
             if changed is None:
                 changed = set(run.get("files_touched") or [])
                 if workspaces and s["workspace"] and Path(s["workspace"]).is_dir():
-                    changed |= workspace_files(Path(s["workspace"]))
+                    changed |= workspace_files(Path(s["workspace"]), s["base_commit"])
             rows.append({**entry, "tool_profile": s["tool_profile"], "backend": s["backend"], "model": s["model"],
                          "status": s["status"], "prompt_tokens": usage["p"], "completion_tokens": usage["c"],
                          "cost_usd": usage["cost"], "files_changed": sorted(changed)})
     finally:
-        conn.close()
+        for c in (conn, *stores):
+            c.close()
     return rows
 
 
@@ -96,7 +125,7 @@ def summarize(rows: list[dict]) -> list[dict]:
     for (task_type, profile), group in sorted(groups.items(), key=lambda kv: (
             order.get(kv[0][0], 2.5), order.get(kv[0][1], len(order)), kv[0])):
         wins = sum(succeeded(r) for r in group)
-        localised = [f for f in (localisation_failure(r) for r in group) if f is not None]
+        localisation_results = [f for f in (localisation_failure(r) for r in group) if f is not None]
         cost = sum(float(r.get("cost_usd") or 0) for r in group)
         out.append({
             "task_type": task_type, "tool_profile": profile, "runs": len(group), "successes": wins,
@@ -105,7 +134,7 @@ def summarize(rows: list[dict]) -> list[dict]:
             "completion_tokens": sum(int(r.get("completion_tokens") or 0) for r in group),
             "cost_usd": round(cost, 6), "cost_per_run": round(cost / len(group), 6),
             "cost_per_success": round(cost / wins, 6) if wins else None,
-            "localisation_checked": len(localised), "localisation_failures": sum(localised),
+            "localisation_checked": len(localisation_results), "localisation_failures": sum(localisation_results),
         })
     return out
 
