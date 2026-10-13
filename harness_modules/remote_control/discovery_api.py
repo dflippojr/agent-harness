@@ -50,6 +50,7 @@ def register(app, mgr, require_admin):
 
     @app.post(PREFIX + '/discovery/scans')
     async def start(request: Request):
+        """Start a background folder scan, or return the scan already running; poll the scan for results."""
         discovery, actor = service(request)
         try:
             return await discovery.start(actor)
@@ -58,16 +59,19 @@ def register(app, mgr, require_admin):
 
     @app.get(PREFIX + '/discovery/scans/{scan_id}')
     async def status(scan_id: str, request: Request):
+        """Return a folder scan's progress and candidates; an expired or unknown scan returns 404."""
         discovery, _ = service(request)
         return invoke(lambda: discovery.view(discovery.get(scan_id)))
 
     @app.delete(PREFIX + '/discovery/scans/{scan_id}')
     async def cancel(scan_id: str, request: Request):
+        """Ask a folder scan to stop and return its current view, which may still show it running."""
         discovery, actor = service(request)
         return invoke(lambda: discovery.cancel(scan_id, actor))
 
     @app.post(PREFIX + '/discovery/scans/{scan_id}/candidates/{candidate_id}/promote')
     async def promote(scan_id: str, candidate_id: str, body: Promotion, request: Request):
+        """Add a scanned folder as a managed folder; the confirmed path and markers must match the scan exactly."""
         discovery, actor = service(request)
         # promote() takes file locks and opens Windows handles: run it off the event loop.
         return await asyncio.to_thread(invoke, lambda: discovery.promote(
@@ -75,6 +79,7 @@ def register(app, mgr, require_admin):
 
     @app.delete(PREFIX + '/folders/{slug}')
     async def remove(slug: str, request: Request):
+        """Remove a managed folder; returns 409 while its Remote Control server or trust window is open."""
         discovery, actor = service(request)
         try:
             return await discovery.remove(slug, actor)

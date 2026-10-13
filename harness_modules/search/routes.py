@@ -28,6 +28,7 @@ async def search_sessions(request: Request, q: str = "", project: str = "", limi
 
 @app_routes.get("/api/v1/search")
 async def api_search(request: Request, q: str = "", project: str = "", limit: int = 20):
+    """Full-text search over past sessions, falling back to any-term matches when no session has every term; limit caps at 50."""
     m = manager(request)
     key = app_auth(request, "sessions")
     user_id = key["user_id"] if key.get("kind") == "member" else "owner"

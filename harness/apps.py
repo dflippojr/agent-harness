@@ -544,6 +544,7 @@ async def pairing_codes(request: Request):
 
 @route_table.post("/pairing-codes", status_code=201)
 async def create_pairing_code(body: PairingCodeRequest, request: Request):
+    """Mint a single-use pairing code bound to one origin; it is returned only here and expires after its TTL."""
     m = mgr(request)
     name = body.name.strip()
     if not name:
@@ -582,6 +583,7 @@ async def create_pairing_code(body: PairingCodeRequest, request: Request):
 
 @route_table.delete("/pairing-codes/{pid}", status_code=204)
 async def revoke_pairing_code(pid: str, request: Request):
+    """Expire an unused pairing code now; 404 when no such code is still active."""
     m = mgr(request)
     ctx = credential_audit.request_context(request, m)
 
@@ -597,6 +599,7 @@ async def revoke_pairing_code(pid: str, request: Request):
 
 @route_table.post("/api/v1/pair", status_code=201, response_model=PairResponse)
 async def pair_browser(body: PairRequest, request: Request):
+    """Redeem a single-use pairing code from this browser's origin for a token, returned once; a spent, expired or other-origin code gets 400."""
     raw_origin = request.headers.get("origin", "")
     if not raw_origin:
         raise HarnessError(400, "browser pairing requires an Origin header")
@@ -627,6 +630,7 @@ async def pair_browser(body: PairRequest, request: Request):
 
 @route_table.get("/api/v1", response_model=AppRootResponse)
 async def api_root(request: Request):
+    """Server version, scopes, models, backends and features; the projects list is always empty, so fetch projects separately."""
     m = mgr(request)
     from .backend_state import local_view, view as backend_view
     from .config import module_effective
@@ -649,6 +653,7 @@ async def api_root(request: Request):
 
 @route_table.get("/api/v1/backends", response_model=list[BackendResponse])
 async def backends(request: Request):
+    """Each configured backend's availability, login state, limits and usage; some callers see only the local backend."""
     m = mgr(request)
     key = auth(request, "sessions")
     if key.get("kind") == "member":
@@ -702,6 +707,7 @@ async def api_me(request: Request):
 
 @route_table.get("/api/v1/projects")
 async def api_projects(request: Request):
+    """The account's catalog projects, with repository URLs withheld."""
     from . import catalog
     m = mgr(request)
     key = auth(request, "sessions")
@@ -711,6 +717,7 @@ async def api_projects(request: Request):
 
 @route_table.post("/api/v1/projects", status_code=201)
 async def api_create_project(body: dict, request: Request):
+    """Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected."""
     key = auth(request, "sessions")
     ident = getattr(request.state, "access", None)
     if not ident or ident.kind not in ("owner", "member") or not ident.bundled:
@@ -772,12 +779,14 @@ def _github_error(e) -> HarnessError:
 
 @route_table.get("/api/v1/me/github-connection")
 async def api_github_connection(request: Request):
+    """GitHub connection state; the device code appears only while a sign-in is in progress."""
     m, uid = _github_member(request)
     return await asyncio.to_thread(m.github_auth.status, uid, include_prompt=True)
 
 
 @route_table.post("/api/v1/me/github-connection/connect")
 async def api_github_connect(request: Request):
+    """Start a GitHub device sign-in, or resume the live one; the sign-in runs in the background and returns the device code if one is ready."""
     from .github_auth import GitHubAuthError
     m, uid = _github_member(request, mutate=True)
     try:
@@ -788,12 +797,14 @@ async def api_github_connect(request: Request):
 
 @route_table.post("/api/v1/me/github-connection/cancel")
 async def api_github_cancel(request: Request):
+    """Cancel a GitHub sign-in in progress, if any, and return the connection status."""
     m, uid = _github_member(request, mutate=True)
     return await asyncio.to_thread(m.github_auth.cancel, uid)
 
 
 @route_table.delete("/api/v1/me/github-connection")
 async def api_github_disconnect(request: Request):
+    """Erase the stored GitHub credentials and disconnect; a failed erase is retried at startup."""
     from .github_auth import GitHubAuthError
     m, uid = _github_member(request, mutate=True)
     try:
@@ -825,18 +836,21 @@ async def api_member_key_set(backend: str, request: Request):
 
 @route_table.post("/api/v1/me/api-keys/{backend}/test")
 async def api_member_key_test(backend: str, request: Request):
+    """Validate the stored key with one cheap provider call; 409 when no key is stored."""
     m, uid = _github_member(request, mutate=True, what="API keys")
     return await asyncio.to_thread(m.member_key_test, uid, backend, credential_audit.member_context(uid))
 
 
 @route_table.delete("/api/v1/me/api-keys/{backend}")
 async def api_member_key_delete(backend: str, request: Request):
+    """Remove the stored key; running sessions on that backend stop and their CLI state is deleted."""
     m, uid = _github_member(request, mutate=True, what="API keys")
     return await m.member_key_delete(uid, backend, credential_audit.member_context(uid))
 
 
 @route_table.get("/api/v1/models")
 async def api_models(request: Request):
+    """Configured models with their context sizes; the default model is flagged."""
     m = mgr(request)
     auth(request, "sessions")
     return [{"name": model.name, "context_tokens": model.context_tokens,
@@ -845,6 +859,7 @@ async def api_models(request: Request):
 
 @route_table.get("/api/v1/profile")
 async def api_profile(request: Request):
+    """The profile emoji or its default; the choices list is always empty."""
     m = mgr(request)
     auth(request, "sessions")
     return {"emoji": m.db.get_meta("profile_emoji", "🙂"), "choices": []}
@@ -852,6 +867,7 @@ async def api_profile(request: Request):
 
 @route_table.get("/api/v1/queue")
 async def api_queue(request: Request):
+    """Queue positions of the caller's sessions for the GPU slot, where 0 holds it and 1 and up are waiting."""
     m = mgr(request)
     key = auth(request, "sessions")
     user_id = key["user_id"] if key.get("kind") == "member" else "owner"
@@ -919,6 +935,7 @@ async def _global_events_stream(request: Request, m, user_id: str, key: dict, ep
 
 @route_table.get("/api/v1/events")
 async def api_events(request: Request):
+    """Live-only server-sent stream of selected session events; nothing is replayed and sequence numbers are omitted."""
     from .api import GLOBAL_TYPES
     m = mgr(request)
     key = auth(request, "sessions")
@@ -931,6 +948,7 @@ async def api_events(request: Request):
 
 @route_table.get("/api/v1/sessions/{ref}/transcript")
 async def api_transcript(ref: str, request: Request):
+    """The session's transcript as Markdown text, opening with its title, status and totals."""
     from . import transcript
     from fastapi.responses import PlainTextResponse
     m = mgr(request)
@@ -940,6 +958,7 @@ async def api_transcript(ref: str, request: Request):
 
 @route_table.get("/api/v1/sessions/{ref}/changes")
 async def api_changes(ref: str, request: Request):
+    """The session's file diffs with secret-scan results; a removed workspace returns no repos."""
     m = mgr(request)
     s = own_session(request, auth(request, "sessions"), ref)
     return await m.changes(s["id"])
@@ -957,30 +976,35 @@ def review_comment_session(request: Request, ref: str) -> tuple:
 
 @route_table.get("/api/v1/sessions/{ref}/review-comments")
 async def api_review_comments(ref: str, request: Request):
+    """The session's draft review comments, which are not yet sent."""
     m, sid = review_comment_session(request, ref)
     return m.review_comments(sid)
 
 
 @route_table.post("/api/v1/sessions/{ref}/review-comments", status_code=201)
 async def api_add_review_comment(ref: str, body: ReviewComment, request: Request):
+    """Save a draft line comment; drafts reach the agent only when sent, and an invalid comment gets 400."""
     m, sid = review_comment_session(request, ref)
     return m.add_review_comment(sid, body.model_dump())
 
 
 @route_table.delete("/api/v1/sessions/{ref}/review-comments/{comment_id}", status_code=204)
 async def api_delete_review_comment(ref: str, comment_id: str, request: Request):
+    """Delete one draft review comment; 404 when no draft has that id."""
     m, sid = review_comment_session(request, ref)
     m.delete_review_comment(sid, comment_id)
 
 
 @route_table.post("/api/v1/sessions/{ref}/review-comments/send")
 async def api_send_review_comments(ref: str, request: Request):
+    """Send all draft review comments as one follow-up message, then clear the drafts; 400 when there are none."""
     m, sid = review_comment_session(request, ref)
     return m.summary(await m.send_review_comments(sid))
 
 
 @route_table.post("/api/v1/sessions/{ref}/secret-findings/fix", status_code=201)
 async def api_secret_findings_fix(ref: str, request: Request):
+    """Draft fix comments for open secret findings, or ask the agent to rewrite older commits; 409 when there is no finished secret scan."""
     m, sid = review_comment_session(request, ref)
     return await m.secret_findings_fix(sid)
 
@@ -998,6 +1022,7 @@ async def api_dismiss_secret_finding(ref: str, fingerprint: str, body: SecretDis
 
 @route_table.post("/api/v1/sessions/{ref}/review/{action}")
 async def api_review(ref: str, action: str, request: Request):
+    """Merge, push or discard the session's git branch; 409 while it is still running, 400 without a git branch."""
     m = mgr(request)
     key = auth(request, "sessions")
     s = own_session(request, key, ref)
@@ -1050,6 +1075,7 @@ async def create_session(body: CreateAppSession, request: Request,
                              "Optional, App tokens only: 1-128 letters, digits, '-' or '_'. A retry with the same "
                              "key and body within 24 hours returns the first request's session (200) instead of "
                              "starting another."))):
+    """Queue a session and return it before it runs; a retried Idempotency-Key replays the first (200), and a different request with that key gets 409."""
     m = mgr(request)
     key = auth(request, "sessions")
     record = _idempotency_record(key, body, idempotency_key)
@@ -1126,6 +1152,7 @@ async def submit_end_user_login_code(end_user: str, backend: str, attempt_id: st
 
 @route_table.get("/api/v1/end-users/{end_user}/logins/{backend}")
 async def end_user_login_status(end_user: str, backend: str, request: Request):
+    """Whether the end user's login for this backend is linked, plus any sign-in attempt in progress."""
     m, app_id = end_user_app(request)
     return JSONResponse(await m.end_user_login_status(app_id, end_user, backend),
                         headers={"Cache-Control": "no-store"})
@@ -1133,6 +1160,7 @@ async def end_user_login_status(end_user: str, backend: str, request: Request):
 
 @route_table.delete("/api/v1/end-users/{end_user}/logins/{backend}", status_code=204)
 async def unlink_end_user_login(end_user: str, backend: str, request: Request):
+    """Sign the end user out of this backend: their running sessions there stop, and their stored CLI login and state are deleted."""
     m, app_id = end_user_app(request)
     await m.end_user_unlink(app_id, end_user, backend,
                             context=namespace_audit.key_context(auth(request, "sessions")))
@@ -1164,6 +1192,7 @@ async def scoped_audit(request: Request, limit: int = 200, before_id: int | None
                        target_id: str | None = None, actor_id: str | None = None, key_id: str | None = None,
                        action: str | None = None, outcome: str | None = None,
                        since: float | None = None, until: float | None = None):
+    """Audit records visible to this caller, newest first; pass next_before_id as before_id for the next page."""
     m = mgr(request)
     key = auth(request, "sessions")
     if key.get("kind") == "app":
@@ -1180,6 +1209,7 @@ async def scoped_audit(request: Request, limit: int = 200, before_id: int | None
 
 @route_table.get("/api/v1/sessions", response_model=list[SessionResponse], response_model_exclude_unset=True)
 async def list_sessions(request: Request, limit: int = 50):
+    """Recent sessions, newest first; limit caps the count (default 50)."""
     m = mgr(request)
     key = auth(request, "sessions")
     if key.get("kind") == "member":
@@ -1196,6 +1226,7 @@ async def list_sessions(request: Request, limit: int = 50):
 
 @route_table.get("/api/v1/sessions/{ref}", response_model=SessionResponse, response_model_exclude_unset=True)
 async def get_session(ref: str, request: Request):
+    """One session's summary with its answer, registered tool names and metadata."""
     m = mgr(request)
     return view(m, visible_session(request, auth(request, "sessions"), ref))
 
@@ -1203,6 +1234,7 @@ async def get_session(ref: str, request: Request):
 @route_table.patch("/api/v1/sessions/{ref}", response_model=SessionResponse, response_model_exclude_unset=True)
 @route_table.put("/api/v1/sessions/{ref}", response_model=SessionResponse, response_model_exclude_unset=True)
 async def patch_session(ref: str, body: AppSessionUpdate, request: Request):
+    """Set the session's title; a blank title or one over 120 characters gets 400."""
     m = mgr(request)
     key = auth(request, "sessions")
     s = own_session(request, key, ref)
@@ -1211,6 +1243,7 @@ async def patch_session(ref: str, body: AppSessionUpdate, request: Request):
 
 @route_table.post("/api/v1/sessions/{ref}/rerun", status_code=201, response_model=SessionResponse, response_model_exclude_unset=True)
 async def rerun_session(ref: str, request: Request):
+    """Start a new queued session with this one's prompt, project and model; tools-only sessions get 409."""
     m = mgr(request)
     key = auth(request, "sessions")
     s = own_session(request, key, ref)
@@ -1219,6 +1252,7 @@ async def rerun_session(ref: str, request: Request):
 
 @route_table.post("/api/v1/sessions/{ref}/messages", response_model=SessionResponse, response_model_exclude_unset=True)
 async def send(ref: str, body: AppMessage, request: Request):
+    """Send a user message; an active session reads it before its next model call, a finished one restarts queued, and a removed workspace gets 409."""
     m = mgr(request)
     key = auth(request, "sessions")
     s = own_session(request, key, ref)
@@ -1227,6 +1261,7 @@ async def send(ref: str, body: AppMessage, request: Request):
 
 @route_table.post("/api/v1/sessions/{ref}/context", response_model=SessionResponse, response_model_exclude_unset=True)
 async def add_context(ref: str, body: AppContext, request: Request):
+    """Send context blocks to the session as information, not user instructions, restarting a finished session; 400 when empty or over 60,000 characters."""
     m = mgr(request)
     key = auth(request, "sessions")
     s = own_session(request, key, ref)
@@ -1239,6 +1274,7 @@ async def add_context(ref: str, body: AppContext, request: Request):
 
 @route_table.post("/api/v1/sessions/{ref}/cancel", response_model=SessionResponse, response_model_exclude_unset=True)
 async def cancel(ref: str, request: Request):
+    """Stop an active session and return it once its run has ended; a session that is not active gets 409."""
     m = mgr(request)
     key = auth(request, "sessions")
     s = own_session(request, key, ref)
@@ -1247,6 +1283,7 @@ async def cancel(ref: str, request: Request):
 
 @route_table.get("/api/v1/sessions/{ref}/tool_calls", response_model=list[AppToolCallResponse])
 async def tool_calls(ref: str, request: Request, status: str = "pending"):
+    """Tool calls the agent made to this session's app tools, filtered by status (default pending), oldest first; an empty status lists all."""
     m = mgr(request)
     s = visible_session(request, auth(request, "sessions"), ref)
     return m.db.app_tool_calls(s["id"], status or None)
@@ -1254,6 +1291,7 @@ async def tool_calls(ref: str, request: Request, status: str = "pending"):
 
 @route_table.post("/api/v1/sessions/{ref}/tool_calls/{call_id}", response_model=AcceptedResponse)
 async def tool_result(ref: str, call_id: str, body: ToolResult, request: Request):
+    """Return the result for one pending app tool call and resume the run waiting on it; 409 when no such call is pending."""
     m = mgr(request)
     key = auth(request, "sessions")
     s = own_session(request, key, ref)
@@ -1268,6 +1306,7 @@ async def tool_result(ref: str, call_id: str, body: ToolResult, request: Request
 
 @route_table.get("/api/v1/sessions/{ref}/approvals", response_model=list[ApprovalResponse])
 async def approvals(ref: str, request: Request):
+    """Approvals in this session that still await a decision."""
     m = mgr(request)
     s = visible_session(request, auth(request, "sessions"), ref)
     return [public_approval(a) for a in m.db.pending_approvals(s["id"])]
@@ -1275,6 +1314,7 @@ async def approvals(ref: str, request: Request):
 
 @route_table.post("/api/v1/sessions/{ref}/approvals/{approval_id}", response_model=ApprovalResponse)
 async def decide(ref: str, approval_id: str, body: AppDecision, request: Request):
+    """Approve or deny one tool-call approval; an already decided one returns 409 and another decision value 400."""
     m = mgr(request)
     key = auth(request, "approvals")
     s = own_session(request, key, ref)
@@ -1364,6 +1404,7 @@ async def _session_events_stream(request: Request, m, sid: str, owner: str, afte
 
 @route_table.get("/api/v1/sessions/{ref}/events")
 async def events(ref: str, request: Request, after: int = 0, follow: bool = True):
+    """Replays events after sequence `after` (or Last-Event-ID), then streams live unless follow is false; a stream ticket can replace the bearer token."""
     m = mgr(request)
     ticket = request.query_params.get("ticket", "")
     key = _ticket_key(request, m, ref, ticket) if ticket else auth(request, "sessions")

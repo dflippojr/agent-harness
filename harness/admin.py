@@ -340,6 +340,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.get(PREFIX, response_model=AdminRootResponse)
     async def admin_root(request: Request):
+        """Return the API version, capabilities, hub claim state, owner logins, and the operations it serves."""
         require_admin(request, mgr)
         return {
             "api_version": API_VERSION,
@@ -357,11 +358,13 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.get(PREFIX + "/provider-credentials")
     async def provider_credentials(request: Request):
+        """List provider grants, including revoked ones, newest first; `available` shows whether a key-based grant's secret file exists."""
         require_admin(request, mgr)
         return mgr(request).provider_credentials()
 
     @app.post(PREFIX + "/provider-credentials", status_code=201)
     async def set_provider_credential(body: ProviderCredentialRequest, request: Request):
+        """Grant an App a provider backend, revoking its previous grant for that backend; key-based policies need a configured `secret_ref`."""
         key = require_admin(request, mgr)
         manager = mgr(request)
         ctx = _context(request, key)
@@ -390,6 +393,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.delete(PREFIX + "/provider-credentials/{credential_id}", status_code=204)
     async def revoke_provider_credential(credential_id: str, request: Request):
+        """Revoke an active provider grant; an unknown or already revoked id returns 404."""
         key = require_admin(request, mgr)
         manager = mgr(request)
         ctx = _context(request, key)
@@ -411,11 +415,13 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
     # #330 decision 5: an App's default retention, and the erasures that revoking Apps scheduled.
     @app.get(PREFIX + "/apps/erasures")
     async def app_erasures(request: Request):
+        """List revoked Apps and devices still waiting for their store and folder to be erased, soonest first."""
         require_admin(request, mgr)
         return mgr(request).db.pending_erasures()
 
     @app.post(PREFIX + "/apps/{app_id}/restore")
     async def restore_app(app_id: str, request: Request):
+        """Undo an App's revoke within its erasure grace and return a new key; 404 after the grace."""
         admin_key = require_admin(request, mgr)
         m = mgr(request)
         ctx = _context(request, admin_key)
@@ -439,6 +445,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.put(PREFIX + "/apps/{app_id}/retention")
     async def set_app_retention(app_id: str, body: AppRetentionRequest, request: Request):
+        """Set an App's default session retention in days, or null to keep sessions until deleted; 404 for an unknown id."""
         admin_key = require_admin(request, mgr)
         m = mgr(request)
         ctx = _context(request, admin_key)
@@ -506,17 +513,20 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.get(PREFIX + "/accounts")
     async def list_accounts(request: Request):
+        """List household member accounts with quotas, disk usage, and Google sign-in state."""
         require_admin(request, mgr)
         return _accounts(request).list_public()
 
     @app.post(PREFIX + "/accounts", status_code=201)
     async def create_account(body: AccountCreateRequest, request: Request):
+        """Create a household member account; needs an explicit owner allowlist, and a login can hold only one role."""
         key = require_admin(request, mgr)
         return await asyncio.to_thread(_accounts(request).create, _context(request, key), body.login,
                                        body.display_name, body.disk_quota_bytes, body.max_running, body.max_queued)
 
     @app.get(PREFIX + "/accounts/audit")
     async def account_audit(request: Request, limit: int = 200):
+        """List recent account audit rows, newest first; `limit` is clamped to 1 through 500."""
         require_admin(request, mgr)
         return await asyncio.to_thread(mgr(request).db.list_audit, limit)
 
@@ -542,12 +552,14 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.get(PREFIX + "/accounts/{user_id}")
     async def get_account(user_id: str, request: Request):
+        """Return one household member's account with disk usage and Google sign-in state; 404 for other ids."""
         require_admin(request, mgr)
         svc = _accounts(request)
         return svc.public_account(svc._require(user_id))
 
     @app.patch(PREFIX + "/accounts/{user_id}")
     async def update_account(user_id: str, body: AccountUpdateRequest, request: Request):
+        """Update the fields sent for a household member; raising `max_running` can start a waiting session now."""
         key = require_admin(request, mgr)
         svc = _accounts(request)
         row = await _apply_account_update(svc, _context(request, key), user_id, body)
@@ -559,6 +571,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
     # erase a member's credential. The owner cannot connect, test, list repositories, or use it.
     @app.get(PREFIX + "/github-member-auth")
     async def github_member_auth(request: Request, refresh: bool = False):
+        """Return GitHub sign-in state and each member's coarse status; `refresh` forces a fresh preflight check."""
         require_admin(request, mgr)
         gh = mgr(request).github_auth
         if gh.configured() and (refresh or gh.cached_preflight() is None):
@@ -567,6 +580,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.put(PREFIX + "/github-member-auth")
     async def set_github_member_auth(body: GitHubMemberAuthRequest, request: Request):
+        """Turn member GitHub sign-in on or off; enabling needs GitHub configured (409 otherwise), and disabling keeps credentials."""
         from .github_auth import GitHubAuthError
         key = require_admin(request, mgr)
         try:
@@ -576,6 +590,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
     @app.post(PREFIX + "/accounts/{user_id}/github-connection/reset")
     async def reset_member_github(user_id: str, body: GitHubResetRequest, request: Request):
+        """Erase a member's GitHub credential and stop their Git work, leaving them disconnected; `confirm` must be true."""
         from .github_auth import GitHubAuthError
         key = require_admin(request, mgr)
         if not body.confirm:

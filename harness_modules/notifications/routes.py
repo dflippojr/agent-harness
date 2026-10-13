@@ -12,6 +12,7 @@ owner_routes = RouteTable()
 
 @owner_routes.post("/notify/test")
 async def notify_test(request: Request):
+    """Send a test push notification; it reports sent even when delivery fails after retries."""
     m = manager(request)
     if not m.cfg.notify.enabled:
         raise HarnessError(400, "notifications are disabled in config/harness.yaml")

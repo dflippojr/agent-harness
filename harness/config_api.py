@@ -63,11 +63,13 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
     @app.get(prefix + "/config/schema")
     async def admin_schema(request: Request):
+        """Describe each admin setting's type, bounds, default, and apply mode, and whether a supervised restart is available."""
         require_admin(request, mgr)
         return service(request).admin_schema()
 
     @app.get(prefix + "/config")
     async def admin_config(request: Request, response: Response):
+        """Return every admin setting with the active and pending revisions and restart state; the ETag is the active revision."""
         require_admin(request, mgr)
         view = service(request).admin_view()
         response.headers["ETag"] = f'"{view["revision"]}"'
@@ -75,6 +77,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
     @app.post(prefix + "/config/validate")
     async def admin_validate(body: AdminPatch, request: Request):
+        """Plan proposed admin changes without saving or applying them; invalid changes return 400 and a stale `revision` returns 409."""
         require_admin(request, mgr)
         with _settings_errors():
             plan = service(request).validate_admin(_changes(body), body.revision, actor=actor(request))
@@ -82,6 +85,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
     @app.patch(prefix + "/config")
     async def admin_patch(body: AdminPatch, request: Request, response: Response):
+        """Change settings; restart-only ones wait for a restart, `dry_run` previews without saving, and a stale `revision` returns 409."""
         require_admin(request, mgr)
         with _settings_errors():
             view = service(request).patch_admin(_changes(body), body.revision, dry_run=body.dry_run,
@@ -91,6 +95,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
     @app.post(prefix + "/config/rollback")
     async def admin_rollback(body: AdminRevision, request: Request):
+        """Restore the previous confirmed config; needs `confirm` true unless `dry_run` is set, and 409 when there is none."""
         require_admin(request, mgr)
         if not body.confirm and not body.dry_run:
             raise_confirm("rollback")
@@ -99,6 +104,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
     @app.post(prefix + "/config/restart", status_code=202)
     async def admin_restart(body: AdminRevision, request: Request):
+        """Restart into the pending or active config with `confirm` true; the process exits after responding, or 409 if unsupervised."""
         require_admin(request, mgr)
         if not body.confirm:
             raise_confirm("restart")
@@ -134,11 +140,13 @@ def register_app(app: FastAPI, mgr, auth, owner_key) -> None:
 
     @app.get("/api/v1/config/schema")
     async def app_schema(request: Request):
+        """Describe the App settings and mark the ones this App cannot write."""
         key = require_app(request, "sessions")
         return mgr(request).settings.app_schema(key)
 
     @app.get("/api/v1/config")
     async def app_config(request: Request, response: Response):
+        """Return this App's settings with configured and effective values, the revision, and any daemon cap that applies."""
         key = require_app(request, "sessions")
         view = mgr(request).settings.app_view(key["id"], key)
         response.headers["ETag"] = f'"{view["revision"]}"'
@@ -146,6 +154,7 @@ def register_app(app: FastAPI, mgr, auth, owner_key) -> None:
 
     @app.patch("/api/v1/config")
     async def app_patch(body: AdminPatch, request: Request, response: Response):
+        """Change this App's settings; a stale `revision` returns 409, and `dry_run` returns the plan without saving."""
         key = require_app(request, "sessions")
         with _settings_errors():
             view = mgr(request).settings.patch_app(key["id"], key, _changes(body), body.revision,
