@@ -20,7 +20,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, taint, telemetry
+from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, stuck, taint, telemetry
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -1221,7 +1221,10 @@ class Runner:
         return telemetry.NOOP_SPAN
 
     def _budget_reason(self, run: dict, s: dict | None = None) -> str:
-        """Why the run is out of budget ("" while it has some left)."""
+        """Why the run is out of budget ("" while it has some left). A stuck cap (#643) counts as one."""
+        reason = stuck.stop_reason(run)
+        if reason:
+            return reason
         max_turns = int(run.get("max_turns") or self.cfg.max_turns)
         max_tokens = int(run.get("max_completion_tokens") or self.cfg.max_completion_tokens)
         if run["turns"] >= max_turns:
@@ -2249,17 +2252,24 @@ class Runner:
             "recomputed_tokens": efficiency.recomputed_tokens(completion.prompt_tokens, cache),
         }
 
-    def _emit_turn_metrics(self, sid: str) -> None:
+    def _emit_turn_metrics(self, sid: str, final: bool = False) -> None:
         s = self.db.get_session(sid)
         pending = (s.get("run") or {}).get("pending_turn_metrics")
+        if not pending and (not final or s.get("backend", "local") != "local"):
+            return  # hosted runs have no native turns: their retry aggregate stays null
+        counts = efficiency.turn_counts(self.db.events(sid))
         if not pending:
-            return
-        retries, correlated = efficiency.turn_increments(self.db.events(sid))
+            # The run ended after a compaction or a tool result that no model turn committed (the next call failed or
+            # was cancelled). Keep those counts in a row with no turn data, so totals and the metrics still hold them.
+            if not efficiency.has_increments(counts):
+                return
+            pending = {"turn": (s.get("run") or {}).get("turns", 0)}
         run = {k: v for k, v in s["run"].items() if k != "pending_turn_metrics"}
-        payload = {**pending, "dead_end_retries": retries, "compaction_correlated_retries": correlated}
+        payload = {**pending, **counts}
 
         def emit_turn_metrics() -> None:
-            self.db.update_session(sid, run=run)
+            totals = efficiency.add_activity(self.db.get_session(sid)["totals"], counts)
+            self.db.update_session(sid, run=run, totals=totals)
             self.bus.emit(sid, "turn_metrics", payload)
         self.db.for_session(sid).write(emit_turn_metrics)
 
@@ -2340,6 +2350,10 @@ class Runner:
         mutated: list[str] = []     # mutating tools that ran this turn (or started to), whatever their outcome
         try:
             for i, call in enumerate(pending):
+                # Checked before each call, so a stop saved before a daemon restart runs nothing more either.
+                if stuck.stop_reason(self.db.get_session(sid)["run"]):   # `_budget_reason` ends the run next
+                    await self._skip_rest(sid, pending[i:], "Not run: the run stopped because it was stuck.")
+                    return False
                 done, used = await self._resolve_call(s, call, pending[i + 1:], executing, budget, mutated)
                 if done is not None:
                     return done
@@ -2419,8 +2433,8 @@ class Runner:
                 raise ValueError("arguments must be a JSON object")
         except ValueError as e:
             self._bump(sid, "invalid_tool_calls")
-            await self._record_result(sid, call, name, f"Error: tool arguments were not a valid JSON object ({e}).",
-                                ok=False)
+            await self._record_result(sid, call, name, f"{efficiency.INVALID_ARGUMENTS} ({e}).",
+                                ok=False, invalid=True)
             return None, None
 
         tools_only = s.get("kind") == TOOLS_ONLY  # not even the loop's own tools: only the App's (#329)
@@ -2440,13 +2454,13 @@ class Runner:
             if await self._authorize(s, call, name, args, ws) is None:
                 # The policy allows the hosted alias (mcp__harness__<tool>), but it is no local tool name: answer it
                 # so the call is resolved instead of left pending.
-                await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
-                                                     f"{', '.join(schemas)}.", ok=False)
+                await self._record_result(sid, call, name, f"{efficiency.UNKNOWN_TOOL}'{name}'. Available: "
+                                                     f"{', '.join(schemas)}.", ok=False, invalid=True)
             return None, None
         if name not in schemas:
             self._bump(sid, "invalid_tool_calls")
-            await self._record_result(sid, call, name, f"Error: unknown tool '{name}'. Available: "
-                                                 f"{', '.join(schemas)}.", ok=False)
+            await self._record_result(sid, call, name, f"{efficiency.UNKNOWN_TOOL}'{name}'. Available: "
+                                                 f"{', '.join(schemas)}.", ok=False, invalid=True)
             return None, None
         try:
             kit = next((k for k in self.daemon_toolkits(s) if name in k.tool_names), None)
@@ -2454,7 +2468,8 @@ class Runner:
             args = validator(name, args) if validator is not None else validate_args(schemas[name], args)
         except ToolError as e:
             self._bump(sid, "invalid_tool_calls")
-            await self._record_result(sid, call, name, f"Error: bad arguments for {name}: {e}", ok=False)
+            await self._record_result(sid, call, name, f"{efficiency.BAD_ARGUMENTS}{name}: {e}", ok=False,
+                                      invalid=True)
             return None, None
 
         with telemetry.tool_span(name, call["id"]) as span:
@@ -2717,6 +2732,21 @@ class Runner:
                       if not any(e["path"] == path for e in proposal["edits"])]
         return max(decisions, key=lambda d: rank.get(d.action, 1))
 
+    def _context_banner(self, s: dict, name: str) -> str:
+        policy = self.policy(s) if name.startswith("mcp__") else None
+        return taint.context_banner(name, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name))
+
+    def _result_banner(self, s: dict, name: str, args: dict) -> str:
+        """The context-only banner for a result (taint.context_banner). A read_artifact range gets the banner of any
+        result its artifact was stored from (identical outputs share one), so a masked MCP result or transcript stays
+        marked when recovered."""
+        if name != "read_artifact":
+            return self._context_banner(s, name)
+        digest = args.get("artifact_id")
+        sources = {e["data"].get("name", "") for e in self.db.events(s["id"])
+                   if e["type"] == "tool_result" and e["data"].get("artifact_id") == digest}
+        return next((b for b in sorted(self._context_banner(s, n) for n in sources) if b), "")
+
     def _taint_from_result(self, s: dict, name: str, args: dict) -> None:
         policy = self.policy(s) if name.startswith("mcp__") else None
         source = taint.source_for(name, args, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name))
@@ -2853,9 +2883,13 @@ class Runner:
                 output = bound_rendered(rendered, cap, raw)
             else:
                 output = bound_rendered(rendered, cap, raw, artifact_available=False)
+        # MCP results and session_read transcripts open with a banner in the model's context only (#644). Size the
+        # artifact on the bannered text, so masking recovers the plain text rather than storing the banner.
+        banner = self._result_banner(s, name, args) if ok else ""
         # A recovered range is already backed by its artifact; storing it again would let masking loop on it.
         if artifact_content is None:
-            artifact_content = (output if ok and name != "read_artifact" and len(output) >= self.cfg.mask_min_chars
+            artifact_content = (output if ok and name != "read_artifact"
+                                and len(banner) + len(output) >= self.cfg.mask_min_chars
                                 and self.artifact_tool_available(s) else None)
         elif not self.artifact_tool_available(s):
             artifact_content = None
@@ -2868,12 +2902,13 @@ class Runner:
                     run["files_touched"] = (touched + [path])[:agent_state.FILES_MODIFIED_MAX]
                     self.db.update_session(sid, run=run)
         output_chars = len(output)
-        if len(output) > max_chars:
-            output = (output[:max_chars] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
+        if len(banner) + len(output) > max_chars:
+            cut = max(0, max_chars - len(banner))
+            output = (output[:cut] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
         await self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
-                            artifact_content=artifact_content, extra=extra, output_chars=output_chars)
-        return output
+                            artifact_content=artifact_content, extra=extra, output_chars=output_chars, banner=banner)
+        return banner + output
 
     async def _dispatch(self, sid: str, s: dict, call: dict, name: str, args: dict, ws: Workspace, kit) -> str:
         """Run one authorized tool call wherever it lives (daemon, app, image service, sandbox, runner)."""
@@ -3022,17 +3057,26 @@ class Runner:
 
     async def _record_result(self, sid: str, call: dict, name: str, output: str, ok: bool, seconds: float = 0.0,
                        artifact_content: str | None = None, extra: dict | None = None,
-                       output_chars: int | None = None) -> None:
+                       output_chars: int | None = None, banner: str = "", invalid: bool = False) -> None:
+        """Append the tool message to the context and emit tool_result. `banner` opens the context message only;
+        the event and any artifact keep the plain output. `invalid` marks a call the harness rejected before running
+        it (bad JSON, unknown tool, bad arguments), for the stuck caps."""
         def record_result() -> None:
-            nonlocal output
+            nonlocal output, output_chars
             s = self.db.get_session(sid)
             run = s["run"]
             run["tool_calls"] = run.get("tool_calls", 0) + 1
             if not ok:
                 run["tool_errors"] = run.get("tool_errors", 0) + 1
+            note, stop = stuck.observe(run, self._stuck_caps(), name, (call.get("function") or {}).get("arguments"),
+                                       output, ok, invalid)
+            if note:
+                output += note
+                if output_chars is not None:
+                    output_chars += len(note)
             if (run.get("executing") or {}).get("id") == call["id"]:
                 run["executing"] = None
-            context = s["context"] + [{"role": "tool", "tool_call_id": call["id"], "content": output}]
+            context = s["context"] + [{"role": "tool", "tool_call_id": call["id"], "content": banner + output}]
             artifact_id = None
             if artifact_content is not None:
                 artifact_id = hashlib.sha256(artifact_content.encode("utf-8")).hexdigest()
@@ -3040,7 +3084,7 @@ class Runner:
                     self.db.put_artifact(sid, artifact_id, artifact_content)
                 except Exception:
                     output = _without_unstored_artifact(output, artifact_id)
-                    context[-1]["content"] = output
+                    context[-1]["content"] = banner + output
                     artifact_id = None
             payload = {"id": call["id"], "name": name, "ok": ok, "artifact_id": artifact_id,
                        "seconds": round(seconds, 2),
@@ -3050,7 +3094,12 @@ class Runner:
                 payload.update(extra)
             self.db.update_session(sid, context=context, run=run)
             self.bus.emit(sid, "tool_result", payload)
+            if stop is not None:
+                self.bus.emit(sid, "stuck", stop)
         await self.db.for_session(sid).awrite(record_result)
+
+    def _stuck_caps(self) -> stuck.Caps:
+        return stuck.Caps(self.cfg.stuck_nudge_after, self.cfg.stuck_stop_after, self.cfg.stuck_invalid_after)
 
     def _progress_reporter(self, sid: str, event: str, base: dict):
         """on_progress callback that sends throttled ephemeral progress events for long prompts."""
@@ -3088,7 +3137,7 @@ class Runner:
             payload = agent_state.validate_state(args, self.cfg.state_max_chars)
         except ToolError as e:
             self._bump(sid, "invalid_tool_calls")
-            await self._record_result(sid, call, "update_state", f"Error: {e}", ok=False)
+            await self._record_result(sid, call, "update_state", f"Error: {e}", ok=False, invalid=True)
             return
 
         def update_state() -> None:
@@ -3105,14 +3154,14 @@ class Runner:
         if args:
             self._bump(sid, "invalid_tool_calls")
             await self._record_result(sid, call, "reset_round",
-                                "Error: reset_round takes no arguments.", ok=False)
+                                "Error: reset_round takes no arguments.", ok=False, invalid=True)
             return
         s = self.db.get_session(sid)
         if not self.has_valid_saved_state(s):
             self._bump(sid, "invalid_tool_calls")
             await self._record_result(sid, call, "reset_round",
                                 "Error: call update_state first so a valid saved state exists before reset_round.",
-                                ok=False)
+                                ok=False, invalid=True)
             return
         run = {**s["run"], "pending_round_reset": True}
         self.db.update_session(sid, run=run)
@@ -3250,7 +3299,10 @@ class Runner:
         with telemetry.span("compaction", {"harness.tokens_before": before}) as span:
             context, _ = compaction.elide(context)
             after = compaction.estimate_tokens(context, cpt) + overhead
-            data = {"tier": "elide", "tokens_before": before, "tokens_after": after}
+            # Under summarize_at after elide alone: no summary call, so the pass is elide-only (#639). An overflow
+            # always summarizes.
+            data = {"tier": "elide", "tokens_before": before, "tokens_after": after,
+                    "summary_averted": not overflow and after < self.cfg.summarize_at * n}
             if overflow:
                 data["reason"] = "overflow"
             if overflow or after >= self.cfg.summarize_at * n:
@@ -3432,7 +3484,7 @@ class Runner:
         remove_tree(path)
 
     async def _run_finished(self, sid: str) -> dict:
-        self._emit_turn_metrics(sid)
+        self._emit_turn_metrics(sid, final=True)
         s = self.db.get_session(sid)
         extra, fields, quotes = {}, {}, []
         if s.get("job_id"):  # scheduled job: the answer's last STATUS line decides how loudly to notify (jobs.py)

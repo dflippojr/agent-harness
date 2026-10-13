@@ -165,6 +165,21 @@ when a proposal for it is applied. Delegate tokens are added to session totals
 don't count against the run's completion budget. Only local-model agent
 sessions on the tower with a workspace are offered these tools.
 
+## Counters
+
+Each `turn_metrics` row carries these increments since the previous row, and
+session `totals` adds them up (#639). They measure what masking, editing and
+elision cost, and they change no behaviour. `summary_averted` is set on each
+`elide` compaction event; it is `true` when elide alone brought the context under
+`summarize_at`, so no summary call followed.
+
+| Field | Counts |
+| --- | --- |
+| `read_artifact_calls` | `read_artifact` calls that ran, failed ones included; argument-validation rejections do not count |
+| `read_artifact_repeats` | successful recoveries of a digest already recovered in the session |
+| `edit_mismatches` | `edit_file` calls rejected with `must appear exactly once` |
+| `elide_only_compactions` | `elide` passes with `summary_averted` set |
+
 ## Research backlog
 
 [Context Language Models](context-language-models-research.md) is a concept to investigate (2026-10-01); the note describes a proposed comparison with the current implementation.

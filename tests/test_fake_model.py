@@ -497,3 +497,29 @@ def test_full_stack_approval_and_compaction(monkeypatch, fake_manager):
         tiers = [e["data"]["tier"] for e in m.db.events(sid) if e["type"] == "compaction"]
         assert "summary" in tiers
         assert m.db.get_session(sid)["answer"].startswith("Done.")
+
+
+def test_full_stack_stuck_loop_nudges_then_ends_the_run(monkeypatch, fake_manager):
+    """#643: the scripted model repeats one failing read; the third result carries the nudge and the eighth ends the
+    run with stuck_repeat and a `stuck` event."""
+    from harness import sandbox
+    monkeypatch.setattr(sandbox, "run_cmd", fail_on_docker)
+    m = fake_manager
+    _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+    headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
+    with TestClient(create_app(m)) as client:
+        made = client.post("/api/v1/sessions", headers=headers,
+                           json={"prompt": "Run the stuck loop.", "project": fake_instance.PROJECT})
+        assert made.status_code == 201, made.text
+        sid = made.json()["id"]
+        done = wait_session(client, sid, headers, "done", "failed")
+    assert (done["status"], done["stop_reason"]) == ("done", "stuck_repeat"), done
+    events = m.db.events(sid)
+    results = [e["data"] for e in events if e["type"] == "tool_result"]
+    assert len(results) == 8 and not any(r["ok"] for r in results)
+    assert "will not work" not in results[1]["output"]
+    assert "failed 3 times" in results[2]["output"] and "will not work" in results[2]["output"]
+    assert [e["data"] for e in events if e["type"] == "stuck"] == [
+        {"reason": "stuck_repeat", "tool": "read_file", "count": 8}]
+    context = m.db.get_session(sid)["context"]
+    assert "will not work" in [msg for msg in context if msg["role"] == "tool"][2]["content"]

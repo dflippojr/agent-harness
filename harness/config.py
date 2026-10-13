@@ -573,6 +573,11 @@ class Config:
     max_run_seconds: float = 3600
     app_max_running: int = 2
     app_max_queued: int = 4
+    # Stuck caps (#643, stuck.py): nudge at the Nth identical failing call, end the run at the Mth, and end it after K
+    # consecutive invalid tool calls (0 = off).
+    stuck_nudge_after: int = 3
+    stuck_stop_after: int = 8
+    stuck_invalid_after: int = 5
     elide_at: float = 0.55
     summarize_at: float = 0.65
     keep_recent: float = 0.20
@@ -1073,6 +1078,9 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         max_run_seconds=float(budgets.get("max_run_seconds", 3600)),
         app_max_running=int(budgets.get("app_max_running", 2)),
         app_max_queued=int(budgets.get("app_max_queued", 4)),
+        stuck_nudge_after=int(budgets.get("stuck_nudge_after", 3)),
+        stuck_stop_after=int(budgets.get("stuck_stop_after", 8)),
+        stuck_invalid_after=int(budgets.get("stuck_invalid_after", 5)),
         elide_at=float(compaction.get("elide_at", 0.55)),
         summarize_at=float(compaction.get("summarize_at", 0.65)),
         keep_recent=float(compaction.get("keep_recent", 0.20)),

@@ -105,6 +105,11 @@ jobs:
     concurrency:
       group: review-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pr_number }}
       cancel-in-progress: true
+    # gh otherwise infers the repository from a git checkout in the working directory,
+    # but the PR head and tooling are checked out into subfolders, so the workspace
+    # root is a repository only when an earlier job left one there.
+    env:
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Check out review tooling
         uses: actions/checkout@v7

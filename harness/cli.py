@@ -279,6 +279,10 @@ def _print_event(t: str, d: dict, args) -> None:
             print(f"{DIM}context compacted ({d['tier']}): ~{d['tokens_before']} → ~{d['tokens_after']} tokens{RESET}")
     elif t in ("error", "llm_retry"):
         print(f"{RED}{t}: {d.get('message') or d.get('error')}{RESET}")
+    elif t == "stuck":
+        what = (f"{d.get('count')} invalid tool calls in a row" if d.get("reason") == "stuck_invalid"
+                else f"{d.get('tool')} failed {d.get('count')} times with the same arguments")
+        print(f"{RED}Run stopped: {what}{RESET}")
     elif t == "model_waking":
         print(f"{YELLOW}model is asleep; waking it (about {d['expected_seconds']} s)...{RESET}")
     elif t == "model_ready":
