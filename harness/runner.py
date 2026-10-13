@@ -20,7 +20,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, stuck, taint, telemetry
+from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, stuck, taint, telemetry, tool_profiles
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -471,8 +471,16 @@ class Runner:
         known = s["model"] in self.cfg.models
         return self.workspace(s if known else {**s, "model": self.cfg.default_model})
 
+    @staticmethod
+    def split_tool_names(s: dict) -> frozenset[str]:
+        """The split-mode tools this session gets: all of SPLIT_TOOLS, or only run_shell under bash-only (#638)."""
+        if s.get("tool_profile") == tool_profiles.BASH_ONLY:
+            return tool_profiles.BASH_ONLY_SPLIT_TOOLS
+        return frozenset(SPLIT_TOOLS)
+
     def split_schemas(self, s: dict) -> list[dict]:
-        return [t for t in self.split_workspace(s).schemas() if t["function"]["name"] in SPLIT_TOOLS]
+        names = self.split_tool_names(s)
+        return [t for t in self.split_workspace(s).schemas() if t["function"]["name"] in names]
 
     def mcp_tool_schemas(self, sid: str) -> list[dict]:
         """The daemon tools a hosted Claude Code or Codex session may call over MCP: web, session search, memory
@@ -1371,6 +1379,14 @@ class Runner:
                 raise CliBackendError(f"{backend_name} split mode needs the harness MCP server, which is off for this "
                                       "session", "split_unavailable")
             extra["split"] = True
+        if s.get("tool_profile", tool_profiles.DEFAULT) != tool_profiles.DEFAULT:
+            # Checked at creation; checked again here because the backend's config can change while a session waits.
+            # Never run the CLI with its full tools in place of the profile it was started with.
+            reason = tool_profiles.refusal(backend_name, backend, s["tool_profile"], s.get("kind", "agent"))
+            if reason or (backend_name == "codex" and not self.split_mode(s)):
+                raise CliBackendError(reason or f"tool_profile {s['tool_profile']} needs Codex in split mode",
+                                      tool_profiles.UNSUPPORTED)
+            extra["tool_profile"] = s["tool_profile"]
         if s.get("kind") == TOOLS_ONLY:
             # Never run a hosted CLI with its built-in tools here: Claude Code gets --tools "", Codex no environment
             # and every other built-in tool off, and only the App's tools over MCP (the approval path still denies
@@ -2158,7 +2174,8 @@ class Runner:
             self._flag_end_pending(sid, status)
             self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, cost,
                                  str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
-                                 str(run.get("credential_source") or "subscription"), s.get("end_user") or "")
+                                 str(run.get("credential_source") or "subscription"), s.get("end_user") or "",
+                                 s.get("tool_profile") or tool_profiles.DEFAULT)
             if failed:
                 self.bus.emit(sid, "error", failure)
             self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})

@@ -78,6 +78,7 @@ class WebSessionResponse(BaseModel):
     # SQLite returns 0/1, including on raw idempotency replays. Preserve the wire representation.
     workspace_removed: bool | int = 0
     push_target: str = ""
+    tool_profile: str = "default"
 
 
 class SessionResponse(WebSessionResponse):

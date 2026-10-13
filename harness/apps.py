@@ -165,6 +165,9 @@ class CreateAppSession(BaseModel):
         "subscription login (set up with /api/v1/end-users/{id}/logins/{backend}) or is refused with "
         "end_user_login_required; it never uses the owner's login or an App key. Needs an App token and backend "
         "claude or codex."))
+    tool_profile: str = Field(default="default", description=(
+        "`default`, or `bash-only` to leave a hosted Claude Code or split-mode Codex session a shell and no file "
+        "tools. Backends that can't restrict their tools refuse it with tool_profile_unsupported."))
 
 
 class AppSessionUpdate(BaseModel):
@@ -241,6 +244,8 @@ class BackendResponse(BaseModel):
     notice: str = ""
     billing_warning: str = ""
     usage_by_source: dict[str, dict] = Field(default_factory=dict)
+    usage_by_profile: dict[str, dict] = Field(default_factory=dict)  # the week's usage per tool profile (#638)
+    tool_profiles: list[str] = Field(default_factory=lambda: ["default"])  # what tool_profile accepts here
     provider_policy: dict | None = None
     app_tools_only: bool = False
 
@@ -1078,7 +1083,7 @@ async def create_session(body: CreateAppSession, request: Request,
                  app_tools=body.tools, app_metadata=body.metadata, owner_id=user_id,
                  kind=TOOLS_ONLY if body.tools_only else "agent",
                  retention_days=body.retention_days if app is not None else None, end_user=end_user,
-                 context=namespace_audit.key_context(key), idempotency=record)
+                 tool_profile=body.tool_profile, context=namespace_audit.key_context(key), idempotency=record)
     return view(m, s)
 
 

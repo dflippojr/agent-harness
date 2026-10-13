@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .bus import EventBus
-from . import cli_domains, local_owner, review_comments, tailscale_peer
+from . import cli_domains, local_owner, review_comments, tailscale_peer, tool_profiles
 from . import review_comments
 from .changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, changes_from_diffs, published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
@@ -63,6 +63,7 @@ class CreateOptions:
     retention_days: float | None = None  # an App session's own retention (#330); else the App's default
     end_user: str = ""  # the App's end user whose own subscription login the session runs on (#365)
     idempotency: dict | None = None  # the App's Idempotency-Key row, written with the session (#462)
+    tool_profile: str = tool_profiles.DEFAULT  # `bash-only` leaves a hosted CLI only a shell (#638)
 REMOTE_WORKSPACE_ROOT = "~/.agent-harness/workspaces"  # where runners keep session workspaces (display only)
 TOOLS_ONLY_PROMPT = ("You answer questions for the user of the App '{app}'. You have no files, shell, web access or "
                      "project; the only tools are the App's own tools. Use them to look things up, say plainly when "
@@ -483,6 +484,9 @@ class Manager:
             model, effort = self._local_choice(model)
         else:
             model, effort = self._hosted_choice(backend, model, effort, target, app)
+        reason = tool_profiles.refusal(backend, self.cfg.backends.get(backend), opts.tool_profile, opts.kind)
+        if reason:
+            raise HarnessError(400, reason, tool_profiles.UNSUPPORTED)
         remote = target != "tower"
         app_id = app["id"] if app else ""
         self._enforce_app_caps(app_id)
@@ -507,7 +511,7 @@ class Manager:
             run["trace"] = {**trace, "started_at": now}
         session = {
             "id": sid, "project": project, "target": target, "model": model, "backend": backend,
-            "effort": effort or "",
+            "effort": effort or "", "tool_profile": opts.tool_profile,
             "title": title or (first_line[:80] + ("…" if len(first_line) > 80 else "")),
             "status": "queued", "workspace": str(workspace), "created_at": now, "updated_at": now,
             "context": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],

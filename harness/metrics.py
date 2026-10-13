@@ -221,7 +221,10 @@ def _backend_metrics(m: Manager, out: _Out, db) -> None:
         for window, value in windows.items():
             if isinstance(value, dict) and value.get("utilization") is not None:
                 backend_limits.append(({"backend": name, "window": window}, value["utilization"]))
-        backend_costs.append(({"backend": name}, db.usage_tally(name, 0)["cost_usd"]))
+        # One series per tool profile (#638); a backend with no usage yet still shows a zero default series.
+        by_profile = db.usage_by_profile(name, 0) or {"default": {"cost_usd": 0}}
+        backend_costs += [({"backend": name, "tool_profile": profile}, tally["cost_usd"])
+                          for profile, tally in sorted(by_profile.items())]
     out.metric("harness_backend_utilization", "gauge", "Latest hosted-backend utilization from 0 to 1.",
                backend_limits)
     out.metric("harness_backend_cost_usd_total", "counter", "Hosted-backend reported cost estimate.",

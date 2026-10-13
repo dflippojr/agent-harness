@@ -8,6 +8,8 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from . import tool_profiles
+
 EFFORTS = ("low", "medium", "high")
 PREFS_KEY = "backend_prefs"
 # Few currently popular CLI model ids per hosted backend. The PWA offers these plus a Custom field.
@@ -160,6 +162,7 @@ def local_view(manager) -> dict:
         "model": manager.cfg.default_model, "effort": "",
         "limits": {}, "today": {}, "week": {}, "notice": "Runs the local model on this server.",
         "billing_warning": "", "api_key_available": False, "app_tools_only": tools_only_supported(manager, "local"),
+        "tool_profiles": [tool_profiles.DEFAULT],
     }
 
 
@@ -211,6 +214,7 @@ def cli_view(manager, name: str, check_auth: bool = True, app_id: str | None = N
         "name": name, "kind": "cli", "available": cfg.enabled and allowed and ready, "logged_in": True,
         "auth": "none", "billing": "local", "model": cfg.model, "effort": "",
         "limits": {}, "limits_updated_at": None, "today": {}, "week": {}, "usage_by_source": {},
+        "usage_by_profile": {}, "tool_profiles": list(tool_profiles.supported(name, cfg)),
         "provider_policy": provider_policy, "notice": cfg.card_note or CLI_CARD_NOTE, "login_note": CLI_LOGIN_NOTE,
         "billing_warning": "", "api_key_available": False, "app_tools_only": False,
         "popular_models": [{"id": model, "label": model} for model in manager.cfg.models],
@@ -244,11 +248,13 @@ def view(manager, name: str, check_auth: bool = True, app_id: str | None = None,
     today = manager.db.usage_tally(name, local_midnight, app_id) if include_usage else {}
     week_tally = manager.db.usage_tally(name, week, app_id) if include_usage else {}
     sources = manager.db.usage_by_source(name, week, app_id) if include_usage else {}
+    profiles = manager.db.usage_by_profile(name, week, app_id) if include_usage else {}
     return {
         "name": name, "available": cfg.enabled and allowed, "logged_in": logged_in, "auth": cfg.auth,
         "billing": cfg.billing, "model": cfg.model, "effort": cfg.effort,
         "limits": limits, "limits_updated_at": None if hide_shared_limits else state["updated_at"],
         "today": today, "week": week_tally, "usage_by_source": sources,
+        "usage_by_profile": profiles, "tool_profiles": list(tool_profiles.supported(name, cfg)),
         "provider_policy": provider_policy,
         "notice": notice(name, cfg, limits),
         "billing_warning": billing_warning(cfg, limits, effective_auth == "api_key"),
