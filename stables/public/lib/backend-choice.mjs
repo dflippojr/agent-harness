@@ -22,7 +22,7 @@ export function modelOptions(h, name, backends, models, selected) {
 /**
  * Backend and model selects for a sheet. `keep` names the session's backend and adds a first "Same as this session"
  * choice (value ""), which leaves both to the server; `exclude` leaves a backend out. `choice()` is the request body
- * part: {} to keep, else {backend, model}, with model null on a hosted backend (its default).
+ * part: {} to keep, else {backend, model}, with model null only when a hosted backend has no default configured.
  * @param {{h: any, fill: any, backends: Array<{name: string, available?: boolean, model?: string | null}>,
  *   models: Array<{name: string, default?: boolean}>, keep?: string, exclude?: string, id?: string}} options
  */
@@ -35,13 +35,13 @@ export function backendPicker({ h, fill, backends, models, keep = "", exclude = 
   const model = h("select", { id: `${id}-model` });
   const sync = () => {
     fill(model, backend.value ? modelOptions(h, backend.value, backends, models, localDefault) : h("option", { value: "" }, "Same model"));
-    if (backend.value === "local") model.value = localDefault || "";
+    model.value = backend.value === "local" ? localDefault || "" : backends.find((b) => b.name === backend.value)?.model || "";
     model.disabled = backend.value !== "local";
   };
   backend.value = keep ? "" : (available[0]?.name || "");
   backend.addEventListener("change", sync);
   sync();
-  const choice = () => (backend.value
-    ? { backend: backend.value, model: backend.value === "local" ? model.value || null : null } : {});
+  // The model shown is the one sent, so a hosted backend's configured default wins over the session's own model.
+  const choice = () => (backend.value ? { backend: backend.value, model: model.value || null } : {});
   return { backend, model, available, choice };
 }

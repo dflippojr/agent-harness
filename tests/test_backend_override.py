@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import namespace_audit
+from harness import member_keys, namespace_audit
 from harness.accounts import AccountService
 from harness.api import create_app
 from harness.cli_backends import CliBackendError
@@ -106,6 +106,22 @@ def test_rerun_on_another_backend(tmp_path):
         assert (picked["backend"], picked["model"]) == ("claude", "claude-sonnet-5")
         plain = m.rerun(s["id"])
         assert (plain["backend"], plain["model"]) == ("local", s["model"])
+        await asyncio.gather(*m.tasks.values(), return_exceptions=True)
+
+    asyncio.run(body())
+
+
+def test_member_reruns_a_hosted_session_on_the_local_model(tmp_path, monkeypatch):
+    async def body():
+        m, s = await started(tmp_path)
+        alice = AccountService(m).create("owner", "alice@example.com", "Alice")
+        monkeypatch.setattr(m.member_keys, "has", lambda uid, backend: True)
+        m.db.update_session(s["id"], owner_id=alice["user_id"], project="scratch", backend="claude", model="claude-opus-5",
+                            end_user=member_keys.end_user_id(alice["user_id"]))
+        local = m.rerun(s["id"], backend="local")
+        assert (local["backend"], local["end_user"]) == ("local", "")
+        hosted = m.rerun(s["id"])
+        assert hosted["end_user"] == member_keys.end_user_id(alice["user_id"])  # `create` sets the member's own again
         await asyncio.gather(*m.tasks.values(), return_exceptions=True)
 
     asyncio.run(body())

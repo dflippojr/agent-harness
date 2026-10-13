@@ -147,17 +147,19 @@ async function viewSession(sid, tab, focusApproval) {
   // from the latest checkpoint with "Continue the task." (no combined endpoint, #664).
   async function continueElsewhere() {
     try {
-      const listing = await api(`/sessions/${sid}/checkpoints`);
-      const turn = Math.max(0, ...(listing.checkpoints || []).map((c) => c.turn));
-      if (!listing.can_fork || !turn) {
-        toast("This session has no checkpoint to continue from yet; use Run again in the ⋯ menu instead.", 8000);
-        return;
-      }
       const picker = backendPicker({ h, fill, ...(await loadChoices()), exclude: session.backend || "local", id: "continue" });
       if (!picker.available.length) { toast("No other backend is available."); return; }
       if (!(await formSheet({ title: "Continue on another backend?", fields: pickerFields(picker), confirmLabel: "Continue",
-        message: `Cancels this waiting session and continues from checkpoint ${turn} in a new session on its own branch.` }))) return;
-      await api(`/sessions/${sid}/cancel`, { method: "POST" });
+        message: "Cancels this waiting session and continues from its latest checkpoint in a new session on its own branch." }))) return;
+      session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) };
+      renderHead();
+      // Read the checkpoints only now: a hosted run saves its last one as the cancel ends.
+      const listing = await api(`/sessions/${sid}/checkpoints`);
+      const turn = Math.max(0, ...(listing.checkpoints || []).map((c) => c.turn));
+      if (!listing.can_fork || !turn) {
+        toast("The session is cancelled, but it has no checkpoint to continue from; use Run again in the ⋯ menu instead.", 8000);
+        return;
+      }
       const s = await api(`/sessions/${sid}/checkpoints/${turn}/fork`, { method: "POST",
         body: { prompt: "Continue the task.", ...picker.choice() } });
       go(`#/s/${s.id}`, true);

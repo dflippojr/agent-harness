@@ -27,7 +27,7 @@ assert.deepEqual(keep.choice(), {});
 assert.match(text(keep.backend), /Same as this session \(claude\)/);
 assert.doesNotMatch(text(keep.backend), /cursor/, "unavailable backends are not offered");
 keep.backend.value = "codex"; keep.backend.listeners.change();
-assert.deepEqual(keep.choice(), { backend: "codex", model: null });
+assert.deepEqual(keep.choice(), { backend: "codex", model: "gpt-5.5" }, "the model shown is the model sent");
 assert.match(text(keep.model), /gpt-5\.5/);
 keep.backend.value = "local"; keep.backend.listeners.change();
 assert.deepEqual(keep.choice(), { backend: "local", model: "qwen" });
@@ -92,11 +92,13 @@ const button = (find, label) => find((n) => n.tag === "button" && text(n) === la
   assert.ok(move, "a waiting_limit session offers Continue on another backend");
   await move.onclick();
   assert.equal(t.forms.length, 1);
-  assert.match(t.forms[0].message, /checkpoint 5/);
   assert.doesNotMatch(text(t.forms[0].fields[0].control), /claude/, "the waiting session's own backend is not offered");
   const writes = t.calls.filter(([method]) => method === "POST");
   assert.deepEqual(writes, [["POST", "/sessions/abc/cancel", undefined],
-    ["POST", "/sessions/abc/checkpoints/5/fork", { prompt: "Continue the task.", backend: "codex", model: null }]]);
+    ["POST", "/sessions/abc/checkpoints/5/fork", { prompt: "Continue the task.", backend: "codex", model: "gpt-5.5" }]]);
+  // the checkpoints are read after the cancel, which is when a hosted run saves its last one
+  const order = t.calls.map(([m, p]) => `${m} ${p}`);
+  assert.ok(order.indexOf("POST /sessions/abc/cancel") < order.indexOf("GET /sessions/abc/checkpoints"));
   assert.deepEqual(t.went, ["#/s/new1"]);
 }
 
