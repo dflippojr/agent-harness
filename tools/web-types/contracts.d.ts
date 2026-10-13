@@ -79,3 +79,15 @@ export type PromptSheet = (options: SheetOptions & {
   placeholder?: string;
   validate?: (value: string) => string | undefined;
 }) => Promise<string | null>;
+export interface SheetField {
+  name: string;
+  label: string;
+  value?: string;
+  type?: string;
+  inputmode?: string;
+  placeholder?: string;
+  validate?: (value: string) => string | undefined;
+  /** A control built elsewhere (a <select>); the sheet reads its `value`. */
+  control?: any;
+}
+export type FormSheet = (options: SheetOptions & { fields: SheetField[] }) => Promise<Record<string, string> | null>;

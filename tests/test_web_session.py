@@ -85,3 +85,14 @@ def test_changes_file_navigation_and_inline_comments():
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout
+
+
+def test_waiting_limit_session_continues_on_another_backend():
+    """#664: Continue on another backend cancels, then forks from the latest checkpoint; Run again takes the picker."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node isn't installed")
+    script = Path(__file__).resolve().parent / "web_backend_continue.mjs"
+    result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ok" in result.stdout

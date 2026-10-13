@@ -7,6 +7,7 @@ const SHELL = `harness-shell-${BUILD_ID}`;
 // module graph is served network-first and cached together for offline use.
 const ASSETS = [
   "/", "/style.css", "/app.js", "/client.mjs", "/icon-192.png", "/manifest.webmanifest",
+  "/lib/backend-choice.mjs",
   "/lib/compat.mjs",
   "/lib/diff.mjs",
   "/lib/jobs.mjs",
