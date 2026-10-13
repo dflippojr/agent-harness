@@ -2250,6 +2250,7 @@ class Runner:
             "estimated": composed["estimated"],
             "cache_tokens": cache,
             "recomputed_tokens": efficiency.recomputed_tokens(completion.prompt_tokens, cache),
+            **efficiency.schema_overhead(tools, run.get("chars_per_token", 3.0)),
         }
 
     def _emit_turn_metrics(self, sid: str, final: bool = False) -> None:
@@ -2288,6 +2289,7 @@ class Runner:
                  "prompt_tps": round(completion.prompt_tps, 1), "gen_tps": round(completion.gen_tps, 1)}
         context = s["context"] + [msg]
         totals = self._add_totals(s["totals"], completion)
+        totals["schema_tokens"] = totals.get("schema_tokens", 0) + run["pending_turn_metrics"]["schema_tokens"]
         event["totals"] = totals
         self.last_completion = {"model": model.name, "prompt_tps": completion.prompt_tps, "gen_tps": completion.gen_tps,
                                 "at": time.time()}
@@ -3255,7 +3257,7 @@ class Runner:
         n = model.context_tokens
         cpt = s["run"].get("chars_per_token", 3.0)
         # Tool schemas are part of every prompt but not of the context list.
-        overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
+        overhead = efficiency.schema_overhead(self.tool_schemas(s, self.workspace(s)), cpt)["schema_tokens"]
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
         context, artifacts, masked_chars = s["context"], {}, 0
         if self.artifact_tool_available(s):  # a receipt tells the model to call read_artifact
