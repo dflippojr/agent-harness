@@ -115,7 +115,7 @@ globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
 globalThis.fetch = fakeFetch;
-const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../harness/web/client.mjs");
+const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../stables/public/client.mjs");
 
 const sandbox = createContext({
   window: win, document: doc, location: loc, history: win.history, navigator: win.navigator,

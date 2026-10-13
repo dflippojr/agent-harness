@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 // ---- stub DOM (installed only after the imports below, to prove the modules need none at import time) ----
 const imports = {};
 for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "tabs", "update", "boot", "warm-model", "secret", "sheet"]) {
-  imports[name] = await import(`../harness/web/lib/${name}.mjs`);
+  imports[name] = await import(`../stables/public/lib/${name}.mjs`);
 }
 const { h, fill, append, kids } = imports.dom;
 const { Emitter, Node } = await import("./web_stub_dom.mjs");
@@ -539,7 +539,7 @@ let router;
   meta.protocols.admin = { min: 3, max: 4 };
   assert.equal(await update.checkCompatibility(), false);
   assert.ok(session.isBlocked());
-  assert.match(E.$app.text, /Update required|Update Agent Harness Web/);
+  assert.match(E.$app.text, /Update required|Update Stables/);
   assert.equal(E.$tabBar.hidden, true, "a blocked app offers no navigation");
   meta.protocols.admin = { min: 2, max: 2 };
   assert.equal(await update.checkCompatibility(), true);
@@ -548,7 +548,7 @@ let router;
   meta.update_hint = { web: { build_id: "b2" } };
   assert.equal(await update.checkCompatibility(), true, "declining the newer bundle keeps the app running");
   await tick();
-  assert.deepEqual(offers, ["Update Agent Harness Web?"], "the newer bundle is offered once");
+  assert.deepEqual(offers, ["Update Stables?"], "the newer bundle is offered once");
   assert.equal(browser.sessionStorage.getItem("harness.webUpdatePrompt"), "b1");
   web.compatibility = async () => { throw new Error("offline"); };
   assert.equal(await update.checkCompatibility(), true);

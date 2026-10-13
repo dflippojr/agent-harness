@@ -1,8 +1,8 @@
 // Agents list grouping (#509): Needs you / Running / Recent membership, sort by activity, hidden empty groups, the
 // inline approval line, and the rendered sections.
 import assert from "node:assert/strict";
-import { FAILED_NEEDS_YOU_SECONDS, groupSessions, mountSessions, sessionGroup } from "../harness/web/pages/sessions.mjs";
-import { approvalLine } from "../harness/web/lib/tools.mjs";
+import { FAILED_NEEDS_YOU_SECONDS, groupSessions, mountSessions, sessionGroup } from "../stables/public/pages/sessions.mjs";
+import { approvalLine } from "../stables/public/lib/tools.mjs";
 
 const now = 1_800_000_000;
 const s = (id, status, ago, extra = {}) => ({ id, title: id, status, updated_at: now - ago, target: "tower", project: "p", ...extra });

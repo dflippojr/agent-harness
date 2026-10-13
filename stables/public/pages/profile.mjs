@@ -202,8 +202,8 @@ function accountCard(me, profile) {
       h("h3", {}, "Connection"),
       me.public_url ? copyBox(me.public_url) : h("p", { class: "muted small" }, "No public URL configured."),
       h("p", { class: "muted small" }, live
-        ? `Agent Harness Web is connected to Agent Harness Server at ${me.public_url || location.origin}.`
-        : `Agent Harness Web is not receiving the live stream from Agent Harness Server at ${me.public_url || location.origin}.`)));
+        ? `Stables is connected to Agent Harness Server at ${me.public_url || location.origin}.`
+        : `Stables is not receiving the live stream from Agent Harness Server at ${me.public_url || location.origin}.`)));
 }
 
 // Issue #64: this member's linked Google identity, Web sessions, logout, and unlink. Never shows tokens or `sub`.
@@ -610,7 +610,7 @@ function fillSettingValues(values, me, current = () => true, owner = isOwner()) 
 // update asks the server again; when a newer bundle is offered the button reloads into it.
 function versionRow() {
   const { WEB_BUILD_ID = "", WEB_PROTOCOL = "" } = build;
-  const line = h("p", { class: "version-line" }, `Agent Harness Web ${WEB_BUILD_ID} · protocol ${WEB_PROTOCOL}`);
+  const line = h("p", { class: "version-line" }, `Stables ${WEB_BUILD_ID} · protocol ${WEB_PROTOCOL}`);
   const server = h("p", { class: "version-line muted" });
   const button = h("button", { class: "btn version-btn", type: "button" }, "Check for update");
   let update = false;
@@ -619,7 +619,7 @@ function versionRow() {
     let meta = null;
     try { meta = await agentHarnessWeb.compatibility(); } catch (err) { console.debug("compatibility check failed", err); }
     const status = versionStatus(meta, WEB_BUILD_ID, WEB_PROTOCOL, protocolMismatch(meta?.protocols?.admin, WEB_PROTOCOL));
-    line.textContent = `Agent Harness Web ${WEB_BUILD_ID} · protocol ${WEB_PROTOCOL} · ${status.text}`;
+    line.textContent = `Stables ${WEB_BUILD_ID} · protocol ${WEB_PROTOCOL} · ${status.text}`;
     line.classList.toggle("warn", !!status.warn);
     server.textContent = serverVersionText(meta);
     update = status.update;
@@ -630,7 +630,7 @@ function versionRow() {
   button.addEventListener("click", async () => {
     if (update) { await reloadAndUpdate(); return; }
     const status = await check();
-    toast(status.update ? "A newer Agent Harness Web is available" : `Agent Harness Web is ${status.text}`);
+    toast(status.update ? "A newer Stables is available" : `Stables is ${status.text}`);
   });
   void check();
   return h("div", { class: "version-row" }, line, server, button);
@@ -648,13 +648,13 @@ function connectionCard() {
   });
   const serverUrl = agentHarnessWeb.baseUrl || location.origin;
   const status = h("p", { class: "muted small" },
-    `Agent Harness Web connects to Agent Harness Server at ${serverUrl}.`);
+    `Stables connects to Agent Harness Server at ${serverUrl}.`);
   const save = async () => {
     try {
       agentHarnessWeb.configure(server.value, token.value);
       status.textContent = "Checking Agent Harness Server…";
       const root = await agentHarnessWeb.request("", { surface: "admin" });
-      status.textContent = `Agent Harness Web is connected to Agent Harness Server at ${server.value || location.origin} (${root.server} owner API ${root.api_version}). Reloading…`;
+      status.textContent = `Stables is connected to Agent Harness Server at ${server.value || location.origin} (${root.server} owner API ${root.api_version}). Reloading…`;
       setTimeout(() => location.reload(), 350);
     } catch (e) {
       status.className = "note bad";
@@ -669,7 +669,7 @@ function connectionCard() {
   const mint = async () => {
     let approvedOrigin;
     try { approvedOrigin = new URL(origin.value).origin; }
-    catch (_) { toast("Enter Agent Harness Web's complete origin"); return; }
+    catch (_) { toast("Enter the Stables copy's complete origin"); return; }
     try {
       const key = await api("/keys", { method: "POST", surface: "admin", body: {
         name: `agent-harness-web (${new URL(approvedOrigin).host})`, kind: "owner", scopes: ["admin"], origins: [approvedOrigin],
@@ -684,19 +684,19 @@ function connectionCard() {
   };
   return h("div", {},
     h("div", { class: "card" },
-      h("h3", {}, "This Agent Harness Web"),
-      h("p", { class: "muted small" }, "Leave the Agent Harness Server URL blank when this Web UI is bundled with the Server. For a separately hosted copy, enter the Server URL and an owner token approved for this Web origin."),
+      h("h3", {}, "This copy of Stables"),
+      h("p", { class: "muted small" }, "Leave the Agent Harness Server URL blank when this copy of Stables is bundled with the Server. For a separately hosted copy, enter the Server URL and an owner token approved for this Stables origin."),
       h("label", {}, "Agent Harness Server URL"), server,
       h("label", {}, "Owner token"), token,
-      h("p", { class: "muted small" }, "The token is stored only in this browser. Do not use an Agent Harness App token; Agent Harness Web manages owner-only settings."),
+      h("p", { class: "muted small" }, "The token is stored only in this browser. Do not use an Agent Harness App token; Stables manages owner-only settings."),
       h("div", { class: "row", style: "margin-top:10px" },
         h("button", { class: "btn", onclick: () => { server.value = ""; token.value = ""; void save(); } }, "Use bundled Server"),
         h("span", { class: "spacer" }),
         h("button", { class: "btn primary", onclick: save }, "Save and test")), status),
     h("div", { class: "card" },
-      h("h3", {}, "Connect another Agent Harness Web"),
+      h("h3", {}, "Connect another copy of Stables"),
       h("p", { class: "muted small" }, "Open this bundled copy as the owner, then mint an origin-bound token for a separately hosted copy. Revocation is available under Settings → Apps."),
-      h("label", {}, "Agent Harness Web origin"), origin,
+      h("label", {}, "Stables origin"), origin,
       h("button", { class: "btn", onclick: mint }, "Create owner token"), minted));
 }
 
@@ -829,8 +829,8 @@ function notificationsCard(me) {
 
 function installCard() {
   return h("div", { class: "card" },
-    h("p", {}, "Install Agent Harness Web in Safari: Share → Add to Home Screen. It appears as Harness and opens full screen."),
-    h("p", { class: "muted small" }, "An existing iPhone or iPad icon may keep its previous label until you remove it and add Agent Harness Web to the Home Screen again."));
+    h("p", {}, "Install Stables in Safari: Share → Add to Home Screen. It appears as Stables and opens full screen."),
+    h("p", { class: "muted small" }, "An existing iPhone or iPad icon may keep its previous label until you remove it and add Stables to the Home Screen again."));
 }
 
 function backendUsage(b) {
@@ -1286,7 +1286,7 @@ function appsCard(me) {
           h("ul", { class: "small" }, webConnections.map((k) => h("li", {},
             h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${usedSuffix(k)} `,
             h("button", { class: "btn small bad", onclick: async () => {
-              if (!(await confirmSheet({ title: `Revoke “${k.name}”?`, message: "That Agent Harness Web connection will stop working.",
+              if (!(await confirmSheet({ title: `Revoke “${k.name}”?`, message: "That Stables connection will stop working.",
                 confirmLabel: "Revoke", destructive: true }))) return;
               try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
             } }, "Revoke"))))] : null,

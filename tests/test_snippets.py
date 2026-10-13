@@ -450,7 +450,7 @@ def test_docs_name_every_toolchain_and_the_pull_command():
 
 def test_web_client_languages_match_the_server():
     from pathlib import Path
-    js = (Path(__file__).resolve().parents[1] / "harness" / "web" / "lib" / "snippets.mjs").read_text(encoding="utf-8")
+    js = (Path(__file__).resolve().parents[1] / "stables" / "public" / "lib" / "snippets.mjs").read_text(encoding="utf-8")
     block = js[js.index("export const SNIPPET_LANGUAGES"):]
     block = block[:block.index("};") + 2]
     for lang in SnippetService.languages():

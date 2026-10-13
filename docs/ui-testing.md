@@ -10,7 +10,7 @@ docstring of [`harness/fake_model.py`](../harness/fake_model.py).
 
 ## Scope and isolation
 
-- **Target.** Agent Harness Web (`harness/web`, native JavaScript, no build step) served against Agent Harness Server
+- **Target.** Agent Harness Web (`stables/public`, native JavaScript, no build step) served against Agent Harness Server
   (`harness/`) from this repository, `dflippojr/agent-harness`.
 - **Loopback only.** Both listeners bind `127.0.0.1` and nothing else:
   - the Server at `http://127.0.0.1:<port>`

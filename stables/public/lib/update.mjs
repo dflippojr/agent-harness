@@ -57,7 +57,7 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
     chrome.setHeader("agents", "Update required", { page: true });
     const daemonIsOld = state === "daemon_update_required";
     fill($app, h("div", { class: "card" },
-      h("h2", {}, daemonIsOld ? "Update Agent Harness Server" : "Update Agent Harness Web"),
+      h("h2", {}, daemonIsOld ? "Update Agent Harness Server" : "Update Stables"),
       h("p", {}, daemonIsOld
         ? "This browser app uses a newer protocol than the connected server. Update the server, then reload."
         : "This installed app is too old for the connected server."),
@@ -73,7 +73,7 @@ export function mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route
     if (browser.sessionStorage.getItem(promptKey) === WEB_BUILD_ID || (foreground && hasUnsavedInput())) return;
     if (sheetOpen()) return; // never replace a sheet being answered; the next check offers it
     browser.sessionStorage.setItem(promptKey, WEB_BUILD_ID);
-    void confirmSheet({ title: "Update Agent Harness Web?", message: "A newer version is available. Updating reloads the app.",
+    void confirmSheet({ title: "Update Stables?", message: "A newer version is available. Updating reloads the app.",
       confirmLabel: "Update now", cancelLabel: "Later", dismissOnRoute: false }).then((yes) => (yes ? reloadAndUpdate({ checkInput: false }) : false))
       .catch((e) => chrome.toast(e.message, 6000));
   }

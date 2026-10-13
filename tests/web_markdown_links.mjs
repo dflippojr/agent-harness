@@ -1,7 +1,7 @@
 // The md() link pattern (javascript:S8786) backtracked super-linearly on crafted input: a nested-bracket label
 // and a run of "[x](http://" with no closing ")" (#239). lib/markdown.mjs uses a linear scanner (mdLinks/mdLinkAt);
 // this proves it matches the old regex on every input that was previously linear, and stays fast on the rest.
-import { mdInline } from "../harness/web/lib/markdown.mjs";
+import { mdInline } from "../stables/public/lib/markdown.mjs";
 
 const fail = (msg) => { throw new Error(msg); };
 

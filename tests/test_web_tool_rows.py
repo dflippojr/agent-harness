@@ -18,7 +18,7 @@ def test_tool_rows():
 
 def test_tool_rows_desktop_css():
     """#564: from 768 px tool rows get hover and focus rings; Copy / Open stay 44 px targets at every width."""
-    css = (Path(__file__).resolve().parents[1] / "harness" / "web" / "style.css").read_text(encoding="utf-8")
+    css = (Path(__file__).resolve().parents[1] / "stables" / "public" / "style.css").read_text(encoding="utf-8")
     start = css.index("/* Desktop 4: session pane")
     section = css[start:css.index("/* End Desktop 4. */", start)]
     inside = section.partition("@media (min-width: 768px) {")[2]

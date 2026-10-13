@@ -277,7 +277,7 @@ def test_cross_origin_admin_request_never_falls_back_to_ambient_owner(tmp_path):
 
 
 def test_web_shell_includes_transport_module_and_canonical_names():
-    web = Path(__file__).parents[1] / "harness" / "web"
+    web = Path(__file__).parents[1] / "stables" / "public"
     app = (web / "app.js").read_text(encoding="utf-8")
     profile = (web / "pages" / "profile.mjs").read_text(encoding="utf-8")
     client = (web / "client.mjs").read_text(encoding="utf-8")
@@ -289,13 +289,13 @@ def test_web_shell_includes_transport_module_and_canonical_names():
     index = (web / "index.html").read_text(encoding="utf-8")
     assert 'src="/app.js?v=5"' in index
     assert 'href="/style.css?v=5"' in index
-    assert "<title>Agent Harness Web</title>" in index
-    assert 'apple-mobile-web-app-title" content="Harness"' in index
+    assert "<title>Stables</title>" in index
+    assert 'apple-mobile-web-app-title" content="Stables"' in index
     manifest = (web / "manifest.webmanifest").read_text(encoding="utf-8")
-    assert '"name": "Agent Harness Web"' in manifest
-    assert '"short_name": "Harness"' in manifest
+    assert '"name": "Stables"' in manifest
+    assert '"short_name": "Stables"' in manifest
     assert "Agent Harness Server URL" in profile
-    assert "Connect another Agent Harness Web" in profile
+    assert "Connect another copy of Stables" in profile
     assert 'name: `agent-harness-web (' in profile
     assert '"/client.mjs"' in worker
     # The shell cache name is derived from BUILD_ID so a client build bumps it automatically (#69).

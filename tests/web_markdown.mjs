@@ -2,7 +2,7 @@
 // recorded from the pre-refactor implementation. md() is imported from lib/markdown.mjs with its real escapeHtml,
 // snippetLanguage and linkQuotes (no pages, so no quote links), so the "py" fence case expects the real language map.
 import { readFileSync } from "node:fs";
-import { md } from "../harness/web/lib/markdown.mjs";
+import { md } from "../stables/public/lib/markdown.mjs";
 
 const cases = JSON.parse(readFileSync(new URL("web_markdown_cases.json", import.meta.url), "utf8"));
 let bad = 0;

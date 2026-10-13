@@ -18,7 +18,7 @@ def test_session_page_renders():
 
 def test_split_view_css_keeps_session_controls_beside_the_list():
     """#563: the split's rules stay behind 1280 px, and the session's fixed controls start after the list pane."""
-    css = (Path(__file__).resolve().parents[1] / "harness" / "web" / "style.css").read_text(encoding="utf-8")
+    css = (Path(__file__).resolve().parents[1] / "stables" / "public" / "style.css").read_text(encoding="utf-8")
     start = css.index("/* Desktop 3: split view")
     section = css[start:css.index("/* End Desktop 3. */", start)]
     outside, _, inside = section.partition("@media (min-width: 1280px) {")
@@ -43,7 +43,7 @@ def test_session_pane_header_approval_and_bar():
 
 
 def _desktop4_css():
-    css = (Path(__file__).resolve().parents[1] / "harness" / "web" / "style.css").read_text(encoding="utf-8")
+    css = (Path(__file__).resolve().parents[1] / "stables" / "public" / "style.css").read_text(encoding="utf-8")
     start = css.index("/* Desktop 4: session pane")
     return css, css[start:css.index("/* End Desktop 4. */", start)]
 

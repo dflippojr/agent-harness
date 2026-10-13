@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-WEB = Path(__file__).resolve().parents[1] / "harness" / "web"
+WEB = Path(__file__).resolve().parents[1] / "stables" / "public"
 
 
 def _desktop10_css() -> str:

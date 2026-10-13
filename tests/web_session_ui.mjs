@@ -1,6 +1,6 @@
 // Imports the shared session chrome helpers under plain Node (no DOM at module top level) and exercises them with stubs (#258 stage k).
 import assert from "node:assert/strict";
-import { mountSessionUi, sessionMenuItems, SESSION_MENU_LABELS, pageMetrics, scrollPage } from "../harness/web/lib/session-ui.mjs";
+import { mountSessionUi, sessionMenuItems, SESSION_MENU_LABELS, pageMetrics, scrollPage } from "../stables/public/lib/session-ui.mjs";
 
 const made = [];
 const el = (tag, attrs, ...kids) => {

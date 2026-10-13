@@ -1,6 +1,6 @@
 // Renders the extracted Session Info page with stub deps so a missing import or dep fails CI (#258 stage f).
 import assert from "node:assert/strict";
-import { mountSessionInfo } from "../harness/web/pages/session-info.mjs";
+import { mountSessionInfo } from "../stables/public/pages/session-info.mjs";
 
 const el = (tag, attrs, ...kids) => ({ tag, attrs: attrs || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined) });
 const text = (n) => (typeof n === "object" ? [...n.kids].map(text).join(" ") : String(n));

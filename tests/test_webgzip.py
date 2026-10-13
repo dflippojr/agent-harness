@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.testclient import TestClient
 
-from harness.api import WEB
+from harness.stables_shell import DEFAULT as WEB
 from harness.webgzip import WebGzipMiddleware
 from tests.test_api import make_client
 

@@ -1,6 +1,6 @@
 // Renders the extracted New task page with stub deps so a missing import or dep fails CI (#258 stage h).
 import assert from "node:assert/strict";
-import { mountNewTask } from "../harness/web/pages/new-task.mjs";
+import { mountNewTask } from "../stables/public/pages/new-task.mjs";
 
 const el = (tag, attrs, ...kids) => ({ tag, attrs: attrs || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined),
   value: "", options: [], children: [], hidden: false, addEventListener() {}, classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {}, style: {} });

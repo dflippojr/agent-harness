@@ -1,8 +1,8 @@
 // Tool-call rows (#508): a 48 px summary whose output and arguments are built only when the row opens, previews that
 // carry the first lines only, Copy with a select-by-hand fallback, and a full-screen viewer with the whole text.
 import assert from "node:assert/strict";
-import { createToolRows } from "../harness/web/lib/tool-row.mjs";
-import { lineCount, previewText, resultState, toolKind } from "../harness/web/lib/tools.mjs";
+import { createToolRows } from "../stables/public/lib/tool-row.mjs";
+import { lineCount, previewText, resultState, toolKind } from "../stables/public/lib/tools.mjs";
 
 const el = (tag, attrs, ...kids) => {
   const node = { tag, attrs: { ...attrs }, className: attrs?.class || "", textContent: "", open: false, listeners: {}, removed: false };

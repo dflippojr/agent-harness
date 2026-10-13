@@ -1,6 +1,6 @@
 {
-  "name": "Agent Harness Web",
-  "short_name": "Harness",
+  "name": "Stables",
+  "short_name": "Stables",
   "description": "Start, watch, and approve agent tasks running on dflippotower.",
   "start_url": "/",
   "scope": "/",

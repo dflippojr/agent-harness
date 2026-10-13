@@ -4,11 +4,11 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
-import { startBoot } from "../harness/web/lib/boot.mjs";
+import { startBoot } from "../stables/public/lib/boot.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const html = readFileSync(join(root, "harness/web/index.html"), "utf8");
-const css = readFileSync(join(root, "harness/web/style.css"), "utf8");
+const html = readFileSync(join(root, "stables/public/index.html"), "utf8");
+const css = readFileSync(join(root, "stables/public/style.css"), "utf8");
 const inline = html.match(/<script>\s*(\/\/ Runs before the module:[\s\S]*?)<\/script>/)[1];
 const deferred = () => {
   let resolve, reject;
@@ -35,7 +35,7 @@ function launch() {
 
 // Every document contains the decorative, static brand before any boot code runs.
 assert.match(html, /<div id="boot-splash" aria-hidden="true">\s*<img src="\/icon-192.png" width="96" height="96" alt="">\s*<\/div>/);
-assert.ok(existsSync(join(root, "harness/web/icon-192.png")));
+assert.ok(existsSync(join(root, "stables/public/icon-192.png")));
 assert.ok(html.indexOf('id="boot-splash"') < html.indexOf("// Runs before the module:"));
 assert.ok(html.indexOf("// Runs before the module:") < html.indexOf('type="module"'));
 assert.match(html, /style\.css\?v=5/);

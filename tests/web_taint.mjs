@@ -1,6 +1,6 @@
 // UI harness: replaying a stored taint_added over a session snapshot that already lists it (the stream
 // restarts from seq 0 on every view or reconnect) must not duplicate the source (#262 review).
-import { withTaint } from "../harness/web/lib/taint.mjs";
+import { withTaint } from "../stables/public/lib/taint.mjs";
 
 const failures = [];
 const eq = (label, got, want) => {

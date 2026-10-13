@@ -110,12 +110,15 @@ def connect_page(server: str, token: str) -> str:
 
 
 def web_app(server: str, token: str, state: dict):
-    """The separately hosted Web copy, its /connect sign-in page, and /ready (503 until seeded and settled)."""
+    """The separately hosted Stables copy, its /connect sign-in page, and /ready (503 until seeded and settled)."""
     from starlette.applications import Starlette
     from starlette.responses import HTMLResponse, JSONResponse
     from starlette.routing import Mount, Route
     from starlette.staticfiles import StaticFiles
-    web = Path(__file__).resolve().parent / "web"
+    from . import stables_shell
+    web = stables_shell.locate()
+    if web is None:
+        raise StartError(f"no Stables shell: set {stables_shell.ENV} or restore stables/public")
 
     async def connect(_request):
         return HTMLResponse(connect_page(server, token), headers={"Cache-Control": "no-store"})

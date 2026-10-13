@@ -40,7 +40,7 @@ assert.match(text(welcome.kids[0]), /How can I help\?/);
 def test_desktop_composer_matches_transcript_and_gradient_fades_at_edges():
     from test_web_tokens import _decls, _rules
 
-    css = (Path(__file__).resolve().parents[1] / "harness/web/style.css").read_text(encoding="utf-8")
+    css = (Path(__file__).resolve().parents[1] / "stables/public/style.css").read_text(encoding="utf-8")
     rules = [(selectors, _decls(body), media) for selectors, body, media in _rules(css)]
     main = next(decls for selectors, decls, _ in rules if selectors == ["main"])
     composer, media = next((decls, media) for selectors, decls, media in rules

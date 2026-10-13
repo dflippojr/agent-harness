@@ -1,11 +1,28 @@
-# Agent Harness Web
+# Stables
 
-Agent Harness Web is the first-party browser UI and installable PWA for Agent Harness Server. Its static files live
-in `harness/web` and have no build step. Agent Harness Server serves that directory by default, so existing Tailscale
-PWA installs continue to work. The same directory can also be hosted at a separate HTTPS origin.
+Stables (formerly Agent Harness Web) is the first-party browser UI and installable PWA for Agent Harness Server. Each
+model is a horse; the agent system is its harness. Its static files live in `stables/public` and have no build step.
+Agent Harness Server serves that directory when it is present, so existing Tailscale PWA installs continue to work. The
+same directory can also be hosted at a separate HTTPS origin.
 
-The PWA manifest name and browser title are **Agent Harness Web**. Its short name and Apple standalone title are
-**Harness**. Functional navigation labels such as Agents, Jobs, Images, Profile, and Settings remain task-oriented.
+The PWA manifest name, short name, browser title and Apple standalone title are **Stables**. Functional navigation
+labels such as Agents, Jobs, Images, Profile, and Settings remain task-oriented.
+
+## A standalone client
+
+Stables is a client of the documented API, not part of the Server (#334 stage (d)). The rules, checked by
+`tests/test_stables_boundary.py`:
+
+- Stables loads only its own files. Its one reach outside `stables/public` is type-only: JSDoc `@import` of the API
+  contract types in `tools/web-types`, which are generated from the Server's OpenAPI document.
+- Only its transport (`client.mjs`, `lib/stream.mjs`) and the service worker open connections. Requests go to
+  `/api/v1` or `/api/admin/v1`; the only unversioned call is `GET /health`, the compatibility probe.
+- The Server names the client's files in one place, `harness/stables_shell.py`. It serves the shell from the
+  directory in `HARNESS_STABLES_DIR` when that is set, else from the checkout's `stables/public`. With neither, it runs
+  the API alone: `/`, `/static/...` and the shell files return 404, and nothing else changes.
+
+Stables still offers daemon-administration settings; moving them to the Hub and the CLI is #545. A later stage moves
+`stables/` to its own repository.
 
 The bundled Server accepts requests only for `127.0.0.1`, `localhost`, or `[::1]` on its configured listen port,
 or the exact authority in `public_url` (including its public port). Other Host headers receive **421** on every
@@ -65,7 +82,7 @@ the arrow keys, Home and End move through it, and Escape closes it and returns f
 
 ## Colours and touch targets
 
-Every colour comes from the CSS custom properties at the top of `harness/web/style.css`. The Light and Dark themes
+Every colour comes from the CSS custom properties at the top of `stables/public/style.css`. The Light and Dark themes
 (and System, which follows the device) use the mobile redesign's palette. Midnight, Forest and Paper keep their own
 values. `--accent` colours text-like actions such as links, the current tab and running badges. `--primary` fills
 buttons, the New task button and your own chat bubbles, with `--on-primary` text. In Dark the accent is blue, not
@@ -91,17 +108,17 @@ says **List may be stale**, when it last updated and why, with **Retry**.
 
 ## API boundary
 
-Agent Harness Web does not construct unversioned Server URLs for owner use:
+Stables does not construct unversioned Server URLs for owner use:
 
 - ordinary session list/create/read, messages, cancellation, approval decisions, and per-session events use
   `/api/v1`;
 - owner operations such as profile, projects, search, jobs, review, GPU, maintenance, images, keys, household
   accounts, and the global event stream use `/api/admin/v1`;
 - household members stay on `/api/v1` after `/me` (including their own projects, search, events, and usage);
-- unversioned routes remain Server compatibility routes. Agent Harness Web uses them only for the existing read-only
+- unversioned routes remain Server compatibility routes. Stables uses them only for the existing read-only
   Tailscale guest experience, whose ambient guest identity is intentionally not an API credential.
 
-Bundled Agent Harness Web can use same-origin localhost/Tailscale owner or household-member identity. Owner sessions
+Bundled Stables can use same-origin localhost/Tailscale owner or household-member identity. Owner sessions
 it creates through `/api/v1` remain ordinary owner sessions, not App-owned sessions. Members are recognized after
 `GET /api/v1/me` and use only the account-scoped `/api/v1` surface; they do not construct `/api/admin/v1` requests.
 A separately hosted copy sends an owner bearer token and is owner-only. Native `EventSource` uses short-lived `/api/v1` stream tickets; the owner-only global stream uses
@@ -110,11 +127,11 @@ putting a token in their URLs.
 
 ## Use a separately hosted copy
 
-1. Serve the contents of `harness/web` at the root of an HTTPS origin, with `index.html` as the root document.
+1. Serve the contents of `stables/public` at the root of an HTTPS origin, with `index.html` as the root document.
    Loopback HTTP is also accepted for local development. Asset URLs are root-relative, so deploy the directory at
    the origin root rather than below a path prefix.
-2. In the Server-bundled Agent Harness Web, open **Settings → Connection**.
-3. Under **Connect another Agent Harness Web**, enter the separate site's exact origin (scheme, host, and optional
+2. In the Server-bundled Stables, open **Settings → Connection**.
+3. Under **Connect another copy of Stables**, enter the separate site's exact origin (scheme, host, and optional
    port) and create a token. Copy the `ho-…` token when shown; only its hash is stored by Agent Harness Server.
 4. In the separate copy, open `#/profile/connection`, enter the **Agent Harness Server URL** and token, then choose
    **Save and test**.
@@ -165,7 +182,7 @@ default: sending or pasting a message never runs it, and the model has no tool t
 
 ## Install on iPhone or iPad
 
-In Safari, choose **Share → Add to Home Screen**. The installed icon is labeled **Harness** and opens Agent Harness
-Web in standalone mode. iOS may retain an older label on an already installed icon; to refresh only that label, remove
-the icon and add Agent Harness Web to the Home Screen again. No application data is cleared or migrated merely to
+In Safari, choose **Share → Add to Home Screen**. The installed icon is labeled **Stables** and opens Stables in
+standalone mode. iOS may retain an older label (such as **Harness**) on an already installed icon; to refresh only that
+label, remove the icon and add Stables to the Home Screen again. No application data is cleared or migrated merely to
 force a label update.

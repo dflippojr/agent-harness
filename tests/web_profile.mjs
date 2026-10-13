@@ -1,6 +1,6 @@
 // Renders the extracted Profile page with stub deps so a missing import or dep fails CI (#258 stage g).
 import assert from "node:assert/strict";
-import { mountProfile } from "../harness/web/pages/profile.mjs";
+import { mountProfile } from "../stables/public/pages/profile.mjs";
 
 const el = (tag, attrs, ...kids) => ({ tag, attrs: attrs || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined),
   addEventListener() {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, setAttribute() {}, style: {} });
@@ -97,7 +97,7 @@ assert.equal(called.filter((p) => p === "/keys").length, 1, "Apps and Inference 
 assert.ok(!called.includes("/maintenance"), "the menu never measures the disk");
 // The version row: this bundle, its protocol, the server's view of it, and Reload and update once a newer bundle is offered.
 const version = () => appended.flatMap((n) => find(n, (x) => x.attrs?.class === "version-row"))[0];
-assert.match(text(version()), /Agent Harness Web B1 · protocol 2 · update available/);
+assert.match(text(version()), /Stables B1 · protocol 2 · update available/);
 assert.match(text(version()), /Server 0\.9\.0 · protocol 1–2/);
 assert.match(text(version()), /Reload and update/);
 // Every value request failing still paints the whole menu, values blank, with no unhandled rejection.

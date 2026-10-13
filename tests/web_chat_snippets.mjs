@@ -1,8 +1,8 @@
 // UI harness for Chat snippets (#85): Run appears only for supported-language fenced blocks and the manual
 // editor, sending a message never runs code, the editor needs an explicit language, and results render as text.
 import { createContext } from "node:vm";
-import { md as renderMd } from "../harness/web/lib/markdown.mjs";
-import { snippetLanguage } from "../harness/web/lib/snippets.mjs";
+import { md as renderMd } from "../stables/public/lib/markdown.mjs";
+import { snippetLanguage } from "../stables/public/lib/snippets.mjs";
 import { runApp } from "./web_app_loader.mjs";
 import { El, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
@@ -54,7 +54,7 @@ globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
 globalThis.fetch = fakeFetch;
-const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../harness/web/client.mjs");
+const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../stables/public/client.mjs");
 
 const sandbox = createContext({
   window: win, document: doc, location: loc, history: win.history, navigator: win.navigator,

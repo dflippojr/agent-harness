@@ -1,5 +1,5 @@
 // Jump-arrow visibility from scrollY / viewport / page height (#184).
-import { sessionJumpHidden } from "../harness/web/lib/layout.mjs";
+import { sessionJumpHidden } from "../stables/public/lib/layout.mjs";
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);

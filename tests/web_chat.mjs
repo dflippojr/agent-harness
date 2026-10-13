@@ -1,6 +1,6 @@
 // Renders the extracted chat page (welcome state and a durable conversation) with stub deps so a missing import or dep fails CI (#258 stage k).
 import assert from "node:assert/strict";
-import { mountChat } from "../harness/web/pages/chat.mjs";
+import { mountChat } from "../stables/public/pages/chat.mjs";
 
 const el = (tag, attrs, ...kids) => {
   const node = { tag, attrs: attrs || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined),

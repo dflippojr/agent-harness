@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
 import { El as BaseEl, Emitter, Node, createDocument, fakeEventSource, storage, walk } from "./web_stub_dom.mjs";
-import { SPLITS, splitRoute, isListToggleKey } from "../harness/web/lib/layout.mjs";
+import { SPLITS, splitRoute, isListToggleKey } from "../stables/public/lib/layout.mjs";
 
 // ---------- pure rules ----------
 const agents = SPLITS.find((s) => s.key === "agents");
@@ -116,7 +116,7 @@ globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
 globalThis.fetch = fakeFetch;
-const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../harness/web/client.mjs");
+const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../stables/public/client.mjs");
 await runApp(createContext({
   window: win, document: doc, location: loc, history: win.history, navigator: win.navigator, localStorage: win.localStorage,
   sessionStorage: win.sessionStorage, EventSource: win.EventSource, fetch: fakeFetch, URL, AbortController, TextDecoder, console,

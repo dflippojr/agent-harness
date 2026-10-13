@@ -1,8 +1,8 @@
 // Desktop Changes (#565): real DOM helpers with shared stubs exercise file navigation and inline review comments.
 import assert from "node:assert/strict";
 import { El as BaseEl, Node, createDocument } from "./web_stub_dom.mjs";
-import { h, fill, append } from "../harness/web/lib/dom.mjs";
-import { mountSession } from "../harness/web/pages/session.mjs";
+import { h, fill, append } from "../stables/public/lib/dom.mjs";
+import { mountSession } from "../stables/public/pages/session.mjs";
 
 class El extends BaseEl {
   get tag() { return this.tagName.toLowerCase(); }

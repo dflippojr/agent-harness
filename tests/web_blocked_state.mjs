@@ -64,7 +64,7 @@ globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
 globalThis.fetch = fakeFetch;
-const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../harness/web/client.mjs");
+const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../stables/public/client.mjs");
 
 const sandbox = createContext({
   window: win,
@@ -149,7 +149,7 @@ await new Promise((r) => setTimeout(r, 50));
 if (!byId.app.textContent.includes("Reload and update")) {
   throw new Error(`blocking card left after nav: ${byId.app.textContent}`);
 }
-if (byId.app.textContent !== before && !byId.app.textContent.includes("Update Agent Harness Web")) {
+if (byId.app.textContent !== before && !byId.app.textContent.includes("Update Stables")) {
   throw new Error(`blocking card replaced: ${byId.app.textContent}`);
 }
 if (apiCalls().length) {

@@ -1,6 +1,6 @@
 # Web type checking
 
-Agent Harness Web still ships the JavaScript files in `harness/web` directly. Nothing here is a build step, and this directory is outside both static mounts.
+Agent Harness Web still ships the JavaScript files in `stables/public` directly. Nothing here is a build step, and this directory is outside both static mounts.
 
 Install the project Python requirements plus `tools/web-types/requirements.txt`, then run:
 

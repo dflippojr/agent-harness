@@ -271,7 +271,7 @@ def test_a_members_usage_is_tallied_on_their_own_id(tmp_path, monkeypatch):
 
 def test_the_members_card_is_in_the_web_ui():
     from pathlib import Path
-    root = Path(__file__).resolve().parents[1] / "harness" / "web" / "pages"
+    root = Path(__file__).resolve().parents[1] / "stables" / "public" / "pages"
     profile = (root / "profile.mjs").read_text(encoding="utf-8")
     card = profile[profile.index("function apiKeysCard("):profile.index("const GITHUB_DEVICE_URL")]
     for needed in ('"/me/api-keys"', "`/me/api-keys/${k.backend}`", '"PUT"', '"DELETE"', "/test", 'type: "password"', "k.last4"):

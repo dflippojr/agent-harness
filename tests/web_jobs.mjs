@@ -2,10 +2,10 @@
 // that still opens the full form. Renders pages/jobs.mjs with the real dom.mjs helpers over the shared stub DOM.
 import assert from "node:assert/strict";
 import { El, Emitter, Node, createDocument, walk } from "./web_stub_dom.mjs";
-import { h, fill, append } from "../harness/web/lib/dom.mjs";
-import { SPLITS, splitRoute } from "../harness/web/lib/layout.mjs";
-import { mountJobs } from "../harness/web/pages/jobs.mjs";
-import { jobGroup, jobBody, lastRunPill, lastRunText, shortWhen, JOB_FIELDS } from "../harness/web/lib/jobs.mjs";
+import { h, fill, append } from "../stables/public/lib/dom.mjs";
+import { SPLITS, splitRoute } from "../stables/public/lib/layout.mjs";
+import { mountJobs } from "../stables/public/pages/jobs.mjs";
+import { jobGroup, jobBody, lastRunPill, lastRunText, shortWhen, JOB_FIELDS } from "../stables/public/lib/jobs.mjs";
 
 // Browsers stringify an array passed to append(), so this stub refuses one rather than flattening it.
 class StrictEl extends El {
