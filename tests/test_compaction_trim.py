@@ -37,7 +37,14 @@ def tools(messages: list[dict]) -> list[str]:
     return [m["content"] for m in messages if m["role"] == "tool"]
 
 
+def all_ok(messages: list[dict]) -> dict:
+    return {m["tool_call_id"]: {"ok": True} for m in messages if m["role"] == "tool"}
+
+
 def trim(messages, rules=ON, keep_chars=0, outcomes=None):
+    """compaction.trim, with every call succeeded unless `outcomes` says otherwise, checked for idempotence and
+    pairing."""
+    outcomes = all_ok(messages) if outcomes is None else outcomes
     out, saved = compaction.trim(messages, rules, keep_chars, outcomes)
     again, saved_again = compaction.trim(out, rules, keep_chars, outcomes)
     assert (again, saved_again) == (out, 0)  # idempotent: a second pass changes nothing
@@ -55,6 +62,10 @@ def test_strip_noise_drops_ansi_carriage_return_overwrites_and_progress_runs():
     assert compaction.strip_noise(raw) == "PASS tests/a.py\nDownloading 100%\n100%|##########| 10/10\ndone 3 passed"
     out, saved = trim(session(turn(1, "run_shell", raw, command="pytest")), only(strip_noise=True))
     assert tools(out)[0] == compaction.strip_noise(raw) and saved > 0
+
+
+def test_a_trailing_carriage_return_keeps_its_line():
+    assert compaction.strip_noise("fatal: compilation failed\r\nnext\r") == "fatal: compilation failed\nnext"
 
 
 def test_a_percentage_without_a_bar_is_not_progress_noise():
@@ -95,6 +106,27 @@ def test_a_failed_reread_keeps_the_older_read():
     assert tools(out)[0] == body
 
 
+def test_a_call_without_an_outcome_supersedes_nothing():
+    """A fork inherits its parent's context without the tool_result events."""
+    body = "x = 1\n" * 50
+    messages = session(turn(1, "read_file", body, path="a.py"), turn(2, "read_file", body, path="a.py"),
+                       turn(3, "read_file", body, path="b.py"), turn(4, "write_file", "?", path="b.py", content="z"))
+    out, _ = trim(messages, only(superseded_reads=True), outcomes={})
+    assert tools(out)[:3] == [body, body, body]
+
+
+def test_only_the_workspace_prefix_is_dropped_from_paths():
+    body = "x = 1\n" * 50
+    messages = session(turn(1, "read_file", body, path="workspace/src/a.py"), turn(2, "read_file", body, path="/src/b.py"),
+                       turn(3, "edit_file", "Edited", path="/workspace/src/a.py", old_text="x", new_text="y"),
+                       turn(4, "edit_file", "Edited", path="src/b.py", old_text="x", new_text="y"),
+                       turn(5, "read_file", body, path="/workspace/src/c.py"),
+                       turn(6, "write_file", "Wrote", path="src/c.py", content="z"))
+    out, _ = trim(messages, only(superseded_reads=True))
+    assert tools(out)[0] == body and tools(out)[1] == body  # different files from the ones edited
+    assert tools(out)[4] == compaction.SUPERSEDED.format(path="src/c.py")
+
+
 def test_a_successful_write_or_edit_supersedes_an_earlier_read_and_a_failed_one_does_not():
     body = "x = 1\n" * 50
     messages = session(turn(1, "read_file", body, path="a.py"), turn(2, "read_file", body, path="b.py"),
@@ -105,14 +137,26 @@ def test_a_successful_write_or_edit_supersedes_an_earlier_read_and_a_failed_one_
     assert tools(out)[1] == body
 
 
-def test_repeated_identical_outputs_collapse_to_the_first_copy():
+def test_repeated_identical_outputs_collapse_to_the_newest_copy():
     status = "On branch main\n" + "modified: src/file_%d.py\n" * 20
     small = "ok"
     out, saved = trim(session(turn(1, "run_shell", status, command="git status"), turn(2, "run_shell", small, command="true"),
                               turn(3, "run_shell", status, command="git status"), turn(4, "run_shell", small, command="true")),
                       only(dedupe=True))
-    assert tools(out)[:4] == [status, small, compaction.SAME_AS_ABOVE.format(name="run_shell"), small]
-    assert saved == len(status) - len(compaction.SAME_AS_ABOVE.format(name="run_shell"))
+    note = compaction.SAME_AS_BELOW.format(name="run_shell")
+    assert tools(out)[:4] == [note, small, status, small]
+    assert saved == len(status) - len(note)
+
+
+def test_a_copy_in_the_kept_tail_is_the_one_kept():
+    """A summary removes the oldest messages, so the kept copy must be the newest: never a note without its copy."""
+    status = "On branch main\n" + "modified: src/file.py\n" * 20
+    old = turn(1, "run_shell", status, command="git status")
+    recent = turn(2, "run_shell", status, command="git status")
+    messages = HEAD + old + recent + turn(99, "list_files", "a.txt", path=".")
+    keep = sum(compaction.message_chars(m) for m in messages[4:])
+    out, _ = trim(messages, only(dedupe=True), keep_chars=keep)
+    assert tools(out)[:2] == [compaction.SAME_AS_BELOW.format(name="run_shell"), status]
 
 
 def test_identical_reads_of_different_files_are_not_deduped():
@@ -156,8 +200,8 @@ def test_rules_compose_and_stay_idempotent():
                        turn(3, "read_file", "a\n" * 200, path="a.py"), turn(4, "write_file", "Wrote a.py", path="a.py"))
     out, saved = trim(messages)
     first, second, read = tools(out)[:3]
-    assert "\x1b" not in first and "\r" not in first and compaction.LINES_OMITTED.split("{")[0] in first
-    assert second == compaction.SAME_AS_ABOVE.format(name="run_shell")
+    assert first == compaction.SAME_AS_BELOW.format(name="run_shell")
+    assert "\x1b" not in second and "\r" not in second and compaction.LINES_OMITTED.split("{")[0] in second
     assert read == compaction.SUPERSEDED.format(path="a.py") and saved > 0
 
 

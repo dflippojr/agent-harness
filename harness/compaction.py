@@ -151,7 +151,7 @@ PROGRESS_BAR = re.compile(r"[#=█▉▊▋▌▍▎▏░▒▓━─>]{5,}")
 COMMAND_TOOLS = frozenset({"run_shell", "verify", "git_clone"})
 FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 DEDUPE_MIN_CHARS = 200  # a "same as above" note is shorter than this, so notes are never collapsed themselves
-SAME_AS_ABOVE = "[Same output as the earlier {name} result above; repeated copy removed.]"
+SAME_AS_BELOW = "[Same output as a later {name} result below; this older copy was removed.]"
 SUPERSEDED = "[Older read of {path} removed: the file was read again or changed later in this session.]"
 LINES_OMITTED = "[... {count} lines omitted: older command output keeps its first {head} and last {tail} lines ...]"
 
@@ -187,7 +187,7 @@ def strip_noise(text: str) -> str:
     """Drop ANSI escapes, keep what a terminal would show of carriage-return overwrites, and keep only the last of a
     run of progress-bar lines."""
     text = ANSI.sub("", text).replace("\r\n", "\n")
-    lines = [line.rsplit("\r", 1)[-1] if "\r" in line else line for line in text.split("\n")]
+    lines = [_overwritten(line) if "\r" in line else line for line in text.split("\n")]
     out: list[str] = []
     for line in lines:
         if _is_progress(line) and out and _is_progress(out[-1]):
@@ -195,6 +195,11 @@ def strip_noise(text: str) -> str:
         else:
             out.append(line)
     return "\n".join(out)
+
+
+def _overwritten(line: str) -> str:
+    """The last non-empty carriage-return segment: a bare carriage return only moves the cursor."""
+    return next((part for part in reversed(line.split("\r")) if part), "")
 
 
 def _is_progress(line: str) -> bool:
@@ -210,7 +215,14 @@ def head_and_tail(text: str, head: int, tail: int) -> str:
 
 
 def _norm_path(path) -> str:
-    return posixpath.normpath(str(path).replace("\\", "/")).lstrip("/") if path else ""
+    """Workspace-relative form, as fileops.normalize_path reads it: only the /workspace prefix is dropped, so other
+    absolute paths stay distinct from relative ones."""
+    if not path:
+        return ""
+    text = str(path).strip().replace("\\", "/")
+    if text == "/workspace" or text.startswith("/workspace/"):
+        text = text[len("/workspace"):].lstrip("/") or "."
+    return posixpath.normpath(text)
 
 
 def _calls(messages: list[dict]) -> dict:
@@ -229,7 +241,8 @@ def _calls(messages: list[dict]) -> dict:
 
 def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
     """Indexes of read_file results made stale by a later read of the same file with the same arguments, or by a
-    later write or edit of it, where the later call did not fail (a failed reread keeps the older contents)."""
+    later write or edit of it, where the later call is known to have succeeded: a failed reread keeps the older
+    contents, and a call without an outcome (one inherited by a fork, say) changes nothing."""
     stale: set[int] = set()
     newer_reads: set[tuple] = set()
     changed: set[str] = set()
@@ -242,7 +255,7 @@ def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
         path = _norm_path(args.get("path"))
         if not path:
             continue
-        succeeded = (outcomes.get(call_id) or {}).get("ok") is not False
+        succeeded = (outcomes.get(call_id) or {}).get("ok") is True
         if name in FILE_WRITE_TOOLS and succeeded:
             changed.add(path)
         elif name == "read_file":
@@ -252,6 +265,14 @@ def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
             if succeeded:
                 newer_reads.add(key)
     return stale
+
+
+def _cleaned(text: str, name: str, rules: TrimRules) -> str:
+    if rules.strip_noise:
+        text = strip_noise(text)
+    if rules.head_tail and name in COMMAND_TOOLS:
+        text = head_and_tail(text, rules.head_lines, rules.tail_lines)
+    return text
 
 
 def trim(messages: list[dict], rules: TrimRules, keep_chars: int,
@@ -265,30 +286,26 @@ def trim(messages: list[dict], rules: TrimRules, keep_chars: int,
     cutoff = recent_start(out, keep_chars)
     calls = _calls(out)
     stale = _superseded(out, calls, outcomes or {}) if rules.superseded_reads else set()
+    # Newest first, so dedupe keeps the newest copy: a summary removes the oldest messages, so it can never remove
+    # the copy and keep a note that points to it. Copies in the kept tail count without being changed.
     seen: set[str] = set()
     saved = 0
-    for i, m in enumerate(out):
-        if m.get("role") != "tool":
-            continue
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
         text = m.get("content") or ""
-        if i >= cutoff or text.startswith(RECEIPT_PREFIX):
+        if m.get("role") != "tool" or text.startswith(RECEIPT_PREFIX):
             continue
         name, args = calls.get(m.get("tool_call_id"), ("", {}))
-        new = text
-        if i in stale:
+        if i in stale and i < cutoff:
             new = SUPERSEDED.format(path=_norm_path(args.get("path")))
         else:
-            if rules.strip_noise:
-                new = strip_noise(new)
-            if rules.head_tail and name in COMMAND_TOOLS:
-                new = head_and_tail(new, rules.head_lines, rules.tail_lines)
+            new = _cleaned(text, name, rules)
             # File reads are left to superseded_reads: a later pass could drop the copy a note points to.
             if rules.dedupe and name != "read_file" and len(new) >= DEDUPE_MIN_CHARS:
-                if new in seen:
-                    new = SAME_AS_ABOVE.format(name=name or "tool")
-                else:
-                    seen.add(new)
-        if len(new) < len(text):
+                if new in seen and i < cutoff:
+                    new = SAME_AS_BELOW.format(name=name or "tool")
+                seen.add(new)
+        if i < cutoff and len(new) < len(text):
             saved += len(text) - len(new)
             m["content"] = new
     return out, saved
@@ -299,13 +316,7 @@ def split_for_summary(messages: list[dict], keep_chars: int) -> tuple[int, int] 
     includes the newest turn: summarizing results the model hasn't read yet would make the summarizer do the
     work (badly) instead of the agent."""
     start = _head_len(messages)
-    end = last_turn_start(messages)
-    kept = sum(message_chars(m) for m in messages[end:])
-    while end > start:
-        kept += message_chars(messages[end - 1])
-        if kept > keep_chars:
-            break
-        end -= 1
+    end = recent_start(messages, keep_chars)
     # Never keep an orphaned tool result: its assistant call must stay with it.
     while end < len(messages) and messages[end]["role"] == "tool":
         end += 1
