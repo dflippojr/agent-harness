@@ -461,6 +461,13 @@ READ_CONNECTIONS = 4
 APP_ERASE_GRACE_SECONDS = 7 * 86400
 APP_LIMITS_META = "app_limits:"           # meta key prefix: an App's owner-set session caps (#524)
 APP_LIMIT_KEYS = ("max_running", "max_queued")
+# An API key as `list_api_keys` and `get_api_key_listing` show it: no hash, and `requests` counts its logged requests.
+_API_KEY_LISTING = (
+    "SELECT k.id, k.name, k.prefix, k.kind, k.role, k.scopes, k.origins, "
+    "COALESCE(k.catalog_app_id, '') AS catalog_app_id, k.created_at, k.last_used_at, k.revoked_at, "
+    "k.retention_days, k.erase_after, k.erased_at, "
+    "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
+    "FROM api_keys k WHERE k.kind != 'web'")
 
 
 def _writes(fn):
@@ -1903,13 +1910,16 @@ class Database:
         """The keys: every App's, device's and owner token's. Agent Harness Web's registry row has no key, so it is
         not listed (`get_api_key(WEB_APP_ID)` reads it)."""
         with self.lock:
-            rows = self.conn.execute(
-                "SELECT k.id, k.name, k.prefix, k.kind, k.role, k.scopes, k.origins, "
-                "COALESCE(k.catalog_app_id, '') AS catalog_app_id, k.created_at, k.last_used_at, k.revoked_at, "
-                "k.retention_days, k.erase_after, k.erased_at, "
-                "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
-                "FROM api_keys k WHERE k.kind != 'web' ORDER BY k.created_at").fetchall()
+            rows = self.conn.execute(_API_KEY_LISTING + " ORDER BY k.created_at").fetchall()
         return [_row(r) for r in rows]
+
+    @_reads
+    def get_api_key_listing(self, kid: str) -> dict | None:
+        """Key `kid` as `list_api_keys` lists it, read alone (#669): the same fields and request count, without
+        listing every key. None when `kid` is not a listed key (a missing or Agent Harness Web's)."""
+        with self.lock:
+            row = self.conn.execute(_API_KEY_LISTING + " AND k.id = ?", (kid,)).fetchone()
+        return _row(row)
 
     @_writes
     def ensure_web_app(self, app_id: str) -> None:
@@ -1954,7 +1964,7 @@ class Database:
             key = prefix + secrets.token_urlsafe(32)
             self.conn.execute("UPDATE api_keys SET hash = ?, prefix = ?, revoked_at = NULL, erase_after = NULL "
                               "WHERE id = ?", (hashlib.sha256(key.encode()).hexdigest(), key[:10], kid))
-        return next(k for k in self.list_api_keys() if k["id"] == kid), key
+        return self.get_api_key_listing(kid), key
 
     @_reads
     def pending_erasures(self, due_by: float | None = None) -> list[dict]:

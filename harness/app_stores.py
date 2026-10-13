@@ -537,11 +537,17 @@ class SessionStores:
 
     def list_api_keys(self) -> list[dict]:
         """The key list (Settings → Apps), each App's and device's with its store's metadata."""
-        keys = self.main.list_api_keys()
-        for k in keys:
-            if k.get("kind") not in ("owner", "web") and not k.get("erased_at"):
-                k["store"] = self.app_metadata(k["id"])
-        return keys
+        return [self._with_store(k) for k in self.main.list_api_keys()]
+
+    def get_api_key_listing(self, kid: str) -> dict | None:
+        """Key `kid` as `list_api_keys` lists it, read alone (#669)."""
+        key = self.main.get_api_key_listing(kid)
+        return self._with_store(key) if key else None
+
+    def _with_store(self, k: dict) -> dict:
+        if k.get("kind") not in ("owner", "web") and not k.get("erased_at"):
+            k["store"] = self.app_metadata(k["id"])
+        return k
 
     def delete_session(self, sid: str) -> None:
         app_id = self.app_of(sid)
