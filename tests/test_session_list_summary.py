@@ -50,6 +50,8 @@ CASES = {
     "spaced-answer": (["ask"], " " * 600 + "tail words"),
     "spaced-long-answer": (["ask"], " \n" * 300 + "z" * 200),
     "blank-and-missing": (["", "\t", "real ask"], "ok"),
+    "nul": (["Run it\x00 and report", "plain"], "Done.\x00Tests failed"),
+    "nul-long-answer": (["ask"], "a\x00" + "b" * 500),
 }
 
 
