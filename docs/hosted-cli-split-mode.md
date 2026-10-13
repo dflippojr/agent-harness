@@ -35,6 +35,8 @@ backends:
 - A split session never falls back to `builtin`: with MCP unavailable the run fails with `split_unavailable`. A Codex
   item other than the plan, reasoning, messages or a harness MCP call stops the run. App-tools-only sessions are
   unchanged and take precedence.
+- A session with `tool_profile: bash-only` (#638) gets `run_shell` alone of `SPLIT_TOOLS`; a call to any other split
+  tool is refused. See `docs/cli-backends.md`, "Tool profiles for hosted backends".
 
 If the hands container dies mid-command, `Sandbox.exec` recreates it on the next call; the CLI container, and with it the
 session's history, is a separate process and keeps running.
