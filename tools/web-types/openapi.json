@@ -2700,6 +2700,11 @@
             "title": "Project",
             "type": "string"
           },
+          "pull_request_url": {
+            "default": "",
+            "title": "Pull Request Url",
+            "type": "string"
+          },
           "push_target": {
             "default": "",
             "title": "Push Target",
@@ -3110,6 +3115,11 @@
           },
           "project": {
             "title": "Project",
+            "type": "string"
+          },
+          "pull_request_url": {
+            "default": "",
+            "title": "Pull Request Url",
             "type": "string"
           },
           "push_target": {

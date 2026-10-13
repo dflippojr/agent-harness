@@ -114,4 +114,23 @@ changesError = new Error("diff unavailable");
 await assert.rejects(page.viewSession("abc", "changes"), /diff unavailable/);
 assert.match(text(byId.app), /Review/);
 assert.match(text(byId.app), /Loading changes/);
+
+// #665: the Review card links to GitHub's PR page only when the server supplies `pull_request_url`.
+changesError = null;
+changes = { removed: false, secret_scan: null, repos: [] };
+const prLink = () => walk(byId.app).find(n => n.tag === "a" && /pull request/.test(text(n)));
+Object.assign(session, { status: "done", repo_kind: "url", review: "pushed", review_detail: "pushed agent/abc to o/r" });
+fill(byId.app);
+await page.viewSession("abc", "changes");
+assert.equal(prLink(), undefined, "no link without pull_request_url");
+assert.match(text(byId.app), /pushed agent\/abc to o\/r/);
+session.pull_request_url = "https://github.com/o/r/compare/main...agent/abc?expand=1&title=Fix";
+fill(byId.app);
+await page.viewSession("abc", "changes");
+let link = prLink();
+assert.equal(text(link), "Open pull request");
+assert.equal(link.attrs.href, session.pull_request_url);
+assert.equal(link.attrs.target, "_blank");
+assert.equal(link.attrs.rel, "noopener");
+assert.match(text(byId.app), /pushed agent\/abc to o\/r/, "the detail line stays beside the link");
 console.log("ok");

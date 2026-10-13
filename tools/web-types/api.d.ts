@@ -6664,6 +6664,11 @@ export interface components {
             /** Project */
             project: string;
             /**
+             * Pull Request Url
+             * @default
+             */
+            pull_request_url?: string;
+            /**
              * Push Target
              * @default
              */
@@ -6905,6 +6910,11 @@ export interface components {
             pending_approvals?: components["schemas"]["ApprovalResponse"][];
             /** Project */
             project: string;
+            /**
+             * Pull Request Url
+             * @default
+             */
+            pull_request_url?: string;
             /**
              * Push Target
              * @default
