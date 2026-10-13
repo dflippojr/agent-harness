@@ -152,7 +152,8 @@ FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 DEDUPE_MIN_CHARS = 200  # a "same as above" note is shorter than this, so notes are never collapsed themselves
 SAME_AS_BELOW = "[Same output as a later {name} result below; this older copy was removed.]"
 SUPERSEDED = "[Older read of {path} removed: the file was read again or changed later in this session.]"
-LINES_OMITTED = "[... {count} lines omitted: older command output keeps its first {head} and last {tail} lines ...]"
+OUTPUT_CUT = "[output cut at "  # the runner's note on a result cut to fit the turn's budget
+LINES_OMITTED ="[... {count} lines omitted: older command output keeps its first {head} and last {tail} lines ...]"
 
 
 @dataclass(frozen=True)
@@ -245,7 +246,8 @@ def _calls(messages: list[dict]) -> dict:
 def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
     """Indexes of read_file results made stale by a later read of the same file with the same arguments, or by a
     later write or edit of it, where the later call is known to have succeeded: a failed reread keeps the older
-    contents, and a call without an outcome (one inherited by a fork, say) changes nothing."""
+    contents, and a call without an outcome (one inherited by a fork, say) changes nothing. A reread cut to fit the
+    turn's budget replaces nothing either."""
     stale: set[int] = set()
     newer_reads: set[tuple] = set()
     changed: set[str] = set()
@@ -265,7 +267,7 @@ def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
             key = (path, json.dumps({k: v for k, v in args.items() if k != "path"}, sort_keys=True))
             if path in changed or key in newer_reads:
                 stale.add(i)
-            if succeeded:
+            if succeeded and OUTPUT_CUT not in (m.get("content") or ""):  # a cut reread lacks the older tail
                 newer_reads.add(key)
     return stale
 

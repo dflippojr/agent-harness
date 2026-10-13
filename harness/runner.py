@@ -2904,7 +2904,7 @@ class Runner:
         output_chars = len(output)
         if len(banner) + len(output) > max_chars:
             cut = max(0, max_chars - len(banner))
-            output = (output[:cut] + f"\n... [output cut at {max_chars} characters: this turn's tool results "
+            output = (output[:cut] + f"\n... {compaction.OUTPUT_CUT}{max_chars} characters: this turn's tool results "
                       "would overflow the context window. Request less at once, e.g. a smaller line range.]")
         await self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
                             artifact_content=artifact_content, extra=extra, output_chars=output_chars, banner=banner)

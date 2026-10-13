@@ -112,6 +112,14 @@ def test_a_failed_reread_keeps_the_older_read():
     assert tools(out)[0] == body
 
 
+def test_a_reread_cut_by_the_turn_budget_keeps_the_older_read():
+    body = "x = 1\n" * 500
+    cut = body[:2000] + f"\n... {compaction.OUTPUT_CUT}2000 characters: this turn's tool results would overflow ...]"
+    messages = session(turn(1, "read_file", body, path="a.py"), turn(2, "read_file", cut, path="a.py"))
+    out, _ = trim(messages, only(superseded_reads=True))
+    assert tools(out)[0] == body
+
+
 def test_a_call_without_an_outcome_supersedes_nothing():
     """A fork inherits its parent's context without the tool_result events."""
     body = "x = 1\n" * 50
