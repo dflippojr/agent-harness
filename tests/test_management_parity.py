@@ -27,7 +27,7 @@ from test_daemon import Script, make_cfg
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "management-parity.md"
-WEB = ROOT / "harness" / "web"
+WEB = ROOT / "stables" / "public"
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 # The CLI's hand-written commands (the rest come from cli.admin_commands()) and the owner API route each one calls.

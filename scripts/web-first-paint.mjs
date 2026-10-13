@@ -1,4 +1,4 @@
-// Cold first-load timing of harness/web through headless Chromium's DevTools protocol (no npm packages), for comparing
+// Cold first-load timing of stables/public through headless Chromium's DevTools protocol (no npm packages), for comparing
 // a web bundle before and after a change such as the app.js module split (#258) on the same setup.
 //   node scripts/web-first-paint.mjs <web-dir> [runs=5] [route=#/agents]
 // Serves <web-dir> on localhost (gzip for text, like harness/webgzip.py; /api answers 503 so the page renders its

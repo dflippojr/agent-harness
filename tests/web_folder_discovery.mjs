@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mountActions } from '../harness/web/pages/actions.mjs';
-import { settingInput } from '../harness/web/lib/setting-input.mjs';
+import { mountActions } from '../stables/public/pages/actions.mjs';
+import { settingInput } from '../stables/public/lib/setting-input.mjs';
 
-const css = readFileSync(new URL('../harness/web/style.css', import.meta.url), 'utf8');
+const css = readFileSync(new URL('../stables/public/style.css', import.meta.url), 'utf8');
 
 class Element {
   constructor(tag, attrs, children) {

@@ -11,5 +11,5 @@
     "moduleResolution": "NodeNext",
     "lib": ["ES2022", "DOM", "DOM.Iterable"]
   },
-  "include": ["../../harness/web/**/*.mjs", "../../harness/web/app.js", "../../harness/web/sw.js", "*.d.ts", "type-tests.mjs"]
+  "include": ["../../stables/public/**/*.mjs", "../../stables/public/app.js", "../../stables/public/sw.js", "*.d.ts", "type-tests.mjs"]
 }

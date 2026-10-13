@@ -3,8 +3,8 @@
 // through list rows with J and K, and leaves the page alone while a sheet or menu answers its own keys.
 import assert from "node:assert/strict";
 import { keyAction, isTypingTarget, newHash, stepRow, mountKeys, SHORTCUTS, GO_KEYS, CHORD_MS, ROW_SELECTOR,
-  shortcutsBody } from "../harness/web/lib/keys.mjs";
-import { SPLITS, mountReadingOrder, READING_ORDER_QUERY } from "../harness/web/lib/layout.mjs";
+  shortcutsBody } from "../stables/public/lib/keys.mjs";
+import { SPLITS, mountReadingOrder, READING_ORDER_QUERY } from "../stables/public/lib/layout.mjs";
 import { createDocument, Emitter, Node, El, walk } from "./web_stub_dom.mjs";
 
 const el = (tagName, extra = {}) => ({ tagName, ...extra });

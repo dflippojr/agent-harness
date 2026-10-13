@@ -25,7 +25,7 @@ class El extends BaseEl {
 const { byId, make, doc } = createDocument({ ElClass: El });
 // Settings links to Actions now that the drawer is gone (#506).
 const actionsHref = "#/actions/resources";
-if (!readFileSync(join(root, "harness/web/pages/profile.mjs"), "utf8").includes("`#/actions/${id}`")) {
+if (!readFileSync(join(root, "stables/public/pages/profile.mjs"), "utf8").includes("`#/actions/${id}`")) {
   throw new Error("missing the Actions links in the Settings menu");
 }
 const profileTab = byId["tab-bar"].querySelectorAll("a[data-tab]").find((a) => a.dataset.tab === "profile");
@@ -176,7 +176,7 @@ globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
 globalThis.fetch = fakeFetch;
-const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../harness/web/client.mjs");
+const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../stables/public/client.mjs");
 
 const sandbox = createContext({
   window: win,

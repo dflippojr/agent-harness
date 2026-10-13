@@ -1019,8 +1019,7 @@ def test_access_log_redacts_callback_query():
 
 
 def test_web_bundle_keeps_csrf_in_memory_only():
-    from pathlib import Path
-    web = Path(gs.__file__).parent / "web"
+    from harness.stables_shell import DEFAULT as web
     client_js = (web / "client.mjs").read_text(encoding="utf-8")
     session_js = (web / "lib" / "session.mjs").read_text(encoding="utf-8")
     for source in (client_js, session_js):

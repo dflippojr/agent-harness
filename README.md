@@ -173,7 +173,7 @@ agent-harness/
 | Component | What it is | Where it lives |
 | --- | --- | --- |
 | **Agent Harness Server** | The host daemon and its APIs | [`harness/`](harness) |
-| **Agent Harness Web** | The first-party browser UI and installable PWA ([`docs/web.md`](docs/web.md)) | [`harness/web/`](harness/web) |
+| **Agent Harness Web** | The first-party browser UI and installable PWA ([`docs/web.md`](docs/web.md)) | [`stables/public/`](stables/public) |
 | **Agent Harness CLI** | The installed `harness` command | [`harness/cli.py`](harness/cli.py) |
 | **Agent Harness Runner** | A remote execution worker, such as the Mac Runner | [`macrunner/`](macrunner) |
 | **Agent Harness SDK** | The supported Python client library | [`sdk/`](sdk) |
@@ -226,7 +226,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | **Native macOS sandboxing** ([`sandbox.sb`](macrunner/sandbox.sb)) | Shell commands run under `sandbox-exec`: writes limited to the workspace and build caches, credentials and personal folders unreadable, no network unless approved. |
 | **Protocol-versioned clients** ([`compat.py`](harness/compat.py), [docs](docs/compatibility.md)) | Wire protocols are versioned separately from releases. The server accepts current and previous versions. Skew returns `426 client_update_required` or `426 daemon_update_required` while health and update discovery stay reachable. |
 | **Transactional self-update** ([`updater.py`](harness/updater.py)) | The Mac client downloads only from its own server, verifies size and SHA-256, swaps the runtime atomically, keeps credentials and config, and rolls back on failure. |
-| **No-build PWA on public contracts** ([`harness/web`](harness/web)) | The web UI is vanilla JS with a service worker. It uses the same `/api/v1` and `/api/admin/v1` contracts offered to third-party apps, and authenticated SSE, images, and downloads never put bearer tokens in URLs. |
+| **No-build PWA on public contracts** ([`stables/public`](stables/public)) | The web UI is vanilla JS with a service worker. It uses the same `/api/v1` and `/api/admin/v1` contracts offered to third-party apps, and authenticated SSE, images, and downloads never put bearer tokens in URLs. |
 
 ### Configuration and data
 

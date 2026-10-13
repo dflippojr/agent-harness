@@ -1,6 +1,6 @@
 // Renders the extracted session page (transcript and Changes tab) with stub deps so a missing import or dep fails CI (#258 stage j).
 import assert from "node:assert/strict";
-import { mountSession } from "../harness/web/pages/session.mjs";
+import { mountSession } from "../stables/public/pages/session.mjs";
 
 const el = (tag, attrs, ...kids) => {
   const node = { tag, attrs: attrs || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined),

@@ -277,7 +277,7 @@ def test_cross_origin_admin_request_never_falls_back_to_ambient_owner(tmp_path):
 
 
 def test_web_shell_includes_transport_module_and_canonical_names():
-    web = Path(__file__).parents[1] / "harness" / "web"
+    web = Path(__file__).parents[1] / "stables" / "public"
     app = (web / "app.js").read_text(encoding="utf-8")
     profile = (web / "pages" / "profile.mjs").read_text(encoding="utf-8")
     client = (web / "client.mjs").read_text(encoding="utf-8")

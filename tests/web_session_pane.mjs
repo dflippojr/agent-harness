@@ -3,8 +3,8 @@
 // Changes and Info show the pending decision as a one-line bar with Review that follows the app-wide stream.
 import assert from "node:assert/strict";
 import { El as BaseEl, Node, createDocument, walk } from "./web_stub_dom.mjs";
-import { h, fill, append } from "../harness/web/lib/dom.mjs";
-import { mountSession } from "../harness/web/pages/session.mjs";
+import { h, fill, append } from "../stables/public/lib/dom.mjs";
+import { mountSession } from "../stables/public/pages/session.mjs";
 
 // Real DOM moves: inserting a node takes it out of its old parent.
 const detach = (n) => {

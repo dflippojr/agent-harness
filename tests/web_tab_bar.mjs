@@ -8,8 +8,8 @@ import { runApp } from "./web_app_loader.mjs";
 import { El as BaseEl, Emitter, Node, createDocument, fakeEventSource, storage } from "./web_stub_dom.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const cssSrc = readFileSync(join(root, "harness/web/style.css"), "utf8");
-const indexHtml = readFileSync(join(root, "harness/web/index.html"), "utf8");
+const cssSrc = readFileSync(join(root, "stables/public/style.css"), "utf8");
+const indexHtml = readFileSync(join(root, "stables/public/index.html"), "utf8");
 
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
@@ -153,7 +153,7 @@ globalThis.window = win;
 globalThis.localStorage = win.localStorage;
 globalThis.location = loc;
 globalThis.fetch = fakeFetch;
-const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../harness/web/client.mjs");
+const { agentHarnessWeb, WEB_BUILD_ID, WEB_PROTOCOL } = await import("../stables/public/client.mjs");
 
 const sandbox = createContext({
   window: win,

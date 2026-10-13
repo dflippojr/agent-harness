@@ -15,8 +15,8 @@ def test_image_model_filter_and_queue_generation():
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout
-    app = (root / "harness/web/pages/images.mjs").read_text(encoding="utf-8")
-    css = (root / "harness/web/style.css").read_text(encoding="utf-8")
+    app = (root / "stables/public/pages/images.mjs").read_text(encoding="utf-8")
+    css = (root / "stables/public/style.css").read_text(encoding="utf-8")
     assert "function installedImageModeEntries" in app
     assert "Queue Generation" in app
     assert "classList.toggle(\"queued\"" in app
@@ -37,8 +37,8 @@ def test_image_columns_keep_gallery_jobs_and_detail_actions():
     root = Path(__file__).resolve().parents[1]
     script = r'''
 import assert from "node:assert/strict";
-import { mountImages } from "./harness/web/pages/images.mjs";
-import { h, fill, append } from "./harness/web/lib/dom.mjs";
+import { mountImages } from "./stables/public/pages/images.mjs";
+import { h, fill, append } from "./stables/public/lib/dom.mjs";
 import { Node, createDocument, storage, walk } from "./tests/web_stub_dom.mjs";
 const { doc, byId } = createDocument();
 globalThis.document = doc;

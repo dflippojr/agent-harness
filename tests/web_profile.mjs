@@ -1,6 +1,6 @@
 // Renders the extracted Profile page with stub deps so a missing import or dep fails CI (#258 stage g).
 import assert from "node:assert/strict";
-import { mountProfile } from "../harness/web/pages/profile.mjs";
+import { mountProfile } from "../stables/public/pages/profile.mjs";
 
 const el = (tag, attrs, ...kids) => ({ tag, attrs: attrs || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined),
   addEventListener() {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, setAttribute() {}, style: {} });

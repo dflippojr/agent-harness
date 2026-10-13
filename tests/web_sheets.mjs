@@ -2,8 +2,8 @@
 // validate inline, dismiss on Escape, a backdrop tap or a route change, and leave nothing behind. The bundle-update offer
 // uses one without holding up boot.
 import assert from "node:assert/strict";
-import { confirmSheet, promptSheet, formSheet, required, wholeNumber } from "../harness/web/lib/sheet.mjs";
-import { mountUpdate } from "../harness/web/lib/update.mjs";
+import { confirmSheet, promptSheet, formSheet, required, wholeNumber } from "../stables/public/lib/sheet.mjs";
+import { mountUpdate } from "../stables/public/lib/update.mjs";
 import { createDocument, Emitter, Node, El, walk, storage } from "./web_stub_dom.mjs";
 
 const { doc } = createDocument();

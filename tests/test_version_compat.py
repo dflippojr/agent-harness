@@ -457,7 +457,7 @@ def test_old_runner_gets_exact_manual_update_fallback(tmp_path):
 
 
 def test_web_bundle_has_safe_cache_update_and_version_handshake():
-    root = Path(__file__).parents[1] / "harness/web"
+    root = Path(__file__).parents[1] / "stables/public"
     app = (root / "lib" / "update.mjs").read_text(encoding="utf-8")
     client = (root / "client.mjs").read_text(encoding="utf-8")
     worker = (root / "sw.js").read_text(encoding="utf-8")
@@ -487,6 +487,6 @@ def test_blocked_web_ui_ignores_hashchange_and_nav_without_api_calls():
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout
-    web = Path(__file__).parents[1] / "harness/web"
+    web = Path(__file__).parents[1] / "stables/public"
     assert "let protocolBlocked = false;" in (web / "lib/session.mjs").read_text(encoding="utf-8")
     assert "if (session.isBlocked()) return;" in (web / "lib/router.mjs").read_text(encoding="utf-8")

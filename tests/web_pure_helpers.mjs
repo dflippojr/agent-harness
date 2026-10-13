@@ -1,17 +1,17 @@
 // UI harness: the small pure helpers pulled out of app.js by the Sonar style cleanup (#229) keep the
-// exact strings and choices the inline ternaries produced. They live in harness/web/lib/ and are imported
+// exact strings and choices the inline ternaries produced. They live in stables/public/lib/ and are imported
 // directly, so no DOM is needed (#258).
-import { approvalDiffClass, diffLineClass } from "../harness/web/lib/diff.mjs";
-import { protocolMismatch } from "../harness/web/lib/compat.mjs";
-import { fmtBytes, fmtSpan, fmtTokens, gpuText, holdRemainingText, pluralize } from "../harness/web/lib/format.mjs";
+import { approvalDiffClass, diffLineClass } from "../stables/public/lib/diff.mjs";
+import { protocolMismatch } from "../stables/public/lib/compat.mjs";
+import { fmtBytes, fmtSpan, fmtTokens, gpuText, holdRemainingText, pluralize } from "../stables/public/lib/format.mjs";
 import { compatibilityText, lastSeenText, recoveryNote, settingValueText, backendsValue, resourcesValue, serverSettingsValue,
-  remoteControlValue, skillsValue, versionStatus, serverVersionText } from "../harness/web/lib/settings-text.mjs";
-import { compareTargets, pickDefaultBackend, runnerStateText } from "../harness/web/lib/targets.mjs";
-import { CRON_PRESETS, cronLabel, newJobDefaults, whenText } from "../harness/web/lib/jobs.mjs";
-import { mountActions } from "../harness/web/pages/actions.mjs";
-import { mountJobs } from "../harness/web/pages/jobs.mjs";
-import { approvalWhat, toolSummaryText } from "../harness/web/lib/tools.mjs";
-import { traceInfo } from "../harness/web/lib/trace.mjs";
+  remoteControlValue, skillsValue, versionStatus, serverVersionText } from "../stables/public/lib/settings-text.mjs";
+import { compareTargets, pickDefaultBackend, runnerStateText } from "../stables/public/lib/targets.mjs";
+import { CRON_PRESETS, cronLabel, newJobDefaults, whenText } from "../stables/public/lib/jobs.mjs";
+import { mountActions } from "../stables/public/pages/actions.mjs";
+import { mountJobs } from "../stables/public/pages/jobs.mjs";
+import { approvalWhat, toolSummaryText } from "../stables/public/lib/tools.mjs";
+import { traceInfo } from "../stables/public/lib/trace.mjs";
 
 const failures = [];
 const eq = (label, got, want) => {

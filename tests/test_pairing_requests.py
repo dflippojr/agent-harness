@@ -25,7 +25,7 @@ ORIGIN = "https://shop.example"
 OTHER = "https://other.example"
 CATALOG_ID = "com.example.shopping-list"
 BASE = PREFIX + "/pairing-requests"
-WEB = Path(__file__).resolve().parents[1] / "harness" / "web"
+WEB = Path(__file__).resolve().parents[1] / "stables" / "public"
 SECRET_PREFIXES = ("ha-", "ho-", "hp-")
 
 

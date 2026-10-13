@@ -94,4 +94,4 @@ def test_sonar_properties_feed_coverage_into_the_quality_gate():
     properties = PROPERTIES.read_text(encoding="utf-8")
     assert "sonar.python.coverage.reportPaths=coverage.xml" in properties
     assert "sonar.coverage.exclusions=**/*" not in properties
-    assert "harness/web/**" in properties
+    assert "stables/public/**" in properties

@@ -5,5 +5,5 @@ title: Agent Harness Web
 summary: 'The first-party browser UI and installable PWA ([`docs/web.md`](docs/web.md))'
 order: 20
 links:
-  - text: '`harness/web/`'
-    href: harness/web
+  - text: '`stables/public/`'
+    href: stables/public

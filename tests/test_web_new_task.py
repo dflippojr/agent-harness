@@ -44,7 +44,7 @@ assert.ok(walk(settings).some((n) => n.tag === "button" && n.attrs.type === "sub
 def test_two_column_task_layout_is_desktop_only():
     from test_web_tokens import _decls, _rules
 
-    css = (Path(__file__).resolve().parents[1] / "harness/web/style.css").read_text(encoding="utf-8")
+    css = (Path(__file__).resolve().parents[1] / "stables/public/style.css").read_text(encoding="utf-8")
     rules = [(selectors, _decls(body), media) for selectors, body, media in _rules(css)
              if any("new-task-" in selector for selector in selectors)]
     assert rules

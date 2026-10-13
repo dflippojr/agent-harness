@@ -1,7 +1,7 @@
 # Agent Harness Web
 
 Agent Harness Web is the first-party browser UI and installable PWA for Agent Harness Server. Its static files live
-in `harness/web` and have no build step. Agent Harness Server serves that directory by default, so existing Tailscale
+in `stables/public` and have no build step. Agent Harness Server serves that directory by default, so existing Tailscale
 PWA installs continue to work. The same directory can also be hosted at a separate HTTPS origin.
 
 The PWA manifest name and browser title are **Agent Harness Web**. Its short name and Apple standalone title are
@@ -65,7 +65,7 @@ the arrow keys, Home and End move through it, and Escape closes it and returns f
 
 ## Colours and touch targets
 
-Every colour comes from the CSS custom properties at the top of `harness/web/style.css`. The Light and Dark themes
+Every colour comes from the CSS custom properties at the top of `stables/public/style.css`. The Light and Dark themes
 (and System, which follows the device) use the mobile redesign's palette. Midnight, Forest and Paper keep their own
 values. `--accent` colours text-like actions such as links, the current tab and running badges. `--primary` fills
 buttons, the New task button and your own chat bubbles, with `--on-primary` text. In Dark the accent is blue, not
@@ -110,7 +110,7 @@ putting a token in their URLs.
 
 ## Use a separately hosted copy
 
-1. Serve the contents of `harness/web` at the root of an HTTPS origin, with `index.html` as the root document.
+1. Serve the contents of `stables/public` at the root of an HTTPS origin, with `index.html` as the root document.
    Loopback HTTP is also accepted for local development. Asset URLs are root-relative, so deploy the directory at
    the origin root rather than below a path prefix.
 2. In the Server-bundled Agent Harness Web, open **Settings → Connection**.

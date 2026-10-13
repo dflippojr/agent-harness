@@ -10,7 +10,7 @@ ROOT = Path(__file__).parents[1]
 
 
 def test_web_metadata_and_compatibility_identifiers():
-    web = ROOT / "harness" / "web"
+    web = ROOT / "stables" / "public"
     manifest = json.loads((web / "manifest.webmanifest").read_text(encoding="utf-8"))
     assert manifest["name"] == "Agent Harness Web"
     assert manifest["short_name"] == "Harness"

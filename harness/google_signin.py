@@ -31,6 +31,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 
+from . import stables_shell
 from .config import ROOT
 from .principal import NOT_ALLOWED_DETAIL, OWNER_USER_ID, Principal, _member_principal, resolve_human
 
@@ -506,8 +507,7 @@ class GoogleSignin:
         self._lock = threading.Lock()
         self._static: tuple[tuple, float, list[str]] | None = None
         self._preflight: dict | None = None
-        web = Path(__file__).parent / "web"
-        self._web_files = frozenset("/" + p.name for p in web.iterdir() if p.is_file()) if web.is_dir() else frozenset()
+        self._web_files = stables_shell.top_files(stables_shell.locate())
 
     @property
     def cfg(self):

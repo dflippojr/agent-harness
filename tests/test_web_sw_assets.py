@@ -2,7 +2,7 @@
 import re
 from pathlib import Path
 
-WEB = Path(__file__).resolve().parents[1] / "harness" / "web"
+WEB = Path(__file__).resolve().parents[1] / "stables" / "public"
 
 
 def _assets() -> list[str]:
@@ -16,7 +16,7 @@ def test_sw_assets_list_every_module():
     assets = set(_assets())
     modules = [WEB / "app.js", *WEB.rglob("*.mjs")]
     missing = sorted("/" + p.relative_to(WEB).as_posix() for p in modules if "/" + p.relative_to(WEB).as_posix() not in assets)
-    assert not missing, f"add to ASSETS in harness/web/sw.js: {missing}"
+    assert not missing, f"add to ASSETS in stables/public/sw.js: {missing}"
 
 
 def test_sw_assets_exist():

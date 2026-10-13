@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-WEB = Path(__file__).resolve().parents[1] / "harness" / "web"
+WEB = Path(__file__).resolve().parents[1] / "stables" / "public"
 CSS = (WEB / "style.css").read_text(encoding="utf-8")
 
 COLOUR = re.compile(r"#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(")

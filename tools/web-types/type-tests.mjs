@@ -40,7 +40,7 @@ export async function checkContracts(api, id) {
   return { title, preview, position, wrong, cron, path, deleted };
 }
 
-/** @param {import('../../harness/web/client.mjs').AgentHarnessWebClient} client @param {string} id */
+/** @param {import('../../stables/public/client.mjs').AgentHarnessWebClient} client @param {string} id */
 export async function checkTransport(client, id) {
   const appDiscovery = await client.request("", { surface: "app" });
   appDiscovery.projects.map((project) => project.name.toUpperCase());

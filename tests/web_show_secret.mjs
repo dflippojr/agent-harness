@@ -15,7 +15,7 @@ globalThis.document = {
   createElement: (tag) => { const el = new StubEl(tag); el.select = () => { focused++; }; return el; },
   createTextNode: (text) => ({ text: String(text) }),
 };
-const { showSecretOnce } = await import("../harness/web/lib/secret.mjs");
+const { showSecretOnce } = await import("../stables/public/lib/secret.mjs");
 
 const failures = [];
 const eq = (label, got, want) => {

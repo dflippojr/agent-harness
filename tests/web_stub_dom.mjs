@@ -1,4 +1,4 @@
-// Shared stub DOM for the Web UI harnesses (#479). Each harness boots the real harness/web/app.js against these stubs
+// Shared stub DOM for the Web UI harnesses (#479). Each harness boots the real stables/public/app.js against these stubs
 // (see web_app_loader.mjs); a harness extends `El` or tweaks the returned document only where its scenario differs.
 
 export class Emitter {

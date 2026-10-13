@@ -11,7 +11,6 @@ import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
@@ -29,6 +28,7 @@ from . import efficiency
 from . import google_signin
 from . import idempotency
 from . import local_owner
+from . import stables_shell
 from . import tailscale_peer
 from . import taint
 from . import telemetry
@@ -45,7 +45,6 @@ mimetypes.add_type("text/javascript", ".js")
 mimetypes.add_type("text/javascript", ".mjs")
 
 log = logging.getLogger("harness.api")
-WEB = Path(__file__).parent / "web"
 # Session-list stream: status-level events only, no tool output or token deltas.
 GLOBAL_TYPES = {"session_created", "status", "approval_requested", "approval_decided", "run_finished", "queue"}
 
@@ -459,21 +458,22 @@ async def harness_error(request: Request, exc: HarnessError):
     return JSONResponse(body, status_code=exc.status)
 
 
-# web app
+# Stables, the bundled browser client: installed only when its shell is present (see stables_shell)
 @web_router.get("/", include_in_schema=False)
-async def index():
-    return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
+async def index(request: Request):
+    return FileResponse(request.app.state.stables / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @web_router.get("/sw.js", include_in_schema=False)
-async def service_worker():
+async def service_worker(request: Request):
     # Served from the root so its scope covers the whole app.
-    return FileResponse(WEB / "sw.js", media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+    return FileResponse(request.app.state.stables / "sw.js", media_type="text/javascript",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @web_router.get("/manifest.webmanifest", include_in_schema=False)
-async def manifest():
-    return FileResponse(WEB / "manifest.webmanifest", media_type="application/manifest+json")
+async def manifest(request: Request):
+    return FileResponse(request.app.state.stables / "manifest.webmanifest", media_type="application/manifest+json")
 
 
 # API
@@ -1252,10 +1252,12 @@ def create_app(manager: Manager | None = None) -> FastAPI:
 
     app = _FramingFastAPI(title="agent-harness", lifespan=lifespan)
     app.middleware("http")(_access_guard)
-    app.add_middleware(WebGzipMiddleware, web=WEB)
     app.add_exception_handler(HarnessError, harness_error)
-    web_router.install(app)
-    app.mount("/static", StaticFiles(directory=WEB), name="static")
+    shell = app.state.stables = stables_shell.locate()
+    if shell is not None:
+        app.add_middleware(WebGzipMiddleware, web=shell)
+        web_router.install(app)
+        app.mount("/static", StaticFiles(directory=shell), name="static")
     from . import apps, modules
     apps.register(app, manager.cfg)
     api_router.install(app)
@@ -1263,9 +1265,10 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     modules.install_routes(app, manager.cfg, "public")
     from . import admin
     admin.register(app, mgr, modules.admin_paths(manager.cfg), manager.cfg)
-    # Keep /static for installed bundled clients, while making harness/web directly deployable at a static-site root.
-    # This catch-all mount is last so daemon/API routes always win.
-    app.mount("/", StaticFiles(directory=WEB), name="web-root")
+    # Keep /static for installed bundled clients, while making the Stables shell directly deployable at a static-site
+    # root. This catch-all mount is last so daemon/API routes always win.
+    if shell is not None:
+        app.mount("/", StaticFiles(directory=shell), name="web-root")
     # Registered last so Host admission precedes even aliases/module middleware that return early.
     app.middleware("http")(guard)
     return app

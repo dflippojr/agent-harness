@@ -749,8 +749,8 @@ def _assert_no_secrets(m, fake, tmp_path):
 
 
 def test_web_ui_member_card_owner_controls_and_no_browser_storage():
-    new_task = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "new-task.mjs").read_text(encoding="utf-8")
-    profile = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "profile.mjs").read_text(encoding="utf-8")
+    new_task = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "new-task.mjs").read_text(encoding="utf-8")
+    profile = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "profile.mjs").read_text(encoding="utf-8")
     start = profile.index("function githubConnectionCard(")
     card = profile[start:profile.index("\n// Each profile subpage", start)]
     for needed in ('"/me/github-connection/connect"', '"/me/github-connection/cancel"', 'act("/me/github-connection", "DELETE"',
@@ -762,11 +762,11 @@ def test_web_ui_member_card_owner_controls_and_no_browser_storage():
     assert "localStorage" not in form and "sessionStorage" not in form
     assert not [line for line in form.splitlines() if "storeSet(" in line and "repo" in line.lower()]
     assert "form.requestSubmit()" in form
-    actions_js = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "actions.mjs").read_text(encoding="utf-8")
+    actions_js = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "actions.mjs").read_text(encoding="utf-8")
     owner = actions_js[actions_js.index("function githubOwnerCard("):actions_js.index("async function accountsCard(")]
     assert '"/github-member-auth"' in owner and "repo" not in owner.lower().replace("repositories", "")
     assert "github-connection/reset" in actions_js and "Erase GitHub credential" in actions_js
-    session = (Path(__file__).resolve().parents[1] / "harness" / "web" / "pages" / "session.mjs").read_text(encoding="utf-8")
+    session = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "session.mjs").read_text(encoding="utf-8")
     assert "s.push_target" in session and "commit authors stay as they are" in session
 
 

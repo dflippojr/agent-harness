@@ -183,7 +183,7 @@ def test_web_app_js_parses():
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    web = Path(__file__).resolve().parent.parent / "harness" / "web"
+    web = Path(__file__).resolve().parent.parent / "stables" / "public"
     for source in [web / "app.js", *sorted(web.rglob("*.mjs"))]:
         result = subprocess.run([node, "--check", "--input-type=module"], input=source.read_text(encoding="utf-8"),
                                 capture_output=True, text=True, encoding="utf-8")

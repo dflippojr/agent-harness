@@ -1,4 +1,4 @@
-// Tooling lives outside harness/web and is never served by the daemon.
+// Tooling lives outside stables/public and is never served by the daemon.
 import { spawnSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";

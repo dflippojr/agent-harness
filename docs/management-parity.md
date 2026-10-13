@@ -10,7 +10,7 @@ operation with a CLI command. This page is the inventory. `tests/test_management
 
 - a route mounted under `/api/admin/v1` (core or an add-on module, including `Module.admin_paths`) has no row below,
   or none of its rows has a CLI command that calls it, unless the test's short allowlist names it with a reason;
-- Web calls an endpoint (`api("…")` in `harness/web`) that no row below lists;
+- Web calls an endpoint (`api("…")` in `stables/public`) that no row below lists;
 - a row's endpoint is on the owner API but has no CLI command, or its CLI command calls something else;
 - a row with no CLI command names an owner API endpoint (only App API and browser sign-in routes may);
 - Web stores a `harness.*` browser key that the client-only list doesn't name.

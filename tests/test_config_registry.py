@@ -778,8 +778,8 @@ def test_backend_prefs_migrate_once(tmp_path):
 
 
 def test_web_settings_render_plan_and_phone_layout(tmp_path):
-    app_js = Path(__file__).resolve().parent.parent / "harness" / "web" / "pages" / "daemon-settings.mjs"
-    css = Path(__file__).resolve().parent.parent / "harness" / "web" / "style.css"
+    app_js = Path(__file__).resolve().parent.parent / "stables" / "public" / "pages" / "daemon-settings.mjs"
+    css = Path(__file__).resolve().parent.parent / "stables" / "public" / "style.css"
     text = app_js.read_text(encoding="utf-8")
     style = css.read_text(encoding="utf-8")
     assert "daemonSettingsCard" in text

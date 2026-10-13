@@ -17,7 +17,7 @@ def test_session_info_page_renders():
 
 
 def test_changes_and_info_desktop_rules_preserve_phone_layout():
-    css = (Path(__file__).resolve().parents[1] / "harness" / "web" / "style.css").read_text(encoding="utf-8")
+    css = (Path(__file__).resolve().parents[1] / "stables" / "public" / "style.css").read_text(encoding="utf-8")
     start = css.index("/* Desktop 5: Changes and Info")
     section = css[start:css.index("/* End Desktop 5. */", start)]
     outside, _, inside = section.partition("@media (min-width: 768px) {")

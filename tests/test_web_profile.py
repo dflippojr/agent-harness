@@ -231,7 +231,7 @@ process.exit(0);
 
 
 def test_settings_desktop_css_is_scoped():
-    css = (TESTS.parent / "harness/web/style.css").read_text(encoding="utf-8")
+    css = (TESTS.parent / "stables/public/style.css").read_text(encoding="utf-8")
     desktop = css.split("/* Desktop 8:", 1)[1].split("/* End Desktop 8. */", 1)[0]
     assert "@media (min-width: 768px)" in desktop
     assert "@media (min-width: 1280px)" in desktop

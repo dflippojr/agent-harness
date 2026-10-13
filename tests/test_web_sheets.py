@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-WEB = Path(__file__).resolve().parents[1] / "harness" / "web"
+WEB = Path(__file__).resolve().parents[1] / "stables" / "public"
 
 # A call of the native dialogs, bare or through window/globalThis/browser/self. Method calls on other objects
 # (`sheets.confirm(`) and longer names (`confirmSheet(`) do not match.
