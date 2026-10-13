@@ -16,6 +16,7 @@
 #   "markdown"                     -> markdown-answer       headings, lists, a table and code
 #   "nightly report"               -> nightly-report        what the seeded job runs (Jobs, #511)
 #   "bad tool call"                -> invalid-tool-call     malformed tool arguments the harness rejects
+#   "stuck loop"                   -> stuck-loop            one failing read repeated until the stuck cap ends the run
 
 context_tokens: 32768
 summary: |
@@ -205,3 +206,32 @@ scripts:
         tool_calls:
           - {name: write_file, args: "{\"path\": \"x.md\", \"content\": "}
       - text: "The harness rejected the malformed call, as the tool row shows."
+
+  - name: stuck-loop
+    match: "stuck loop"
+    turns:
+      - text: "Reading the file again."
+        tool_calls:
+          - {name: read_file, args: {path: missing/never-there.md}}
+      - text: "Reading the file again."
+        tool_calls:
+          - {name: read_file, args: {path: missing/never-there.md}}
+      - text: "Reading the file again."
+        tool_calls:
+          - {name: read_file, args: {path: missing/never-there.md}}
+      - text: "Reading the file again."
+        tool_calls:
+          - {name: read_file, args: {path: missing/never-there.md}}
+      - text: "Reading the file again."
+        tool_calls:
+          - {name: read_file, args: {path: missing/never-there.md}}
+      - text: "Reading the file again."
+        tool_calls:
+          - {name: read_file, args: {path: missing/never-there.md}}
+      - text: "Reading the file again."
+        tool_calls:
+          - {name: read_file, args: {path: missing/never-there.md}}
+      - text: "Reading the file again."
+        tool_calls:
+          - {name: read_file, args: {path: missing/never-there.md}}
+      - text: "Unreachable: budgets.stuck_stop_after (8) ends the run first."

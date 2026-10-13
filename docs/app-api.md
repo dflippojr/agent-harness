@@ -605,6 +605,11 @@ for a retry under the same [`Idempotency-Key`](#retrying-a-create-safely-idempot
   `done` and `stop_reason` `budget_time`, wherever it is (a model call, a tool); time queued or parked does not count. A pending approval nobody decides
   within `budgets.approval_timeout_seconds` (default 24 hours) is denied with an `approval_decided` event carrying
   `expired: true`, and the run ends with `stop_reason` `approval_expired`. Send a message to continue either one.
+- **Stuck caps (#643).** On the local model, a tool call that fails with the same name and arguments a third time
+  gets a note appended to its result saying repeating it will not work; the eighth such failure ends the run with
+  `stop_reason` `stuck_repeat`. Five invalid tool calls in a row (bad JSON, an unknown tool, bad arguments) end it
+  with `stuck_invalid`. Both emit a `stuck` event first; denials and policy blocks never count. The thresholds are
+  `budgets.stuck_nudge_after`, `budgets.stuck_stop_after` and `budgets.stuck_invalid_after` (0 turns one off).
 
 #### Retrying a create safely (`Idempotency-Key`)
 
@@ -781,6 +786,7 @@ deltas (`delta`) and queue moves have `seq: null` and aren't replayed. Types an 
 | `tool_result` | `name`, `ok`, `output` (built-in and app tools) |
 | `approval_requested` | `id`, `tool`, `args`, `reason`: the user (or an app with `approvals`) must decide |
 | `status` | `status`, and for the end `stop_reason`, `answer` |
+| `stuck` | `reason` (`stuck_repeat` or `stuck_invalid`), `tool`, `count`: a stuck cap is ending the run |
 | `run_finished` | the run ended; the session may continue if you send a message |
 
 Persisted events are committed and delivered in increasing `seq` order. A stream subscribes before replaying the

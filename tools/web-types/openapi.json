@@ -2913,9 +2913,29 @@
             "title": "Completion Tokens",
             "type": "integer"
           },
+          "edit_mismatches": {
+            "default": 0,
+            "title": "Edit Mismatches",
+            "type": "integer"
+          },
+          "elide_only_compactions": {
+            "default": 0,
+            "title": "Elide Only Compactions",
+            "type": "integer"
+          },
           "prompt_tokens": {
             "default": 0,
             "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "read_artifact_calls": {
+            "default": 0,
+            "title": "Read Artifact Calls",
+            "type": "integer"
+          },
+          "read_artifact_repeats": {
+            "default": 0,
+            "title": "Read Artifact Repeats",
             "type": "integer"
           }
         },

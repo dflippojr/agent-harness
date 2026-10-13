@@ -6765,10 +6765,30 @@ export interface components {
              */
             completion_tokens?: number;
             /**
+             * Edit Mismatches
+             * @default 0
+             */
+            edit_mismatches?: number;
+            /**
+             * Elide Only Compactions
+             * @default 0
+             */
+            elide_only_compactions?: number;
+            /**
              * Prompt Tokens
              * @default 0
              */
             prompt_tokens?: number;
+            /**
+             * Read Artifact Calls
+             * @default 0
+             */
+            read_artifact_calls?: number;
+            /**
+             * Read Artifact Repeats
+             * @default 0
+             */
+            read_artifact_repeats?: number;
         } & {
             [key: string]: unknown;
         };
