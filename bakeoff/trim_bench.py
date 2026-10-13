@@ -109,21 +109,27 @@ def _git_status(dirty: int) -> str:
         f"\tmodified:   src/module_{i:02d}.py\n" for i in range(dirty)) + "\nno changes added to commit"
 
 
+def _shell(command: str, output: str, code: int = 0, text: str = "") -> Step:
+    """A run_shell result as the runner records it: a nonzero exit is still a successful tool call (so masking
+    applies to it), with the exit code on the first line."""
+    return Step("run_shell", {"command": command}, f"exit code {code}\n{output}", text=text)
+
+
 def fix_loop() -> list[Step]:
     """Run the failing suite, read and edit the culprit, re-run, check git status; the suite passes at the end."""
     rng = random.Random(1)
-    steps: list[Step] = [Step("run_shell", {"command": "pip install -e ."}, _install_output())]
+    steps: list[Step] = [_shell("pip install -e .", _install_output())]
     for cycle in range(40):
         failing = max(0, 6 - cycle // 6)
         path = f"src/module_{cycle % 5:02d}.py"
         steps += [
-            Step("run_shell", {"command": "pytest -q"}, _pytest_output(rng, failing), ok=failing == 0),
+            _shell("pytest -q", _pytest_output(rng, failing), code=int(failing > 0)),
             Step("read_file", {"path": path}, _source(path, 60 + cycle * 3, cycle)),
             Step("edit_file", {"path": path, "old_text": "value_1", "new_text": "value_2"}, f"Edited {path}"),
             Step("read_file", {"path": path}, _source(path, 60 + cycle * 3, cycle + 100)),
-            Step("run_shell", {"command": "git status"}, _git_status(3), text="Checking what changed."),
+            _shell("git status", _git_status(3), text="Checking what changed."),
         ]
-    steps.append(Step("run_shell", {"command": "pytest -q"}, _pytest_output(rng, 0)))
+    steps.append(_shell("pytest -q", _pytest_output(rng, 0)))
     return steps
 
 
@@ -139,7 +145,7 @@ def exploration() -> list[Step]:
                 steps.append(Step("read_file", {"path": path}, _source(path, 45, i)))
         steps.append(Step("search", {"pattern": "compute\\("},
                           "\n".join(f"{p}:{k}: value = compute()" for p in files for k in range(4))))
-        steps.append(Step("run_shell", {"command": "python -m mypy harness"},
+        steps.append(_shell("python -m mypy harness",
                           _ansi("Success: no issues found in 40 source files", "32") * 3))
     return steps
 
@@ -151,7 +157,7 @@ def build_failures() -> list[Step]:
     for attempt in range(50):
         log = "\n".join([_ansi(f"[{t:4d}/1200] Compiling unit_{t}.c", "36") for t in range(0, 1200, 4)] +
                         [_ansi(f"error: undefined reference to `sym_{rng.randint(0, 9)}'", "31;1")] * max(1, 8 - attempt // 6))
-        steps += [Step("run_shell", {"command": "make -j4"}, log, ok=attempt == 49),
+        steps += [_shell("make -j4", log, code=int(attempt < 49)),
                   Step("read_file", {"path": "src/link.c", "start_line": 1, "end_line": 80},
                        _source("src/link.c", 80, attempt)),
                   Step("edit_file", {"path": "src/link.c", "old_text": "a", "new_text": "b"}, "Edited src/link.c")]

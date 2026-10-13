@@ -198,8 +198,12 @@ def strip_noise(text: str) -> str:
 
 
 def _overwritten(line: str) -> str:
-    """The last non-empty carriage-return segment: a bare carriage return only moves the cursor."""
-    return next((part for part in reversed(line.split("\r")) if part), "")
+    """What a terminal shows: each carriage return moves the cursor to the start of the line, and the next segment
+    overwrites only as many characters as it has."""
+    shown = ""
+    for part in line.split("\r"):
+        shown = part + shown[len(part):]
+    return shown
 
 
 def _is_progress(line: str) -> bool:

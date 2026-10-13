@@ -3257,9 +3257,10 @@ class Runner:
         # Tool schemas are part of every prompt but not of the context list.
         overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
-        context, artifacts, masked_chars = s["context"], {}, 0
+        context, artifacts, masked_chars, outcomes = s["context"], {}, 0, None
         if self.artifact_tool_available(s):  # a receipt tells the model to call read_artifact
-            context, artifacts, masked_chars = self._mask_used_results(s)
+            outcomes = self._tool_outcomes(sid)  # loaded once a pass: trim reuses them
+            context, artifacts, masked_chars = self._mask_used_results(s, outcomes)
         if artifacts:
             def mask_results() -> None:
                 for digest, content in artifacts.items():
@@ -3283,7 +3284,7 @@ class Runner:
             s = self.db.get_session(sid)
         if before < self.cfg.elide_at * n:
             return s
-        return await self._elide_and_summarize(s, context, before, cpt, overhead)
+        return await self._elide_and_summarize(s, context, before, cpt, overhead, outcomes=outcomes)
 
     async def _compact_on_overflow(self, s: dict) -> dict:
         """The model server rejected the prompt as too long: one summary pass whatever `summarize_at` says."""
@@ -3293,11 +3294,11 @@ class Runner:
         return await self._elide_and_summarize(s, s["context"], before, cpt, overhead, overflow=True)
 
     async def _elide_and_summarize(self, s: dict, context: list, before: int, cpt: float, overhead: int,
-                                   overflow: bool = False) -> dict:
+                                   overflow: bool = False, outcomes: dict | None = None) -> dict:
         sid = s["id"]
         n = self.cfg.models[s["model"]].context_tokens
         with telemetry.span("compaction", {"harness.tokens_before": before}) as span:
-            context = await self._trim(s, context, cpt)
+            context = await self._trim(s, context, cpt, outcomes)
             context, _ = compaction.elide(context)
             after = compaction.estimate_tokens(context, cpt) + overhead
             # Under summarize_at after trim and elide: no summary call, so the pass is elide-only (#639). An overflow
@@ -3325,12 +3326,13 @@ class Runner:
             await self.db.for_session(s["id"]).awrite(compact)
         return self.db.get_session(sid)
 
-    async def _trim(self, s: dict, context: list, cpt: float) -> list:
+    async def _trim(self, s: dict, context: list, cpt: float, outcomes: dict | None = None) -> list:
         """The free rule tier ahead of elide and summary (compaction.trim); the `trim` event goes out before any summary
         request. The context itself is stored with the elide or summary result."""
         sid = s["id"]
         keep_chars = int(self.cfg.keep_recent * self.cfg.models[s["model"]].context_tokens * cpt)
-        outcomes = self._tool_outcomes(sid)
+        if outcomes is None:
+            outcomes = self._tool_outcomes(sid)
         context, saved = compaction.trim(context, self.cfg.trim, keep_chars, outcomes)
         if saved > 0:
             await self.db.for_session(sid).awrite(lambda: self.bus.emit(sid, "compaction", {
@@ -3341,10 +3343,10 @@ class Runner:
         """tool_call_id -> its tool_result event data, for this session's history."""
         return {e["data"].get("id"): e["data"] for e in self.db.events(sid) if e["type"] == "tool_result"}
 
-    def _mask_used_results(self, s: dict) -> tuple[list, dict, int]:
-        """Replace this session's used, oversized tool results with receipts (see compaction.mask_used_results)."""
+    def _mask_used_results(self, s: dict, outcomes: dict) -> tuple[list, dict, int]:
+        """Replace this session's used, oversized tool results with receipts (see compaction.mask_used_results).
+        `outcomes` is _tool_outcomes for the session."""
         sid = s["id"]
-        outcomes = self._tool_outcomes(sid)
         full_outputs = {}
         masked = {m.get("tool_call_id") for m in s["context"]
                   if m.get("role") == "tool" and (m.get("content") or "").startswith(compaction.RECEIPT_PREFIX)}

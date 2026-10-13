@@ -72,6 +72,8 @@ def test_file_reads_keep_their_noise_like_lines():
 
 def test_a_trailing_carriage_return_keeps_its_line():
     assert compaction.strip_noise("fatal: compilation failed\r\nnext\r") == "fatal: compilation failed\nnext"
+    # A shorter overwrite replaces only its own width, as on a terminal.
+    assert compaction.strip_noise("FATAL: missing config.json\r!") == "!ATAL: missing config.json"
 
 
 def test_a_percentage_without_a_bar_is_not_progress_noise():
