@@ -3,6 +3,12 @@ and every notification is dropped."""
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from harness import cli, modules
@@ -10,6 +16,7 @@ from harness.api import create_app
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.settings_keys import build_registry
+from harness_modules.notifications.service import DeliveryError
 
 from test_daemon import Script, make_cfg
 from test_modules import route_paths
@@ -67,6 +74,13 @@ def test_notify_test_route_publishes_or_refuses(tmp_path):
     with TestClient(create_app(m)) as client:
         assert client.post("/notify/test").json() == {"sent": True}
         assert sent[0]["topic"] == "t" and sent[0]["title"] == "Agent harness"
+
+        async def refused(client, payload):
+            raise DeliveryError("ntfy answered 401")
+        m.notifier.publish = refused
+        response = client.post("/notify/test")
+        assert response.status_code == 502
+        assert response.json()["detail"] == "ntfy answered 401"
         m.cfg.notify.enabled = False
         assert client.post("/notify/test").status_code == 400
 
@@ -135,6 +149,68 @@ def test_service_queues_publishes_and_retries(tmp_path):
     asyncio.run(go())
     assert seen[:2] == ["Bearer secret", "Bearer secret"]
     assert n.sent[0] == {"title": "p"}
+
+
+@pytest.mark.parametrize("answers, reason, attempts, sleeps", [
+    ([200], None, 1, []),
+    ([503, 200], None, 2, [2]),
+    ([401], "ntfy answered 401", 1, []),
+    ([503], "ntfy answered 503 after 3 attempts", 3, [2, 4]),
+    ([httpx.ConnectError("refused")], "ntfy unreachable after 3 attempts", 3, [2, 4]),
+])
+def test_publish_reports_delivery_and_retries_only_server_and_network_errors(
+        tmp_path, monkeypatch, answers, reason, attempts, sleeps):
+    n = enabled_manager(tmp_path).notifier
+    slept, calls = [], []
+
+    async def no_sleep(seconds):
+        slept.append(seconds)
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = answers[min(len(calls), len(answers) - 1)]
+        calls.append(request)
+        if isinstance(answer, Exception):
+            raise answer
+        return httpx.Response(answer)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await n.publish(client, {"title": "p"})
+    if reason is None:
+        asyncio.run(go())
+    else:
+        with pytest.raises(DeliveryError) as refused:
+            asyncio.run(go())
+        assert str(refused.value) == reason
+    assert len(calls) == attempts
+    assert slept == sleeps
+
+
+def test_background_queue_survives_a_refused_notification(tmp_path, monkeypatch, caplog):
+    n = enabled_manager(tmp_path).notifier
+    real_client = httpx.AsyncClient
+    titles = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        titles.append(json.loads(request.content)["title"])
+        return httpx.Response(401 if len(titles) == 1 else 200)
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+
+    async def go():
+        n.start()
+        n.send({"title": "refused"})
+        n.send({"title": "after"})
+        for _ in range(200):
+            if len(titles) == 2:
+                break
+            await asyncio.sleep(0.01)
+        await n.stop()
+    with caplog.at_level(logging.WARNING, logger="harness.notify"):
+        asyncio.run(go())
+    assert titles == ["refused", "after"]
+    assert "notification not delivered: ntfy answered 401" in caplog.text
 
 
 def test_listener_drops_chat_and_member_sessions(tmp_path):

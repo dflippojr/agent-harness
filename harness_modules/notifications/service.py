@@ -20,6 +20,11 @@ from harness.modules import Config, Database, TOOLS_ONLY, frozen_app_defaults, u
 
 log = logging.getLogger("harness.notify")
 
+
+class DeliveryError(Exception):
+    """ntfy never accepted a notification. The message is the plain reason, e.g. "ntfy answered 401"."""
+
+
 WATCHED = {"approval_requested", "approval_decided", "run_finished", "model_waking", "target_waiting",
            "target_online", "gpu_paused", "gpu_resumed", "waiting_memory", "memory_recovered"}
 
@@ -108,15 +113,20 @@ class Notifier:
                     payload = event.get("payload") or self.build(event)
                     if payload:
                         await self.publish(client, payload)
+                except DeliveryError as e:
+                    log.warning("notification not delivered: %s", e)
                 except Exception:  # noqa: BLE001 - a failed notification must not stop later ones
                     log.exception("notification for event %s failed", event.get("seq"))
 
     async def publish(self, client: httpx.AsyncClient, payload: dict) -> None:
+        """Post one notification. A 5xx answer or a network error is retried twice more; a 4xx answer is not.
+        Raises DeliveryError when ntfy never accepts the notification."""
         self.sent = (self.sent + [payload])[-50:]
         headers = {}
         token = self._token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        reason = "ntfy unreachable after 3 attempts"
         for attempt in range(3):
             try:
                 resp = await client.post(self.cfg.notify.server, json=payload, headers=headers)
@@ -124,10 +134,14 @@ class Notifier:
                     return
                 log.warning("ntfy answered %s: %s", resp.status_code, resp.text[:200])
                 if resp.status_code < 500:
-                    return
+                    raise DeliveryError(f"ntfy answered {resp.status_code}")
+                reason = f"ntfy answered {resp.status_code} after 3 attempts"
             except httpx.HTTPError as e:
                 log.warning("ntfy unreachable (%s)", e)
-            await asyncio.sleep(2 * (attempt + 1))
+                reason = "ntfy unreachable after 3 attempts"
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
+        raise DeliveryError(reason)
 
     def link(self, path: str) -> str:
         return f"{self.cfg.public_url}{path}" if self.cfg.public_url else ""
