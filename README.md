@@ -33,7 +33,7 @@ git branch for you to review and merge.
 flowchart TB
     subgraph Clients["Clients (over Tailscale)"]
         direction LR
-        WEB["Agent Harness Web<br/>installable PWA"]
+        WEB["Stables<br/>installable PWA"]
         CLI["harness CLI"]
         SDK["Python SDK and<br/>third-party apps"]
     end
@@ -152,9 +152,9 @@ agent-harness/
 │   ├── apps.py, admin.py  versioned App API and owner API
 │   ├── principal.py       owner / member / guest / app / device identity model
 │   ├── settings*.py       typed configuration registry
-│   ├── managed_config.py  crash-safe config overlay: pending → active → last-known-good
-│   └── web/               Agent Harness Web: vanilla JS PWA with a service worker
+│   └── managed_config.py  crash-safe config overlay: pending → active → last-known-good
 ├── harness_modules/       optional add-ons behind the module interface: images, runners, search, endpoint, jobs, backup, ... (docs/modules.md)
+├── stables/public/        Stables: the standalone browser client, a vanilla JS PWA served at / when present (docs/web.md)
 ├── macrunner/             Mac Runner: stdlib-only Python 3.9, launchd, sandbox-exec profile
 ├── sdk/                   single-file Python SDK (depends only on httpx) + example app
 ├── bakeoff/               model and harness benchmarks, hidden-test tasks, recorded-web suite
@@ -173,7 +173,7 @@ agent-harness/
 | Component | What it is | Where it lives |
 | --- | --- | --- |
 | **Agent Harness Server** | The host daemon and its APIs | [`harness/`](harness) |
-| **Agent Harness Web** | The first-party browser UI and installable PWA ([`docs/web.md`](docs/web.md)) | [`stables/public/`](stables/public) |
+| **Stables** | The first-party browser client and installable PWA, standalone over the documented API ([`docs/web.md`](docs/web.md)) | [`stables/public/`](stables/public) |
 | **Agent Harness CLI** | The installed `harness` command | [`harness/cli.py`](harness/cli.py) |
 | **Agent Harness Runner** | A remote execution worker, such as the Mac Runner | [`macrunner/`](macrunner) |
 | **Agent Harness SDK** | The supported Python client library | [`sdk/`](sdk) |
@@ -339,7 +339,7 @@ gives up the GPU.
 | App API and SDK | [app-api](docs/app-api.md) · [`sdk/`](sdk) |
 | Owner API, members, per-app provider keys | [admin-api](docs/admin-api.md) |
 | Configuration registry | [config-registry](docs/config-registry.md) |
-| Web client deployment | [web](docs/web.md) |
+| Stables (web client) | [web](docs/web.md) |
 | UI testing with the fake model | [ui-testing](docs/ui-testing.md) |
 | Harness-design gap report (arXiv 2609.00006, 2609.20804) | [harness-design-gap-report](docs/harness-design-gap-report.md) |
 | Mac client and version compatibility | [mac-client](docs/mac-client.md) · [compatibility](docs/compatibility.md) |

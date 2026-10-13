@@ -1,8 +1,8 @@
 schema_version: 1
 kind: module
 target: readme-components
-title: Agent Harness Web
-summary: 'The first-party browser UI and installable PWA ([`docs/web.md`](docs/web.md))'
+title: Stables
+summary: 'The first-party browser client and installable PWA, standalone over the documented API ([`docs/web.md`](docs/web.md))'
 order: 20
 links:
   - text: '`stables/public/`'

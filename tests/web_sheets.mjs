@@ -152,7 +152,7 @@ assert.equal(required("x")("y"), "");
   assert.equal(await pending, false);
   assert.equal(await update.checkCompatibility(), true, "boot continues while the offer is open");
   const dialog = only();
-  assert.match(text(dialog), /Update Agent Harness Web\?/);
+  assert.match(text(dialog), /Update Stables\?/);
   assert.equal(text(pick(dialog, "confirm")), "Update now");
   win.dispatchEvent({ type: "hashchange" });
   assert.equal(sheets().length, 1, "the boot redirect to #/agents does not dismiss the update offer");

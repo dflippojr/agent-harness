@@ -1,4 +1,4 @@
-// Agent Harness Web transport: the PWA can be bundled with Agent Harness Server or hosted independently.
+// Stables transport: the PWA can be bundled with Agent Harness Server or hosted independently.
 // Connection settings are intentionally browser-local and never sent anywhere except the chosen Server.
 /** @import { ApiResponse, ClientError, HttpMethod, RequestOptions, Surface } from '../../tools/web-types/contracts.js' */
 

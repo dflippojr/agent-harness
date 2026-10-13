@@ -1,4 +1,4 @@
-"""Issue #91: canonical product names stay consistent across active surfaces."""
+"""Issues #91 and #334: canonical product names stay consistent across active surfaces."""
 
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ ROOT = Path(__file__).parents[1]
 def test_web_metadata_and_compatibility_identifiers():
     web = ROOT / "stables" / "public"
     manifest = json.loads((web / "manifest.webmanifest").read_text(encoding="utf-8"))
-    assert manifest["name"] == "Agent Harness Web"
-    assert manifest["short_name"] == "Harness"
+    assert manifest["name"] == "Stables"
+    assert manifest["short_name"] == "Stables"
 
     index = (web / "index.html").read_text(encoding="utf-8")
-    assert "<title>Agent Harness Web</title>" in index
-    assert 'apple-mobile-web-app-title" content="Harness"' in index
+    assert "<title>Stables</title>" in index
+    assert 'apple-mobile-web-app-title" content="Stables"' in index
 
     transport = (web / "client.mjs").read_text(encoding="utf-8")
     assert '"harness.daemonUrl"' in transport
@@ -31,7 +31,7 @@ def test_readme_glossary_defines_every_first_party_surface():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for name in (
         "Agent Harness Server",
-        "Agent Harness Web",
+        "Stables",
         "Agent Harness CLI",
         "Agent Harness Runner",
         "Agent Harness SDK",
@@ -47,7 +47,8 @@ def test_web_guide_is_canonical_and_old_path_is_a_short_pointer():
     guide = (ROOT / "docs" / "web.md").read_text(encoding="utf-8")
     pointer = (ROOT / "docs" / "control-center.md").read_text(encoding="utf-8")
 
-    assert guide.startswith("# Agent Harness Web\n")
+    assert guide.startswith("# Stables\n")
+    assert "formerly Agent Harness Web" in guide
     assert "Agent Harness Server URL" in guide
     assert "Web connections" in guide
     assert "harness.*" in guide

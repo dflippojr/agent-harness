@@ -87,7 +87,7 @@ def test_github_routes_serve_owner_and_build_prompt(tmp_path, monkeypatch):
 def test_web_app_and_guard(tmp_path):
     client, m, _ = make_client(tmp_path, [Completion(content="hi")])
     with client:
-        assert "<title>Agent Harness Web</title>" in client.get("/").text
+        assert "<title>Stables</title>" in client.get("/").text
         js = client.get("/static/app.js").text
         chrome_js = client.get("/static/lib/chrome.mjs").text
         router_js = client.get("/static/lib/router.mjs").text
@@ -216,8 +216,8 @@ def test_web_app_and_guard(tmp_path):
         assert client.get("/sw.js").headers["content-type"].startswith("text/javascript")
         manifest = client.get("/manifest.webmanifest").json()
         assert manifest["display"] == "standalone"
-        assert manifest["name"] == "Agent Harness Web"
-        assert manifest["short_name"] == "Harness"
+        assert manifest["name"] == "Stables"
+        assert manifest["short_name"] == "Stables"
         # tailnet identity
         assert client.get("/sessions", headers={"Tailscale-User-Login": "intruder@example.com"}).status_code == 403
         me = client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()

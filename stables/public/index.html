@@ -8,8 +8,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Harness">
-  <title>Agent Harness Web</title>
+  <meta name="apple-mobile-web-app-title" content="Stables">
+  <title>Stables</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/icon-180.png">
   <link rel="icon" href="/icon-192.png">
@@ -89,14 +89,14 @@
   </script>
   <header id="bar">
     <button id="back" class="icon" aria-label="Back" hidden>‹</button>
-    <h1 id="title" hidden>Agent Harness</h1>
+    <h1 id="title" hidden>Stables</h1>
     <span id="conn" class="conn" role="status" title="Agent Harness Server live connection" hidden></span>
     <a id="settings-btn" class="icon" href="#/settings" aria-label="Settings" hidden>
       <svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
     </a>
   </header>
   <nav id="tab-bar" aria-label="Sections" hidden>
-    <a class="rail-brand" href="#/" aria-label="Harness home"><img src="/icon-192.png" width="32" height="32" alt=""><span>Harness</span></a>
+    <a class="rail-brand" href="#/" aria-label="Stables home"><img src="/icon-192.png" width="32" height="32" alt=""><span>Stables</span></a>
     <a class="tab" href="#/chat" data-tab="chat"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/></svg><span>Chat</span></a>
     <a class="tab" href="#/agents" data-tab="agents"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="7" width="16" height="12" rx="3"/><circle cx="9" cy="13" r="1.5"/><circle cx="15" cy="13" r="1.5"/><path d="M12 7V4"/></svg><span>Agents</span><span id="agents-needs-you" class="rail-count" role="status" hidden></span></a>
     <a class="tab" href="#/jobs" data-tab="jobs"><svg class="tab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Jobs</span></a>

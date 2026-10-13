@@ -1,7 +1,7 @@
 schema_version: 1
 kind: doc-index
 target: readme-docs-index
-title: Web client deployment
+title: Stables (web client)
 order: 50
 links:
   - text: 'web'

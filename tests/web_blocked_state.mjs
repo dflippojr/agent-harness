@@ -149,7 +149,7 @@ await new Promise((r) => setTimeout(r, 50));
 if (!byId.app.textContent.includes("Reload and update")) {
   throw new Error(`blocking card left after nav: ${byId.app.textContent}`);
 }
-if (byId.app.textContent !== before && !byId.app.textContent.includes("Update Agent Harness Web")) {
+if (byId.app.textContent !== before && !byId.app.textContent.includes("Update Stables")) {
   throw new Error(`blocking card replaced: ${byId.app.textContent}`);
 }
 if (apiCalls().length) {
