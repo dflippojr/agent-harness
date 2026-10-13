@@ -1780,7 +1780,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Sessions */
+        /**
+         * List Sessions
+         * @description One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that
+         *     is active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663).
+         */
         get: operations["admin_list_sessions_sessions_get"];
         put?: never;
         /** Create Session */
@@ -4663,7 +4667,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Sessions */
+        /**
+         * List Sessions
+         * @description One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that
+         *     is active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663).
+         */
         get: operations["list_sessions_sessions_get"];
         put?: never;
         /** Create Session */
@@ -10382,6 +10390,8 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                before?: string;
+                target?: string;
             };
             header?: never;
             path?: never;
@@ -16069,6 +16079,8 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                before?: string;
+                target?: string;
             };
             header?: never;
             path?: never;

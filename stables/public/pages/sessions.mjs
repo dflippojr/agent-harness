@@ -48,8 +48,22 @@ async function viewList(pane = null) {
     showListAction("#/new", "+ New task");
   }
 
+  // The first page always holds every active session (#663); "Show older" appends finished ones by the server's cursor.
   let sessions = [];
+  let older = [];
+  let nextBefore = null;
   let targets = [];
+  const sessionsPath = (before) => {
+    const query = new URLSearchParams();
+    if (sessionTarget !== "all") query.set("target", sessionTarget);
+    if (before) query.set("before", before);
+    const qs = query.toString();
+    return qs ? `/sessions?${qs}` : "/sessions";
+  };
+  const shown = () => {
+    const ids = new Set(sessions.map((s) => s.id));
+    return [...sessions, ...older.filter((s) => !ids.has(s.id))];
+  };
   const targetName = (target) => target === "tower" ? "Tower" : TARGET_LABEL[target] || target;
   const sessionCardKey = (s) => [
     s.id, s.title, s.status, s.updated_at, s.chat_summary, s.queue_position, s.review, s.job_status,
@@ -82,26 +96,45 @@ async function viewList(pane = null) {
         !ask && s.chat_summary ? h("p", { class: "agent-preview" }, s.chat_summary) : null),
       h("span", { class: "agent-chev", html: CHEVRON_SVG }));
   };
-  const renderSessions = () => {
-    const visible = sessionTarget === "all" ? sessions : sessions.filter((s) => s.target === sessionTarget);
-    if (!sessions.length) {
-      delete list.dataset.keys;
-      fill(list, h("p", { class: "empty" }, "No sessions yet. Start one with “New task”."));
-      return;
+  let loadingOlder = false;
+  const showOlder = async (button) => {
+    if (loadingOlder || !nextBefore) return;
+    loadingOlder = true;
+    button.disabled = true;
+    button.textContent = "Loading…";
+    const asked = sessionTarget;
+    let next = null;
+    try {
+      const page = await api(sessionsPath(nextBefore), { onHeaders: (headers) => { next = headers.get("X-Next-Before"); } });
+      if (gone || asked !== sessionTarget) return;  // left, or the machine changed meanwhile
+      older = [...older, ...page];
+      nextBefore = next;
+      renderSessions();
+    } catch (e) {
+      console.error("loading older sessions failed", e);
+      button.disabled = false;
+      button.textContent = "Couldn't load older sessions. Retry";
+    } finally {
+      loadingOlder = false;
     }
+  };
+  const renderSessions = () => {
+    const visible = shown();
     if (!visible.length) {
       delete list.dataset.keys;
-      fill(list, h("p", { class: "empty" }, `No sessions on the ${targetName(sessionTarget)} yet.`));
+      fill(list, h("p", { class: "empty" }, sessionTarget === "all" ? "No sessions yet. Start one with “New task”."
+        : `No sessions on the ${targetName(sessionTarget)} yet.`));
       return;
     }
     const groups = groupSessions(visible);
     // The group is part of the key: a failure that ages out of Needs you moves without any field changing.
-    const keys = groups.flatMap((g) => g.sessions.map((s) => `${g.key}\0${sessionCardKey(s)}`)).join("\n");
+    const keys = groups.flatMap((g) => g.sessions.map((s) => `${g.key}\0${sessionCardKey(s)}`)).join("\n") + (nextBefore ? "\nmore" : "");
     if (list.dataset.keys === keys && list.querySelector("a.agent-row")) return;
     list.dataset.keys = keys;
     fill(list, groups.map((g) => h("section", { class: `agent-group ${g.key}`, "aria-label": g.label },
       h("h2", { class: "agent-sec" }, g.label, g.key === "recent" ? null : h("span", { class: "agent-count" }, String(g.sessions.length))),
-      h("div", { class: "agent-list" }, g.sessions.map(sessionRow)))));
+      h("div", { class: "agent-list" }, g.sessions.map(sessionRow)))),
+    nextBefore ? h("button", { type: "button", class: "btn secondary agent-more", onclick: (e) => showOlder(e.currentTarget) }, "Show older") : null);
     pane?.paint();
   };
   const renderTargetSwitch = () => {
@@ -110,10 +143,15 @@ async function viewList(pane = null) {
     fill(targetSwitch, ["all", ...targets].map((target) => h("button", {
       type: "button", class: target === sessionTarget ? "on" : "", "aria-pressed": target === sessionTarget,
       onclick: () => {
+        if (target === sessionTarget) return;
         sessionTarget = target;
         try { localStorage.setItem("harness.sessionTarget", target); } catch (_) { /* private mode */ }
         renderTargetSwitch();
-        renderSessions();
+        // The server filters by machine (#663), so the pages loaded so far belong to the old choice.
+        sessions = [];
+        older = [];
+        nextBefore = null;
+        void refreshNow();
       },
     }, target === "all" ? "All" : targetName(target))));
   };
@@ -157,12 +195,23 @@ async function viewList(pane = null) {
   search.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
   if (searchQuery.trim()) void runSearch();
 
+  let listRun = 0;  // only the latest load paints: a machine switch can start one while another is on its way
   const render = async () => {
+    const run = ++listRun;
+    const asked = sessionTarget;
+    let next = null;
     const [freshSessions, queue, gpu, projects] = await Promise.all([
-      api("/sessions"), api("/queue"), isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
-    sessions = freshSessions;
+      api(sessionsPath(), { onHeaders: (headers) => { next = headers.get("X-Next-Before"); } }), api("/queue"),
+      isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
+    if (gone || run !== listRun) return;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]
       .sort(compareTargets);
+    if (asked !== "all" && !targets.includes(asked)) {  // a remembered machine that is gone: load every machine's
+      sessionTarget = "all";
+      return render();
+    }
+    sessions = freshSessions;
+    if (!older.length) nextBefore = next;  // once older pages show, the cursor goes on from the last of them
     const waiting = queue.filter((q) => q.position > 0).length;
     const paused = gpu && (gpu.manual || gpu.state !== "clear");
     fill(queueNote,

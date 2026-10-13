@@ -7258,6 +7258,7 @@
     },
     "/api/admin/v1/sessions": {
       "get": {
+        "description": "One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that\nis active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663).",
         "operationId": "admin_list_sessions_sessions_get",
         "parameters": [
           {
@@ -7268,6 +7269,26 @@
               "default": 50,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Before",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Target",
+              "type": "string"
             }
           }
         ],
@@ -14171,6 +14192,7 @@
     },
     "/sessions": {
       "get": {
+        "description": "One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that\nis active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663).",
         "operationId": "list_sessions_sessions_get",
         "parameters": [
           {
@@ -14181,6 +14203,26 @@
               "default": 50,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Before",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Target",
+              "type": "string"
             }
           }
         ],
