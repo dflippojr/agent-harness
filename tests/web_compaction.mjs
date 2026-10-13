@@ -1,4 +1,4 @@
-// Session-page VM: mask compaction must not crash summary notes or ctxUsed (#248).
+// Session-page VM: mask and trim compaction must not crash summary notes or ctxUsed (#248).
 import { createContext } from "node:vm";
 import { runApp } from "./web_app_loader.mjs";
 import { El as BaseEl, Emitter, Node, createDocument, fakeEventSource, storage, walk } from "./web_stub_dom.mjs";
@@ -192,6 +192,21 @@ await sleep(20);
 if (!text().includes(SUMMARY)) fail(`summary-only: ${text()}`);
 if (text().includes(MASK) || text().includes(FAILED)) fail(`summary-only leaked mask copy: ${text()}`);
 if (!text().includes("30%")) fail(`summary-only ctxUsed: ${text()}`);
+
+// trim then summary (#637, the live _elide_and_summarize order): a one-line note, then the summary completes.
+const TRIM = "Removed repeated, stale and noisy tool output (~900 tokens saved)";
+es = await openSession();
+es.emit("compaction", { tier: "trim", tokens_saved: 900, characters_saved: 2700 }, 1);
+await sleep(20);
+if (!text().includes(TRIM)) fail(`trim note: ${text()}`);
+if (!text().includes("90%") || text().includes("Trimmed old tool output")) fail(`trim must not act like elide: ${text()}`);
+es.emit("compaction_started", { messages: 12, tokens_before: 8000 }, 2);
+await sleep(20);
+es.emit("compaction", {
+  tier: "summary", tokens_before: 8000, tokens_after: 3000, summarized_messages: 12, summary: "handoff",
+}, 3);
+await sleep(20);
+if (!text().includes(TRIM) || !text().includes(SUMMARY) || text().includes(FAILED)) fail(`trim then summary: ${text()}`);
 
 // elide rendering without a compact note stays the same.
 es = await openSession();

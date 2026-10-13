@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from .atomic_io import write_atomic
+from .compaction import TrimRules
 
 ROOT = Path(__file__).resolve().parent.parent
 PROJECTS_FILE = "projects.yaml"
@@ -584,6 +585,7 @@ class Config:
     reset_at: float = 0.60
     mask_min_chars: int = 2000
     state_max_chars: int = 8000
+    trim: TrimRules = field(default_factory=TrimRules)
     repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
     canary: CanaryConfig = field(default_factory=CanaryConfig)
     tool_output: ToolOutputConfig = field(default_factory=ToolOutputConfig)
@@ -1089,6 +1091,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
                            float(compaction.get("summarize_at", 0.65))),
         mask_min_chars=_mask_min_chars(compaction.get("mask_min_chars", 2000)),
         state_max_chars=_state_max_chars(compaction.get("state_max_chars", 8000)),
+        trim=_trim_rules(compaction.get("trim")),
         tool_output=_tool_output(raw.get("tool_output")),
     )
     from . import fake_model
@@ -1217,6 +1220,26 @@ def _state_max_chars(value) -> int:
     except (TypeError, ValueError, OverflowError):
         return 8000
     return parsed if 256 <= parsed <= 100_000 else 8000
+
+
+def _trim_rules(raw) -> TrimRules:
+    """`compaction.trim` (#637): each rule switch must be a YAML boolean and each line count 0-10,000; anything else
+    keeps the default."""
+    raw = raw if isinstance(raw, dict) else {}
+    default = TrimRules()
+
+    def switch(key: str) -> bool:
+        value = raw.get(key)
+        return value if isinstance(value, bool) else getattr(default, key)
+
+    def lines(key: str) -> int:
+        value = raw.get(key)
+        ok = isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 10_000
+        return value if ok else getattr(default, key)
+
+    return TrimRules(strip_noise=switch("strip_noise"), head_tail=switch("head_tail"),
+                     head_lines=lines("head_lines"), tail_lines=lines("tail_lines"),
+                     superseded_reads=switch("superseded_reads"), dedupe=switch("dedupe"))
 
 
 def _validate_loaded(cfg: Config) -> None:
