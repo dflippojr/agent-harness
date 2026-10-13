@@ -139,7 +139,7 @@ elision cost, and they change no behaviour. `summary_averted` is set on each
 
 | Field | Counts |
 | --- | --- |
-| `read_artifact_calls` | `read_artifact` calls that ran, failed ones included |
+| `read_artifact_calls` | `read_artifact` calls that ran, failed ones included; argument-validation rejections do not count |
 | `read_artifact_repeats` | successful recoveries of a digest already recovered in the session |
 | `edit_mismatches` | `edit_file` calls rejected with `must appear exactly once` |
 | `elide_only_compactions` | `elide` passes with `summary_averted` set |

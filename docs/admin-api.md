@@ -704,12 +704,13 @@ The activity counts (#639) are the same in each `turn_metrics` row and in the se
 
 | Field | Counts |
 | --- | --- |
-| `read_artifact_calls` | `read_artifact` calls that ran, including failed ones (policy-blocked and denied calls do not count) |
+| `read_artifact_calls` | `read_artifact` calls that ran, including failed ones (argument-validation rejections, policy-blocked and denied calls do not count) |
 | `read_artifact_repeats` | successful `read_artifact` calls for a digest this session had already recovered successfully |
 | `edit_mismatches` | `edit_file` calls that failed with `old_text must appear exactly once` |
 | `elide_only_compactions` | compaction passes that ended at the `elide` tier with the context under `summarize_at` and no summary call |
 
-Older sessions report 0 in `totals` and null in the aggregate. The Prometheus `harness_edit_mismatch_total` and
+A pass that no model turn committed (the next call failed or was cancelled) is kept in a turn row with only `turn` and the
+activity fields, so the totals still hold it. Older sessions report 0 in `totals` and null in the aggregate. The Prometheus `harness_edit_mismatch_total` and
 `harness_compaction_elide_only_total` counters sum the same turn-level fields.
 
 `tool_result.output_chars` is Unicode code points of the result before the 20,000-character event truncation.

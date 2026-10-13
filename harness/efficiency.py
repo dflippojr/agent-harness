@@ -16,6 +16,7 @@ DELEGATE_TOOLS = frozenset({"delegate"})
 # Per-turn activity counts (#639), summed into session totals and the session aggregate.
 ACTIVITY_KEYS = ("read_artifact_calls", "read_artifact_repeats", "edit_mismatches", "elide_only_compactions")
 EDIT_MISMATCH = "must appear exactly once"
+BAD_ARGUMENTS = "Error: bad arguments for "  # argument validation refused the call before the tool ran (runner)
 
 _INTERRUPTED_MARK = "the daemon restarted while this tool call was running"
 
@@ -214,6 +215,8 @@ class RetryTracker:
     def _count_activity(self, name: str, args, data: dict) -> None:
         """A read_artifact call counts; a repeat is a successful recovery of a digest already recovered. An edit_file
         call counts as a mismatch when it failed because old_text did not match exactly once."""
+        if str(data.get("output") or "").startswith(BAD_ARGUMENTS):
+            return  # rejected before the tool ran, so not a call that ran
         if name == "read_artifact":
             self.activity["read_artifact_calls"] += 1
             if data.get("ok"):
@@ -254,6 +257,12 @@ def turn_counts(events: list[dict]) -> dict:
     tracker.replay(events)
     return {"dead_end_retries": tracker.dead_end_retries, "compaction_correlated_retries": dict(tracker.correlated),
             **tracker.activity}
+
+
+def has_increments(counts: dict) -> bool:
+    """Whether `turn_counts` found a retry or activity since the last turn_metrics row (correlated retries only
+    ever follow a dead-end retry, so they need no check of their own)."""
+    return bool(counts["dead_end_retries"] or any(counts[key] for key in ACTIVITY_KEYS))
 
 
 def add_activity(totals: dict, counts: dict) -> dict:

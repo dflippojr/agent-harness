@@ -2238,12 +2238,18 @@ class Runner:
             "recomputed_tokens": efficiency.recomputed_tokens(completion.prompt_tokens, cache),
         }
 
-    def _emit_turn_metrics(self, sid: str) -> None:
+    def _emit_turn_metrics(self, sid: str, final: bool = False) -> None:
         s = self.db.get_session(sid)
         pending = (s.get("run") or {}).get("pending_turn_metrics")
-        if not pending:
+        if not pending and not final:
             return
         counts = efficiency.turn_counts(self.db.events(sid))
+        if not pending:
+            # The run ended after a compaction or a tool result that no model turn committed (the next call failed or
+            # was cancelled). Keep those counts in a row with no turn data, so totals and the metrics still hold them.
+            if not efficiency.has_increments(counts):
+                return
+            pending = {"turn": (s.get("run") or {}).get("turns", 0)}
         run = {k: v for k, v in s["run"].items() if k != "pending_turn_metrics"}
         payload = {**pending, **counts}
 
@@ -3401,7 +3407,7 @@ class Runner:
         remove_tree(path)
 
     async def _run_finished(self, sid: str) -> dict:
-        self._emit_turn_metrics(sid)
+        self._emit_turn_metrics(sid, final=True)
         s = self.db.get_session(sid)
         extra, fields, quotes = {}, {}, []
         if s.get("job_id"):  # scheduled job: the answer's last STATUS line decides how loudly to notify (jobs.py)

@@ -32,7 +32,7 @@ from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, ho
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
-from . import audit_context, operation_audit, namespace_audit, checkpoints, llm, member_keys, projects, secret_scan, telemetry
+from . import audit_context, operation_audit, namespace_audit, checkpoints, llm, member_keys, projects, secret_scan, telemetry, efficiency
 
 log = logging.getLogger("harness.manager")
 
@@ -2006,6 +2006,8 @@ class Manager:
 
     def summary(self, s: dict) -> dict:
         out = {k: v for k, v in s.items() if k not in ("context", "inbox")}
+        # Sessions from before the activity counts (#639) have no such keys; zero them so the response always carries them.
+        out["totals"] = {**efficiency.empty_activity(), **(s.get("totals") or {})}
         out["failure"] = self._failure(s)
         out["queue_position"] = self.scheduler.positions().get(s["id"])
         model = self.cfg.models.get(s["model"])

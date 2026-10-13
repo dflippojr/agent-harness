@@ -10,7 +10,7 @@ from harness import compaction, efficiency
 from harness.admin import PREFIX
 from harness.api import create_app
 from harness.efficiency import add_activity, canonical_args, compose, session_payload, turn_counts, turn_increments
-from harness.llm import Completion, _apply_chunk
+from harness.llm import Completion, LLMError, _apply_chunk
 from harness.manager import Manager
 from harness.metrics import render
 from test_daemon import Script, call, events, make_cfg, wait_status
@@ -292,6 +292,9 @@ def test_activity_counts_per_turn_and_repeats_across_turns():
         _assistant(5, "r4", "read_artifact", _read_artifact_args(digest)),
         _call("r4", "read_artifact", _read_artifact_args(digest), decision="deny"),
         _result("r4", "read_artifact", False, "Error: blocked by policy (not allowed). Don't retry this."),
+        _assistant(9, "r6", "read_artifact", {}),
+        _call("r6", "read_artifact", {}),
+        _result("r6", "read_artifact", False, "Error: bad arguments for read_artifact: 'artifact_id' is required"),
         _assistant(6, "e2", "edit_file", edit_args),
         _call("e2", "edit_file", edit_args),
         _result("e2", "edit_file", True, "edited"),
@@ -301,7 +304,8 @@ def test_activity_counts_per_turn_and_repeats_across_turns():
         _ev("compaction", 20, tier="elide", tokens_before=100, tokens_after=90),
     ]
     counts = turn_counts(second)
-    assert counts["read_artifact_calls"] == 2  # r2 and r3; the denied r4 is not a call that ran
+    # r2 and r3 are calls that ran; the denied r4 and the malformed r6 (refused before the tool) are not
+    assert counts["read_artifact_calls"] == 2
     assert counts["read_artifact_repeats"] == 1  # r2 re-reads the digest recovered in the first turn
     assert counts["edit_mismatches"] == 0  # e2 succeeded; e3 failed for another reason
     assert counts["elide_only_compactions"] == 0  # the second elide left the context above summarize_at
@@ -498,6 +502,45 @@ def test_native_loop_counts_read_artifact_edit_mismatch_and_elide_only(tmp_path)
         session = client.get(f"{PREFIX}/sessions/{sid}").json()
         assert session["totals"]["read_artifact_calls"] == 2
         assert session["totals"]["edit_mismatches"] == 1
+
+
+def test_pass_before_a_failed_model_call_still_reaches_totals(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.elide_at = 0
+    cfg.summarize_at = 99
+    cfg.reset_at = 99
+    script = Script([
+        Completion(tool_calls=[call("write_file", 0, path="a.txt", content="one one")],
+                   prompt_tokens=40, completion_tokens=3),
+        Completion(tool_calls=[call("edit_file", 1, path="a.txt", old_text="one", new_text="two")],
+                   prompt_tokens=50, completion_tokens=3),
+        LLMError("model server unreachable"),  # the third turn never commits, so its elide pass has no turn row
+    ])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        await m.start()
+        sid = m.create("fail after a pass")["id"]
+        await wait_status(m, sid, "failed")
+        elides = [c for c in events(m, sid, "compaction") if c["tier"] == "elide"]
+        assert len(elides) == 3 and all(c["summary_averted"] for c in elides)
+        rows = events(m, sid, "turn_metrics")
+        # The last pass has no turn: its row carries the counts and no turn data.
+        unturned = [row for row in rows if row.get("composition") is None]
+        assert len(unturned) == 1 and unturned[0]["elide_only_compactions"] == 1
+        totals = m.db.get_session(sid)["totals"]
+        assert totals["elide_only_compactions"] == len(elides)
+        assert totals["edit_mismatches"] == 1  # "one" occurs twice in "one one"
+        assert sum(row["elide_only_compactions"] for row in rows) == len(elides)
+        # A session from before the counts has no such totals keys; the summary still reports them as zero.
+        legacy = m.summary({**m.db.get_session(sid), "totals": {"turns": 1}})
+        assert legacy["totals"]["read_artifact_calls"] == 0 and legacy["totals"]["turns"] == 1
+        await m.stop()
+        return sid, m
+
+    sid, m = asyncio.run(body())
+    with TestClient(create_app(m)) as client:
+        assert client.get(f"{PREFIX}/sessions/{sid}").json()["totals"]["elide_only_compactions"] == 3
 
 
 def test_metrics_survive_manager_restart(tmp_path):
