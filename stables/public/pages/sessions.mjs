@@ -54,9 +54,9 @@ async function viewList(pane = null) {
   let olderPages = 0;
   let nextBefore = null;
   let targets = [];
-  const sessionsPath = (before) => {
+  const sessionsPath = (target, before) => {
     const query = new URLSearchParams();
-    if (sessionTarget !== "all") query.set("target", sessionTarget);
+    if (target !== "all") query.set("target", target);
     if (before) query.set("before", before);
     const qs = query.toString();
     return qs ? `/sessions?${qs}` : "/sessions";
@@ -64,18 +64,18 @@ async function viewList(pane = null) {
   // The owner route pages and filters by machine; a member's App-surface list does neither, so filter here too.
   const shown = () => sessions.filter((s) => sessionTarget === "all" || s.target === sessionTarget);
   const listOptions = (onNext) => ({ surface: ownerSurface(), onHeaders: (headers) => onNext(headers.get("X-Next-Before")) });
-  // The first page and `olderPages` more, each row once (a later page can repeat an active row of the first).
-  const loadSessions = async () => {
+  // The first page of `target` and `olderWanted` more, each row once (a later page can repeat an active row of the first).
+  const loadSessions = async (target, olderWanted) => {
     const byId = new Map();
     const read = async (before) => {
       let next = null;
-      const page = await api(sessionsPath(before), listOptions((cursor) => { next = cursor; }));
+      const page = await api(sessionsPath(target, before), listOptions((cursor) => { next = cursor; }));
       for (const s of page) if (!byId.has(s.id)) byId.set(s.id, s);
       return next;
     };
     let next = await read(null);
     let pages = 0;
-    while (next && pages < olderPages) {
+    while (next && pages < olderWanted) {
       next = await read(next);
       pages++;
     }
@@ -214,7 +214,7 @@ async function viewList(pane = null) {
   const render = async () => {
     const run = ++listRun;
     const asked = sessionTarget;
-    const [loaded, queue, gpu, projects] = await Promise.all([loadSessions(), api("/queue"),
+    const [loaded, queue, gpu, projects] = await Promise.all([loadSessions(asked, olderPages), api("/queue"),
       isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
     if (gone || run !== listRun) return;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]

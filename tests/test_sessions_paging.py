@@ -96,6 +96,7 @@ def test_app_stores_merge_one_page_across_stores(tmp_path):
             rows, cursor = app.session_page(3, before=cursor)
             seen += [r["id"] for r in rows]
         assert seen == ["a3", "w3", "a2", "w2", "a1", "w1", "a0", "w0"]
+        assert isinstance(app.active_sessions(), list)  # not scoped: no with_app to refuse
     finally:
         stores.close()
 

@@ -78,7 +78,7 @@ _ENDED = ("done", "failed", "cancelled")
 # pass "" (the owner and members: the main store only) or the App's id (the main store plus that App's own).
 EVERY_APP = "*"
 # Lists, searches and id lookups that take `with_app`; `scope(app_id)` fills it in.
-_SCOPED = frozenset({"list_sessions", "session_page", "active_sessions", "search_events", "find_session_ids", "pending_approvals"})
+_SCOPED = frozenset({"list_sessions", "session_page", "search_events", "find_session_ids", "pending_approvals"})
 _APP_ERROR = "app_error:"  # meta key prefix: an App's failed-session count and last error (metadata, main store)
 # Agent Harness Web's reserved App id (#330 decision 4). Its store holds every session with no App (the owner's and
 # members'); it has no token, is never revoked or erased, and its sessions keep their owner's folders (`storage`).
