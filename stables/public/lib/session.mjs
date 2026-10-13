@@ -62,7 +62,7 @@ export function createSession({ agentHarnessWeb, storage = null }) {
    * @param {RequestOptions<M, S>} [options]
    * @returns {Promise<ApiResponse<P, M, S>>}
    */
-  async function api(path, { method = /** @type {M} */ ("GET"), body, surface } = {}) {
+  async function api(path, { method = /** @type {M} */ ("GET"), body, surface, onHeaders } = {}) {
     if (protocolBlocked) {
       /** @type {ClientError} */
       const err = new Error("Update required");
@@ -71,7 +71,7 @@ export function createSession({ agentHarnessWeb, storage = null }) {
     }
     const chosen = surface || apiSurface(path, method, { role: currentMe.role, hasToken: !!agentHarnessWeb.token });
     // An explicit surface is honored; without one S includes every surface apiSurface() can choose.
-    return /** @type {Promise<ApiResponse<P, M, S>>} */ (agentHarnessWeb.request(path, { method, body, surface: chosen }));
+    return /** @type {Promise<ApiResponse<P, M, S>>} */ (agentHarnessWeb.request(path, { method, body, surface: chosen, onHeaders }));
   }
 
   // Called only when an identity is adopted (setMe), never from fetchMe: boot discards a speculative /me on a

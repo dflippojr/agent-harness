@@ -68,6 +68,7 @@ const jsonResp = (body, status = 200) => ({
 
 let meRole = "owner";
 let sessionPayload = [];
+const sessionHrefs = [];
 let holdSessions = null;
 let sessionsOffline = false;
 const imagePayload = {
@@ -102,6 +103,7 @@ const fakeFetch = async (url) => {
   }
   if (path === "/me") return jsonResp({ role: meRole, name: "Owner", login: "owner", public_url: "http://localhost" });
   if (path === "/profile") return jsonResp({ emoji: "🙂", choices: ["🙂"] });
+  if (path === "/sessions" || path.startsWith("/sessions?")) sessionHrefs.push(href);
   if (path === "/sessions" || path.startsWith("/sessions?")) return holdSessions ? await holdSessions : sessionsOffline ? jsonResp({error:"offline"}, 503) : jsonResp(sessionPayload);
   if (path === "/sessions/sess1") return jsonResp(sessionDetail);
   if (path === "/queue") return jsonResp([]);
@@ -324,6 +326,8 @@ for (const width of [768, 959, 1024, 1280, 1440]) {
 }
 await waitFor(() => !count.hidden && count.textContent === "3", "Needs you includes approvals and fresh failures");
 assert(count.attributes["aria-label"] === "3 agents need you", "count has a spoken label");
+// #663: the owner's badge reads the owner route, whose first page holds every waiting session however old.
+assert(sessionHrefs.at(-1).includes("/api/admin/v1/sessions"), `badge reads the owner route: ${sessionHrefs.at(-1)}`);
 for (const [route, section] of [["#/new", "agents"], ["#/jobs/job1", "jobs"], ["#/jobs/new", "jobs"],
   ["#/images/img1", "images"], ["#/s/sess1/approval/a", "agents"], ["#/profile/appearance", "profile"]]) {
   await go(route);

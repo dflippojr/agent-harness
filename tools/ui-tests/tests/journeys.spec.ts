@@ -188,3 +188,22 @@ test('AH-14 connection loss and reconnect', async ({ signedIn: page }) => {
   await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
   await expect(page.locator('.conn-strip[role=status]')).toBeHidden();
 });
+
+test('AH-16 Agents list pages older sessions with Show older', async ({ signedIn: page }) => {
+  // Pages of two rows instead of fifty, so the seeded sessions span several pages; everything else is the real server.
+  await page.route(url => url.pathname.endsWith('/v1/sessions'), async route => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const url = new URL(route.request().url());
+    url.searchParams.set('limit', '2');
+    await route.continue({ url: url.toString() });
+  });
+  await page.goto('/#/agents');
+  const recent = page.getByRole('region', { name: 'Recent', exact: true });
+  const titles = () => recent.locator('a.agent-row h3').allTextContents();
+  await expect(recent.locator('a.agent-row').first()).toBeVisible();
+  const first = await titles();
+  await page.getByRole('button', { name: 'Show older', exact: true }).click();
+  // The next page joins the rows already shown (the instance holds well over two finished sessions).
+  await expect.poll(async () => (await titles()).length).toBeGreaterThan(first.length);
+  expect(await titles()).toEqual(expect.arrayContaining(first));
+});

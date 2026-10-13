@@ -88,7 +88,7 @@ export class AgentHarnessWebClient {
    * @param {RequestOptions<M, S>} [options]
    * @returns {Promise<ApiResponse<P, M, S>>}
    */
-  async request(path, { method = /** @type {M} */ ("GET"), body, surface = /** @type {S} */ ("admin") } = {}) {
+  async request(path, { method = /** @type {M} */ ("GET"), body, surface = /** @type {S} */ ("admin"), onHeaders } = {}) {
     const headers = this.headers();
     /** @type {RequestInit} */
     const opts = { method, headers, cache: "no-store" };
@@ -116,6 +116,7 @@ export class AgentHarnessWebClient {
       err.data = data;
       throw err;
     }
+    onHeaders?.(resp.headers);
     return data;
   }
 
