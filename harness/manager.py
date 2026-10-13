@@ -2043,8 +2043,9 @@ class Manager:
 
     @staticmethod
     def _pull_request_url(s: dict, project, github: dict | None) -> str:
-        """Issue #665: after a push to GitHub, the page that opens (or shows) the PR for the session branch. A compare
-        URL needs no token; it carries only the session title and, for issue sessions, `Closes #N`, never agent text."""
+        """Issue #665: after a push to GitHub, GitHub's compare page that opens a PR for the session branch. It needs no
+        token and carries only the session title and, for issue sessions, `Closes #N`, never agent text. A PR session
+        pushes its own branch, not the PR's head, so its compare page targets that head branch (`github_base_branch`)."""
         from urllib.parse import quote, urlencode
         from . import github_tasks
         if s.get("review") != "pushed" or not s.get("branch") or project is None:
@@ -2055,12 +2056,11 @@ class Manager:
         if not repo:
             return ""
         meta = s.get("app_metadata") or {}
-        item = meta.get("github_item") or {}
-        if str(item.get("repo") or "").lower() != repo.lower() or not isinstance(item.get("number"), int):
+        item = meta.get("github_item")
+        # App sessions set arbitrary metadata, so only a well-formed item from this repository fills in `Closes #N`.
+        if (not isinstance(item, dict) or str(item.get("repo") or "").lower() != repo.lower()
+                or not isinstance(item.get("number"), int)):
             item = {}
-        if item.get("kind") == "pr":
-            # The push updated that PR's head branch.
-            return f"https://github.com/{repo}/pull/{item['number']}"
         base = meta.get("github_base_branch") or s.get("base_branch") or ""
         if not base:
             return ""

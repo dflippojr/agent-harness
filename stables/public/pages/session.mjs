@@ -840,14 +840,13 @@ function reviewCard(s) {
       message: "This can't be undone.", confirmLabel: "Discard", destructive: true }) }, "Discard"));
   }
   const detail = s.review_detail ? h("p", { class: "muted small" }, s.review_detail) : null;
-  // #665: after a GitHub push, GitHub's compare page (or the PR a PR session pushed to) opens the PR in one tap.
+  // #665: after a GitHub push, GitHub's compare page opens the PR in one tap.
   return h("section", { class: "card" },
     h("h3", {}, "Review"),
     h("div", { class: "meta" }, h("span", {}, `branch ${s.branch}`), s.base_branch ? h("span", {}, `from ${s.base_branch}`) : null,
       s.review ? reviewBadge(s.review, s.review) : null),
     s.pull_request_url ? h("div", { class: "row" }, detail,
-      h("a", { class: "btn", href: s.pull_request_url, target: "_blank", rel: "noopener" },
-        /\/pull\/\d+$/.test(s.pull_request_url) ? "View pull request" : "Open pull request")) : detail,
+      h("a", { class: "btn", href: s.pull_request_url, target: "_blank", rel: "noopener" }, "Open pull request")) : detail,
     busy ? h("p", { class: "muted small" }, "The agent is still working; review when the run ends.") : null,
     buttons.length ? h("div", { class: "row end", style: "margin-top:8px" }, buttons) : null);
 }

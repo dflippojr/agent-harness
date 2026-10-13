@@ -108,12 +108,17 @@ def test_pushed_session_links_to_github_pull_request(tmp_path):
         assert "title=Fix%20A%20%26%20B%20%232%20now" in issue and issue.endswith("&body=Closes%20%235")
         query = parse_qs(urlsplit(issue).query)
         assert query == {"expand": ["1"], "title": ["Fix A & B #2 now"], "body": ["Closes #5"]}
-        assert url(item={"repo": "o/r", "kind": "pr", "number": 6}, base="feat/x") == "https://github.com/o/r/pull/6"
+        # A PR session pushed its own branch, so the compare page targets the PR's head branch, without `Closes`.
+        assert url(item={"repo": "o/r", "kind": "pr", "number": 6}, base="feat/x") == (
+            "https://github.com/o/r/compare/feat/x...agent/abc?expand=1&title=Fix%20A%20%26%20B%20%232%20now")
         plain = url()
         assert plain == "https://github.com/o/r/compare/main...agent/abc?expand=1&title=Fix%20A%20%26%20B%20%232%20now"
         assert parse_qs(urlsplit(url(title="x" * 300)).query)["title"] == ["x" * 200]
         # An item from another repository (the project URL changed) is not trusted for `Closes #N`.
         assert "body" not in url(item={"repo": "o/other", "kind": "issue", "number": 5})
+        # App session metadata is caller-supplied; a malformed item is ignored instead of breaking the summary.
+        for bad in ("reference", ["o/r", 5], {"repo": "o/r", "kind": "issue", "number": "5"}):
+            assert "body" not in url(item=bad)
         assert url(project="scratch") is None
         assert url(project="gitlab") is None
         assert url(review="") is None

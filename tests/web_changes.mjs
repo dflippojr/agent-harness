@@ -133,8 +133,4 @@ assert.equal(link.attrs.href, session.pull_request_url);
 assert.equal(link.attrs.target, "_blank");
 assert.equal(link.attrs.rel, "noopener");
 assert.match(text(byId.app), /pushed agent\/abc to o\/r/, "the detail line stays beside the link");
-session.pull_request_url = "https://github.com/o/r/pull/6";
-fill(byId.app);
-await page.viewSession("abc", "changes");
-assert.equal(text(prLink()), "View pull request");
 console.log("ok");
