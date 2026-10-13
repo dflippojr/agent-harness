@@ -532,7 +532,7 @@ scripts:
     match: "trim"
     turns:
       - text: "Writing the data file."
-        tool_calls: [{name: write_file, args: {path: notes/data.txt, content: "%s"}}]
+        tool_calls: [{name: write_file, args: {path: notes/data.txt, content: "ROWS"}}]
       - text: "Reading it."
         filler_chars: 12000
         tool_calls: [{name: read_file, args: {path: notes/data.txt}}]
@@ -546,7 +546,7 @@ scripts:
         filler_chars: 12000
         tool_calls: [{name: write_file, args: {path: notes/out.md, content: "2"}}]
       - text: "Done."
-""" % "".join(f"row {i:02d} alpha beta gamma delta\n" for i in range(40))
+""".replace("ROWS", "".join(f"row {i:02d} alpha beta gamma delta\\n" for i in range(40)))
 
 
 def test_full_stack_trim_runs_before_the_summary(monkeypatch, tmp_path):

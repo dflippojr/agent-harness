@@ -10,6 +10,7 @@ from harness import compaction
 from harness.compaction import TrimRules
 from harness.config import _trim_rules
 
+ON = TrimRules()
 OFF = TrimRules(strip_noise=False, head_tail=False, superseded_reads=False, dedupe=False)
 HEAD = [{"role": "system", "content": "sys"}, {"role": "user", "content": "fix the build"}]
 
@@ -36,7 +37,7 @@ def tools(messages: list[dict]) -> list[str]:
     return [m["content"] for m in messages if m["role"] == "tool"]
 
 
-def trim(messages, rules=TrimRules(), keep_chars=0, outcomes=None):
+def trim(messages, rules=ON, keep_chars=0, outcomes=None):
     out, saved = compaction.trim(messages, rules, keep_chars, outcomes)
     again, saved_again = compaction.trim(out, rules, keep_chars, outcomes)
     assert (again, saved_again) == (out, 0)  # idempotent: a second pass changes nothing

@@ -1,10 +1,11 @@
 # Context compaction and observation masking
 
-Local-model agent sessions keep the model's context under the window with three
-steps, in order: **mask** used tool results, **elide** old tool output, then
-**summarize** older turns. This page is the operator description of masking.
-Elide and summarize thresholds (`elide_at`, `summarize_at`, `keep_recent`) are
-live admin keys; see [`config-registry.md`](config-registry.md).
+Local-model agent sessions keep the model's context under the window with four
+steps, in order: **mask** used tool results, **trim** older tool results with
+fixed rules, **elide** old tool output, then **summarize** older turns. This
+page is the operator description of masking and trimming. Elide and summarize
+thresholds (`elide_at`, `summarize_at`, `keep_recent`) are live admin keys; see
+[`config-registry.md`](config-registry.md).
 
 ## Masking
 
@@ -63,6 +64,142 @@ This payload does **not** include `tokens_before`, `tokens_after`, or
 `summarized_messages`. Those fields belong to the `elide` and `summary` tiers.
 The web UI, CLI, and Markdown transcript render a mask event as a one-line
 note using `tokens_saved` only.
+
+## Trimming
+
+Once the context reaches `elide_at`, and before elide and any summary request,
+a free rule tier rewrites older tool results (#637). Like elide, it costs no
+model call; arXiv 2609.20804 found that cheap elision ahead of the summary call
+is what reduces summary calls. The rules only replace a tool result's text and
+never remove a message, so every result keeps its tool call. They skip the
+system prompt, the task, receipts (masking owns those), and the tail a summary
+would keep verbatim: the newest turn, plus older messages while they fit in
+`keep_recent` of the window. Running trim again on its own output changes
+nothing.
+
+| Rule (`compaction.trim.*`) | What it does |
+| --- | --- |
+| `strip_noise` | Removes ANSI escape sequences, keeps only what a terminal would show of a line overwritten with carriage returns, and keeps the last line of a run of progress-bar lines (a percentage plus a bar of `#`, `=` or block characters). |
+| `head_tail` | `run_shell`, `verify` and `git_clone` output longer than `head_lines` + `tail_lines` + 1 lines keeps its first `head_lines` (40) and last `tail_lines` (60) lines around a marker line. File reads are left alone. |
+| `superseded_reads` | Drops a `read_file` result when the same file is read again later with the same arguments, or written or edited later by a call that did not fail. The older read is dropped, not archived (gap report Section 4.3: recoverable elided content was almost never recalled); a short note names the path. |
+| `dedupe` | A result of 200 or more characters that repeats an earlier one exactly becomes a one-line "same output as the earlier ... result above" note. The first copy stays. |
+
+All rules are on by default. They are file configuration only, under
+`compaction.trim` in `config/harness.yaml` (not live admin keys). A switch that
+is not a YAML boolean, or a line count outside 0-10,000, keeps its default.
+
+When trim removes anything, the daemon emits a `compaction` event before the
+elide or summary event, with the same shape as the mask event:
+
+| Field | Meaning |
+| --- | --- |
+| `tier` | `"trim"` |
+| `tokens_saved` | estimated tokens removed (`characters_saved / chars_per_token`) |
+| `characters_saved` | characters removed from the model context |
+
+The web UI, CLI and Markdown transcript show it as a one-line note. The
+trimmed context is stored with the elide or summary result of the same pass.
+The following `elide` event's `tokens_before` is still the size before trim, so
+`summary_averted` counts passes that trim and elide together kept under
+`summarize_at`.
+
+### Benchmark
+
+`python -m bakeoff.trim_bench` replays three fixed synthetic transcripts
+through the real compaction functions, the way `_maybe_compact` runs them for a
+local agent session without saved state. The transcripts are a test-fix loop
+(a failing pytest run with ANSI colour, read, edit, re-read, `git status`,
+repeated), exploration (re-reading the same files and listings, mostly under
+the masking threshold) and build failures (long noisy `make` logs re-run after
+each fix). A summary is a fixed 2,400-character stand-in. The arms are trim off
+(baseline), trim on, a config-only arm that only widens the elide/summarize
+gap to 25 points (0.55/0.80, as in 2609.20804; `reset_at` 0.60 stays between
+them), and both. "Chars sent" adds up every agent prompt (context plus tool
+schemas) and every summary request. "Elide-only" is the share of compaction
+passes that ended under `summarize_at` without a summary call. "Needed again"
+counts head-and-tail trimmed outputs whose identical call recurs within 10
+turns (the proxy from [`jev-compaction-study.md`](jev-compaction-study.md)).
+
+The production window (65,536 tokens) with masking on:
+
+| Transcript | Arm | Chars sent | Summary calls | Passes | Elide-only | Trim saved | Head-tail / needed again |
+|---|---|---:|---:|---:|---:|---:|---:|
+| test-fix loop (202 turns) | baseline | 16,854,853 | 0 | 31 | 31/31 (100%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim | 16,732,715 | 0 | 28 | 28/28 (100%) | 229,919 | 20 / 20 |
+| test-fix loop (202 turns) | config-only (0.55/0.80) | 16,854,853 | 0 | 31 | 31/31 (100%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim + 0.55/0.80 | 16,732,715 | 0 | 28 | 28/28 (100%) | 229,919 | 20 / 20 |
+| exploration (170 turns) | baseline | 9,669,560 | 0 | 0 | 0/0 | 0 | 0 / 0 |
+| exploration (170 turns) | trim | 9,669,560 | 0 | 0 | 0/0 | 0 | 0 / 0 |
+| exploration (170 turns) | config-only (0.55/0.80) | 9,669,560 | 0 | 0 | 0/0 | 0 | 0 / 0 |
+| exploration (170 turns) | trim + 0.55/0.80 | 9,669,560 | 0 | 0 | 0/0 | 0 | 0 / 0 |
+| build failures (150 turns) | baseline | 12,385,280 | 0 | 25 | 25/25 (100%) | 0 | 0 / 0 |
+| build failures (150 turns) | trim | 11,927,257 | 0 | 17 | 17/17 (100%) | 300,473 | 27 / 27 |
+| build failures (150 turns) | config-only (0.55/0.80) | 12,385,280 | 0 | 25 | 25/25 (100%) | 0 | 0 / 0 |
+| build failures (150 turns) | trim + 0.55/0.80 | 11,927,257 | 0 | 17 | 17/17 (100%) | 300,473 | 27 / 27 |
+
+A 32,768-token window with masking on (`--context 32768`):
+
+| Transcript | Arm | Chars sent | Summary calls | Passes | Elide-only | Trim saved | Head-tail / needed again |
+|---|---|---:|---:|---:|---:|---:|---:|
+| test-fix loop (202 turns) | baseline | 8,377,783 | 2 | 48 | 46/48 (95%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim | 8,642,530 | 2 | 46 | 44/46 (95%) | 404,514 | 36 / 36 |
+| test-fix loop (202 turns) | config-only (0.55/0.80) | 9,540,702 | 1 | 83 | 82/83 (98%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim + 0.55/0.80 | 9,560,260 | 1 | 77 | 76/77 (98%) | 404,514 | 36 / 36 |
+| exploration (170 turns) | baseline | 6,706,625 | 2 | 36 | 34/36 (94%) | 0 | 0 / 0 |
+| exploration (170 turns) | trim | 7,158,510 | 0 | 37 | 37/37 (100%) | 43,825 | 0 / 0 |
+| exploration (170 turns) | config-only (0.55/0.80) | 7,213,044 | 1 | 45 | 44/45 (97%) | 0 | 0 / 0 |
+| exploration (170 turns) | trim + 0.55/0.80 | 7,158,510 | 0 | 37 | 37/37 (100%) | 43,825 | 0 / 0 |
+| build failures (150 turns) | baseline | 6,756,250 | 2 | 54 | 52/54 (96%) | 0 | 0 / 0 |
+| build failures (150 turns) | trim | 6,925,308 | 2 | 58 | 56/58 (96%) | 463,898 | 48 / 48 |
+| build failures (150 turns) | config-only (0.55/0.80) | 7,453,455 | 1 | 73 | 72/73 (98%) | 0 | 0 / 0 |
+| build failures (150 turns) | trim + 0.55/0.80 | 7,311,176 | 1 | 66 | 65/66 (98%) | 474,064 | 48 / 47 |
+
+The same window without masking (`--context 32768 --no-mask`: chat sessions,
+hosted backends, or `read_artifact` denied by policy):
+
+| Transcript | Arm | Chars sent | Summary calls | Passes | Elide-only | Trim saved | Head-tail / needed again |
+|---|---|---:|---:|---:|---:|---:|---:|
+| test-fix loop (202 turns) | baseline | 9,409,868 | 5 | 92 | 87/92 (94%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim | 9,129,625 | 2 | 75 | 73/75 (97%) | 755,082 | 40 / 40 |
+| test-fix loop (202 turns) | config-only (0.55/0.80) | 10,547,747 | 3 | 123 | 120/123 (97%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim + 0.55/0.80 | 10,231,364 | 1 | 112 | 111/112 (99%) | 706,225 | 40 / 40 |
+| exploration (170 turns) | baseline | 7,912,620 | 4 | 53 | 49/53 (92%) | 0 | 0 / 0 |
+| exploration (170 turns) | trim | 7,458,027 | 0 | 23 | 23/23 (100%) | 144,499 | 0 / 0 |
+| exploration (170 turns) | config-only (0.55/0.80) | 8,841,037 | 3 | 84 | 81/84 (96%) | 0 | 0 / 0 |
+| exploration (170 turns) | trim + 0.55/0.80 | 7,458,027 | 0 | 23 | 23/23 (100%) | 144,499 | 0 / 0 |
+| build failures (150 turns) | baseline | 7,164,662 | 3 | 67 | 64/67 (95%) | 0 | 0 / 0 |
+| build failures (150 turns) | trim | 6,998,250 | 1 | 63 | 62/63 (98%) | 667,337 | 49 / 48 |
+| build failures (150 turns) | config-only (0.55/0.80) | 7,892,905 | 2 | 89 | 87/89 (97%) | 0 | 0 / 0 |
+| build failures (150 turns) | trim + 0.55/0.80 | 7,836,024 | 1 | 82 | 81/82 (98%) | 663,354 | 49 / 48 |
+
+What the numbers say (2026-10-12):
+
+- **At 65,536 tokens with masking, nothing reaches a summary in any arm.**
+  Masking and elide already hold these transcripts under `summarize_at`. Trim
+  sends 1-4% fewer characters on the two command-heavy transcripts and cuts
+  compaction passes (25 to 17 on build failures). The config-only arm changes
+  nothing because no summary was due.
+- **Without masking, trim cuts summary calls on every transcript** (5 to 2, 4 to
+  0, 3 to 1) and sends 2-6% fewer characters. That beats the config-only arm,
+  which saves fewer summary calls (5 to 3, 4 to 3, 3 to 2) and sends 10-12% more
+  characters, because the context sits higher between passes. Trim plus the
+  wider gap makes the fewest summary calls but sends more than trim alone.
+- **With masking at 32,768 tokens the result is mixed.** Trim removes both
+  summaries on exploration but leaves the other two transcripts at 2, and it
+  sends 2-7% *more* characters than the baseline. A summary resets the context
+  to a small size, so averting or delaying one leaves the later prompts larger.
+  The config-only arm halves summary calls there at a 7-14% character cost.
+  Fewer summary calls is what 2609.20804 measures as efficiency (fewer lossy
+  rewrites and model calls), but prompt characters do not always fall with it.
+- **"Needed again" says nothing on fixed scripts.** Nearly every trimmed
+  `pytest` or `make` output recurs within 10 turns because the scripts re-run
+  the command after each fix, not because the trimmed lines were needed. Only
+  live sessions can show whether head-and-tail loses something; the #639
+  counters (`elide_only_compactions`, `read_artifact_calls`) are where to look.
+
+The synthetic transcripts model typical sessions; they are not a sample of
+them. The rules stay on by default: in every case trim makes no more summary
+calls than the baseline and sends fewer characters than the config-only arm.
 
 ## Summaries build on the previous one
 
