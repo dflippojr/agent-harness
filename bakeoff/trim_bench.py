@@ -173,9 +173,10 @@ def _tokens(context: list[dict]) -> int:
 
 def _compact(context: list[dict], arm: Arm, outcomes: dict, mask: bool, turn: int, sigs: dict,
              result: Result, n: int) -> list[dict]:
+    before = _tokens(context)  # the runner compares the size before masking with elide_at
     if mask:
         context, _, _ = compaction.mask_used_results(context, outcomes, MASK_MIN_CHARS)
-    if _tokens(context) < arm.elide_at * n:
+    if before < arm.elide_at * n:
         return context
     result.passes += 1
     if arm.trim:

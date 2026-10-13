@@ -57,8 +57,8 @@ def test_strip_noise_drops_ansi_carriage_return_overwrites_and_progress_runs():
     assert tools(out)[0] == compaction.strip_noise(raw) and saved > 0
 
 
-def test_a_lone_percentage_is_not_progress_noise():
-    text = "coverage 87%\nbranch 50%\nall good"
+def test_a_percentage_without_a_bar_is_not_progress_noise():
+    text = "coverage 87%\nbranch 50%\n10% of requests failed validation\n20% of requests failed authorization\nok"
     assert compaction.strip_noise(text) == text
 
 
@@ -88,6 +88,13 @@ def test_a_reread_with_the_same_arguments_drops_the_older_read():
     assert ranged == body[:50] and latest == body  # another range doesn't supersede; the newest read stays
 
 
+def test_a_failed_reread_keeps_the_older_read():
+    body = "secret = 1\n" * 50
+    messages = session(turn(1, "read_file", body, path="a.py"), turn(2, "read_file", "Error: access denied", path="a.py"))
+    out, _ = trim(messages, only(superseded_reads=True), outcomes={"c1": {"ok": True}, "c2": {"ok": False}})
+    assert tools(out)[0] == body
+
+
 def test_a_successful_write_or_edit_supersedes_an_earlier_read_and_a_failed_one_does_not():
     body = "x = 1\n" * 50
     messages = session(turn(1, "read_file", body, path="a.py"), turn(2, "read_file", body, path="b.py"),
@@ -106,6 +113,15 @@ def test_repeated_identical_outputs_collapse_to_the_first_copy():
                       only(dedupe=True))
     assert tools(out)[:4] == [status, small, compaction.SAME_AS_ABOVE.format(name="run_shell"), small]
     assert saved == len(status) - len(compaction.SAME_AS_ABOVE.format(name="run_shell"))
+
+
+def test_identical_reads_of_different_files_are_not_deduped():
+    """A note pointing at a read could outlive it: a later edit makes superseded_reads drop that read."""
+    body = "same contents\n" * 30
+    messages = session(turn(1, "read_file", body, path="a.txt"), turn(2, "read_file", body, path="b.txt"),
+                       turn(3, "edit_file", "Edited a.txt", path="a.txt", old_text="s", new_text="t"))
+    out, _ = trim(messages)
+    assert tools(out)[:2] == [compaction.SUPERSEDED.format(path="a.txt"), body]
 
 
 def test_the_head_the_recent_tail_and_receipts_are_never_touched():

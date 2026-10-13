@@ -81,8 +81,8 @@ nothing.
 | --- | --- |
 | `strip_noise` | Removes ANSI escape sequences, keeps only what a terminal would show of a line overwritten with carriage returns, and keeps the last line of a run of progress-bar lines (a percentage plus a bar of `#`, `=` or block characters). |
 | `head_tail` | `run_shell`, `verify` and `git_clone` output longer than `head_lines` + `tail_lines` + 1 lines keeps its first `head_lines` (40) and last `tail_lines` (60) lines around a marker line. File reads are left alone. |
-| `superseded_reads` | Drops a `read_file` result when the same file is read again later with the same arguments, or written or edited later by a call that did not fail. The older read is dropped, not archived (gap report Section 4.3: recoverable elided content was almost never recalled); a short note names the path. |
-| `dedupe` | A result of 200 or more characters that repeats an earlier one exactly becomes a one-line "same output as the earlier ... result above" note. The first copy stays. |
+| `superseded_reads` | Drops a `read_file` result when the same file is read again later with the same arguments, or written or edited later, by a call that did not fail (a failed reread keeps the older contents). The older read is dropped, not archived (gap report Section 4.3: recoverable elided content was almost never recalled); a short note names the path. |
+| `dedupe` | A result of 200 or more characters that repeats an earlier one exactly becomes a one-line "same output as the earlier ... result above" note. The first copy stays. File reads are left to `superseded_reads`, since a later pass could drop the copy a note points to. |
 
 All rules are on by default. They are file configuration only, under
 `compaction.trim` in `config/harness.yaml` (not live admin keys). A switch that
@@ -124,35 +124,35 @@ The production window (65,536 tokens) with masking on:
 
 | Transcript | Arm | Chars sent | Summary calls | Passes | Elide-only | Trim saved | Head-tail / needed again |
 |---|---|---:|---:|---:|---:|---:|---:|
-| test-fix loop (202 turns) | baseline | 16,854,853 | 0 | 31 | 31/31 (100%) | 0 | 0 / 0 |
-| test-fix loop (202 turns) | trim | 16,732,715 | 0 | 28 | 28/28 (100%) | 229,919 | 20 / 20 |
-| test-fix loop (202 turns) | config-only (0.55/0.80) | 16,854,853 | 0 | 31 | 31/31 (100%) | 0 | 0 / 0 |
-| test-fix loop (202 turns) | trim + 0.55/0.80 | 16,732,715 | 0 | 28 | 28/28 (100%) | 229,919 | 20 / 20 |
-| exploration (170 turns) | baseline | 9,669,560 | 0 | 0 | 0/0 | 0 | 0 / 0 |
-| exploration (170 turns) | trim | 9,669,560 | 0 | 0 | 0/0 | 0 | 0 / 0 |
-| exploration (170 turns) | config-only (0.55/0.80) | 9,669,560 | 0 | 0 | 0/0 | 0 | 0 / 0 |
-| exploration (170 turns) | trim + 0.55/0.80 | 9,669,560 | 0 | 0 | 0/0 | 0 | 0 / 0 |
-| build failures (150 turns) | baseline | 12,385,280 | 0 | 25 | 25/25 (100%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | baseline | 16,854,853 | 0 | 40 | 40/40 (100%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim | 16,732,715 | 0 | 37 | 37/37 (100%) | 229,919 | 20 / 20 |
+| test-fix loop (202 turns) | config-only (0.55/0.80) | 16,854,853 | 0 | 40 | 40/40 (100%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim + 0.55/0.80 | 16,732,715 | 0 | 37 | 37/37 (100%) | 229,919 | 20 / 20 |
+| exploration (170 turns) | baseline | 9,669,560 | 0 | 2 | 2/2 (100%) | 0 | 0 / 0 |
+| exploration (170 turns) | trim | 9,571,835 | 0 | 1 | 1/1 (100%) | 32,575 | 0 / 0 |
+| exploration (170 turns) | config-only (0.55/0.80) | 9,669,560 | 0 | 2 | 2/2 (100%) | 0 | 0 / 0 |
+| exploration (170 turns) | trim + 0.55/0.80 | 9,571,835 | 0 | 1 | 1/1 (100%) | 32,575 | 0 / 0 |
+| build failures (150 turns) | baseline | 12,385,280 | 0 | 28 | 28/28 (100%) | 0 | 0 / 0 |
 | build failures (150 turns) | trim | 11,927,257 | 0 | 17 | 17/17 (100%) | 300,473 | 27 / 27 |
-| build failures (150 turns) | config-only (0.55/0.80) | 12,385,280 | 0 | 25 | 25/25 (100%) | 0 | 0 / 0 |
+| build failures (150 turns) | config-only (0.55/0.80) | 12,385,280 | 0 | 28 | 28/28 (100%) | 0 | 0 / 0 |
 | build failures (150 turns) | trim + 0.55/0.80 | 11,927,257 | 0 | 17 | 17/17 (100%) | 300,473 | 27 / 27 |
 
 A 32,768-token window with masking on (`--context 32768`):
 
 | Transcript | Arm | Chars sent | Summary calls | Passes | Elide-only | Trim saved | Head-tail / needed again |
 |---|---|---:|---:|---:|---:|---:|---:|
-| test-fix loop (202 turns) | baseline | 8,377,783 | 2 | 48 | 46/48 (95%) | 0 | 0 / 0 |
-| test-fix loop (202 turns) | trim | 8,642,530 | 2 | 46 | 44/46 (95%) | 404,514 | 36 / 36 |
-| test-fix loop (202 turns) | config-only (0.55/0.80) | 9,540,702 | 1 | 83 | 82/83 (98%) | 0 | 0 / 0 |
-| test-fix loop (202 turns) | trim + 0.55/0.80 | 9,560,260 | 1 | 77 | 76/77 (98%) | 404,514 | 36 / 36 |
-| exploration (170 turns) | baseline | 6,706,625 | 2 | 36 | 34/36 (94%) | 0 | 0 / 0 |
-| exploration (170 turns) | trim | 7,158,510 | 0 | 37 | 37/37 (100%) | 43,825 | 0 / 0 |
-| exploration (170 turns) | config-only (0.55/0.80) | 7,213,044 | 1 | 45 | 44/45 (97%) | 0 | 0 / 0 |
-| exploration (170 turns) | trim + 0.55/0.80 | 7,158,510 | 0 | 37 | 37/37 (100%) | 43,825 | 0 / 0 |
-| build failures (150 turns) | baseline | 6,756,250 | 2 | 54 | 52/54 (96%) | 0 | 0 / 0 |
-| build failures (150 turns) | trim | 6,925,308 | 2 | 58 | 56/58 (96%) | 463,898 | 48 / 48 |
-| build failures (150 turns) | config-only (0.55/0.80) | 7,453,455 | 1 | 73 | 72/73 (98%) | 0 | 0 / 0 |
-| build failures (150 turns) | trim + 0.55/0.80 | 7,311,176 | 1 | 66 | 65/66 (98%) | 474,064 | 48 / 47 |
+| test-fix loop (202 turns) | baseline | 8,322,279 | 2 | 55 | 53/55 (96%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim | 8,597,441 | 2 | 56 | 54/56 (96%) | 394,184 | 35 / 35 |
+| test-fix loop (202 turns) | config-only (0.55/0.80) | 9,540,702 | 1 | 100 | 99/100 (99%) | 0 | 0 / 0 |
+| test-fix loop (202 turns) | trim + 0.55/0.80 | 9,560,260 | 1 | 93 | 92/93 (98%) | 404,514 | 36 / 36 |
+| exploration (170 turns) | baseline | 6,706,625 | 2 | 40 | 38/40 (95%) | 0 | 0 / 0 |
+| exploration (170 turns) | trim | 7,095,710 | 0 | 41 | 41/41 (100%) | 43,825 | 0 / 0 |
+| exploration (170 turns) | config-only (0.55/0.80) | 7,213,044 | 1 | 48 | 47/48 (97%) | 0 | 0 / 0 |
+| exploration (170 turns) | trim + 0.55/0.80 | 7,095,710 | 0 | 41 | 41/41 (100%) | 43,825 | 0 / 0 |
+| build failures (150 turns) | baseline | 6,756,250 | 2 | 58 | 56/58 (96%) | 0 | 0 / 0 |
+| build failures (150 turns) | trim | 6,925,308 | 2 | 62 | 60/62 (96%) | 463,898 | 48 / 48 |
+| build failures (150 turns) | config-only (0.55/0.80) | 7,453,455 | 1 | 78 | 77/78 (98%) | 0 | 0 / 0 |
+| build failures (150 turns) | trim + 0.55/0.80 | 7,311,176 | 1 | 69 | 68/69 (98%) | 474,064 | 48 / 47 |
 
 The same window without masking (`--context 32768 --no-mask`: chat sessions,
 hosted backends, or `read_artifact` denied by policy):
@@ -176,8 +176,8 @@ What the numbers say (2026-10-12):
 
 - **At 65,536 tokens with masking, nothing reaches a summary in any arm.**
   Masking and elide already hold these transcripts under `summarize_at`. Trim
-  sends 1-4% fewer characters on the two command-heavy transcripts and cuts
-  compaction passes (25 to 17 on build failures). The config-only arm changes
+  sends 1-4% fewer characters and cuts compaction passes (28 to 17 on build
+  failures). The config-only arm changes
   nothing because no summary was due.
 - **Without masking, trim cuts summary calls on every transcript** (5 to 2, 4 to
   0, 3 to 1) and sends 2-6% fewer characters. That beats the config-only arm,
@@ -186,9 +186,9 @@ What the numbers say (2026-10-12):
   wider gap makes the fewest summary calls but sends more than trim alone.
 - **With masking at 32,768 tokens the result is mixed.** Trim removes both
   summaries on exploration but leaves the other two transcripts at 2, and it
-  sends 2-7% *more* characters than the baseline. A summary resets the context
+  sends 2-6% *more* characters than the baseline. A summary resets the context
   to a small size, so averting or delaying one leaves the later prompts larger.
-  The config-only arm halves summary calls there at a 7-14% character cost.
+  The config-only arm halves summary calls there at a 7-15% character cost.
   Fewer summary calls is what 2609.20804 measures as efficiency (fewer lossy
   rewrites and model calls), but prompt characters do not always fall with it.
 - **"Needed again" says nothing on fixed scripts.** Nearly every trimmed

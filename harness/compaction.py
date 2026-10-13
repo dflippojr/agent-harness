@@ -147,7 +147,7 @@ def elide(messages: list[dict], keep_last: int = 6, max_chars: int = 1500) -> tu
 
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
 PROGRESS = re.compile(r"\d{1,3}(?:\.\d+)?%")
-PROGRESS_BAR = re.compile(r"[#=█▉▊▋▌▍▎▏░▒▓━─>]{5,}|^\s*\d{1,3}(?:\.\d+)?%")
+PROGRESS_BAR = re.compile(r"[#=█▉▊▋▌▍▎▏░▒▓━─>]{5,}")
 COMMAND_TOOLS = frozenset({"run_shell", "verify", "git_clone"})
 FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 DEDUPE_MIN_CHARS = 200  # a "same as above" note is shorter than this, so notes are never collapsed themselves
@@ -229,7 +229,7 @@ def _calls(messages: list[dict]) -> dict:
 
 def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
     """Indexes of read_file results made stale by a later read of the same file with the same arguments, or by a
-    later write or edit of it that did not fail."""
+    later write or edit of it, where the later call did not fail (a failed reread keeps the older contents)."""
     stale: set[int] = set()
     newer_reads: set[tuple] = set()
     changed: set[str] = set()
@@ -242,13 +242,15 @@ def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
         path = _norm_path(args.get("path"))
         if not path:
             continue
-        if name in FILE_WRITE_TOOLS and (outcomes.get(call_id) or {}).get("ok") is not False:
+        succeeded = (outcomes.get(call_id) or {}).get("ok") is not False
+        if name in FILE_WRITE_TOOLS and succeeded:
             changed.add(path)
         elif name == "read_file":
             key = (path, json.dumps({k: v for k, v in args.items() if k != "path"}, sort_keys=True))
             if path in changed or key in newer_reads:
                 stale.add(i)
-            newer_reads.add(key)
+            if succeeded:
+                newer_reads.add(key)
     return stale
 
 
@@ -280,7 +282,8 @@ def trim(messages: list[dict], rules: TrimRules, keep_chars: int,
                 new = strip_noise(new)
             if rules.head_tail and name in COMMAND_TOOLS:
                 new = head_and_tail(new, rules.head_lines, rules.tail_lines)
-            if rules.dedupe and len(new) >= DEDUPE_MIN_CHARS:
+            # File reads are left to superseded_reads: a later pass could drop the copy a note points to.
+            if rules.dedupe and name != "read_file" and len(new) >= DEDUPE_MIN_CHARS:
                 if new in seen:
                     new = SAME_AS_ABOVE.format(name=name or "tool")
                 else:

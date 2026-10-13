@@ -3300,7 +3300,7 @@ class Runner:
             context = await self._trim(s, context, cpt)
             context, _ = compaction.elide(context)
             after = compaction.estimate_tokens(context, cpt) + overhead
-            # Under summarize_at after elide alone: no summary call, so the pass is elide-only (#639). An overflow
+            # Under summarize_at after trim and elide: no summary call, so the pass is elide-only (#639). An overflow
             # always summarizes.
             data = {"tier": "elide", "tokens_before": before, "tokens_after": after,
                     "summary_averted": not overflow and after < self.cfg.summarize_at * n}
