@@ -1012,7 +1012,10 @@ def _idempotency_record(key: dict, body: CreateAppSession, idempotency_key: str 
         return None
     if key.get("kind") != "app":
         raise HarnessError(400, f"only an App token can send {idempotency.HEADER}", "idempotency_unsupported")
-    return idempotency.new_record(key["id"], idempotency.check_key(idempotency_key), body.model_dump(mode="json"))
+    # A field added after #462 stays out of the digest at its default, so a retry across an upgrade still replays.
+    later = {"tool_profile"} if body.tool_profile == "default" else set()
+    return idempotency.new_record(key["id"], idempotency.check_key(idempotency_key),
+                                  body.model_dump(mode="json", exclude=later))
 
 
 def _replay(m, key: dict, record: dict | None) -> JSONResponse | None:

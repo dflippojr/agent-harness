@@ -326,3 +326,16 @@ def test_member_keys_say_which_profiles_each_backend_takes(tmp_path):
     m.cfg.backends["codex"].tool_mode = "split"
     keys = {k["backend"]: k["tool_profiles"] for k in m.member_keys_status("u1")["keys"]}
     assert keys == {"claude": ["default", "bash-only"], "codex": ["default", "bash-only"]}
+
+
+def test_idempotency_digest_is_unchanged_for_the_default_profile():
+    """A retry across the upgrade still replays: the digest of a request without tool_profile matches #462's."""
+    from harness import idempotency
+    from harness.apps import CreateAppSession, _idempotency_record
+    key = {"id": "app-1", "kind": "app"}
+    body = CreateAppSession(prompt="hi", backend="claude")
+    before = body.model_dump(mode="json", exclude={"tool_profile"})  # what the digest covered before #638
+    record = _idempotency_record(key, body, "k1")
+    assert record is not None and record["request_digest"] == idempotency.request_digest(before)
+    bash = _idempotency_record(key, CreateAppSession(prompt="hi", backend="claude", tool_profile="bash-only"), "k1")
+    assert bash is not None and bash["request_digest"] != record["request_digest"]

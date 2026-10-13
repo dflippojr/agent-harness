@@ -26,6 +26,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from contextlib import ExitStack, closing
 from pathlib import Path
 
 PROFILES = ("default", "bash-only")
@@ -58,11 +59,11 @@ def _open(path: Path) -> sqlite3.Connection:
 
 
 def session_stores(db_path: Path) -> list[Path]:
-    """Where sessions can live (#330): Web's store first, then each App's, then the main store itself."""
+    """Where sessions can live besides the main store (#330): Web's store first, then each App's."""
     apps = Path(db_path).resolve().parent / "apps"
     web = apps / "app-web" / "harness.sqlite3"
     others = sorted(p for p in apps.glob("*/harness.sqlite3") if p != web) if apps.is_dir() else []
-    return [p for p in (web, *others) if p.is_file()] + [Path(db_path)]
+    return [p for p in (web, *others) if p.is_file()]
 
 
 def _find_session(stores: list[sqlite3.Connection], sid: str) -> dict | None:
@@ -81,10 +82,11 @@ def _find_session(stores: list[sqlite3.Connection], sid: str) -> dict | None:
 def rows_from_db(db_path: Path, manifest: dict, workspaces: bool = False) -> list[dict]:
     """One row per manifest entry: the session's profile and status from its store, its summed usage from the main
     store's usage log."""
-    conn = _open(db_path)
-    stores = [_open(p) for p in session_stores(db_path)]
     rows = []
-    try:
+    with ExitStack() as stack:
+        conn = stack.enter_context(closing(_open(db_path)))
+        # The main store comes last: it holds sessions only from before the Web store migration.
+        stores = [stack.enter_context(closing(_open(p))) for p in session_stores(db_path)] + [conn]
         for entry in manifest.get("runs", []):
             sid = entry["session_id"]
             s = _find_session(stores, sid)
@@ -101,9 +103,6 @@ def rows_from_db(db_path: Path, manifest: dict, workspaces: bool = False) -> lis
             rows.append({**entry, "tool_profile": s["tool_profile"], "backend": s["backend"], "model": s["model"],
                          "status": s["status"], "prompt_tokens": usage["p"], "completion_tokens": usage["c"],
                          "cost_usd": usage["cost"], "files_changed": sorted(changed)})
-    finally:
-        for c in (conn, *stores):
-            c.close()
     return rows
 
 
