@@ -419,6 +419,29 @@ AND_OWNER = " AND owner_id = ?"
 AND_APP = " AND app_id = ?"
 AND_KIND = " AND kind = ?"
 AND_JOIN = " AND "
+_SESSION_LIST_COLUMNS = (
+    "SELECT id, project, target, model, backend, title, status, stop_reason, created_at, updated_at, totals, "
+    "branch, review, workspace_removed, app_id, job_id, job_status, owner_id FROM sessions")
+
+
+def _session_filter(owner_id: str | None, kind: str, target: str | None) -> tuple[str, list]:
+    where, params = " WHERE kind = ?", [kind]
+    if owner_id is not None:
+        where += AND_OWNER
+        params.append(owner_id)
+    if target is not None:
+        where += " AND target = ?"
+        params.append(target)
+    return where, params
+
+
+def merge_newest_first(*lists: list[dict]) -> list[dict]:
+    """Session rows of several lists once each, newest first by (created_at, id): the order a page cursor follows."""
+    seen: dict[str, dict] = {}
+    for rows in lists:
+        for r in rows:
+            seen.setdefault(r["id"], r)
+    return sorted(seen.values(), key=lambda r: (r["created_at"], r["id"]), reverse=True)
 
 APP_SETTINGS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -461,6 +484,13 @@ READ_CONNECTIONS = 4
 APP_ERASE_GRACE_SECONDS = 7 * 86400
 APP_LIMITS_META = "app_limits:"           # meta key prefix: an App's owner-set session caps (#524)
 APP_LIMIT_KEYS = ("max_running", "max_queued")
+# An API key as `list_api_keys` and `get_api_key_listing` show it: no hash, and `requests` counts its logged requests.
+_API_KEY_LISTING = (
+    "SELECT k.id, k.name, k.prefix, k.kind, k.role, k.scopes, k.origins, "
+    "COALESCE(k.catalog_app_id, '') AS catalog_app_id, k.created_at, k.last_used_at, k.revoked_at, "
+    "k.retention_days, k.erase_after, k.erased_at, "
+    "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
+    "FROM api_keys k WHERE k.kind != 'web'")
 
 
 def _writes(fn):
@@ -825,16 +855,50 @@ class Database:
         return [r["id"] for r in rows]
 
     @_reads
-    def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent") -> list[dict]:
-        """Sessions of one conversation kind, newest first. Agent lists never include Chat and vice versa."""
-        where = " WHERE kind = ?" + (AND_OWNER if owner_id is not None else "")
-        params = (kind, owner_id, limit) if owner_id is not None else (kind, limit)
+    def list_sessions(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent", *,
+                      before: tuple[float, str] | None = None, target: str | None = None,
+                      include_active: bool = False) -> list[dict]:
+        """Sessions of one conversation kind, newest first. Agent lists never include Chat and vice versa.
+        `before` is a `(created_at, id)` keyset cursor; `include_active` adds every active session or one with a
+        pending approval, whatever its age (#663)."""
+        return self.session_page(limit, owner_id, kind, before=before, target=target,
+                                 include_active=include_active)[0]
+
+    @_reads
+    def session_page(self, limit: int = 50, owner_id: str | None = None, kind: str = "agent", *,
+                     before: tuple[float, str] | None = None, target: str | None = None,
+                     include_active: bool = False) -> tuple[list[dict], tuple[float, str] | None]:
+        """`list_sessions` and the cursor of the next older page, None when this page is the last (#663)."""
+        where, params = _session_filter(owner_id, kind, target)
+        page_where, page_params = where, list(params)
+        if before is not None:
+            page_where += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            page_params += [before[0], before[0], before[1]]
         with self.lock:
             rows = self.conn.execute(
-                "SELECT id, project, target, model, backend, title, status, stop_reason, created_at, updated_at, totals, "
-                "branch, review, workspace_removed, app_id, job_id, job_status, owner_id FROM sessions" + where +
-                " ORDER BY created_at DESC LIMIT ?", params
-            ).fetchall()
+                _SESSION_LIST_COLUMNS + page_where + " ORDER BY created_at DESC, id DESC LIMIT ?",
+                (*page_params, limit + 1)).fetchall()
+            active = self._active_sessions(where, params) if include_active else []
+        page = [_row(r) for r in rows[:limit]]
+        cursor = (page[-1]["created_at"], page[-1]["id"]) if page and len(rows) > limit else None
+        return merge_newest_first(page, active), cursor
+
+    @_reads
+    def active_sessions(self, owner_id: str | None = None, kind: str = "agent",
+                        target: str | None = None) -> list[dict]:
+        """Every session that is running, queued or parked, or has a pending approval, newest first (#663)."""
+        where, params = _session_filter(owner_id, kind, target)
+        with self.lock:
+            return self._active_sessions(where, params)
+
+    def _active_sessions(self, where: str, params: list) -> list[dict]:
+        from .runner import ACTIVE
+        marks = ",".join("?" * len(ACTIVE))
+        rows = self.conn.execute(
+            _SESSION_LIST_COLUMNS + where + f" AND status IN ({marks}) UNION "
+            + _SESSION_LIST_COLUMNS + where
+            + " AND id IN (SELECT session_id FROM approvals WHERE status = 'pending')"
+            " ORDER BY created_at DESC, id DESC", (*params, *ACTIVE, *params)).fetchall()
         return [_row(r) for r in rows]
 
     @_reads
@@ -1926,13 +1990,16 @@ class Database:
         """The keys: every App's, device's and owner token's. Agent Harness Web's registry row has no key, so it is
         not listed (`get_api_key(WEB_APP_ID)` reads it)."""
         with self.lock:
-            rows = self.conn.execute(
-                "SELECT k.id, k.name, k.prefix, k.kind, k.role, k.scopes, k.origins, "
-                "COALESCE(k.catalog_app_id, '') AS catalog_app_id, k.created_at, k.last_used_at, k.revoked_at, "
-                "k.retention_days, k.erase_after, k.erased_at, "
-                "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
-                "FROM api_keys k WHERE k.kind != 'web' ORDER BY k.created_at").fetchall()
+            rows = self.conn.execute(_API_KEY_LISTING + " ORDER BY k.created_at").fetchall()
         return [_row(r) for r in rows]
+
+    @_reads
+    def get_api_key_listing(self, kid: str) -> dict | None:
+        """Key `kid` as `list_api_keys` lists it, read alone (#669): the same fields and request count, without
+        listing every key. None when `kid` is not a listed key (a missing or Agent Harness Web's)."""
+        with self.lock:
+            row = self.conn.execute(_API_KEY_LISTING + " AND k.id = ?", (kid,)).fetchone()
+        return _row(row)
 
     @_writes
     def ensure_web_app(self, app_id: str) -> None:
@@ -1977,7 +2044,7 @@ class Database:
             key = prefix + secrets.token_urlsafe(32)
             self.conn.execute("UPDATE api_keys SET hash = ?, prefix = ?, revoked_at = NULL, erase_after = NULL "
                               "WHERE id = ?", (hashlib.sha256(key.encode()).hexdigest(), key[:10], kid))
-        return next(k for k in self.list_api_keys() if k["id"] == kid), key
+        return self.get_api_key_listing(kid), key
 
     @_reads
     def pending_erasures(self, due_by: float | None = None) -> list[dict]:

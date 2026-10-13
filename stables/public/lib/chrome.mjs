@@ -49,7 +49,8 @@ export function mountChrome({ els, browser, session }) {
       if (document.hidden || session.isBlocked()) return;
       const generation = ++needsGeneration;
       try {
-        const sessions = await session.api("/sessions");
+        // The owner route (#663): its first page holds every active session, however old.
+        const sessions = await session.api("/sessions", { surface: session.ownerSurface() });
         if (generation !== needsGeneration) return;
         const count = sessions.filter((s) => sessionGroup(s) === "needs").length;
         needsYou.textContent = String(count);

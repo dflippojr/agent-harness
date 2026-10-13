@@ -454,7 +454,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             return False
         if not await m.db.main.awrite(commit):
             raise HarnessError(404, "no App or device key has that id")
-        return next(k for k in m.db.list_api_keys() if k["id"] == app_id)
+        return m.db.get_api_key_listing(app_id)
 
     def _live_app(m, app_id: str) -> None:
         key = m.db.main.get_api_key(app_id)

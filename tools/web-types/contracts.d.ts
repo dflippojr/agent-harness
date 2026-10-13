@@ -7,6 +7,8 @@ export interface RequestOptions<M extends HttpMethod = HttpMethod, S extends Sur
   method?: M;
   body?: unknown;
   surface?: S;
+  /** Called with the response headers of a successful request, e.g. a list's `X-Next-Before` page cursor. */
+  onHeaders?: (headers: Headers) => void;
 }
 // api() selects the surface at runtime: shared fields are typed; surface-specific fields require narrowing.
 export type SessionDetail =
