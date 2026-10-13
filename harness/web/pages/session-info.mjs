@@ -15,6 +15,7 @@ export function mountSessionInfo({ $app, h, append, copyBox, downloadDaemonFile 
       ["read_artifact calls", t.read_artifact_calls || 0], ["Edit mismatches", t.edit_mismatches || 0],
       ["Workspace", s.workspace_removed ? `${s.workspace} (removed)` : s.workspace],
     ];
+    if (s.tool_profile && s.tool_profile !== "default") rows.push(["Tool profile", s.tool_profile]);
     if (s.branch) rows.push(["Branch", s.base_branch ? `${s.branch} from ${s.base_branch}` : s.branch], ["Review", s.review || "pending"]);
     const frozen = s.skills || [];
     if (frozen.length) {

@@ -1235,13 +1235,14 @@ class Database:
     @_writes
     def record_usage(self, backend: str, sid: str, app_id: str, prompt_tokens: int,
                      completion_tokens: int, cost_usd: float, billing: str,
-                     credential_source: str = "subscription", end_user: str = "") -> None:
+                     credential_source: str = "subscription", end_user: str = "",
+                     tool_profile: str = "default") -> None:
         with self.lock:
             self.conn.execute("INSERT INTO usage (backend, session_id, app_id, prompt_tokens, completion_tokens, "
-                              "cost_usd, billing, credential_source, end_user, created_at) "
-                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              "cost_usd, billing, credential_source, end_user, tool_profile, created_at) "
+                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                               (backend, sid, app_id, prompt_tokens, completion_tokens, cost_usd, billing,
-                               credential_source, end_user, time.time()))
+                               credential_source, end_user, tool_profile, time.time()))
 
     @_reads
     def end_user_usage(self, app_id: str, end_user: str) -> dict:
@@ -1312,6 +1313,20 @@ class Database:
                 f"{app_clause} GROUP BY credential_source", params).fetchall()
         return {row["credential_source"]: {k: row[k] for k in
                                             ("requests", "prompt_tokens", "completion_tokens", "cost_usd")}
+                for row in rows}
+
+    @_reads
+    def usage_by_profile(self, backend: str, since: float, app_id: str | None = None) -> dict[str, dict]:
+        """The usage log's tally per tool profile (#638): `default` or `bash-only`."""
+        app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT tool_profile, COALESCE(SUM(requests),0) requests, "
+                "COALESCE(SUM(prompt_tokens),0) prompt_tokens, COALESCE(SUM(completion_tokens),0) completion_tokens, "
+                "COALESCE(SUM(cost_usd),0) cost_usd FROM usage WHERE backend = ? AND created_at >= ?"
+                f"{app_clause} GROUP BY tool_profile", params).fetchall()
+        return {row["tool_profile"]: {k: row[k] for k in
+                                       ("requests", "prompt_tokens", "completion_tokens", "cost_usd")}
                 for row in rows}
 
     # Owner-managed per-app provider policy. Secret values and file paths never enter this database.

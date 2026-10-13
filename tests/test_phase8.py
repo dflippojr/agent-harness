@@ -987,7 +987,7 @@ def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
         assert tally == {"requests": 1, "prompt_tokens": 15, "completion_tokens": 4, "cost_usd": 0.42}
         metrics = render(m)
         assert 'harness_backend_utilization{backend="claude",window="seven_day"} 0.8' in metrics
-        assert 'harness_backend_cost_usd_total{backend="claude"} 0.42' in metrics
+        assert 'harness_backend_cost_usd_total{backend="claude",tool_profile="default"} 0.42' in metrics
         await m.stop()
         with TestClient(create_app(m)) as client:
             public = client.get("/backends").json()[1]
