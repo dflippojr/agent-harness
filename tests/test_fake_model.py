@@ -523,3 +523,65 @@ def test_full_stack_stuck_loop_nudges_then_ends_the_run(monkeypatch, fake_manage
         {"reason": "stuck_repeat", "tool": "read_file", "count": 8}]
     context = m.db.get_session(sid)["context"]
     assert "will not work" in [msg for msg in context if msg["role"] == "tool"][2]["content"]
+
+
+TRIM_SCRIPT = """
+context_tokens: 16384
+scripts:
+  - name: trim
+    match: "trim"
+    turns:
+      - text: "Writing the data file."
+        tool_calls: [{name: write_file, args: {path: notes/data.txt, content: "%s"}}]
+      - text: "Reading it."
+        filler_chars: 12000
+        tool_calls: [{name: read_file, args: {path: notes/data.txt}}]
+      - text: "Reading it again."
+        filler_chars: 12000
+        tool_calls: [{name: read_file, args: {path: notes/data.txt}}]
+      - text: "Another long pass."
+        filler_chars: 12000
+        tool_calls: [{name: write_file, args: {path: notes/out.md, content: "1"}}]
+      - text: "Another long pass."
+        filler_chars: 12000
+        tool_calls: [{name: write_file, args: {path: notes/out.md, content: "2"}}]
+      - text: "Done."
+""" % "".join(f"row {i:02d} alpha beta gamma delta\n" for i in range(40))
+
+
+def test_full_stack_trim_runs_before_the_summary(monkeypatch, tmp_path):
+    """#637: a transcript that crosses summarize_at in fake model mode. The older of two identical reads is dropped by
+    the trim tier, its `trim` event comes before the summary, and the model gets the trimmed context."""
+    from harness import sandbox
+    monkeypatch.setattr(sandbox, "run_cmd", fail_on_docker)
+    config_dir, data_dir = fake_instance.write_instance(tmp_path / "instance", 0)
+    monkeypatch.setenv(fake_model.ENV, str(fixtures(tmp_path, TRIM_SCRIPT)))
+    requests: list[list[dict]] = []
+    real_call = fake_model.FakeModel.__call__
+
+    async def recording(self, model_name, messages, *args, **kwargs):
+        requests.append(json.loads(json.dumps(messages)))
+        return await real_call(self, model_name, messages, *args, **kwargs)
+    monkeypatch.setattr(fake_model.FakeModel, "__call__", recording)
+    m = Manager(config_mod.load(config_dir, data_dir))
+    try:
+        _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+        headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
+        with TestClient(create_app(m)) as client:
+            made = client.post("/api/v1/sessions", headers=headers,
+                               json={"prompt": "Run the trim task.", "project": fake_instance.PROJECT})
+            assert made.status_code == 201, made.text
+            sid = made.json()["id"]
+            done = wait_session(client, sid, headers, "done", "failed")
+        assert done["status"] == "done", done
+        compactions = [e["data"] for e in m.db.events(sid) if e["type"] == "compaction"]
+        tiers = [c["tier"] for c in compactions]
+        assert "trim" in tiers and "summary" in tiers and tiers.index("trim") < tiers.index("summary"), tiers
+        assert compactions[tiers.index("trim")]["characters_saved"] > 1000
+        marker = compaction.SUPERSEDED.format(path="notes/data.txt")
+        summary = next(r for r in requests if r[0]["content"] == compaction.SUMMARY_SYSTEM)
+        excerpt = summary[1]["content"]
+        assert f"TOOL RESULT: {marker}" in excerpt  # the summarizer got the trimmed context
+        assert excerpt.count("row 07 alpha") <= 2   # the write's arguments and the newer read; the older read is gone
+    finally:
+        m.db.close()

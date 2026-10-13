@@ -1,5 +1,6 @@
 """Context compaction.
 
+Tier 0 (free): rule-based trimming of older tool results (noise, long command output, stale reads, repeats).
 Tier 1 (free): strip old reasoning and shorten old tool outputs.
 Tier 2 (one model call): replace older turns with handoff notes, keeping the system prompt, the original task,
 and recent turns verbatim.
@@ -13,6 +14,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import posixpath
+import re
+from dataclasses import dataclass
 
 SUMMARY_TAG = "[Context summary]"
 STATE_TAG = "[Task state]"
@@ -134,6 +138,156 @@ def elide(messages: list[dict], keep_last: int = 6, max_chars: int = 1500) -> tu
                      f"re-run the tool if you need it] ...\n{text[-600:]}")
             saved += len(text) - len(short)
             m["content"] = short
+    return out, saved
+
+
+# Tier 0 (free, #637): rule-based trimming ahead of elide and summary. Each rule rewrites the content of older tool
+# results and never removes a message, so every tool result keeps its call (arXiv 2609.20804: cheap elision before
+# the summary call is what cut summary calls). Running trim on its output changes nothing.
+
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+PROGRESS = re.compile(r"\d{1,3}(?:\.\d+)?%")
+PROGRESS_BAR = re.compile(r"[#=█▉▊▋▌▍▎▏░▒▓━─>]{5,}|^\s*\d{1,3}(?:\.\d+)?%")
+COMMAND_TOOLS = frozenset({"run_shell", "verify", "git_clone"})
+FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+DEDUPE_MIN_CHARS = 200  # a "same as above" note is shorter than this, so notes are never collapsed themselves
+SAME_AS_ABOVE = "[Same output as the earlier {name} result above; repeated copy removed.]"
+SUPERSEDED = "[Older read of {path} removed: the file was read again or changed later in this session.]"
+LINES_OMITTED = "[... {count} lines omitted: older command output keeps its first {head} and last {tail} lines ...]"
+
+
+@dataclass(frozen=True)
+class TrimRules:
+    """Switches for each trim rule (`compaction.trim` in config/harness.yaml); all on by default."""
+    strip_noise: bool = True
+    head_tail: bool = True
+    head_lines: int = 40
+    tail_lines: int = 60
+    superseded_reads: bool = True
+    dedupe: bool = True
+
+    @property
+    def any(self) -> bool:
+        return self.strip_noise or self.head_tail or self.superseded_reads or self.dedupe
+
+
+def recent_start(messages: list[dict], keep_chars: int) -> int:
+    """First index of the tail kept verbatim: the newest turn, plus older messages while they fit in `keep_chars`
+    (the tail split_for_summary would keep)."""
+    head = _head_len(messages)
+    start = max(last_turn_start(messages), head)
+    kept = sum(message_chars(m) for m in messages[start:])
+    while start > head and kept + message_chars(messages[start - 1]) <= keep_chars:
+        start -= 1
+        kept += message_chars(messages[start])
+    return start
+
+
+def strip_noise(text: str) -> str:
+    """Drop ANSI escapes, keep what a terminal would show of carriage-return overwrites, and keep only the last of a
+    run of progress-bar lines."""
+    text = ANSI.sub("", text).replace("\r\n", "\n")
+    lines = [line.rsplit("\r", 1)[-1] if "\r" in line else line for line in text.split("\n")]
+    out: list[str] = []
+    for line in lines:
+        if _is_progress(line) and out and _is_progress(out[-1]):
+            out[-1] = line
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _is_progress(line: str) -> bool:
+    return bool(PROGRESS.search(line) and PROGRESS_BAR.search(line))
+
+
+def head_and_tail(text: str, head: int, tail: int) -> str:
+    lines = text.split("\n")
+    if len(lines) <= head + tail + 1:
+        return text
+    marker = LINES_OMITTED.format(count=len(lines) - head - tail, head=head, tail=tail)
+    return "\n".join(lines[:head] + [marker] + (lines[-tail:] if tail else []))
+
+
+def _norm_path(path) -> str:
+    return posixpath.normpath(str(path).replace("\\", "/")).lstrip("/") if path else ""
+
+
+def _calls(messages: list[dict]) -> dict:
+    """tool_call_id -> (tool name, parsed arguments)."""
+    out = {}
+    for m in messages:
+        for call in (m.get("tool_calls") or []) if m.get("role") == "assistant" else []:
+            fn = call.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except (TypeError, ValueError):
+                args = {}
+            out[call.get("id")] = (fn.get("name", ""), args if isinstance(args, dict) else {})
+    return out
+
+
+def _superseded(messages: list[dict], calls: dict, outcomes: dict) -> set[int]:
+    """Indexes of read_file results made stale by a later read of the same file with the same arguments, or by a
+    later write or edit of it that did not fail."""
+    stale: set[int] = set()
+    newer_reads: set[tuple] = set()
+    changed: set[str] = set()
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") != "tool":
+            continue
+        call_id = m.get("tool_call_id")
+        name, args = calls.get(call_id, ("", {}))
+        path = _norm_path(args.get("path"))
+        if not path:
+            continue
+        if name in FILE_WRITE_TOOLS and (outcomes.get(call_id) or {}).get("ok") is not False:
+            changed.add(path)
+        elif name == "read_file":
+            key = (path, json.dumps({k: v for k, v in args.items() if k != "path"}, sort_keys=True))
+            if path in changed or key in newer_reads:
+                stale.add(i)
+            newer_reads.add(key)
+    return stale
+
+
+def trim(messages: list[dict], rules: TrimRules, keep_chars: int,
+         outcomes: dict | None = None) -> tuple[list[dict], int]:
+    """Tier 0. Returns (new messages, characters saved). The system prompt, the task and the tail recent_start keeps
+    are never touched, nor are receipts (masking owns those) or results the model has not read yet. `outcomes` maps
+    tool_call_id to its tool_result event data; a write that failed does not make a read stale."""
+    out = copy.deepcopy(messages)
+    if not rules.any:
+        return out, 0
+    cutoff = recent_start(out, keep_chars)
+    calls = _calls(out)
+    stale = _superseded(out, calls, outcomes or {}) if rules.superseded_reads else set()
+    seen: set[str] = set()
+    saved = 0
+    for i, m in enumerate(out):
+        if m.get("role") != "tool":
+            continue
+        text = m.get("content") or ""
+        if i >= cutoff or text.startswith(RECEIPT_PREFIX):
+            continue
+        name, args = calls.get(m.get("tool_call_id"), ("", {}))
+        new = text
+        if i in stale:
+            new = SUPERSEDED.format(path=_norm_path(args.get("path")))
+        else:
+            if rules.strip_noise:
+                new = strip_noise(new)
+            if rules.head_tail and name in COMMAND_TOOLS:
+                new = head_and_tail(new, rules.head_lines, rules.tail_lines)
+            if rules.dedupe and len(new) >= DEDUPE_MIN_CHARS:
+                if new in seen:
+                    new = SAME_AS_ABOVE.format(name=name or "tool")
+                else:
+                    seen.add(new)
+        if len(new) < len(text):
+            saved += len(text) - len(new)
+            m["content"] = new
     return out, saved
 
 

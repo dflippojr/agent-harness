@@ -3297,6 +3297,7 @@ class Runner:
         sid = s["id"]
         n = self.cfg.models[s["model"]].context_tokens
         with telemetry.span("compaction", {"harness.tokens_before": before}) as span:
+            context = await self._trim(s, context, cpt)
             context, _ = compaction.elide(context)
             after = compaction.estimate_tokens(context, cpt) + overhead
             # Under summarize_at after elide alone: no summary call, so the pass is elide-only (#639). An overflow
@@ -3323,6 +3324,18 @@ class Runner:
                 self.bus.emit(sid, "compaction", data)
             await self.db.for_session(s["id"]).awrite(compact)
         return self.db.get_session(sid)
+
+    async def _trim(self, s: dict, context: list, cpt: float) -> list:
+        """The free rule tier ahead of elide and summary (compaction.trim); the `trim` event goes out before any summary
+        request. The context itself is stored with the elide or summary result."""
+        sid = s["id"]
+        keep_chars = int(self.cfg.keep_recent * self.cfg.models[s["model"]].context_tokens * cpt)
+        outcomes = {e["data"].get("id"): e["data"] for e in self.db.events(sid) if e["type"] == "tool_result"}
+        context, saved = compaction.trim(context, self.cfg.trim, keep_chars, outcomes)
+        if saved > 0:
+            await self.db.for_session(sid).awrite(lambda: self.bus.emit(sid, "compaction", {
+                "tier": "trim", "tokens_saved": int(saved / cpt), "characters_saved": saved}))
+        return context
 
     def _mask_used_results(self, s: dict) -> tuple[list, dict, int]:
         """Replace this session's used, oversized tool results with receipts (see compaction.mask_used_results)."""
