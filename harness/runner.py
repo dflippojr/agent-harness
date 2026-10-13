@@ -3330,17 +3330,21 @@ class Runner:
         request. The context itself is stored with the elide or summary result."""
         sid = s["id"]
         keep_chars = int(self.cfg.keep_recent * self.cfg.models[s["model"]].context_tokens * cpt)
-        outcomes = {e["data"].get("id"): e["data"] for e in self.db.events(sid) if e["type"] == "tool_result"}
+        outcomes = self._tool_outcomes(sid)
         context, saved = compaction.trim(context, self.cfg.trim, keep_chars, outcomes)
         if saved > 0:
             await self.db.for_session(sid).awrite(lambda: self.bus.emit(sid, "compaction", {
                 "tier": "trim", "tokens_saved": int(saved / cpt), "characters_saved": saved}))
         return context
 
+    def _tool_outcomes(self, sid: str) -> dict:
+        """tool_call_id -> its tool_result event data, for this session's history."""
+        return {e["data"].get("id"): e["data"] for e in self.db.events(sid) if e["type"] == "tool_result"}
+
     def _mask_used_results(self, s: dict) -> tuple[list, dict, int]:
         """Replace this session's used, oversized tool results with receipts (see compaction.mask_used_results)."""
         sid = s["id"]
-        outcomes = {e["data"].get("id"): e["data"] for e in self.db.events(sid) if e["type"] == "tool_result"}
+        outcomes = self._tool_outcomes(sid)
         full_outputs = {}
         masked = {m.get("tool_call_id") for m in s["context"]
                   if m.get("role") == "tool" and (m.get("content") or "").startswith(compaction.RECEIPT_PREFIX)}

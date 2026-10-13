@@ -14,7 +14,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import posixpath
 import re
 from dataclasses import dataclass
 
@@ -216,13 +215,17 @@ def head_and_tail(text: str, head: int, tail: int) -> str:
 
 def _norm_path(path) -> str:
     """Workspace-relative form, as fileops.normalize_path reads it: only the /workspace prefix is dropped, so other
-    absolute paths stay distinct from relative ones."""
+    absolute paths stay distinct from relative ones. Only `.` segments and repeated slashes collapse; a path with a
+    `..` segment gets no key (""), since a symlink can make it name a different file than the lexical form."""
     if not path:
         return ""
     text = str(path).strip().replace("\\", "/")
     if text == "/workspace" or text.startswith("/workspace/"):
         text = text[len("/workspace"):].lstrip("/") or "."
-    return posixpath.normpath(text)
+    parts = [part for part in text.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        return ""
+    return ("/" if text.startswith("/") else "") + "/".join(parts) or "."
 
 
 def _calls(messages: list[dict]) -> dict:

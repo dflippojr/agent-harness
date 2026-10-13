@@ -137,6 +137,17 @@ def test_a_successful_write_or_edit_supersedes_an_earlier_read_and_a_failed_one_
     assert tools(out)[1] == body
 
 
+def test_a_path_through_dotdot_matches_nothing():
+    """`link/../a.txt` reads nested/a.txt when `link` is a symlink to nested/subdir, not ./a.txt."""
+    body = "x = 1\n" * 50
+    messages = session(turn(1, "read_file", body, path="link/../a.txt"),
+                       turn(2, "edit_file", "Edited", path="a.txt", old_text="x", new_text="y"),
+                       turn(3, "read_file", body, path="./b//c.txt"), turn(4, "write_file", "Wrote", path="b/c.txt"))
+    out, _ = trim(messages, only(superseded_reads=True))
+    assert tools(out)[0] == body
+    assert tools(out)[2] == compaction.SUPERSEDED.format(path="b/c.txt")
+
+
 def test_repeated_identical_outputs_collapse_to_the_newest_copy():
     status = "On branch main\n" + "modified: src/file_%d.py\n" * 20
     small = "ok"
