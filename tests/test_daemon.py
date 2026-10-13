@@ -320,6 +320,48 @@ def test_retries_invalid_calls_and_bad_args(tmp_path):
     asyncio.run(body())
 
 
+def test_consecutive_invalid_calls_end_the_run_stuck_invalid(tmp_path):
+    """#643: five invalid calls in a row end the run; a valid call between them resets the count."""
+    def bad(i: int) -> Completion:
+        return Completion(tool_calls=[call(f"nope{i}", i)])
+
+    script = Script([bad(0), bad(1), bad(2), bad(3), Completion(tool_calls=[call("list_files", 4)]),
+                     bad(5), bad(6), bad(7), bad(8), Completion(tool_calls=[call("nope9", 9), call("list_files", 10)]),
+                     Completion(content="unreachable")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        await m.start()
+        s = m.create("go")
+        s = await wait_status(m, s["id"], "done")
+        assert s["stop_reason"] == "stuck_invalid"
+        assert events(m, s["id"], "stuck") == [{"reason": "stuck_invalid", "tool": "nope9", "count": 5}]
+        outputs = [r["output"] for r in events(m, s["id"], "tool_result")]
+        assert outputs[-1] == "Not run: the run stopped because it was stuck."   # the rest of the turn is skipped
+        assert s["run"]["invalid_tool_calls"] == 9
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_repeated_failing_call_is_nudged_then_ends_the_run_stuck_repeat(tmp_path):
+    """#643: the same failing call gets a nudge from the third time and ends the run at the eighth."""
+    script = Script([Completion(tool_calls=[call("read_file", i, path="missing.txt")]) for i in range(8)]
+                    + [Completion(content="unreachable")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        await m.start()
+        s = m.create("go")
+        s = await wait_status(m, s["id"], "done")
+        assert s["stop_reason"] == "stuck_repeat"
+        outputs = [r["output"] for r in events(m, s["id"], "tool_result")]
+        assert len(outputs) == 8
+        assert "will not work" not in outputs[1] and "failed 3 times" in outputs[2]
+        assert events(m, s["id"], "stuck") == [{"reason": "stuck_repeat", "tool": "read_file", "count": 8}]
+        await m.stop()
+    asyncio.run(body())
+
+
 def test_cancel_and_follow_up_message(tmp_path):
     cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "action": "ask"}])
     script = Script([Completion(tool_calls=[call("write_file", 0, path="a", content="x")]),

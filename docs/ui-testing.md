@@ -150,6 +150,7 @@ and a chat message:
 | "markdown" | `markdown-answer` | "## Summary", a list, a table (Tab bar #506, Approval sheet #507) and a Python code block |
 | "nightly report" | `nightly-report` | Writes reports/nightly.md, answers "Nightly report written to reports/nightly.md. All quiet." |
 | "bad tool call" | `invalid-tool-call` | A malformed `write_file` call the harness rejects |
+| "stuck loop" | `stuck-loop` | The same failing `read_file` eight times: a nudge from the third, then the run ends `stuck_repeat` |
 | anything else | fallback | "[fake model] No fixture script matches this message. Scripts: ..." |
 
 **Reset.** There is no in-place reset. Reset is Teardown followed by Start, which takes about 10 s and gives the same
