@@ -14,7 +14,7 @@ export { FAILED_NEEDS_YOU_SECONDS, SESSION_GROUPS, sessionGroup, groupSessions }
 const LAPTOP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M2 19h20"/></svg>';
 const CHEVRON_SVG = '<svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
 
-export function mountSessions({ $app, h, fill, append, api, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
+export function mountSessions({ $app, h, fill, append, api, ownerSurface = () => "admin", setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, onDaemonChange, onDaemonState, browser }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, localStorage } = browser;
@@ -60,10 +60,13 @@ async function viewList(pane = null) {
     const qs = query.toString();
     return qs ? `/sessions?${qs}` : "/sessions";
   };
+  // The owner route pages and filters by machine; a member's App-surface list does neither, so filter here too.
   const shown = () => {
     const ids = new Set(sessions.map((s) => s.id));
-    return [...sessions, ...older.filter((s) => !ids.has(s.id))];
+    return [...sessions, ...older.filter((s) => !ids.has(s.id))]
+      .filter((s) => sessionTarget === "all" || s.target === sessionTarget);
   };
+  const listOptions = (onNext) => ({ surface: ownerSurface(), onHeaders: (headers) => onNext(headers.get("X-Next-Before")) });
   const targetName = (target) => target === "tower" ? "Tower" : TARGET_LABEL[target] || target;
   const sessionCardKey = (s) => [
     s.id, s.title, s.status, s.updated_at, s.chat_summary, s.queue_position, s.review, s.job_status,
@@ -105,7 +108,7 @@ async function viewList(pane = null) {
     const asked = sessionTarget;
     let next = null;
     try {
-      const page = await api(sessionsPath(nextBefore), { onHeaders: (headers) => { next = headers.get("X-Next-Before"); } });
+      const page = await api(sessionsPath(nextBefore), listOptions((cursor) => { next = cursor; }));
       if (gone || asked !== sessionTarget) return;  // left, or the machine changed meanwhile
       older = [...older, ...page];
       nextBefore = next;
@@ -201,7 +204,7 @@ async function viewList(pane = null) {
     const asked = sessionTarget;
     let next = null;
     const [freshSessions, queue, gpu, projects] = await Promise.all([
-      api(sessionsPath(), { onHeaders: (headers) => { next = headers.get("X-Next-Before"); } }), api("/queue"),
+      api(sessionsPath(), listOptions((cursor) => { next = cursor; })), api("/queue"),
       isMember() ? Promise.resolve(null) : api("/gpu").catch(() => null), api("/projects")]);
     if (gone || run !== listRun) return;
     targets = [...new Set(projects.map((p) => p.target || "tower"))]

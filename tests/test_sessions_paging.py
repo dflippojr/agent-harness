@@ -124,3 +124,22 @@ def test_route_returns_active_sessions_pages_and_filters_by_machine(tmp_path):
         assert [s["id"] for s in mac.json()] == ["mac2", "mac1", "mac0"] and "X-Next-Before" not in mac.headers
         for bad in ("nope", "1.5", ":s001", "inf:s001"):
             assert client.get("/sessions", params={"before": bad}, headers=OWNER).status_code == 400
+
+
+def test_cross_origin_web_can_read_the_page_cursor(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from harness.api import create_app
+    from harness.manager import Manager
+    from test_daemon import Script, make_cfg
+
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="hi")]))
+    _, token = m.db.main.create_api_key("web", "admin", "owner", origins=["https://web.example"])
+    with TestClient(create_app(m)) as client:
+        _seed(m.db, 5)
+        response = client.get("/api/admin/v1/sessions", params={"limit": 2}, headers={
+            "Authorization": "Bearer " + token, "Origin": "https://web.example", "X-Agent-Harness-Client": "web/2"})
+        assert response.status_code == 200, response.text
+        assert response.headers["Access-Control-Allow-Origin"] == "https://web.example"
+        assert response.headers["X-Next-Before"] == f"{BASE + 3!r}:s003"
+        assert "X-Next-Before" in response.headers["Access-Control-Expose-Headers"]

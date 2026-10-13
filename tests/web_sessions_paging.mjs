@@ -19,8 +19,10 @@ const row = (id, status, age, target = "tower") => ({ id, title: `Task ${id}`, s
 const firstPage = [row("new1", "done", 10), row("new2", "done", 20), row("old-wait", "waiting_approval", 9000)];
 const olderPage = [row("old1", "done", 5000), row("old2", "done", 6000)];
 const calls = [];
-const api = async (path, { onHeaders } = {}) => {
+const surfaces = new Set();
+const api = async (path, { onHeaders, surface } = {}) => {
   calls.push(path);
+  if (path.startsWith("/sessions")) surfaces.add(surface);
   const headers = new Map();
   let body = [];
   if (path === "/sessions") { body = firstPage; headers.set("X-Next-Before", "1760000000.5:new2"); }
@@ -34,7 +36,7 @@ const api = async (path, { onHeaders } = {}) => {
 let painted = [];
 let switchKids = [];
 const page = mountSessions({
-  $app: "APP", h: el, api, append() {}, setHeader() {}, showListAction() {}, onLeave() {},
+  $app: "APP", h: el, api, ownerSurface: () => "admin", append() {}, setHeader() {}, showListAction() {}, onLeave() {},
   fill: (target, ...n) => {
     if (target?.attrs?.role === "group") switchKids = n.flat(Infinity);
     else if (target?.attrs?.class === "agent-groups") painted = n.flat(Infinity);
@@ -64,4 +66,5 @@ mac.attrs.onclick();
 await sleep(20);
 assert.ok(calls.includes("/sessions?target=macbook"), "the machine switch filters on the server");
 assert.deepEqual(rowIds(section("Recent")), ["mac1"], "and replaces the pages shown so far");
+assert.deepEqual([...surfaces], ["admin"], "every page comes from the owner route, which holds the active sessions");
 console.log("ok");
