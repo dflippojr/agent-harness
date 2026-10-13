@@ -16,6 +16,7 @@ import json
 
 SUMMARY_TAG = "[Context summary]"
 STATE_TAG = "[Task state]"
+SUMMARY_HEADER = f"{SUMMARY_TAG} Earlier work in this session, condensed:\n\n"
 NOTES_HEADING = "## Your saved notes (kept verbatim)"
 SUMMARY_CONTINUE = "Continue from here; don't redo work that is already done."
 ROUND_CONTINUE = ("Continue from the saved state. Do not repeat a command that already failed with the "
@@ -197,23 +198,25 @@ def render_excerpt(messages: list[dict], max_chars: int) -> str:
     return text
 
 
-def prior_summary(message: dict) -> str | None:
+def prior_summary(message: dict, known: str = "") -> str | None:
     """The summary in a message apply_summary wrote, without its framing or the saved notes (apply_summary adds
-    those again); None for any other message."""
+    those again); None for any other message. `known` is the summary text the runner kept: used when the message
+    still holds it, since a summary may itself quote the notes heading. Otherwise the framing is cut from the end."""
     content = message.get("content") or ""
-    if message.get("role") != "user" or not content.startswith(SUMMARY_TAG):
+    if message.get("role") != "user" or not content.startswith(SUMMARY_HEADER):
         return None
-    body = content.partition("\n\n")[2]
-    for marker in (NOTES_HEADING, SUMMARY_CONTINUE):
-        body = body.split("\n\n" + marker, 1)[0]
-    return body.strip()
+    if known.strip() and content.startswith(f"{SUMMARY_HEADER}{known.strip()}\n\n"):
+        return known.strip()
+    body = content[len(SUMMARY_HEADER):].removesuffix(f"\n\n{SUMMARY_CONTINUE}")
+    before, found, _ = body.rpartition(f"\n\n{NOTES_HEADING}\n")
+    return (before if found else body).strip()
 
 
-def summary_request(messages: list[dict], start: int, end: int, max_chars: int) -> list[dict]:
+def summary_request(messages: list[dict], start: int, end: int, max_chars: int, known: str = "") -> list[dict]:
     """An earlier summary at the start of the span goes whole into its own prior-notes block, instead of being the
-    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`."""
+    first thing render_excerpt cuts; the excerpt gets what is left of `max_chars`. `known`: see prior_summary."""
     task = messages[1]["content"] if _head_len(messages) == 2 else "(not available)"
-    prior = prior_summary(messages[start]) if start < end else None
+    prior = prior_summary(messages[start], known) if start < end else None
     block = ""
     if prior is not None:
         block = PRIOR_NOTES.format(prior=prior)
@@ -227,7 +230,7 @@ def summary_request(messages: list[dict], start: int, end: int, max_chars: int) 
 
 def apply_summary(messages: list[dict], _start: int, end: int, summary: str, notes: str = "") -> list[dict]:
     head = [m for m in messages[:_head_len(messages)] if not (m.get("content") or "").startswith(SUMMARY_TAG)]
-    text = f"{SUMMARY_TAG} Earlier work in this session, condensed:\n\n{summary.strip()}"
+    text = f"{SUMMARY_HEADER}{summary.strip()}"
     if notes.strip():
         text += f"\n\n{NOTES_HEADING}\n{notes.strip()}"
     note = {"role": "user", "content": f"{text}\n\n{SUMMARY_CONTINUE}"}

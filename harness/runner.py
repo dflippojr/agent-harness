@@ -3262,7 +3262,11 @@ class Runner:
                       "harness.compaction_reason": data.get("reason", "threshold")})
 
             def compact() -> None:
-                self.db.update_session(sid, context=context)
+                if data["tier"] == "summary":  # the next summary request quotes it as the prior notes
+                    self.db.update_session(sid, context=context,
+                                           run={**self.db.get_session(sid)["run"], "summary": data["summary"]})
+                else:
+                    self.db.update_session(sid, context=context)
                 self.bus.emit(sid, "compaction", data)
             await self.db.for_session(s["id"]).awrite(compact)
         return self.db.get_session(sid)
@@ -3292,7 +3296,8 @@ class Runner:
         # Persisted, so a client that opens the session mid-summary still shows it.
         await self.bus.aemit(sid, "compaction_started", {"messages": end - start, "tokens_before": before,
                                                   "context_tokens": n})
-        request = compaction.summary_request(context, start, end, max_chars=int(0.45 * n * cpt))
+        request = compaction.summary_request(context, start, end, max_chars=int(0.45 * n * cpt),
+                                             known=s["run"].get("summary", ""))
         written = {"tokens": 0, "last": 0.0}
 
         async def writing(kind: str, text: str) -> None:

@@ -77,16 +77,13 @@ def _overflow_cfg(tmp_path):
 
 
 def test_overflow_compacts_once_and_retries(tmp_path):
-    calls = {"failed": 0}
+    turns = {"n": 0}
 
-    def step(msgs):
-        n = sum(1 for m in msgs if m["role"] == "assistant")
-        if n < 4:
-            return Completion(tool_calls=[call("run_fake", n)])
-        if not calls["failed"]:
-            calls["failed"] += 1
-            return LLMError(OVERFLOW)
-        return Completion(content="final")
+    def step(_msgs):  # by call, not by assistant turns: the summary removes those
+        turns["n"] += 1
+        if turns["n"] <= 4:
+            return Completion(tool_calls=[call("run_fake", turns["n"])])
+        return LLMError(OVERFLOW) if turns["n"] == 5 else Completion(content="final")
 
     script = Script([step])
 
@@ -98,8 +95,10 @@ def test_overflow_compacts_once_and_retries(tmp_path):
         overflow = [c for c in events(m, s["id"], "compaction") if c.get("reason") == "overflow"]
         assert len(overflow) == 1 and overflow[0]["tier"] == "summary"
         assert sum(1 for r in script.requests if r[0]["content"] == compaction.SUMMARY_SYSTEM) == 1
-        retry = script.requests[-1]
-        assert retry[2]["content"].startswith(compaction.SUMMARY_TAG)   # the retry got the compacted context
+        turns_sent = [r for r in script.requests if r[0]["content"] != compaction.SUMMARY_SYSTEM]
+        assert len(turns_sent) == 6                                        # four turns, the rejected call, the retry
+        assert turns_sent[-1][2]["content"].startswith(compaction.SUMMARY_TAG)  # the retry got the compacted context
+        assert m.db.get_session(s["id"])["run"]["summary"] == "SUMMARY: did things"
         assert not events(m, s["id"], "error")
         await m.stop()
     asyncio.run(body())
@@ -170,3 +169,16 @@ def test_prior_notes_that_use_up_the_budget_leave_no_excerpt():
     assert FIRST in text
     assert text.endswith("Conversation excerpt:\n[earliest part omitted]\n")
     assert "result 0" not in text
+
+
+def test_a_summary_quoting_the_notes_heading_is_kept_whole():
+    quoting = f"## Findings\nthe template has\n\n{compaction.NOTES_HEADING}\nin it\n## Next steps\nedit it"
+    head = [{"role": "system", "content": "sys"}, {"role": "user", "content": "task"}]
+    for notes in ("", "my notes"):
+        message = compaction.apply_summary(head + _turns(2, 10), 2, 6, quoting, notes=notes)[2]
+        assert compaction.prior_summary(message, known=quoting) == quoting
+    # Without the kept text the framing is still cut from the end, so appended notes go and the summary stays.
+    message = compaction.apply_summary(head, 2, 2, FIRST, notes=f"x\n\n{compaction.NOTES_HEADING}\ny")[2]
+    assert compaction.prior_summary(message).startswith(FIRST)
+    # Kept text from another summary (a round reset dropped that one) is not used.
+    assert compaction.prior_summary(compaction.apply_summary(head, 2, 2, FIRST)[2], known="stale") == FIRST
