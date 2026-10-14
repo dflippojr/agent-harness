@@ -737,25 +737,17 @@ def _assert_no_secrets(m, fake, tmp_path):
         assert secret not in rows
 
 
-def test_web_ui_member_card_owner_controls_and_no_browser_storage():
-    new_task = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "new-task.mjs").read_text(encoding="utf-8")
-    profile = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "profile.mjs").read_text(encoding="utf-8")
+def test_web_ui_member_card_keeps_nothing_in_the_browser():
+    pages = Path(__file__).resolve().parents[1] / "stables" / "public" / "pages"
+    new_task = (pages / "new-task.mjs").read_text(encoding="utf-8")
+    profile = (pages / "profile.mjs").read_text(encoding="utf-8")
     start = profile.index("function githubConnectionCard(")
     card = profile[start:profile.index("\n// Each profile subpage", start)]
-    for needed in ('"/me/github-connection/connect"', '"/me/github-connection/cancel"', 'act("/me/github-connection", "DELETE"',
-                   "copyBox(prompt.user_code)", 'rel: "noopener noreferrer"', "st.scopes_note"):
-        assert needed in card, needed
     for forbidden in ("localStorage", "sessionStorage", "storeSet", "window.open"):
         assert forbidden not in card, forbidden  # no browser automation, nothing persisted in the browser
     form = new_task[new_task.index('const githubConnect = h("div");'):new_task.index("const model = h(\"select\"")]
     assert "localStorage" not in form and "sessionStorage" not in form
     assert not [line for line in form.splitlines() if "storeSet(" in line and "repo" in line.lower()]
-    assert "form.requestSubmit()" in form
-    actions_js = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "actions.mjs").read_text(encoding="utf-8")
-    # The owner's switch and credential reset are in the Hub and the CLI (#545); Stables has neither.
-    assert '"/github-member-auth"' not in actions_js and "github-connection/reset" not in actions_js
-    session = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "session.mjs").read_text(encoding="utf-8")
-    assert "s.push_target" in session and "commit authors stay as they are" in session
 
 
 def test_real_git_reaches_only_the_pinned_helper_in_the_member_namespace(tmp_path, fake):

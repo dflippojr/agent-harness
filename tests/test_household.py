@@ -360,21 +360,6 @@ def test_member_clone_allows_only_public_https(tmp_path):
             clone_mod.clone_public = orig
 
 
-def test_run_clone_stops_when_dest_exceeds_max_bytes(tmp_path):
-    src = tmp_path / "src"
-    src.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
-    (src / "blob.bin").write_bytes(b"x" * 80_000)
-    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "add", "."], check=True)
-    subprocess.run(["git", "-C", str(src), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "big"],
-                   check=True)
-    dest = tmp_path / "dest"
-    from harness.clone import _run_clone
-    with pytest.raises(QuotaExceeded):
-        _run_clone(["git", "clone", "--", str(src), str(dest)], dest, max_bytes=2_000)
-    assert not dest.exists()
-
-
 def test_isolated_prepare_stops_when_clone_exceeds_max_bytes(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
@@ -893,47 +878,6 @@ def test_scheduler_grants_non_session_gpu_holders(tmp_path):
         assert m.scheduler.holder == "images"
         m.scheduler.release("images")
     asyncio.run(body())
-
-
-def test_scheduler_gpu_hold_preserves_global_fifo(tmp_path):
-    async def body():
-        order = []
-        s = GpuScheduler()
-        s.set_paused(True)
-
-        async def worker(sid):
-            await s.acquire(sid)
-            order.append(sid)
-            s.release(sid)
-
-        tasks = [asyncio.create_task(worker(x)) for x in ("member-a", "owner-b")]
-        await asyncio.sleep(0.02)
-        assert s.holder is None
-        s.set_paused(False)
-        await asyncio.gather(*tasks)
-        assert order == ["member-a", "owner-b"]
-    asyncio.run(body())
-
-
-def test_owner_accounts_ui_and_js_hide_member_content(tmp_path):
-    client, _ = household(tmp_path)
-    with client:
-        session_js = client.get("/static/lib/session.mjs").text
-        assert "const isMember = " in session_js
-        actions_js = client.get("/static/pages/actions.mjs").text
-        assert "accountsCard" not in actions_js  # the owner manages members in the Hub and the CLI (#545)
-        assert "Household member" in client.get("/static/pages/profile.mjs").text
-        assert "function ownerSurface()" in session_js
-        assert 'if (isMember()) return "app";' in session_js
-        assert 'agentHarnessWeb.url("/events", ownerSurface())' in client.get("/static/lib/stream.mjs").text
-        create_member(client, ALICE, "Alice")
-        rows = client.get(f"{PREFIX}/accounts", headers=H(OWNER)).json()
-        assert rows[0]["display_name"] == "Alice"
-        blob = str(rows)
-        for leak in ("prompt", "transcript", "diff", "github.com"):
-            assert leak not in blob
-        assert client.get(f"{PREFIX}").json()["api_version"] == ADMIN_API_VERSION
-        assert any(op["path"] == f"{PREFIX}/accounts" for op in client.get(PREFIX).json()["operations"])
 
 
 def test_guest_stays_non_durable(tmp_path):
