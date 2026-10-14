@@ -47,6 +47,11 @@ function present(dialog, { dismissOnRoute = true, wire }) {
 function openSheet({ title, message, fields = [], confirmLabel, cancelLabel = "Cancel", destructive = false, dismissOnRoute = true }) {
   const id = `sheet-${++serial}`;
   const inputs = fields.map((f, i) => {
+    if (f.control) { // a ready-made control, such as a <select>; the sheet reads its value like an input's
+      f.control.id = `${id}-f${i}`;
+      f.control.setAttribute("aria-describedby", `${id}-e${i}`);
+      return f.control;
+    }
     const input = h("input", { id: `${id}-f${i}`, name: f.name, type: f.type || "text", inputmode: f.inputmode,
       placeholder: f.placeholder, autocomplete: "off", "aria-describedby": `${id}-e${i}` });
     input.value = f.value ?? "";
@@ -131,7 +136,8 @@ export async function promptSheet({ title, message, label, value = "", confirmLa
   return result ? result.value : null;
 }
 
-// Several inputs in one sheet. fields: [{ name, label, value, type, inputmode, placeholder, validate }].
+// Several inputs in one sheet. fields: [{ name, label, value, type, inputmode, placeholder, validate }], or
+// [{ name, label, control }] for a control built elsewhere (the backend picker, #664).
 export async function formSheet({ title, message, fields, confirmLabel = "Save", cancelLabel, destructive = false }) {
   return openSheet({ title, message, fields, confirmLabel, cancelLabel, destructive });
 }

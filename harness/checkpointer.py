@@ -19,6 +19,22 @@ log = logging.getLogger("harness.checkpointer")
 RECLAIM_EVERY = 10
 
 
+def _clip(parts: list[str], limit: int) -> str:
+    text = "\n".join(parts)
+    return text if len(text) <= limit else "…" + text[-limit:]
+
+
+def context_summary(context: list[dict], limit: int = 6000) -> str:
+    """`Checkpointer.summary` from a local session's saved context, which (unlike its event log) still holds what a
+    fork inherited from its own parent (#664)."""
+    parts = []
+    for message in context:
+        content = message.get("content")
+        if message.get("role") in ("user", "assistant") and isinstance(content, str) and content.strip():
+            parts.append(f"{'User' if message['role'] == 'user' else 'Agent'}: {content.strip()}")
+    return _clip(parts, limit)
+
+
 @dataclass
 class Restored:
     """A rewind whose files are restored but not yet recorded: `saved` is the checkpoint's (context, run fields);
@@ -314,16 +330,23 @@ class Checkpointer:
 
     def summary(self, parent: dict, turn: int, limit: int = 6000) -> str:
         """A digest of the parent's transcript up to the checkpoint, for hosted sessions whose CLI state cannot
-        be forked. Built from the event log; no model call."""
+        be forked. Built from the event log; no model call. From the session's latest checkpoint it runs to the end of
+        the log: a hosted run is checkpointed at its end only if its files changed, so a later follow-up that changed
+        none (answered, or never answered because the run hit its limit, #664) is still of that checkpoint's files.
+        A skipped snapshot since means the files did change, so then it stops at the checkpoint."""
         ckpt = self.checkpoint(parent["id"], turn)
+        events = self.db.events(parent["id"])
+        visible = self.db.checkpoints(parent["id"])
+        later = [e for e in events if e["seq"] > ckpt["event_seq"]]
+        to_end = bool(visible) and visible[-1]["turn"] == turn and not any(
+            e["type"] == "checkpoint" and e["data"].get("status") == "skipped" for e in later)
         parts: list[str] = []
-        for e in self.db.events(parent["id"]):
-            if e["seq"] > ckpt["event_seq"]:
+        for e in events:
+            if e["seq"] > ckpt["event_seq"] and not to_end:
                 break
             d = e["data"]
             if e["type"] == "user_message" and d.get("content"):
                 parts.append(f"User: {str(d['content']).strip()}")
             elif e["type"] == "assistant" and str(d.get("content") or "").strip():
                 parts.append(f"Agent: {str(d['content']).strip()}")
-        text = "\n".join(parts)
-        return text if len(text) <= limit else "…" + text[-limit:]
+        return _clip(parts, limit)

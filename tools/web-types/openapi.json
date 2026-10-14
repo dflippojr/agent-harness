@@ -1568,6 +1568,28 @@
       },
       "ForkRequest": {
         "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
           "prompt": {
             "title": "Prompt",
             "type": "string"
@@ -2337,6 +2359,34 @@
           }
         },
         "title": "RateLimitsResponse",
+        "type": "object"
+      },
+      "RerunRequest": {
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backend"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          }
+        },
+        "title": "RerunRequest",
         "type": "object"
       },
       "ReviewComment": {
@@ -8058,7 +8108,7 @@
     },
     "/api/admin/v1/sessions/{ref}/rerun": {
       "post": {
-        "description": "Starts a new session repeating this one's original prompt, project, model and taint; 409 for App tools-only sessions.",
+        "description": "Starts a new session repeating this one's original prompt, project and taint, optionally on another backend or model; 409 for App tools-only sessions.",
         "operationId": "admin_rerun_sessions__ref__rerun_post",
         "parameters": [
           {
@@ -8071,6 +8121,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RerunRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "content": {
@@ -15152,7 +15219,7 @@
     },
     "/sessions/{ref}/rerun": {
       "post": {
-        "description": "Starts a new session repeating this one's original prompt, project, model and taint; 409 for App tools-only sessions.",
+        "description": "Starts a new session repeating this one's original prompt, project and taint, optionally on another backend or model; 409 for App tools-only sessions.",
         "operationId": "rerun_sessions__ref__rerun_post",
         "parameters": [
           {
@@ -15165,6 +15232,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RerunRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "content": {

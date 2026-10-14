@@ -2305,7 +2305,7 @@ export interface paths {
         put?: never;
         /**
          * Rerun
-         * @description Starts a new session repeating this one's original prompt, project, model and taint; 409 for App tools-only sessions.
+         * @description Starts a new session repeating this one's original prompt, project and taint, optionally on another backend or model; 409 for App tools-only sessions.
          */
         post: operations["admin_rerun_sessions__ref__rerun_post"];
         delete?: never;
@@ -5672,7 +5672,7 @@ export interface paths {
         put?: never;
         /**
          * Rerun
-         * @description Starts a new session repeating this one's original prompt, project, model and taint; 409 for App tools-only sessions.
+         * @description Starts a new session repeating this one's original prompt, project and taint, optionally on another backend or model; 409 for App tools-only sessions.
          */
         post: operations["rerun_sessions__ref__rerun_post"];
         delete?: never;
@@ -6949,6 +6949,10 @@ export interface components {
         };
         /** ForkRequest */
         ForkRequest: {
+            /** Backend */
+            backend?: string | null;
+            /** Model */
+            model?: string | null;
             /** Prompt */
             prompt: string;
         };
@@ -7333,6 +7337,13 @@ export interface components {
             utilization?: number | null;
         } & {
             [key: string]: unknown;
+        };
+        /** RerunRequest */
+        RerunRequest: {
+            /** Backend */
+            backend?: string | null;
+            /** Model */
+            model?: string | null;
         };
         /** ReviewComment */
         ReviewComment: {
@@ -11769,7 +11780,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RerunRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             201: {
@@ -17458,7 +17473,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RerunRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             201: {

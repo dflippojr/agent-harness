@@ -113,6 +113,8 @@ test('AH-08/AH-09 retry, fatal rerun and compaction', async ({ signedIn: page })
   const oldUrl = page.url();
   await page.getByRole('button', { name: 'Session menu', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Run again as new session' }).click();
+  // #664: Run again offers a backend/model picker first; the default keeps this session's.
+  await page.getByRole('dialog').getByRole('button', { name: 'Run again', exact: true }).click();
   await expect(page).not.toHaveURL(oldUrl);
   await expect(page.locator('.session-strip .badge').first()).toHaveText('failed');
   await page.reload();

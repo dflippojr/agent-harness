@@ -97,6 +97,13 @@ class SendMessage(BaseModel):
 
 class ForkRequest(BaseModel):
     prompt: str
+    backend: str | None = None  # continue on another backend or model (#664); empty keeps the parent's
+    model: str | None = None
+
+
+class RerunRequest(BaseModel):
+    backend: str | None = None  # run again on another backend or model (#664); empty keeps the session's
+    model: str | None = None
 
 
 class ReviewComment(BaseModel):
@@ -836,10 +843,12 @@ async def send_message(ref: str, body: SendMessage, request: Request):
 
 
 @api_router.post("/sessions/{ref}/rerun", status_code=201)
-async def rerun(ref: str, request: Request):
-    """Starts a new session repeating this one's original prompt, project, model and taint; 409 for App tools-only sessions."""
+async def rerun(ref: str, request: Request, body: RerunRequest | None = None):
+    """Starts a new session repeating this one's original prompt, project and taint, optionally on another backend or model; 409 for App tools-only sessions."""
     m, sid, _ = owned_session(request, ref)
-    return m.summary(m.rerun(sid, context=operation_audit.request_context(request, m)))
+    body = body or RerunRequest()
+    return m.summary(m.rerun(sid, backend=body.backend, model=body.model,
+                             context=operation_audit.request_context(request, m)))
 
 
 @api_router.get("/sessions/{ref}/checkpoints")
@@ -860,7 +869,8 @@ async def rewind_checkpoint(ref: str, turn: int, request: Request):
 async def fork_checkpoint(ref: str, turn: int, body: ForkRequest, request: Request):
     """Starts a new session from this checkpoint with a non-blank prompt, and returns before its run finishes."""
     m, sid, _ = owned_session(request, ref)
-    return m.summary(await m.fork(sid, turn, body.prompt, context=operation_audit.request_context(request, m)))
+    return m.summary(await m.fork(sid, turn, body.prompt, backend=body.backend, model=body.model,
+                                  context=operation_audit.request_context(request, m)))
 
 
 @api_router.get("/sessions/{ref}/changes")

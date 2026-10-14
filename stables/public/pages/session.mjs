@@ -11,7 +11,8 @@ import { withTaint } from "../lib/taint.mjs";
 import { mountSessionUi, sessionMenuItems, pageMetrics as measurePage, scrollPage as scrollPageOf } from "../lib/session-ui.mjs";
 import { sinceText } from "../lib/widgets.mjs";
 import * as sheets from "../lib/sheet.mjs";
-/** @import { Api, ConfirmSheet, OpenStream, PromptSheet, SessionDetail, StreamHandlers } from '../../../tools/web-types/contracts.js' */
+import { backendPicker } from "../lib/backend-choice.mjs";
+/** @import { Api, ConfirmSheet, FormSheet, OpenStream, SessionDetail, StreamHandlers } from '../../../tools/web-types/contracts.js' */
 
 /**
  * The shell and UI helpers are incremental boundaries; API responses use the generated contract.
@@ -43,7 +44,7 @@ import * as sheets from "../lib/sheet.mjs";
  * @property {any} downloadDaemonFile
  * @property {Set<string>} TERMINAL
  * @property {ConfirmSheet} [confirmSheet]
- * @property {PromptSheet} [promptSheet]
+ * @property {FormSheet} [formSheet]
  */
 
 const SESSION_EVENT_TYPES = [
@@ -57,7 +58,7 @@ const SESSION_EVENT_TYPES = [
 /** @param {SessionDependencies} dependencies */
 export function mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
   progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser, confirmSheet = /** @type {ConfirmSheet} */ (sheets.confirmSheet),
-  promptSheet = /** @type {PromptSheet} */ (sheets.promptSheet), announceChange = () => {}, onDaemonChange = null }) {
+  formSheet = /** @type {FormSheet} */ (sheets.formSheet), announceChange = () => {}, onDaemonChange = null }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, location, setInterval, clearInterval, setTimeout, clearTimeout } = browser;
 const { renameTitle, sessionMenu, bindSessionJumps, placeSessionHeader } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser,
@@ -117,9 +118,11 @@ async function viewSession(sid, tab, focusApproval) {
       taint.length ? h("span", { class: "badge warn", title: `Untrusted content read: ${taint.map((t) => t.origin).join(", ")}. Risky actions ask for approval until cleared.` }, "Tainted") : null,
       h("span", { class: "session-strip-meta", title: tokens }, `${session.project}${onTarget} · ${session.backend || "local"}${backendUsage} · ${session.model}`),
       pct === null ? null : h("span", { class: `ctx${pct >= 55 ? " high" : ""}`, title: `Context window: ~${ctxUsed} of ${ctxLimit} tokens. Older context is condensed as it fills up. ${tokens}.` },
-        progressBar(pct / 100), `${pct}%`));
+        progressBar(pct / 100), `${pct}%`),
+      session.status === "waiting_limit" && canMove() ? h("button", { class: "btn small", type: "button",
+        title: "Cancel this waiting session and continue from its latest checkpoint on another backend",
+        onclick: continueElsewhere }, "Continue on another backend") : null);
   };
-  renderHead();
 
   // The overflow menu's actions work on every tab, so they live above the tab split. Changes and Info get no stream, so
   // each action repaints the strip itself.
@@ -128,12 +131,54 @@ async function viewSession(sid, tab, focusApproval) {
       destructive: true }))) return;
     try { session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) }; renderHead(); } catch (e) { toast(e.message); }
   };
+  // Run again, Fork and Continue on another backend can move the work to another backend or model (#664). An App's
+  // session keeps its own (the server refuses), and members fork and pick backends elsewhere, so they get no picker.
+  function canMove() { return !isMember() && !session.app_id && session.kind !== "tools_only"; }
+  let choices = null;
+  const loadChoices = async () => {
+    choices ||= await Promise.all([api("/backends?auth=skip"), api("/models")]);
+    const [backends, models] = choices;
+    return { backends, models };
+  };
+  const pickerFields = (picker) => [{ name: "backend", label: "Backend", control: picker.backend },
+    { name: "model", label: "Model", control: picker.model }];
+  // A session waiting on its subscription limit is idle only once cancelled, so this is two calls: cancel, then fork
+  // from the latest checkpoint with "Continue the task." (no combined endpoint, #664).
+  async function continueElsewhere() {
+    try {
+      const picker = backendPicker({ h, fill, ...(await loadChoices()), exclude: session.backend || "local", id: "continue" });
+      if (!picker.available.length) { toast("No other backend is available."); return; }
+      if (!(await formSheet({ title: "Continue on another backend?", fields: pickerFields(picker), confirmLabel: "Continue",
+        message: "Cancels this waiting session and continues from its latest checkpoint in a new session on its own branch." }))) return;
+      session = { ...session, ...(await api(`/sessions/${sid}/cancel`, { method: "POST" })) };
+      renderHead();
+      // Read the checkpoints only now: a hosted run saves its last one as the cancel ends.
+      const listing = await api(`/sessions/${sid}/checkpoints`);
+      const turn = Math.max(0, ...(listing.checkpoints || []).map((c) => c.turn));
+      if (!listing.can_fork || !turn) {
+        toast("The session is cancelled, but it has no checkpoint to continue from; use Run again in the ⋯ menu instead.", 8000);
+        return;
+      }
+      const s = await api(`/sessions/${sid}/checkpoints/${turn}/fork`, { method: "POST",
+        body: { prompt: "Continue the task.", ...picker.choice() } });
+      go(`#/s/${s.id}`, true);
+    } catch (e) { toast(e.message, 8000); }
+  }
+  renderHead();
+
   const menuActions = {
     rename: () => renameTitle(session, () => !left),
     cancel: cancelTask,
     rerun: async () => {
       try {
-        const s = await api(`/sessions/${sid}/rerun`, { method: "POST" });
+        let body;
+        if (canMove()) {
+          const picker = backendPicker({ h, fill, ...(await loadChoices()), keep: session.backend || "local", id: "rerun" });
+          if (!(await formSheet({ title: "Run again as a new session?", fields: pickerFields(picker), confirmLabel: "Run again",
+            message: "Starts a fresh session with the same task. Pick another backend or model, or keep this session's." }))) return;
+          body = picker.choice();
+        }
+        const s = await api(`/sessions/${sid}/rerun`, { method: "POST", body });
         location.hash = `#/s/${s.id}`;
       } catch (e) { toast(e.message); }
     },
@@ -625,15 +670,22 @@ async function viewSession(sid, tab, focusApproval) {
           class: "btn small", type: "button", title: "Start a new session from this point, on its own branch",
           onclick: async (ev) => {
             const btn = ev.currentTarget;
-            const prompt = await promptSheet({ title: `Fork from checkpoint ${turn}`, label: "Instruction for the forked session",
-              message: "Starts a new session from this point, on its own branch.", confirmLabel: "Fork", validate: sheets.required("an instruction") });
-            if (prompt?.trim()) void act(btn, "fork", { prompt });
+            const instruction = { name: "prompt", label: "Instruction for the forked session", validate: sheets.required("an instruction") };
+            let picker = null;
+            try {
+              if (canMove()) picker = backendPicker({ h, fill, ...(await loadChoices()), keep: session.backend || "local", id: "fork" });
+            } catch (err) { toast(err.message); return; }
+            const result = await formSheet({ title: `Fork from checkpoint ${turn}`, fields: [instruction, ...(picker ? pickerFields(picker) : [])],
+              message: "Starts a new session from this point, on its own branch.", confirmLabel: "Fork" });
+            if (result?.prompt?.trim()) void act(btn, "fork", { prompt: result.prompt, ...(picker?.choice() || {}) });
           },
         }, "Fork from here"))));
     },
     rewound: (e) => add(h("p", { class: "note" }, `Rewound to checkpoint ${e.data.turn}: the workspace and context are as they were then; later turns above are kept for the record`)),
     forked: (e) => add(h("p", { class: "note" }, "Forked from ", h("a", { href: `#/s/${e.data.parent}` }, e.data.parent),
-      ` at checkpoint ${e.data.turn}${e.data.summary_note ? ` (${e.data.summary_note})` : ""}`)),
+      ` at checkpoint ${e.data.turn}${e.data.backend ? ` on ${e.data.backend} · ${e.data.model}` : ""}`
+      + `${e.data.summary_note ? ` (${e.data.summary_note})` : ""}`
+      + `${e.data.tool_profile_reset ? `; ${e.data.backend} can't run ${e.data.tool_profile_reset.from} tools, so it has the default tools` : ""}`)),
     model_waking: (e) => {
       wakingNote = add(h("p", { class: "note" }, h("span", { class: "dots" },
         `The model was asleep. Waking it (about ${Math.round(e.data.expected_seconds / 60) || 1} min)`)));

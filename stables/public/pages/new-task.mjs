@@ -4,6 +4,7 @@
 // into another page.
 import { holdRemainingText } from "../lib/format.mjs";
 import { TARGET_LABEL, runnerStateText, pickDefaultBackend } from "../lib/targets.mjs";
+import { backendLabel, modelOptions } from "../lib/backend-choice.mjs";
 import * as sheets from "../lib/sheet.mjs";
 
 export function mountNewTask({ $app, h, fill, append, api, setHeader, toast, route, isMember, isOwner, onLeave, githubConnectionCard, warmModel, browser,
@@ -257,7 +258,7 @@ async function viewNew() {
   const availableBackends = backends.filter((b) => b.available);
   const defaultBackend = pickDefaultBackend(availableBackends, gpuHold());
   const backend = h("select", { id: "new-task-backend" }, availableBackends.map((b) =>
-    h("option", { value: b.name, selected: b.name === defaultBackend }, b.name === "local" ? "Local model" : b.name)));
+    h("option", { value: b.name, selected: b.name === defaultBackend }, backendLabel(b.name))));
   backend.value = defaultBackend;
   const backendState = h("div", { class: "muted small", style: "margin-top:6px" });
   const holdNotice = h("div", { class: "muted small gpu-hold-note", style: "margin-top:6px" },
@@ -283,12 +284,8 @@ async function viewNew() {
   const showBackend = () => {
     const b = backends.find((x) => x.name === backend.value);
     const isLocal = backend.value === "local";
-    if (isLocal) {
-      fill(model, models.map((m) => h("option", { value: m.name, selected: m.name === localModel }, m.name)));
-    } else {
-      if (models.some((m) => m.name === model.value)) localModel = model.value;
-      fill(model, h("option", { value: b?.model || "" }, b?.model || `${backend.value} default`));
-    }
+    if (!isLocal && models.some((m) => m.name === model.value)) localModel = model.value;
+    fill(model, modelOptions(h, backend.value, backends, models, localModel));
     model.disabled = !isLocal;
     modelState.hidden = !isLocal;
     const bashOnly = (b?.tool_profiles || []).includes("bash-only");

@@ -18,6 +18,8 @@ SESSION_ACTIONS = frozenset({"approval.decide", "approval.auto_decide", "review.
 ACTIONS = SESSION_ACTIONS | {"job.create", "job.update", "job.delete", "job.run", "maintenance.cleanup",
                               "maintenance.backup"}
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# A backend or model name a fork or rerun moved to (#664): configuration identifiers, never content.
+CHOICE = re.compile(r"[A-Za-z0-9._:/@+-]{1,128}")
 ENUMS = {"decision": {"approved", "denied"}, "reviewer_mode": {"off", "shadow", "auto"},
          "trigger": {"manual", "scheduled"}, "reason": {"already_decided"}}
 
@@ -31,6 +33,8 @@ def _clean_value(key, value):
         if isinstance(value, (list, tuple)):
             return sorted({v for v in value if isinstance(v, str) and v in JOB_FIELDS})
         return None
+    if key in {"backend", "model"}:
+        return value if isinstance(value, str) and CHOICE.fullmatch(value) else None
     if key == "enabled":
         return value if isinstance(value, bool) else None
     return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**53 else None
@@ -43,7 +47,7 @@ def clean_metadata(action, metadata):
     if action.startswith("approval."):
         allowed.update({"decision", "reviewer_mode", "reason"})
     if action.startswith("checkpoint."):
-        allowed.update({"turn", "resulting_session_id"})
+        allowed.update({"turn", "resulting_session_id", "backend", "model"})
     if action.startswith("job."):
         allowed.update({"fields", "enabled", "resulting_session_id", "trigger"})
     if action.startswith("maintenance."):

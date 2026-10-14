@@ -32,6 +32,8 @@ def clean(metadata):
     for key, value in (metadata or {}).items():
         if key == "fields" and isinstance(value, (list, tuple)):
             out[key] = sorted({v for v in value if isinstance(v, str) and v in FIELDS})
+        elif key in {"backend", "model"} and isinstance(value, str) and operation_audit.CHOICE.fullmatch(value):
+            out[key] = value
         elif key in {"count", "sessions"} and isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 2**53:
             out[key] = value
         elif key == "decision" and value in ("approved", "denied"):

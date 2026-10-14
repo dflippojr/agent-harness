@@ -32,7 +32,7 @@ from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, ho
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
-from . import audit_context, operation_audit, namespace_audit, checkpoints, llm, member_keys, projects, secret_scan, telemetry, efficiency
+from . import audit_context, operation_audit, namespace_audit, checkpointer, checkpoints, llm, member_keys, projects, secret_scan, telemetry, efficiency
 
 log = logging.getLogger("harness.manager")
 
@@ -44,6 +44,8 @@ UNSETTLED_SEND = ("the last rewind of this session failed and its files could no
                   "match the conversation; rewind to a checkpoint (or fork from one) before sending")
 REVIEW_BUSY = "the agent is still working; wait for the run to end or cancel it"
 ACCOUNT_DISABLED = "this household account is disabled"
+BACKEND_OVERRIDE_UNSUPPORTED = "backend_override_unsupported"
+DIGEST_PREAMBLE = "You are continuing earlier work from a checkpoint. The workspace is exactly as it was then."
 
 
 @dataclass
@@ -1108,22 +1110,75 @@ class Manager:
         except Exception:  # noqa: BLE001 - the in-memory mark still refuses sends
             log.exception("could not record the failed rewind of %s", sid)
 
-    async def fork(self, ref: str, turn: int, prompt: str, *, context=None) -> dict:
-        """A new session that starts from a checkpoint: its own workspace, branch and model context."""
+    async def fork(self, ref: str, turn: int, prompt: str, *, backend: str | None = None, model: str | None = None,
+                   context=None) -> dict:
+        """A new session that starts from a checkpoint: its own workspace, branch and model context. `backend` and
+        `model` move it to another backend or model (#664)."""
         sid = self.resolve_id(ref)
         await self._idle_for_checkpoint(sid)
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
+        choice = self._fork_choice(self.db.get_session(sid), backend, model)
+        override = {"backend": choice["backend"], "model": choice["model"]} if choice else {}
         async with self._exclusive(sid, "fork", CHECKPOINT_IDLE):
             async with operation_audit.async_operation(self.db, context, sid, "checkpoint.fork",
-                                           {"session_id": sid, "turn": int(turn)},
+                                           {"session_id": sid, "turn": int(turn), **override},
                                            enabled=operation_audit.owner_session(self.db.get_session(sid))) as audit:
-                new_sid = await self._fork(sid, int(turn), prompt)
+                new_sid = await self._fork(sid, int(turn), prompt, choice)
                 audit["resulting_session_id"] = new_sid
                 self._spawn(new_sid)
         return self.db.get_session(new_sid)
 
-    async def _fork(self, sid: str, turn: int, prompt: str) -> str:
+    @staticmethod
+    def _refuse_override(s: dict) -> None:
+        # An App's backend and model follow its credential and catalog rules (#29, #376), which a fork or rerun skips.
+        if s.get("app_id") or s.get("kind") == TOOLS_ONLY:
+            raise HarnessError(409, "an App session can't move to another backend or model",
+                               BACKEND_OVERRIDE_UNSUPPORTED)
+
+    def _fork_choice(self, parent: dict, backend: str | None, model: str | None) -> dict | None:
+        """The fork's backend, model, effort and tool profile when the request names another backend or model,
+        checked as `create` checks a new session's; None when it names neither."""
+        if not backend and not model:
+            return None
+        self._refuse_override(parent)
+        before = parent.get("backend", "local")
+        backend = backend or before
+        owner_id = session_user_id(parent)
+        if owner_id != OWNER_USER_ID:
+            backend = self._check_member(owner_id, backend, "tower", None, None)
+        same = backend == before
+        model = model or (parent["model"] if same else None)
+        if backend == "local":
+            model, effort = self._local_choice(model)
+        else:  # effort is per backend: only a same-backend fork keeps the parent's
+            model, effort = self._hosted_choice(backend, model, parent.get("effort") if same else None, "tower", None)
+        profile = parent.get("tool_profile") or tool_profiles.DEFAULT
+        reset = profile != tool_profiles.DEFAULT and bool(
+            tool_profiles.refusal(backend, self.cfg.backends.get(backend), profile, parent.get("kind", "agent")))
+        return {"backend": backend, "model": model, "effort": effort or "", "same": same,
+                "tool_profile": tool_profiles.DEFAULT if reset else profile, "profile_reset": profile if reset else ""}
+
+    @staticmethod
+    def _digest_context(parent: dict, saved_context: list, log_digest: str, prompt: str) -> tuple[list, list]:
+        """A digest fork's (context, saved checkpoint context): the checkpoint's system prompt, then the earlier work.
+        A local parent's saved context is its whole conversation, a fork's inherited start included. A hosted
+        parent's digest comes from its event log (`log_digest`), which starts at its own fork, so the summary it
+        inherited (its first message) goes first."""
+        system = saved_context[0] if saved_context and saved_context[0].get("role") == "system" else parent["context"][0]
+        if parent.get("backend", "local") == "local":
+            digest = checkpointer.context_summary(saved_context)
+        else:
+            first = saved_context[1].get("content") if len(saved_context) > 1 else ""
+            inherited = first if parent.get("parent_id") and isinstance(first, str) and first.startswith(DIGEST_PREAMBLE) else ""
+            digest = "\n".join(part for part in (checkpointer.context_summary(
+                [{"role": "user", "content": inherited}], limit=3000), log_digest) if part)
+        earlier = f"{DIGEST_PREAMBLE} Summary of the earlier conversation:\n\n{digest}"
+        context = [system, {"role": "user", "content": f"{earlier}\n\nNew instruction:\n{prompt}"}]
+        # The fork's own checkpoint keeps the digest, so a local fork rewound to it still knows the earlier work.
+        return context, [system, {"role": "user", "content": earlier}]
+
+    async def _fork(self, sid: str, turn: int, prompt: str, choice: dict | None = None) -> str:
         """`fork` while it holds the parent; returns the new session's id, recorded but not yet started."""
         parent = self.db.get_session(sid)
         owner_id = session_user_id(parent)
@@ -1135,16 +1190,16 @@ class Manager:
         cp = self.runner.checkpointer
         new_sid = uuid.uuid4().hex[:10]
         workspace = self._new_workspace(False, "tower", owner_id, new_sid, app_id=app_id)
-        hosted = parent.get("backend", "local") != "local"
+        # A hosted parent's CLI state can't be forked, and another backend can't read the parent's saved context:
+        # both start from a transcript digest.
+        use_digest = parent.get("backend", "local") != "local" or (choice is not None and not choice["same"])
         try:
             git_fields = await asyncio.to_thread(cp.prepare_fork, parent, int(turn), new_sid, workspace)
             saved_context, carried = await asyncio.to_thread(cp.store(parent).load_turn, int(turn))
-            if hosted:
-                digest = await asyncio.to_thread(cp.summary, parent, int(turn))
-                context = [parent["context"][0], {"role": "user", "content": (
-                    "You are continuing earlier work from a checkpoint. The workspace is exactly as it was then. "
-                    f"Summary of the earlier conversation:\n\n{digest}\n\nNew instruction:\n{prompt}")}]
-                base_context = context[:1]
+            if use_digest:
+                log_digest = "" if parent.get("backend", "local") == "local" else await asyncio.to_thread(
+                    cp.summary, parent, int(turn))
+                context, base_context = self._digest_context(parent, saved_context, log_digest, prompt)
             else:
                 base_context = saved_context
                 context = base_context + [{"role": "user", "content": prompt}]
@@ -1153,8 +1208,10 @@ class Manager:
             remove_tree(cp.store({**parent, "id": new_sid}).base)
             raise HarnessError(getattr(e, "status", 500), str(e)) from e
         now = time.time()
+        moved = choice is not None and not choice["same"]
+        dropped = {"backend_session_id", "backend_auth"} if moved else {"backend_session_id"}
         run = new_run(carry={k: v for k, v in parent["run"].items()
-                             if k != "backend_session_id" and k not in checkpoints.TURN_RUN_KEYS})
+                             if k not in dropped and k not in checkpoints.TURN_RUN_KEYS})
         run.update(carried)                                 # the agent's state and notes as of the checkpoint
         for key in ("max_turns", "max_completion_tokens"):
             if key in parent["run"]:
@@ -1168,14 +1225,25 @@ class Manager:
                    "parent_id": sid, "fork_turn": int(turn), "turn_seq": int(turn)}
         if not git_fields:
             session["branch"] = ""
+        forked = {"parent": sid, "turn": int(turn)}
+        if use_digest:
+            forked["summary_note"] = (
+                f"moved from {parent.get('backend', 'local')}: started from a transcript digest, no model call" if moved
+                else "hosted session: a fresh CLI session started from a transcript digest, no model call")
+        if choice is not None:
+            session.update(backend=choice["backend"], model=choice["model"], effort=choice["effort"],
+                           tool_profile=choice["tool_profile"])
+            if owner_id != OWNER_USER_ID:  # a member's hosted session runs on their own key, as `create` sets it
+                session["end_user"] = member_keys.end_user_id(owner_id) if choice["backend"] != "local" else ""
+            forked.update(backend=choice["backend"], model=choice["model"])
+            if choice["profile_reset"]:
+                forked["tool_profile_reset"] = {"from": choice["profile_reset"], "to": choice["tool_profile"]}
 
         def insert_fork() -> None:     # one transaction on the writer thread (#294): the row, its checkpoint, events
             self._insert_created(session, None, [], "", prompt)
             ckpt = cp.checkpoint(sid, int(turn))
             self.db.add_checkpoint(new_sid, int(turn), ckpt["sha"], ckpt["head"], session["branch"])
-            self.bus.emit(new_sid, "forked", {"parent": sid, "turn": int(turn), **(
-                {"summary_note": "hosted session: a fresh CLI session started from a transcript digest, no model call"}
-                if hosted else {})})
+            self.bus.emit(new_sid, "forked", forked)
         try:
             await asyncio.to_thread(cp.store(session).save_context, int(turn), base_context, carried)
             await self.db.for_session(sid).awrite(insert_fork)
@@ -1186,14 +1254,25 @@ class Manager:
         return new_sid
 
     @namespace_audit.failures("session.rerun")
-    def rerun(self, ref: str, *, context=None) -> dict:
-        """Start a fresh session with the same task, project, model, and starting taint."""
+    def rerun(self, ref: str, *, backend: str | None = None, model: str | None = None, context=None) -> dict:
+        """Start a fresh session with the same task, project, model, and starting taint; `backend` and `model` start
+        it on another backend or model (#664)."""
         from .apps import AppTool
         s = self.get(ref)
+        override = {"backend": backend, "model": model} if backend or model else {}
+        if override:
+            self._refuse_override(s)
         if s.get("kind") == TOOLS_ONLY:  # its tools live in the App, which has to send them again
             raise HarnessError(409, "an App-tools-only session can't be rerun; start a new one with its tools")
-        backend = s.get("backend", "local")
-        model = s["model"] if backend != "local" or s["model"] in self.cfg.models else None
+        before = s.get("backend", "local")
+        if backend and backend != before:
+            model = model or None                       # the new backend's default model
+        else:
+            backend = before
+            model = model or (s["model"] if backend != "local" or s["model"] in self.cfg.models else None)
+        profile = s.get("tool_profile") or tool_profiles.DEFAULT
+        if backend != before and tool_profiles.refusal(backend, self.cfg.backends.get(backend), profile):
+            profile = tool_profiles.DEFAULT             # the new backend can't run the profile; it starts with its own
         result = self.create(self.original_prompt(s["id"]), project=s["project"], target=s["target"],
                            model=model, backend=backend, title=s["title"], owner_id=s.get("owner_id", "owner"),
                            skills=[item["slug"] for item in (s.get("skills") or []) if item.get("slug")],
@@ -1201,10 +1280,14 @@ class Manager:
                            app=self.db.get_api_key(s["app_id"]) if s.get("app_id") else None,
                            app_tools=[AppTool.model_validate(tool) for tool in (s.get("app_tools") or [])],
                            app_context="", app_metadata=s.get("app_metadata"),
-                           retention_days=s.get("retention_days"), end_user=s.get("end_user", ""),
-                           tool_profile=s.get("tool_profile") or tool_profiles.DEFAULT,
+                           retention_days=s.get("retention_days"),
+                           # only an App names an end user; `create` gives a member's hosted session its own again
+                           end_user=s.get("end_user", "") if s.get("app_id") else "",
+                           tool_profile=profile,
                            taint=list(s.get("taint") or []))  # the replayed prompt carries the same untrusted input
-        namespace_audit.record(self.db, s, context, "session.rerun")
+        if override:
+            override = {"backend": result["backend"], "model": result["model"]}
+        namespace_audit.record(self.db, s, context, "session.rerun", metadata=override)
         return result
 
     async def remote(self, s: dict, op: str, params: dict, timeout: float = 300):
