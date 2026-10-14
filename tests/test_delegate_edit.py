@@ -158,16 +158,39 @@ def test_propose_then_apply_keeps_snippets_out_of_the_worker_context(tmp_path):
     delegate = Delegate(_reply([{"path": "app.py", "old_text": old, "new_text": new},
                                 {"path": "other.py", "old_text": "VALUE = 1", "new_text": "VALUE = 2"}]))
 
+    propose = call("delegate_edit", 1, paths=["app.py", "other.py"], instruction="greet the world")
+    live, untouched = {}, []
+
+    def apply_what_was_proposed(_messages):
+        """The model's next turn: it read the patch_id from the propose result, which is all it knows of the patch."""
+        result = json.loads(next(x["content"] for x in live["m"].db.get_session(live["sid"])["context"]
+                                 if x.get("tool_call_id") == propose["id"]))
+        untouched.append((live["root"] / "app.py").read_text(encoding="utf-8") == SOURCE)  # nothing written yet
+        return Completion(tool_calls=[call("apply_delegated_edit", 2, patch_id=result["patch_id"])])
+
+    script = Script([
+        Completion(tool_calls=[propose]),
+        apply_what_was_proposed,
+        Completion(content="done"),
+    ])
+
+    async def chat(model, messages, tools, *args, **kwargs):
+        """Delegate calls (no tools) go to the delegate model, the worker's own turns to the script."""
+        return await (delegate if tools is None else script)(model, messages, tools, *args, **kwargs)
+
     async def body():
-        m = _manager(tmp_path, delegate)
-        s, root = await _session(m)
-        sid = s["id"]
-        propose = call("delegate_edit", 1, paths=["app.py", "other.py"], instruction="greet the world")
-        await _run(m, sid, propose)
+        m = Manager(make_cfg(tmp_path), chat=chat)
+        await m.start()
+        sid = m.create("task")["id"]
+        root = Path(m.db.get_session(sid)["workspace"])
+        for name, text in {"app.py": SOURCE, "other.py": OTHER}.items():  # before the run's first turn, not by the worker
+            (root / name).write_text(text, encoding="utf-8", newline="")
+        live.update(m=m, sid=sid, root=root)
+        await wait_status(m, sid, "done")
         result = _payload(m, sid, propose)
         assert result["status"] == "proposed" and result["error"] is None
         assert "app.py: 1 edit, +1 -1 lines" in result["summary"] and "renamed things" in result["summary"]
-        assert (root / "app.py").read_text(encoding="utf-8") == SOURCE  # nothing written yet
+        assert untouched == [True]
 
         # The delegate got a fresh context: the files and the instruction, nothing of the worker's conversation.
         sent = delegate.requests[0]
@@ -176,9 +199,7 @@ def test_propose_then_apply_keeps_snippets_out_of_the_worker_context(tmp_path):
         assert "task" not in sent[1]["content"].split("Instruction:")[0]
         assert delegate.kwargs[0]["max_tokens"] == delegate_edit.DELEGATE_MAX_TOKENS
 
-        apply = call("apply_delegated_edit", 2, patch_id=result["patch_id"])
-        await _run(m, sid, apply)
-        assert _payload(m, sid, apply)["status"] == "applied"
+        assert _payload(m, sid, {"id": "c2-apply_delegated_edit"})["status"] == "applied"
         assert (root / "app.py").read_text(encoding="utf-8") == SOURCE.replace(old, new)
         assert (root / "other.py").read_text(encoding="utf-8") == "VALUE = 2\n"
 
