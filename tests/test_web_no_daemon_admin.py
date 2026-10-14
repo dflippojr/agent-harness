@@ -11,7 +11,7 @@ import re
 
 import pytest
 
-from test_management_parity import ROOT, WEB, _call_methods, _doc_rows, _path_patterns, _skip_expression, _template_re
+from test_management_parity import ROOT, WEB, _api_calls, _call_methods, _doc_rows, _path_patterns, _template_re
 
 REMOVED = [
     # Settings: daemon settings.
@@ -47,16 +47,11 @@ REMOVED = [
 def _admin_calls(text: str, where: str = "") -> list[str]:
     """Each api() call in `text` that reaches a REMOVED route, unless it goes over the App API."""
     found = []
-    for m in re.finditer(r"(?<![\w.])api\(|agentHarnessWeb\.request\(", text):
-        start = m.end()
-        first_end = _skip_expression(text, start, ",")
-        close = _skip_expression(text, start, ")")
-        options = text[first_end:close] if first_end < close else ""
+    for line, expr, options in _api_calls(text):
         if re.search(r"\bsurface\s*:\s*[\"']app[\"']", options):
             continue
         methods = _call_methods(options)
-        line = text.count("\n", 0, m.start()) + 1
-        for pattern, sample in _path_patterns(text[start:min(first_end, close)]):
+        for pattern, sample in _path_patterns(expr):
             for method, template in REMOVED:
                 concrete = re.sub(r"\{[^}/]+\}", "x", template)
                 if (methods is None or method in methods) and (

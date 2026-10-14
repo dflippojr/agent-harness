@@ -142,9 +142,9 @@ putting a token in their URLs.
 1. Serve the contents of `stables/public` at the root of an HTTPS origin, with `index.html` as the root document.
    Loopback HTTP is also accepted for local development. Asset URLs are root-relative, so deploy the directory at
    the origin root rather than below a path prefix.
-2. Create an owner token approved for the separate site's exact origin (scheme, host, and optional port), in the Hub
-   or with `harness keys create "stables (<host>)" --kind owner --scopes admin --origins <origin>`. Copy the `ho-…`
-   token when shown; only its hash is stored by Agent Harness Server.
+2. On the daemon host, create an owner token approved for the separate site's exact origin (scheme, host, and
+   optional port) with `harness keys create "stables (<host>)" --kind owner --scopes admin --origins <origin>`. The
+   Hub cannot mint owner tokens. Copy the `ho-…` token when shown; only its hash is stored by Agent Harness Server.
 3. In the separate copy, open `#/profile/connection`, enter the **Agent Harness Server URL** and token, then choose
    **Save and test**.
 

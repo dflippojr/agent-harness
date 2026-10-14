@@ -143,17 +143,23 @@ def _call_methods(options: str) -> set[str] | None:
     return verbs or None
 
 
+def _api_calls(text: str):
+    """(line, path expression, options text) for each `api(...)` or `agentHarnessWeb.request(...)` call in `text`."""
+    for m in re.finditer(r"(?<![\w.])api\(|agentHarnessWeb\.request\(", text):
+        start = m.end()
+        first_end = _skip_expression(text, start, ",")
+        close = _skip_expression(text, start, ")")
+        options = text[first_end:close] if first_end < close else ""
+        yield text.count(chr(10), 0, m.start()) + 1, text[start:min(first_end, close)], options
+
+
 def _web_calls() -> list[tuple[str, re.Pattern[str], str, set[str] | None]]:
     calls = []
     for path in sorted([*WEB.rglob("*.mjs"), WEB / "app.js"]):
         text = path.read_text(encoding="utf-8")
-        for m in re.finditer(r"(?<![\w.])api\(|agentHarnessWeb\.request\(", text):
-            start = m.end()
-            first_end = _skip_expression(text, start, ",")
-            close = _skip_expression(text, start, ")")
-            options = text[first_end:close] if first_end < close else ""
-            where = f"{path.relative_to(ROOT)}:{text.count(chr(10), 0, m.start()) + 1}"
-            for pattern, sample in _path_patterns(text[start:min(first_end, close)]):
+        for line, expr, options in _api_calls(text):
+            where = f"{path.relative_to(ROOT)}:{line}"
+            for pattern, sample in _path_patterns(expr):
                 calls.append((where, pattern, sample, _call_methods(options)))
     return calls
 

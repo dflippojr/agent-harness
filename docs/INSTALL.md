@@ -237,8 +237,8 @@ Phone notifications (approvals with Approve/Deny buttons, task finished) use a s
 ## Install Agent Harness for Mac
 
 After Tailscale and `public_url` are configured, add a `macbook` entry under `runners:` with an owner-side
-`token_file`, restart Agent Harness Server, then make a Mac pairing code in the Hub (or with
-`harness runner-pairing-codes create --runner macbook`). Run the one-time install command in Terminal on the Mac:
+`token_file`, restart Agent Harness Server, then make a Mac pairing code on the daemon host (the Hub cannot mint owner credentials):
+`harness runner-pairing-codes create --runner macbook`. Run the one-time install command in Terminal on the Mac:
 `curl -fsSL <public_url>/mac-client/install.sh | bash -s -- --server <public_url> --code <code>`. It installs a venv, Agent Harness CLI and
 Agent Harness SDK, and the sandboxed Mac Runner as a launchd agent—without SSH, sudo, or copying tokens. See
 [`mac-client.md`](mac-client.md).
