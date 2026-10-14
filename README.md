@@ -154,7 +154,9 @@ agent-harness/
 │   ├── settings*.py       typed configuration registry
 │   └── managed_config.py  crash-safe config overlay: pending → active → last-known-good
 ├── harness_modules/       optional add-ons behind the module interface: images, runners, search, endpoint, jobs, backup, ... (docs/modules.md)
-├── stables/public/        Stables: the standalone browser client, a vanilla JS PWA served at / when present (docs/web.md)
+├── stables/               Stables: the standalone browser client (docs/web.md)
+│   ├── public/            the vanilla JS PWA, served at / when present
+│   └── types/             API contract types generated from the Server's OpenAPI, and the type checks
 ├── macrunner/             Mac Runner: stdlib-only Python 3.9, launchd, sandbox-exec profile
 ├── sdk/                   single-file Python SDK (depends only on httpx) + example app
 ├── bakeoff/               model and harness benchmarks, hidden-test tasks, recorded-web suite

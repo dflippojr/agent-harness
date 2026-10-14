@@ -18,7 +18,7 @@ from tests.test_api import make_client
 
 ROOT = Path(__file__).resolve().parents[1]
 SHELL = ROOT / "stables" / "public"
-CONTRACTS = ROOT / "tools" / "web-types"
+CONTRACTS = ROOT / "stables" / "types"
 OPENAPI = json.loads((CONTRACTS / "openapi.json").read_text(encoding="utf-8"))
 SERVER_TREES = ("harness", "harness_modules", "sdk")
 
@@ -71,7 +71,7 @@ def test_type_imports_reach_only_the_shell_or_the_api_contract():
             allowed = target.is_relative_to(SHELL.resolve()) or target.parent == CONTRACTS.resolve()
             if not allowed:
                 outside.append(f"{_rel(source)}: {spec}")
-    assert not outside, f"type-only imports may name the shell or tools/web-types contracts: {outside}"
+    assert not outside, f"type-only imports may name the shell or stables/types contracts: {outside}"
 
 
 def test_only_the_transport_opens_connections():

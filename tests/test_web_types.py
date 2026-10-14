@@ -64,7 +64,8 @@ def test_openapi_covers_web_contracts_and_static_serving_stays_native(tmp_path):
                 response = client.get(path)
                 assert response.status_code == 200
                 assert response.content == (ROOT / "stables/public" / Path(path).name).read_bytes()
-            for path in ("/package.json", "/api.d.ts", "/openapi-schema.json", "/tools/web-types/package.json"):
+            for path in ("/package.json", "/api.d.ts", "/openapi-schema.json", "/types/package.json",
+                         "/static/types/api.d.ts", "/stables/types/package.json"):
                 assert client.get(path).status_code == 404
         finally:
             client.close()

@@ -5,8 +5,10 @@ import { fileURLToPath } from "node:url";
 import openapiTS, { astToString } from "openapi-typescript";
 
 const directory = new URL("./", import.meta.url);
+// The Server exports its own OpenAPI document; Stables only consumes it.
+const exporter = new URL("../../tools/openapi/export_schema.py", import.meta.url);
 const python = process.env.PYTHON || "python";
-const exported = spawnSync(python, [fileURLToPath(new URL("export_schema.py", directory))], { encoding: "utf8", env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
+const exported = spawnSync(python, [fileURLToPath(exporter)], { encoding: "utf8", env: { ...process.env, PYTHONIOENCODING: "utf-8" } });
 if (exported.status !== 0) {
   throw new Error(`OpenAPI export failed: ${exported.error || exported.stderr}`);
 }
@@ -19,7 +21,7 @@ for (const [name, content] of Object.entries(outputs)) {
   const path = new URL(name, directory);
   if (process.argv.includes("--check")) {
     const existing = await readFile(path, "utf8").catch(() => "");
-    if (existing !== content) throw new Error(`${name} is stale. Run npm --prefix tools/web-types run generate.`);
+    if (existing !== content) throw new Error(`${name} is stale. Run npm --prefix stables/types run generate.`);
   } else {
     await writeFile(path, content);
   }

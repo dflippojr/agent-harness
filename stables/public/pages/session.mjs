@@ -12,7 +12,7 @@ import { mountSessionUi, sessionMenuItems, pageMetrics as measurePage, scrollPag
 import { sinceText } from "../lib/widgets.mjs";
 import * as sheets from "../lib/sheet.mjs";
 import { backendPicker } from "../lib/backend-choice.mjs";
-/** @import { Api, ConfirmSheet, FormSheet, OpenStream, SessionDetail, StreamHandlers } from '../../../tools/web-types/contracts.js' */
+/** @import { Api, ConfirmSheet, FormSheet, OpenStream, SessionDetail, StreamHandlers } from '../../types/contracts.js' */
 
 /**
  * The shell and UI helpers are incremental boundaries; API responses use the generated contract.
