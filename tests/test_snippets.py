@@ -434,7 +434,7 @@ def test_web_client_run_controls_and_untrusted_rendering(tmp_path):
     if not node:
         pytest.skip("node isn't installed")
     from pathlib import Path
-    script = Path(__file__).resolve().parent / "web_chat_snippets.mjs"
+    script = Path(__file__).resolve().parents[1] / "stables" / "tests" / "web_chat_snippets.mjs"
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout

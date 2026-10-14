@@ -252,7 +252,8 @@ readiness signal.
 ## Playwright and CI
 
 - **Current state.** The Playwright suite added by #589 lives at the paths below. The
-  existing web tests are pytest wrappers around Node scripts with DOM stubs (`tests/test_web_*.py`).
+  existing web tests are Node scripts with DOM stubs in `stables/tests` (run by `npm --prefix stables test`), each
+  also wrapped by a pytest test (`tests/test_web_*.py`).
 - **Package manager and paths.** npm, in a self-contained package like `stables/types`:
   - `tools/ui-tests/package.json` with `@playwright/test` pinned to an exact version, plus its `package-lock.json`
   - config `tools/ui-tests/playwright.config.ts`
