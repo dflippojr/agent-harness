@@ -16,7 +16,7 @@ from harness.fileops import ToolError
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.principal import Principal
-from harness.policy import ChatPolicy
+from harness.policy import ChatPolicy, Policy
 from harness.runner import Runner
 from harness_modules.search.service import SessionSearch, search
 
@@ -104,6 +104,7 @@ def test_chat_is_separate_from_agent_sessions(tmp_path):
 
 def test_chat_denies_agent_tools_without_approval_cards(tmp_path):
     policy = ChatPolicy()
+    assert policy.fingerprint() != Policy().fingerprint()  # approval records are keyed per policy
     assert policy.decide("web_search", {}).action == "allow"
     for name in ("run_shell", "Bash", "write_file", "git_push", "remote_control_start", "Edit"):
         assert policy.decide(name, {}).action == "deny"
@@ -129,6 +130,9 @@ def test_chat_owner_only(tmp_path):
         assert client.get(f"/chats/{chat['id']}", headers=gh).status_code in (403, 404)
         assert client.get(f"/sessions/{chat['id']}", headers=gh).status_code == 404
         assert client.get("/sessions", headers=gh).json() == []
+        with pytest.raises(HarnessError) as err:  # and below the HTTP layer
+            m.create("hi", owner_id="guest:someone@example.com", kind="chat")
+        assert err.value.status == 403
 
 
 def test_household_member_cannot_use_chat():

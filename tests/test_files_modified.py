@@ -72,6 +72,17 @@ def test_baseline_dirty_committed_unchanged_is_not_listed(tmp_path):
     assert "stale.py" not in paths
 
 
+def test_baseline_records_a_file_deleted_before_the_run(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / "gone.py").write_text("g\n", encoding="utf-8")
+    _sh(repo, "add", "gone.py")
+    _sh(repo, "commit", "-qm", "add")
+    (repo / "gone.py").unlink()  # deleted but not committed: dirty, with nothing left to hash
+    baseline = snapshot_git_baseline(repo)
+    assert "gone.py" in baseline["dirty"] and baseline["dirty"]["gone.py"] is None
+    assert "gone.py" not in files_modified_since(repo, baseline)
+
+
 def test_deleted_and_renamed_files(tmp_path):
     repo = _repo(tmp_path / "r")
     (repo / "gone.py").write_text("g\n", encoding="utf-8")
