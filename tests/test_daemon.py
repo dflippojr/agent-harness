@@ -490,7 +490,7 @@ def test_daemon_stop_during_the_final_status_write_ends_the_run(tmp_path):
         await asyncio.to_thread(entered.wait, scaled(10))
         task = m.tasks[s["id"]]
         stopping = asyncio.create_task(m.stop())
-        while not stopping.done() and task._fut_waiter is not None and not task._fut_waiter.cancelled():
+        while not stopping.done() and not task.cancelling():
             await asyncio.sleep(0.01)  # until stop() has cancelled the run's task
         release.set()
         await stopping
