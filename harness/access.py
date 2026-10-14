@@ -1,6 +1,6 @@
-"""Tailscale login roles for Agent Harness Web: owner, household member, and time-boxed guest.
+"""Tailscale login roles for Stables: owner, household member, and time-boxed guest.
 
-The PWA is the first-party Agent Harness Web. `allowed_logins` is the owner allowlist. Household
+Stables is the first-party PWA. `allowed_logins` is the owner allowlist. Household
 members are owner-provisioned SQLite accounts keyed by opaque `user_id` and authenticated only by
 the exact `Tailscale-User-Login`. `guests` lets a named tailnet login look around for a limited time
 without owner or member powers.
@@ -113,7 +113,7 @@ def member_forbidden(access: Access, method: str, path: str, cfg=None) -> str | 
     """Return an error detail if this member request is refused, else None.
 
     Members use the account-scoped session surface. Server authorization is authoritative even when
-    Agent Harness Web hides the matching navigation.
+    Stables hides the matching navigation.
     """
     if access.role != "member":
         return None

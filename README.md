@@ -154,7 +154,10 @@ agent-harness/
 │   ├── settings*.py       typed configuration registry
 │   └── managed_config.py  crash-safe config overlay: pending → active → last-known-good
 ├── harness_modules/       optional add-ons behind the module interface: images, runners, search, endpoint, jobs, backup, ... (docs/modules.md)
-├── stables/public/        Stables: the standalone browser client, a vanilla JS PWA served at / when present (docs/web.md)
+├── stables/               Stables: the standalone browser client (docs/web.md)
+│   ├── public/            the vanilla JS PWA, served at / when present
+│   ├── types/             API contract types generated from the Server's OpenAPI, and the type checks
+│   └── tests/             Node harnesses with their own runner (npm --prefix stables test)
 ├── macrunner/             Mac Runner: stdlib-only Python 3.9, launchd, sandbox-exec profile
 ├── sdk/                   single-file Python SDK (depends only on httpx) + example app
 ├── bakeoff/               model and harness benchmarks, hidden-test tasks, recorded-web suite
@@ -162,7 +165,7 @@ agent-harness/
 ├── sandbox/               sandbox and hosted-CLI Dockerfiles
 ├── ops/                   egress proxies, service tasks, Tailscale, deployment, review runner
 ├── install/               PowerShell + POSIX installers and uninstallers
-├── tests/                 pytest suite + Node harnesses for the web UI's pure functions
+├── tests/                 pytest suite (it also runs the Stables Node harnesses)
 ├── docs/                  API contracts, design docs, per-phase results
 └── .github/workflows/     CI, SonarCloud, AI review, staging, publish + deploy
 ```
@@ -243,7 +246,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | --- | --- |
 | **Self-validating benchmarks** ([`bakeoff/`](bakeoff)) | Each task ships with a reference solution. `--selftest` proves every checker passes on correct work and fails on no work. The hard suite grades mostly with hidden tests, and `rescore` regrades saved runs after a checker fix. |
 | **Isolated comparison harnesses** ([`reference.py`](bakeoff/reference.py)) | OpenHands and OpenCode run the same tasks on an internal Docker network whose only route out is a socat proxy to the local model. |
-| **One suite for everything** ([`tests/`](tests)) | The web UI's JavaScript runs under Node harnesses driven by pytest. The CI and deploy workflows, the installers, and the docs' product naming have their own tests too. |
+| **One suite for everything** ([`tests/`](tests)) | Stables' JavaScript runs under Node harnesses (`stables/tests`) that pytest also drives. The CI and deploy workflows, the installers, and the docs' product naming have their own tests too. |
 | **Fail-closed deployment** ([`ci-cd.yml`](.github/workflows/ci-cd.yml), [docs](docs/CI-CD.md)) | Deployment triggers from `workflow_run` on the exact tested SHA and pulls immutable `sha-` images. It builds a new venv side by side and switches a pointer, so rollback is instant, then waits for `/health`. |
 | **Trusted-code staging slot** ([`resolve_staging_ref.py`](scripts/resolve_staging_ref.py)) | A GitHub-hosted job resolves a branch or PR to one commit and rejects fork refs before anything reaches the server. Staging gets its own database and freshly minted tokens, never production credentials. |
 | **Multi-provider AI code review** ([`review.yml`](.github/workflows/review.yml)) | Pull requests are reviewed by Codex, Claude, or Cursor on a self-hosted runner pool, with incremental re-review when a prior review marker makes that safe. The `Automated Code Review` check fails when the review has findings, and other projects call the same workflow through a thin caller pinned to `review-v1`. |

@@ -5,12 +5,14 @@ from pathlib import Path
 
 import pytest
 
+STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
+
 
 def test_session_page_renders():
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    script = Path(__file__).resolve().parent / "web_session.mjs"
+    script = STABLES_TESTS / "web_session.mjs"
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout
@@ -36,7 +38,7 @@ def test_session_pane_header_approval_and_bar():
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    script = Path(__file__).resolve().parent / "web_session_pane.mjs"
+    script = STABLES_TESTS / "web_session_pane.mjs"
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout
@@ -81,7 +83,7 @@ def test_changes_file_navigation_and_inline_comments():
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    script = Path(__file__).resolve().parent / "web_changes.mjs"
+    script = STABLES_TESTS / "web_changes.mjs"
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout
@@ -92,7 +94,7 @@ def test_waiting_limit_session_continues_on_another_backend():
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    script = Path(__file__).resolve().parent / "web_backend_continue.mjs"
+    script = STABLES_TESTS / "web_backend_continue.mjs"
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout

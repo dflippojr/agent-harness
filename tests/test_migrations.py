@@ -91,8 +91,10 @@ def test_baseline_is_frozen_at_45():
     # 0048_canary_note (#316), 0049_checkpoints (#261), 0050_app_retention (#330), 0051_end_users (#365),
     # 0052_member_api_keys (#393), 0053_audit_context (#467), 0054_namespace_audit (#471), 0055_catalog_app_id (#518),
     # 0056_pairing_requests (#519), 0057_hub_claim (#543), 0058_idempotency_keys (#462), 0059_tool_profile (#638),
-    # 0060_endpoint_requests_key (#669), 0061_sessions_list_index (#663), 0062_sessions_owner_status_index (#668)
-    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62]
+    # 0060_endpoint_requests_key (#669), 0061_sessions_list_index (#663), 0062_sessions_owner_status_index (#668),
+    # 0063_stables_name (#334)
+    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
+                                                63]
 
 
 def test_fresh_database_matches_pre_versioning_build(tmp_path):
@@ -378,7 +380,7 @@ def test_session_scan_indexes_reach_old_and_fresh_databases(tmp_path):
     assert _session_indexes(db) == _SESSION_INDEXES
     assert db.get_session("s1")["title"] == "hello"
     db.close()
-    assert _version(old) == 62
+    assert _version(old) == shipped[-1][0]
     fresh = Database(tmp_path / "fresh.db", migrations=shipped)
     assert _session_indexes(fresh) == _SESSION_INDEXES
     fresh.close()
@@ -417,3 +419,25 @@ def test_owner_session_count_searches_the_owner_status_index(tmp_path, holding):
     db.close()
     assert _searches_an_index(details) and any("sessions_owner_status (owner_id=? AND status=?)" in d
                                                for d in details), details
+
+
+def test_stables_registry_name_reaches_old_databases(tmp_path):
+    """#334 stage (d): the reserved `app-web` row registered as "Agent Harness Web" is renamed; other rows are not."""
+    shipped = _REAL_DISCOVER()
+    old = tmp_path / "old" / "harness.db"
+    old.parent.mkdir()
+    db = Database(old, migrations=[step for step in shipped if step[0] < 63])
+    insert = ("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins) "
+              "VALUES (?, ?, '', ?, 0, '', ?, '[]')")
+    db.conn.execute(insert, ("app-web", "Agent Harness Web", "h1", "web"))
+    db.conn.execute(insert, ("k1", "Agent Harness Web", "h2", "owner"))
+    db.conn.commit()
+    db.close()
+    db = Database(old, migrations=shipped)
+    names = dict(db.conn.execute("SELECT id, name FROM api_keys").fetchall())
+    db.close()
+    assert names == {"app-web": "Stables", "k1": "Agent Harness Web"}
+    fresh = Database(tmp_path / "fresh.db", migrations=shipped)
+    fresh.ensure_web_app("app-web")
+    assert fresh.conn.execute("SELECT name FROM api_keys WHERE id = 'app-web'").fetchone()[0] == "Stables"
+    fresh.close()

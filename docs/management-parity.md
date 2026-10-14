@@ -1,11 +1,11 @@
-# Management parity: Agent Harness Web, the owner API and the CLI
+# Management parity: Stables, the owner API and the CLI
 
-**Every owner API route, and so every Hub action, has a CLI command.** The standalone Hub and Agent Harness Web
+**Every owner API route, and so every Hub action, has a CLI command.** The standalone Hub and Stables
 administer the daemon only through the [owner API](admin-api.md) (`/api/admin/v1`), and installing either is
 optional, so an owner who declines them can still do everything from the Agent Harness CLI (`harness`, or
 `python -m harness.cli`). A new owner route ships with its row below and its CLI command (#544).
 
-Agent Harness Web is an optional client (#334): every setting and management action it offers is also an owner API
+Stables is an optional client (#334): every setting and management action it offers is also an owner API
 operation with a CLI command. This page is the inventory. `tests/test_management_parity.py` reads it and fails when:
 
 - a route mounted under `/api/admin/v1` (core or an add-on module, including `Module.admin_paths`) has no row below,

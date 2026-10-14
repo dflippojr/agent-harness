@@ -62,7 +62,7 @@ machine-readable schema at `/openapi.json`. Machine-owner operations (schedules,
 GPU, review/push, token management, maintenance, Remote Control trust) live on [`/api/admin/v1`](admin-api.md) and
 are not part of this App contract. App tokens cannot call them.
 
-First-party [Agent Harness Web](web.md) also uses this surface for ordinary session operations. A same-origin bundled
+First-party [Stables](web.md) also uses this surface for ordinary session operations. A same-origin bundled
 Web UI may use its Tailscale/localhost owner identity; a separately hosted copy uses an origin-bound owner token.
 Owner-created sessions are not assigned to an Agent Harness App. This first-party privilege does not change App-token
 scoping: App tokens still see only their own sessions unless granted read-only `sessions:all`, which adds the owner's
@@ -130,7 +130,7 @@ the App registry (ids, token hashes, scopes), the per-App usage counters, provid
 everything global (jobs, schedules, skills, the memory library, accounts, the audit log), and no sessions at all.
 Session ids stay unique across all stores. The `/api/v1` responses are the same as before.
 
-- **Agent Harness Web is an App too** (#330 decision 4). Its store, `<data_dir>/apps/app-web/harness.sqlite3`, holds
+- **Stables is an App too** (#330 decision 4). Its store, `<data_dir>/apps/app-web/harness.sqlite3`, holds
   the owner's and members' sessions (every session no App started), and the owner reads them through Web, their own
   App. Web's id `app-web` is reserved: it is registered in the App registry without a token (the owner's Tailscale
   and Google identity maps to it), it isn't listed by `GET /keys`, and it can't be revoked, erased or given a
@@ -909,7 +909,7 @@ upscale routes return a clear install error. `GET /images` (phone) and job JSON 
 details. Each finished job stores `provenance` (mode, steps, sampler, hashes, seed, timing); older rows without that
 column still load.
 App tokens can only create and read **generated** images and their upscaled derivatives. Uploaded photos, masks, and
-masked edits are owner-only Agent Harness Web data and return 404 on this surface.
+masked edits are owner-only Stables data and return 404 on this surface.
 
 ### `GET /api/v1/remote-control`, `POST /api/v1/remote-control/{project}`, `POST /api/v1/remote-control/{project}/stop`  (scope `remote_control`)
 Starts the unmodified `claude remote-control --spawn worktree` in a tower project's folder, so the user can work there
@@ -944,7 +944,7 @@ signs in once, on their own machine, through the provider's own login flow.
 - **Each user's usage is billed to that user.** A harness serves its owner. It must not route other people's apps or
   users through one person's subscription.
 - **Usage is visible.** Agent Harness Server reports rate-limit state, and a running tally of programmatic usage,
-  through this API and Agent Harness Web. It warns when that usage is billed from separate credits instead of
+  through this API and Stables. It warns when that usage is billed from separate credits instead of
   subscription limits.
 - **API keys are optional and configurable.** An Anthropic, OpenAI or Cursor API key can be the machine default, or
   the owner can assign an isolated key file and billing policy to one app. Apps never submit or retrieve those keys.

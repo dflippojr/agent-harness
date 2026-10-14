@@ -1,9 +1,11 @@
-"""Pure Web Node harnesses retain isolated pytest cases and launch behavior."""
+"""Pure Stables Node harnesses (stables/tests) retain isolated pytest cases and launch behavior."""
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
 
 
 @pytest.mark.parametrize(
@@ -47,7 +49,7 @@ def test_web_node_harness(script_name, timeout, marker):
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    script = Path(__file__).resolve().parent / script_name
+    script = STABLES_TESTS / script_name
     result = subprocess.run(
         [node, str(script)], capture_output=True, text=True, encoding="utf-8", timeout=timeout,
     )

@@ -1,7 +1,7 @@
 # Hosted-provider service profile
 
 The `service` profile is a small, hosted-provider-first Agent Harness Server. It keeps the same sessions, provider
-adapters, approval flow, event stream, scoped tokens, persistent storage, Agent Harness Web, and versioned APIs as
+adapters, approval flow, event stream, scoped tokens, persistent storage, Stables, and versioned APIs as
 the full install, without requiring a GPU or local model. Agent Harness Apps use the App API; Agent Harness SDK is
 the supported Python library for that API.
 
@@ -30,7 +30,7 @@ provider. `GET /health`, `GET /api/v1`, and authenticated `GET /api/admin/v1` re
 ```
 
 The actual response includes every core module, and each add-on module ([`modules.md`](modules.md)) that is
-present: an absent add-on (images on the service profile) has no entry at all. Agent Harness Web, Apps, and SDK consumers should use capability
+present: an absent add-on (images on the service profile) has no entry at all. Stables, Apps, and SDK consumers should use capability
 discovery instead of assuming that model,
 GPU, jobs, image, memory, runner, or other optional routes are usable.
 
@@ -71,7 +71,7 @@ An installer run without `-Profile` preserves an existing profile. It defaults t
 ## App data isolation
 
 Each App's data lives in its own store, `<data_dir>/apps/<app_id>/` (a SQLite database plus that App's session files),
-and Agent Harness Web's sessions, the owner's history, live in the reserved App store `apps/app-web/`. The main
+and Stables' sessions, the owner's history, live in the reserved App store `apps/app-web/`. The main
 database keeps only the App registry, per-App metadata and counters, provider credentials, settings and global data.
 
 - An App reaches only its own store; another App, the owner's lists, search, `session_search` and `session_read` never

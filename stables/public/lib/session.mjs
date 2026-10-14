@@ -2,7 +2,7 @@
 // protocol-blocked flag and the api() wrapper. createSession() holds that state in a closure; nothing here touches
 // document/window, so it imports under plain Node.
 /** @import { AgentHarnessWebClient } from '../client.mjs' */
-/** @import { ApiResponse, ApiSurface, ClientError, HttpMethod, Identity, RequestOptions, WebAuth } from '../../../tools/web-types/contracts.js' */
+/** @import { ApiResponse, ApiSurface, ClientError, HttpMethod, Identity, RequestOptions, WebAuth } from '../../types/contracts.js' */
 
 // Which API surface a request uses: guests and members go through the app surface, the owner through admin except for
 // the few session endpoints the app surface serves.

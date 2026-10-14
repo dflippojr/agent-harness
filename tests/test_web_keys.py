@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
 WEB = Path(__file__).resolve().parents[1] / "stables" / "public"
 
 
@@ -25,7 +26,7 @@ def test_keys_behave():
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    script = Path(__file__).resolve().parent / "web_keys.mjs"
+    script = STABLES_TESTS / "web_keys.mjs"
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok: shortcuts, the ? sheet, fields and no Approve key" in result.stdout

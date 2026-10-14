@@ -4,7 +4,7 @@ Run AI agents on Windows, Linux, or Apple Silicon macOS and drive them from a br
 local model or your own hosted-provider CLI subscriptions. Agents work in Docker sandboxes and ask before risky
 actions.
 
-The installer sets up **Agent Harness Server**, which hosts the APIs and normally serves **Agent Harness Web**. An
+The installer sets up **Agent Harness Server**, which hosts the APIs and normally serves **Stables**. An
 **Agent Harness App** is a third-party API integration. **Agent Harness for Mac** installs the `harness` command
 (**Agent Harness CLI**) and a **Mac Runner** together; the Python library in `sdk/` is **Agent Harness SDK**.
 
@@ -81,7 +81,7 @@ Both are Apache 2.0.
 
 ## Hosted-provider service profile
 
-The service profile installs Agent Harness Server, Agent Harness Web, the provider CLI image, and provider-specific
+The service profile installs Agent Harness Server, Stables, the provider CLI image, and provider-specific
 egress proxies.
 It skips llama.cpp, model downloads, GPU checks, and every optional integration unless selected:
 
@@ -143,7 +143,7 @@ config (`-Force` rewrites it).
 Useful options: `-Profile Service`, `-EnableModules jobs,backup`, `-Model gpt-oss`, `-InstallDir D:\agent-harness`, `-DataDir D:\agents`, `-ModelPath <existing .gguf>`,
 `-LlamaDir <existing llama.cpp>`, `-Port 8100`, `-NoTasks`, `-DryRun`. See `Get-Help .\install\install.ps1 -Full`.
 
-Then open **http://127.0.0.1:8100** in Agent Harness Web. The first model load takes a minute or two.
+Then open **http://127.0.0.1:8100** in Stables. The first model load takes a minute or two.
 
 > **Antivirus:** some engines flag `uv.exe` (Astral's Rust-based Python manager) as suspicious because it's unsigned
 > and downloads packages. It's a false positive; allow the `%LOCALAPPDATA%\agent-harness\bin` folder. You can check
@@ -206,9 +206,9 @@ Linux/macOS:
 Logs are under `%LOCALAPPDATA%\agent-harness\logs` on Windows and
 `~/.local/share/agent-harness/logs` on Unix (`daemon.log`, `llama-server.log`, and supervisor logs).
 
-## Use Agent Harness Web from your phone
+## Use Stables from your phone
 
-Agent Harness Server listens only on localhost. To reach Agent Harness Web from other devices, use
+Agent Harness Server listens only on localhost. To reach Stables from other devices, use
 [Tailscale](https://tailscale.com):
 
 1. Install Tailscale on the PC and your phone, and sign in to both with the same account.
@@ -227,7 +227,7 @@ Agent Harness Server listens only on localhost. To reach Agent Harness Web from 
    **Actions → Accounts**; see [`member-github-auth.md`](member-github-auth.md).
    For a shared household device whose tailnet login is no single member, configure `google_signin` so members
    identify themselves with their linked Google account; see [`google-signin.md`](google-signin.md).
-5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Agent Harness Web icon is
+5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Stables icon is
    labeled **Harness**. iOS may retain an older label until you remove that icon and add it again; no server or
    browser data migration is required. See [`web.md`](web.md).
 
@@ -322,7 +322,7 @@ A backup folder holds exactly:
 | File | What it is |
 | --- | --- |
 | `harness.sqlite3` | the main store: App registry, accounts, settings, jobs, skills, provider credentials, audit log |
-| `apps/<app_id>.sqlite3` | one per App store, Agent Harness Web's `app-web.sqlite3` included (every owner and member session) |
+| `apps/<app_id>.sqlite3` | one per App store, Stables' `app-web.sqlite3` included (every owner and member session) |
 | `transcripts.zip` | the owner's transcripts (`<data_dir>/transcripts`) |
 | `transcripts/users/<user_id>.zip` | each member's transcripts, when they have any |
 | `transcripts/apps/<app_id>.zip` | each App's transcripts, when it has any |
@@ -418,11 +418,11 @@ install/uninstall.sh --remove-files  # also remove the install directory
 
 ## Security model, briefly
 
-- One owner per install, plus optional owner-provisioned household members and time-boxed guests. Agent Harness Web
+- One owner per install, plus optional owner-provisioned household members and time-boxed guests. Stables
   and the APIs treat a local caller as the owner only when it sends the local owner token (see
   [Local callers](#local-callers)); other devices need a tailnet login plus, for the inference endpoint and
   App API, a key or token. Members authenticate only with the exact `Tailscale-User-Login` the owner stored.
-  Optional `guests:` entries grant time-boxed read-only Agent Harness Web access to a named tailnet login without
+  Optional `guests:` entries grant time-boxed read-only Stables access to a named tailnet login without
   owner or member powers. Member data lives under `data_dir/users/<opaque-id>/`. The machine owner remains
   inside the host/OS trust boundary and can read local storage; household isolation prevents accidental or
   API/UI cross-account access, not a hostile administrator. Optional member GitHub sign-in

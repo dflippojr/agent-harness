@@ -14,12 +14,16 @@ Stables is a client of the documented API, not part of the Server (#334 stage (d
 `tests/test_stables_boundary.py`:
 
 - Stables loads only its own files. Its one reach outside `stables/public` is type-only: JSDoc `@import` of the API
-  contract types in `tools/web-types`, which are generated from the Server's OpenAPI document.
+  contract types in `stables/types`, which are generated from the Server's OpenAPI document.
 - Only its transport (`client.mjs`, `lib/stream.mjs`) and the service worker open connections. Requests go to
   `/api/v1` or `/api/admin/v1`; the only unversioned call is `GET /health`, the compatibility probe.
 - The Server names the client's files in one place, `harness/stables_shell.py`. It serves the shell from the
   directory in `HARNESS_STABLES_DIR` when that is set, else from the checkout's `stables/public`. With neither, it runs
   the API alone: `/`, `/static/...` and the shell files return 404, and nothing else changes.
+
+Stables carries its own checks, so they can move with it: the API contract types and type-check in `stables/types`,
+and the Node harnesses in `stables/tests`, which run without pytest (`npm --prefix stables test`, or
+`node stables/tests/run.mjs <name>` for a subset). This repository's pytest suite runs each harness too.
 
 Stables still offers daemon-administration settings; moving them to the Hub and the CLI is #545. A later stage moves
 `stables/` to its own repository.
@@ -141,9 +145,8 @@ to its approved browser origin for browser requests. Revoke it under **Settings 
 preflight and actual requests are allowed only for an origin present on a live key, and the owner API still verifies
 that the presented token is an owner token approved for that same origin.
 
-Existing owner credentials whose display name is `control-center` or “Control Center” remain valid and visible; the
-naming change does not rewrite or revoke them. Newly created Web credentials use an `agent-harness-web` display
-name. Existing routes, API fields, service-worker scope, and storage keys are also unchanged, so bundled and
+Existing owner credentials named `control-center`, “Control Center” or `agent-harness-web` remain valid and visible;
+the naming changes do not rewrite or revoke them. Newly created Web credentials use a `stables` display name. Existing routes, API fields, service-worker scope, and storage keys are also unchanged, so bundled and
 separately hosted copies do not need to pair again.
 
 The service worker caches only the static shell. API responses, streams, images, and transcripts are never cached.

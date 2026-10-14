@@ -11,5 +11,12 @@ Stables talks to the Server only through the documented API (`/api/v1`, `/api/ad
 `tests/test_stables_boundary.py` checks that it loads only its own files, that only its transport opens connections,
 and that the Server names this directory in one place.
 
-This directory is moving to its own repository (#334). Until then its type checks live in `tools/web-types` and its
-Node test harnesses in `tests/web_*.mjs`.
+`types/` holds the type checks: the API contract types generated from the Server's OpenAPI document, plus the
+`jsconfig` and compile-only type tests over `public/` (see [`types/README.md`](types/README.md)). Nothing in it is
+served.
+
+`tests/` holds the Node harnesses: each one boots real modules from `public/` against a stub DOM and exits non-zero on
+a failed assertion. Run them all with `npm --prefix stables test` (no install needed), or a subset with
+`node stables/tests/run.mjs <name-filter>`. The pytest suite in this repository also runs each harness.
+
+This directory is moving to its own repository (#334).

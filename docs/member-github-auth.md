@@ -25,7 +25,7 @@ replace this later; it is not part of this version.
 1. Install **Git Credential Manager 2.9.0 or newer** in an administrator-owned location that household members
    cannot write. On Windows, use the copy bundled with Git for Windows
    (`C:/Program Files/Git/mingw64/bin/git-credential-manager.exe`).
-2. Configure it in `harness.local.yaml` (file configuration only; Agent Harness Web cannot change these values):
+2. Configure it in `harness.local.yaml` (file configuration only; Stables cannot change these values):
 
    ```yaml
    github_member_auth:

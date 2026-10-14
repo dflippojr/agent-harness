@@ -158,7 +158,7 @@ def test_entries_match_ids_pending_and_do_not_open_app_stores(tmp_path, monkeypa
     (m.cfg.config_dir / "hub.entries.json").write_text(json.dumps(doc), encoding="utf-8")
     key, token = m.db.create_api_key("display name intentionally different", "sessions", kind="app",
                                     catalog_app_id=CATALOG, origins=["https://web.example.invalid"])
-    unmatched, _ = m.db.create_api_key("Agent Harness Web", "sessions", kind="app")
+    unmatched, _ = m.db.create_api_key("Stables", "sessions", kind="app")
     now = time.time()
     def add_requests():
         # Beyond the ordinary list's newest-100 limit, with secrets the inventory must not project.
@@ -365,11 +365,11 @@ def test_entry_attribution_requires_manifest_origins(tmp_path, origins, pending_
     doc = document()
     doc["entries"][0]["app"]["browser_origins"] = [manifest_origin]
     (m.cfg.config_dir / "hub.entries.json").write_text(json.dumps(doc), encoding="utf-8")
-    key, _ = m.db.create_api_key("Agent Harness Web", "sessions", kind="app", origins=origins,
+    key, _ = m.db.create_api_key("Stables", "sessions", kind="app", origins=origins,
                                catalog_app_id=CATALOG)
     now = time.time()
     m.db.main.write(m.db.main.insert_pairing_request, {
-        "id": "synthetic", "kind": "app", "name": "Agent Harness Web", "catalog_app_id": CATALOG,
+        "id": "synthetic", "kind": "app", "name": "Stables", "catalog_app_id": CATALOG,
         "origin": pending_origin, "scopes": "sessions", "source": "synthetic",
         "challenge_hash": "synthetic-challenge", "match_code": "1234",
         "state": "pending", "created_at": now, "expires_at": now + 500})

@@ -72,3 +72,26 @@ def test_active_docs_link_to_the_canonical_web_guide():
     assert "(control-center.md)" not in combined
     assert "docs/control-center.md" not in combined
     assert "(web.md)" in combined
+
+
+def test_server_and_living_docs_call_the_client_stables():
+    """#334 stage (d): the Server, its config and living docs say Stables. History keeps the old name: study and
+    results docs, API changelog rows, the rename notes, and the migration that renames the registry row."""
+    import re
+    import subprocess
+
+    history = re.compile(r"docs/(.*-study|phase\w*-results|issue-\d+-\w*results|control-center)\.md$")
+    allowed_files = {"harness/migrations/0063_stables_name.py"}
+    allowed_lines = re.compile(r"^\| \d+\.\d+ \||formerly Agent Harness Web|from \"Agent Harness Web\" to \"Stables\"")
+    tracked = subprocess.run(["git", "ls-files", "harness", "harness_modules", "sdk", "config", "ops", "install",
+                              "macrunner", "stables", "tools", "docs", "README.md", "AGENTS.md"],
+                             cwd=ROOT, capture_output=True, text=True, check=True).stdout.split()
+    stale = []
+    for name in tracked:
+        if name in allowed_files or history.search(name) or not name.endswith((".py", ".md", ".mjs", ".js", ".yaml",
+                                                                                ".html", ".ps1", ".sh")):
+            continue
+        for number, line in enumerate((ROOT / name).read_text(encoding="utf-8").splitlines(), 1):
+            if "Agent Harness Web" in line and not allowed_lines.search(line):
+                stale.append(f"{name}:{number}")
+    assert not stale, stale

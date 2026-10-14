@@ -2,7 +2,7 @@
 # <staging checkout>\config\profile.yaml on every deploy, and the loader applies profile.yaml after both
 # harness.yaml and harness.local.yaml, so the candidate's own yaml cannot switch any of these modules back on.
 #
-# v1 staging is a smoke slot: Agent Harness Server, Agent Harness Web, health/version, the owner/admin API against
+# v1 staging is a smoke slot: Agent Harness Server, Stables, health/version, the owner/admin API against
 # staging data, and the config registry. Sessions fail closed with a "no backend" error. Everything that would
 # share the GPU, provider spend, household services, or owner credentials stays off.
 #

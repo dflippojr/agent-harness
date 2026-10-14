@@ -7,13 +7,13 @@ outcome and a fresh receipt correlation id. `started` without `ok` means complet
 does not prove no effect happened. Inspect before repeating an external erase. See the [private audit contract](app-api.md#private-operational-audit-120-471)
 for scoped reads, retention, failure responses, live erasure, backup rotation/restore and provider-controlled copies.
 
-Machine-owner operations for Agent Harness Web and other first-party operator surfaces. Agent Harness Apps keep
+Machine-owner operations for Stables and other first-party operator surfaces. Agent Harness Apps keep
 using [`/api/v1`](app-api.md); they cannot call this surface, even with every App scope.
 
 Base path: `/api/admin/v1`. Versioning is in the path (`/api/admin/v2` for breaking changes). FastAPI
 serves the machine-readable schema at `/openapi.json`.
 
-Bundled and separately hosted Agent Harness Web use this contract, and so does the Agent Harness CLI: every owner
+Bundled and separately hosted Stables use this contract, and so does the Agent Harness CLI: every owner
 setting and action Web offers has a `harness` command too ([management-parity.md](management-parity.md)). Unversioned Agent Harness Server operator routes
 remain a compatibility surface and keep Tailscale owner/guest rules.
 
@@ -21,13 +21,13 @@ remain a compatibility surface and keep Tailscale owner/guest rules.
 
 Two owner credentials are accepted:
 
-1. **Tailscale/localhost owner identity**, with no `Authorization` header. Same trust as bundled Agent Harness Web:
+1. **Tailscale/localhost owner identity**, with no `Authorization` header. Same trust as bundled Stables:
    a listed `allowed_logins` entry is the owner. The `Tailscale-*` headers count only when tailscaled sent them
    ([INSTALL](INSTALL.md#local-callers)). A request without `Tailscale-User-Login` reached the loopback
    listener directly and is the owner only when it carries the local owner token (`X-Agent-Harness-Local-Token`, see
    [INSTALL](INSTALL.md#local-callers)); otherwise it gets **401**. Guests (`guests:` in `harness.local.yaml`) are refused for every `/api/admin` path.
 2. **Owner bearer token.** `POST /keys` or `POST /api/admin/v1/keys` with
-   `{"name": "agent-harness-web", "kind": "owner", "scopes": ["admin"]}`. The secret is shown once,
+   `{"name": "stables", "kind": "owner", "scopes": ["admin"]}`. The secret is shown once,
    starts with `ho-`, and is sent as `Authorization: Bearer ho-...`.
 
 3. **The Hub's key** (#543). The standalone Hub gets an owner token with the `admin` scope and role `hub` from a
@@ -38,7 +38,7 @@ Two owner credentials are accepted:
 App tokens (`ha-…`, kind `app`) and device/inference tokens (`hk-…`, kind `device`) receive **403**
 `app tokens cannot use the owner API`. The `admin` scope cannot be granted to those kinds.
 
-An owner token may include an exact browser-origin allowlist for separately hosted Agent Harness Web. Create it from
+An owner token may include an exact browser-origin allowlist for separately hosted Stables. Create it from
 the bundled Web UI's **Settings → Connection** page (or `POST /api/admin/v1/keys` with `kind: "owner"`, the `admin`
 scope, and an `origins` array). Versioned API CORS is allowlisted by those live keys, and each actual owner request
 also checks that the presented token was approved for the request's origin. See [`web.md`](web.md).
@@ -465,7 +465,7 @@ Each App's sessions live in its own store and folder (`<data_dir>/apps/<app_id>/
 - **Revoke.** `DELETE /keys/{kid}` on an App or device key kills its token at once and schedules the erasure of its
   whole store and folder 7 days later: `GET /keys` shows `revoked_at` and `erase_after` (Unix seconds), and the Apps
   card lists it under "Revoked: data to be erased" with the date. Owner keys have no erasure.
-- **Agent Harness Web** (`app-web`) is the owner's own App (#330 decision 4): its store holds the owner's and members'
+- **Stables** (`app-web`) is the owner's own App (#330 decision 4): its store holds the owner's and members'
   sessions. It has no key, so `GET /keys` doesn't list it and `DELETE /keys/app-web` is a `404`; its retention route
   is a `404` too, and the sweep never erases it. See [Web's store](#web-store) below.
 - **Pending erasures.** `GET /api/admin/v1/apps/erasures` lists them, soonest first:
@@ -483,7 +483,7 @@ Each App's sessions live in its own store and folder (`<data_dir>/apps/<app_id>/
 <a id="web-store"></a>
 ## Web's store and the data layout
 
-Since #330 stage (c) the owner's and members' sessions live in Agent Harness Web's own store; the main store keeps
+Since #330 stage (c) the owner's and members' sessions live in Stables' own store; the main store keeps
 no sessions. A one-time step at startup moved them (see [migrations](migrations.md#web-store)).
 
 | Data | Where |
@@ -496,7 +496,7 @@ no sessions. A one-time step at startup moved them (see [migrations](migrations.
 
 ## Examples
 
-Tailscale/localhost owner (bundled Agent Harness Web, no bearer token):
+Tailscale/localhost owner (bundled Stables, no bearer token):
 
 ```http
 GET /api/admin/v1/sessions HTTP/1.1
@@ -514,10 +514,10 @@ Mint an owner token from the PC:
 ```bash
 curl -s http://127.0.0.1:8100/api/admin/v1/keys \
   -H "Content-Type: application/json" \
-  -d '{"name":"agent-harness-web","kind":"owner","scopes":["admin"]}'
+  -d '{"name":"stables","kind":"owner","scopes":["admin"]}'
 ```
 
-For a separately hosted Agent Harness Web copy, add `"origins":["https://harness-web.example"]`. Browser origins must be HTTPS except for
+For a separately hosted Stables copy, add `"origins":["https://harness-web.example"]`. Browser origins must be HTTPS except for
 loopback development and contain no path, query, fragment, or credentials.
 
 ## Zero-touch pairing requests
@@ -722,7 +722,7 @@ Failed outputs count. `largest_tool_output_by_tool` is session-API only (never a
 
 Counters, bounded labels, no session id or tool name. Aggregates sum precomputed `turn_metrics` fields (sessions
 without those fields contribute nothing). `harness_round_resets_total` is unchanged and is not duplicated here.
-Every series covers the owner's and members' sessions only, read from Agent Harness Web's store
+Every series covers the owner's and members' sessions only, read from Stables' store
 (`<data_dir>/apps/app-web/harness.sqlite3`, #330 decision 4): an App's sessions live in its own store, which the owner
 surfaces never read (#330); `GET /keys` carries each App's counts instead. The smart-approval stats
 (`GET /smart-approvals`) and Control Center's counts follow the same rule.

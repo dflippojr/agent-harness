@@ -88,9 +88,9 @@ it back, stop the daemon, move the session folders and transcripts back to the o
 backup over the App's `harness.sqlite3`.
 
 <a id="web-store"></a>
-### Agent Harness Web's store
+### Stables' store
 
-Agent Harness Web is an App with its own store, `<data dir>/apps/app-web/harness.sqlite3` (#330 decision 4). At the
+Stables is an App with its own store, `<data dir>/apps/app-web/harness.sqlite3` (#330 decision 4). At the
 first start after the upgrade, right after the App sessions move above, every session left in the main store (the
 owner's, whether started from Web, the CLI or the admin API, and the members') moves there with every row tied to
 it: events, approvals, artifacts, checkpoints, App tool calls, smart reviews, review drafts and secret dismissals.
@@ -130,3 +130,9 @@ Step 0057 (`hub_claim`) adds `api_keys.role` (empty for every existing key) and 
 most one row: the Hub key's id, display name, kind, origin and claim time, never a token or hash (#543). There is no
 down-migration. Rolling back restores the pre-0057 snapshot, which has no Hub key and no `hub_claim`. Keys, settings and
 audit rows written since the upgrade are lost with it.
+
+Step 0063 (`stables_name`) renames the reserved `app-web` registry row from "Agent Harness Web" to "Stables", the
+client's new name (#334 stage (d)). It changes only that default display name; the row's id, kind and store, and every
+session in it, stay as they were. There is no down-migration: an older harness refuses a version-63 database
+(`SchemaTooNewError`), so rolling back restores the pre-0063 snapshot as [above](#backups-and-rollback), which brings
+back the old name. Keys, settings and sessions written since the upgrade are lost with it.

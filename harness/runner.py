@@ -133,7 +133,7 @@ def holds_place(s: dict) -> bool:
 
 
 def capped_app(db, app_id: str) -> bool:
-    """Only third-party Apps have session caps and a run time budget; Agent Harness Web and the owner's own tokens
+    """Only third-party Apps have session caps and a run time budget; Stables and the owner's own tokens
     (device and owner keys) do not (#524)."""
     if not app_id:
         return False

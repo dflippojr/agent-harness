@@ -64,7 +64,7 @@ Used in the tables:
 | Cat | Catalog service (future storage/signing issue) |
 | Own | Daemon owner |
 | Dae | Daemon implementation (today + future revocation-hook issue) |
-| Web | Agent Harness Web discovery/consent UI (future) |
+| Web | Stables discovery/consent UI (future) |
 | Prv | Hosted provider (Anthropic / OpenAI / Cursor) |
 
 ## 5. Abuse cases

@@ -1,6 +1,6 @@
 # Configuration registry
 
-The daemon, `/api/v1`, `/api/admin/v1`, and Agent Harness Web share one typed, allowlisted
+The daemon, `/api/v1`, `/api/admin/v1`, and Stables share one typed, allowlisted
 registry of operational settings. Unlisted configuration stays in `harness.yaml` /
 `harness.local.yaml` / `profile.yaml` and is not writable through these APIs.
 
