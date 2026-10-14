@@ -2,7 +2,7 @@
 
 Contract version: 1
 
-This contract covers testing Agent Harness Web against a disposable Agent Harness Server that runs in **fake model
+This contract covers testing Stables against a disposable Agent Harness Server that runs in **fake model
 mode** (#588). Every local model reply comes from a fixture script instead of llama-server. Everything else is the
 real server: the runner, policy and approvals, the file tools, compaction, jobs, events and streams. The agent-ops
 `ui-testing-pass` skill reads this file. The commands and the safety boundary are here; the fixture format is in the
@@ -10,7 +10,7 @@ docstring of [`harness/fake_model.py`](../harness/fake_model.py).
 
 ## Scope and isolation
 
-- **Target.** Agent Harness Web (`stables/public`, native JavaScript, no build step) served against Agent Harness Server
+- **Target.** Stables (`stables/public`, native JavaScript, no build step) served against Agent Harness Server
   (`harness/`) from this repository, `dflippojr/agent-harness`.
 - **Loopback only.** Both listeners bind `127.0.0.1` and nothing else:
   - the Server at `http://127.0.0.1:<port>`

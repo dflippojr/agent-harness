@@ -1,6 +1,6 @@
 # Household member Google sign-in (issue #64)
 
-An owner-provisioned, enabled household member can identify themselves to **bundled, same-origin Agent Harness Web**
+An owner-provisioned, enabled household member can identify themselves to **bundled, same-origin Stables**
 with Google OpenID Connect. Tailscale Serve still decides which devices reach the server. Google only says *which
 pre-approved member* is at the keyboard. Google never creates an account, never grants access by itself, and never
 makes anyone an owner. The feature is **off by default**. Owners, direct-Tailscale members (#62), guests, and app

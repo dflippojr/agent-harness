@@ -13,7 +13,7 @@ listen:
 public_url: ""          # e.g. https://tower.your-tailnet.ts.net
 # Requests arriving through `tailscale serve` carry the caller's login; anyone else is refused.
 allowed_logins: []      # e.g. [you@example.com]
-# Time-boxed read-only Agent Harness Web access for a tailnet buddy. Put this in harness.local.yaml.
+# Time-boxed read-only Stables access for a tailnet buddy. Put this in harness.local.yaml.
 # Requires allowed_logins (otherwise every tailnet login is already owner). Restart after changing.
 # until is ISO-8601 (timezone preferred). Omit until to last until you remove the entry.
 guests: []
@@ -34,7 +34,7 @@ provider_secret_files: {}
 # github_member_auth:
 #   gcm_path: C:/Program Files/Git/mingw64/bin/git-credential-manager.exe
 #   credential_store: wincredman
-# Household members' Google sign-in for bundled Agent Harness Web (docs/google-signin.md). Off by default. Requires
+# Household members' Google sign-in for bundled Stables (docs/google-signin.md). Off by default. Requires
 # public_url on the HTTPS Tailscale Serve origin and allowed_logins. The secret stays in an owner-only file outside
 # the repo. admitted_logins are shared-device tailnet logins with no role of their own.
 # google_signin:

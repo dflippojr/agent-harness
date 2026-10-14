@@ -392,7 +392,7 @@ def watch(sid: str, args, after: int = 0) -> int:
             time.sleep(2)  # stream ended or dropped; reconnect
 
 
-# Issue #334: every owner setting and action Agent Harness Web offers is also a command here, so Web stays optional
+# Issue #334: every owner setting and action Stables offers is also a command here, so Web stays optional
 # (docs/management-parity.md). A row is (words, method, owner API path, help, fields). Each `{param}` in the path is
 # a positional argument. A field "name" is a positional argument and "--name" an option; a suffix sets its type:
 # ":int", ":float", ":bool" (true/false), ":flag" (no value), ":list" (zero or more values), ":pairs" (key=value,

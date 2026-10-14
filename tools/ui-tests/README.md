@@ -1,4 +1,4 @@
-# Agent Harness Web UI tests
+# Stables UI tests
 
 Run from the repository root with Python dependencies installed:
 

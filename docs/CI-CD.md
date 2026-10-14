@@ -569,7 +569,7 @@ a forced-off module back on. It selects the `full` profile with **every** module
 profile, which would require an enabled hosted backend. Off: local model / llama-server / inference endpoint,
 images and image edit, the GPU guard, hosted CLI backends, `homelab`, `remote_control`, Mac `runners`, `jobs`,
 notifications / ntfy, `backup`, `web` search and fetch, memory-library writes, `search`, `skills`, and repository
-cloning. On: the Server process, Agent Harness Web, `/health`, the owner/admin API against staging data, the config
+cloning. On: the Server process, Stables, `/health`, the owner/admin API against staging data, the config
 registry over the staging overlay, and creating or listing sessions, which fail closed with a "no backend" error.
 
 After the slot reports healthy, the deployer reads `/health` and refuses to leave staging up if any module or hosted

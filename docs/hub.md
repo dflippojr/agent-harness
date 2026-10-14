@@ -1,7 +1,7 @@
 # Hub inventory
 
 The optional daemon-side Hub module provides `GET /api/admin/v1/hub` and `harness hub status`.
-The standalone Hub app lives in its own repository; Agent Harness Web does not consume this inventory.
+The standalone Hub app lives in its own repository; Stables does not consume this inventory.
 Owner credentials and the exclusive Hub key can read it. Other apps, members and guests cannot.
 
 ## Local entries

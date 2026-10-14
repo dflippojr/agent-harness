@@ -1,11 +1,11 @@
-"""Owner API (/api/admin/v1): Agent Harness Web operations that ordinary apps must not receive.
+"""Owner API (/api/admin/v1): owner operations (Stables, the Hub, the CLI) that ordinary apps must not receive.
 
 Issue #24. The least-privilege app contract stays at /api/v1. This surface versions the daemon's
 operator routes (sessions, search, jobs, keys, GPU, maintenance, Remote Control trust, …) under a
-stable prefix. Bundled and separately hosted Agent Harness Web both use this contract.
+stable prefix. Bundled and separately hosted Stables both use this contract.
 
 Auth is an explicit owner credential:
-- Tailscale/localhost owner identity (no bearer token), same as bundled Agent Harness Web; or
+- Tailscale/localhost owner identity (no bearer token), same as bundled Stables; or
 - a bearer token of kind ``owner`` holding the ``admin`` scope (prefix ``ho-``). The Hub's key (#543, role ``hub``)
   is one of these, except on the host-only Hub claim routes (harness/hub_claim.py).
 
@@ -36,7 +36,7 @@ log = logging.getLogger("harness.admin")
 API_VERSION = "1.27"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
-ADMIN_SCOPE_HELP = "owner-only Agent Harness Web operations under /api/admin/v1"
+ADMIN_SCOPE_HELP = "owner-only Server administration under /api/admin/v1 (Stables, the Hub and the CLI)"
 PREFIX = "/api/admin/v1"
 
 

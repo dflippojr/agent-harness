@@ -30,7 +30,7 @@ LEGACY_COLUMNS = [
     ("sessions", "app_id", TEXT_EMPTY),
     ("sessions", "app_tools", TEXT_EMPTY_LIST),
     ("sessions", "app_metadata", TEXT_EMPTY_OBJECT),
-    # Issue #57: human-owned Agent Harness Web data. v1 has one stable owner; guests own nothing.
+    # Issue #57: human-owned Stables data. v1 has one stable owner; guests own nothing.
     ("sessions", "owner_id", "TEXT NOT NULL DEFAULT 'owner'"),
     ("api_keys", "scopes", "TEXT NOT NULL DEFAULT 'inference'"),
     ("api_keys", "kind", "TEXT NOT NULL DEFAULT 'device'"),

@@ -145,9 +145,8 @@ to its approved browser origin for browser requests. Revoke it under **Settings 
 preflight and actual requests are allowed only for an origin present on a live key, and the owner API still verifies
 that the presented token is an owner token approved for that same origin.
 
-Existing owner credentials whose display name is `control-center` or “Control Center” remain valid and visible; the
-naming change does not rewrite or revoke them. Newly created Web credentials use an `agent-harness-web` display
-name. Existing routes, API fields, service-worker scope, and storage keys are also unchanged, so bundled and
+Existing owner credentials named `control-center`, “Control Center” or `agent-harness-web` remain valid and visible;
+the naming changes do not rewrite or revoke them. Newly created Web credentials use a `stables` display name. Existing routes, API fields, service-worker scope, and storage keys are also unchanged, so bundled and
 separately hosted copies do not need to pair again.
 
 The service worker caches only the static shell. API responses, streams, images, and transcripts are never cached.

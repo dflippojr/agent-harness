@@ -70,7 +70,7 @@ DEFAULT_SUMMARY = ("## User requests\nnone\n## Done so far\nThe fake model ran a
                    "Nothing real: this is fake model mode.\n## Answer so far\nnone yet\n## Next steps\n"
                    "Continue the script.")
 FILLER = ("This paragraph is filler from fake model mode. It makes the reply long enough that the next turn "
-          "crosses the compaction threshold, so Agent Harness Web shows the compaction rows. ")
+          "crosses the compaction threshold, so Stables shows the compaction rows. ")
 
 
 class FixtureError(ValueError):

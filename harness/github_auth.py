@@ -2,7 +2,7 @@
 
 Each enabled member can sign in to their own GitHub account with GCM's GitHub OAuth device flow. GCM owns the
 token and keeps it in an allowlisted OS secure store under `GCM_NAMESPACE=agent-harness/v1/<user_id>`. The
-daemon and Agent Harness Web never receive it:
+daemon and Stables never receive it:
 
 - connect runs `gcm get` with stdout piped straight into `gcm store` (process to process, never read here),
   and GCM's custom GitHub UI helper (`gcm_ui_helper.py`) relays only the verification URL and user code;

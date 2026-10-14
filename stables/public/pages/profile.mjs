@@ -672,7 +672,7 @@ function connectionCard() {
     catch (_) { toast("Enter the Stables copy's complete origin"); return; }
     try {
       const key = await api("/keys", { method: "POST", surface: "admin", body: {
-        name: `agent-harness-web (${new URL(approvedOrigin).host})`, kind: "owner", scopes: ["admin"], origins: [approvedOrigin],
+        name: `stables (${new URL(approvedOrigin).host})`, kind: "owner", scopes: ["admin"], origins: [approvedOrigin],
       } });
       const field = h("input", { type: "text", readonly: true, value: key.key, onclick: (e) => e.target.select() });
       fill(minted,

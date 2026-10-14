@@ -53,7 +53,7 @@ def images_runtime(request: Request):
     return runtime(request, "images")
 
 
-# owner surface: Agent Harness Web and /api/admin/v1 (the guard middleware and require_owner do the auth)
+# owner surface: Stables and /api/admin/v1 (the guard middleware and require_owner do the auth)
 def images_service(request: Request):
     svc = images_runtime(request).service
     if svc is None:

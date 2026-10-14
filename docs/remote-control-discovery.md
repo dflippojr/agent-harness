@@ -1,7 +1,7 @@
 # Owner Remote Control folder discovery
 
 Folder discovery is Windows-only, owner-only, metadata-only and disabled by
-default. Enable it in Agent Harness Web Settings after adding at least one valid
+default. Enable it in Stables Settings after adding at least one valid
 discovery root. These are the only writable discovery settings:
 
 | Setting | Default | Bounds |

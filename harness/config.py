@@ -301,7 +301,7 @@ class DiscoveryConfig:
 class GitHubMemberAuthConfig:
     """`github_member_auth` in harness.yaml (issue #63): per-member GitHub sign-in through Git Credential Manager.
 
-    Installer/file configuration only. Agent Harness Web can switch the feature on or off but never sets the
+    Installer/file configuration only. Stables can switch the feature on or off but never sets the
     executable or the store. Empty `gcm_path` means the feature is unavailable.
     """
     gcm_path: str = ""              # absolute, owner-controlled git-credential-manager executable
@@ -503,7 +503,7 @@ class Project:
     web: bool = True             # give sessions web_search / web_fetch (when web is enabled)
     images: bool = True          # give sessions generate_image (when images is enabled)
     session_search: bool = True  # give sessions session_search / session_read (when search is enabled)
-    owner_id: str = "owner"     # stable v1 Agent Harness Web owner scope
+    owner_id: str = "owner"     # stable v1 Stables owner scope
     managed: bool = False        # loaded from data_dir/projects.yaml rather than checked-in config
     tool_output: dict = field(default_factory=dict)  # optional overlay on Config.tool_output
     verify: list = field(default_factory=list)       # list[VerifyCheck]; empty → verify returns an error
@@ -513,7 +513,7 @@ class Project:
 
 @dataclass
 class GuestAccess:
-    """Time-boxed read-only Agent Harness Web access for a tailnet login that is not the owner."""
+    """Time-boxed read-only Stables access for a tailnet login that is not the owner."""
     login: str
     until: str = ""  # ISO-8601 datetime; empty means until the entry is removed from config
 

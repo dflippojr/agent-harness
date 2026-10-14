@@ -37,7 +37,7 @@ scripts:
     turns:
       - reasoning: "The user wants a short tour. Keep it brief."
         text: >-
-          Hi! This is the fake model. Agent Harness Web's tab bar has Agents, Chat, Jobs and Settings. Agents
+          Hi! This is the fake model. Stables' tab bar has Agents, Chat, Jobs and Settings. Agents
           groups sessions into Needs you, Running and Recent. Open a session to see its compact header and its
           overflow menu.
         delay: 0.03

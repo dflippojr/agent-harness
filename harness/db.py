@@ -403,7 +403,7 @@ CREATE TABLE IF NOT EXISTS google_link_invitations (
     created_at REAL NOT NULL,
     expires_at REAL NOT NULL
 );
--- Agent Harness Web member sessions. Only the cookie value's SHA-256 is stored.
+-- Stables member sessions. Only the cookie value's SHA-256 is stored.
 CREATE TABLE IF NOT EXISTS web_sessions (
     id_hash TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -1987,7 +1987,7 @@ class Database:
 
     @_reads
     def list_api_keys(self) -> list[dict]:
-        """The keys: every App's, device's and owner token's. Agent Harness Web's registry row has no key, so it is
+        """The keys: every App's, device's and owner token's. Stables' registry row has no key, so it is
         not listed (`get_api_key(WEB_APP_ID)` reads it)."""
         with self.lock:
             rows = self.conn.execute(_API_KEY_LISTING + " ORDER BY k.created_at").fetchall()
@@ -1996,20 +1996,20 @@ class Database:
     @_reads
     def get_api_key_listing(self, kid: str) -> dict | None:
         """Key `kid` as `list_api_keys` lists it, read alone (#669): the same fields and request count, without
-        listing every key. None when `kid` is not a listed key (a missing or Agent Harness Web's)."""
+        listing every key. None when `kid` is not a listed key (a missing or Stables')."""
         with self.lock:
             row = self.conn.execute(_API_KEY_LISTING + " AND k.id = ?", (kid,)).fetchone()
         return _row(row)
 
     @_writes
     def ensure_web_app(self, app_id: str) -> None:
-        """Register Agent Harness Web in the App registry (#330 decision 4) under its reserved id, once. It has no
+        """Register Stables in the App registry (#330 decision 4) under its reserved id, once. It has no
         token: its hash is of a random secret nobody is given, and `api_key_by_secret` never matches its kind."""
         import hashlib
         with self.lock:
             self.conn.execute(
                 "INSERT OR IGNORE INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins) "
-                "VALUES (?, 'Agent Harness Web', '', ?, ?, '', 'web', '[]')",
+                "VALUES (?, 'Stables', '', ?, ?, '', 'web', '[]')",
                 (app_id, hashlib.sha256(("web:" + secrets.token_urlsafe(32)).encode()).hexdigest(), time.time()))
 
     @_writes
@@ -2063,7 +2063,7 @@ class Database:
         provider credentials and error counts go with its store."""
         with self.lock:
             if self.conn.execute("SELECT 1 FROM api_keys WHERE id = ? AND kind = 'web'", (kid,)).fetchone():
-                raise ValueError("Agent Harness Web is never erased")
+                raise ValueError("Stables is never erased")
             self.conn.execute("UPDATE api_keys SET erased_at = ?, erase_after = NULL, scopes = '', origins = '[]', "
                               "retention_days = NULL WHERE id = ?", (time.time(), kid))
             self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
@@ -2694,7 +2694,7 @@ class Database:
             return self.conn.execute("DELETE FROM member_api_keys WHERE user_id = ? AND backend = ?",
                                      (user_id, backend)).rowcount
 
-    # Issue #64: Google identities, link invitations, and Agent Harness Web sessions (hashes only).
+    # Issue #64: Google identities, link invitations, and Stables sessions (hashes only).
     @_reads
     def google_identity(self, user_id: str) -> dict | None:
         with self.lock:

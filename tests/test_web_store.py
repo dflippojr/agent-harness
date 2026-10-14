@@ -1,4 +1,4 @@
-"""Agent Harness Web's store (#330 stage c, decision 4): the owner's and members' sessions move out of the main store
+"""Stables' store (#330 stage c, decision 4): the owner's and members' sessions move out of the main store
 into Web's own App store once, at startup, and every owner surface reads them there."""
 
 from __future__ import annotations
