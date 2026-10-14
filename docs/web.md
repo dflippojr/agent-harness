@@ -14,7 +14,7 @@ Stables is a client of the documented API, not part of the Server (#334 stage (d
 `tests/test_stables_boundary.py`:
 
 - Stables loads only its own files. Its one reach outside `stables/public` is type-only: JSDoc `@import` of the API
-  contract types in `tools/web-types`, which are generated from the Server's OpenAPI document.
+  contract types in `stables/types`, which are generated from the Server's OpenAPI document.
 - Only its transport (`client.mjs`, `lib/stream.mjs`) and the service worker open connections. Requests go to
   `/api/v1` or `/api/admin/v1`; the only unversioned call is `GET /health`, the compatibility probe.
 - The Server names the client's files in one place, `harness/stables_shell.py`. It serves the shell from the

@@ -1,7 +1,7 @@
 // Server-sent event streams (#258): the URL guard (pure) and openStream(), an EventSource that survives iOS suspending the app.
 // Browser globals arrive through `browser` (globalThis in the app, a stub under Node), so the module imports under plain Node.
 /** @import { AgentHarnessWebClient } from '../client.mjs' */
-/** @import { ConnectionState, Surface, StreamHandlers, StreamOptions, StreamStop } from '../../../tools/web-types/contracts.js' */
+/** @import { ConnectionState, Surface, StreamHandlers, StreamOptions, StreamStop } from '../../types/contracts.js' */
 
 // Ids come from the URL hash, so only the characters the daemon issues (hex, "-", "_") may reach a request path.
 const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
