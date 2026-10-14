@@ -25,6 +25,7 @@ from test_daemon import Script, call, make_cfg, wait_status
 from test_household import ALICE, OWNER, H, create_member, household
 from test_phase6 import wait_for
 from test_phase8 import FAKE_CLAUDE, _claude_manager
+from waits import scaled
 
 LIMITS = "/api/admin/v1/apps/{}/limits"
 
@@ -918,7 +919,7 @@ class SlowFinalModel:
 
     async def __call__(self, model, messages, tools, on_delta=None, max_tokens=None, extra=None, timeout=0,
                        on_progress=None):
-        await asyncio.sleep(10)
+        await asyncio.sleep(60)  # far past the scaled bound below, so only the budget ends the run in time
         return Completion(content="finished late", prompt_tokens=10, completion_tokens=1)
 
 
@@ -932,10 +933,10 @@ def test_the_time_budget_ends_a_run_during_a_long_model_call(tmp_path):
         app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
         started = time.monotonic()
         sid = m.create("slow", app=app)["id"]
-        s = await wait_status(m, sid, "done", "failed", timeout=8)
+        s = await wait_status(m, sid, "done", "failed", timeout=scaled(8))
         assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
         assert s["answer"] != "finished late"
-        assert time.monotonic() - started < 8
+        assert time.monotonic() - started < scaled(8)
         assert m.scheduler.holder is None
         await m.stop()
     asyncio.run(body())
@@ -950,16 +951,16 @@ def test_the_time_budget_ends_a_run_stuck_outside_a_model_call(tmp_path):
         m = Manager(cfg, chat=Script([Completion(content="never asked")]))
 
         async def slow_compaction(s):
-            await asyncio.sleep(10)
+            await asyncio.sleep(60)
             return s
         m.runner._maybe_compact = slow_compaction
         await m.start()
         app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
         started = time.monotonic()
         sid = m.create("slow", app=app)["id"]
-        s = await wait_status(m, sid, "done", "failed", "cancelled", timeout=8)
+        s = await wait_status(m, sid, "done", "failed", "cancelled", timeout=scaled(8))
         assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
-        assert time.monotonic() - started < 8
+        assert time.monotonic() - started < scaled(8)
         assert m.scheduler.holder is None
         await m.stop()
     asyncio.run(body())
@@ -1189,7 +1190,7 @@ def test_a_hosted_run_falling_back_to_an_api_key_waits_for_its_slot_queued(tmp_p
     asyncio.run(body())
 
 
-def test_a_runs_time_spent_running_survives_a_daemon_restart(tmp_path):
+def test_a_runs_time_spent_running_survives_a_daemon_restart(tmp_path, monkeypatch):
     cfg = make_cfg(tmp_path)
     cfg.max_run_seconds = 3
 
@@ -1203,13 +1204,20 @@ def test_a_runs_time_spent_running_survives_a_daemon_restart(tmp_path):
         await m.stop()                       # the daemon stops mid-run
         kept = m.db.get_session(sid)["run"].get(RUN_SECONDS) or 0
         assert kept >= 2.0
+        # The restarted run's clock goes on from what it had spent, not from 0: read what it starts with, rather than
+        # how long the rest of the run takes, which grows with the machine's load.
+        started_with = []
+
+        def recording_clock(**fields):
+            started_with.append(fields.get("spent", 0.0))
+            return RunClock(**fields)
+        monkeypatch.setattr("harness.runner.RunClock", recording_clock)
         restarted = Manager(cfg, chat=SleepyModel(0.1))
         await restarted.start()
-        s = await wait_status(restarted, sid, "done", "failed", timeout=15)
+        s = await wait_status(restarted, sid, "done", "failed", timeout=scaled(15))
         assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
-        # Its clock went on from what it had spent: after the restart it ran for what was left (under 1 s), not a
-        # fresh 3 s. Measured on its own running clock, so the restart's own overhead does not count.
-        assert s["run"][RUN_SECONDS] - kept < 2.0
+        assert started_with == [kept]
+        assert s["run"][RUN_SECONDS] >= cfg.max_run_seconds
         await restarted.stop()
     asyncio.run(body())
 
