@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,15 +38,29 @@ async def started(tmp_path, project="proj", script=None):
     return m, s
 
 
+def _module_session(tmp_path_factory, name, rewind_to=None):
+    """A finished two-edit session on an event loop that outlives the test; `run` drives its coroutines."""
+    loop = asyncio.new_event_loop()
+    m, s = loop.run_until_complete(started(tmp_path_factory.mktemp(name)))
+    if rewind_to:
+        loop.run_until_complete(m.rewind(s["id"], rewind_to))
+    yield SimpleNamespace(m=m, s=s, run=loop.run_until_complete)
+    loop.run_until_complete(m.stop())
+    loop.close()
+
+
 @pytest.fixture(scope="module")
 def shared(tmp_path_factory):
     """One finished two-edit session for the tests that only read it. A `started()` session spawns about 90 git
     processes, so these tests share one and leave it as they found it."""
-    loop = asyncio.new_event_loop()
-    m, s = loop.run_until_complete(started(tmp_path_factory.mktemp("shared")))
-    yield m, s
-    loop.run_until_complete(m.stop())
-    loop.close()
+    yield from _module_session(tmp_path_factory, "shared")
+
+
+@pytest.fixture(scope="module")
+def rewound(tmp_path_factory):
+    """The same session rewound to turn 1, so turn 2 is hidden and redoable. The tests that fail the next take
+    assert that it stays so, and put it back the way it was."""
+    yield from _module_session(tmp_path_factory, "rewound", rewind_to=1)
 
 
 def test_checkpoint_per_mutating_turn_and_rewind(tmp_path):
@@ -195,7 +210,7 @@ def test_cap_prunes_oldest(tmp_path, monkeypatch):
 
 
 def test_over_quota_prunes_then_skips_without_failing_the_turn(shared, monkeypatch):
-    m, s = shared
+    m, s = shared.m, shared.s
     sid = s["id"]
     cp = m.runner.checkpointer
     usage = {"bytes": 10}
@@ -235,10 +250,11 @@ def test_disk_view_and_usage_count_checkpoints_and_cleanup_removes_them(tmp_path
     asyncio.run(body())
 
 
-def test_rewind_and_fork_refuse_active_and_runner_sessions(tmp_path):
+def test_rewind_and_fork_refuse_active_and_runner_sessions(shared):
+    m, s = shared.m, shared.s
+    sid = s["id"]
+
     async def body():
-        m, s = await started(tmp_path)
-        sid = s["id"]
         m.db.update_session(sid, status="running")
         for action in (m.rewind(sid, 1), m.fork(sid, 1, "again")):
             with pytest.raises(HarnessError) as e:
@@ -250,7 +266,10 @@ def test_rewind_and_fork_refuse_active_and_runner_sessions(tmp_path):
         assert e.value.status == 409 and "tower" in str(e.value)
         assert m.checkpoints(sid)["can_rewind"] is False
 
-    asyncio.run(body())
+    try:
+        shared.run(body())
+    finally:
+        m.db.update_session(sid, status=s["status"], target=s["target"])
 
 
 def test_rewind_after_compaction_restores_the_saved_context(tmp_path):
@@ -266,7 +285,7 @@ def test_rewind_after_compaction_restores_the_saved_context(tmp_path):
 
 
 def test_take_reports_a_reason_code_never_the_reason_text(shared, monkeypatch):
-    m, s = shared
+    m, s = shared.m, shared.s
     secret = str(Path(s["workspace"]) / "private-path")
 
     def fail(*args, **kwargs):
@@ -574,7 +593,7 @@ def test_unchanged_hosted_runs_write_no_objects(tmp_path):
 
 
 def test_unrecorded_snapshot_objects_are_reclaimed(shared, monkeypatch):
-    m, s = shared
+    m, s = shared.m, shared.s
     cp = m.runner.checkpointer
     cp._unreclaimed.clear()
     store = cp.store(s)
@@ -690,7 +709,7 @@ def test_a_mutating_call_the_policy_blocked_is_not_checkpointed(tmp_path, monkey
 
 
 @pytest.mark.parametrize("failing", ["context", "publish", "record", "quota"])
-def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoable(tmp_path, monkeypatch, failing):
+def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoable(rewound, monkeypatch, failing):
     write_bytes, replace = Path.write_bytes, os.replace
 
     def disk_full(self, data):
@@ -706,40 +725,38 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
     def record_fails(*args):
         raise sqlite3.OperationalError("database is locked")
 
-    async def body():
-        m, s = await started(tmp_path)
-        sid, ws = s["id"], Path(s["workspace"])
-        cp = m.runner.checkpointer
-        cp._unreclaimed.clear()
-        store = cp.store(s)
-        await m.rewind(sid, 1)
-        hidden = m.db.checkpoints(sid, hidden=True)
-        (ws / "after-rewind.txt").write_text("new work\n")
-        if failing == "context":                                     # the new turn 2's context cannot be written
-            monkeypatch.setattr(Path, "write_bytes", disk_full)
-        elif failing == "publish":                                   # the new turn 2 cannot be named
-            monkeypatch.setattr(checkpoints.os, "replace", rename_fails)
-        elif failing == "record":                                    # or its row cannot be committed
-            monkeypatch.setattr(cp, "_record", record_fails)
-        else:                                                        # or the account has no room for it
-            monkeypatch.setattr("harness.principal.OWNER_USER_ID", "nobody")   # measure it like a member's
-            monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
-            monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: 10 ** 9)
-        event = await asyncio.to_thread(cp.take, sid)
-        monkeypatch.undo()
-        assert event["status"] == "skipped"
-        if failing == "quota":
-            assert "quota" in event["reason"]
-        assert m.db.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
-        refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
-        assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
-        assert not [r for r in refs if "/staged/" in r or "/replaced/" in r]
-        assert sorted(p.name for p in store.contexts.iterdir()) == ["1.json.gz", "2.json.gz"]
-        (ws / "after-rewind.txt").unlink()
-        await m.rewind(sid, 2)                                       # redo still works
-        assert (ws / "extra.txt").read_text() == "late\n"
-
-    asyncio.run(body())
+    m, s = rewound.m, rewound.s
+    sid, ws = s["id"], Path(s["workspace"])
+    cp = m.runner.checkpointer
+    cp._unreclaimed.clear()
+    store = cp.store(s)
+    hidden = m.db.checkpoints(sid, hidden=True)
+    assert [c["turn"] for c in hidden] == [2]
+    (ws / "after-rewind.txt").write_text("new work\n")
+    if failing == "context":                                     # the new turn 2's context cannot be written
+        monkeypatch.setattr(Path, "write_bytes", disk_full)
+    elif failing == "publish":                                   # the new turn 2 cannot be named
+        monkeypatch.setattr(checkpoints.os, "replace", rename_fails)
+    elif failing == "record":                                    # or its row cannot be committed
+        monkeypatch.setattr(cp, "_record", record_fails)
+    else:                                                        # or the account has no room for it
+        monkeypatch.setattr("harness.principal.OWNER_USER_ID", "nobody")   # measure it like a member's
+        monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
+        monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: 10 ** 9)
+    event = cp.take(sid)
+    monkeypatch.undo()
+    assert event["status"] == "skipped"
+    if failing == "quota":
+        assert "quota" in event["reason"]
+    assert m.db.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
+    refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
+    assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
+    assert not [r for r in refs if "/staged/" in r or "/replaced/" in r]
+    assert sorted(p.name for p in store.contexts.iterdir()) == ["1.json.gz", "2.json.gz"]
+    (ws / "after-rewind.txt").unlink()
+    rewound.run(m.rewind(sid, 2))                                # redo still works
+    assert (ws / "extra.txt").read_text() == "late\n"
+    rewound.run(m.rewind(sid, 1))                                # and the next case starts rewound again
 
 
 def test_a_take_after_a_rewind_replaces_the_rewound_past_checkpoint_of_its_turn(tmp_path):
