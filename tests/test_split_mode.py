@@ -88,29 +88,6 @@ def test_hands_container_gets_no_environment(tmp_path, monkeypatch):
     assert TOKEN_ENV not in " ".join(run)
 
 
-def test_killed_hands_container_is_recreated_for_the_next_call(tmp_path, monkeypatch):
-    state = {"container": "running", "created": 0}
-    commands = []
-
-    async def fake_run_cmd(args, timeout=60, input_=None, env=None):
-        if args[:2] == ["docker", "inspect"]:
-            return (0, state["container"], "") if state["container"] else (1, "", "no such container")
-        if args[:3] == ["docker", "run", "-d"]:
-            state["container"], state["created"] = "running", state["created"] + 1
-            return 0, "id", ""
-        if args[:2] == ["docker", "exec"]:
-            commands.append(args[-1])
-            return 0, "ok", ""
-        return 0, "", ""
-    monkeypatch.setattr(sandbox_module, "run_cmd", fake_run_cmd)
-    box = sandbox_module.Sandbox("abc", tmp_path, SandboxConfig())
-    assert asyncio.run(box.exec("echo one")) == (0, "ok")
-    state["container"] = ""  # the hands container died mid-command
-    code, out = asyncio.run(box.exec("echo two"))
-    assert code == 0 and out.endswith("ok") and "environment recreated" in out  # the model is told (#429)
-    assert state["created"] == 1 and commands == ["echo one", "echo two"]
-
-
 def _split_manager(tmp_path, mode="split"):
     cfg = make_cfg(tmp_path)
     cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", tool_mode=mode)

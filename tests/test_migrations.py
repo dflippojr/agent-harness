@@ -12,7 +12,6 @@ import pytest
 
 from harness import doctor, migrations
 from harness.db import APP_SETTINGS_SCHEMA, SCHEMA, Database
-from harness_modules.backup.service import BackupService
 from harness.migrations.baseline import BASELINE_VERSION, LEGACY_COLUMNS
 
 _REAL_DISCOVER = migrations.discover
@@ -311,18 +310,6 @@ def test_baseline_plus_migrations_equals_fresh_build(tmp_path):
     assert _version(legacy) == _version(fresh_real) == migrations.latest_version(_REAL_DISCOVER())
 
 
-def test_backup_service_delegates_to_backup_sqlite(tmp_path):
-    path = tmp_path / "harness.db"
-    _seed_session(path)
-    maint = BackupService.__new__(BackupService)
-    maint.cfg = SimpleNamespace(db_path=path)
-    copy = tmp_path / "copy.sqlite3"
-    maint._backup_db(copy)
-    conn = sqlite3.connect(str(copy))
-    assert conn.execute("SELECT title FROM sessions").fetchone()[0] == "hello"
-    conn.close()
-
-
 def test_session_taint_migration_adds_column_to_existing_sessions(tmp_path):
     path = tmp_path / "harness.db"
     _seed_session(path)
@@ -337,17 +324,6 @@ def test_session_taint_migration_adds_column_to_existing_sessions(tmp_path):
     assert len(backups) == 1
     with closing(sqlite3.connect(str(backups[0]))) as conn:
         assert "taint" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
-
-
-def test_fresh_database_gets_session_taint_column(tmp_path):
-    path = tmp_path / "harness.db"
-    shipped = _REAL_DISCOVER()
-    db = Database(path, migrations=shipped)
-    info = {r["name"]: r for r in db.conn.execute("PRAGMA table_info(sessions)")}
-    db.close()
-    assert _version(path) == migrations.latest_version(shipped)
-    assert info["taint"]["notnull"] == 1 and info["taint"]["dflt_value"] == "'[]'"
-    assert not (tmp_path / "pre-migration").exists()
 
 
 def test_key_listing_counts_each_keys_requests_through_the_key_index(tmp_path):

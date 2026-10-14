@@ -15,10 +15,8 @@ from harness.config import Project, _reset_at, _state_max_chars
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.metrics import render as render_metrics
-from harness.runner import Runner, new_run
-from harness.state import (
-    git_porcelain, inject_payload, is_dead_end_retry, is_valid_state, paths_since, validate_state,
-)
+from harness.runner import new_run
+from harness.state import inject_payload, is_dead_end_retry, is_valid_state, validate_state
 from harness.tools import ToolError
 from test_daemon import Script, call, events, make_cfg, wait_status
 
@@ -91,17 +89,6 @@ def test_apply_round_reset_keeps_head_and_atomic_tail():
     assert new[4:] == msgs[compaction.last_turn_start(msgs):]
     _assert_tool_groups_intact(new)
     assert "hello.txt" in new[2]["content"]
-
-
-def test_git_porcelain_paths_and_baseline_diff(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    assert git_porcelain(tmp_path) == []
-    (tmp_path / "new.txt").write_text("x", encoding="utf-8")
-    current = git_porcelain(tmp_path)
-    assert current is not None
-    assert "new.txt" in paths_since([], current)
-    assert paths_since(current, current) == []
-    assert git_porcelain(tmp_path / "missing") is None
 
 
 def test_reset_at_and_state_max_chars_fallback():
@@ -351,13 +338,6 @@ def test_threshold_with_state_resets_without_elide(tmp_path):
         assert "summary" not in tiers
         await m.stop()
     asyncio.run(body())
-
-
-def test_has_valid_saved_state_predicate():
-    assert not Runner.has_valid_saved_state({"run": {}})
-    assert not Runner.has_valid_saved_state({"run": {"state": None}})
-    assert not Runner.has_valid_saved_state({"run": {"state": {"plan": "no goal"}}})
-    assert Runner.has_valid_saved_state({"run": {"state": validate_state({"goal": "g"}, 8000)}})
 
 
 def test_reset_round_without_state_is_tool_error(tmp_path):

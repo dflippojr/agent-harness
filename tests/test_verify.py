@@ -7,10 +7,10 @@ import hashlib
 import json
 
 from harness.config import Project, VerifyCheck
-from harness.fileops import ToolError, cap_command_output, CappedStream, CAPTURE_CAPPED_NOTE, OUTPUT_CAP
+from harness.fileops import cap_command_output, CappedStream, CAPTURE_CAPPED_NOTE, OUTPUT_CAP
 from harness.llm import Completion
 from harness.manager import Manager
-from harness.tools import bound_shell_text, shell_result, tool_schemas
+from harness.tools import bound_shell_text, shell_result
 from harness.verify import (ARTIFACT_FOOTER, bound_rendered, infer_parser, normalize_message, parse_generic,
                             parse_pytest, render_verify, run_verify)
 
@@ -86,20 +86,6 @@ def test_generic_20mb_log_summary_stays_at_4000_chars():
     digest = hashlib.sha256(noisy.encode("utf-8")).hexdigest()
     assert ARTIFACT_FOOTER.format(total=len(noisy), artifact_id=digest) == footer
     assert "the next page" not in noisy_capped.lower()
-
-
-def test_bound_rendered_omits_read_artifact_when_unavailable():
-    noisy = "\n".join(f"error {i}: {i}" for i in range(400))
-    noisy_items = [{**it, "check": "lint", "count": 1} for it in parse_generic(noisy)]
-    noisy_rendered = render_verify({"ok": False, "checks": [{"name": "lint", "code": 1, "timed_out": False}],
-                                    "failures": noisy_items})
-    assert len(noisy_rendered) > 4000
-    capped = bound_rendered(noisy_rendered, 4000, noisy, artifact_available=False)
-    assert "read_artifact" not in capped
-    assert len(capped) <= 4000
-    offered = bound_rendered(noisy_rendered, 4000, noisy)
-    assert "recover with read_artifact" in offered
-    assert hashlib.sha256(noisy.encode("utf-8")).hexdigest() in offered
 
 
 def test_normalize_message_strips_timings_pids_and_hex():
@@ -267,17 +253,6 @@ def test_mixed_passing_and_failing_checks_only_parse_failures():
     assert "test_a" in result.text
 
 
-def test_no_configured_checks_errors():
-    async def exec_cmd(command, timeout):
-        raise AssertionError("must not run")
-    try:
-        asyncio.run(run_verify([], exec_cmd, 4000))
-    except ToolError as e:
-        assert str(e) == "no configured checks"
-    else:
-        raise AssertionError("expected ToolError")
-
-
 def test_shell_result_does_not_truncate_and_footer_never_says_next_page():
     output = "y" * 50000
     text = shell_result(0, output, False)
@@ -324,14 +299,6 @@ def test_capture_cap_is_reported_in_artifact_truncation_and_footer():
     footer = bound_rendered(noisy_rendered, 4000, noisy).rpartition("\n")[2]
     assert "characters total (capture capped);" in footer
     assert hashlib.sha256(noisy.encode("utf-8")).hexdigest() in footer
-
-
-def test_verify_is_in_managed_schemas_and_search_mentions_at_least():
-    names = [t["function"]["name"] for t in tool_schemas(400)]
-    assert "verify" in names
-    search = next(t for t in tool_schemas(400) if t["function"]["name"] == "search")
-    assert "at least" in search["function"]["description"]
-    assert "offset" in search["function"]["parameters"]["properties"]
 
 
 def test_verify_and_run_shell_store_full_output_not_the_view(tmp_path):

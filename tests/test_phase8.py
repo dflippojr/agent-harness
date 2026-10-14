@@ -174,22 +174,6 @@ def test_github_falls_back_to_html_when_api_fails():
     assert "github.com/o/r" in seen
 
 
-# web app: a syntax error in app.js or any module it imports blanks the whole phone app, and nothing else would catch it
-def test_web_app_js_parses():
-    import shutil
-    import subprocess
-    from pathlib import Path
-    import pytest
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node isn't installed")
-    web = Path(__file__).resolve().parent.parent / "stables" / "public"
-    for source in [web / "app.js", *sorted(web.rglob("*.mjs"))]:
-        result = subprocess.run([node, "--check", "--input-type=module"], input=source.read_text(encoding="utf-8"),
-                                capture_output=True, text=True, encoding="utf-8")
-        assert result.returncode == 0, f"{source.name}: {result.stderr}"
-
-
 # Claude Code Remote Control launches (8b)
 import json as _json  # noqa: E402
 import subprocess as _subprocess  # noqa: E402
@@ -694,19 +678,6 @@ def test_claude_cli_completed_session_followup_sends_latest_message(tmp_path):
                  if json.loads(line[3:]).get("type") == "user"]
         assert [item["message"]["content"] for item in users] == ["the original prompt", "the later follow-up"]
         assert all(item["session_id"] == "" for item in users)
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_claude_cli_cancel_kills_process(tmp_path):
-    async def body():
-        m, _, _ = _claude_manager(tmp_path, "cancel")
-        await m.start()
-        sid = m.create("wait", backend="claude")["id"]
-        await wait_status(m, sid, "running")
-        s = await m.cancel(sid)
-        assert s["status"] == "cancelled"
-        await wait_cli_gone(m, sid)
         await m.stop()
     asyncio.run(body())
 

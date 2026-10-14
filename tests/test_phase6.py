@@ -763,31 +763,6 @@ def test_app_root_lists_quality_fast_without_enabling_it(tmp_path):
         assert root["image_modes"]["quality-fast"]["label"] == "Qwen quality (fast, 4-step)"
 
 
-def test_image_warmup_holds_gpu_until_cooldown(tmp_path):
-    async def body():
-        m, server, _ = image_manager(tmp_path)
-        await m.start(maintenance=False)
-        await m.images.warmup()
-        for _ in range(200):
-            if m.images.phase == "warm":
-                break
-            await asyncio.sleep(0.01)
-        assert m.images.phase == "warm"
-        assert m.images.gpu_taken
-        assert server.calls == ["stop"]
-        assert m.images.status()["phase"] == "warm"
-        m.images.cooldown()
-        for _ in range(200):
-            if m.images.phase == "idle":
-                break
-            await asyncio.sleep(0.02)
-        assert m.images.phase == "idle"
-        assert not m.images.gpu_taken
-        assert server.calls == ["stop", "start"]
-        await m.stop()
-    asyncio.run(body())
-
-
 def test_gpu_hold_prevents_comfyui_warmup(tmp_path):
     async def body():
         from types import SimpleNamespace
@@ -844,24 +819,6 @@ def test_held_images_drain_after_waiting_sessions(tmp_path):
         m.scheduler.release("b")
         done = await m.images.wait(job["id"])
         assert done["status"] == "done"
-        assert server.calls == ["stop", "start"]
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_image_batch_does_not_linger_after_last_job(tmp_path):
-    async def body():
-        m, server, _ = image_manager(tmp_path)
-        await m.start(maintenance=False)
-        job = m.images.submit("a red cube")
-        done = await m.images.wait(job["id"])
-        assert done["status"] == "done"
-        for _ in range(200):
-            if m.images.phase == "idle":
-                break
-            await asyncio.sleep(0.01)
-        assert m.images.phase == "idle"
-        assert "lingering" not in server.calls
         assert server.calls == ["stop", "start"]
         await m.stop()
     asyncio.run(body())

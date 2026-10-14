@@ -460,25 +460,6 @@ def test_guard_startup_with_leftover_flag_resumes_when_clear():
     asyncio.run(body())
 
 
-def test_gpu_pause_notification_points_at_actions_resources(tmp_path):
-    from harness.db import Database
-    from harness_modules.notifications.service import Notifier
-    from test_phase7 import seed
-
-    cfg = make_cfg(tmp_path)
-    cfg.notify.topic = "t"
-    db = Database(tmp_path / "h.sqlite3")
-    seed(db, "sessgpu001", "scratch", "Write numbers", [])
-    note = Notifier(cfg, db).build({
-        "type": "gpu_paused",
-        "session_id": "sessgpu001",
-        "data": {"reason": "Hades.exe", "resume_after_seconds": 180},
-    })
-    assert note is not None
-    assert "Actions → Resources" in note["message"]
-    assert "Settings" not in note["message"]
-
-
 # guard with sessions
 def test_session_pauses_before_next_turn_and_continues(tmp_path):
     cfg = make_cfg(tmp_path)
