@@ -7,6 +7,8 @@ from fastapi import Request
 
 from harness.modules import HarnessError, RouteTable, manager, runtime
 
+from .service import DeliveryError
+
 owner_routes = RouteTable()
 
 
@@ -20,5 +22,8 @@ async def notify_test(request: Request):
     payload = {"topic": m.cfg.notify.topic, "title": "Agent harness", "message": "Test notification 👋",
                "tags": ["robot"], "click": notifier.link("/")}
     async with httpx.AsyncClient(timeout=15) as client:
-        await notifier.publish(client, payload)
+        try:
+            await notifier.publish(client, payload)
+        except DeliveryError as e:
+            raise HarnessError(502, str(e)) from e
     return {"sent": True}

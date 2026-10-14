@@ -91,8 +91,8 @@ def test_baseline_is_frozen_at_45():
     # 0048_canary_note (#316), 0049_checkpoints (#261), 0050_app_retention (#330), 0051_end_users (#365),
     # 0052_member_api_keys (#393), 0053_audit_context (#467), 0054_namespace_audit (#471), 0055_catalog_app_id (#518),
     # 0056_pairing_requests (#519), 0057_hub_claim (#543), 0058_idempotency_keys (#462), 0059_tool_profile (#638),
-    # 0060_endpoint_requests_key (#669), 0061_sessions_list_index (#663)
-    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61]
+    # 0060_endpoint_requests_key (#669), 0061_sessions_list_index (#663), 0062_sessions_owner_status_index (#668)
+    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62]
 
 
 def test_fresh_database_matches_pre_versioning_build(tmp_path):
@@ -358,3 +358,62 @@ def test_key_listing_counts_each_keys_requests_through_the_key_index(tmp_path):
     details = [row[-1] for row in plan]
     assert any(d.startswith("SEARCH r USING") and "endpoint_requests_key (key_id=?)" in d for d in details), details
     assert not any(d.startswith("SCAN r") or d.startswith("SCAN endpoint_requests") for d in details), details
+
+
+_SESSION_INDEXES = {"sessions_list", "sessions_owner_status"}
+
+
+def _session_indexes(db: Database) -> set[str]:
+    return {r["name"] for r in db.conn.execute("PRAGMA index_list(sessions)")} & _SESSION_INDEXES
+
+
+def test_session_scan_indexes_reach_old_and_fresh_databases(tmp_path):
+    """#668: a database one step behind gains the owner count's index; a fresh one has both scan indexes."""
+    shipped = _REAL_DISCOVER()
+    old = tmp_path / "old" / "harness.db"
+    old.parent.mkdir()
+    _seed_session(old)
+    Database(old, migrations=[step for step in shipped if step[0] < 62]).close()
+    db = Database(old, migrations=shipped)
+    assert _session_indexes(db) == _SESSION_INDEXES
+    assert db.get_session("s1")["title"] == "hello"
+    db.close()
+    assert _version(old) == 62
+    fresh = Database(tmp_path / "fresh.db", migrations=shipped)
+    assert _session_indexes(fresh) == _SESSION_INDEXES
+    fresh.close()
+
+
+def _plan(db: Database, sql: str, params: tuple) -> list[str]:
+    return [row[-1] for row in db.conn.execute("EXPLAIN QUERY PLAN " + sql, params).fetchall()]
+
+
+def _searches_an_index(details: list[str]) -> bool:
+    return any(d.startswith("SEARCH sessions USING") and "INDEX" in d for d in details) and         not any(d.startswith("SCAN sessions") for d in details)
+
+
+@pytest.mark.parametrize("owner_id", ["owner", None])
+def test_session_list_searches_an_index(tmp_path, owner_id):
+    """#668: the list's filter is answered by `sessions_list`, not a scan past each row's `context`."""
+    from harness.db import _SESSION_LIST_COLUMNS, _session_filter
+    db = Database(tmp_path / "harness.db", migrations=_REAL_DISCOVER())
+    where, params = _session_filter(owner_id, "agent", None)
+    details = _plan(db, _SESSION_LIST_COLUMNS + where + " ORDER BY created_at DESC, id DESC LIMIT ?", (*params, 51))
+    db.close()
+    assert _searches_an_index(details) and any("sessions_list" in d for d in details), details
+
+
+@pytest.mark.parametrize("holding", [False, True])
+def test_owner_session_count_searches_the_owner_status_index(tmp_path, holding):
+    """#668: `count_sessions` (member account views, admission) reads `sessions_owner_status`, not each row."""
+    db = Database(tmp_path / "harness.db", migrations=_REAL_DISCOVER())
+    seen: list[str] = []
+    db.conn.set_trace_callback(seen.append)  # the statement as run, its parameters bound
+    # count_sessions' body on the traced writer; the public method runs on a pooled reader
+    assert db._count_sessions("owner_id", "owner", ("running", "queued"), holding) == 0
+    db.conn.set_trace_callback(None)
+    [sql] = [s for s in seen if "COUNT(*)" in s]
+    details = _plan(db, sql, ())
+    db.close()
+    assert _searches_an_index(details) and any("sessions_owner_status (owner_id=? AND status=?)" in d
+                                               for d in details), details
