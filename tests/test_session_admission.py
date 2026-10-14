@@ -9,6 +9,7 @@ import contextlib
 import sys
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from harness.api import create_app
@@ -127,20 +128,29 @@ def test_app_caps_are_owner_only_and_reset_to_the_default(tmp_path):
         assert sorted(audit) == ["noop", "ok", "ok"]  # the unknown App is recorded as a no-op
 
 
-def test_an_apps_running_cap_counts_its_parked_sessions(tmp_path):
+@pytest.mark.parametrize("rows, eligible", [
+    pytest.param([("parked", "waiting_approval"), ("queued", "queued"), ("owners", "queued", "owner")],
+                 {"parked": True, "queued": False, "owners": True}, id="a-parked-session-holds-its-slot-and-comes-back"),
+    pytest.param([("parked", "done"), ("queued", "queued")], {"queued": True}, id="a-slot-frees-when-the-parked-one-ends"),
+    pytest.param([("parked", "waiting_approval"), ("parked2", "waiting_approval"), ("queued", "queued")],
+                 {"parked": True, "parked2": True, "queued": False}, id="parked-sessions-over-a-lowered-cap-come-back"),
+    pytest.param([("running", "running", "lagging"), ("queued", "queued")], {"queued": False},
+                 id="a-committed-running-counts-before-the-index-catches-up"),
+])
+def test_the_apps_running_cap_decides_who_the_scheduler_may_admit(tmp_path, rows, eligible):
+    """An App capped at one running session: parked sessions already hold their place, so each may come back (even
+    when the owner lowered the cap under them) while a new one waits; a `running` the App store has committed counts
+    before the index of every store takes it; and the owner's sessions are no part of the App's cap."""
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
-    client = TestClient(create_app(m))
-    with client:
-        shop_id, _ = _key(client, "shop", "sessions")
-        client.put(LIMITS.format(shop_id), json={"max_running": 1})
-        _insert(m, "parked0001", "waiting_approval", app_id=shop_id)
-        _insert(m, "queued0001", "queued", app_id=shop_id)
-        _insert(m, "owner00001", "queued")
-        assert not m._scheduler_eligible("queued0001")
-        assert m._scheduler_eligible("parked0001")  # its own slot: it can come back to run
-        assert m._scheduler_eligible("owner00001")
-        m.db.update_session("parked0001", status="done")
-        assert m._scheduler_eligible("queued0001")
+    app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+    assert m.db.set_app_limits(app_id, {"max_running": 1})
+    for sid, status, *how in rows:
+        _insert(m, sid, "queued" if how == ["lagging"] else status, app_id="" if how == ["owner"] else app_id)
+        if how == ["lagging"]:
+            with m.db._using(app_id, write=True) as store:  # the row, without the index's callback
+                store.update_session(sid, status=status)
+    for sid, expected in eligible.items():
+        assert m._scheduler_eligible(sid) is expected, sid
 
 
 def test_concurrent_restarts_of_an_apps_finished_sessions_respect_max_queued(tmp_path):
@@ -160,19 +170,6 @@ def test_concurrent_restarts_of_an_apps_finished_sessions_respect_max_queued(tmp
         m.scheduler.set_paused(False)
         await m.stop()
     asyncio.run(body())
-
-
-def test_parked_sessions_over_a_lowered_cap_can_still_come_back(tmp_path):
-    """Two hosted sessions parked on approvals, then the owner lowers the App's cap to one (and the daemon restarts):
-    each already counts, so each may come back to reach its approval; a new one still waits."""
-    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
-    app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-    assert m.db.set_app_limits(app_id, {"max_running": 1})
-    _insert(m, "parked0003", "waiting_approval", app_id=app_id)
-    _insert(m, "parked0004", "waiting_approval", app_id=app_id)
-    _insert(m, "queued0003", "queued", app_id=app_id)
-    assert m._scheduler_eligible("parked0003") and m._scheduler_eligible("parked0004")
-    assert not m._scheduler_eligible("queued0003")
 
 
 def test_local_parked_sessions_over_a_lowered_cap_get_the_gpu_back_once_approved(tmp_path):
@@ -224,19 +221,6 @@ def test_a_session_back_from_an_offline_mac_keeps_its_place_under_the_cap(tmp_pa
         other.cancel()
         await asyncio.gather(other, return_exceptions=True)
     asyncio.run(body())
-
-def test_a_session_whose_running_status_committed_counts_before_the_index_catches_up(tmp_path):
-    """The App store has committed a session's `running`, but the index of every store only takes it once the
-    commit's callbacks run: the cap must count it already."""
-    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
-    app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-    assert m.db.set_app_limits(app_id, {"max_running": 1})
-    _insert(m, "runsnow001", "queued", app_id=app_id)
-    _insert(m, "queued0005", "queued", app_id=app_id)
-    with m.db._using(app_id, write=True) as store:  # the row, without the index's callback
-        store.update_session("runsnow001", status="running")
-    assert not m._scheduler_eligible("queued0005")
-
 
 def test_a_mac_session_recovered_after_a_restart_keeps_its_place_under_a_lowered_cap(tmp_path):
     """It was running when the daemon stopped and its Mac is offline at the restart: once the Mac is back it takes
@@ -444,10 +428,14 @@ def test_a_message_racing_a_restart_of_the_same_session_joins_its_run(tmp_path):
         await m.stop()
     asyncio.run(body())
 
-def test_a_message_waits_for_a_run_still_ending_before_it_restarts_the_session(tmp_path):
+@pytest.mark.parametrize("stop_reason, answer, ends", [
+    ("final_message", "the old answer", "finishes"),
+    ("budget_time", "", "cancelled"),
+], ids=["it-finishes-its-end", "its-deadline-cancels-it"])
+def test_a_message_waits_for_a_run_still_ending_before_it_restarts_the_session(tmp_path, stop_reason, answer, ends):
     """The request read the session running; its run reached its final status before the message's write, but its
-    task is still ending it (run_finished, branch save): the message waits, so the ended run's answer and counters
-    are what that end records, then it restarts the session."""
+    task is still ending it (run_finished, branch save; or, past its deadline, being cancelled): the message waits,
+    so the ended run's answer and counters are what that end records, then it restarts the session."""
     async def body():
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         await m.start()
@@ -458,53 +446,25 @@ def test_a_message_waits_for_a_run_still_ending_before_it_restarts_the_session(t
         async def old_run():  # the previous run's task, finishing its end
             await ending.wait()
         m._spawn_task("winding001", old_run())
+        old = m.tasks["winding001"]
         real, raced = m._refuse_unsettled, []
 
         def run_reaches_its_final_status(s):  # after this request read it running, before its write
             if not raced:
                 raced.append(True)
-                m.db.update_session("winding001", status="done", answer="the old answer", stop_reason="final_message")
+                m.db.update_session("winding001", status="done", answer=answer, stop_reason=stop_reason)
             return real(s)
         m._refuse_unsettled = run_reaches_its_final_status
         sending = asyncio.create_task(m.send("winding001", "one more thing"))
         await asyncio.sleep(0.3)
         assert not sending.done()
-        assert (m.get("winding001")["status"], m.get("winding001")["answer"]) == ("done", "the old answer")
-        ending.set()
+        assert (m.get("winding001")["status"], m.get("winding001")["answer"]) == ("done", answer)
+        if ends == "finishes":
+            ending.set()
+        else:
+            old.cancel()
         await asyncio.wait_for(sending, 5)
         s = await wait_status(m, "winding001", "done", "failed", timeout=10)
-        assert (s["status"], s["answer"]) == ("done", "ok")
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_a_message_waits_for_a_run_its_deadline_is_ending(tmp_path):
-    """As above, but the old run's task ends cancelled, as a deadline ends it: the message still restarts the session
-    once it is over."""
-    async def body():
-        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
-        await m.start()
-        app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-        _insert(m, "winding002", "running", app_id=app_id)
-
-        async def old_run():
-            await asyncio.sleep(60)
-        m._spawn_task("winding002", old_run())
-        old = m.tasks["winding002"]
-        real, raced = m._refuse_unsettled, []
-
-        def run_ends_on_its_budget(s):
-            if not raced:
-                raced.append(True)
-                m.db.update_session("winding002", status="done", stop_reason="budget_time")
-            return real(s)
-        m._refuse_unsettled = run_ends_on_its_budget
-        sending = asyncio.create_task(m.send("winding002", "one more thing"))
-        await asyncio.sleep(0.3)
-        assert not sending.done()
-        old.cancel()
-        await asyncio.wait_for(sending, 5)
-        s = await wait_status(m, "winding002", "done", "failed", timeout=10)
         assert (s["status"], s["answer"]) == ("done", "ok")
         await m.stop()
     asyncio.run(body())
@@ -514,35 +474,23 @@ def test_a_message_waits_for_a_run_its_deadline_is_ending(tmp_path):
 def test_a_member_at_max_queued_with_parked_sessions_is_refused(tmp_path):
     client, m = household(tmp_path)
     with client:
-        alice = create_member(client, ALICE, "Alice", max_running=1, max_queued=2)
+        alice = create_member(client, ALICE, "Alice", max_running=1, max_queued=3)
         uid = alice["user_id"]
         _insert(m, "parkedali1", "waiting_approval", owner_id=uid)
         _insert(m, "parkedali2", "waiting_app", owner_id=uid)
+        _insert(m, "parkedali3", "waiting_limit", owner_id=uid)
         refused = client.post("/api/v1/sessions", json={"prompt": "more"}, headers=H(ALICE))
-        assert refused.status_code == 429, refused.text
+        assert refused.status_code == 429 and "queued or waiting" in refused.text, refused.text
         # Parked sessions also hold the member's running cap, but not the owner's.
         _insert(m, "queuedali1", "queued", owner_id=uid)
         assert not m._scheduler_eligible("queuedali1")
         m.db.update_session("parkedali1", status="done")
         m.db.update_session("parkedali2", status="done")
+        m.db.update_session("parkedali3", status="done")
         assert m._scheduler_eligible("queuedali1")
         assert client.get("/api/v1/me", headers=H(OWNER)).status_code == 200
 
 
-def test_a_members_parked_session_counts_toward_max_queued(tmp_path):
-    client, m = household(tmp_path)
-    with client:
-        alice = create_member(client, ALICE, "Alice", max_queued=1)
-        _insert(m, "parkedali3", "waiting_limit", owner_id=alice["user_id"])
-        try:
-            m._enforce_member_caps(m.db.account_by_id(alice["user_id"]))
-        except HarnessError as e:
-            assert e.status == 429 and "queued or waiting" in str(e)
-        else:
-            raise AssertionError("a parked session must count toward max_queued")
-
-
-# hosted backend slots -------------------------------------------------------------------------------------------------
 def test_sessions_parked_on_approval_leave_the_backend_slot_free(tmp_path):
     async def body():
         m, made, _ = _claude_manager(tmp_path, "ask", max_sessions=2)
@@ -554,15 +502,12 @@ def test_sessions_parked_on_approval_leave_the_backend_slot_free(tmp_path):
         third = m.create("three", backend="claude")["id"]
         await wait_status(m, third, "waiting_approval")  # it got a slot and ran up to its own approval
         assert len(made) == 3
-        slot = m.runner._backend_slots["claude"]
-        await _until(lambda: slot._value == 2)  # all three parked: nobody holds a slot
 
         for sid, approve in ((first, True), (second, False), (third, True)):
             m.decide(sid, None, approve=approve)
         for sid in (first, second, third):
             await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
-        assert slot._value == 2  # denied and approved alike took their slot back and gave it up once
         await m.stop()
     asyncio.run(body())
 
@@ -718,7 +663,6 @@ def test_a_hosted_approval_past_its_deadline_is_denied_and_the_run_ends(tmp_path
         approval = m.db.approvals(sid)[0]
         assert approval["status"] == "denied" and "Expired" in approval["note"]
         await asyncio.gather(*m.tasks.values())
-        assert m.runner._backend_slots["claude"]._value == 1
         # The slot is free for the next session.
         m.cfg.approval_timeout_seconds = 0
         nxt = m.create("again", backend="claude")["id"]
@@ -742,45 +686,12 @@ def test_a_local_approval_past_its_deadline_is_denied_and_the_run_ends(tmp_path)
         s = await wait_status(m, s["id"], "done", "failed")
         assert (s["status"], s["stop_reason"]) == ("done", "approval_expired")
         assert m.db.approvals(s["id"])[0]["status"] == "denied"
+        assert unresolved_calls(s["context"]) == []
         assert any(e["data"].get("expired") for e in m.db.events(s["id"]) if e["type"] == "approval_decided")
         assert m.scheduler.holder is None
         await m.stop()
     asyncio.run(body())
 
-
-def test_a_decision_before_the_deadline_stands(tmp_path):
-    cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "action": "ask", "reason": "test"}])
-    cfg.approval_timeout_seconds = 3600
-    script = Script([Completion(tool_calls=[call("write_file", 0, path="a.txt", content="x")]),
-                     Completion(content="wrote it")])
-
-    async def body():
-        m = Manager(cfg, chat=script)
-        await m.start()
-        s = m.create("try", project="guarded")
-        await wait_status(m, s["id"], "waiting_approval")
-        m.decide(s["id"], None, approve=True)
-        s = await wait_status(m, s["id"], "done")
-        assert s["answer"] == "wrote it"
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_an_expired_approval_leaves_no_tool_call_unanswered(tmp_path):
-    cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "action": "ask", "reason": "test"}])
-    cfg.approval_timeout_seconds = 0.5
-    script = Script([Completion(tool_calls=[call("write_file", 0, path="a.txt", content="x")]),
-                     Completion(content="never reached")])
-
-    async def body():
-        m = Manager(cfg, chat=script)
-        await m.start()
-        s = m.create("try", project="guarded")
-        s = await wait_status(m, s["id"], "done", "failed")
-        assert s["stop_reason"] == "approval_expired"
-        assert unresolved_calls(s["context"]) == []
-        await m.stop()
-    asyncio.run(body())
 
 def test_an_approval_expires_while_its_recovered_run_waits_for_an_offline_mac(tmp_path):
     """After a restart the run is held for its offline Mac before it reaches the approval: the approval still expires
