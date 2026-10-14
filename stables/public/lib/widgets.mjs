@@ -20,7 +20,12 @@ export function badge(status) {
   return h("span", { class: `badge ${status}` }, STATUS_LABEL[status] || status);
 }
 
-export const jobStatusBadge = (st) => h("span", { class: `badge ${st === "ok" ? "done" : "waiting_approval"}` }, st === "ok" ? "OK" : "⚠ attention");
+// Stables is a client of the daemon (#545): where a daemon-administration control used to be, this one line says
+// where it went. Pages pass their own `make` (the injected h). No link: the Hub and the CLI hold the admin flows.
+export const adminPointer = (make = h) => make("p", { class: "muted small admin-pointer" },
+  "Daemon administration is in the Hub or the ", make("code", {}, "harness"), " CLI.");
+
+export const jobStatusBadge =(st) => h("span", { class: `badge ${st === "ok" ? "done" : "waiting_approval"}` }, st === "ok" ? "OK" : "⚠ attention");
 
 // "12 s ago" / "3 min ago" from a millisecond timestamp, for connection and staleness notes (#510).
 export const sinceText = (ms, now = Date.now()) => `${fmtSpan(Math.max(0, Math.round((now - ms) / 1000)))} ago`;

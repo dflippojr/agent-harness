@@ -50,7 +50,7 @@ def test_web_guide_is_canonical_and_old_path_is_a_short_pointer():
     assert guide.startswith("# Stables\n")
     assert "formerly Agent Harness Web" in guide
     assert "Agent Harness Server URL" in guide
-    assert "Web connections" in guide
+    assert "harness keys create" in guide  # Web connection tokens come from the Hub or the CLI (#545)
     assert "harness.*" in guide
     assert "remain valid and visible" in guide
 

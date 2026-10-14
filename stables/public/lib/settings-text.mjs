@@ -1,22 +1,6 @@
 // @ts-nocheck
 // Text for Settings rows. Pure: no DOM.
 
-export function settingValueText(spec) {
-  const configured = spec.configured != null && spec.configured !== spec.effective ? ` · configured ${spec.configured}` : "";
-  const inherited = spec.inherited != null ? ` · inherited ${spec.inherited}` : "";
-  return `effective ${spec.effective == null ? "—" : spec.effective}${configured}${inherited}`;
-}
-
-export function settingMeta(spec) {
-  const bits = [];
-  bits.push({ live: "applies live", daemon_restart: "needs restart" }[spec.apply] || "file only");
-  if (spec.source) bits.push(`source: ${spec.source}`);
-  if (spec.pending != null && spec.apply === "daemon_restart") bits.push(`pending: ${spec.pending}`);
-  if (spec.capped_by) bits.push(`capped by ${spec.capped_by}`);
-  if (spec.file_only) bits.push(spec.guidance || "managed in local configuration");
-  return bits.join(" · ");
-}
-
 export const lastUpdateText = (update) => `${update.ok ? "succeeded" : "failed"}: ${update.message}`;
 
 export function compatibilityText(compatibility) {
@@ -28,13 +12,6 @@ export function compatibilityText(compatibility) {
 export function lastSeenText(runner) {
   if (runner.last_seen_seconds === null) return "not connected since Agent Harness Server started";
   return `last seen ${Math.round(runner.last_seen_seconds / 60)} min ago`;
-}
-
-export function recoveryNote(recovery) {
-  if (recovery?.recovery === "overlay_quarantined") {
-    return ` · ${recovery.reason || "managed overlay quarantined; YAML defaults in effect"}`;
-  }
-  return recovery?.recovery ? ` · recovered from ${recovery.reason || "failed generation"}` : "";
 }
 
 // ---- Settings menu row values (#512): one short line per row, read at a glance. Each takes the row's own API
@@ -57,14 +34,6 @@ export function backendsValue(rows) {
 export function smartApprovalsValue(data) {
   if (!data) return { text: "" };
   return { text: (data.configured || data.enabled) && data.mode && data.mode !== "off" ? capitalize(data.mode) : "Off" };
-}
-
-export function skillsValue(data) {
-  if (!data) return { text: "" };
-  if (!data.enabled) return { text: "Off" };
-  const installed = (data.installed || []).length;
-  const proposals = (data.proposals || []).length;
-  return { text: [`${installed} installed`, proposals && plural(proposals, "proposal")].filter(Boolean).join(" · ") };
 }
 
 export function memoryValue(mem) {
@@ -90,38 +59,11 @@ export function resourcesValue(g) {
   return { text: "GPU free" };
 }
 
-export function serverSettingsValue(view) {
-  if (!view) return { text: "" };
-  const pending = (view.settings || []).filter((s) => s.apply === "daemon_restart" && s.pending != null).length;
-  if (pending) return { text: `${pending} pending restart` };
-  if (view.restart_required) return { text: "Restart pending" };
-  return { text: view.revision != null ? `Revision ${view.revision}` : "" };
-}
-
-export function accountsValue(rows) {
-  if (!Array.isArray(rows)) return { text: "" };
-  return { text: rows.length ? plural(rows.length, "member") : "Owner only" };
-}
-
 export function remoteControlValue(r) {
   if (!r) return { text: "" };
   if (!r.enabled) return { text: "Off" };
   const running = (r.projects || []).filter((p) => p.running).length;
   return { text: running ? `${running} running` : "Ready" };
-}
-
-// Same filters as the Apps and Inference endpoint pages, so the row and the page agree.
-export function appsValue(keys) {
-  if (!Array.isArray(keys)) return { text: "" };
-  const live = keys.filter((k) => !k.revoked_at);
-  const apps = live.filter((k) => k.kind === "app").length;
-  const web = live.filter((k) => k.kind === "owner" && k.origins?.length).length;
-  return { text: [plural(apps, "app"), web && `${web} web`].filter(Boolean).join(" · ") };
-}
-
-export function endpointValue(keys) {
-  if (!Array.isArray(keys)) return { text: "" };
-  return { text: plural(keys.filter((k) => !k.revoked_at && k.kind !== "app").length, "key") };
 }
 
 // The version row: this bundle, its protocol, and what the connected server says about it.

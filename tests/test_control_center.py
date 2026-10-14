@@ -295,8 +295,8 @@ def test_web_shell_includes_transport_module_and_canonical_names():
     assert '"name": "Stables"' in manifest
     assert '"short_name": "Stables"' in manifest
     assert "Agent Harness Server URL" in profile
-    assert "Connect another copy of Stables" in profile
-    assert 'name: `stables (' in profile
+    # Minting a token for another copy is key administration, in the Hub and `harness keys create` (#545).
+    assert "Connect another copy of Stables" not in profile
     assert '"/client.mjs"' in worker
     # The shell cache name is derived from BUILD_ID so a client build bumps it automatically (#69).
     assert 'const BUILD_ID = "' in worker

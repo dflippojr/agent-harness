@@ -763,9 +763,8 @@ def test_web_ui_member_card_owner_controls_and_no_browser_storage():
     assert not [line for line in form.splitlines() if "storeSet(" in line and "repo" in line.lower()]
     assert "form.requestSubmit()" in form
     actions_js = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "actions.mjs").read_text(encoding="utf-8")
-    owner = actions_js[actions_js.index("function githubOwnerCard("):actions_js.index("async function accountsCard(")]
-    assert '"/github-member-auth"' in owner and "repo" not in owner.lower().replace("repositories", "")
-    assert "github-connection/reset" in actions_js and "Erase GitHub credential" in actions_js
+    # The owner's switch and credential reset are in the Hub and the CLI (#545); Stables has neither.
+    assert '"/github-member-auth"' not in actions_js and "github-connection/reset" not in actions_js
     session = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "session.mjs").read_text(encoding="utf-8")
     assert "s.push_target" in session and "commit authors stay as they are" in session
 

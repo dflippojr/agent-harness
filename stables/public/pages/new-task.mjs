@@ -6,6 +6,7 @@ import { holdRemainingText } from "../lib/format.mjs";
 import { TARGET_LABEL, runnerStateText, pickDefaultBackend } from "../lib/targets.mjs";
 import { backendLabel, modelOptions } from "../lib/backend-choice.mjs";
 import * as sheets from "../lib/sheet.mjs";
+import { adminPointer } from "../lib/widgets.mjs";
 
 export function mountNewTask({ $app, h, fill, append, api, setHeader, toast, route, isMember, isOwner, onLeave, githubConnectionCard, warmModel, browser,
   confirmSheet = sheets.confirmSheet, promptSheet = sheets.promptSheet }) {
@@ -106,21 +107,10 @@ function templateManager(templates) {
       h("div", { class: "preview" }, `${t.project} · ${t.prompt}`))));
 }
 
-const NEW_PROJECT_NOTE = {
-  member: "Saved in your household account. Use a lowercase project id; a public HTTPS git source is cloned into your own area.",
-  owner: "Saved privately on Agent Harness Server. Use a lowercase project id; a git source gets a reviewable branch per task.",
-};
-
-const repoPlaceholder = () => (isMember() ? "https://github.com/org/repo" : String.raw`D:\Projects\example or https://…`);
-
-// Members get a fixed "tower" value; the owner picks which machine the new project lives on.
-function projectTargetInput(targets, target) {
-  if (isMember()) return h("input", { type: "hidden", value: "tower" });
-  const select = h("select", {}, targets.map((name) => h("option", { value: name },
-    name === "tower" ? "Tower" : TARGET_LABEL[name] || name)));
-  select.value = target;
-  return select;
-}
+// A household member adds projects to their own account here. Adding a project to the server's catalog is daemon
+// administration, in the Hub and the CLI (#545), so the owner sees a pointer instead.
+const NEW_PROJECT_NOTE = "Saved in your household account. Use a lowercase project id; a public HTTPS git source is cloned into your own area.";
+const REPO_PLACEHOLDER = "https://github.com/org/repo";
 
 // A member runs the local model, plus Claude or Codex on their own API key once they have added it (#393).
 async function memberBackends() {
@@ -166,7 +156,6 @@ async function viewNew() {
     onclick: (ev) => {
       target = name;
       storeSet(targetKey, name);
-      newProjectTarget.value = target;
       for (const b of ev.currentTarget.parentNode.children) b.classList.toggle("primary", b === ev.currentTarget);
       fillChoices();
       void showTarget();
@@ -194,29 +183,28 @@ async function viewNew() {
   const newProjectName = h("input", { id: "new-project-name", type: "text", placeholder: "my-project", maxlength: "64", required: true,
     pattern: "[a-z0-9][a-z0-9._-]{0,63}" });
   const newProjectDescription = h("input", { id: "new-project-description", type: "text", placeholder: "Optional description", maxlength: "240" });
-  const newProjectTarget = projectTargetInput(targets, target);
   const newProjectSource = h("select", { id: "new-project-source" },
     h("option", { value: "empty" }, "Empty workspace"),
-    h("option", { value: "repo" }, isMember() ? "Public HTTPS repository" : "Local folder or git URL"),
-    isMember() ? h("option", { value: "github" }, "Private GitHub repository (my GitHub connection)") : null);
+    h("option", { value: "repo" }, "Public HTTPS repository"),
+    h("option", { value: "github" }, "Private GitHub repository (my GitHub connection)"));
   const githubConnect = h("div");
-  const newProjectRepo = h("input", { id: "new-project-repo", "aria-label": "Repository", type: "text", placeholder: repoPlaceholder(), hidden: true });
+  const newProjectRepo = h("input", { id: "new-project-repo", "aria-label": "Repository", type: "text", placeholder: REPO_PLACEHOLDER, hidden: true });
   newProjectSource.addEventListener("change", () => {
     const repoSource = newProjectSource.value !== "empty";
     newProjectRepo.hidden = !repoSource;
     newProjectRepo.required = repoSource;
-    newProjectRepo.placeholder = newProjectSource.value === "github" ? "https://github.com/owner/repo" : repoPlaceholder();
+    newProjectRepo.placeholder = newProjectSource.value === "github" ? "https://github.com/owner/repo" : REPO_PLACEHOLDER;
     fill(githubConnect);
   });
   const createProjectButton = h("button", { class: "btn primary", type: "submit" }, "Create project");
-  const projectCreator = h("details", { class: "card" }, h("summary", {}, "＋ New project"),
+  const projectCreator = !isMember() ? adminPointer(h) : h("details", { class: "card" }, h("summary", {}, "＋ New project"),
     h("form", { onsubmit: async (e) => {
       e.preventDefault();
       createProjectButton.disabled = true;
       try {
         const github = newProjectSource.value === "github";
-        const created = await api("/projects", { method: "POST", body: {
-          name: newProjectName.value, description: newProjectDescription.value, target: newProjectTarget.value,
+        const created = await api("/projects", { method: "POST", surface: "app", body: {
+          name: newProjectName.value, description: newProjectDescription.value, target: "tower",
           repo: newProjectSource.value === "empty" ? "" : newProjectRepo.value, github,
         } });
         projects.push(created);
@@ -242,10 +230,9 @@ async function viewNew() {
         createProjectButton.disabled = false;
       }
     } },
-    h("p", { class: "muted small" }, NEW_PROJECT_NOTE[isMember() ? "member" : "owner"]),
+    h("p", { class: "muted small" }, NEW_PROJECT_NOTE),
     field("new-project-name", "Name", newProjectName),
     field("new-project-description", "Description", newProjectDescription),
-    isMember() ? [] : field("new-project-target", "Runs on", newProjectTarget),
     field("new-project-source", "Workspace", newProjectSource), newProjectRepo, githubConnect,
     h("div", { class: "row", style: "margin-top:18px" }, createProjectButton)));
   const model = h("select", { id: "new-task-model" }, models.map((m) => h("option", { value: m.name, selected: m.default }, m.name)));

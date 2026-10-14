@@ -777,28 +777,6 @@ def test_backend_prefs_migrate_once(tmp_path):
     assert yaml_only.read_bytes() == original
 
 
-def test_web_settings_render_plan_and_phone_layout(tmp_path):
-    app_js = Path(__file__).resolve().parent.parent / "stables" / "public" / "pages" / "daemon-settings.mjs"
-    css = Path(__file__).resolve().parent.parent / "stables" / "public" / "style.css"
-    text = app_js.read_text(encoding="utf-8")
-    style = css.read_text(encoding="utf-8")
-    assert "daemonSettingsCard" in text
-    assert "dry_run" in text
-    assert "revision_conflict" in text
-    assert "confirmRestart" in text
-    assert "lkg_restore" in text
-    assert "overlay_quarantined" in text
-    assert "Enable " in text
-    assert "Roll back" in text
-    assert "config-row" in style
-    assert "max-width: 420px" in style
-    client, _ = _client(tmp_path)
-    with client:
-        js = client.get("/static/app.js").text
-        assert "Server" in js or "daemon" in js
-        assert client.get("/api/admin/v1/config").status_code == 200
-
-
 def test_failed_overlay_does_not_leave_keys_absent_from_lkg(tmp_path):
     """_apply_values must not commit a partial overlay. A bad backends.local.model plus
     sessions.max_turns must not leave max_turns applied after LKG restore/unlink."""

@@ -20,16 +20,15 @@ let member = false;
 // Settings row values (#512): each value path answers with synthetic data; `failing` makes every one of them throw.
 let failing = false;
 const VALUES = {
-  "/backends?auth=skip": [{ name: "local", available: true }, { name: "claude", available: true, effort: "high" }],
+  "/backends?auth=skip": [{ name: "local", available: true }, { name: "claude", available: true, effort: "high", model: "opus", today: {}, week: {} }],
   "/smart-approvals": { configured: true, mode: "shadow" },
-  "/skills": { enabled: true, installed: [{}, {}, {}], proposals: [{}] },
-  "/memory": { enabled: true, writes: true },
+  "/memory": { enabled: true, writes: true, categories: ["people"], profile: "Be brief." },
   "/resources": { enabled: true, manual: true, manual_remaining_seconds: 41 * 60, signals: [] },
-  "/config": { revision: 4, settings: [{ apply: "daemon_restart", pending: 1 }, { apply: "daemon_restart", pending: 2 }, { apply: "live" }] },
-  "/accounts": [],
   "/remote-control": { enabled: false },
-  "/keys": [{ kind: "app" }, { kind: "app" }, { kind: "owner", origins: ["https://x"] }, { kind: "endpoint" }],
 };
+// Daemon administration reads (#545): Settings never asks for them.
+const ADMIN_READS = ["/config", "/accounts", "/skills", "/keys", "/pairing-codes", "/runner-pairing-codes"];
+const POINTER = /Daemon administration is in the Hub or the\s+harness\s+CLI\./;
 const called = [];
 const appended = [];
 const gone = [];
@@ -37,7 +36,7 @@ const headers = [];
 const conn = el("conn");
 const connListeners = new Set();
 const profile = mountProfile({
-  $app: "APP", $conn: conn, $profileIcon: el("icon"), layoutBar() {}, setHeader: (...a) => headers.push(a), h: el, fill() {}, // Like lib/dom.mjs append(): one level of arrays is flattened, so a nested array would show up as a non-node.
+  $app: "APP", $conn: conn, $profileIcon: el("icon"), layoutBar() {}, setHeader: (...a) => headers.push(a), h: el, fill: (node, ...kids) => { node.kids = kids.flat(Infinity).filter((k) => k !== null && k !== undefined); }, // Like lib/dom.mjs append(): one level of arrays is flattened, so a nested array would show up as a non-node.
   append: (_app, ...n) => appended.push(...n.flat().filter((k) => k != null)),
   api: async (path) => {
     called.push(path);
@@ -52,7 +51,7 @@ const profile = mountProfile({
   agentHarnessWeb: { baseUrl: "", token: "", csrf: "", configure() {}, independent: false,
     compatibility: async () => { if (failing) throw new Error("offline"); return { release: "0.9.0", protocols: { admin: { min: 1, max: 2 } }, update_hint: { web: { build_id: "B2" } } }; } },
   isGuest: () => false, isMember: () => member, isOwner: () => owner, toast() {}, go: (...a) => gone.push(a), route: async () => {},
-  daemonSettingsCard: () => el("daemon"), build: { WEB_BUILD_ID: "B1", WEB_PROTOCOL: 2 }, reloadAndUpdate: async () => true, browser,
+  build: { WEB_BUILD_ID: "B1", WEB_PROTOCOL: 2 }, reloadAndUpdate: async () => true, browser,
   onConnState: (fn) => { connListeners.add(fn); return () => connListeners.delete(fn); },
 });
 for (const name of ["viewProfile", "copyBox", "githubConnectionCard", "readAppIcon", "applyAppIcon", "applyTheme", "applyTextSize"]) {
@@ -75,25 +74,23 @@ assert.deepEqual(labels(), ["This device", "Agents", "Server", "Integrations"]);
 assert.ok(appended.every((n) => n && typeof n === "object" && !Array.isArray(n)), "the menu appends nodes, not nested arrays");
 const links = (n) => (n && typeof n === "object" ? [n.attrs?.href, ...(n.kids || []).flatMap(links)].filter(Boolean) : []);
 const hrefs = appended.flatMap(links);
-for (const tab of ["resources", "accounts", "remote-control", "disk"]) assert.ok(hrefs.includes(`#/actions/${tab}`), `owner Server row ${tab}`);
-assert.ok(hrefs.includes("#/profile/daemon"));
+for (const tab of ["resources", "remote-control", "disk"]) assert.ok(hrefs.includes(`#/actions/${tab}`), `owner Server row ${tab}`);
+// Daemon administration rows moved to the Hub and the CLI (#545); one line says so.
+for (const href of ["#/actions/accounts", "#/profile/daemon", "#/profile/skills", "#/profile/apps"]) assert.ok(!hrefs.includes(href), href);
 assert.deepEqual(rows().map((r) => r.attrs["data-setting"]), ["appearance", "notifications", "connection", "install", "backends",
-  "smart-approvals", "skills", "memory", "resources", "daemon", "accounts", "remote-control", "disk", "apps", "endpoint"]);
+  "smart-approvals", "memory", "resources", "remote-control", "disk", "endpoint"]);
+assert.match(appended.map(text).join(" "), POINTER);
 // Every row shows its current value.
 assert.equal(rowValue("appearance"), "System · Default text");
 assert.equal(rowValue("connection"), "Bundled server");
 assert.equal(rowValue("notifications"), "ntfy · on");
 assert.equal(rowValue("backends"), "Claude · high +1");
 assert.equal(rowValue("smart-approvals"), "Shadow");
-assert.equal(rowValue("skills"), "3 installed · 1 proposal");
 assert.equal(rowValue("memory"), "Writes on");
 assert.equal(rowValue("resources"), "GPU held · 41 min");
-assert.equal(rowValue("daemon"), "2 pending restart");
-assert.equal(rowValue("accounts"), "Owner only");
 assert.equal(rowValue("remote-control"), "Off");
-assert.equal(rowValue("apps"), "2 apps · 1 web");
-assert.equal(rowValue("endpoint"), "2 keys");
-assert.equal(called.filter((p) => p === "/keys").length, 1, "Apps and Inference endpoint share one /keys read");
+assert.equal(rowValue("endpoint"), undefined, "the endpoint row reads no keys");
+assert.ok(!called.some((p) => ADMIN_READS.includes(p)), "the menu reads no daemon administration");
 assert.ok(!called.includes("/maintenance"), "the menu never measures the disk");
 // The version row: this bundle, its protocol, the server's view of it, and Reload and update once a newer bundle is offered.
 const version = () => appended.flatMap((n) => find(n, (x) => x.attrs?.class === "version-row"))[0];
@@ -105,7 +102,7 @@ failing = true;
 appended.length = 0;
 await profile.viewProfile();
 await settle();
-assert.equal(rows().length, 15);
+assert.equal(rows().length, 11);
 assert.equal(rowValue("resources"), undefined);
 assert.match(text(version()), /server not reachable/);
 failing = false;
@@ -119,6 +116,7 @@ await settle();
 assert.ok(!labels().includes("Agents"), "no empty Agents group");
 assert.ok(!appended.flatMap(links).some((href) => href.startsWith("#/actions")), "members get no Actions links");
 assert.ok(!called.some((p) => Object.hasOwn(VALUES, p)), "non-owners read no owner values");
+assert.doesNotMatch(appended.map(text).join(" "), POINTER, "members administer nothing, so no pointer");
 member = false;
 owner = true;
 // The header's Settings gear opens the same menu under its own name.
@@ -134,11 +132,31 @@ assert.match(text(appended.at(-1)), /Server URL/);
 await profile.viewProfile("appearance");
 assert.ok(appended.length >= 3);
 // Every subpage must render without a missing dep; other errors (stub gaps) are tolerated, a ReferenceError is not.
-for (const page of ["account", "notifications", "install", "backends", "smart-approvals", "daemon", "memory", "skills", "apps", "endpoint"]) {
+for (const page of ["account", "notifications", "install", "backends", "smart-approvals", "memory", "endpoint"]) {
   try { await profile.viewProfile(page); } catch (e) { assert.ok(!(e instanceof ReferenceError), `${page}: ${e.message}`); }
 }
 await profile.viewProfile("nope");
 assert.deepEqual(gone.slice(-1), [["#/profile", true]]);
+// The removed pages are gone too: old bookmarks land on the menu.
+for (const page of ["daemon", "skills", "apps"]) {
+  gone.length = 0;
+  await profile.viewProfile(page);
+  assert.deepEqual(gone, [["#/profile", true]], page);
+}
+// Where a removed control was, the subpage shows the pointer line instead (#545).
+owner = true;
+for (const page of ["connection", "notifications", "backends", "smart-approvals", "memory", "endpoint"]) {
+  appended.length = 0;
+  await profile.viewProfile(page);
+  await settle();
+  assert.match(appended.map(text).join(" "), POINTER, page);
+  const controls = appended.flatMap((n) => find(n, (x) => ["button", "select"].includes(x.tag))).map((x) => text(x).trim());
+  for (const removed of ["Send test notification", "Shadow", "Auto", "Off", "Save", "New key", "Revoke", "Create owner token"]) {
+    assert.ok(!controls.includes(removed), `${page}: ${removed}`);
+  }
+  if (page === "backends") assert.ok(!appended.some((n) => find(n, (x) => x.tag === "select").length), "no model or effort pickers");
+}
+assert.ok(!called.some((p) => ADMIN_READS.includes(p)), "no subpage reads daemon administration");
 
 // The identity line follows the header chip while Settings is open (#512, #510): no state before the chip first
 // shows, then each state the chip reports; the first report after the page is gone unsubscribes.
