@@ -264,61 +264,40 @@ def test_reset_lists_files_after_commit(tmp_path):
     asyncio.run(body())
 
 
-def test_threshold_without_state_falls_through(tmp_path):
-    cfg = make_cfg(tmp_path, context_tokens=8000)
-    cfg.reset_at = 0.50
-    cfg.stuck_stop_after = cfg.stuck_invalid_after = 0  # eight unknown-tool calls stand in for real tools
-    big = "line of output\n" * 400
+def test_threshold_resets_the_round_only_when_state_is_saved(tmp_path):
+    """A model that saved its state and then reports a prompt near the window gets a round reset, with no elide or
+    summary; the same prompt size without saved state falls through to elide or summary."""
+    def step(messages):
+        saved = "with state" in messages[1]["content"]
+        turns = sum(1 for m in messages if m["role"] == "assistant")
+        if turns:
+            return Completion(content="done", prompt_tokens=100)
+        first = call("update_state", 0, goal="g", plan="p") if saved else call("run_fake", 0)
+        return Completion(tool_calls=[first], prompt_tokens=1900)  # 95% of the 2,000-token window
 
-    def step(msgs):
-        n = sum(1 for m in msgs if m["role"] == "assistant")
-        if n < 8:
-            return Completion(tool_calls=[call("run_fake", n)], prompt_tokens=sum(
-                compaction.message_chars(m) for m in msgs) // 3)
-        return Completion(content="final", prompt_tokens=1000)
+    async def tiers(m, prompt, after_tool=None):
+        """The compaction tiers of a run, from the result of `after_tool` on if one is named."""
+        sid = m.create(prompt)["id"]
+        await wait_status(m, sid, "done")
+        await asyncio.gather(*m.tasks.values())
+        log = m.db.events(sid)
+        start = next((i for i, e in enumerate(log) if e["type"] == "tool_result" and e["data"]["name"] == after_tool), 0)
+        return sid, [e["data"]["tier"] for e in log[start:] if e["type"] == "compaction"]
 
     async def body():
-        m = Manager(cfg, chat=Script([step]))
-        orig = m.runner._record_result
-
-        async def padded(sid, c, name, output, ok, seconds=0.0, **kwargs):
-            await orig(sid, c, name, output + big, ok, seconds, **kwargs)
-        m.runner._record_result = padded
+        m = Manager(make_cfg(tmp_path, context_tokens=2000), chat=Script([step]))
         await m.start()
-        s = await wait_status(m, m.create("long task")["id"], "done", timeout=20)
-        comp = events(m, s["id"], "compaction")
-        assert not any(item["tier"] == "round_reset" for item in comp)
-        assert any(item["tier"] in ("elide", "summary") for item in comp)
-        assert "harness_round_resets_total 0" in render_metrics(m)
-        await m.stop()
-    asyncio.run(body())
+        # the window is tiny, so the first pass (before any state exists) elides; once state is saved it resets
+        sid, saved_tiers = await tiers(m, "task with state", after_tool="update_state")
+        assert saved_tiers == ["round_reset"]
+        context = m.db.get_session(sid)["context"]
+        assert _state_from_context(context)["goal"] == "g"
+        _assert_tool_groups_intact(context)
 
-
-def test_threshold_with_state_resets_without_elide(tmp_path):
-    async def body():
-        m = Manager(make_cfg(tmp_path, context_tokens=2000), chat=Script([Completion(content="done")]))
-        await m.start()
-        s = await wait_status(m, m.create("task")["id"], "done")
-        sid = s["id"]
-        state = validate_state({"goal": "g", "errors": [
-            {"command": "run_fake", "args": FAIL_ARGS, "message": "nope"}]}, 8000)
-        run = {**m.db.get_session(sid)["run"], "state": state, "chars_per_token": 3.0}
-        padded = s["context"] + [
-            {"role": "assistant", "content": "x" * 4000, "tool_calls": [call("read_file", 9, path="a")]},
-            {"role": "tool", "tool_call_id": "c9-read_file", "content": "y" * 4000},
-            {"role": "assistant", "content": "used it"},
-        ]
-        m.db.update_session(sid, context=padded, run=run)
-        before = len(m.db.events(sid))
-        await m.runner._maybe_compact(m.db.get_session(sid))
-        s = m.db.get_session(sid)
-        payload = _state_from_context(s["context"])
-        assert payload["goal"] == "g"
-        _assert_tool_groups_intact(s["context"])
-        tiers = [e["data"]["tier"] for e in m.db.events(sid)[before:] if e["type"] == "compaction"]
-        assert "round_reset" in tiers
-        assert "elide" not in tiers
-        assert "summary" not in tiers
+        _, bare_tiers = await tiers(m, "task without it")
+        assert "round_reset" not in bare_tiers
+        assert any(tier in ("elide", "summary") for tier in bare_tiers)
+        assert "harness_round_resets_total 1" in render_metrics(m)  # only the first session reset
         await m.stop()
     asyncio.run(body())
 
