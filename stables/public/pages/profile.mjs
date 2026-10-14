@@ -822,7 +822,7 @@ function notificationsCard(me) {
     me.notify.enabled ? h("button", {
       class: "btn",
       onclick: async () => {
-        try { await api("/notify/test", { method: "POST" }); toast("Test notification sent"); } catch (e) { toast(e.message); }
+        try { await api("/notify/test", { method: "POST" }); toast("Test notification sent"); } catch (e) { toast(`Test notification failed: ${e.message}`); }
       },
     }, "Send test notification") : null);
 }
