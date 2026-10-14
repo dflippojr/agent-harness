@@ -361,7 +361,8 @@ def test_apply_is_decided_and_previewed_as_an_edit_of_each_file(tmp_path):
     asyncio.run(body())
 
 
-def test_apply_rolls_back_earlier_files_and_raises_tool_error_when_a_write_fails(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["oserror", "other-exception"])
+def test_apply_rolls_back_earlier_files_and_raises_tool_error_when_a_write_fails(tmp_path, monkeypatch, failure):
     (tmp_path / "a.py").write_text("X = 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("Y = 1\n", encoding="utf-8")
     files = FileOps(tmp_path, 8000)
@@ -377,7 +378,10 @@ def test_apply_rolls_back_earlier_files_and_raises_tool_error_when_a_write_fails
             raise PermissionError("denied")
         return real_write(p, shown, data)
     flaky.failed = False
-    monkeypatch.setattr(files, "write_replacing", flaky)
+    if failure == "oserror":
+        monkeypatch.setattr(files, "write_replacing", flaky)
+    else:   # a surrogate fails the write with something that is not an OSError
+        monkeypatch.setattr(delegate_edit, "apply_to_texts", lambda t, e: {"a.py": "X = 2\n", "b.py": "Y = \ud800"})
     with pytest.raises(ToolError, match="rolled back"):
         delegate_edit.apply(files, proposal)
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "X = 1\n"
@@ -397,21 +401,6 @@ def test_surrogate_text_is_rejected_before_any_file_is_touched(tmp_path):
     with pytest.raises(ToolError):
         delegate_edit.apply(files, proposal)
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "X = 1\n"
-
-
-def test_non_oserror_write_failure_rolls_back_and_raises_tool_error(tmp_path, monkeypatch):
-    (tmp_path / "a.py").write_text("X = 1\n", encoding="utf-8")
-    (tmp_path / "b.py").write_text("Y = 1\n", encoding="utf-8")
-    files = FileOps(tmp_path, 8000)
-    texts = {"a.py": "X = 1\n", "b.py": "Y = 1\n"}
-    edits = [{"path": "a.py", "old_text": "X = 1", "new_text": "X = 2"},
-             {"path": "b.py", "old_text": "Y = 1", "new_text": "Y = 2"}]
-    _, proposal = delegate_edit.new_proposal(texts, edits, "k", "s")
-    monkeypatch.setattr(delegate_edit, "apply_to_texts", lambda t, e: {"a.py": "X = 2\n", "b.py": "Y = \ud800"})
-    with pytest.raises(ToolError, match="rolled back"):
-        delegate_edit.apply(files, proposal)
-    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "X = 1\n"
-    assert (tmp_path / "b.py").read_text(encoding="utf-8") == "Y = 1\n"
 
 
 def test_content_based_edit_rules_apply_to_apply_delegated_edit(tmp_path):
