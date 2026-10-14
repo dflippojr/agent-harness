@@ -10,6 +10,7 @@ import pytest
 from harness import metrics
 from harness.bus import EventBus
 from harness.db import Database
+from waits import scaled
 
 
 def _session(sid: str) -> dict:
@@ -101,28 +102,26 @@ def test_emit_is_dropped_with_a_rolled_back_transaction(db):
 
 def test_a_slow_write_does_not_block_reads_or_the_event_loop(db):
     async def run():
-        ticks = 0
-        started = threading.Event()
+        started, release, released = threading.Event(), threading.Event(), []
 
         def slow():
             started.set()
             db.update_session("s1", status="done")
-            time.sleep(0.4)
+            released.append(release.wait(scaled(30)))  # the transaction stays open until the loop has read
 
         write = asyncio.create_task(db.awrite(slow))
-        await asyncio.to_thread(started.wait)
-        t0 = time.perf_counter()
-        status = (await db.aio.get_session("s1"))["status"]
-        read_seconds = time.perf_counter() - t0
-        while not write.done():
-            ticks += 1
-            await asyncio.sleep(0.01)
-        return status, read_seconds, ticks
+        assert await asyncio.to_thread(started.wait, scaled(10))
+        for _ in range(5):  # the loop keeps turning while the writer is busy
+            await asyncio.sleep(0)
+        status = (await asyncio.wait_for(db.aio.get_session("s1"), scaled(10)))["status"]
+        still_writing = not write.done()
+        release.set()
+        await write
+        return status, still_writing, released
 
-    status, read_seconds, ticks = asyncio.run(run())
+    status, still_writing, released = asyncio.run(run())
     assert status == "running"  # the reader sees the last commit, not the open transaction
-    assert read_seconds < 0.3
-    assert ticks >= 5
+    assert still_writing and released == [True]
 
 
 def test_aio_methods_and_aemit(db):
