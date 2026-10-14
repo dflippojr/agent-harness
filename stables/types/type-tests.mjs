@@ -23,8 +23,10 @@ export async function checkContracts(api, id) {
   // @ts-expect-error Wrong job fields cannot be used as strings.
   jobs[0].schedule.toUpperCase();
   const previewed = await api("/jobs/preview?cron=@daily");
+  /** @type {string[]} */
+  let nextRuns = [];
   if (previewed.ok) {
-    previewed.next.map((time) => time.toFixed(0));
+    nextRuns = previewed.next.map((time) => time.toFixed(0));
     // @ts-expect-error Cron preview is not job detail.
     previewed.id.toUpperCase();
   } else {
@@ -37,17 +39,17 @@ export async function checkContracts(api, id) {
   discovery.operations[0].url.toUpperCase();
   /** @type {null} */
   const deleted = await api(`/jobs/${id}`, { method: "DELETE" });
-  return { title, preview, position, wrong, cron, path, deleted };
+  return { title, preview, position, wrong, cron, nextRuns, path, deleted };
 }
 
 /** @param {import('../public/client.mjs').AgentHarnessWebClient} client @param {string} id */
 export async function checkTransport(client, id) {
   const appDiscovery = await client.request("", { surface: "app" });
-  appDiscovery.projects.map((project) => project.name.toUpperCase());
+  const projects = appDiscovery.projects.map((project) => project.name.toUpperCase());
   // @ts-expect-error App discovery does not declare admin operations.
   appDiscovery.operations.map(() => "");
   const adminDiscovery = await client.request("");
-  adminDiscovery.operations.map((operation) => operation.path.toUpperCase());
+  const paths = adminDiscovery.operations.map((operation) => operation.path.toUpperCase());
   const session = await client.request(`/sessions/${id}`, { surface: "app" });
   /** @type {string} */
   const title = session.title;
@@ -58,5 +60,5 @@ export async function checkTransport(client, id) {
   const createdId = created.id;
   // @ts-expect-error POST /sessions returns one session, not the GET session list.
   created.map(() => "");
-  return { title, createdId };
+  return { title, createdId, projects, paths };
 }
