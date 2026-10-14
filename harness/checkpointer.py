@@ -330,11 +330,19 @@ class Checkpointer:
 
     def summary(self, parent: dict, turn: int, limit: int = 6000) -> str:
         """A digest of the parent's transcript up to the checkpoint, for hosted sessions whose CLI state cannot
-        be forked. Built from the event log; no model call."""
+        be forked. Built from the event log; no model call. From the session's latest checkpoint it runs to the end of
+        the log: a hosted run is checkpointed at its end only if its files changed, so a later follow-up that changed
+        none (answered, or never answered because the run hit its limit, #664) is still of that checkpoint's files.
+        A skipped snapshot since means the files did change, so then it stops at the checkpoint."""
         ckpt = self.checkpoint(parent["id"], turn)
+        events = self.db.events(parent["id"])
+        visible = self.db.checkpoints(parent["id"])
+        later = [e for e in events if e["seq"] > ckpt["event_seq"]]
+        to_end = bool(visible) and visible[-1]["turn"] == turn and not any(
+            e["type"] == "checkpoint" and e["data"].get("status") == "skipped" for e in later)
         parts: list[str] = []
-        for e in self.db.events(parent["id"]):
-            if e["seq"] > ckpt["event_seq"]:
+        for e in events:
+            if e["seq"] > ckpt["event_seq"] and not to_end:
                 break
             d = e["data"]
             if e["type"] == "user_message" and d.get("content"):

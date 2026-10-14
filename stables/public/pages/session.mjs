@@ -12,7 +12,7 @@ import { mountSessionUi, sessionMenuItems, pageMetrics as measurePage, scrollPag
 import { sinceText } from "../lib/widgets.mjs";
 import * as sheets from "../lib/sheet.mjs";
 import { backendPicker } from "../lib/backend-choice.mjs";
-/** @import { Api, ConfirmSheet, FormSheet, OpenStream, PromptSheet, SessionDetail, StreamHandlers } from '../../../tools/web-types/contracts.js' */
+/** @import { Api, ConfirmSheet, FormSheet, OpenStream, SessionDetail, StreamHandlers } from '../../../tools/web-types/contracts.js' */
 
 /**
  * The shell and UI helpers are incremental boundaries; API responses use the generated contract.
@@ -44,7 +44,6 @@ import { backendPicker } from "../lib/backend-choice.mjs";
  * @property {any} downloadDaemonFile
  * @property {Set<string>} TERMINAL
  * @property {ConfirmSheet} [confirmSheet]
- * @property {PromptSheet} [promptSheet]
  * @property {FormSheet} [formSheet]
  */
 
@@ -59,7 +58,7 @@ const SESSION_EVENT_TYPES = [
 /** @param {SessionDependencies} dependencies */
 export function mountSession({ $app, h, fill, append, api, setHeader, toast, go, route, validId, isGuest, isMember, isOwner, onLeave, badge, reviewBadge,
   progressBar, openStream, layoutBar, viewInfo, downloadDaemonFile, TERMINAL, agentHarnessWeb, browser, confirmSheet = /** @type {ConfirmSheet} */ (sheets.confirmSheet),
-  promptSheet = /** @type {PromptSheet} */ (sheets.promptSheet), formSheet = /** @type {FormSheet} */ (sheets.formSheet), announceChange = () => {}, onDaemonChange = null }) {
+  formSheet = /** @type {FormSheet} */ (sheets.formSheet), announceChange = () => {}, onDaemonChange = null }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { window, document, location, setInterval, clearInterval, setTimeout, clearTimeout } = browser;
 const { renameTitle, sessionMenu, bindSessionJumps, placeSessionHeader } = mountSessionUi({ h, api, setHeader, toast, isGuest, onLeave, layoutBar, browser,

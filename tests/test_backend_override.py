@@ -223,3 +223,28 @@ def test_routes_pass_the_override_and_rerun_still_takes_no_body(tmp_path, monkey
 def test_audit_metadata_keeps_backend_and_model_names_only():
     assert namespace_audit.clean({"backend": "codex", "model": "gpt-5.5"}) == {"backend": "codex", "model": "gpt-5.5"}
     assert namespace_audit.clean({"backend": "a prompt with spaces", "model": 5}) == {}
+
+
+def test_continuing_a_hosted_session_carries_its_unanswered_follow_up(tmp_path):
+    async def body():
+        m, s = await started(tmp_path)
+        sid = s["id"]
+        m.db.update_session(sid, backend="claude", model="claude-opus-5")
+        # A follow-up the run never answered: it hit the subscription limit before changing a file, so the cancel
+        # took no checkpoint and checkpoint 2 is still the latest (#664).
+        m.bus.emit(sid, "user_message", {"content": "add tests"})
+        m.bus.emit(sid, "limit_waiting", {"backend": "claude", "resets_at": 0})
+        moved = m.db.get_session((await m.fork(sid, 2, "Continue the task.", backend="codex"))["id"])
+        digest = moved["context"][1]["content"]
+        assert digest.index("User: add tests") < digest.index("New instruction:\nContinue the task.")
+        await finished(m, moved["id"])
+        earlier = m.db.get_session((await m.fork(sid, 1, "from one", backend="codex"))["id"])
+        assert "add tests" not in earlier["context"][1]["content"]   # not of checkpoint 1's files
+        await finished(m, earlier["id"])
+        # A snapshot that failed since means the files changed after checkpoint 2, so its digest stops there
+        m.bus.emit(sid, "checkpoint", {"status": "skipped", "reason": "the account is over its disk quota"})
+        stale = m.db.get_session((await m.fork(sid, 2, "Continue the task.", backend="codex"))["id"])
+        assert "add tests" not in stale["context"][1]["content"]
+        await finished(m, stale["id"])
+
+    asyncio.run(body())
