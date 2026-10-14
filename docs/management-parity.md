@@ -6,7 +6,10 @@ optional, so an owner who declines them can still do everything from the Agent H
 `python -m harness.cli`). A new owner route ships with its row below and its CLI command (#544).
 
 Stables is an optional client (#334): every setting and management action it offers is also an owner API
-operation with a CLI command. This page is the inventory. `tests/test_management_parity.py` reads it and fails when:
+operation with a CLI command. Daemon administration (daemon settings, module switches, Apps, keys and pairing,
+accounts, policy, installed skills, maintenance, and runner or folder trust) is not in Stables at all (#545): its
+rows are under [Owner API operations](#owner-api-operations-hub-and-cli), and Stables says where it went. This page
+is the inventory. `tests/test_management_parity.py` reads it and fails when:
 
 - a route mounted under `/api/admin/v1` (core or an add-on module, including `Module.admin_paths`) has no row below,
   or none of its rows has a CLI command that calls it, unless the test's short allowlist names it with a reason;
@@ -117,50 +120,25 @@ Pages: Actions → Resources (`pages/actions.mjs`), the model warm-up on New tas
 
 ## Actions: Remote Control
 
+Start and stop only; folder trust, forgetting and discovery are owner API operations.
+
 | Web action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
 | Folders and sessions | GET | `/remote-control` | `harness remote-control list` |
 | Start | POST | `/remote-control/{project}` | `harness remote-control launch <project>` |
 | Stop | POST | `/remote-control/{project}/stop` | `harness remote-control stop <project>` |
-| Trust a folder | POST | `/remote-control/{project}/trust` | `harness remote-control trust <project>` |
-| Remove a discovered folder | DELETE | `/remote-control/folders/{slug}` | `harness remote-control forget <slug>` |
-| Scan for folders | POST | `/remote-control/discovery/scans` | `harness remote-control scan` |
-| Scan progress | GET | `/remote-control/discovery/scans/{scan_id}` | `harness remote-control scan-show <scan_id>` |
-| Cancel a scan | DELETE | `/remote-control/discovery/scans/{scan_id}` | `harness remote-control scan-cancel <scan_id>` |
-| Add a scanned folder | POST | `/remote-control/discovery/scans/{scan_id}/candidates/{candidate_id}/promote` | `harness remote-control promote <scan_id> <candidate_id> <slug> <confirmed_path> <marker>` |
 
-## Actions: maintenance and runners
+## Actions: disk and runners
 
 | Web action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
 | Disk usage and maintenance state | GET | `/maintenance` | `harness maintenance status` |
-| Clean up | POST | `/maintenance/cleanup` | `harness maintenance cleanup` |
-| Image-archive retention preview | POST | `/maintenance/image-archive/retention/preview` | `harness maintenance image-retention-preview` |
-| Apply image-archive retention | POST | `/maintenance/image-archive/retention/apply` | `harness maintenance image-retention-apply <confirmation>` |
-| Runners (also on New task and Settings) | GET | `/runners` | `harness runner list` |
-| Update a runner | POST | `/runners/{name}/update` | `harness runner update <name>` |
+| Runners (also on New task) | GET | `/runners` | `harness runner list` |
 | Projects (several pages) | GET | `/projects` | `harness projects list` |
-| Add a project | POST | `/projects` | `harness projects create <name>` |
-
-## Actions: household members
-
-| Web action | Method | Endpoint | CLI |
-| --- | --- | --- | --- |
-| Members | GET | `/accounts` | `harness accounts list` |
-| Add a member | POST | `/accounts` | `harness accounts add <login> <display_name>` |
-| Rename, rebind, disable or re-enable, limits | PATCH | `/accounts/{user_id}` | `harness accounts update <user_id>` |
-| Erase a member's GitHub credential | POST | `/accounts/{user_id}/github-connection/reset` | `harness accounts github-reset <user_id> --confirm` |
-| Members may connect GitHub | GET | `/github-member-auth` | `harness github-member-auth show` |
-| Allow or stop members connecting GitHub | PUT | `/github-member-auth` | `harness github-member-auth set <enabled>` |
-| Google sign-in state | GET | `/google-signin` | `harness google-signin status` |
-| Google link code | POST | `/accounts/{user_id}/google/invitation` | `harness accounts google-invite <user_id>` |
-| Cancel a link code | DELETE | `/accounts/{user_id}/google/invitation` | `harness accounts google-cancel-invite <user_id>` |
-| Revoke a member's Google Web sessions | POST | `/accounts/{user_id}/google/revoke-sessions` | `harness accounts google-revoke-sessions <user_id>` |
-| Unlink Google | DELETE | `/accounts/{user_id}/google` | `harness accounts google-unlink <user_id> --confirm` |
 
 ## Settings and profile
 
-Pages: Settings (`pages/profile.mjs` and its subpages), `app.js`.
+Pages: Settings (`pages/profile.mjs` and its subpages), `app.js`. Smart approvals, Backends and Memory are read-only.
 
 | Web action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
@@ -168,44 +146,42 @@ Pages: Settings (`pages/profile.mjs` and its subpages), `app.js`.
 | Profile | GET | `/profile` | `harness profile show` |
 | Profile icon | PUT | `/profile` | `harness profile set-icon <emoji>` |
 | Connection: API version and capabilities | GET | `/` | `harness capabilities` |
-| Test notification | POST | `/notify/test` | `harness notify test` |
 | Smart approvals | GET | `/smart-approvals` | `harness smart-approvals show` |
-| Smart approvals mode | PUT | `/smart-approvals` | `harness smart-approvals set <mode>` |
 | Backends (`?auth=skip` skips sign-in checks) | GET | `/backends` | `harness backends list` |
-| Backend default model and effort | PUT | `/backends/{name}` | `harness backends set <name>` |
+| Memory library | GET | `/memory` | `harness memory show` |
 
-## Settings: daemon settings
+## Jobs
 
-Page: `pages/daemon-settings.mjs`.
+Page: `pages/jobs.mjs`.
 
 | Web action | Method | Endpoint | CLI |
+| --- | --- | --- | --- |
+| Jobs | GET | `/jobs` | `harness jobs list` |
+| Job | GET | `/jobs/{jid}` | `harness jobs show <jid>` |
+| Create | POST | `/jobs` | `harness jobs create <name> <prompt> <cron>` |
+| Save | PUT | `/jobs/{jid}` | `harness jobs update <jid> <name> <prompt> <cron>` |
+| Delete | DELETE | `/jobs/{jid}` | `harness jobs delete <jid>` |
+| Run now | POST | `/jobs/{jid}/run` | `harness jobs run <jid>` |
+| Cron preview | GET | `/jobs/preview` | `harness jobs preview <cron>` |
+
+## Owner API operations (Hub and CLI)
+
+Stables has no page for these; like every owner route, each has a CLI command. The groups before "Other operations"
+are the daemon administration Stables offered until #545. A household member still adds a project to their own account
+on New task; that call goes over the App API (`/api/v1`).
+
+### Daemon settings
+
+| Action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
 | Settings and revision | GET | `/config` | `harness config show` |
 | Save or dry-run changes | PATCH | `/config` | `harness config set <key>=<value>` |
 | Roll back | POST | `/config/rollback` | `harness config rollback --confirm` |
 | Restart to apply | POST | `/config/restart` | `harness config restart --confirm` |
 
-## Settings: skills and memory library
+### Apps, keys and pairing
 
-| Web action | Method | Endpoint | CLI |
-| --- | --- | --- | --- |
-| Skills and proposals | GET | `/skills` | `harness skills list` |
-| Proposal | GET | `/skills/proposals/{pid}` | `harness skills proposal <pid>` |
-| Install at the reviewed hash | POST | `/skills/proposals/{pid}/install` | `harness skills install <pid> <content_hash>` |
-| Reject | POST | `/skills/proposals/{pid}/reject` | `harness skills reject <pid>` |
-| Run the hosted review | POST | `/skills/proposals/{pid}/review` | `harness skills review <pid>` |
-| Delete a proposal | DELETE | `/skills/proposals/{pid}` | `harness skills delete-proposal <pid>` |
-| Enable | POST | `/skills/{slug}/enable` | `harness skills enable <slug>` |
-| Disable | POST | `/skills/{slug}/disable` | `harness skills disable <slug>` |
-| Project allowlist | PUT | `/skills/{slug}/projects` | `harness skills projects <slug> <project>` |
-| Roll back | POST | `/skills/{slug}/rollback` | `harness skills rollback <slug>` |
-| Uninstall | POST | `/skills/{slug}/uninstall` | `harness skills uninstall <slug>` |
-| Memory library | GET | `/memory` | `harness memory show` |
-| Agent profile | PUT | `/memory/profile` | `harness memory set-profile <content>` |
-
-## Settings: Apps, keys and pairing
-
-| Web action | Method | Endpoint | CLI |
+| Action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
 | Apps and keys | GET | `/keys` | `harness keys list` |
 | Create a key or Web connection token, optionally with a catalog app id | POST | `/keys` | `harness keys create <name> --catalog-app-id <id>` |
@@ -229,23 +205,69 @@ Page: `pages/daemon-settings.mjs`.
 | Make a Mac pairing code | POST | `/runner-pairing-codes` | `harness runner-pairing-codes create` |
 | Revoke a Mac pairing code | DELETE | `/runner-pairing-codes/{pid}` | `harness runner-pairing-codes revoke <pid>` |
 
-## Jobs
+### Household members
 
-Page: `pages/jobs.mjs`.
-
-| Web action | Method | Endpoint | CLI |
+| Action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
-| Jobs | GET | `/jobs` | `harness jobs list` |
-| Job | GET | `/jobs/{jid}` | `harness jobs show <jid>` |
-| Create | POST | `/jobs` | `harness jobs create <name> <prompt> <cron>` |
-| Save | PUT | `/jobs/{jid}` | `harness jobs update <jid> <name> <prompt> <cron>` |
-| Delete | DELETE | `/jobs/{jid}` | `harness jobs delete <jid>` |
-| Run now | POST | `/jobs/{jid}/run` | `harness jobs run <jid>` |
-| Cron preview | GET | `/jobs/preview` | `harness jobs preview <cron>` |
+| Members | GET | `/accounts` | `harness accounts list` |
+| Add a member | POST | `/accounts` | `harness accounts add <login> <display_name>` |
+| Rename, rebind, disable or re-enable, limits | PATCH | `/accounts/{user_id}` | `harness accounts update <user_id>` |
+| Erase a member's GitHub credential | POST | `/accounts/{user_id}/github-connection/reset` | `harness accounts github-reset <user_id> --confirm` |
+| Members may connect GitHub | GET | `/github-member-auth` | `harness github-member-auth show` |
+| Allow or stop members connecting GitHub | PUT | `/github-member-auth` | `harness github-member-auth set <enabled>` |
+| Google sign-in state | GET | `/google-signin` | `harness google-signin status` |
+| Google link code | POST | `/accounts/{user_id}/google/invitation` | `harness accounts google-invite <user_id>` |
+| Cancel a link code | DELETE | `/accounts/{user_id}/google/invitation` | `harness accounts google-cancel-invite <user_id>` |
+| Revoke a member's Google Web sessions | POST | `/accounts/{user_id}/google/revoke-sessions` | `harness accounts google-revoke-sessions <user_id>` |
+| Unlink Google | DELETE | `/accounts/{user_id}/google` | `harness accounts google-unlink <user_id> --confirm` |
 
-## Owner API operations (Hub and CLI)
+### Skills and the memory library
 
-Web has no page for these; like every owner route, each has a CLI command.
+| Action | Method | Endpoint | CLI |
+| --- | --- | --- | --- |
+| Skills and proposals | GET | `/skills` | `harness skills list` |
+| Proposal | GET | `/skills/proposals/{pid}` | `harness skills proposal <pid>` |
+| Install at the reviewed hash | POST | `/skills/proposals/{pid}/install` | `harness skills install <pid> <content_hash>` |
+| Reject | POST | `/skills/proposals/{pid}/reject` | `harness skills reject <pid>` |
+| Run the hosted review | POST | `/skills/proposals/{pid}/review` | `harness skills review <pid>` |
+| Delete a proposal | DELETE | `/skills/proposals/{pid}` | `harness skills delete-proposal <pid>` |
+| Enable | POST | `/skills/{slug}/enable` | `harness skills enable <slug>` |
+| Disable | POST | `/skills/{slug}/disable` | `harness skills disable <slug>` |
+| Project allowlist | PUT | `/skills/{slug}/projects` | `harness skills projects <slug> <project>` |
+| Roll back | POST | `/skills/{slug}/rollback` | `harness skills rollback <slug>` |
+| Uninstall | POST | `/skills/{slug}/uninstall` | `harness skills uninstall <slug>` |
+| Agent profile | PUT | `/memory/profile` | `harness memory set-profile <content>` |
+
+### Maintenance, runner updates and projects
+
+| Action | Method | Endpoint | CLI |
+| --- | --- | --- | --- |
+| Clean up | POST | `/maintenance/cleanup` | `harness maintenance cleanup` |
+| Image-archive retention preview | POST | `/maintenance/image-archive/retention/preview` | `harness maintenance image-retention-preview` |
+| Apply image-archive retention | POST | `/maintenance/image-archive/retention/apply` | `harness maintenance image-retention-apply <confirmation>` |
+| Update a runner | POST | `/runners/{name}/update` | `harness runner update <name>` |
+| Add a project | POST | `/projects` | `harness projects create <name>` |
+
+### Remote Control folders
+
+| Action | Method | Endpoint | CLI |
+| --- | --- | --- | --- |
+| Trust a folder | POST | `/remote-control/{project}/trust` | `harness remote-control trust <project>` |
+| Remove a discovered folder | DELETE | `/remote-control/folders/{slug}` | `harness remote-control forget <slug>` |
+| Scan for folders | POST | `/remote-control/discovery/scans` | `harness remote-control scan` |
+| Scan progress | GET | `/remote-control/discovery/scans/{scan_id}` | `harness remote-control scan-show <scan_id>` |
+| Cancel a scan | DELETE | `/remote-control/discovery/scans/{scan_id}` | `harness remote-control scan-cancel <scan_id>` |
+| Add a scanned folder | POST | `/remote-control/discovery/scans/{scan_id}/candidates/{candidate_id}/promote` | `harness remote-control promote <scan_id> <candidate_id> <slug> <confirmed_path> <marker>` |
+
+### Smart approvals, backends and notifications
+
+| Action | Method | Endpoint | CLI |
+| --- | --- | --- | --- |
+| Smart approvals mode | PUT | `/smart-approvals` | `harness smart-approvals set <mode>` |
+| Backend default model and effort | PUT | `/backends/{name}` | `harness backends set <name>` |
+| Test notification | POST | `/notify/test` | `harness notify test` |
+
+### Other operations
 
 | Action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |

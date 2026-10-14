@@ -89,7 +89,7 @@ assignment. A managed app receives limits reported by its own provider process i
 
 ## Tokens and scopes
 
-Create an Agent Harness App token in **Settings → Apps** (or `POST /keys` from the PC:
+Create an Agent Harness App token in the Hub or with `harness keys create <name> --kind app --scopes sessions` (`POST /keys`:
 `{"name": "my-app", "kind": "app", "scopes": ["sessions"]}`). It's shown once; only its hash is stored. Send it as
 `Authorization: Bearer ha-...`.
 
@@ -278,8 +278,8 @@ accidental or API/UI cross-account access, not a hostile administrator.
 
 ## Pair a separately hosted browser app
 
-Do not paste a long-lived App token into a browser URL. In **Settings → Apps → Pair browser app**, the owner enters
-the Agent Harness App's exact origin (for example `https://app.example`) and scopes, then approves a bootstrap code. The
+Do not paste a long-lived App token into a browser URL. In the Hub, or with `harness pairing-codes create <name> <origin>
+--scopes <scope>`, the owner enters the Agent Harness App's exact origin (for example `https://app.example`) and scopes, then approves a bootstrap code. The
 code expires after 10 minutes, works once, and can only be redeemed from that exact `Origin`. Browser origins must
 use HTTPS; HTTP is accepted only for loopback development (`localhost`, `127.0.0.1`, or `[::1]`):
 

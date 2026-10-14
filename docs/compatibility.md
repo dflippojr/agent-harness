@@ -51,6 +51,6 @@ The owner can also choose **Update Mac client** beside a compatible online Runne
 dedicated update operation—not a command or URL. A Runner too old to understand that operation is given the exact
 manual `harness update`/installer fallback instead.
 
-Recovery: run `harness update` again. If the command itself is missing, reopen Settings → Apps → Pair Mac client and
-run the displayed installer command; pairing credentials and user configuration are stored outside the replaced
+Recovery: run `harness update` again. If the command itself is missing, make a new Mac pairing code on the daemon host (the Hub cannot mint owner credentials)
+with `harness runner-pairing-codes create --runner <name>` and run the installer command again; pairing credentials and user configuration are stored outside the replaced
 runtime and are not overwritten.

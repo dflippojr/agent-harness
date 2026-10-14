@@ -7,8 +7,8 @@ sudo, or manual token copying.
 ## Install or update
 
 1. Configure Agent Harness Server's `public_url` and a `runners.macbook.token_file`, then restart the Server.
-2. In Stables, open **Settings → Apps → Pair Agent Harness for Mac** and create an install command.
-3. Run that command in Terminal on the Mac while its 10-minute code is valid.
+2. Make a Mac pairing code on the daemon host (the Hub cannot mint owner credentials): `harness runner-pairing-codes create --runner macbook`.
+3. Run `curl -fsSL <public_url>/mac-client/install.sh | bash -s -- --server <public_url> --code <code>` in Terminal on the Mac while its 10-minute code is valid.
 
 The script comes from Agent Harness Server, downloads a version-matched bundle from the same Server, and installs:
 

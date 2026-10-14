@@ -38,9 +38,9 @@ Two owner credentials are accepted:
 App tokens (`ha-…`, kind `app`) and device/inference tokens (`hk-…`, kind `device`) receive **403**
 `app tokens cannot use the owner API`. The `admin` scope cannot be granted to those kinds.
 
-An owner token may include an exact browser-origin allowlist for separately hosted Stables. Create it from
-the bundled Web UI's **Settings → Connection** page (or `POST /api/admin/v1/keys` with `kind: "owner"`, the `admin`
-scope, and an `origins` array). Versioned API CORS is allowlisted by those live keys, and each actual owner request
+An owner token may include an exact browser-origin allowlist for separately hosted Stables. Create it on the
+daemon host with `harness keys create <name> --kind owner --scopes admin --origins <origin>` (`POST
+/api/admin/v1/keys`; the Hub's key gets `403 hub_key`) with `kind: "owner"`, the `admin` scope, and an `origins` array). Versioned API CORS is allowlisted by those live keys, and each actual owner request
 also checks that the presented token was approved for the request's origin. See [`web.md`](web.md).
 
 Existing owner records named `control-center` remain valid and visible as legacy Web connections. Agent Harness

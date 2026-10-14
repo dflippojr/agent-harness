@@ -37,8 +37,8 @@ replace this later; it is not part of this version.
      # git_path: C:/Program Files/Git/cmd/git.exe            # optional; default: git on PATH
    ```
 
-3. Restart the daemon, then turn it on in **Actions → Accounts → Member GitHub sign-in**. Turning it on runs a
-   preflight. The owner page shows each member's coarse state (`disconnected`, `connecting`, `connected`,
+3. Restart the daemon, then turn it on in the Hub or with `harness github-member-auth set true`. Turning it on runs a
+   preflight. `harness github-member-auth show` lists each member's coarse state (`disconnected`, `connecting`, `connected`,
    `reconnect_required`) and last-use time. It never shows repository URLs, GitHub usernames, or device codes.
 
 ### Supported stores and preflight

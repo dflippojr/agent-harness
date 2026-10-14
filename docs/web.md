@@ -42,10 +42,18 @@ Household members see Agents and Profile only. The header shows the section titl
 home.
 
 The Settings menu is grouped into **This phone** (Appearance, Notifications, Connection, Install), **Agents**
-(Backends, Smart approvals, Skills, Memory), **Server** (Resources, Server settings, Accounts, Remote control, Disk) and
-**Integrations** (Apps, Inference endpoint). Each row shows its current value, such as `System · Default text` or
-`GPU held · 41 min`; a value that can't be read is left blank. Disk shows no value, because measuring it walks every
-workspace. The owner's former Actions pages are the Server rows, and only the owner sees them. At the end, a version
+(Backends, Smart approvals, Memory), **Server** (Resources, Remote control, Disk) and **Integrations** (Inference
+endpoint). Each row shows its current value, such as `System · Default text` or `GPU held · 41 min`; a value that can't
+be read is left blank. Disk and Inference endpoint show no value: measuring the disk walks every workspace, and the
+endpoint's keys aren't Stables' to list. The owner's former Actions pages are the Server rows, and only the owner sees
+them.
+
+Stables is a client of the daemon, like any other App. Daemon administration (Server settings, smart approvals mode,
+backend defaults, Apps, keys and pairing, household members, skills, the memory library's agent profile, maintenance,
+runner updates, adding a project, and Remote Control folder trust and discovery) is in the standalone Hub and the
+`harness` CLI (#545); [management parity](management-parity.md) lists each one with its CLI command. Where one of
+those controls used to be, Stables says "Daemon administration is in the Hub or the `harness` CLI." A household
+member still adds projects to their own account on New task. At the end, a version
 row shows this bundle's build and protocol, whether it is up to date with the connected Server, and the Server's
 release and supported protocol range. **Check for update** asks the Server again and, when a newer bundle is offered,
 becomes **Reload and update** (see [compatibility](compatibility.md)).
@@ -134,14 +142,14 @@ putting a token in their URLs.
 1. Serve the contents of `stables/public` at the root of an HTTPS origin, with `index.html` as the root document.
    Loopback HTTP is also accepted for local development. Asset URLs are root-relative, so deploy the directory at
    the origin root rather than below a path prefix.
-2. In the Server-bundled Stables, open **Settings → Connection**.
-3. Under **Connect another copy of Stables**, enter the separate site's exact origin (scheme, host, and optional
-   port) and create a token. Copy the `ho-…` token when shown; only its hash is stored by Agent Harness Server.
-4. In the separate copy, open `#/profile/connection`, enter the **Agent Harness Server URL** and token, then choose
+2. On the daemon host, create an owner token approved for the separate site's exact origin (scheme, host, and
+   optional port) with `harness keys create "stables (<host>)" --kind owner --scopes admin --origins <origin>`. The
+   Hub cannot mint owner tokens. Copy the `ho-…` token when shown; only its hash is stored by Agent Harness Server.
+3. In the separate copy, open `#/profile/connection`, enter the **Agent Harness Server URL** and token, then choose
    **Save and test**.
 
 The Server URL and token stay in that browser's existing `harness.*` local-storage keys. The owner token is limited
-to its approved browser origin for browser requests. Revoke it under **Settings → Apps → Web connections**. CORS
+to its approved browser origin for browser requests. Revoke it in the Hub or with `harness keys revoke <kid>`. CORS
 preflight and actual requests are allowed only for an origin present on a live key, and the owner API still verifies
 that the presented token is an owner token approved for that same origin.
 

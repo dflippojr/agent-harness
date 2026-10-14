@@ -1,15 +1,15 @@
 // @ts-nocheck
-// Profile page (#258): account, appearance, notifications, install, backends, smart approvals, skills, memory,
-// endpoint and apps cards. The shell (DOM builder, router, auth state) is injected by app.js so this module
+// Profile page (#258): account, appearance, notifications, install, backends, smart approvals, memory and endpoint
+// cards. Daemon administration (settings, Apps and keys, skills, members) lives in the Hub and the CLI (#545). The shell (DOM builder, router, auth state) is injected by app.js so this module
 // imports under plain Node and never reaches into another page.
-import { ago, pluralize } from "../lib/format.mjs";
+import { ago } from "../lib/format.mjs";
 import { md } from "../lib/markdown.mjs";
-import { showSecretOnce as showSecret } from "../lib/secret.mjs";
 import * as sheets from "../lib/sheet.mjs";
 import { protocolMismatch } from "../lib/compat.mjs";
 import { SPLITS } from "../lib/layout.mjs";
-import { backendsValue, smartApprovalsValue, skillsValue, memoryValue, notificationsValue, resourcesValue, serverSettingsValue,
-  accountsValue, remoteControlValue, appsValue, endpointValue, versionStatus, serverVersionText } from "../lib/settings-text.mjs";
+import { adminPointer } from "../lib/widgets.mjs";
+import { backendsValue, smartApprovalsValue, memoryValue, notificationsValue, resourcesValue, remoteControlValue, versionStatus,
+  serverVersionText } from "../lib/settings-text.mjs";
 
 // A mounted desktop menu follows successful writes from any of its detail pages.
 const settingsRefreshes = new Set();
@@ -22,32 +22,16 @@ export function refreshingSettingsApi(api) {
 }
 
 export function mountProfile({ $app, $conn, $profileIcon, layoutBar, setHeader, h, fill, append, api, getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route,
-  daemonSettingsCard, build = {}, reloadAndUpdate = async () => false, onConnState = () => () => {}, browser, confirmSheet = sheets.confirmSheet,
-  promptSheet = sheets.promptSheet }) {
+  build = {}, reloadAndUpdate = async () => false, onConnState = () => () => {}, browser, confirmSheet = sheets.confirmSheet }) {
 // Browser globals come in through `browser` (globalThis in the app, a stub under Node) so importing this module touches no DOM.
 const { document, window, localStorage, location, navigator, history, getComputedStyle, requestAnimationFrame, open,
   setTimeout, clearTimeout, fetch } = browser;
 api = refreshingSettingsApi(api);
 const escalateSuffix = (row) => (row.escalate_reason ? ` (${row.escalate_reason})` : "");
-const originsSuffix = (k) => (k.origins?.length ? ` · ${k.origins.join(", ")}` : "");
-const usedSuffix = (k) => (k.last_used_at ? ` · used ${ago(k.last_used_at)}` : "");
-// An App's sessions stay in its own store; the owner sees only this metadata about them (#330).
-const storeLine = (k) => {
-  const s = k.store;
-  if (!s) return "";
-  const counts = Object.entries(s.sessions || {}).map(([status, n]) => `${n} ${status}`);
-  const parts = [counts.length ? `Sessions: ${counts.join(", ")}` : "No sessions"];
-  if (s.usage?.requests) parts.push(`${s.usage.requests} hosted requests, $${Number(s.usage.cost_usd || 0).toFixed(2)}`);
-  if (s.errors) parts.push(`${s.errors} failed, last ${s.last_error}${s.last_error_at ? ` ${ago(s.last_error_at)}` : ""}`);
-  return parts.join(" · ");
-};
-// A revoked App's (or device's) store and files are erased after a 7-day grace the owner can undo (#330).
-const ERASE_GRACE_DAYS = 7;
-const eraseDate = (k) => new Date(k.erase_after * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || !!navigator.standalone;
-const GUEST_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "smart-approvals", "skills"]);
-const MEMBER_HIDDEN_PAGES = new Set(["notifications", "apps", "endpoint", "memory", "backends", "smart-approvals", "skills"]);
+const GUEST_HIDDEN_PAGES = new Set(["notifications", "endpoint", "smart-approvals"]);
+const MEMBER_HIDDEN_PAGES = new Set(["notifications", "endpoint", "memory", "backends", "smart-approvals"]);
 const PROFILE_PAGES = {
   connection: "Connection",
   appearance: "Appearance",
@@ -55,21 +39,19 @@ const PROFILE_PAGES = {
   install: "Install",
   backends: "Backends",
   "smart-approvals": "Smart approvals",
-  daemon: "Server settings",
   memory: "Memory",
-  skills: "Skills",
-  apps: "Apps",
   endpoint: "Inference endpoint",
 };
 // The Settings menu (#512): four groups of rows, each row showing its current value. `action` rows are the owner's
-// Actions pages (#/actions/<id>), folded in under Server; the rest open #/profile/<id>.
+// Actions pages (#/actions/<id>), folded in under Server; the rest open #/profile/<id>. Daemon administration rows
+// (Server settings, Accounts, Skills, Apps) moved to the Hub and the CLI (#545).
 const SETTINGS_GROUPS = [
   ["This device", ["appearance", "notifications", "connection", "install"]],
-  ["Agents", ["backends", "smart-approvals", "skills", "memory"]],
-  ["Server", ["resources", "daemon", "accounts", "remote-control", "disk"]],
-  ["Integrations", ["apps", "endpoint"]],
+  ["Agents", ["backends", "smart-approvals", "memory"]],
+  ["Server", ["resources", "remote-control", "disk"]],
+  ["Integrations", ["endpoint"]],
 ];
-const ACTION_PAGES = { resources: "Resources", accounts: "Accounts", "remote-control": "Remote control", disk: "Disk" };
+const ACTION_PAGES = { resources: "Resources", "remote-control": "Remote control", disk: "Disk" };
 // Swatches preview each theme's --bg, --panel and --accent from style.css (tests/test_web_tokens.py keeps them in step).
 const THEMES = {
   auto: { label: "System", swatch: ["#f3f4f6", "#ffffff", "#2457d9"] },
@@ -383,7 +365,7 @@ function githubConnectionCard({ onConnected } = {}) {
   return card;
 }
 
-// Each profile subpage builds its card from the account, the profile emoji and the optional third path part.
+// Each profile subpage builds its card from the account and the profile emoji.
 const PROFILE_CARDS = {
   account: (me, profile) => accountCard(me, profile),
   appearance: () => appearanceCard(),
@@ -391,10 +373,7 @@ const PROFILE_CARDS = {
   install: () => installCard(),
   backends: () => backendsCard(),
   "smart-approvals": () => smartApprovalsCard(),
-  daemon: () => daemonSettingsCard(),
   memory: () => memoryCard(),
-  skills: (me, profile, extra) => skillsPage(extra),
-  apps: (me) => appsCard(me),
   endpoint: (me) => endpointCard(me),
 };
 
@@ -435,10 +414,10 @@ function settingsGroupRows(values, isOwner, hidden) {
     });
     // A group whose rows are all hidden for this role (a member's Agents, say) gets no header either.
     return rows.length ? [h("p", { class: "section-label" }, label), h("div", { class: "card settings-group" }, rows)] : null;
-  }).flat();
+  }).flat().concat(isOwner() ? adminPointer(h) : null);
 }
 
-async function viewProfile(page, extra) {
+async function viewProfile(page) {
   // With a pane, the router is asking for the persistent menu rather than a detail page.
   if (page?.body) return settingsMenu(page);
   const titles = { account: "Account", ...PROFILE_PAGES };
@@ -449,7 +428,7 @@ async function viewProfile(page, extra) {
   setHeader("agents", titles[page] || home, { page: true });
   if (page === "connection") return append($app, connectionCard());
   const [me, profile] = await Promise.all([api("/me"), api("/profile").catch(() => ({ emoji: "🙂", choices: [] }))]);
-  if (Object.hasOwn(PROFILE_CARDS, page)) return append($app, await PROFILE_CARDS[page](me, profile, extra));
+  if (Object.hasOwn(PROFILE_CARDS, page)) return append($app, await PROFILE_CARDS[page](me, profile));
   return settingsMenu(null, me, profile);
 }
 
@@ -584,19 +563,13 @@ function fillSettingValues(values, me, current = () => true, owner = isOwner()) 
   paint("notifications", notificationsValue(me.notify));
   paint("install", { text: "Add to Home Screen" });
   if (!owner) return;
-  let keys = null;
-  const readKeys = () => (keys ||= api("/keys"));
   const loaders = {
     backends: () => api("/backends?auth=skip").then(backendsValue),
     "smart-approvals": () => api("/smart-approvals").then(smartApprovalsValue),
-    skills: () => api("/skills").then(skillsValue),
     memory: () => api("/memory").then(memoryValue),
     resources: () => api("/resources").then(resourcesValue),
-    daemon: () => api("/config").then(serverSettingsValue),
-    accounts: () => api("/accounts", { surface: "admin" }).then(accountsValue),
     "remote-control": () => api("/remote-control").then(remoteControlValue),
-    apps: () => readKeys().then(appsValue),
-    endpoint: () => readKeys().then(endpointValue),
+    // Inference endpoint has no value: its keys are daemon administration, in the Hub and the CLI (#545).
     // Disk has no value here: /maintenance walks every workspace and asks Docker for container sizes, too slow to
     // run on every visit to this menu. The Disk page measures it on open.
   };
@@ -661,43 +634,18 @@ function connectionCard() {
       status.textContent = `${e.message} Settings were saved so you can correct them here.`;
     }
   };
-  const origin = h("input", {
-    type: "url", inputmode: "url", value: location.origin,
-    placeholder: "https://harness-web.example.com", spellcheck: "false",
-  });
-  const minted = h("div");
-  const mint = async () => {
-    let approvedOrigin;
-    try { approvedOrigin = new URL(origin.value).origin; }
-    catch (_) { toast("Enter the Stables copy's complete origin"); return; }
-    try {
-      const key = await api("/keys", { method: "POST", surface: "admin", body: {
-        name: `stables (${new URL(approvedOrigin).host})`, kind: "owner", scopes: ["admin"], origins: [approvedOrigin],
-      } });
-      const field = h("input", { type: "text", readonly: true, value: key.key, onclick: (e) => e.target.select() });
-      fill(minted,
-        h("p", { class: "note" }, "Copy this token now; it is not shown again."), field,
-        h("button", { class: "btn small", onclick: async () => {
-          void copyToClipboard(key.key, () => field.select());
-        } }, "Copy token"));
-    } catch (e) { toast(e.message, 5000); }
-  };
   return h("div", {},
     h("div", { class: "card" },
       h("h3", {}, "This copy of Stables"),
       h("p", { class: "muted small" }, "Leave the Agent Harness Server URL blank when this copy of Stables is bundled with the Server. For a separately hosted copy, enter the Server URL and an owner token approved for this Stables origin."),
       h("label", {}, "Agent Harness Server URL"), server,
       h("label", {}, "Owner token"), token,
-      h("p", { class: "muted small" }, "The token is stored only in this browser. Do not use an Agent Harness App token; Stables manages owner-only settings."),
+      h("p", { class: "muted small" }, "The token is stored only in this browser. Do not use an Agent Harness App token; Stables uses the owner API."),
       h("div", { class: "row", style: "margin-top:10px" },
         h("button", { class: "btn", onclick: () => { server.value = ""; token.value = ""; void save(); } }, "Use bundled Server"),
         h("span", { class: "spacer" }),
         h("button", { class: "btn primary", onclick: save }, "Save and test")), status),
-    h("div", { class: "card" },
-      h("h3", {}, "Connect another copy of Stables"),
-      h("p", { class: "muted small" }, "Open this bundled copy as the owner, then mint an origin-bound token for a separately hosted copy. Revocation is available under Settings → Apps."),
-      h("label", {}, "Stables origin"), origin,
-      h("button", { class: "btn", onclick: mint }, "Create owner token"), minted));
+    adminPointer(h));
 }
 
 const iconGlyph = (spec) => (spec.id === "profile" ? ($profileIcon.textContent || "🙂") : spec.emoji);
@@ -819,12 +767,7 @@ function notificationsCard(me) {
       h("li", {}, "In ntfy: Settings → Users → add ", h("code", {}, ntfyUrl), " with the phone username and password", String.raw` (D:\Docker\ntfy\secrets\phone-login.txt on the tower).`),
       h("li", {}, "Settings → Default server → the same URL. Then + → topic ", h("code", {}, me.notify.topic), "."),
       h("li", {}, "Tap a notification to open the session; long-press it for Approve / Deny.")) : h("p", {}, "Disabled in config/harness.yaml."),
-    me.notify.enabled ? h("button", {
-      class: "btn",
-      onclick: async () => {
-        try { await api("/notify/test", { method: "POST" }); toast("Test notification sent"); } catch (e) { toast(`Test notification failed: ${e.message}`); }
-      },
-    }, "Send test notification") : null);
+    adminPointer(h));
 }
 
 function installCard() {
@@ -852,25 +795,10 @@ async function smartApprovalsCard() {
   try { data = await api("/smart-approvals"); }
   catch (e) { return h("div", { class: "card" }, h("p", { class: "note bad" }, e.message)); }
   const status = h("p", { class: "muted small" });
-  const setMode = async (mode) => {
-    try {
-      data = await api("/smart-approvals", { method: "PUT", body: { mode } });
-      toast(mode === "off" ? "Smart approvals off" : `Smart approvals ${mode}`);
-      go("#/profile/smart-approvals");
-    } catch (e) { toast(e.message); }
-  };
   const configured = data.configured || data.enabled;
   status.textContent = configured
     ? `${data.provider || "provider"} · ${data.model || "model"} · mode ${data.mode}`
     : "Off. The owner enables this in harness.yaml with a hosted API secret reference.";
-  const modeButtons = configured ? [
-    h("button", { class: "btn", onclick: () => setMode("shadow") }, "Shadow"),
-    h("button", { class: "btn", onclick: () => setMode("auto") }, "Auto"),
-  ] : [];
-  const buttons = isGuest() ? h("p", { class: "muted small" }, "Demo access cannot change smart approvals.")
-    : h("div", { class: "row", style: "margin-top:10px; gap:8px; flex-wrap:wrap" },
-        modeButtons,
-        h("button", { class: "btn", onclick: () => setMode("off") }, "Off"));
   const stats = h("p", { class: "muted small" },
     `${data.attempts || 0} reviews · ${data.auto_approvals || 0} auto-approved · ${data.escalations || 0} escalated · `
     + `${data.latency_ms || 0} ms avg · $${Number(data.cost_usd || 0).toFixed(4)}`);
@@ -881,70 +809,25 @@ async function smartApprovalsCard() {
     h("div", { class: "card" },
       h("h3", {}, "Smart approvals"),
       h("p", { class: "muted small" }, "A small hosted model can rate tagged, local, reversible shell asks after the deterministic policy. It never auto-denies. Shadow records a recommendation and still asks; auto only approves a high-confidence approve."),
-      status, stats, buttons),
+      status, stats, adminPointer(h)),
     recent.length ? h("div", { class: "card" }, h("h3", {}, "Recent reviews"), ...recent) : null);
 }
 
 async function backendsCard() {
   const body = h("div", {}, h("p", { class: "muted small" }, "Checking…"));
   let failed = false;
-  const [rows, models] = await Promise.all([api("/backends?auth=skip"), api("/models")]).catch((e) => {
+  const rows = await api("/backends?auth=skip").catch((e) => {
     fill(body, h("p", { class: "note bad" }, e.message));
     failed = true;
-    return [[], []];
+    return [];
   });
   if (failed) {
     return h("div", { class: "card" }, body);
   }
-  const effortSelect = (b) => {
-    const sel = h("select", {}, ["low", "medium", "high"].map((level) =>
-      h("option", { value: level, selected: (b.effort || "high") === level }, level)));
-    sel.addEventListener("change", async () => {
-      try { await api(`/backends/${b.name}`, { method: "PUT", body: { effort: sel.value } }); toast(`Saved ${b.name} effort`); }
-      catch (e) { toast(e.message); }
-    });
-    return sel;
-  };
-  const modelControl = (b) => {
-    if (b.name === "local") {
-      const sel = h("select", {}, models.map((m) => h("option", { value: m.name, selected: m.name === b.model }, m.name)));
-      sel.addEventListener("change", async () => {
-        try { await api("/backends/local", { method: "PUT", body: { model: sel.value } }); toast("Saved local model"); }
-        catch (e) { toast(e.message); }
-      });
-      return sel;
-    }
-    const popular = b.popular_models || [];
-    const save = async (model) => {
-      if (!model) return toast("Model is empty");
-      try { await api(`/backends/${b.name}`, { method: "PUT", body: { model } }); toast(`Saved ${b.name} model`); }
-      catch (e) { toast(e.message); }
-    };
-    if (!popular.length) {
-      const input = h("input", { type: "text", value: b.model || "", placeholder: "Provider model name" });
-      input.addEventListener("change", () => save(input.value.trim()));
-      return input;
-    }
-    const known = popular.some((m) => m.id === b.model);
-    const sel = h("select", {},
-      popular.map((m) => h("option", { value: m.id, selected: m.id === b.model }, m.label || m.id)),
-      h("option", { value: "__custom__", selected: !known }, "Custom"));
-    const input = h("input", {
-      type: "text", value: known ? "" : (b.model || ""),
-      placeholder: "Model name the CLI accepts", hidden: known,
-    });
-    sel.addEventListener("change", () => {
-      const custom = sel.value === "__custom__";
-      input.hidden = !custom;
-      if (custom) input.focus();
-      else void save(sel.value);
-    });
-    input.addEventListener("change", () => save(input.value.trim()));
-    return [sel, input];
-  };
   const BACKEND_TITLES = { local: "Qwen (this PC)", claude: "Claude", codex: "Codex", cursor: "Cursor", opencode: "OpenCode" };
-  const noEffort = (b) => b.name === "local" || b.kind === "cli";
   const title = (b) => BACKEND_TITLES[b.name] || b.name;
+  const hasEffort = (b) => b.effort && b.name !== "local" && b.kind !== "cli";
+  const defaultsText = (b) => `Default model ${b.model}${hasEffort(b) ? ` · effort ${b.effort}` : ""}`;
   const usage = {};
   fill(body, rows.length ? rows.map((b) => {
     const line = h("p", { class: `small ${b.billing_warning ? "bad" : "muted"}` }, b.billing_warning || backendUsage(b));
@@ -952,10 +835,7 @@ async function backendsCard() {
     return h("div", { class: "backend-block" },
       h("strong", {}, title(b)),
       line,
-      isGuest() ? null : h("label", {}, "Default model"),
-      isGuest() ? null : modelControl(b),
-      isGuest() || noEffort(b) ? null : h("label", {}, "Effort"),
-      isGuest() || noEffort(b) ? null : effortSelect(b));
+      b.model ? h("p", { class: "muted small" }, defaultsText(b)) : null);
   }) : h("p", { class: "muted small" }, "No backends configured."));
   api("/backends").then((fresh) => {
     for (const b of fresh) {
@@ -967,105 +847,7 @@ async function backendsCard() {
   }).catch(() => {});
   return h("div", { class: "card" },
     h("p", { class: "muted small" }, "New tasks use these defaults. You can still pick a backend when you start one."),
-    body);
-}
-
-async function skillProposalView(pid) {
-  const p = await api(`/skills/proposals/${pid}`);
-  const findings = (p.static_findings || []).map((f) => h("li", {}, `${f.code}: ${f.message}`));
-  const review = p.review || {};
-  const examples = (p.examples || []).map((ex) => h("div", { class: "card" },
-    h("p", {}, ex.prompt), h("p", { class: "muted small" }, ex.expected || ex.expected_behavior || "")));
-  const refs = (p.references || []).map((r) => h("details", {}, h("summary", {}, r.path), h("pre", {}, r.content || "")));
-  const act = async (path, body, ask) => {
-    if (ask && !(await confirmSheet(ask))) return;
-    try {
-      await api(path, { method: "POST", body: body || {} });
-      toast("Done");
-      go("#/profile/skills", true);
-    } catch (e) { toast(e.message); }
-  };
-  return h("div", {},
-    h("div", { class: "card" },
-      h("h3", {}, p.title || p.slug),
-      h("p", { class: "muted small" }, `${p.slug} · ${p.status} · hash ${p.content_hash} · session ${p.source_session_id || "—"}`),
-      h("p", {}, p.purpose || ""),
-      p.activation_suggestion ? h("p", { class: "muted small" }, `Suggested when: ${p.activation_suggestion}`) : null,
-      p.diff ? h("pre", { class: "preview" }, p.diff) : null,
-      h("p", { class: "section-label" }, "SKILL.md"),
-      h("pre", {}, p.skill_md || ""),
-      refs.length ? h("p", { class: "section-label" }, "References") : null, ...refs,
-      h("p", { class: "section-label" }, "Examples"), ...examples,
-      h("p", { class: "section-label" }, "Static findings"),
-      findings.length ? h("ul", {}, findings) : h("p", { class: "muted small" }, "No static findings."),
-      h("p", { class: "section-label" }, "Model review"),
-      h("p", { class: "muted small" }, p.review_status || "not started"),
-      review.summary ? h("p", {}, review.summary) : null,
-      review.recommendation ? h("p", {}, `Recommendation: ${review.recommendation}`) : null,
-      review.error ? h("p", { class: "bad" }, review.error) : null,
-      h("div", { class: "row", style: "margin-top:18px;flex-wrap:wrap;gap:8px" },
-        h("button", { class: "btn primary", onclick: () => act(`/skills/proposals/${p.id}/install`, { content_hash: p.content_hash },
-          { title: `Install hash ${p.content_hash.slice(0, 12)}?`, message: "It stays disabled until you enable it.", confirmLabel: "Install" }) }, "Install"),
-        h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/reject`, { reason: "rejected from Skills page" },
-          { title: "Reject this hash?", confirmLabel: "Reject", destructive: true }) }, "Reject"),
-        h("button", { class: "btn", onclick: () => act(`/skills/proposals/${p.id}/review`) }, "Run hosted review"),
-        h("button", { class: "btn bad", onclick: async () => {
-          if (!(await confirmSheet({ title: "Delete this draft?", confirmLabel: "Delete draft", destructive: true }))) return;
-          try { await api(`/skills/proposals/${p.id}`, { method: "DELETE" }); go("#/profile/skills", true); }
-          catch (e) { toast(e.message); }
-        } }, "Delete draft"))));
-
-}
-
-function installedSkillCard(sk) {
-  const toggle = sk.enabled ? "disable" : "enable";
-  return h("div", { class: "card" },
-    h("h3", {}, `${sk.enabled ? "" : "⏸ "}${sk.title || sk.slug}`),
-    h("p", { class: "muted small" }, `${sk.slug} v${sk.version} · ${(sk.content_hash || "").slice(0, 12)}`),
-    h("p", {}, sk.purpose || ""),
-    sk.projects?.length ? h("p", { class: "muted small" }, `Projects: ${sk.projects.join(", ")}`) : h("p", { class: "muted small" }, "No project allowlist. Enable it and pick it on New task."),
-    h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" },
-      h("button", { class: "btn small", onclick: async () => {
-        try { await api(`/skills/${sk.slug}/${toggle}`, { method: "POST" }); void route(); } catch (e) { toast(e.message); }
-      } }, sk.enabled ? "Disable" : "Enable"),
-      h("button", { class: "btn small", onclick: async () => {
-        const raw = await promptSheet({ title: `Projects for ${sk.slug}`, label: "Project allowlist (comma-separated names)",
-          value: (sk.projects || []).join(", "), message: "Leave it empty for no allowlist." });
-        if (raw === null) return;
-        try {
-          await api(`/skills/${sk.slug}/projects`, { method: "PUT", body: { projects: raw.split(",").map((s) => s.trim()).filter(Boolean) } });
-          void route();
-        } catch (e) { toast(e.message); }
-      } }, "Projects"),
-      h("button", { class: "btn small", onclick: async () => {
-        if (!(await confirmSheet({ title: `Roll ${sk.slug} back to the previous version?`, confirmLabel: "Roll back" }))) return;
-        try { await api(`/skills/${sk.slug}/rollback`, { method: "POST" }); void route(); } catch (e) { toast(e.message); }
-      } }, "Rollback"),
-      h("button", { class: "btn small bad", onclick: async () => {
-        if (!(await confirmSheet({ title: `Uninstall ${sk.slug}?`, message: "Later sessions will not receive it.", confirmLabel: "Uninstall",
-          destructive: true }))) return;
-        try { await api(`/skills/${sk.slug}/uninstall`, { method: "POST" }); void route(); } catch (e) { toast(e.message); }
-      } }, "Uninstall")));
-}
-
-async function skillsPage(pid) {
-  const data = await api("/skills");
-  if (!data.enabled) {
-    return h("div", { class: "card" }, h("p", { class: "muted small" }, "Instruction skills are disabled. Ordinary sessions are unchanged."));
-  }
-  if (pid) return skillProposalView(pid);
-  const proposals = (data.proposals || []).map((p) => h("a", { class: "card", href: `#/profile/skills/${p.id}` },
-    h("h3", {}, p.title || p.slug),
-    h("div", { class: "meta" }, h("span", {}, p.status), h("span", {}, p.review_status || "no review"),
-      h("span", {}, (p.content_hash || "").slice(0, 12)))));
-  const installed = (data.installed || []).map(installedSkillCard);
-  return h("div", {},
-    h("p", { class: "muted small" }, "Agents can only stage drafts. You install an exact hash; new skills stay off until you enable them. Advisory model review never installs."),
-    data.hosted_reviewer_configured ? h("p", { class: "muted small" }, "Hosted review is configured and spends that provider's quota only when you tap Run hosted review.") : h("p", { class: "muted small" }, "No hosted reviewer configured. Local Qwen review runs only when the GPU is idle."),
-    h("p", { class: "section-label" }, "Proposals"),
-    proposals.length ? proposals : h("p", { class: "empty" }, "No proposals yet."),
-    h("p", { class: "section-label" }, "Installed"),
-    installed.length ? installed : h("p", { class: "empty" }, "No installed skills."));
+    body, adminPointer(h));
 }
 
 function memoryCard() {
@@ -1074,29 +856,14 @@ function memoryCard() {
     try {
       const mem = await api("/memory");
       if (!mem.enabled) return fill(body, h("p", { class: "muted small" }, "The memory library is disabled in config/harness.yaml."));
-      const editor = h("textarea", { class: "memory-editor", rows: 24, readOnly: isGuest() || !mem.writes }, mem.profile || "");
-      const save = h("button", { class: "btn primary", disabled: !mem.writes || isGuest() }, "Save");
-      save.addEventListener("click", async () => {
-        if (!(await confirmSheet({ title: "Save this profile to the memory library?",
-          message: "It is given to every new session, then committed and pushed.", confirmLabel: "Save profile" }))) return;
-        save.disabled = true;
-        try {
-          const saved = await api("/memory/profile", { method: "PUT", body: { content: editor.value, summary: "Update agent profile from Settings" } });
-          toast(`Saved (${saved.last_commit.head})`);
-        } catch (e) { toast(e.message); }
-        save.disabled = !mem.writes;
-      });
-      const memoryProfileAction = () => {
-        if (isGuest()) return h("p", { class: "muted small" }, "Demo access cannot edit the memory profile.");
-        return mem.writes ? save : h("p", { class: "muted small" }, "Enable memory_library.writes to edit from here.");
-      };
+      const editor = h("textarea", { class: "memory-editor", rows: 24, readOnly: true }, mem.profile || "");
       fill(body,
         h("p", { class: "small" }, "A short purpose statement given to every new session: how agents should use this library. Keep personal biography in category files, not here."),
         h("p", { class: "small" }, `Agents can read ${mem.categories.join(", ")}. `,
           mem.writes ? "They can propose changes; every change asks you first." : "Read-only for agents."),
         editor,
         h("p", { class: "muted small" }, `${mem.profile_path || "profile"} · limit ${mem.profile_max_chars} characters`),
-        memoryProfileAction(),
+        adminPointer(h),
         mem.last_commit?.head ? h("p", { class: "muted small" }, `Last saved change: ${mem.last_commit.summary} (${mem.last_commit.head}, ${ago(mem.last_commit.at)})`) : null,
         mem.refresh_error ? h("p", { class: "small bad" }, `Couldn't refresh the library: ${mem.refresh_error}`) : null);
     } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
@@ -1104,215 +871,15 @@ function memoryCard() {
   return h("div", { class: "card" }, body);
 }
 
-// Shows a secret exactly once (lib/secret.mjs), copying through this page's clipboard helper.
-const showSecretOnce = (form, load, intro, secret, copyLabel) => showSecret(form, load, intro, secret, copyLabel, copyToClipboard);
-
 function endpointCard(me) {
   const base = me.public_url || location.origin;
-  const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
-  const load = async () => {
-    try {
-      const keys = await api("/keys");
-      const active = keys.filter((k) => !k.revoked_at && k.kind !== "app");
-      const form = h("div");
-      const newBtn = h("button", { class: "btn", type: "button", onclick: () => { newBtn.hidden = true; showForm(); } }, "New key");
-      const showForm = () => {
-        const name = h("input", { type: "text", placeholder: "Name (the device or app)" });
-        fill(form,
-          h("p", { class: "small" }, "The token is shown once. Anyone with it can call the inference endpoint as you."),
-          h("label", {}, "Key name"), name,
-          h("div", { class: "row", style: "margin-top:10px" },
-            h("button", { class: "btn", type: "button", onclick: load }, "Cancel"),
-            h("span", { class: "spacer" }),
-            h("button", {
-              class: "btn primary", type: "button",
-              onclick: async () => {
-                if (!name.value.trim()) return toast("Name the key");
-                try {
-                  const k = await api("/keys", { method: "POST", body: { name: name.value } });
-                  showSecretOnce(form, load, `Key for ${k.name}. Copy it now; it isn't shown again.`, k.key, "Copy");
-                } catch (e) { toast(e.message); }
-              },
-            }, "Create")));
-      };
-      fill(body,
-        h("p", { class: "muted small" }, "Point a coding tool at these URLs. Tap a box to copy. Any model name works; unknown names use the default."),
-        h("p", { class: "small", style: "margin-bottom:0" }, "OpenAI-compatible"),
-        copyBox(`${base}/v1`),
-        h("p", { class: "small", style: "margin-bottom:0" }, "Anthropic-compatible"),
-        copyBox(base),
-        active.length ? h("ul", { class: "small" }, active.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${pluralize(k.requests, "request")}${usedSuffix(k)} `,
-          h("button", {
-            class: "btn small bad",
-            onclick: async () => {
-              if (!(await confirmSheet({ title: `Revoke the key “${k.name}”?`,
-                message: `Tools using it stop working. Any sessions it started, and their files, are erased in ${ERASE_GRACE_DAYS} days unless you undo it under Apps.`,
-                confirmLabel: "Revoke key", destructive: true }))) return;
-              try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
-            },
-          }, "Revoke")))) : h("p", { class: "muted small" }, "No keys yet."),
-        form, newBtn);
-    } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
-  };
-  void load();
-  return h("div", { class: "card" }, body);
-}
-
-const APP_SCOPES = {
-  sessions: "Start and follow its own sessions (with context and tools)",
-  "sessions:all": "Read all sessions, not only its own",
-  approvals: "Approve or deny in its own sessions",
-  images: "Generate images",
-  inference: "Use the inference endpoint",
-  remote_control: "Start and stop Claude Remote Control in a project folder",
-  "models:warm": "Start loading the local model ahead of a chat",
-  memory_library: "Read the memory library and propose edits to it",
-  homelab: "Use homelab tools (logs, service config, metrics) in homelab projects",
-};
-
-function appsCard(me) {
-  const base = me.public_url || location.origin;
-  const body = h("div", {}, h("p", { class: "muted small" }, "Loading…"));
-  const load = async () => {
-    try {
-      const [keys, pairingCodes, runnerPairingCodes, runners] = await Promise.all([
-        api("/keys"), api("/pairing-codes"), api("/runner-pairing-codes"), api("/runners"),
-      ]);
-      const apps = keys.filter((k) => k.kind === "app" && !k.revoked_at);
-      const erasing = keys.filter((k) => k.kind !== "owner" && k.erase_after && !k.erased_at);
-      const ownerConnections = keys.filter((k) => k.kind === "owner" && !k.revoked_at);
-      const webConnections = ownerConnections.filter((k) => k.origins?.length);
-      const cliConnections = ownerConnections.filter((k) => !k.origins?.length);
-      const pending = pairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
-      const pendingRunners = runnerPairingCodes.filter((p) => !p.used_at && p.expires_at > Date.now() / 1000);
-      const form = h("div");
-      const newBtn = h("button", { class: "btn", type: "button", onclick: () => {
-        newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showForm();
-      } }, "New app");
-      const pairBtn = h("button", { class: "btn", type: "button", onclick: () => {
-        newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showPairForm();
-      } }, "Pair browser app");
-      const macBtn = h("button", { class: "btn", type: "button", hidden: !runners.length, onclick: () => {
-        newBtn.hidden = true; pairBtn.hidden = true; macBtn.hidden = true; showMacPairForm();
-      } }, "Pair Agent Harness for Mac");
-      const showForm = () => {
-        const name = h("input", { type: "text", placeholder: "App name" });
-        const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
-          h("input", { type: "checkbox", value: scope, checked: scope === "sessions" }), ` ${label}`));
-        fill(form,
-          h("p", { class: "small" }, "This mints a token shown once. Anyone with it can use the permissions you tick. It is not your Claude/Codex/Cursor login."),
-          h("label", {}, "Name"), name, h("label", {}, "What it may do"), boxes,
-          h("div", { class: "row", style: "margin-top:10px" },
-            h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
-            h("button", {
-              class: "btn primary",
-              onclick: async () => {
-                const scopes = boxes.map((b) => b.querySelector("input")).filter((i) => i.checked).map((i) => i.value);
-                if (!name.value.trim() || !scopes.length) return toast("Name the app and allow at least one thing");
-                try {
-                  const k = await api("/keys", { method: "POST", body: { name: name.value, kind: "app", scopes } });
-                  showSecretOnce(form, load, `Token for ${k.name}. Copy it now; it isn't shown again.`, k.key, "Copy");
-                } catch (e) { toast(e.message); }
-              },
-            }, "Create")));
-      };
-      const showPairForm = () => {
-        const name = h("input", { type: "text", placeholder: "App name" });
-        const origin = h("input", { type: "url", placeholder: "https://app.example.com" });
-        const boxes = Object.entries(APP_SCOPES).map(([scope, label]) => h("label", { class: "small", style: "display:block;font-weight:normal" },
-          h("input", { type: "checkbox", value: scope, checked: scope === "sessions" }), ` ${label}`));
-        fill(form,
-          h("p", { class: "small" }, "Approve one exact browser origin. The short-lived code is shown once and can only be redeemed from that origin."),
-          h("label", {}, "Name"), name,
-          h("label", {}, "Browser origin (scheme and host only)"), origin,
-          h("label", {}, "What it may do"), boxes,
-          h("div", { class: "row", style: "margin-top:10px" },
-            h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
-            h("button", { class: "btn primary", onclick: async () => {
-              const scopes = boxes.map((b) => b.querySelector("input")).filter((i) => i.checked).map((i) => i.value);
-              if (!name.value.trim() || !origin.value.trim() || !scopes.length) return toast("Name the app, enter its origin, and allow at least one thing");
-              try {
-                const p = await api("/pairing-codes", { method: "POST", body: { name: name.value, origin: origin.value, scopes } });
-                showSecretOnce(form, load, `Pairing code for ${p.name} at ${p.origin}. It expires in 10 minutes and works once.`, p.code, "Copy");
-              } catch (e) { toast(e.message); }
-            } }, "Approve and create code")));
-      };
-      const showMacPairForm = () => {
-        const name = h("input", { type: "text", value: "Agent Harness for Mac", placeholder: "Mac connection name" });
-        const runner = h("select", {}, runners.map((item) => h("option", { value: item.name }, item.name)));
-        fill(form,
-          h("p", { class: "small" }, "Create a 10-minute, one-use code. The install command sets up the harness CLI, runner, and launchd without SSH."),
-          h("label", {}, "Name"), name,
-          h("label", {}, "Runner"), runner,
-          h("div", { class: "row", style: "margin-top:10px" },
-            h("button", { class: "btn", onclick: load }, "Cancel"), h("span", { class: "spacer" }),
-            h("button", { class: "btn primary", onclick: async () => {
-              if (!name.value.trim()) return toast("Name this Agent Harness for Mac connection");
-              try {
-                const p = await api("/runner-pairing-codes", { method: "POST", body: { name: name.value, runner: runner.value } });
-                const command = `curl -fsSL ${base}/mac-client/install.sh | bash -s -- --server ${base} --code ${p.code}`;
-                showSecretOnce(form, load, "Run this in Terminal on the Mac. The code expires in 10 minutes and works once.", command, "Copy install command");
-              } catch (e) { toast(e.message); }
-            } }, "Create install command")));
-      };
-      fill(body,
-        h("p", { class: "small" }, "An Agent Harness App token lets a third-party integration start and follow sessions on Agent Harness Server. It is shown once and can be revoked later."),
-        h("p", { class: "muted small" }, "API: ", h("code", {}, `${base}/api/v1`), " · guide: docs/app-api.md"),
-        apps.length ? h("ul", { class: "small" }, apps.map((k) => h("li", {},
-          h("strong", {}, k.name), ` ${k.prefix}… · ${k.scopes.replaceAll(" ", ", ")}${originsSuffix(k)}${usedSuffix(k)} `,
-          h("button", {
-            class: "btn small bad",
-            onclick: async () => {
-              if (!(await confirmSheet({ title: `Revoke the app “${k.name}”?`,
-                message: `It can no longer start or read sessions, and its sessions and files are erased in ${ERASE_GRACE_DAYS} days unless you undo the revoke here.`,
-                confirmLabel: "Revoke app", destructive: true }))) return;
-              try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
-            },
-          }, "Revoke"),
-          storeLine(k) ? h("div", { class: "muted small" }, storeLine(k)) : null))) : h("p", { class: "muted small" }, "No apps yet."),
-        erasing.length ? [h("p", { class: "section-label" }, "Revoked: data to be erased"),
-          h("ul", { class: "small" }, erasing.map((k) => h("li", {},
-            h("strong", {}, k.name), ` · its sessions and files are erased on ${eraseDate(k)} `,
-            h("button", { class: "btn small", type: "button", onclick: async () => {
-              if (!(await confirmSheet({ title: `Undo revoking “${k.name}”?`, message: "Its sessions and files are kept, and it gets a new token.",
-                confirmLabel: "Undo revoke" }))) return;
-              try {
-                const r = await api(`/apps/${k.id}/restore`, { method: "POST" });
-                showSecretOnce(form, load, `New token for ${r.name}. Copy it now; it isn't shown again. The old token stays revoked.`, r.key, "Copy");
-              } catch (e) { toast(e.message); }
-            } }, "Undo"))))] : null,
-        webConnections.length ? [h("p", { class: "section-label" }, "Web connections"),
-          h("ul", { class: "small" }, webConnections.map((k) => h("li", {},
-            h("strong", {}, k.name), ` ${k.prefix}… · ${k.origins?.join(", ") || "non-browser"}${usedSuffix(k)} `,
-            h("button", { class: "btn small bad", onclick: async () => {
-              if (!(await confirmSheet({ title: `Revoke “${k.name}”?`, message: "That Stables connection will stop working.",
-                confirmLabel: "Revoke", destructive: true }))) return;
-              try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
-            } }, "Revoke"))))] : null,
-        cliConnections.length ? [h("p", { class: "section-label" }, "CLI connections"),
-          h("ul", { class: "small" }, cliConnections.map((k) => h("li", {},
-            h("strong", {}, k.name), ` ${k.prefix}… · non-browser${usedSuffix(k)} `,
-            h("button", { class: "btn small bad", onclick: async () => {
-              if (!(await confirmSheet({ title: `Revoke “${k.name}”?`, message: "That Agent Harness CLI connection will stop working.",
-                confirmLabel: "Revoke", destructive: true }))) return;
-              try { await api(`/keys/${k.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
-            } }, "Revoke"))))] : null,
-        pending.length ? h("ul", { class: "small" }, pending.map((p) => h("li", {},
-          `Pairing pending for ${p.name} at ${p.origin} · expires ${new Date(p.expires_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} `,
-          h("button", { class: "btn small bad", onclick: async () => {
-            try { await api(`/pairing-codes/${p.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
-          } }, "Cancel")))) : null,
-        pendingRunners.length ? h("ul", { class: "small" }, pendingRunners.map((p) => h("li", {},
-          `Mac pairing pending for ${p.name} (${p.runner}) Â· expires ${new Date(p.expires_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} `,
-          h("button", { class: "btn small bad", onclick: async () => {
-            try { await api(`/runner-pairing-codes/${p.id}`, { method: "DELETE" }); void load(); } catch (e) { toast(e.message); }
-          } }, "Cancel")))) : null,
-        form, h("div", { class: "row", style: "margin-top:10px" }, newBtn, pairBtn, macBtn));
-    } catch (e) { fill(body, h("p", { class: "note bad" }, e.message)); }
-  };
-  void load();
-  return h("div", { class: "card" }, body);
+  return h("div", { class: "card" },
+    h("p", { class: "muted small" }, "Point a coding tool at these URLs. Tap a box to copy. Any model name works; unknown names use the default."),
+    h("p", { class: "small", style: "margin-bottom:0" }, "OpenAI-compatible"),
+    copyBox(`${base}/v1`),
+    h("p", { class: "small", style: "margin-bottom:0" }, "Anthropic-compatible"),
+    copyBox(base),
+    adminPointer(h));
 }
 
 return { viewProfile, copyBox, githubConnectionCard, readAppIcon, applyAppIcon, applyTheme, applyTextSize };

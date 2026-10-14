@@ -929,13 +929,11 @@ def test_owner_accounts_ui_and_js_hide_member_content(tmp_path):
         session_js = client.get("/static/lib/session.mjs").text
         assert "const isMember = " in session_js
         actions_js = client.get("/static/pages/actions.mjs").text
-        assert "accountsCard" in actions_js
+        assert "accountsCard" not in actions_js  # the owner manages members in the Hub and the CLI (#545)
         assert "Household member" in client.get("/static/pages/profile.mjs").text
         assert "function ownerSurface()" in session_js
         assert 'if (isMember()) return "app";' in session_js
         assert 'agentHarnessWeb.url("/events", ownerSurface())' in client.get("/static/lib/stream.mjs").text
-        accounts_js = actions_js.split("async function accountsCard")[1].split("async function viewActions")[0]
-        assert "Delete" not in accounts_js
         create_member(client, ALICE, "Alice")
         rows = client.get(f"{PREFIX}/accounts", headers=H(OWNER)).json()
         assert rows[0]["display_name"] == "Alice"

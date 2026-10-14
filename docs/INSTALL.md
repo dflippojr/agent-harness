@@ -220,11 +220,11 @@ Agent Harness Server listens only on localhost. To reach Stables from other devi
    in the untracked local file (`login` plus an ISO `until`), restart, and remove the entry when done.
    Guests can browse sessions, jobs and images; they cannot start tasks, approve, mint keys, or use GPU /
    Remote Control / Review. Default stays "this login is the owner."
-   To add a household member, keep an explicit `allowed_logins` owner allowlist, then use **Actions → Accounts**
-   (or `POST /api/admin/v1/accounts`) with their exact Tailscale login. Members see only their own work through
+   To add a household member, keep an explicit `allowed_logins` owner allowlist, then use the Hub or
+   `harness accounts add <login> <display_name>` with their exact Tailscale login. Members see only their own work through
    `/api/v1`. Creating the first member while `allowed_logins` is empty fails closed.
-   To let members use their own private GitHub repositories, configure `github_member_auth` and turn it on under
-   **Actions → Accounts**; see [`member-github-auth.md`](member-github-auth.md).
+   To let members use their own private GitHub repositories, configure `github_member_auth` and turn it on in the Hub
+   or with `harness github-member-auth set true`; see [`member-github-auth.md`](member-github-auth.md).
    For a shared household device whose tailnet login is no single member, configure `google_signin` so members
    identify themselves with their linked Google account; see [`google-signin.md`](google-signin.md).
 5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Stables icon is
@@ -237,8 +237,9 @@ Phone notifications (approvals with Approve/Deny buttons, task finished) use a s
 ## Install Agent Harness for Mac
 
 After Tailscale and `public_url` are configured, add a `macbook` entry under `runners:` with an owner-side
-`token_file`, restart Agent Harness Server, then choose **Settings → Apps → Pair Agent Harness for Mac** in Agent
-Harness Web. Run the generated one-time command in Terminal on the Mac. It installs a venv, Agent Harness CLI and
+`token_file`, restart Agent Harness Server, then make a Mac pairing code on the daemon host (the Hub cannot mint owner credentials):
+`harness runner-pairing-codes create --runner macbook`. Run the one-time install command in Terminal on the Mac:
+`curl -fsSL <public_url>/mac-client/install.sh | bash -s -- --server <public_url> --code <code>`. It installs a venv, Agent Harness CLI and
 Agent Harness SDK, and the sandboxed Mac Runner as a launchd agent—without SSH, sudo, or copying tokens. See
 [`mac-client.md`](mac-client.md).
 
@@ -257,7 +258,7 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 | Claude Code Remote Control from the phone | `remote_control` | Claude Code trusted in that project folder (`docs/phase8b-results.md`) |
 | Memory library for agents | `memory_library` | clone URL in `harness.local.yaml` |
 | Scheduled jobs | `jobs` (on by default) | nothing |
-| Agent Harness Apps that start and drive sessions | always on | a token from Settings → Apps (`docs/app-api.md`) |
+| Agent Harness Apps that start and drive sessions | always on | a token from the Hub or `harness keys create` (`docs/app-api.md`) |
 | Nightly backups | `backup` (on by default) | nothing |
 
 ## Optional Real-ESRGAN upscaling

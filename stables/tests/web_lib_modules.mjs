@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 
 // ---- stub DOM (installed only after the imports below, to prove the modules need none at import time) ----
 const imports = {};
-for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "tabs", "update", "boot", "warm-model", "secret", "sheet"]) {
+for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "tabs", "update", "boot", "warm-model", "sheet"]) {
   imports[name] = await import(`../public/lib/${name}.mjs`);
 }
 const { h, fill, append, kids } = imports.dom;
@@ -440,7 +440,7 @@ let router;
   assert.ok(isProfileRoute(["settings"]) && !isProfileRoute(["jobs"]));
   assert.equal(blockedRedirect(["new"], "guest"), "#/profile");
   assert.equal(blockedRedirect(["jobs", "new"], "guest"), "#/jobs");
-  assert.equal(blockedRedirect(["profile", "apps"], "guest"), "#/profile");
+  assert.equal(blockedRedirect(["profile", "endpoint"], "guest"), "#/profile");
   assert.equal(blockedRedirect(["jobs"], "member"), "#/agents");
   assert.equal(blockedRedirect(["profile", "disk"], "member"), "#/profile");
   assert.equal(blockedRedirect(["profile", "account"], "member"), null);
@@ -572,7 +572,6 @@ let router;
   assert.equal(calls.length, 4, "guests never warm the model");
 }
 
-// ---- boot and secret are exercised by web_boot_splash.mjs and web_show_secret.mjs ----
+// ---- boot is exercised by web_boot_splash.mjs ----
 assert.equal(typeof imports.boot.startBoot, "function");
-assert.equal(typeof imports.secret.showSecretOnce, "function");
 console.log("ok: lib modules import under plain Node and behave on their own");

@@ -412,7 +412,7 @@ assertTitle("#/actions", "Actions");
 assertNewAction();
 if (!byId.bar.classList.contains("page")) throw new Error("Actions must use the shared page header");
 const gpuTabs = tabLabels(byId.app);
-if (gpuTabs.join("|") !== "Resources|Accounts|Claude Remote Control|Disk") {
+if (gpuTabs.join("|") !== "Resources|Claude Remote Control|Disk") {
   throw new Error(`tab order ${gpuTabs.join("|")}`);
 }
 const selected = (root) => {
@@ -465,10 +465,10 @@ const clickTab = (label) => {
   if (!found) throw new Error(`missing tab ${label}`);
   found.click();
 };
-clickTab("Accounts");
-if (loc.hash !== "#/actions/accounts") throw new Error(`accounts tab hash ${loc.hash}`);
+clickTab("Claude Remote Control");
+if (loc.hash !== "#/actions/remote-control") throw new Error(`remote control tab hash ${loc.hash}`);
 win.dispatchEvent({ type: "hashchange" });
-await waitFor(() => /No household members yet|New member/.test(byId.app.textContent), "accounts tab");
+await waitFor(() => /Claude Remote Control/.test(byId.app.textContent), "remote control tab");
 if (profileTab.attributes["aria-current"] !== "page") {
   throw new Error(`Profile tab not current on ${loc.hash}`);
 }
@@ -476,17 +476,13 @@ clickTab("Disk");
 win.dispatchEvent({ type: "hashchange" });
 await waitFor(() => loc.hash === "#/actions/disk" && /Tower|Measuring/.test(byId.app.textContent), "disk tab");
 
+// Household members moved to the Hub and the CLI (#545): old Accounts bookmarks land on Resources or the menu.
+await go("#/actions/accounts");
+await waitFor(() => loc.hash === "#/actions/resources", "accounts tab bookmark redirects to resources");
 await go("#/profile/accounts");
-await waitFor(() => loc.hash === "#/actions/accounts" && /New member/.test(byId.app.textContent), "accounts bookmark redirects");
+await waitFor(() => loc.hash === "#/profile", "legacy #/profile/accounts lands on the menu");
 await sleep(50);
-const accountTabs = tabLabels(byId.app);
-if (accountTabs.join("|") !== "Resources|Accounts|Claude Remote Control|Disk") {
-  throw new Error(`legacy #/profile/accounts duplicated tabs: ${accountTabs.join("|")}`);
-}
-const accountPanels = (byId.app.textContent.match(/New member/g) || []).length;
-if (accountPanels !== 1) {
-  throw new Error(`legacy #/profile/accounts rendered ${accountPanels} Accounts panels`);
-}
+if (/New member/.test(byId.app.textContent)) throw new Error("the Accounts panel is gone");
 await go("#/profile/remote-control");
 await waitFor(() => loc.hash === "#/actions/remote-control", "remote-control bookmark redirects");
 await go("#/settings/disk");

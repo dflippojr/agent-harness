@@ -42,17 +42,12 @@ const fetch = async (url, options = {}) => {
     return response({ emoji: profileEmoji, choices: ["🙂", "🤖"] });
   }
   if (p === "/health") return response({ protocols: { admin: { min: 1, max: 99 } }, update_hint: {} });
-  if (p === "/backends/claude" && options.method === "PUT") {
-    backendEffort = JSON.parse(options.body).effort;
-    return response({});
-  }
   if (p === "/backends") {
     const snapshot = [{ name: "claude", available: true, effort: backendEffort, today: {}, week: {} }];
     if (backendGate) await backendGate;
     return response(snapshot);
   }
-  if (["/keys", "/accounts", "/sessions", "/models"].includes(p)) return response([]);
-  if (p === "/config") return response({ revision: 1, settings: [] });
+  if (["/sessions", "/models"].includes(p)) return response([]);
   return response({});
 };
 Object.assign(win, { location: loc, navigator: {}, localStorage: storage(), sessionStorage: storage(),
@@ -75,7 +70,7 @@ await sleep();
 assert.ok(doc.body.classList.contains("split"));
 assert.match(byId.app.textContent, /No setting open/);
 assert.equal(pane().getAttribute("aria-label"), "Settings menu");
-assert.equal(rows().length, 16);
+assert.equal(rows().length, 12);
 assert.match(pane().textContent, /This device/);
 const menuRow = rows().find(n => n.dataset.splitKey === "appearance");
 await go("#/profile/appearance");
@@ -90,12 +85,10 @@ assert.match(menuRow.textContent, /Dark · Default text/, "menu value follows th
 const backendRow = rows().find(n => n.dataset.splitKey === "backends");
 assert.match(backendRow.textContent, /Claude · high/);
 await go("#/profile/backends");
-const effort = walk(byId.app, n => n.tagName === "SELECT" && n.options.some(o => o.value === "high"))[0];
-assert.ok(effort, byId.app.textContent);
-effort.value = "low";
-effort.dispatchEvent({ type: "change" });
-await sleep();
-assert.match(backendRow.textContent, /Claude · low/, "successful writes refresh the existing menu");
+// Default model and effort are daemon settings (#545): the page shows them and says where they are changed.
+assert.equal(walk(byId.app, n => n.tagName === "SELECT").length, 0, "no model or effort pickers");
+assert.match(byId.app.textContent, /Daemon administration is in the Hub or the\s*harness\s*CLI\./);
+backendEffort = "low";
 await go("#/settings");
 assert.equal(rows().find(n => n.dataset.splitKey === "backends"), backendRow);
 assert.match(backendRow.textContent, /Claude · low/, "returning to Settings refreshes server values");
@@ -114,9 +107,11 @@ assert.deepEqual(marked(), ["resources"]);
 assert.equal(profileTab.getAttribute("aria-current"), "page");
 assert.equal(rows().find(n => n.dataset.splitKey === "appearance"), menuRow);
 assert.ok(walk(byId.app, n => n.classList.contains("resources-tabs")).length);
+// Server settings moved to the Hub and the CLI (#545): an old bookmark lands on the menu.
 await go("#/profile/daemon");
-assert.deepEqual(marked(), ["daemon"]);
-assert.ok(walk(byId.app, n => n.classList.contains("daemon-settings")).length);
+assert.equal(loc.hash, "#/profile");
+assert.ok(!rows().some(n => ["daemon", "accounts", "skills", "apps"].includes(n.dataset.splitKey)));
+assert.ok(!fetched.some(p => ["/config", "/accounts", "/skills", "/keys"].includes(p)), "Settings reads no daemon administration");
 await go("#/profile/connection");
 const input = walk(byId.app, n => n.tagName === "INPUT")[0];
 input.value = "https://unsaved.example";
@@ -179,12 +174,12 @@ assert.equal(recoveryInput.value, "https://repair.example");
 offline = false;
 win.dispatchEvent({ type: "online" });
 await sleep();
-assert.equal(rows().length, 16, "owner actions return after uncached offline recovery");
+assert.equal(rows().length, 12, "owner actions return after uncached offline recovery");
 assert.deepEqual(marked(), ["connection"]);
 role = "member"; fetched.length = 0;
 await go("#/profile/appearance");
-assert.ok(!rows().some(n => ["resources", "apps", "backends"].includes(n.dataset.splitKey)));
-assert.ok(!fetched.some(p => ["/resources", "/keys", "/accounts", "/config"].includes(p)), "member menu reads no owner data");
+assert.ok(!rows().some(n => ["resources", "backends"].includes(n.dataset.splitKey)));
+assert.ok(!fetched.some(p => ["/resources", "/backends"].includes(p)), "member menu reads no owner data");
 await go("#/actions/resources");
 assert.equal(loc.hash, "#/agents");
 role = "guest";

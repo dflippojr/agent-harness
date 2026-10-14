@@ -990,8 +990,8 @@ def test_member_gets_403_on_every_skills_route(tmp_path):
                 r = client.request(method, prefix + path, headers=ah, json=body)
                 assert r.status_code == 403, (method, prefix + path, r.status_code, r.text)
                 assert "member" in r.json()["detail"]
-        hidden = client.get("/static/pages/profile.mjs").text.split("MEMBER_HIDDEN_PAGES")[1].split(";")[0]
-        assert "skills" in hidden
+        # Stables has no Skills page for anyone (#545): skills are managed in the Hub and the CLI.
+        assert 'skills: "Skills"' not in client.get("/static/pages/profile.mjs").text
 
 
 def test_reviewer_payload_has_no_transcript_or_secrets():

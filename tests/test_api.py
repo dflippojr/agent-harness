@@ -231,23 +231,22 @@ def test_web_app_and_guard(tmp_path):
         assert 'duration.disabled = isGuest() || !g.manual' in actions_js
         assert "function viewActions" in actions_js
         assert 'go(`#/actions/${parts[1]}`, true)' in router_js
-        assert actions_js.index('["resources", "Resources"]') < actions_js.index('["accounts", "Accounts"]')
-        assert actions_js.index('["accounts", "Accounts"]') < actions_js.index('["remote-control", "Claude Remote Control"]')
+        assert actions_js.index('["resources", "Resources"]') < actions_js.index('["remote-control", "Claude Remote Control"]')
+        assert '["accounts", "Accounts"]' not in actions_js  # household members are in the Hub and the CLI (#545)
         assert actions_js.index('["remote-control", "Claude Remote Control"]') < actions_js.index('["disk", "Disk"]')
         assert "member && (tab === \"jobs\" || tab === \"images\")" in tabs_js
         assert 'href: "#/profile/remote-control"' not in js
         assert 'href: "#/profile/disk"' not in js
         # Actions are the owner-only rows of Settings → Server (#512).
         assert "Object.hasOwn(ACTION_PAGES, id) ? isOwner()" in profile_js
-        assert '["Server", ["resources", "daemon", "accounts", "remote-control", "disk"]]' in profile_js
+        assert '["Server", ["resources", "remote-control", "disk"]]' in profile_js
         view_profile_js = profile_js.split("async function viewProfile")[1].split("function connectionCard")[0]
         assert "gpuActionRow()" not in view_profile_js
         assert "Claude Remote Control" not in view_profile_js
         assert '"smart-approvals": "Smart approvals"' in profile_js
         assert "function smartApprovalsCard()" in profile_js
-        assert 'skills: "Skills"' in profile_js
+        assert 'skills: "Skills"' not in profile_js and "Install hash" not in profile_js  # skills: Hub and CLI (#545)
         assert 'api("/skills/enabled")' in new_task_js
-        assert "Install hash" in profile_js
         assert "confirmGpuQueue" in js
         assert "gpu.manual" in warm_js
         assert "picker.hidden = !picker.hidden" not in js

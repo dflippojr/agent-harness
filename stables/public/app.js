@@ -41,7 +41,6 @@ import { mountImages } from "./pages/images.mjs";
 import { mountJobs } from "./pages/jobs.mjs";
 import { mountActions } from "./pages/actions.mjs";
 import { mountSessionInfo } from "./pages/session-info.mjs";
-import { mountDaemonSettings } from "./pages/daemon-settings.mjs";
 import { mountProfile } from "./pages/profile.mjs";
 import { mountNewTask } from "./pages/new-task.mjs";
 import { mountSessions } from "./pages/sessions.mjs";
@@ -82,9 +81,8 @@ const build = { WEB_BUILD_ID, WEB_PROTOCOL };
 const { checkCompatibility, reloadAndUpdate } = mountUpdate({ els, agentHarnessWeb, session, chrome, tabs, route, closeSplit, build, browser });
 
 // ---------- pages ----------
-const { daemonSettingsCard } = mountDaemonSettings({ h, fill, append, api, toast, isGuest, location });
 const { viewProfile, copyBox, githubConnectionCard, readAppIcon, applyAppIcon, applyTheme, applyTextSize } = mountProfile({ $app, $conn, $profileIcon,
-  layoutBar, setHeader, h, fill, append, api, getWebAuth: session.getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route, daemonSettingsCard,
+  layoutBar, setHeader, h, fill, append, api, getWebAuth: session.getWebAuth, startGoogle, agentHarnessWeb, isGuest, isMember, isOwner, toast, go, route,
   build, reloadAndUpdate, onConnState, browser });
 applyTheme();
 applyTextSize();
@@ -103,7 +101,7 @@ const { viewJobs, viewJob } = mountJobs({ $app, h, fill, append, api, setHeader,
   confirmGpuQueue, badge, jobStatusBadge, location, onLeave, onDaemonChange: stream.onDaemonChange, browser });
 const { viewList } = mountSessions({ $app, h, fill, append, api, ownerSurface, setHeader, showListAction, onLeave, isMember, isGuest, badge, reviewBadge, REVIEW_LABEL,
   jobStatusBadge, onDaemonChange: stream.onDaemonChange, onDaemonState: stream.onDaemonState, browser });
-const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, isMember, onLeave, copyBox, progressBar });
+const { viewActions } = mountActions({ $app, h, fill, append, api, setHeader, toast, go, isGuest, onLeave, progressBar });
 
 // Keyboard shortcuts (#571): `?` lists them; none fires while focus is in a field.
 mountKeys({ browser, go, role: () => session.getMe()?.role });

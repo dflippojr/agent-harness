@@ -18,13 +18,13 @@ export const normalizeHash = (hash) => {
 };
 
 export const isProfileRoute = (parts) => parts[0] === "profile" || parts[0] === "settings";
-const MEMBER_HIDDEN_PROFILE = new Set(["notifications", "apps", "endpoint", "memory", "remote-control", "backends", "disk", "accounts"]);
+const MEMBER_HIDDEN_PROFILE = new Set(["notifications", "endpoint", "memory", "remote-control", "backends", "disk"]);
 
 // Where a guest or member who asked for a page they may not see should land instead (null = allowed).
 export function blockedRedirect(parts, role) {
   const guestBlocked = role === "guest" && (
     parts[0] === "new" || (parts[0] === "jobs" && parts[1] === "new")
-    || (isProfileRoute(parts) && ["notifications", "apps", "endpoint"].includes(parts[1])));
+    || (isProfileRoute(parts) && ["notifications", "endpoint"].includes(parts[1])));
   if (guestBlocked) return parts[0] === "jobs" ? "#/jobs" : "#/profile";
   const memberBlocked = role === "member" && (
     parts[0] === "jobs" || parts[0] === "images"
@@ -78,7 +78,7 @@ export function mountRouter({ els, session, chrome, tabs, signin, stream, views,
 
   async function routeProfile(v, parts) {
     // Bookmarks from when these lived under Profile. Non-owners never land on Actions.
-    if (!["accounts", "disk", "remote-control"].includes(parts[1])) {
+    if (!["disk", "remote-control"].includes(parts[1])) {
       await v.viewProfile(parts[1], parts[2]);
     } else if (!isOwner()) go("#/profile", true);
     else go(`#/actions/${parts[1]}`, true);
