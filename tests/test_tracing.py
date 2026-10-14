@@ -268,7 +268,7 @@ def test_spans_outside_a_session_are_not_recorded():
     assert exporter.get_finished_spans() == ()
 
 
-def test_scripted_session_produces_one_covering_trace(tmp_path):
+def test_scripted_session_produces_one_covering_trace(tmp_path, work_clock):
     cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "path": "secret/*", "action": "ask", "reason": "x"}])
     cfg.elide_at = 0       # compact before every model call
     cfg.summarize_at = 99
@@ -281,29 +281,32 @@ def test_scripted_session_produces_one_covering_trace(tmp_path):
     ])
 
     async def slow_chat(*args, **kwargs):
-        await asyncio.sleep(0.15)  # model time dominates the bookkeeping between spans
+        work_clock.advance()  # model time, which the chat span must cover
+        await asyncio.sleep(0)
         return await base(*args, **kwargs)
+
+    async def until(condition):
+        deadline = asyncio.get_running_loop().time() + scaled(30)
+        while not condition():
+            assert asyncio.get_running_loop().time() < deadline, "timed out waiting for the session"
+            await asyncio.sleep(0.005)
 
     async def body():
         m, exporter = _traced_manager(cfg, slow_chat)
         await m.start()
         await m.scheduler.acquire("blocker")  # another session holds the GPU: a real gpu_slot_wait
-
-        async def free_gpu():
-            await asyncio.sleep(0.3)
-            m.scheduler.release("blocker")
-        releaser = asyncio.create_task(free_gpu())
         s = m.create("write the secret", project="guarded")
         assert len(m.summary(s)["trace_id"]) == 32
+        await until(lambda: s["id"] in m.scheduler.positions())  # queued behind the blocker
+        work_clock.advance()  # time spent waiting for the slot
+        m.scheduler.release("blocker")
         s = await wait_status(m, s["id"], "waiting_approval")
-        await asyncio.sleep(0.3)
+        work_clock.advance()  # time parked on the approval
         approval = m.db.pending_approvals(s["id"])[0]
         m.decide(s["id"], approval["id"], True)
         await wait_status(m, s["id"], "done")
-        await releaser
-        await asyncio.sleep(0.3)  # idle between runs
+        work_clock.advance()  # idle between runs
         await m.send(s["id"], "and again")
-        await asyncio.sleep(0.05)
         s = await wait_status(m, s["id"], "done")
         trace_id = m.summary(s)["trace_id"]
         await m.stop()
