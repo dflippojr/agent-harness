@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -123,22 +122,6 @@ def test_new_run_carries_state():
     assert run["notes"] == "n"
     assert run["state"] == {"goal": "g"}
     assert "pending_round_reset" not in run
-
-
-def test_config_yaml_loads_reset_keys(tmp_path):
-    from harness import config
-    cfg_dir = tmp_path / "cfg"
-    shutil.copytree(config.ROOT / "config", cfg_dir)
-    loaded = config.load(cfg_dir, tmp_path / "data")
-    assert loaded.reset_at == 0.60
-    assert loaded.state_max_chars == 8000
-    text = (cfg_dir / "harness.yaml").read_text(encoding="utf-8")
-    (cfg_dir / "harness.yaml").write_text(
-        text.replace("reset_at: 0.60", "reset_at: no").replace("state_max_chars: 8000", "state_max_chars: 12"),
-        encoding="utf-8")
-    loaded = config.load(cfg_dir, tmp_path / "data")
-    assert loaded.reset_at == 0.60
-    assert loaded.state_max_chars == 8000
 
 
 def test_update_notes_alias_preserves_other_fields(tmp_path):

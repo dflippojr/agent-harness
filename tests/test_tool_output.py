@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import shutil
+
+import pytest
 
 from harness import config
 from harness.config import (Project, ToolOutputConfig, VerifyCheck, _tool_output, _verify_checks,
@@ -87,18 +90,28 @@ def test_invalid_project_override_falls_back_to_global_not_package_default(tmp_p
     assert resolved.run_shell_chars == 50_000 and resolved.read_file_lines == 7
 
 
-def test_tool_output_loaded_from_yaml(tmp_path):
+@pytest.mark.parametrize("key, value, read, expected", [
+    ("mask_min_chars", 5000, lambda c: c.mask_min_chars, 5000),
+    ("mask_min_chars", 0, lambda c: c.mask_min_chars, None),
+    ("mask_min_chars", "many", lambda c: c.mask_min_chars, None),
+    ("read_file_lines", "nope", lambda c: c.tool_output.read_file_lines, None),
+    ("search_matches", 12, lambda c: c.tool_output.search_matches, 12),
+    ("reset_at", "no", lambda c: c.reset_at, None),
+    ("state_max_chars", 12, lambda c: c.state_max_chars, None),
+    (None, None, lambda c: c.tool_output, config.ToolOutputConfig()),
+], ids=["mask-set", "mask-zero", "mask-text", "read-lines-text", "search-set", "reset-at-text", "state-chars-low",
+        "tool-output-defaults"])
+def test_harness_yaml_keys_reach_the_loaded_config(tmp_path, key, value, read, expected):
+    """A valid value reaches the loaded config; an invalid one falls back to the shipped value (`expected` None)."""
     cfg_dir = tmp_path / "cfg"
     shutil.copytree(config.ROOT / "config", cfg_dir)
-    loaded = config.load(cfg_dir, tmp_path / "data")
-    assert loaded.tool_output == ToolOutputConfig()
-    text = (cfg_dir / "harness.yaml").read_text(encoding="utf-8")
-    (cfg_dir / "harness.yaml").write_text(
-        text.replace("read_file_lines: 400", "read_file_lines: nope")
-            .replace("search_matches: 100", "search_matches: 12"), encoding="utf-8")
-    again = config.load(cfg_dir, tmp_path / "data")
-    assert again.tool_output.read_file_lines == 400
-    assert again.tool_output.search_matches == 12
+    shipped = read(config.load(cfg_dir, tmp_path / "data"))
+    if key is not None:
+        path = cfg_dir / "harness.yaml"
+        text, found = re.subn(rf"^(\s*{key}:).*$", rf"\g<1> {value}", path.read_text(encoding="utf-8"), flags=re.M)
+        assert found == 1
+        path.write_text(text, encoding="utf-8")
+    assert read(config.load(cfg_dir, tmp_path / "data")) == (shipped if expected is None else expected)
 
 
 def test_read_file_default_page_is_400_and_max_lines_clamps(tmp_path):
