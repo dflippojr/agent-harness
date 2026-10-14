@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from harness.config import BackendConfig, ModelConfig, SandboxConfig
 from harness.manager import HarnessError, Manager
 from test_daemon import events, make_cfg, wait_status
 from test_phase8 import wait_cli_gone
+from waits import scaled
 
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode_1.18.30"
 COMMAND = ["opencode", "run", "--format", "json", "--auto", "-m", "llama/{model}"]
@@ -423,10 +425,15 @@ def test_no_opencode_turn_starts_while_the_gpu_guard_holds(tmp_path):
         guard = FakeGuard(active=True)
         m.runner.guard = guard
         sid = m.create("x", backend="opencode")["id"]
-        await asyncio.sleep(0.3)
+        # The run meets the guard only after its route check (a thread hop) and shows `running` until then, so wait for
+        # the hold itself, not a fixed time (#684). Then a few guard polls pass with nothing started.
+        deadline = time.monotonic() + scaled(10)
+        while not events(m, sid, "gpu_paused") and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        assert events(m, sid, "gpu_paused")
+        await asyncio.sleep(m.runner.gpu_poll_seconds * 5)
         assert not state.exists()  # no OpenCode process yet
         assert m.db.get_session(sid)["status"] == "queued"
-        assert events(m, sid, "gpu_paused")
         guard.active = False
         m.runner.gpu_resumed(1)
         s = await wait_status(m, sid, "done")
