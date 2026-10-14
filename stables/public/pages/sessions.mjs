@@ -207,7 +207,13 @@ async function viewList(pane = null) {
     }
   };
   let searchTimer = null;
-  search.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 250); });
+  // The query is remembered as it is typed, not when the debounced search runs: a list that re-mounts inside the
+  // debounce (the window crossing the split breakpoint moves it between <main> and the pane) keeps it and searches it.
+  search.addEventListener("input", () => {
+    if (!gone) searchQuery = search.value;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 250);
+  });
   if (searchQuery.trim()) void runSearch();
 
   let listRun = 0;  // only the latest load paints: a machine switch can start one while another is on its way
