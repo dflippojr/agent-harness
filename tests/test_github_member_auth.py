@@ -16,7 +16,6 @@ import pytest
 
 from harness import github_auth as ga
 from harness.admin import PREFIX
-from harness.clone import isolated_clone_env
 from harness.github_auth import GitHubAuthError, canonical_github_url
 
 from github_fakes import FakeGitHub, wait_for
@@ -184,16 +183,6 @@ def test_broker_env_is_minimal_and_namespaced(tmp_path, fake):
         close(client)
 
 
-def test_public_member_clone_env_unchanged_when_feature_enabled(tmp_path, fake):
-    client, m, ids = setup(tmp_path, fake)
-    try:
-        env = isolated_clone_env()
-        assert "GCM_NAMESPACE" not in env and env["GIT_CONFIG_VALUE_0"] == "" and env["GCM_INTERACTIVE"] == "Never"
-        assert env["GIT_CONFIG_KEY_0"] == "credential.helper"
-    finally:
-        close(client)
-
-
 # --- preflight -------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("platform,store,ok", [
@@ -213,11 +202,14 @@ def test_store_adapters(tmp_path, fake, monkeypatch, platform, store, ok):
         assert settings["GCM_CREDENTIAL_STORE"] == store
         if store == "dpapi":
             assert "u-alice" in settings["GCM_DPAPI_STORE_PATH"]
-        assert ga.run_preflight(m.cfg).ok
     else:
         with pytest.raises(GitHubAuthError) as e:
             ga.store_settings(m.cfg, "u-alice")
         assert e.value.code == "store_unavailable"
+    # The preflight runs a real fake-GCM subprocess, so one accepted and one refused store stand for the rest.
+    if (platform, store) == ("win32", "wincredman"):
+        assert ga.run_preflight(m.cfg).ok
+    elif (platform, store) == ("linux", "gpg"):
         assert ga.run_preflight(m.cfg).error == "store_unavailable"
 
 
@@ -850,32 +842,6 @@ def test_unverifiable_store_check_erases_the_possibly_stored_credential(tmp_path
         close(client)
 
 
-def test_failed_erase_stays_owed_and_is_retried_at_startup(tmp_path, fake, monkeypatch):
-    client, m, ids = setup(tmp_path, fake)
-    try:
-        a = ids[ALICE]
-        connect(client, fake, ALICE, a)
-        real_erase = ga.erase
-
-        def broken_erase(cfg, user_id, attempts=5):
-            raise GitHubAuthError("erase_failed", 500)
-
-        monkeypatch.setattr(ga, "erase", broken_erase)
-        r = client.delete(ME, headers=H(ALICE))
-        assert r.status_code >= 400
-        row = m.db.get_github_connection(a)
-        assert row["status"] == "disconnected" and row["last_error"] == "erase_failed"
-        assert fake.namespaces() == {f"agent-harness/v1/{a}"}  # the credential really is still there
-        with pytest.raises(GitHubAuthError):
-            m.github_auth.require_connected(a)  # but credentialed Git fails closed
-        monkeypatch.setattr(ga, "erase", real_erase)
-        m.github_auth.reconcile()  # what startup runs
-        assert fake.namespaces() == set()
-        assert m.db.get_github_connection(a)["last_error"] == ""
-    finally:
-        close(client)
-
-
 def test_startup_retries_owed_erase_even_with_the_feature_disabled(tmp_path, fake, monkeypatch):
     client, m, ids = setup(tmp_path, fake)
     a = ids[ALICE]
@@ -887,7 +853,11 @@ def test_startup_retries_owed_erase_even_with_the_feature_disabled(tmp_path, fak
 
     monkeypatch.setattr(ga, "erase", broken_erase)
     assert client.delete(ME, headers=H(ALICE)).status_code >= 400
-    assert m.db.get_github_connection(a)["last_error"] == "erase_failed"
+    row = m.db.get_github_connection(a)
+    assert row["status"] == "disconnected" and row["last_error"] == "erase_failed"
+    assert fake.namespaces() == {f"agent-harness/v1/{a}"}  # the credential really is still there
+    with pytest.raises(GitHubAuthError):
+        m.github_auth.require_connected(a)  # but credentialed Git fails closed
     # the owner turns member sign-in off before the next restart
     client.put(f"{PREFIX}/github-member-auth", json={"enabled": False}, headers=H(OWNER))
     close(client)
@@ -910,19 +880,28 @@ def test_startup_retries_owed_erase_even_with_the_feature_disabled(tmp_path, fak
 
 
 def test_failed_erase_after_a_rejected_credential_is_owed(tmp_path, fake, monkeypatch):
+    from harness.storage import repos_dir
     client, m, ids = setup(tmp_path, fake)
     try:
         a = ids[ALICE]
+        fake.add_repo("alice-gh/secret", allowed=["alice"])
         connect(client, fake, ALICE, a)
+        assert _project(client, ALICE, "secret", "https://github.com/alice-gh/secret").status_code == 201
+        row = m.db.get_member_project(a, "secret")
+        managed = Path(row["repo"])
+        _git(managed, "checkout", "-q", "-b", "agent/s1")
+        _git(managed, "-c", "user.name=Agent", "-c", "user.email=a@x", "commit", "--allow-empty", "-qm", "work")
+        _git(managed, "checkout", "-q", "main")
         real_erase = ga.erase
 
         def broken_erase(cfg, user_id, attempts=5):
             raise GitHubAuthError("erase_failed", 500)
 
         monkeypatch.setattr(ga, "erase", broken_erase)
-        raw = "remote: Invalid username or token.\nfatal: Authentication failed for 'https://github.com/o/r.git/'"
-        assert ga.classify_git_failure(raw) == "reconnect_required"
-        assert m.github_auth._failed(a, raw).code == "reconnect_required"
+        fake.revoke_all()  # GitHub rejects the credential, and removing it from the store fails too
+        with pytest.raises(GitHubAuthError) as e:
+            m.github_auth.push(a, row["source_url"], managed, repos_dir(m.cfg, a), "agent/s1")
+        assert e.value.code == "reconnect_required"
         row = m.db.get_github_connection(a)
         assert row["status"] == "reconnect_required" and row["last_error"] == "erase_failed"
         assert m.github_auth.owes_erase()

@@ -79,11 +79,17 @@ def test_device_search_queue_and_global_events_require_read_all(tmp_path, monkey
         asyncio.run(consume())
 
 
-@pytest.mark.parametrize("kind,restore", [("owner", False), ("app", False), ("device", False),
-                                         ("app", True), ("device", True)])
-@pytest.mark.parametrize("surface,tick", [(surface, tick) for surface in ("global", "session", "ticket")
-                                         for tick in ("event", "keepalive", "replay")
-                                         if (surface, tick) != ("global", "replay")])
+# The full surface x tick product for an app key; owner and device keys share the stream code, so each keeps one
+# live-stream case and one replay case; a restored key is checked once per surface.
+REVOCATION_CASES = (
+    [("app", False, surface, tick) for surface in ("global", "session", "ticket")
+     for tick in ("event", "keepalive", "replay") if (surface, tick) != ("global", "replay")]
+    + [(kind, False, surface, tick) for kind in ("owner", "device")
+       for surface, tick in (("global", "event"), ("ticket", "replay"))]
+    + [("app", True, "global", "event"), ("device", True, "session", "event"), ("app", True, "ticket", "event")])
+
+
+@pytest.mark.parametrize("kind,restore,surface,tick", REVOCATION_CASES)
 def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
         tmp_path, monkeypatch, kind, restore, surface, tick):
     client, m = make_client(tmp_path)

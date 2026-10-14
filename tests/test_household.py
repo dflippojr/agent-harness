@@ -327,7 +327,8 @@ def test_member_clone_allows_only_public_https(tmp_path):
     env = isolated_clone_env()
     assert env["GIT_TERMINAL_PROMPT"] == "0"
     assert env["GIT_CONFIG_NOSYSTEM"] == "1"
-    assert env["credential.helper"] if False else env["GIT_CONFIG_VALUE_0"] == ""
+    assert env["GIT_CONFIG_KEY_0"] == "credential.helper" and env["GIT_CONFIG_VALUE_0"] == ""
+    assert "GCM_NAMESPACE" not in env and env["GCM_INTERACTIVE"] == "Never"  # whatever the GitHub feature is set to
 
     client, m = household(tmp_path)
     with client:
