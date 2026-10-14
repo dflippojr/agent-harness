@@ -969,32 +969,6 @@ def test_app_session_with_context_and_app_tool(tmp_path):
         assert any(e["type"] == "app_context" for e in m.db.events(sid))
 
 
-def test_app_scopes_and_isolation(tmp_path):
-    client, m = app_client(tmp_path, [Completion(content="hi")])
-    with client:
-        a = client.post("/keys", json={"name": "a", "kind": "app", "scopes": ["sessions"]}).json()["key"]
-        b = client.post("/keys", json={"name": "b", "kind": "app", "scopes": ["sessions"]}).json()["key"]
-        device = client.post("/keys", json={"name": "zed"}).json()["key"]  # inference only
-        reader = client.post("/keys", json={"name": "dash", "kind": "app", "scopes": ["sessions:all"]}).json()["key"]
-        assert client.post("/keys", json={"name": "x", "scopes": ["root"]}).status_code == 400
-        H = lambda k: {"Authorization": f"Bearer {k}"}  # noqa: E731
-
-        sid = client.post("/api/v1/sessions", headers=H(a), json={"prompt": "hello"}).json()["id"]
-        own = client.post("/sessions", json={"prompt": "the user's own task"}).json()
-        assert client.post("/api/v1/sessions", headers=H(device), json={"prompt": "x"}).status_code == 403
-        assert client.get(f"/api/v1/sessions/{sid}", headers=H(b)).status_code == 404
-        assert client.get(f"/api/v1/sessions/{own['id']}", headers=H(a)).status_code == 404
-        assert [s["id"] for s in client.get("/api/v1/sessions", headers=H(a)).json()] == [sid]
-        assert client.get(f"/api/v1/sessions/{own['id']}", headers=H(reader)).status_code == 200
-        assert client.post("/api/v1/sessions", headers=H(reader), json={"prompt": "x"}).status_code == 403
-        assert client.post(f"/api/v1/sessions/{sid}/approvals/pending", headers=H(a),
-                           json={"decision": "approve"}).status_code == 403
-        assert client.get("/api/v1/sessions", headers={"Authorization": "Bearer nope"}).status_code == 401
-        # app tokens without the inference scope can't use the model endpoint
-        m.cfg.endpoint.enabled = True
-        assert client.post("/v1/chat/completions", headers=H(a), json={"messages": []}).status_code == 401
-
-
 def test_sessions_all_read_vs_mutation_matrix(tmp_path):
     client, m = app_client(tmp_path, [Completion(content="ok")])
     with client:
@@ -1009,7 +983,14 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
                                           "scopes": ["sessions", "sessions:all", "approvals"]}).json()["key"]
         owner = client.post("/keys", json={"name": "control-center", "kind": "owner",
                                            "scopes": ["admin"]}).json()["key"]
+        device = client.post("/keys", json={"name": "zed"}).json()["key"]  # inference only
         H = lambda k: {"Authorization": f"Bearer {k}"}  # noqa: E731
+
+        assert client.post("/keys", json={"name": "x", "scopes": ["root"]}).status_code == 400
+        assert client.post("/api/v1/sessions", headers=H(device), json={"prompt": "x"}).status_code == 403
+        assert client.get("/api/v1/sessions", headers={"Authorization": "Bearer nope"}).status_code == 401
+        m.cfg.endpoint.enabled = True  # app tokens without the inference scope can't use the model endpoint
+        assert client.post("/v1/chat/completions", headers=H(a), json={"messages": []}).status_code == 401
 
         owner_sid = client.post("/sessions", json={"prompt": "owner task"}).json()["id"]
         a_sid = client.post("/api/v1/sessions", headers=H(a), json={"prompt": "a task"}).json()["id"]

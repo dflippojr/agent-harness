@@ -6,6 +6,8 @@ import asyncio
 import json
 import time
 
+import pytest
+
 from harness.config import GpuGuardConfig
 from harness_modules.local_model.service import CLEAR, MANUAL_HOLD_FILE, PAUSED, PAUSING, RESUMING, GpuGuard, find_games, hw_transcodes
 from harness.llm import Completion
@@ -316,12 +318,13 @@ def test_gpu_hold_api_accepts_optional_duration(tmp_path):
         assert resume_calls[-1] is True
 
 
-def test_manual_hold_persists_across_daemon_restart_indefinite(tmp_path):
+@pytest.mark.parametrize("duration", [None, 1800], ids=["indefinite", "timed"])
+def test_manual_hold_persists_across_daemon_restart(tmp_path, duration):
     async def body():
         detect, control, scheduler = FakeDetect(), FakeControl(), GpuScheduler()
         guard = GpuGuard(GpuGuardConfig(enabled=True, resume_after_seconds=999), None, scheduler, lambda: False,
                          detect=detect, control=control, data_dir=tmp_path)
-        guard.pause()
+        guard.pause(duration_seconds=duration)
         await guard.check()
         assert guard.state == PAUSED
         assert guard.manual
@@ -333,37 +336,19 @@ def test_manual_hold_persists_across_daemon_restart_indefinite(tmp_path):
         guard2.start()
         try:
             assert guard2.manual
-            assert guard2.manual_until is None
-            await asyncio.sleep(0.05)
-            assert guard2.state == PAUSED
-            assert scheduler2.paused
-            assert control.starts == 0
-        finally:
-            await guard2.stop()
-    asyncio.run(body())
-
-
-def test_manual_hold_persists_across_daemon_restart_timed(tmp_path):
-    async def body():
-        detect, control, scheduler = FakeDetect(), FakeControl(), GpuScheduler()
-        guard = GpuGuard(GpuGuardConfig(enabled=True, resume_after_seconds=999), None, scheduler, lambda: False,
-                         detect=detect, control=control, data_dir=tmp_path)
-        guard.pause(duration_seconds=1800)
-        await guard.check()
-        assert control.flag
-
-        scheduler2 = GpuScheduler()
-        guard2 = GpuGuard(GpuGuardConfig(enabled=True, resume_after_seconds=999), None, scheduler2, lambda: False,
-                          detect=FakeDetect(), control=control, data_dir=tmp_path)
-        guard2.start()
-        try:
-            assert guard2.manual
-            assert guard2.manual_duration_seconds == 1800
-            assert guard2.manual_until is not None
-            assert 0 < guard2.manual_until - time.time() <= 1800
-            status = guard2.status()
-            assert status["manual"]
-            assert 0 < status["manual_remaining_seconds"] <= 1800
+            if duration is None:
+                assert guard2.manual_until is None
+                await asyncio.sleep(0.05)
+                assert guard2.state == PAUSED
+                assert scheduler2.paused
+                assert control.starts == 0
+            else:
+                assert guard2.manual_duration_seconds == duration
+                assert guard2.manual_until is not None
+                assert 0 < guard2.manual_until - time.time() <= duration
+                status = guard2.status()
+                assert status["manual"]
+                assert 0 < status["manual_remaining_seconds"] <= duration
         finally:
             await guard2.stop()
     asyncio.run(body())
@@ -371,13 +356,12 @@ def test_manual_hold_persists_across_daemon_restart_timed(tmp_path):
 
 def test_expired_timed_hold_resumes_normally_on_restart(tmp_path):
     async def body():
-        detect, control, scheduler = FakeDetect(), FakeControl(), GpuScheduler()
-        guard = GpuGuard(GpuGuardConfig(enabled=True, resume_after_seconds=999), None, scheduler, lambda: False,
-                         detect=detect, control=control, data_dir=tmp_path)
-        guard.pause(duration_seconds=1)
-        await guard.check()
-        assert control.flag
-        await asyncio.sleep(1.1)  # the hold expires while the daemon is "down"
+        control = FakeControl()
+        control.flag = True  # the pause flag the earlier daemon left behind
+        # the hold expired while the daemon was "down"
+        (tmp_path / MANUAL_HOLD_FILE).write_text(
+            json.dumps({"manual": True, "manual_until": time.time() - 1, "manual_duration_seconds": 1}),
+            encoding="utf-8")
 
         scheduler2 = GpuScheduler()
         guard2 = GpuGuard(GpuGuardConfig(enabled=True, resume_after_seconds=999, poll_seconds=0.05), None,

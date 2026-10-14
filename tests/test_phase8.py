@@ -618,25 +618,23 @@ def test_claude_cli_allow_maps_events_usage_and_limits(tmp_path):
     asyncio.run(body())
 
 
-def test_claude_cli_ask_approve_and_deny(tmp_path):
-    async def one(root, approve, note=""):
-        m, _, state = _claude_manager(root, "ask")
+def test_claude_cli_ask_and_deny(tmp_path):
+    """Approving is covered by test_claude_cli_restart_resumes_and_keeps_pending_approval."""
+    async def body():
+        m, _, state = _claude_manager(tmp_path, "ask")
         await m.start()
         sid = m.create("run it", backend="claude")["id"]
         await wait_status(m, sid, "waiting_approval")
         pending = m.db.pending_approvals(sid)
         assert len(pending) == 1
         assert pending[0]["tool"] == "Bash"
-        m.decide(sid, pending[0]["id"], approve=approve, note=note)
+        m.decide(sid, pending[0]["id"], approve=False, note="not today")
         s = await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
-        assert s["answer"] == ("allow" if approve else "deny")
-        if not approve:
-            assert note in state.read_text(encoding="utf-8")
+        assert s["answer"] == "deny"
+        assert "not today" in state.read_text(encoding="utf-8")
         await m.stop()
-
-    asyncio.run(one(tmp_path / "approved", True))
-    asyncio.run(one(tmp_path / "denied", False, "not today"))
+    asyncio.run(body())
 
 
 def test_claude_cli_inbox_message(tmp_path):
