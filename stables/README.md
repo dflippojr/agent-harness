@@ -15,4 +15,8 @@ and that the Server names this directory in one place.
 `jsconfig` and compile-only type tests over `public/` (see [`types/README.md`](types/README.md)). Nothing in it is
 served.
 
-This directory is moving to its own repository (#334). Until then its Node test harnesses live in `tests/web_*.mjs`.
+`tests/` holds the Node harnesses: each one boots real modules from `public/` against a stub DOM and exits non-zero on
+a failed assertion. Run them all with `npm --prefix stables test` (no install needed), or a subset with
+`node stables/tests/run.mjs <name-filter>`. The pytest suite in this repository also runs each harness.
+
+This directory is moving to its own repository (#334).

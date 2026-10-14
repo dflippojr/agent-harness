@@ -21,6 +21,10 @@ Stables is a client of the documented API, not part of the Server (#334 stage (d
   directory in `HARNESS_STABLES_DIR` when that is set, else from the checkout's `stables/public`. With neither, it runs
   the API alone: `/`, `/static/...` and the shell files return 404, and nothing else changes.
 
+Stables carries its own checks, so they can move with it: the API contract types and type-check in `stables/types`,
+and the Node harnesses in `stables/tests`, which run without pytest (`npm --prefix stables test`, or
+`node stables/tests/run.mjs <name>` for a subset). This repository's pytest suite runs each harness too.
+
 Stables still offers daemon-administration settings; moving them to the Hub and the CLI is #545. A later stage moves
 `stables/` to its own repository.
 

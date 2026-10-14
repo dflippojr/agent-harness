@@ -5,36 +5,27 @@ from pathlib import Path
 
 import pytest
 
+STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
 SCRIPTS = ["web_chat.mjs", "web_session_ui.mjs"]
 
 
-@pytest.mark.parametrize("name", SCRIPTS)
-def test_chat_modules_render(name):
+def _run(name):
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    script = Path(__file__).resolve().parent / name
-    result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
+    result = subprocess.run([node, str(STABLES_TESTS / name)], capture_output=True, text=True, encoding="utf-8",
+                            timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout
 
 
+@pytest.mark.parametrize("name", SCRIPTS)
+def test_chat_modules_render(name):
+    _run(name)
+
+
 def test_recent_chats_are_outside_the_welcome_gradient():
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node isn't installed")
-    tests = Path(__file__).resolve().parent
-    script = (tests / "web_chat.mjs").read_text(encoding="utf-8") + r'''
-rendered.length = 0;
-await page.viewChat();
-const home = rendered.find((n) => n.attrs?.class === "chat-wrap");
-const welcome = home.kids.find((n) => n.attrs?.class === "chat-welcome");
-assert.deepEqual(welcome.kids.map((n) => n.attrs?.class), ["chat-welcome-content", "recent-chats-section"]);
-assert.match(text(welcome.kids[0]), /How can I help\?/);
-'''
-    result = subprocess.run([node, "--input-type=module", "-e", script], cwd=tests,
-                            capture_output=True, text=True, encoding="utf-8", timeout=15)
-    assert result.returncode == 0, result.stdout + result.stderr
+    _run("web_chat_recent.mjs")
 
 
 def test_desktop_composer_matches_transcript_and_gradient_fades_at_edges():

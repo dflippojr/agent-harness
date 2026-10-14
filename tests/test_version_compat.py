@@ -19,6 +19,8 @@ from harness.config import RunnerConfig
 from harness.manager import Manager
 from test_daemon import make_cfg
 
+STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
+
 
 def manager_with_runner(tmp_path: Path) -> Manager:
     cfg = make_cfg(tmp_path)
@@ -483,7 +485,7 @@ def test_blocked_web_ui_ignores_hashchange_and_nav_without_api_calls():
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    script = Path(__file__).resolve().parent / "web_blocked_state.mjs"
+    script = STABLES_TESTS / "web_blocked_state.mjs"
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok" in result.stdout

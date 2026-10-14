@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
 WEB = Path(__file__).resolve().parents[1] / "stables" / "public"
 
 # A call of the native dialogs, bare or through window/globalThis/browser/self. Method calls on other objects
@@ -51,7 +52,7 @@ def test_sheets_behave():
     node = shutil.which("node")
     if not node:
         pytest.skip("node isn't installed")
-    script = Path(__file__).resolve().parent / "web_sheets.mjs"
+    script = STABLES_TESTS / "web_sheets.mjs"
     result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ok: in-app sheets confirm, prompt, validate and dismiss" in result.stdout
