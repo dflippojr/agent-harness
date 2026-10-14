@@ -210,4 +210,40 @@ for (const guest of [false, true]) {
   gate = null;
   box.value = "";
 }
+
+// A list that re-mounts inside the search debounce keeps what was typed (#684): crossing the split breakpoint moves the
+// list between <main> and the pane, and the new field starts from the typed query and searches it.
+{
+  const boxes = [];
+  const searched = [];
+  const rel = (tag, attrs, ...kids) => {
+    const n = el(tag, attrs, ...kids);
+    if (attrs?.type === "search") {
+      n.value = attrs.value;
+      n.addEventListener = (type, fn) => { n[`on_${type}`] = fn; };
+      boxes.push(n);
+    }
+    return n;
+  };
+  const leaves = [];
+  const remountApi = async (path) => {
+    if (!path.startsWith("/search")) return api(path);
+    searched.push(path);
+    return { mode: "all", results: [] };
+  };
+  const remount = mountSessions({
+    $app: "APP", h: rel, fill() {}, append() {}, api: remountApi, setHeader() {}, showListAction() {}, onLeave: (fn) => leaves.push(fn),
+    isMember: () => false, isGuest: () => false, badge: (st) => el("badge", {}, st), reviewBadge: () => el("rb"), REVIEW_LABEL: {},
+    jobStatusBadge: () => el("jb"), onDaemonChange: subscribe([]), onDaemonState: subscribe([]), browser,
+  });
+  await remount.viewList();
+  boxes[0].value = "Tab bar tour";
+  boxes[0].on_input();
+  for (const fn of leaves.splice(0)) fn();  // re-mounted before the debounce settles
+  await remount.viewList();
+  assert.equal(boxes[1].value, "Tab bar tour", "the new field keeps the typed query");
+  await sleep(300);
+  assert.deepEqual(searched, ["/search?q=Tab%20bar%20tour"], "one search, from the new field");
+  for (const fn of leaves.splice(0)) fn();
+}
 console.log("ok");
