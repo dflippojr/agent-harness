@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import json
 
+import pytest
+
 from harness.config import Project, VerifyCheck
 from harness.fileops import cap_command_output, CappedStream, CAPTURE_CAPPED_NOTE, OUTPUT_CAP
 from harness.llm import Completion
@@ -144,43 +146,59 @@ def test_infer_parser_from_command_and_explicit_field():
     assert infer_parser(VerifyCheck("t", "pytest", parser="generic")) == "generic"
 
 
-def test_timeout_is_detected_by_exit_124_not_substring():
-    async def exec_cmd(command, timeout):
-        return 124, "command finished the word timeout in its output"
-    check = VerifyCheck("slow", "sleep 999", timeout=2)
-    result = asyncio.run(run_verify([check], exec_cmd, 4000))
-    assert "TIMED OUT" in result.text
-    assert result.extra["verify"]["checks"][0]["timed_out"] is True
-    assert "timeout in its output" in result.artifact_content
+PYTEST_PASSED = (
+    "============================= test session starts ==============================\n"
+    "============================== 3 passed in 0.12s ===============================\n"
+)
 
 
-def test_passing_generic_check_with_error_like_text_has_no_failures():
-    async def exec_cmd(command, timeout):
-        return 0, "Found 0 errors.\nAll checks passed!\n"
-    result = asyncio.run(run_verify([VerifyCheck("lint", "ruff check .")], exec_cmd, 4000))
-    payload = result.extra["verify"]
-    assert payload["ok"] is True
-    assert payload["failures"] == []
-    assert result.text == "verify: all checks passed (1 checks)"
-    assert "LOG" not in result.text and "[lint] ERROR" not in result.text
-    assert "Found 0 errors" not in result.text
-    assert "All checks passed!" not in result.text
-
-
-def test_passing_pytest_run_has_no_failures():
-    log = (
-        "============================= test session starts ==============================\n"
-        "============================== 3 passed in 0.12s ===============================\n"
-    )
+@pytest.mark.parametrize("check, log, absent", [
+    (VerifyCheck("lint", "ruff check ."), "Found 0 errors.\nAll checks passed!\n",
+     ["LOG", "[lint] ERROR", "Found 0 errors", "All checks passed!"]),
+    (VerifyCheck("tests", "pytest --tb=short -ra", parser="pytest"), PYTEST_PASSED, ["passed in"]),
+], ids=["generic-with-error-like-text", "pytest"])
+def test_passing_check_has_no_failures(check, log, absent):
     async def exec_cmd(command, timeout):
         return 0, log
-    result = asyncio.run(run_verify(
-        [VerifyCheck("tests", "pytest --tb=short -ra", parser="pytest")], exec_cmd, 4000))
+    result = asyncio.run(run_verify([check], exec_cmd, 4000))
     payload = result.extra["verify"]
     assert payload["ok"] is True
     assert payload["failures"] == []
     assert result.text == "verify: all checks passed (1 checks)"
-    assert "passed in" not in result.text
+    assert not [text for text in absent if text in result.text]
+
+
+# (exit 124, output) -> the header, the [check] lines, and what the stored artifact keeps
+TIMEOUTS = [
+    pytest.param("command finished the word timeout in its output", 2, "slow",     # #254: only exit 124 counts
+                 "verify: 1 timed out (1 checks)", ["[slow] TIMED OUT after 2s (exit 124)"],
+                 "timeout in its output", id="exit-code-not-substring"),
+    pytest.param("", 2, "slow", "verify: 1 timed out (1 checks)", ["[slow] TIMED OUT after 2s (exit 124)"],
+                 None, id="empty-output"),
+    pytest.param("starting server\nwaiting for connections\n", 5, "serve",
+                 "verify: 1 timed out (1 checks)", ["[serve] TIMED OUT after 5s (exit 124)"],
+                 "waiting for connections", id="hung-log-tail-is-not-a-second-failure"),
+    pytest.param("error: build step failed\n", 5, "build", "verify: 1 error, 1 timed out (1 checks)",
+                 ["[build] TIMED OUT after 5s (exit 124)", "[build] ERROR error: build step failed"],
+                 None, id="distinct-parsed-failures-kept"),
+]
+
+
+@pytest.mark.parametrize("output, timeout, name, header, lines, artifact_has", TIMEOUTS)
+def test_timed_out_check_reports_one_line_and_a_header(output, timeout, name, header, lines, artifact_has):
+    async def exec_cmd(command, timeout):
+        return 124, output
+    result = asyncio.run(run_verify([VerifyCheck(name, "sleep 9", timeout=timeout)], exec_cmd, 4000))
+    payload = result.extra["verify"]
+    assert payload["ok"] is False
+    assert payload["checks"][0]["timed_out"] is True
+    assert payload["failures"]
+    if name == "serve":   # the log tail of a hung check is not a second failure
+        assert [f["kind"] for f in payload["failures"]] == ["timeout"]
+    assert result.text.splitlines()[0] == header
+    assert [ln for ln in result.text.splitlines() if ln.startswith(f"[{name}]")] == lines
+    if artifact_has:
+        assert artifact_has in result.artifact_content
 
 
 def test_failing_generic_check_keeps_error_lines():
@@ -192,43 +210,6 @@ def test_failing_generic_check_keeps_error_lines():
     assert [f["message"] for f in payload["failures"]] == ["error: nope", "FAILED something"]
     assert "[lint] ERROR" in result.text
     assert "all checks passed" not in result.text.lower()
-
-
-def test_timeout_with_empty_output_is_still_a_failure():
-    async def exec_cmd(command, timeout):
-        return 124, ""
-    result = asyncio.run(run_verify([VerifyCheck("slow", "sleep 9", timeout=2)], exec_cmd, 4000))
-    payload = result.extra["verify"]
-    assert payload["ok"] is False
-    assert payload["checks"][0]["timed_out"] is True
-    assert payload["failures"]
-    assert "TIMED OUT" in result.text
-    # #254: one line for the check and a single count in the header, not "1 error, 1 timed out".
-    assert [ln for ln in result.text.splitlines() if ln.startswith("[slow]")] == [
-        "[slow] TIMED OUT after 2s (exit 124)"]
-    assert result.text.splitlines()[0] == "verify: 1 timed out (1 checks)"
-
-
-def test_hung_check_log_tail_is_not_a_second_failure():
-    async def exec_cmd(command, timeout):
-        return 124, "starting server\nwaiting for connections\n"
-    result = asyncio.run(run_verify([VerifyCheck("serve", "npm start", timeout=5)], exec_cmd, 4000))
-    payload = result.extra["verify"]
-    assert payload["ok"] is False
-    assert [f["kind"] for f in payload["failures"]] == ["timeout"]
-    assert [ln for ln in result.text.splitlines() if ln.startswith("[serve]")] == [
-        "[serve] TIMED OUT after 5s (exit 124)"]
-    assert result.text.splitlines()[0] == "verify: 1 timed out (1 checks)"
-    assert "waiting for connections" in result.artifact_content
-
-
-def test_timed_out_check_keeps_distinct_parsed_failures():
-    async def exec_cmd(command, timeout):
-        return 124, "error: build step failed\n"
-    result = asyncio.run(run_verify([VerifyCheck("build", "make", timeout=5)], exec_cmd, 4000))
-    lines = [ln for ln in result.text.splitlines() if ln.startswith("[build]")]
-    assert lines == ["[build] TIMED OUT after 5s (exit 124)", "[build] ERROR error: build step failed"]
-    assert result.text.splitlines()[0] == "verify: 1 error, 1 timed out (1 checks)"
 
 
 def test_mixed_passing_and_failing_checks_only_parse_failures():
