@@ -136,7 +136,7 @@ def _first_json_object(content: str):
 
 
 def _require_utf8(n: int, *texts: str) -> None:
-    """Reject text that cannot be written as UTF-8 (e.g. a lone surrogate from a JSON \ud800 escape)."""
+    """Reject text that cannot be written as UTF-8 (e.g. a lone surrogate from a JSON \\ud800 escape)."""
     for t in texts:
         try:
             t.encode("utf-8")
