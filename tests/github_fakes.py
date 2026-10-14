@@ -3,10 +3,11 @@
 The broker drops every environment variable outside its allowlist, so the fakes find their state next to
 their own script (one install directory per test). Nothing here touches a real store or the network.
 
-fake GCM: `--version`, `get`, `store`, `erase` against store.json keyed by (GCM_NAMESPACE, store, host).
+fake GCM: `--version`, `get`, `store`, `erase` against a store keyed by (GCM_NAMESPACE, store, host), kept as
+records in store.d: each write is a new file, never a file rewritten in place (#684).
 In connect mode (GCM_INTERACTIVE != never, GUI prompts on, GCM_GITHUB_HELPER set) it runs the configured
 helper as `device --code <code> --url https://github.com/login/device`, waits for an approval file, kills the
-helper, and prints the credential. Tokens it issues are recorded in issued.json for the fake GitHub.
+helper, and prints the credential. Tokens it issues are recorded in issued.d for the fake GitHub.
 
 fake git: records argv and environment, asks the configured credential helper for a github.com credential
 (the way git does), checks it against the fake GitHub (issued, unrevoked, allowed for the repo), and then
@@ -30,7 +31,8 @@ FAKE_GCM = r'''
 import json, os, secrets, subprocess, sys, time
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
-STORE = HERE / "store.json"
+STORE = HERE / "store"
+ISSUED = HERE / "issued"
 MODE = HERE / "mode.json"
 
 def load(p, default):
@@ -38,11 +40,6 @@ def load(p, default):
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return default
-
-def save(p, data):
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    os.replace(tmp, p)
 
 def append(path, row):
     # One file per record, renamed into place: concurrent O_APPEND writes from several fake
@@ -54,6 +51,26 @@ def append(path, row):
     tmp = d / (name + ".tmp")
     tmp.write_text(json.dumps(row), encoding="utf-8")
     os.replace(tmp, d / (name + ".json"))
+
+def replay(path):
+    # The store and the issued tokens are records too (#684): a file rewritten in place can't be replaced on
+    # Windows while any other process (another fake, the test, a scanner) has it open, and a failed save
+    # crashed the fake mid sign-in. A record is never replaced, and a read error is never an empty store.
+    d = path.with_name(path.name + ".d")
+    if not d.is_dir():
+        return []
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(d.iterdir()) if p.suffix == ".json"]
+
+def credentials():
+    creds = {}
+    for r in replay(STORE):
+        if r["op"] == "store":
+            creds[r["key"]] = r["credential"]
+        elif r["op"] == "erase":
+            creds.pop(r["key"], None)
+        else:  # wipe
+            creds.clear()
+    return creds
 
 def record(action):
     append(HERE / "calls.jsonl", {"argv": sys.argv[1:], "action": action, "env": dict(os.environ)})
@@ -80,19 +97,18 @@ if mode.get("store_broken"):
 data = read_input()
 host = data.get("host", "")
 key = f"{ns}|{store}|{host}"
-creds = load(STORE, {})
+creds = credentials()
 if action == "store":
     if mode.get("store_noop"):
         sys.exit(0)
     if not data.get("username") or not data.get("password"):
         sys.exit(1)
-    creds[key] = {"username": data["username"], "password": data["password"]}
-    save(STORE, creds)
+    append(STORE, {"op": "store", "key": key,
+                   "credential": {"username": data["username"], "password": data["password"]}})
     sys.exit(0)
 if action == "erase":
     if not mode.get("erase_noop"):
-        creds.pop(key, None)
-        save(STORE, creds)
+        append(STORE, {"op": "erase", "key": key})
     sys.exit(0)
 if action != "get":
     sys.exit(2)
@@ -116,9 +132,7 @@ while time.time() < end:
     login = approve.read_text(encoding="utf-8").strip() if approve.exists() else ""
     if login:
         token = "gho_" + secrets.token_hex(18)
-        issued = load(HERE / "issued.json", {})
-        issued[token] = login
-        save(HERE / "issued.json", issued)
+        append(ISSUED, {"token": token, "login": login})
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
         proc.kill()
@@ -193,7 +207,10 @@ else:
         sys.stderr.write("fatal: could not read Username for 'https://github.com': terminal prompts disabled\n")
         sys.exit(128)
     cred = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
-    issued = load(GH / "issued.json", {})
+    records = GH / "issued.d"  # the fake GCM's issued tokens, one record each
+    issued = {} if not records.is_dir() else {
+        row["token"]: row["login"] for row in (json.loads(p.read_text(encoding="utf-8"))
+                                               for p in sorted(records.iterdir()) if p.suffix == ".json")}
     revoked = set(server.get("revoked", []))
     token = cred.get("password", "")
     if token not in issued or token in revoked:
@@ -301,10 +318,7 @@ class FakeGitHub:
         self._save_server()
 
     def issued(self) -> dict:
-        try:
-            return json.loads((self.gcm_dir / "issued.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
+        return {row["token"]: row["login"] for row in _lines(self.gcm_dir / "issued")}
 
     # --- device flow --------------------------------------------------------------------------------
     def approve(self, user_id: str, login: str = "octocat") -> None:
@@ -322,16 +336,25 @@ class FakeGitHub:
 
     # --- inspection -------------------------------------------------------------------------------------
     def store(self) -> dict:
-        try:
-            return json.loads((self.gcm_dir / "store.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
+        """The fake store's credentials: its store, erase and wipe records replayed in order."""
+        creds: dict = {}
+        for row in _lines(self.gcm_dir / "store"):
+            if row["op"] == "store":
+                creds[row["key"]] = row["credential"]
+            elif row["op"] == "erase":
+                creds.pop(row["key"], None)
+            else:
+                creds.clear()
+        return creds
 
     def namespaces(self) -> set[str]:
         return {k.split("|")[0] for k in self.store()}
 
     def wipe_store(self) -> None:
-        (self.gcm_dir / "store.json").write_text("{}", encoding="utf-8")
+        d = self.gcm_dir / "store.d"
+        d.mkdir(exist_ok=True)
+        name = "%020d-%d-%s" % (time.time_ns(), os.getpid(), os.urandom(4).hex())
+        self._publish(d / f"{name}.json", json.dumps({"op": "wipe"}))
 
     def gcm_calls(self) -> list[dict]:
         return _lines(self.gcm_dir / "calls.jsonl")
