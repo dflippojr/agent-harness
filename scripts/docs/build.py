@@ -12,7 +12,8 @@ Output is deterministic (stable sort, no timestamps) and uses only stdlib plus P
 
 Tables derived from code (API endpoints, settings registry; code_tables.py) are regions too. On a PR they may equal
 the base branch's committed text (the PR left them alone; the post-merge job regenerates) or what this branch's
-code produces; on main they must equal what the code produces. Missing summaries are warnings, never failures.
+code produces; on main they must equal what the code produces. A route with no summary fails the check (#666); a
+setting with no help text is only a warning.
 """
 
 from __future__ import annotations
@@ -303,7 +304,10 @@ def check_code_regions(root: Path, base: str | None = None) -> list[str]:
             problems.append(str(exc))
             continue
         for warning in warnings:
-            print(f"warning: {warning}", file=sys.stderr)
+            if region.strict:
+                problems.append(f"{region.file}: {warning}")
+            else:
+                print(f"warning: {warning}", file=sys.stderr)
         if have == want:
             continue
         if base:

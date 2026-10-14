@@ -78,8 +78,9 @@ or `auth(request, "scope")`); `see source` means a helper decides. The source co
 line number, so unrelated edits do not make the table stale. Settings use `SettingSpec.help` as the description;
 installer-only, path-like, secret and per-backend defaults print `—`.
 
-`--check` lists each `TODO` as a `warning:` and still passes. It fails when a table disagrees with the code, with
-the same single-writer rule as fragments: on a **PR** (`--base`) a table may equal the base branch's committed text
+`--check` fails on each API route whose summary is `TODO`, so a new handler needs a one-sentence docstring (or a
+`summary=` argument) before its table row can pass. A setting with no help text is only a `warning:`. It also fails
+when a table disagrees with the code, with the same single-writer rule as fragments: on a **PR** (`--base`) a table may equal the base branch's committed text
 (the PR left it alone) or what the PR's code produces, so a code change does not have to touch the docs and parallel
 PRs do not conflict; a **hand edit** fails. On **main** CI runs `--check --fragments-only` (schema only), so a table
 that lags a just-merged code change never fails there; `docs-regen.yml` rewrites the regions after each merge. Locally,

@@ -53,6 +53,7 @@ async def create_gadget(request):
 
 @app_routes.delete("/api/v1/gadgets/{gid}")
 async def drop_gadget(request, gid):
+    """Delete one gadget."""
     require_owner(request)
 
 
@@ -103,7 +104,7 @@ def test_app_table_lists_methods_paths_auth_summary_and_source(repo):
            "`harness/fixture_routes.py` `list_gadgets` |" in rows
     assert any("Replace one gadget, and say so over two source lines. |" in r for r in rows)
     assert any(r.startswith(r"| POST | `/api/v1/gadgets` | scope `gadgets` | Create \| a gadget |") for r in rows)
-    assert any(r.startswith("| DELETE | `/api/v1/gadgets/{gid}` | owner | TODO |") for r in rows)
+    assert any(r.startswith("| DELETE | `/api/v1/gadgets/{gid}` | owner | Delete one gadget. |") for r in rows)
     assert "/widgets" not in "".join(rows)
 
 
@@ -146,12 +147,24 @@ def test_check_fails_when_a_route_or_setting_is_missing_from_the_table(repo, mon
     assert {p.split(":")[0] for p in build.check(repo)} == {"docs/app-api.md", "docs/config-registry.md"}
 
 
-def test_missing_summary_is_a_warning_not_a_failure(repo, capsys):
+def test_a_route_with_no_docstring_fails_the_check_and_is_named(repo, capsys):
     build.build(repo)
     assert build.check(repo) == []
-    err = capsys.readouterr().err
-    assert "warning: DELETE /api/v1/gadgets/{gid} (harness/fixture_routes.py drop_gadget)" in err
-    assert "list_gadgets" not in err
+    src = repo / "harness" / "fixture_routes.py"
+    undocumented = '\n\n@app_routes.post("/api/v1/nodoc")\nasync def nodoc(request):\n    auth(request, "gadgets")\n'
+    src.write_text(ROUTES + undocumented, encoding="utf-8")
+    build.build(repo)
+    problems = build.check(repo)
+    assert len(problems) == 1 and problems[0].startswith("docs/app-api.md: ")
+    assert "POST /api/v1/nodoc (harness/fixture_routes.py nodoc) has no summary or docstring" in problems[0]
+    assert "warning" not in capsys.readouterr().err
+
+
+def test_a_setting_with_no_help_text_is_only_a_warning(repo, monkeypatch, capsys):
+    monkeypatch.setattr(code_tables, "load_specs", lambda root: [spec(help="")])
+    build.build(repo)
+    assert build.check(repo) == []
+    assert "warning: setting fixture.limit has no help text" in capsys.readouterr().err
 
 
 def git(repo, *args):

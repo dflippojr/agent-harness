@@ -83,6 +83,7 @@ def job_view(m, job: dict, runs: int = 1) -> dict:
 
 @owner_routes.get("/jobs", response_model=list[JobResponse])
 async def list_jobs(request: Request):
+    """List scheduled jobs, each with its most recent run."""
     m = jobs_on(request)
     if request.state.access.role == "guest":
         return []
@@ -107,6 +108,7 @@ async def preview_cron(cron: str, request: Request, count: int = 3):
 
 @owner_routes.post("/jobs", status_code=201, response_model=JobResponse)
 async def create_job(body: Job, request: Request):
+    """Create a scheduled job after validating it; its next run is set from the cron schedule."""
     import time as _time
     from .service import Cron, new_job_id, validate
     m = jobs_on(request)
@@ -127,6 +129,7 @@ async def create_job(body: Job, request: Request):
 
 @owner_routes.get("/jobs/{jid}", response_model=JobResponse)
 async def get_job(jid: str, request: Request):
+    """Return one scheduled job with its 15 most recent runs."""
     m = jobs_on(request)
     if request.state.access.role == "guest":
         raise HarnessError(404, NO_SUCH_JOB)
@@ -138,6 +141,7 @@ async def get_job(jid: str, request: Request):
 
 @owner_routes.put("/jobs/{jid}", response_model=JobResponse)
 async def update_job(jid: str, body: Job, request: Request):
+    """Replace a scheduled job's settings after validation and recompute its next run."""
     import time as _time
     from .service import Cron, validate
     m = jobs_on(request)
@@ -161,6 +165,7 @@ async def update_job(jid: str, body: Job, request: Request):
 
 @owner_routes.delete("/jobs/{jid}", status_code=204)
 async def delete_job(jid: str, request: Request):
+    """Delete a scheduled job and record the deletion in the audit log."""
     m = jobs_on(request)
     context = operation_audit.request_context(request, m)
     def remove():
@@ -186,6 +191,7 @@ async def run_job(jid: str, request: Request):
 # templates
 @owner_routes.get("/templates")
 async def list_templates(request: Request):
+    """List saved task templates."""
     if request.state.access.role == "guest":
         return []
     return manager(request).db.list_templates()
@@ -193,11 +199,13 @@ async def list_templates(request: Request):
 
 @owner_routes.post("/templates", status_code=201)
 async def create_template(body: Template, request: Request):
+    """Create a task template after checking its name, prompt, project, backend, and model."""
     return _save_template(manager(request), "t-" + uuid.uuid4().hex[:8], body)
 
 
 @owner_routes.put("/templates/{tid}")
 async def update_template(tid: str, body: Template, request: Request):
+    """Replace a task template's fields after the same checks as create; returns 404 if it does not exist."""
     m = manager(request)
     if m.db.get_template(tid) is None:
         raise HarnessError(404, "no such template")
@@ -206,6 +214,7 @@ async def update_template(tid: str, body: Template, request: Request):
 
 @owner_routes.delete("/templates/{tid}", status_code=204)
 async def delete_template(tid: str, request: Request):
+    """Delete a saved task template."""
     if not manager(request).db.delete_template(tid):
         raise HarnessError(404, "no such template")
 

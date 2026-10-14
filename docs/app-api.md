@@ -473,75 +473,75 @@ Generated from the route registrations (`scripts/docs/build.py`; do not edit bet
 <!-- generated:begin app-api-endpoints -->
 | Method | Path | Auth | Summary | Source |
 | --- | --- | --- | --- | --- |
-| GET | `/api/v1` | see source | TODO | `harness/apps.py` `api_root` |
-| GET | `/api/v1/audit` | scope `sessions` | TODO | `harness/apps.py` `scoped_audit` |
-| POST | `/api/v1/auth/google/start` | see source | TODO | `harness/google_signin_api.py` `google_start` |
-| POST | `/api/v1/auth/logout` | see source | TODO | `harness/google_signin_api.py` `logout` |
-| GET | `/api/v1/auth/session` | see source | TODO | `harness/google_signin_api.py` `auth_session` |
-| GET | `/api/v1/backends` | scope `sessions` | TODO | `harness/apps.py` `backends` |
-| GET | `/api/v1/config` | see source | TODO | `harness/config_api.py` `app_config` |
-| PATCH | `/api/v1/config` | see source | TODO | `harness/config_api.py` `app_patch` |
-| GET | `/api/v1/config/schema` | see source | TODO | `harness/config_api.py` `app_schema` |
-| DELETE | `/api/v1/end-users/{end_user}/logins/{backend}` | scope `sessions` | TODO | `harness/apps.py` `unlink_end_user_login` |
-| GET | `/api/v1/end-users/{end_user}/logins/{backend}` | see source | TODO | `harness/apps.py` `end_user_login_status` |
+| GET | `/api/v1` | see source | Server version, scopes, models, backends and features; the projects list is always empty, so fetch projects separately. | `harness/apps.py` `api_root` |
+| GET | `/api/v1/audit` | scope `sessions` | Audit records visible to this caller, newest first; pass next_before_id as before_id for the next page. | `harness/apps.py` `scoped_audit` |
+| POST | `/api/v1/auth/google/start` | see source | Start a Google sign-in, link, or invite attempt bound to this browser and return its authorization URL; invite needs a link code. | `harness/google_signin_api.py` `google_start` |
+| POST | `/api/v1/auth/logout` | see source | End this browser's Web session and clear its cookie; a request with an active session must send the CSRF token. | `harness/google_signin_api.py` `logout` |
+| GET | `/api/v1/auth/session` | see source | Report Google sign-in availability and this browser's sign-in state; the CSRF token appears only with a session. | `harness/google_signin_api.py` `auth_session` |
+| GET | `/api/v1/backends` | scope `sessions` | Each configured backend's availability, login state, limits and usage; some callers see only the local backend. | `harness/apps.py` `backends` |
+| GET | `/api/v1/config` | see source | Return this App's settings with configured and effective values, the revision, and any daemon cap that applies. | `harness/config_api.py` `app_config` |
+| PATCH | `/api/v1/config` | see source | Change this App's settings; a stale `revision` returns 409, and `dry_run` returns the plan without saving. | `harness/config_api.py` `app_patch` |
+| GET | `/api/v1/config/schema` | see source | Describe the App settings and mark the ones this App cannot write. | `harness/config_api.py` `app_schema` |
+| DELETE | `/api/v1/end-users/{end_user}/logins/{backend}` | scope `sessions` | Sign the end user out of this backend: their running sessions there stop, and their stored CLI login and state are deleted. | `harness/apps.py` `unlink_end_user_login` |
+| GET | `/api/v1/end-users/{end_user}/logins/{backend}` | see source | Whether the end user's login for this backend is linked, plus any sign-in attempt in progress. | `harness/apps.py` `end_user_login_status` |
 | POST | `/api/v1/end-users/{end_user}/logins/{backend}` | scope `sessions` | Start the CLI's own sign-in for one of the App's end users (#365): `{verification_url, user_code?, needs_code, attempt_id, ...}`. The App shows the URL (and the user code) in a popup. | `harness/apps.py` `start_end_user_login` |
 | POST | `/api/v1/end-users/{end_user}/logins/{backend}/{attempt_id}/code` | scope `sessions` | Pass the one-time code the person pasted into the popup (Claude) straight to the waiting login. The body is read by hand, so a validation error can never echo the code back. | `harness/apps.py` `submit_end_user_login_code` |
-| GET | `/api/v1/events` | scope `sessions` | TODO | `harness/apps.py` `api_events` |
-| POST | `/api/v1/images` | scope `images` | TODO | `harness_modules/images/routes.py` `app_image` |
-| GET | `/api/v1/images/{iid}` | scope `images` | TODO | `harness_modules/images/routes.py` `app_image_status` |
-| POST | `/api/v1/images/{iid}/upscale` | scope `images` | TODO | `harness_modules/images/routes.py` `app_image_upscale` |
+| GET | `/api/v1/events` | scope `sessions` | Live-only server-sent stream of selected session events; nothing is replayed and sequence numbers are omitted. | `harness/apps.py` `api_events` |
+| POST | `/api/v1/images` | scope `images` | Queue an image generation and return the job with a PNG URL that works once the image is done. | `harness_modules/images/routes.py` `app_image` |
+| GET | `/api/v1/images/{iid}` | scope `images` | Return an image's status and upscales, or its PNG (404 until done) for an id ending in .png; uploads and edits return 404. | `harness_modules/images/routes.py` `app_image_status` |
+| POST | `/api/v1/images/{iid}/upscale` | scope `images` | Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job. | `harness_modules/images/routes.py` `app_image_upscale` |
 | GET | `/api/v1/me` | scope `sessions` | Authenticated principal. Unauthenticated callers receive 401 rather than a project list. | `harness/apps.py` `api_me` |
 | GET | `/api/v1/me/api-keys` | see source | #393: a member's own provider API keys: what is set (last four characters only), the billing note and usage. | `harness/apps.py` `api_member_keys` |
-| DELETE | `/api/v1/me/api-keys/{backend}` | see source | TODO | `harness/apps.py` `api_member_key_delete` |
+| DELETE | `/api/v1/me/api-keys/{backend}` | see source | Remove the stored key; running sessions on that backend stop and their CLI state is deleted. | `harness/apps.py` `api_member_key_delete` |
 | PUT | `/api/v1/me/api-keys/{backend}` | see source | Store or replace the key. The body is read by hand, so a validation error can never echo the key back. | `harness/apps.py` `api_member_key_set` |
-| POST | `/api/v1/me/api-keys/{backend}/test` | see source | TODO | `harness/apps.py` `api_member_key_test` |
-| DELETE | `/api/v1/me/github-connection` | see source | TODO | `harness/apps.py` `api_github_disconnect` |
-| GET | `/api/v1/me/github-connection` | see source | TODO | `harness/apps.py` `api_github_connection` |
-| POST | `/api/v1/me/github-connection/cancel` | see source | TODO | `harness/apps.py` `api_github_cancel` |
-| POST | `/api/v1/me/github-connection/connect` | see source | TODO | `harness/apps.py` `api_github_connect` |
-| DELETE | `/api/v1/me/google` | see source | TODO | `harness/google_signin_api.py` `my_google_unlink` |
-| GET | `/api/v1/me/google` | see source | TODO | `harness/google_signin_api.py` `my_google` |
-| GET | `/api/v1/models` | scope `sessions` | TODO | `harness/apps.py` `api_models` |
-| GET | `/api/v1/models/status` | scope `sessions` | TODO | `harness_modules/local_model/routes.py` `api_models_status` |
-| POST | `/api/v1/models/warm` | scope `sessions` | TODO | `harness_modules/local_model/routes.py` `api_models_warm` |
-| POST | `/api/v1/pair` | see source | TODO | `harness/apps.py` `pair_browser` |
+| POST | `/api/v1/me/api-keys/{backend}/test` | see source | Validate the stored key with one cheap provider call; 409 when no key is stored. | `harness/apps.py` `api_member_key_test` |
+| DELETE | `/api/v1/me/github-connection` | see source | Erase the stored GitHub credentials and disconnect; a failed erase is retried at startup. | `harness/apps.py` `api_github_disconnect` |
+| GET | `/api/v1/me/github-connection` | see source | GitHub connection state; the device code appears only while a sign-in is in progress. | `harness/apps.py` `api_github_connection` |
+| POST | `/api/v1/me/github-connection/cancel` | see source | Cancel a GitHub sign-in in progress, if any, and return the connection status. | `harness/apps.py` `api_github_cancel` |
+| POST | `/api/v1/me/github-connection/connect` | see source | Start a GitHub device sign-in, or resume the live one; the sign-in runs in the background and returns the device code if one is ready. | `harness/apps.py` `api_github_connect` |
+| DELETE | `/api/v1/me/google` | see source | Unlink this account's Google link, end its Web sessions, and clear this browser's cookie; `confirm` must be true. | `harness/google_signin_api.py` `my_google_unlink` |
+| GET | `/api/v1/me/google` | see source | Return this account's Google link state; `unlink_removes_this_device` is set when this device signed in with Google. | `harness/google_signin_api.py` `my_google` |
+| GET | `/api/v1/models` | scope `sessions` | Configured models with their context sizes; the default model is flagged. | `harness/apps.py` `api_models` |
+| GET | `/api/v1/models/status` | scope `sessions` | Report each model's load state and how long its current warm-up has been running. | `harness_modules/local_model/routes.py` `api_models_status` |
+| POST | `/api/v1/models/warm` | scope `sessions` | Start loading the default model if it is asleep, without waiting; an App gets 409 if the GPU is held or RAM is low. | `harness_modules/local_model/routes.py` `api_models_warm` |
+| POST | `/api/v1/pair` | see source | Redeem a single-use pairing code from this browser's origin for a token, returned once; a spent, expired or other-origin code gets 400. | `harness/apps.py` `pair_browser` |
 | POST | `/api/v1/pair/requests` | see source | Ask the owner to pair this App (#519). Returns the request id and a match code to show the user. | `harness/pairing_requests.py` `create_pairing_request` |
 | POST | `/api/v1/pair/requests/{rid}/claim` | see source | Attach this App's code_challenge to a slot the owner armed from the Hub (#519). | `harness/pairing_requests.py` `claim_pairing_request` |
 | POST | `/api/v1/pair/requests/{rid}/token` | see source | Fetch the App's token once the owner approved (#519): minted now, returned once, to the verifier's holder. Until then it answers 409 `pairing_pending`. The body is read by hand, so a validation error can never echo the verifier back. | `harness/pairing_requests.py` `redeem_pairing_request` |
-| GET | `/api/v1/profile` | scope `sessions` | TODO | `harness/apps.py` `api_profile` |
-| GET | `/api/v1/projects` | scope `sessions` | TODO | `harness/apps.py` `api_projects` |
-| POST | `/api/v1/projects` | scope `sessions` | TODO | `harness/apps.py` `api_create_project` |
-| GET | `/api/v1/queue` | scope `sessions` | TODO | `harness/apps.py` `api_queue` |
-| GET | `/api/v1/remote-control` | scope `remote_control` | TODO | `harness_modules/remote_control/routes.py` `app_rc_status` |
-| POST | `/api/v1/remote-control/{project}` | scope `remote_control` | TODO | `harness_modules/remote_control/routes.py` `app_rc_launch` |
-| POST | `/api/v1/remote-control/{project}/stop` | scope `remote_control` | TODO | `harness_modules/remote_control/routes.py` `app_rc_stop` |
+| GET | `/api/v1/profile` | scope `sessions` | The profile emoji or its default; the choices list is always empty. | `harness/apps.py` `api_profile` |
+| GET | `/api/v1/projects` | scope `sessions` | The account's catalog projects, with repository URLs withheld. | `harness/apps.py` `api_projects` |
+| POST | `/api/v1/projects` | scope `sessions` | Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected. | `harness/apps.py` `api_create_project` |
+| GET | `/api/v1/queue` | scope `sessions` | Queue positions of the caller's sessions for the GPU slot, where 0 holds it and 1 and up are waiting. | `harness/apps.py` `api_queue` |
+| GET | `/api/v1/remote-control` | scope `remote_control` | Report whether Remote Control is enabled and each project's state. | `harness_modules/remote_control/routes.py` `app_rc_status` |
+| POST | `/api/v1/remote-control/{project}` | scope `remote_control` | Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder. | `harness_modules/remote_control/routes.py` `app_rc_launch` |
+| POST | `/api/v1/remote-control/{project}/stop` | scope `remote_control` | Stop a project's Remote Control server and its child processes; 404 if none was started. | `harness_modules/remote_control/routes.py` `app_rc_stop` |
 | POST | `/api/v1/runner-pair` | see source | Redeem an owner-approved native Mac code without browser-origin authority. | `harness_modules/runners/routes.py` `pair_runner` |
-| GET | `/api/v1/search` | scope `sessions` | TODO | `harness_modules/search/routes.py` `api_search` |
-| GET | `/api/v1/sessions` | scope `sessions` | TODO | `harness/apps.py` `list_sessions` |
-| POST | `/api/v1/sessions` | scope `sessions` | TODO | `harness/apps.py` `create_session` |
+| GET | `/api/v1/search` | scope `sessions` | Full-text search over past sessions, falling back to any-term matches when no session has every term; limit caps at 50. | `harness_modules/search/routes.py` `api_search` |
+| GET | `/api/v1/sessions` | scope `sessions` | Recent sessions, newest first; limit caps the count (default 50). | `harness/apps.py` `list_sessions` |
+| POST | `/api/v1/sessions` | scope `sessions` | Queue a session and return it before it runs; a retried Idempotency-Key replays the first (200), and a different request with that key gets 409. | `harness/apps.py` `create_session` |
 | DELETE | `/api/v1/sessions/{ref}` | scope `sessions` | Erase one of the calling App's sessions and everything tied to it (#330 decision 5). Only the App that started it may: the owner, members and other Apps get a 404. Erasing a session that is already gone succeeds again. | `harness/apps.py` `delete_session` |
-| GET | `/api/v1/sessions/{ref}` | scope `sessions` | TODO | `harness/apps.py` `get_session` |
-| PATCH | `/api/v1/sessions/{ref}` | scope `sessions` | TODO | `harness/apps.py` `patch_session` |
-| PUT | `/api/v1/sessions/{ref}` | scope `sessions` | TODO | `harness/apps.py` `patch_session` |
-| GET | `/api/v1/sessions/{ref}/approvals` | scope `sessions` | TODO | `harness/apps.py` `approvals` |
-| POST | `/api/v1/sessions/{ref}/approvals/{approval_id}` | scope `approvals` | TODO | `harness/apps.py` `decide` |
-| POST | `/api/v1/sessions/{ref}/cancel` | scope `sessions` | TODO | `harness/apps.py` `cancel` |
-| GET | `/api/v1/sessions/{ref}/changes` | scope `sessions` | TODO | `harness/apps.py` `api_changes` |
-| POST | `/api/v1/sessions/{ref}/context` | scope `sessions` | TODO | `harness/apps.py` `add_context` |
-| GET | `/api/v1/sessions/{ref}/events` | scope `sessions` | TODO | `harness/apps.py` `events` |
+| GET | `/api/v1/sessions/{ref}` | scope `sessions` | One session's summary with its answer, registered tool names and metadata. | `harness/apps.py` `get_session` |
+| PATCH | `/api/v1/sessions/{ref}` | scope `sessions` | Set the session's title; a blank title or one over 120 characters gets 400. | `harness/apps.py` `patch_session` |
+| PUT | `/api/v1/sessions/{ref}` | scope `sessions` | Set the session's title; a blank title or one over 120 characters gets 400. | `harness/apps.py` `patch_session` |
+| GET | `/api/v1/sessions/{ref}/approvals` | scope `sessions` | Approvals in this session that still await a decision. | `harness/apps.py` `approvals` |
+| POST | `/api/v1/sessions/{ref}/approvals/{approval_id}` | scope `approvals` | Approve or deny one tool-call approval; an already decided one returns 409 and another decision value 400. | `harness/apps.py` `decide` |
+| POST | `/api/v1/sessions/{ref}/cancel` | scope `sessions` | Stop an active session and return it once its run has ended; a session that is not active gets 409. | `harness/apps.py` `cancel` |
+| GET | `/api/v1/sessions/{ref}/changes` | scope `sessions` | The session's file diffs with secret-scan results; a removed workspace returns no repos. | `harness/apps.py` `api_changes` |
+| POST | `/api/v1/sessions/{ref}/context` | scope `sessions` | Send context blocks to the session as information, not user instructions, restarting a finished session; 400 when empty or over 60,000 characters. | `harness/apps.py` `add_context` |
+| GET | `/api/v1/sessions/{ref}/events` | scope `sessions` | Replays events after sequence `after` (or Last-Event-ID), then streams live unless follow is false; a stream ticket can replace the bearer token. | `harness/apps.py` `events` |
 | POST | `/api/v1/sessions/{ref}/events/ticket` | scope `sessions` | Mint a short-lived query credential so native EventSource need not receive a bearer token in its URL. | `harness/apps.py` `event_ticket` |
-| POST | `/api/v1/sessions/{ref}/messages` | scope `sessions` | TODO | `harness/apps.py` `send` |
-| POST | `/api/v1/sessions/{ref}/rerun` | scope `sessions` | TODO | `harness/apps.py` `rerun_session` |
-| GET | `/api/v1/sessions/{ref}/review-comments` | see source | TODO | `harness/apps.py` `api_review_comments` |
-| POST | `/api/v1/sessions/{ref}/review-comments` | see source | TODO | `harness/apps.py` `api_add_review_comment` |
-| POST | `/api/v1/sessions/{ref}/review-comments/send` | see source | TODO | `harness/apps.py` `api_send_review_comments` |
-| DELETE | `/api/v1/sessions/{ref}/review-comments/{comment_id}` | see source | TODO | `harness/apps.py` `api_delete_review_comment` |
-| POST | `/api/v1/sessions/{ref}/review/{action}` | scope `sessions` | TODO | `harness/apps.py` `api_review` |
-| POST | `/api/v1/sessions/{ref}/secret-findings/fix` | see source | TODO | `harness/apps.py` `api_secret_findings_fix` |
+| POST | `/api/v1/sessions/{ref}/messages` | scope `sessions` | Send a user message; an active session reads it before its next model call, a finished one restarts queued, and a removed workspace gets 409. | `harness/apps.py` `send` |
+| POST | `/api/v1/sessions/{ref}/rerun` | scope `sessions` | Start a new queued session with this one's prompt, project and model; tools-only sessions get 409. | `harness/apps.py` `rerun_session` |
+| GET | `/api/v1/sessions/{ref}/review-comments` | see source | The session's draft review comments, which are not yet sent. | `harness/apps.py` `api_review_comments` |
+| POST | `/api/v1/sessions/{ref}/review-comments` | see source | Save a draft line comment; drafts reach the agent only when sent, and an invalid comment gets 400. | `harness/apps.py` `api_add_review_comment` |
+| POST | `/api/v1/sessions/{ref}/review-comments/send` | see source | Send all draft review comments as one follow-up message, then clear the drafts; 400 when there are none. | `harness/apps.py` `api_send_review_comments` |
+| DELETE | `/api/v1/sessions/{ref}/review-comments/{comment_id}` | see source | Delete one draft review comment; 404 when no draft has that id. | `harness/apps.py` `api_delete_review_comment` |
+| POST | `/api/v1/sessions/{ref}/review/{action}` | scope `sessions` | Merge, push or discard the session's git branch; 409 while it is still running, 400 without a git branch. | `harness/apps.py` `api_review` |
+| POST | `/api/v1/sessions/{ref}/secret-findings/fix` | see source | Draft fix comments for open secret findings, or ask the agent to rewrite older commits; 409 when there is no finished secret scan. | `harness/apps.py` `api_secret_findings_fix` |
 | POST | `/api/v1/sessions/{ref}/secret-findings/{fingerprint}/dismiss` | scope `sessions` | Owner-only: members and app tokens can ask the agent to fix a finding but never dismiss one. | `harness/apps.py` `api_dismiss_secret_finding` |
-| GET | `/api/v1/sessions/{ref}/tool_calls` | scope `sessions` | TODO | `harness/apps.py` `tool_calls` |
-| POST | `/api/v1/sessions/{ref}/tool_calls/{call_id}` | scope `sessions` | TODO | `harness/apps.py` `tool_result` |
-| GET | `/api/v1/sessions/{ref}/transcript` | scope `sessions` | TODO | `harness/apps.py` `api_transcript` |
+| GET | `/api/v1/sessions/{ref}/tool_calls` | scope `sessions` | Tool calls the agent made to this session's app tools, filtered by status (default pending), oldest first; an empty status lists all. | `harness/apps.py` `tool_calls` |
+| POST | `/api/v1/sessions/{ref}/tool_calls/{call_id}` | scope `sessions` | Return the result for one pending app tool call and resume the run waiting on it; 409 when no such call is pending. | `harness/apps.py` `tool_result` |
+| GET | `/api/v1/sessions/{ref}/transcript` | scope `sessions` | The session's transcript as Markdown text, opening with its title, status and totals. | `harness/apps.py` `api_transcript` |
 <!-- generated:end app-api-endpoints -->
 
 ### `GET /api/v1`

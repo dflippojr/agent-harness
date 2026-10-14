@@ -13,6 +13,7 @@ class GpuHoldRequest(BaseModel):
 
 @owner_routes.get("/models/status")
 async def models_status(request: Request):
+    """Report each model's load state and how long its current warm-up has been running."""
     m = manager(request)
     return [{"name": mc.name, "state": await m.warmer.state(mc), "waking_seconds": m.warmer.waking_for(mc)}
             for mc in m.cfg.models.values()]
@@ -39,6 +40,7 @@ async def _resources_status(m) -> dict:
 @owner_routes.get("/gpu")
 @owner_routes.get("/resources")
 async def gpu(request: Request):
+    """Return the resource guard's state, the model's status, and the default load-now duration."""
     return await _resources_status(manager(request))
 
 
@@ -96,6 +98,7 @@ async def gpu_action(action: str, request: Request, body: GpuHoldRequest | None 
 
 @app_routes.get("/api/v1/models/status")
 async def api_models_status(request: Request):
+    """Report each model's load state and how long its current warm-up has been running."""
     m = manager(request)
     app_auth(request, "sessions")
     return [{"name": mc.name, "state": await m.warmer.state(mc), "waking_seconds": m.warmer.waking_for(mc)}
@@ -104,6 +107,7 @@ async def api_models_status(request: Request):
 
 @app_routes.post("/api/v1/models/warm")
 async def api_models_warm(request: Request):
+    """Start loading the default model if it is asleep, without waiting; an App gets 409 if the GPU is held or RAM is low."""
     m = manager(request)
     key = app_auth(request, "sessions")
     app = key.get("kind") == "app"

@@ -64,17 +64,20 @@ def runner_auth(request: Request, name: str):
 
 @owner_routes.get("/runners")
 async def runners(request: Request):
+    """List each runner's presence, compatibility, pending requests, and whether remote update is supported."""
     return mgr(request).hub.status()
 
 
 @owner_routes.post("/runners/{name}/poll")
 async def runner_poll(name: str, body: RunnerPoll, request: Request):
+    """Long-poll for requests queued to this runner; returns when work arrives or the hold ends."""
     m = runner_auth(request, name)
     return await m.hub.poll(name, body.instance, body.inflight, body.info)
 
 
 @owner_routes.post("/runners/{name}/results")
 async def runner_result(name: str, body: RunnerResult, request: Request):
+    """Report one request's result; accepted is false if it is no longer pending, and 413 for results over 16 MiB."""
     m = runner_auth(request, name)
     if int(request.headers.get("content-length") or 0) > RUNNER_BODY_LIMIT:
         raise HarnessError(413, "result too large")
@@ -83,6 +86,7 @@ async def runner_result(name: str, body: RunnerResult, request: Request):
 
 @owner_routes.post("/runners/{name}/update")
 async def runner_update(name: str, request: Request):
+    """Ask an online Mac runner to update itself and wait for the outcome; 409 if offline, too old, or failed."""
     m = mgr(request)
     require_admin(request, mgr)
     if name not in m.hub.state:
@@ -114,6 +118,7 @@ async def runner_pairing_codes(request: Request):
 
 @owner_routes.post("/runner-pairing-codes", status_code=201)
 async def create_runner_pairing_code(body: RunnerPairingCodeRequest, request: Request):
+    """Create a one-time Mac pairing code, returned only in this response, that expires after its lifetime."""
     name = body.name.strip()
     runner = body.runner.strip()
     if not name or not runner:
@@ -129,6 +134,7 @@ async def create_runner_pairing_code(body: RunnerPairingCodeRequest, request: Re
 
 @owner_routes.delete("/runner-pairing-codes/{pid}", status_code=204)
 async def revoke_runner_pairing_code(pid: str, request: Request):
+    """Revoke an unused, unexpired pairing code; 404 if no such code is active."""
     m = mgr(request)
     if not runtime(request, "runners").revoke_runner_pairing_code(
             pid, credential_audit.request_context(request, m)):
@@ -147,12 +153,14 @@ async def pair_runner(body: RunnerPairRequest, request: Request):
 
 @public_routes.get("/mac-client/install.sh", include_in_schema=False)
 async def mac_client_installer():
+    """Serve the shell script that installs the Mac client."""
     return FileResponse(ROOT / "macrunner" / "install.sh",
                         media_type="text/x-shellscript", headers={"Cache-Control": "no-cache"})
 
 
 @public_routes.get("/mac-client/package.tar.gz", include_in_schema=False)
 async def mac_client_package():
+    """Return the gzip tarball of the Mac client runtime, built once and cached in memory."""
     from .mac_client import package_bytes
     return Response(package_bytes(), media_type="application/gzip", headers={
         "Content-Disposition": 'attachment; filename="agent-harness-mac.tar.gz"',
@@ -162,5 +170,6 @@ async def mac_client_package():
 
 @public_routes.get("/mac-client/manifest.json", include_in_schema=False)
 async def mac_client_manifest():
+    """Describe the Mac client package: version, protocol numbers, size, and sha256."""
     from .mac_client import package_manifest
     return JSONResponse(package_manifest(), headers={"Cache-Control": "no-cache"})

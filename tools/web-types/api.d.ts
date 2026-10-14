@@ -27,7 +27,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Admin Root */
+        /**
+         * Admin Root
+         * @description Return the API version, capabilities, hub claim state, owner logins, and the operations it serves.
+         */
         get: operations["admin_root_api_admin_v1_get"];
         put?: never;
         post?: never;
@@ -44,10 +47,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Accounts */
+        /**
+         * List Accounts
+         * @description List household member accounts with quotas, disk usage, and Google sign-in state.
+         */
         get: operations["list_accounts_api_admin_v1_accounts_get"];
         put?: never;
-        /** Create Account */
+        /**
+         * Create Account
+         * @description Create a household member account; needs an explicit owner allowlist, and a login can hold only one role.
+         */
         post: operations["create_account_api_admin_v1_accounts_post"];
         delete?: never;
         options?: never;
@@ -62,7 +71,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Account Audit */
+        /**
+         * Account Audit
+         * @description List recent account audit rows, newest first; `limit` is clamped to 1 through 500.
+         */
         get: operations["account_audit_api_admin_v1_accounts_audit_get"];
         put?: never;
         post?: never;
@@ -79,14 +91,20 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Account */
+        /**
+         * Get Account
+         * @description Return one household member's account with disk usage and Google sign-in state; 404 for other ids.
+         */
         get: operations["get_account_api_admin_v1_accounts__user_id__get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /** Update Account */
+        /**
+         * Update Account
+         * @description Update the fields sent for a household member; raising `max_running` can start a waiting session now.
+         */
         patch: operations["update_account_api_admin_v1_accounts__user_id__patch"];
         trace?: never;
     };
@@ -99,7 +117,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Reset Member Github */
+        /**
+         * Reset Member Github
+         * @description Erase a member's GitHub credential and stop their Git work, leaving them disconnected; `confirm` must be true.
+         */
         post: operations["reset_member_github_api_admin_v1_accounts__user_id__github_connection_reset_post"];
         delete?: never;
         options?: never;
@@ -117,7 +138,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Google Unlink */
+        /**
+         * Google Unlink
+         * @description Unlink a member's Google account, cancel any pending link code, and end their Web sessions; `confirm` must be true.
+         */
         delete: operations["google_unlink_api_admin_v1_accounts__user_id__google_delete"];
         options?: never;
         head?: never;
@@ -133,9 +157,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Google Invite */
+        /**
+         * Google Invite
+         * @description Create a one-time link code, replacing any pending one; 409 if the member is linked or disabled, and it expires in 15 minutes.
+         */
         post: operations["google_invite_api_admin_v1_accounts__user_id__google_invitation_post"];
-        /** Google Invite Cancel */
+        /**
+         * Google Invite Cancel
+         * @description Cancel a member's pending link code; the call succeeds even when none is pending.
+         */
         delete: operations["google_invite_cancel_api_admin_v1_accounts__user_id__google_invitation_delete"];
         options?: never;
         head?: never;
@@ -151,7 +181,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Google Revoke */
+        /**
+         * Google Revoke
+         * @description Sign the member out of all Web sessions, leaving the Google link in place; returns the number revoked.
+         */
         post: operations["google_revoke_api_admin_v1_accounts__user_id__google_revoke_sessions_post"];
         delete?: never;
         options?: never;
@@ -166,7 +199,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** App Erasures */
+        /**
+         * App Erasures
+         * @description List revoked Apps and devices still waiting for their store and folder to be erased, soonest first.
+         */
         get: operations["app_erasures_api_admin_v1_apps_erasures_get"];
         put?: never;
         post?: never;
@@ -210,7 +246,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Restore App */
+        /**
+         * Restore App
+         * @description Undo an App's revoke within its erasure grace and return a new key; 404 after the grace.
+         */
         post: operations["restore_app_api_admin_v1_apps__app_id__restore_post"];
         delete?: never;
         options?: never;
@@ -226,7 +265,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Set App Retention */
+        /**
+         * Set App Retention
+         * @description Set an App's default session retention in days, or null to keep sessions until deleted; 404 for an unknown id.
+         */
         put: operations["set_app_retention_api_admin_v1_apps__app_id__retention_put"];
         post?: never;
         delete?: never;
@@ -262,7 +304,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Backends */
+        /**
+         * Backends
+         * @description Local and hosted backends with their model and sign-in state; `auth=skip` skips the sign-in checks.
+         */
         get: operations["admin_backends_backends_get"];
         put?: never;
         post?: never;
@@ -299,10 +344,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Chats */
+        /**
+         * List Chats
+         * @description The caller's chats, newest first, up to `limit` (1 to 200, default 50).
+         */
         get: operations["admin_list_chats_chats_get"];
         put?: never;
-        /** Create Chat */
+        /**
+         * Create Chat
+         * @description Starts a chat and returns before its first reply finishes; backend, model and effort are optional.
+         */
         post: operations["admin_create_chat_chats_post"];
         delete?: never;
         options?: never;
@@ -317,7 +368,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Chat Options */
+        /**
+         * Chat Options
+         * @description Backends, models and efforts a new chat can start with, and the default backend.
+         */
         get: operations["admin_chat_options_chats_options_get"];
         put?: never;
         post?: never;
@@ -334,7 +388,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Snippet Languages */
+        /**
+         * Snippet Languages
+         * @description Languages the snippet runner supports, with their aliases and size limits.
+         */
         get: operations["admin_snippet_languages_chats_snippet_languages_get"];
         put?: never;
         post?: never;
@@ -351,16 +408,28 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Chat */
+        /**
+         * Get Chat
+         * @description Current state of one chat.
+         */
         get: operations["admin_get_chat_chats__ref__get"];
-        /** Rename Chat */
+        /**
+         * Rename Chat
+         * @description Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.
+         */
         put: operations["admin_rename_chat_chats__ref__put"];
         post?: never;
-        /** Delete Chat */
+        /**
+         * Delete Chat
+         * @description Deletes an idle chat and its workspace; 409 while a reply or snippet is running.
+         */
         delete: operations["admin_delete_chat_chats__ref__delete"];
         options?: never;
         head?: never;
-        /** Rename Chat */
+        /**
+         * Rename Chat
+         * @description Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.
+         */
         patch: operations["admin_rename_chat_chats__ref__patch"];
         trace?: never;
     };
@@ -373,7 +442,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel Chat */
+        /**
+         * Cancel Chat
+         * @description Stops a chat's running reply and returns once it has ended; 409 when no reply is active.
+         */
         post: operations["admin_cancel_chat_chats__ref__cancel_post"];
         delete?: never;
         options?: never;
@@ -388,7 +460,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Chat Events */
+        /**
+         * Chat Events
+         * @description Server-sent events for one chat, replaying events after `after`; `follow=false` ends after the replay.
+         */
         get: operations["admin_chat_events_chats__ref__events_get"];
         put?: never;
         post?: never;
@@ -407,7 +482,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Send Chat Message */
+        /**
+         * Send Chat Message
+         * @description Sends a chat message and returns before the reply finishes; snippets run since the last message are included.
+         */
         post: operations["admin_send_chat_message_chats__ref__messages_post"];
         delete?: never;
         options?: never;
@@ -444,7 +522,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel Snippet */
+        /**
+         * Cancel Snippet
+         * @description Asks a running snippet to stop; 409 if it is not running, and the final result arrives as a snippet_result event.
+         */
         post: operations["admin_cancel_snippet_chats__ref__snippets__run_id__cancel_post"];
         delete?: never;
         options?: never;
@@ -459,14 +540,20 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Admin Config */
+        /**
+         * Admin Config
+         * @description Return every admin setting with the active and pending revisions and restart state; the ETag is the active revision.
+         */
         get: operations["admin_config_api_admin_v1_config_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /** Admin Patch */
+        /**
+         * Admin Patch
+         * @description Change settings; restart-only ones wait for a restart, `dry_run` previews without saving, and a stale `revision` returns 409.
+         */
         patch: operations["admin_patch_api_admin_v1_config_patch"];
         trace?: never;
     };
@@ -479,7 +566,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Admin Restart */
+        /**
+         * Admin Restart
+         * @description Restart into the pending or active config with `confirm` true; the process exits after responding, or 409 if unsupervised.
+         */
         post: operations["admin_restart_api_admin_v1_config_restart_post"];
         delete?: never;
         options?: never;
@@ -496,7 +586,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Admin Rollback */
+        /**
+         * Admin Rollback
+         * @description Restore the previous confirmed config; needs `confirm` true unless `dry_run` is set, and 409 when there is none.
+         */
         post: operations["admin_rollback_api_admin_v1_config_rollback_post"];
         delete?: never;
         options?: never;
@@ -511,7 +604,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Admin Schema */
+        /**
+         * Admin Schema
+         * @description Describe each admin setting's type, bounds, default, and apply mode, and whether a supervised restart is available.
+         */
         get: operations["admin_schema_api_admin_v1_config_schema_get"];
         put?: never;
         post?: never;
@@ -530,7 +626,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Admin Validate */
+        /**
+         * Admin Validate
+         * @description Plan proposed admin changes without saving or applying them; invalid changes return 400 and a stale `revision` returns 409.
+         */
         post: operations["admin_validate_api_admin_v1_config_validate_post"];
         delete?: never;
         options?: never;
@@ -565,9 +664,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Github Member Auth */
+        /**
+         * Github Member Auth
+         * @description Return GitHub sign-in state and each member's coarse status; `refresh` forces a fresh preflight check.
+         */
         get: operations["github_member_auth_api_admin_v1_github_member_auth_get"];
-        /** Set Github Member Auth */
+        /**
+         * Set Github Member Auth
+         * @description Turn member GitHub sign-in on or off; enabling needs GitHub configured (409 otherwise), and disabling keeps credentials.
+         */
         put: operations["set_github_member_auth_api_admin_v1_github_member_auth_put"];
         post?: never;
         delete?: never;
@@ -583,7 +688,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Github Items */
+        /**
+         * Github Items
+         * @description Open issues and pull requests, 30 per page; results are cached for 60 seconds.
+         */
         get: operations["admin_github_items_github_projects__project__items_get"];
         put?: never;
         post?: never;
@@ -600,7 +708,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Github Item */
+        /**
+         * Github Item
+         * @description One open issue or PR with its body and, for a PR, its line comments; closed and fork PRs are refused.
+         */
         get: operations["admin_github_item_github_projects__project__items__number__get"];
         put?: never;
         post?: never;
@@ -619,7 +730,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create Github Session */
+        /**
+         * Create Github Session
+         * @description Starts a session from a GitHub issue or PR, whose text becomes the untrusted prompt; PR tasks need a tower project.
+         */
         post: operations["admin_create_github_session_github_sessions_post"];
         delete?: never;
         options?: never;
@@ -634,7 +748,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Google Status */
+        /**
+         * Google Status
+         * @description Return Google sign-in configuration and readiness; `refresh` re-runs the OpenID discovery check, not the cached result.
+         */
         get: operations["google_status_api_admin_v1_google_signin_get"];
         put?: never;
         post?: never;
@@ -651,7 +768,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Gpu */
+        /**
+         * Gpu
+         * @description Return the resource guard's state, the model's status, and the default load-now duration.
+         */
         get: operations["admin_gpu_gpu_get"];
         put?: never;
         post?: never;
@@ -792,10 +912,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Images */
+        /**
+         * List Images
+         * @description List gallery images newest first, up to the limit (default 60), with the service status.
+         */
         get: operations["admin_list_images_images_get"];
         put?: never;
-        /** Create Image */
+        /**
+         * Create Image
+         * @description Queue an image generation and return its job; the image is not ready until its status is done.
+         */
         post: operations["admin_create_image_images_post"];
         delete?: never;
         options?: never;
@@ -832,7 +958,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Upload Image */
+        /**
+         * Upload Image
+         * @description Store an uploaded photo as a finished gallery image, once image editing is set up.
+         */
         post: operations["admin_upload_image_images_uploads_post"];
         delete?: never;
         options?: never;
@@ -867,11 +996,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Image */
+        /**
+         * Get Image
+         * @description Return an image's JSON record, its PNG for ids ending in .png (404 until done), or its edit inputs for .source.png and .mask.png.
+         */
         get: operations["admin_get_image_images__iid__get"];
         put?: never;
         post?: never;
-        /** Delete Image */
+        /**
+         * Delete Image
+         * @description Delete an image and its files, cancelling it first if it is still queued or running.
+         */
         delete: operations["admin_delete_image_images__iid__delete"];
         options?: never;
         head?: never;
@@ -887,7 +1022,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel Image */
+        /**
+         * Cancel Image
+         * @description Cancel a queued or running image and wait until a running one stops; finished images are returned as they are.
+         */
         post: operations["admin_cancel_image_images__iid__cancel_post"];
         delete?: never;
         options?: never;
@@ -904,7 +1042,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Edit Image */
+        /**
+         * Edit Image
+         * @description Queue a masked edit of a finished image and return the queued job before it runs.
+         */
         post: operations["admin_edit_image_images__iid__edit_post"];
         delete?: never;
         options?: never;
@@ -921,7 +1062,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Upscale Image */
+        /**
+         * Upscale Image
+         * @description Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job.
+         */
         post: operations["admin_upscale_image_images__iid__upscale_post"];
         delete?: never;
         options?: never;
@@ -936,10 +1080,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Jobs */
+        /**
+         * List Jobs
+         * @description List scheduled jobs, each with its most recent run.
+         */
         get: operations["admin_list_jobs_jobs_get"];
         put?: never;
-        /** Create Job */
+        /**
+         * Create Job
+         * @description Create a scheduled job after validating it; its next run is set from the cron schedule.
+         */
         post: operations["admin_create_job_jobs_post"];
         delete?: never;
         options?: never;
@@ -974,12 +1124,21 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Job */
+        /**
+         * Get Job
+         * @description Return one scheduled job with its 15 most recent runs.
+         */
         get: operations["admin_get_job_jobs__jid__get"];
-        /** Update Job */
+        /**
+         * Update Job
+         * @description Replace a scheduled job's settings after validation and recompute its next run.
+         */
         put: operations["admin_update_job_jobs__jid__put"];
         post?: never;
-        /** Delete Job */
+        /**
+         * Delete Job
+         * @description Delete a scheduled job and record the deletion in the audit log.
+         */
         delete: operations["admin_delete_job_jobs__jid__delete"];
         options?: never;
         head?: never;
@@ -1013,10 +1172,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Keys */
+        /**
+         * List Keys
+         * @description Key metadata only; a key's secret is returned once, by the create response.
+         */
         get: operations["admin_list_keys_keys_get"];
         put?: never;
-        /** Create Key */
+        /**
+         * Create Key
+         * @description Mints an API key and returns its secret only in this response; a Hub's owner-kind request gets 403.
+         */
         post: operations["admin_create_key_keys_post"];
         delete?: never;
         options?: never;
@@ -1034,7 +1199,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke Key */
+        /**
+         * Revoke Key
+         * @description Revokes one key; an unknown or already revoked id returns 404, and the Hub's own key returns 409.
+         */
         delete: operations["admin_revoke_key_keys__kid__delete"];
         options?: never;
         head?: never;
@@ -1048,7 +1216,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Maintenance */
+        /**
+         * Maintenance
+         * @description Disk usage of session workspaces and checkpoints, and of the data volume.
+         */
         get: operations["admin_maintenance_maintenance_get"];
         put?: never;
         post?: never;
@@ -1067,7 +1238,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Maintenance Backup */
+        /**
+         * Maintenance Backup
+         * @description Write a dated backup of the database, transcripts, and config, wait for it, then prune old backups.
+         */
         post: operations["admin_maintenance_backup_maintenance_backup_post"];
         delete?: never;
         options?: never;
@@ -1084,7 +1258,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Maintenance Cleanup */
+        /**
+         * Maintenance Cleanup
+         * @description Runs a cleanup pass now, after any pass in progress, and returns what it removed.
+         */
         post: operations["admin_maintenance_cleanup_maintenance_cleanup_post"];
         delete?: never;
         options?: never;
@@ -1101,7 +1278,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Image Archive Retention Apply */
+        /**
+         * Image Archive Retention Apply
+         * @description Delete the archived images from a preview if its confirmation still matches; a missing or stale one returns 409.
+         */
         post: operations["admin_image_archive_retention_apply_maintenance_image_archive_retention_apply_post"];
         delete?: never;
         options?: never;
@@ -1118,7 +1298,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Image Archive Retention Preview */
+        /**
+         * Image Archive Retention Preview
+         * @description Preview the archived images that retention would delete, with the confirmation to pass to apply.
+         */
         post: operations["admin_image_archive_retention_preview_maintenance_image_archive_retention_preview_post"];
         delete?: never;
         options?: never;
@@ -1133,7 +1316,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Me */
+        /**
+         * Me
+         * @description Caller's identity, role and capabilities, plus disk and queue usage where the account has it.
+         */
         get: operations["admin_me_me_get"];
         put?: never;
         post?: never;
@@ -1190,7 +1376,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Models */
+        /**
+         * Models
+         * @description Configured models with their context sizes; one is marked as the default.
+         */
         get: operations["admin_models_models_get"];
         put?: never;
         post?: never;
@@ -1207,7 +1396,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Models Status */
+        /**
+         * Models Status
+         * @description Report each model's load state and how long its current warm-up has been running.
+         */
         get: operations["admin_models_status_models_status_get"];
         put?: never;
         post?: never;
@@ -1246,7 +1438,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Notify Test */
+        /**
+         * Notify Test
+         * @description Send a test push notification through ntfy.
+         */
         post: operations["admin_notify_test_notify_test_post"];
         delete?: never;
         options?: never;
@@ -1267,7 +1462,10 @@ export interface paths {
          */
         get: operations["admin_pairing_codes_pairing_codes_get"];
         put?: never;
-        /** Create Pairing Code */
+        /**
+         * Create Pairing Code
+         * @description Mint a single-use pairing code bound to one origin; it is returned only here and expires after its TTL.
+         */
         post: operations["admin_create_pairing_code_pairing_codes_post"];
         delete?: never;
         options?: never;
@@ -1285,7 +1483,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke Pairing Code */
+        /**
+         * Revoke Pairing Code
+         * @description Expire an unused pairing code now; 404 when no such code is still active.
+         */
         delete: operations["admin_revoke_pairing_code_pairing_codes__pid__delete"];
         options?: never;
         head?: never;
@@ -1404,9 +1605,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Profile */
+        /**
+         * Profile
+         * @description The profile icon and the list of icons to choose from.
+         */
         get: operations["admin_profile_profile_get"];
-        /** Update Profile */
+        /**
+         * Update Profile
+         * @description Sets the profile icon; the emoji must be one of the listed choices.
+         */
         put: operations["admin_update_profile_profile_put"];
         post?: never;
         delete?: never;
@@ -1422,10 +1629,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Projects */
+        /**
+         * Projects
+         * @description Projects visible to the caller, or an empty list for a read-only demo session.
+         */
         get: operations["admin_projects_projects_get"];
         put?: never;
-        /** Create Project */
+        /**
+         * Create Project
+         * @description Creates a project with an empty workspace or a repo cloned per session; `github` clones use the caller's GitHub sign-in.
+         */
         post: operations["admin_create_project_projects_post"];
         delete?: never;
         options?: never;
@@ -1440,10 +1653,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Provider Credentials */
+        /**
+         * Provider Credentials
+         * @description List provider grants, including revoked ones, newest first; `available` shows whether a key-based grant's secret file exists.
+         */
         get: operations["provider_credentials_api_admin_v1_provider_credentials_get"];
         put?: never;
-        /** Set Provider Credential */
+        /**
+         * Set Provider Credential
+         * @description Grant an App a provider backend, revoking its previous grant for that backend; key-based policies need a configured `secret_ref`.
+         */
         post: operations["set_provider_credential_api_admin_v1_provider_credentials_post"];
         delete?: never;
         options?: never;
@@ -1461,7 +1680,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke Provider Credential */
+        /**
+         * Revoke Provider Credential
+         * @description Revoke an active provider grant; an unknown or already revoked id returns 404.
+         */
         delete: operations["revoke_provider_credential_api_admin_v1_provider_credentials__credential_id__delete"];
         options?: never;
         head?: never;
@@ -1475,7 +1697,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Queue */
+        /**
+         * Queue
+         * @description Queue positions of the caller's queued agent sessions, in queue order.
+         */
         get: operations["admin_queue_queue_get"];
         put?: never;
         post?: never;
@@ -1492,7 +1717,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Rc Status */
+        /**
+         * Rc Status
+         * @description Report whether Remote Control is enabled and each project's state.
+         */
         get: operations["admin_rc_status_remote_control_get"];
         put?: never;
         post?: never;
@@ -1511,7 +1739,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Start */
+        /**
+         * Start
+         * @description Start a background folder scan, or return the scan already running; poll the scan for results.
+         */
         post: operations["start_api_admin_v1_remote_control_discovery_scans_post"];
         delete?: never;
         options?: never;
@@ -1526,11 +1757,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Status */
+        /**
+         * Status
+         * @description Return a folder scan's progress and candidates; an expired or unknown scan returns 404.
+         */
         get: operations["status_api_admin_v1_remote_control_discovery_scans__scan_id__get"];
         put?: never;
         post?: never;
-        /** Cancel */
+        /**
+         * Cancel
+         * @description Ask a folder scan to stop and return its current view, which may still show it running.
+         */
         delete: operations["cancel_api_admin_v1_remote_control_discovery_scans__scan_id__delete"];
         options?: never;
         head?: never;
@@ -1546,7 +1783,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Promote */
+        /**
+         * Promote
+         * @description Add a scanned folder as a managed folder; the confirmed path and markers must match the scan exactly.
+         */
         post: operations["promote_api_admin_v1_remote_control_discovery_scans__scan_id__candidates__candidate_id__promote_post"];
         delete?: never;
         options?: never;
@@ -1564,7 +1804,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Remove */
+        /**
+         * Remove
+         * @description Remove a managed folder; returns 409 while its Remote Control server or trust window is open.
+         */
         delete: operations["remove_api_admin_v1_remote_control_folders__slug__delete"];
         options?: never;
         head?: never;
@@ -1580,7 +1823,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rc Launch */
+        /**
+         * Rc Launch
+         * @description Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder.
+         */
         post: operations["admin_rc_launch_remote_control__project__post"];
         delete?: never;
         options?: never;
@@ -1597,7 +1843,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rc Stop */
+        /**
+         * Rc Stop
+         * @description Stop a project's Remote Control server and its child processes; 404 if none was started.
+         */
         post: operations["admin_rc_stop_remote_control__project__stop_post"];
         delete?: never;
         options?: never;
@@ -1614,7 +1863,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rc Trust */
+        /**
+         * Rc Trust
+         * @description Open a Claude console window in a project so the user can accept workspace trust; Windows only.
+         */
         post: operations["admin_rc_trust_remote_control__project__trust_post"];
         delete?: never;
         options?: never;
@@ -1629,7 +1881,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Gpu */
+        /**
+         * Gpu
+         * @description Return the resource guard's state, the model's status, and the default load-now duration.
+         */
         get: operations["admin_gpu_resources_get"];
         put?: never;
         post?: never;
@@ -1694,7 +1949,10 @@ export interface paths {
          */
         get: operations["admin_runner_pairing_codes_runner_pairing_codes_get"];
         put?: never;
-        /** Create Runner Pairing Code */
+        /**
+         * Create Runner Pairing Code
+         * @description Create a one-time Mac pairing code, returned only in this response, that expires after its lifetime.
+         */
         post: operations["admin_create_runner_pairing_code_runner_pairing_codes_post"];
         delete?: never;
         options?: never;
@@ -1712,7 +1970,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke Runner Pairing Code */
+        /**
+         * Revoke Runner Pairing Code
+         * @description Revoke an unused, unexpired pairing code; 404 if no such code is active.
+         */
         delete: operations["admin_revoke_runner_pairing_code_runner_pairing_codes__pid__delete"];
         options?: never;
         head?: never;
@@ -1726,7 +1987,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Runners */
+        /**
+         * Runners
+         * @description List each runner's presence, compatibility, pending requests, and whether remote update is supported.
+         */
         get: operations["admin_runners_runners_get"];
         put?: never;
         post?: never;
@@ -1745,7 +2009,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Runner Update */
+        /**
+         * Runner Update
+         * @description Ask an online Mac runner to update itself and wait for the outcome; 409 if offline, too old, or failed.
+         */
         post: operations["admin_runner_update_runners__name__update_post"];
         delete?: never;
         options?: never;
@@ -1787,7 +2054,10 @@ export interface paths {
          */
         get: operations["admin_list_sessions_sessions_get"];
         put?: never;
-        /** Create Session */
+        /**
+         * Create Session
+         * @description Starts an agent session and returns before its run finishes.
+         */
         post: operations["admin_create_session_sessions_post"];
         delete?: never;
         options?: never;
@@ -1802,15 +2072,24 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Session */
+        /**
+         * Get Session
+         * @description Current state of one session, with its queue position and any pending approvals.
+         */
         get: operations["admin_get_session_sessions__ref__get"];
-        /** Patch Session */
+        /**
+         * Patch Session
+         * @description Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.
+         */
         put: operations["admin_patch_session_sessions__ref__put"];
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /** Patch Session */
+        /**
+         * Patch Session
+         * @description Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.
+         */
         patch: operations["admin_patch_session_sessions__ref__patch"];
         trace?: never;
     };
@@ -1821,7 +2100,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Approvals */
+        /**
+         * Approvals
+         * @description Pending approvals for the session, or every approval when `all` is true.
+         */
         get: operations["admin_approvals_sessions__ref__approvals_get"];
         put?: never;
         post?: never;
@@ -1840,7 +2122,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Decide */
+        /**
+         * Decide
+         * @description Approves or denies an approval; `pending` works only when exactly one is waiting, and a decided one returns 409.
+         */
         post: operations["admin_decide_sessions__ref__approvals__approval_id__post"];
         delete?: never;
         options?: never;
@@ -1857,7 +2142,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel */
+        /**
+         * Cancel
+         * @description Stops an active session and returns once its run has ended; 409 when nothing is active.
+         */
         post: operations["admin_cancel_sessions__ref__cancel_post"];
         delete?: never;
         options?: never;
@@ -1872,7 +2160,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Changes */
+        /**
+         * Changes
+         * @description The session's git diff by repository, with its secret-scan result; a removed workspace returns no repositories.
+         */
         get: operations["admin_changes_sessions__ref__changes_get"];
         put?: never;
         post?: never;
@@ -1889,7 +2180,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Session Checkpoints */
+        /**
+         * Session Checkpoints
+         * @description Checkpoints by turn, with flags for whether rewind and fork are allowed here.
+         */
         get: operations["admin_session_checkpoints_sessions__ref__checkpoints_get"];
         put?: never;
         post?: never;
@@ -1908,7 +2202,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Fork Checkpoint */
+        /**
+         * Fork Checkpoint
+         * @description Starts a new session from this checkpoint with a non-blank prompt, and returns before its run finishes.
+         */
         post: operations["admin_fork_checkpoint_sessions__ref__checkpoints__turn__fork_post"];
         delete?: never;
         options?: never;
@@ -1925,7 +2222,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rewind Checkpoint */
+        /**
+         * Rewind Checkpoint
+         * @description Rewinds the session to this checkpoint; 409 while it runs, and hosted CLI sessions cannot rewind.
+         */
         post: operations["admin_rewind_checkpoint_sessions__ref__checkpoints__turn__rewind_post"];
         delete?: never;
         options?: never;
@@ -1963,7 +2263,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Send Message */
+        /**
+         * Send Message
+         * @description Sends a follow-up and returns before the reply finishes; a running session reads it before its next model call.
+         */
         post: operations["admin_send_message_sessions__ref__messages_post"];
         delete?: never;
         options?: never;
@@ -2000,7 +2303,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rerun */
+        /**
+         * Rerun
+         * @description Starts a new session repeating this one's original prompt, project and taint, optionally on another backend or model; 409 for App tools-only sessions.
+         */
         post: operations["admin_rerun_sessions__ref__rerun_post"];
         delete?: never;
         options?: never;
@@ -2015,10 +2321,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Review Comments */
+        /**
+         * Review Comments
+         * @description Draft line comments on the session's Changes diff, not yet sent to the agent.
+         */
         get: operations["admin_review_comments_sessions__ref__review_comments_get"];
         put?: never;
-        /** Add Review Comment */
+        /**
+         * Add Review Comment
+         * @description Saves a draft line comment on the Changes diff; nothing reaches the agent until the drafts are sent.
+         */
         post: operations["admin_add_review_comment_sessions__ref__review_comments_post"];
         delete?: never;
         options?: never;
@@ -2056,7 +2368,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete Review Comment */
+        /**
+         * Delete Review Comment
+         * @description Removes one draft line comment; 404 if no draft has that id.
+         */
         delete: operations["admin_delete_review_comment_sessions__ref__review_comments__comment_id__delete"];
         options?: never;
         head?: never;
@@ -2132,7 +2447,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Clear Taint */
+        /**
+         * Clear Taint
+         * @description Clears the session's untrusted-source taint and records the clear.
+         */
         post: operations["admin_clear_taint_sessions__ref__taint_clear_post"];
         delete?: never;
         options?: never;
@@ -2147,7 +2465,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Transcript */
+        /**
+         * Get Transcript
+         * @description The session's transcript as plain text.
+         */
         get: operations["admin_get_transcript_sessions__ref__transcript_get"];
         put?: never;
         post?: never;
@@ -2164,7 +2485,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Skills Overview */
+        /**
+         * Skills Overview
+         * @description List proposals and installed skills; returns empty lists with enabled false when the module is off.
+         */
         get: operations["admin_skills_overview_skills_get"];
         put?: never;
         post?: never;
@@ -2181,7 +2505,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Skills Enabled */
+        /**
+         * Skills Enabled
+         * @description List installed skills that are enabled; returns an empty list when the module is off.
+         */
         get: operations["admin_skills_enabled_skills_enabled_get"];
         put?: never;
         post?: never;
@@ -2198,11 +2525,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Skill Proposal */
+        /**
+         * Skill Proposal
+         * @description Return one proposal, including its body; 404 if no proposal has that id.
+         */
         get: operations["admin_skill_proposal_skills_proposals__pid__get"];
         put?: never;
         post?: never;
-        /** Skill Delete Draft */
+        /**
+         * Skill Delete Draft
+         * @description Delete a proposal and its draft files; 409 if it has been installed.
+         */
         delete: operations["admin_skill_delete_draft_skills_proposals__pid__delete"];
         options?: never;
         head?: never;
@@ -2218,7 +2551,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Install */
+        /**
+         * Skill Install
+         * @description Install a proposal whose content hash matches the reviewed bytes; 409 if the hash is stale, rejected, or fails validation.
+         */
         post: operations["admin_skill_install_skills_proposals__pid__install_post"];
         delete?: never;
         options?: never;
@@ -2235,7 +2571,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Reject */
+        /**
+         * Skill Reject
+         * @description Reject a proposal and block its content hash; an installed proposal must be uninstalled first.
+         */
         post: operations["admin_skill_reject_skills_proposals__pid__reject_post"];
         delete?: never;
         options?: never;
@@ -2252,7 +2591,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Reopen */
+        /**
+         * Skill Reopen
+         * @description Reopen a rejected proposal and lift its content-hash block; it returns to validated or draft.
+         */
         post: operations["admin_skill_reopen_skills_proposals__pid__reopen_post"];
         delete?: never;
         options?: never;
@@ -2269,7 +2611,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Hosted Review */
+        /**
+         * Skill Hosted Review
+         * @description Queue an advisory hosted review that uses reviewer quota and returns before it runs; 400 if none is configured.
+         */
         post: operations["admin_skill_hosted_review_skills_proposals__pid__review_post"];
         delete?: never;
         options?: never;
@@ -2286,7 +2631,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Disable */
+        /**
+         * Skill Disable
+         * @description Turn an installed skill off without changing its version or project allowlist.
+         */
         post: operations["admin_skill_disable_skills__slug__disable_post"];
         delete?: never;
         options?: never;
@@ -2303,7 +2651,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Enable */
+        /**
+         * Skill Enable
+         * @description Turn an installed skill on without changing its version or project allowlist.
+         */
         post: operations["admin_skill_enable_skills__slug__enable_post"];
         delete?: never;
         options?: never;
@@ -2318,7 +2669,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Skill Export */
+        /**
+         * Skill Export
+         * @description Return the installed skill's current version as an exportable bundle with its content hash.
+         */
         get: operations["admin_skill_export_skills__slug__export_get"];
         put?: never;
         post?: never;
@@ -2336,7 +2690,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Skill Projects */
+        /**
+         * Skill Projects
+         * @description Replace the projects an installed skill is allowed in; unknown project names get 400.
+         */
         put: operations["admin_skill_projects_skills__slug__projects_put"];
         post?: never;
         delete?: never;
@@ -2354,7 +2711,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Rollback */
+        /**
+         * Skill Rollback
+         * @description Roll an installed skill back to its previous version; 409 when no older version exists.
+         */
         post: operations["admin_skill_rollback_skills__slug__rollback_post"];
         delete?: never;
         options?: never;
@@ -2371,7 +2731,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Uninstall */
+        /**
+         * Skill Uninstall
+         * @description Remove an installed skill's files and project allowlist.
+         */
         post: operations["admin_skill_uninstall_skills__slug__uninstall_post"];
         delete?: never;
         options?: never;
@@ -2386,9 +2749,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Smart Approvals */
+        /**
+         * Smart Approvals
+         * @description Smart-approval status and the 20 most recent reviews.
+         */
         get: operations["admin_smart_approvals_smart_approvals_get"];
-        /** Update Smart Approvals */
+        /**
+         * Update Smart Approvals
+         * @description Sets the smart-approval mode; any mode but off needs smart_approvals configured in harness.yaml.
+         */
         put: operations["admin_update_smart_approvals_smart_approvals_put"];
         post?: never;
         delete?: never;
@@ -2404,10 +2773,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Templates */
+        /**
+         * List Templates
+         * @description List saved task templates.
+         */
         get: operations["admin_list_templates_templates_get"];
         put?: never;
-        /** Create Template */
+        /**
+         * Create Template
+         * @description Create a task template after checking its name, prompt, project, backend, and model.
+         */
         post: operations["admin_create_template_templates_post"];
         delete?: never;
         options?: never;
@@ -2423,10 +2798,16 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Update Template */
+        /**
+         * Update Template
+         * @description Replace a task template's fields after the same checks as create; returns 404 if it does not exist.
+         */
         put: operations["admin_update_template_templates__tid__put"];
         post?: never;
-        /** Delete Template */
+        /**
+         * Delete Template
+         * @description Delete a saved task template.
+         */
         delete: operations["admin_delete_template_templates__tid__delete"];
         options?: never;
         head?: never;
@@ -2440,7 +2821,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Root */
+        /**
+         * Api Root
+         * @description Server version, scopes, models, backends and features; the projects list is always empty, so fetch projects separately.
+         */
         get: operations["api_root_api_v1_get"];
         put?: never;
         post?: never;
@@ -2457,7 +2841,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Scoped Audit */
+        /**
+         * Scoped Audit
+         * @description Audit records visible to this caller, newest first; pass next_before_id as before_id for the next page.
+         */
         get: operations["scoped_audit_api_v1_audit_get"];
         put?: never;
         post?: never;
@@ -2476,7 +2863,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Google Start */
+        /**
+         * Google Start
+         * @description Start a Google sign-in, link, or invite attempt bound to this browser and return its authorization URL; invite needs a link code.
+         */
         post: operations["google_start_api_v1_auth_google_start_post"];
         delete?: never;
         options?: never;
@@ -2493,7 +2883,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Logout */
+        /**
+         * Logout
+         * @description End this browser's Web session and clear its cookie; a request with an active session must send the CSRF token.
+         */
         post: operations["logout_api_v1_auth_logout_post"];
         delete?: never;
         options?: never;
@@ -2508,7 +2901,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Auth Session */
+        /**
+         * Auth Session
+         * @description Report Google sign-in availability and this browser's sign-in state; the CSRF token appears only with a session.
+         */
         get: operations["auth_session_api_v1_auth_session_get"];
         put?: never;
         post?: never;
@@ -2525,7 +2921,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Backends */
+        /**
+         * Backends
+         * @description Each configured backend's availability, login state, limits and usage; some callers see only the local backend.
+         */
         get: operations["backends_api_v1_backends_get"];
         put?: never;
         post?: never;
@@ -2542,14 +2941,20 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** App Config */
+        /**
+         * App Config
+         * @description Return this App's settings with configured and effective values, the revision, and any daemon cap that applies.
+         */
         get: operations["app_config_api_v1_config_get"];
         put?: never;
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /** App Patch */
+        /**
+         * App Patch
+         * @description Change this App's settings; a stale `revision` returns 409, and `dry_run` returns the plan without saving.
+         */
         patch: operations["app_patch_api_v1_config_patch"];
         trace?: never;
     };
@@ -2560,7 +2965,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** App Schema */
+        /**
+         * App Schema
+         * @description Describe the App settings and mark the ones this App cannot write.
+         */
         get: operations["app_schema_api_v1_config_schema_get"];
         put?: never;
         post?: never;
@@ -2577,7 +2985,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** End User Login Status */
+        /**
+         * End User Login Status
+         * @description Whether the end user's login for this backend is linked, plus any sign-in attempt in progress.
+         */
         get: operations["end_user_login_status_api_v1_end_users__end_user__logins__backend__get"];
         put?: never;
         /**
@@ -2586,7 +2997,10 @@ export interface paths {
          *     attempt_id, ...}`. The App shows the URL (and the user code) in a popup.
          */
         post: operations["start_end_user_login_api_v1_end_users__end_user__logins__backend__post"];
-        /** Unlink End User Login */
+        /**
+         * Unlink End User Login
+         * @description Sign the end user out of this backend: their running sessions there stop, and their stored CLI login and state are deleted.
+         */
         delete: operations["unlink_end_user_login_api_v1_end_users__end_user__logins__backend__delete"];
         options?: never;
         head?: never;
@@ -2621,7 +3035,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Events */
+        /**
+         * Api Events
+         * @description Live-only server-sent stream of selected session events; nothing is replayed and sequence numbers are omitted.
+         */
         get: operations["api_events_api_v1_events_get"];
         put?: never;
         post?: never;
@@ -2640,7 +3057,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** App Image */
+        /**
+         * App Image
+         * @description Queue an image generation and return the job with a PNG URL that works once the image is done.
+         */
         post: operations["app_image_api_v1_images_post"];
         delete?: never;
         options?: never;
@@ -2655,7 +3075,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** App Image Status */
+        /**
+         * App Image Status
+         * @description Return an image's status and upscales, or its PNG (404 until done) for an id ending in .png; uploads and edits return 404.
+         */
         get: operations["app_image_status_api_v1_images__iid__get"];
         put?: never;
         post?: never;
@@ -2674,7 +3097,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** App Image Upscale */
+        /**
+         * App Image Upscale
+         * @description Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job.
+         */
         post: operations["app_image_upscale_api_v1_images__iid__upscale_post"];
         delete?: never;
         options?: never;
@@ -2736,7 +3162,10 @@ export interface paths {
          */
         put: operations["api_member_key_set_api_v1_me_api_keys__backend__put"];
         post?: never;
-        /** Api Member Key Delete */
+        /**
+         * Api Member Key Delete
+         * @description Remove the stored key; running sessions on that backend stop and their CLI state is deleted.
+         */
         delete: operations["api_member_key_delete_api_v1_me_api_keys__backend__delete"];
         options?: never;
         head?: never;
@@ -2752,7 +3181,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Api Member Key Test */
+        /**
+         * Api Member Key Test
+         * @description Validate the stored key with one cheap provider call; 409 when no key is stored.
+         */
         post: operations["api_member_key_test_api_v1_me_api_keys__backend__test_post"];
         delete?: never;
         options?: never;
@@ -2767,11 +3199,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Github Connection */
+        /**
+         * Api Github Connection
+         * @description GitHub connection state; the device code appears only while a sign-in is in progress.
+         */
         get: operations["api_github_connection_api_v1_me_github_connection_get"];
         put?: never;
         post?: never;
-        /** Api Github Disconnect */
+        /**
+         * Api Github Disconnect
+         * @description Erase the stored GitHub credentials and disconnect; a failed erase is retried at startup.
+         */
         delete: operations["api_github_disconnect_api_v1_me_github_connection_delete"];
         options?: never;
         head?: never;
@@ -2787,7 +3225,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Api Github Cancel */
+        /**
+         * Api Github Cancel
+         * @description Cancel a GitHub sign-in in progress, if any, and return the connection status.
+         */
         post: operations["api_github_cancel_api_v1_me_github_connection_cancel_post"];
         delete?: never;
         options?: never;
@@ -2804,7 +3245,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Api Github Connect */
+        /**
+         * Api Github Connect
+         * @description Start a GitHub device sign-in, or resume the live one; the sign-in runs in the background and returns the device code if one is ready.
+         */
         post: operations["api_github_connect_api_v1_me_github_connection_connect_post"];
         delete?: never;
         options?: never;
@@ -2819,11 +3263,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** My Google */
+        /**
+         * My Google
+         * @description Return this account's Google link state; `unlink_removes_this_device` is set when this device signed in with Google.
+         */
         get: operations["my_google_api_v1_me_google_get"];
         put?: never;
         post?: never;
-        /** My Google Unlink */
+        /**
+         * My Google Unlink
+         * @description Unlink this account's Google link, end its Web sessions, and clear this browser's cookie; `confirm` must be true.
+         */
         delete: operations["my_google_unlink_api_v1_me_google_delete"];
         options?: never;
         head?: never;
@@ -2837,7 +3287,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Models */
+        /**
+         * Api Models
+         * @description Configured models with their context sizes; the default model is flagged.
+         */
         get: operations["api_models_api_v1_models_get"];
         put?: never;
         post?: never;
@@ -2854,7 +3307,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Models Status */
+        /**
+         * Api Models Status
+         * @description Report each model's load state and how long its current warm-up has been running.
+         */
         get: operations["api_models_status_api_v1_models_status_get"];
         put?: never;
         post?: never;
@@ -2873,7 +3329,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Api Models Warm */
+        /**
+         * Api Models Warm
+         * @description Start loading the default model if it is asleep, without waiting; an App gets 409 if the GPU is held or RAM is low.
+         */
         post: operations["api_models_warm_api_v1_models_warm_post"];
         delete?: never;
         options?: never;
@@ -2890,7 +3349,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Pair Browser */
+        /**
+         * Pair Browser
+         * @description Redeem a single-use pairing code from this browser's origin for a token, returned once; a spent, expired or other-origin code gets 400.
+         */
         post: operations["pair_browser_api_v1_pair_post"];
         delete?: never;
         options?: never;
@@ -2967,7 +3429,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Profile */
+        /**
+         * Api Profile
+         * @description The profile emoji or its default; the choices list is always empty.
+         */
         get: operations["api_profile_api_v1_profile_get"];
         put?: never;
         post?: never;
@@ -2984,10 +3449,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Projects */
+        /**
+         * Api Projects
+         * @description The account's catalog projects, with repository URLs withheld.
+         */
         get: operations["api_projects_api_v1_projects_get"];
         put?: never;
-        /** Api Create Project */
+        /**
+         * Api Create Project
+         * @description Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected.
+         */
         post: operations["api_create_project_api_v1_projects_post"];
         delete?: never;
         options?: never;
@@ -3002,7 +3473,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Queue */
+        /**
+         * Api Queue
+         * @description Queue positions of the caller's sessions for the GPU slot, where 0 holds it and 1 and up are waiting.
+         */
         get: operations["api_queue_api_v1_queue_get"];
         put?: never;
         post?: never;
@@ -3019,7 +3493,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** App Rc Status */
+        /**
+         * App Rc Status
+         * @description Report whether Remote Control is enabled and each project's state.
+         */
         get: operations["app_rc_status_api_v1_remote_control_get"];
         put?: never;
         post?: never;
@@ -3038,7 +3515,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** App Rc Launch */
+        /**
+         * App Rc Launch
+         * @description Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder.
+         */
         post: operations["app_rc_launch_api_v1_remote_control__project__post"];
         delete?: never;
         options?: never;
@@ -3055,7 +3535,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** App Rc Stop */
+        /**
+         * App Rc Stop
+         * @description Stop a project's Remote Control server and its child processes; 404 if none was started.
+         */
         post: operations["app_rc_stop_api_v1_remote_control__project__stop_post"];
         delete?: never;
         options?: never;
@@ -3090,7 +3573,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Search */
+        /**
+         * Api Search
+         * @description Full-text search over past sessions, falling back to any-term matches when no session has every term; limit caps at 50.
+         */
         get: operations["api_search_api_v1_search_get"];
         put?: never;
         post?: never;
@@ -3107,10 +3593,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Sessions */
+        /**
+         * List Sessions
+         * @description Recent sessions, newest first; limit caps the count (default 50).
+         */
         get: operations["list_sessions_api_v1_sessions_get"];
         put?: never;
-        /** Create Session */
+        /**
+         * Create Session
+         * @description Queue a session and return it before it runs; a retried Idempotency-Key replays the first (200), and a different request with that key gets 409.
+         */
         post: operations["create_session_api_v1_sessions_post"];
         delete?: never;
         options?: never;
@@ -3125,9 +3617,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Session */
+        /**
+         * Get Session
+         * @description One session's summary with its answer, registered tool names and metadata.
+         */
         get: operations["get_session_api_v1_sessions__ref__get"];
-        /** Patch Session */
+        /**
+         * Patch Session
+         * @description Set the session's title; a blank title or one over 120 characters gets 400.
+         */
         put: operations["patch_session_api_v1_sessions__ref__put"];
         post?: never;
         /**
@@ -3138,7 +3636,10 @@ export interface paths {
         delete: operations["delete_session_api_v1_sessions__ref__delete"];
         options?: never;
         head?: never;
-        /** Patch Session */
+        /**
+         * Patch Session
+         * @description Set the session's title; a blank title or one over 120 characters gets 400.
+         */
         patch: operations["patch_session_api_v1_sessions__ref__patch"];
         trace?: never;
     };
@@ -3149,7 +3650,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Approvals */
+        /**
+         * Approvals
+         * @description Approvals in this session that still await a decision.
+         */
         get: operations["approvals_api_v1_sessions__ref__approvals_get"];
         put?: never;
         post?: never;
@@ -3168,7 +3672,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Decide */
+        /**
+         * Decide
+         * @description Approve or deny one tool-call approval; an already decided one returns 409 and another decision value 400.
+         */
         post: operations["decide_api_v1_sessions__ref__approvals__approval_id__post"];
         delete?: never;
         options?: never;
@@ -3185,7 +3692,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel */
+        /**
+         * Cancel
+         * @description Stop an active session and return it once its run has ended; a session that is not active gets 409.
+         */
         post: operations["cancel_api_v1_sessions__ref__cancel_post"];
         delete?: never;
         options?: never;
@@ -3200,7 +3710,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Changes */
+        /**
+         * Api Changes
+         * @description The session's file diffs with secret-scan results; a removed workspace returns no repos.
+         */
         get: operations["api_changes_api_v1_sessions__ref__changes_get"];
         put?: never;
         post?: never;
@@ -3219,7 +3732,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Add Context */
+        /**
+         * Add Context
+         * @description Send context blocks to the session as information, not user instructions, restarting a finished session; 400 when empty or over 60,000 characters.
+         */
         post: operations["add_context_api_v1_sessions__ref__context_post"];
         delete?: never;
         options?: never;
@@ -3234,7 +3750,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Events */
+        /**
+         * Events
+         * @description Replays events after sequence `after` (or Last-Event-ID), then streams live unless follow is false; a stream ticket can replace the bearer token.
+         */
         get: operations["events_api_v1_sessions__ref__events_get"];
         put?: never;
         post?: never;
@@ -3273,7 +3792,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Send */
+        /**
+         * Send
+         * @description Send a user message; an active session reads it before its next model call, a finished one restarts queued, and a removed workspace gets 409.
+         */
         post: operations["send_api_v1_sessions__ref__messages_post"];
         delete?: never;
         options?: never;
@@ -3290,7 +3812,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rerun Session */
+        /**
+         * Rerun Session
+         * @description Start a new queued session with this one's prompt, project and model; tools-only sessions get 409.
+         */
         post: operations["rerun_session_api_v1_sessions__ref__rerun_post"];
         delete?: never;
         options?: never;
@@ -3305,10 +3830,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Review Comments */
+        /**
+         * Api Review Comments
+         * @description The session's draft review comments, which are not yet sent.
+         */
         get: operations["api_review_comments_api_v1_sessions__ref__review_comments_get"];
         put?: never;
-        /** Api Add Review Comment */
+        /**
+         * Api Add Review Comment
+         * @description Save a draft line comment; drafts reach the agent only when sent, and an invalid comment gets 400.
+         */
         post: operations["api_add_review_comment_api_v1_sessions__ref__review_comments_post"];
         delete?: never;
         options?: never;
@@ -3325,7 +3856,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Api Send Review Comments */
+        /**
+         * Api Send Review Comments
+         * @description Send all draft review comments as one follow-up message, then clear the drafts; 400 when there are none.
+         */
         post: operations["api_send_review_comments_api_v1_sessions__ref__review_comments_send_post"];
         delete?: never;
         options?: never;
@@ -3343,7 +3877,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Api Delete Review Comment */
+        /**
+         * Api Delete Review Comment
+         * @description Delete one draft review comment; 404 when no draft has that id.
+         */
         delete: operations["api_delete_review_comment_api_v1_sessions__ref__review_comments__comment_id__delete"];
         options?: never;
         head?: never;
@@ -3359,7 +3896,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Api Review */
+        /**
+         * Api Review
+         * @description Merge, push or discard the session's git branch; 409 while it is still running, 400 without a git branch.
+         */
         post: operations["api_review_api_v1_sessions__ref__review__action__post"];
         delete?: never;
         options?: never;
@@ -3376,7 +3916,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Api Secret Findings Fix */
+        /**
+         * Api Secret Findings Fix
+         * @description Draft fix comments for open secret findings, or ask the agent to rewrite older commits; 409 when there is no finished secret scan.
+         */
         post: operations["api_secret_findings_fix_api_v1_sessions__ref__secret_findings_fix_post"];
         delete?: never;
         options?: never;
@@ -3411,7 +3954,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Tool Calls */
+        /**
+         * Tool Calls
+         * @description Tool calls the agent made to this session's app tools, filtered by status (default pending), oldest first; an empty status lists all.
+         */
         get: operations["tool_calls_api_v1_sessions__ref__tool_calls_get"];
         put?: never;
         post?: never;
@@ -3430,7 +3976,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Tool Result */
+        /**
+         * Tool Result
+         * @description Return the result for one pending app tool call and resume the run waiting on it; 409 when no such call is pending.
+         */
         post: operations["tool_result_api_v1_sessions__ref__tool_calls__call_id__post"];
         delete?: never;
         options?: never;
@@ -3445,7 +3994,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Api Transcript */
+        /**
+         * Api Transcript
+         * @description The session's transcript as Markdown text, opening with its title, status and totals.
+         */
         get: operations["api_transcript_api_v1_sessions__ref__transcript_get"];
         put?: never;
         post?: never;
@@ -3462,7 +4014,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Backends */
+        /**
+         * Backends
+         * @description Local and hosted backends with their model and sign-in state; `auth=skip` skips the sign-in checks.
+         */
         get: operations["backends_backends_get"];
         put?: never;
         post?: never;
@@ -3499,10 +4054,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Chats */
+        /**
+         * List Chats
+         * @description The caller's chats, newest first, up to `limit` (1 to 200, default 50).
+         */
         get: operations["list_chats_chats_get"];
         put?: never;
-        /** Create Chat */
+        /**
+         * Create Chat
+         * @description Starts a chat and returns before its first reply finishes; backend, model and effort are optional.
+         */
         post: operations["create_chat_chats_post"];
         delete?: never;
         options?: never;
@@ -3517,7 +4078,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Chat Options */
+        /**
+         * Chat Options
+         * @description Backends, models and efforts a new chat can start with, and the default backend.
+         */
         get: operations["chat_options_chats_options_get"];
         put?: never;
         post?: never;
@@ -3534,7 +4098,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Snippet Languages */
+        /**
+         * Snippet Languages
+         * @description Languages the snippet runner supports, with their aliases and size limits.
+         */
         get: operations["snippet_languages_chats_snippet_languages_get"];
         put?: never;
         post?: never;
@@ -3551,16 +4118,28 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Chat */
+        /**
+         * Get Chat
+         * @description Current state of one chat.
+         */
         get: operations["get_chat_chats__ref__get"];
-        /** Rename Chat */
+        /**
+         * Rename Chat
+         * @description Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.
+         */
         put: operations["rename_chat_chats__ref__put"];
         post?: never;
-        /** Delete Chat */
+        /**
+         * Delete Chat
+         * @description Deletes an idle chat and its workspace; 409 while a reply or snippet is running.
+         */
         delete: operations["delete_chat_chats__ref__delete"];
         options?: never;
         head?: never;
-        /** Rename Chat */
+        /**
+         * Rename Chat
+         * @description Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.
+         */
         patch: operations["rename_chat_chats__ref__patch"];
         trace?: never;
     };
@@ -3573,7 +4152,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel Chat */
+        /**
+         * Cancel Chat
+         * @description Stops a chat's running reply and returns once it has ended; 409 when no reply is active.
+         */
         post: operations["cancel_chat_chats__ref__cancel_post"];
         delete?: never;
         options?: never;
@@ -3588,7 +4170,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Chat Events */
+        /**
+         * Chat Events
+         * @description Server-sent events for one chat, replaying events after `after`; `follow=false` ends after the replay.
+         */
         get: operations["chat_events_chats__ref__events_get"];
         put?: never;
         post?: never;
@@ -3607,7 +4192,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Send Chat Message */
+        /**
+         * Send Chat Message
+         * @description Sends a chat message and returns before the reply finishes; snippets run since the last message are included.
+         */
         post: operations["send_chat_message_chats__ref__messages_post"];
         delete?: never;
         options?: never;
@@ -3644,7 +4232,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel Snippet */
+        /**
+         * Cancel Snippet
+         * @description Asks a running snippet to stop; 409 if it is not running, and the final result arrives as a snippet_result event.
+         */
         post: operations["cancel_snippet_chats__ref__snippets__run_id__cancel_post"];
         delete?: never;
         options?: never;
@@ -3661,7 +4252,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create Compare */
+        /**
+         * Create Compare
+         * @description Starts one prompt on 2 to 4 backends in a git project, each on its own branch; pick a winner afterwards.
+         */
         post: operations["create_compare_compare_post"];
         delete?: never;
         options?: never;
@@ -3676,7 +4270,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Compare */
+        /**
+         * Get Compare
+         * @description Members of a compare group with their status, cost and the start of each answer.
+         */
         get: operations["get_compare_compare__group__get"];
         put?: never;
         post?: never;
@@ -3695,7 +4292,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Discard Compare */
+        /**
+         * Discard Compare
+         * @description Discards each group member not already merged, pushed or discarded.
+         */
         post: operations["discard_compare_compare__group__discard_post"];
         delete?: never;
         options?: never;
@@ -3712,7 +4312,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Pick Compare */
+        /**
+         * Pick Compare
+         * @description Merges or pushes the winner and optionally discards the rest; retrying after a partial failure is safe.
+         */
         post: operations["pick_compare_compare__group__pick_post"];
         delete?: never;
         options?: never;
@@ -3747,7 +4350,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Github Items */
+        /**
+         * Github Items
+         * @description Open issues and pull requests, 30 per page; results are cached for 60 seconds.
+         */
         get: operations["github_items_github_projects__project__items_get"];
         put?: never;
         post?: never;
@@ -3764,7 +4370,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Github Item */
+        /**
+         * Github Item
+         * @description One open issue or PR with its body and, for a PR, its line comments; closed and fork PRs are refused.
+         */
         get: operations["github_item_github_projects__project__items__number__get"];
         put?: never;
         post?: never;
@@ -3783,7 +4392,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create Github Session */
+        /**
+         * Create Github Session
+         * @description Starts a session from a GitHub issue or PR, whose text becomes the untrusted prompt; PR tasks need a tower project.
+         */
         post: operations["create_github_session_github_sessions_post"];
         delete?: never;
         options?: never;
@@ -3798,7 +4410,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Gpu */
+        /**
+         * Gpu
+         * @description Return the resource guard's state, the model's status, and the default load-now duration.
+         */
         get: operations["gpu_gpu_get"];
         put?: never;
         post?: never;
@@ -3837,7 +4452,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Health */
+        /**
+         * Health
+         * @description Liveness check that also reports the build commit and configuration revision.
+         */
         get: operations["health_health_get"];
         put?: never;
         post?: never;
@@ -3854,10 +4472,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Images */
+        /**
+         * List Images
+         * @description List gallery images newest first, up to the limit (default 60), with the service status.
+         */
         get: operations["list_images_images_get"];
         put?: never;
-        /** Create Image */
+        /**
+         * Create Image
+         * @description Queue an image generation and return its job; the image is not ready until its status is done.
+         */
         post: operations["create_image_images_post"];
         delete?: never;
         options?: never;
@@ -3894,7 +4518,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Upload Image */
+        /**
+         * Upload Image
+         * @description Store an uploaded photo as a finished gallery image, once image editing is set up.
+         */
         post: operations["upload_image_images_uploads_post"];
         delete?: never;
         options?: never;
@@ -3929,11 +4556,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Image */
+        /**
+         * Get Image
+         * @description Return an image's JSON record, its PNG for ids ending in .png (404 until done), or its edit inputs for .source.png and .mask.png.
+         */
         get: operations["get_image_images__iid__get"];
         put?: never;
         post?: never;
-        /** Delete Image */
+        /**
+         * Delete Image
+         * @description Delete an image and its files, cancelling it first if it is still queued or running.
+         */
         delete: operations["delete_image_images__iid__delete"];
         options?: never;
         head?: never;
@@ -3949,7 +4582,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel Image */
+        /**
+         * Cancel Image
+         * @description Cancel a queued or running image and wait until a running one stops; finished images are returned as they are.
+         */
         post: operations["cancel_image_images__iid__cancel_post"];
         delete?: never;
         options?: never;
@@ -3966,7 +4602,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Edit Image */
+        /**
+         * Edit Image
+         * @description Queue a masked edit of a finished image and return the queued job before it runs.
+         */
         post: operations["edit_image_images__iid__edit_post"];
         delete?: never;
         options?: never;
@@ -3983,7 +4622,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Upscale Image */
+        /**
+         * Upscale Image
+         * @description Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job.
+         */
         post: operations["upscale_image_images__iid__upscale_post"];
         delete?: never;
         options?: never;
@@ -3998,10 +4640,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Jobs */
+        /**
+         * List Jobs
+         * @description List scheduled jobs, each with its most recent run.
+         */
         get: operations["list_jobs_jobs_get"];
         put?: never;
-        /** Create Job */
+        /**
+         * Create Job
+         * @description Create a scheduled job after validating it; its next run is set from the cron schedule.
+         */
         post: operations["create_job_jobs_post"];
         delete?: never;
         options?: never;
@@ -4036,12 +4684,21 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Job */
+        /**
+         * Get Job
+         * @description Return one scheduled job with its 15 most recent runs.
+         */
         get: operations["get_job_jobs__jid__get"];
-        /** Update Job */
+        /**
+         * Update Job
+         * @description Replace a scheduled job's settings after validation and recompute its next run.
+         */
         put: operations["update_job_jobs__jid__put"];
         post?: never;
-        /** Delete Job */
+        /**
+         * Delete Job
+         * @description Delete a scheduled job and record the deletion in the audit log.
+         */
         delete: operations["delete_job_jobs__jid__delete"];
         options?: never;
         head?: never;
@@ -4075,10 +4732,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Keys */
+        /**
+         * List Keys
+         * @description Key metadata only; a key's secret is returned once, by the create response.
+         */
         get: operations["list_keys_keys_get"];
         put?: never;
-        /** Create Key */
+        /**
+         * Create Key
+         * @description Mints an API key and returns its secret only in this response; a Hub's owner-kind request gets 403.
+         */
         post: operations["create_key_keys_post"];
         delete?: never;
         options?: never;
@@ -4096,7 +4759,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke Key */
+        /**
+         * Revoke Key
+         * @description Revokes one key; an unknown or already revoked id returns 404, and the Hub's own key returns 409.
+         */
         delete: operations["revoke_key_keys__kid__delete"];
         options?: never;
         head?: never;
@@ -4110,7 +4776,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Maintenance */
+        /**
+         * Maintenance
+         * @description Disk usage of session workspaces and checkpoints, and of the data volume.
+         */
         get: operations["maintenance_maintenance_get"];
         put?: never;
         post?: never;
@@ -4129,7 +4798,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Maintenance Backup */
+        /**
+         * Maintenance Backup
+         * @description Write a dated backup of the database, transcripts, and config, wait for it, then prune old backups.
+         */
         post: operations["maintenance_backup_maintenance_backup_post"];
         delete?: never;
         options?: never;
@@ -4146,7 +4818,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Maintenance Cleanup */
+        /**
+         * Maintenance Cleanup
+         * @description Runs a cleanup pass now, after any pass in progress, and returns what it removed.
+         */
         post: operations["maintenance_cleanup_maintenance_cleanup_post"];
         delete?: never;
         options?: never;
@@ -4163,7 +4838,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Image Archive Retention Apply */
+        /**
+         * Image Archive Retention Apply
+         * @description Delete the archived images from a preview if its confirmation still matches; a missing or stale one returns 409.
+         */
         post: operations["image_archive_retention_apply_maintenance_image_archive_retention_apply_post"];
         delete?: never;
         options?: never;
@@ -4180,7 +4858,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Image Archive Retention Preview */
+        /**
+         * Image Archive Retention Preview
+         * @description Preview the archived images that retention would delete, with the confirmation to pass to apply.
+         */
         post: operations["image_archive_retention_preview_maintenance_image_archive_retention_preview_post"];
         delete?: never;
         options?: never;
@@ -4195,7 +4876,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Me */
+        /**
+         * Me
+         * @description Caller's identity, role and capabilities, plus disk and queue usage where the account has it.
+         */
         get: operations["me_me_get"];
         put?: never;
         post?: never;
@@ -4252,7 +4936,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Models */
+        /**
+         * Models
+         * @description Configured models with their context sizes; one is marked as the default.
+         */
         get: operations["models_models_get"];
         put?: never;
         post?: never;
@@ -4269,7 +4956,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Models Status */
+        /**
+         * Models Status
+         * @description Report each model's load state and how long its current warm-up has been running.
+         */
         get: operations["models_status_models_status_get"];
         put?: never;
         post?: never;
@@ -4308,7 +4998,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Notify Test */
+        /**
+         * Notify Test
+         * @description Send a test push notification through ntfy.
+         */
         post: operations["notify_test_notify_test_post"];
         delete?: never;
         options?: never;
@@ -4329,7 +5022,10 @@ export interface paths {
          */
         get: operations["pairing_codes_pairing_codes_get"];
         put?: never;
-        /** Create Pairing Code */
+        /**
+         * Create Pairing Code
+         * @description Mint a single-use pairing code bound to one origin; it is returned only here and expires after its TTL.
+         */
         post: operations["create_pairing_code_pairing_codes_post"];
         delete?: never;
         options?: never;
@@ -4347,7 +5043,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke Pairing Code */
+        /**
+         * Revoke Pairing Code
+         * @description Expire an unused pairing code now; 404 when no such code is still active.
+         */
         delete: operations["revoke_pairing_code_pairing_codes__pid__delete"];
         options?: never;
         head?: never;
@@ -4361,9 +5060,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Profile */
+        /**
+         * Profile
+         * @description The profile icon and the list of icons to choose from.
+         */
         get: operations["profile_profile_get"];
-        /** Update Profile */
+        /**
+         * Update Profile
+         * @description Sets the profile icon; the emoji must be one of the listed choices.
+         */
         put: operations["update_profile_profile_put"];
         post?: never;
         delete?: never;
@@ -4379,10 +5084,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Projects */
+        /**
+         * Projects
+         * @description Projects visible to the caller, or an empty list for a read-only demo session.
+         */
         get: operations["projects_projects_get"];
         put?: never;
-        /** Create Project */
+        /**
+         * Create Project
+         * @description Creates a project with an empty workspace or a repo cloned per session; `github` clones use the caller's GitHub sign-in.
+         */
         post: operations["create_project_projects_post"];
         delete?: never;
         options?: never;
@@ -4397,7 +5108,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Queue */
+        /**
+         * Queue
+         * @description Queue positions of the caller's queued agent sessions, in queue order.
+         */
         get: operations["queue_queue_get"];
         put?: never;
         post?: never;
@@ -4414,7 +5128,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Rc Status */
+        /**
+         * Rc Status
+         * @description Report whether Remote Control is enabled and each project's state.
+         */
         get: operations["rc_status_remote_control_get"];
         put?: never;
         post?: never;
@@ -4433,7 +5150,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rc Launch */
+        /**
+         * Rc Launch
+         * @description Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder.
+         */
         post: operations["rc_launch_remote_control__project__post"];
         delete?: never;
         options?: never;
@@ -4450,7 +5170,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rc Stop */
+        /**
+         * Rc Stop
+         * @description Stop a project's Remote Control server and its child processes; 404 if none was started.
+         */
         post: operations["rc_stop_remote_control__project__stop_post"];
         delete?: never;
         options?: never;
@@ -4467,7 +5190,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rc Trust */
+        /**
+         * Rc Trust
+         * @description Open a Claude console window in a project so the user can accept workspace trust; Windows only.
+         */
         post: operations["rc_trust_remote_control__project__trust_post"];
         delete?: never;
         options?: never;
@@ -4482,7 +5208,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Gpu */
+        /**
+         * Gpu
+         * @description Return the resource guard's state, the model's status, and the default load-now duration.
+         */
         get: operations["gpu_resources_get"];
         put?: never;
         post?: never;
@@ -4547,7 +5276,10 @@ export interface paths {
          */
         get: operations["runner_pairing_codes_runner_pairing_codes_get"];
         put?: never;
-        /** Create Runner Pairing Code */
+        /**
+         * Create Runner Pairing Code
+         * @description Create a one-time Mac pairing code, returned only in this response, that expires after its lifetime.
+         */
         post: operations["create_runner_pairing_code_runner_pairing_codes_post"];
         delete?: never;
         options?: never;
@@ -4565,7 +5297,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke Runner Pairing Code */
+        /**
+         * Revoke Runner Pairing Code
+         * @description Revoke an unused, unexpired pairing code; 404 if no such code is active.
+         */
         delete: operations["revoke_runner_pairing_code_runner_pairing_codes__pid__delete"];
         options?: never;
         head?: never;
@@ -4579,7 +5314,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Runners */
+        /**
+         * Runners
+         * @description List each runner's presence, compatibility, pending requests, and whether remote update is supported.
+         */
         get: operations["runners_runners_get"];
         put?: never;
         post?: never;
@@ -4598,7 +5336,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Runner Poll */
+        /**
+         * Runner Poll
+         * @description Long-poll for requests queued to this runner; returns when work arrives or the hold ends.
+         */
         post: operations["runner_poll_runners__name__poll_post"];
         delete?: never;
         options?: never;
@@ -4615,7 +5356,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Runner Result */
+        /**
+         * Runner Result
+         * @description Report one request's result; accepted is false if it is no longer pending, and 413 for results over 16 MiB.
+         */
         post: operations["runner_result_runners__name__results_post"];
         delete?: never;
         options?: never;
@@ -4632,7 +5376,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Runner Update */
+        /**
+         * Runner Update
+         * @description Ask an online Mac runner to update itself and wait for the outcome; 409 if offline, too old, or failed.
+         */
         post: operations["runner_update_runners__name__update_post"];
         delete?: never;
         options?: never;
@@ -4674,7 +5421,10 @@ export interface paths {
          */
         get: operations["list_sessions_sessions_get"];
         put?: never;
-        /** Create Session */
+        /**
+         * Create Session
+         * @description Starts an agent session and returns before its run finishes.
+         */
         post: operations["create_session_sessions_post"];
         delete?: never;
         options?: never;
@@ -4689,15 +5439,24 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Session */
+        /**
+         * Get Session
+         * @description Current state of one session, with its queue position and any pending approvals.
+         */
         get: operations["get_session_sessions__ref__get"];
-        /** Patch Session */
+        /**
+         * Patch Session
+         * @description Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.
+         */
         put: operations["patch_session_sessions__ref__put"];
         post?: never;
         delete?: never;
         options?: never;
         head?: never;
-        /** Patch Session */
+        /**
+         * Patch Session
+         * @description Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters.
+         */
         patch: operations["patch_session_sessions__ref__patch"];
         trace?: never;
     };
@@ -4708,7 +5467,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Approvals */
+        /**
+         * Approvals
+         * @description Pending approvals for the session, or every approval when `all` is true.
+         */
         get: operations["approvals_sessions__ref__approvals_get"];
         put?: never;
         post?: never;
@@ -4727,7 +5489,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Decide */
+        /**
+         * Decide
+         * @description Approves or denies an approval; `pending` works only when exactly one is waiting, and a decided one returns 409.
+         */
         post: operations["decide_sessions__ref__approvals__approval_id__post"];
         delete?: never;
         options?: never;
@@ -4744,7 +5509,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Cancel */
+        /**
+         * Cancel
+         * @description Stops an active session and returns once its run has ended; 409 when nothing is active.
+         */
         post: operations["cancel_sessions__ref__cancel_post"];
         delete?: never;
         options?: never;
@@ -4759,7 +5527,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Changes */
+        /**
+         * Changes
+         * @description The session's git diff by repository, with its secret-scan result; a removed workspace returns no repositories.
+         */
         get: operations["changes_sessions__ref__changes_get"];
         put?: never;
         post?: never;
@@ -4776,7 +5547,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Session Checkpoints */
+        /**
+         * Session Checkpoints
+         * @description Checkpoints by turn, with flags for whether rewind and fork are allowed here.
+         */
         get: operations["session_checkpoints_sessions__ref__checkpoints_get"];
         put?: never;
         post?: never;
@@ -4795,7 +5569,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Fork Checkpoint */
+        /**
+         * Fork Checkpoint
+         * @description Starts a new session from this checkpoint with a non-blank prompt, and returns before its run finishes.
+         */
         post: operations["fork_checkpoint_sessions__ref__checkpoints__turn__fork_post"];
         delete?: never;
         options?: never;
@@ -4812,7 +5589,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rewind Checkpoint */
+        /**
+         * Rewind Checkpoint
+         * @description Rewinds the session to this checkpoint; 409 while it runs, and hosted CLI sessions cannot rewind.
+         */
         post: operations["rewind_checkpoint_sessions__ref__checkpoints__turn__rewind_post"];
         delete?: never;
         options?: never;
@@ -4850,7 +5630,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Send Message */
+        /**
+         * Send Message
+         * @description Sends a follow-up and returns before the reply finishes; a running session reads it before its next model call.
+         */
         post: operations["send_message_sessions__ref__messages_post"];
         delete?: never;
         options?: never;
@@ -4887,7 +5670,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Rerun */
+        /**
+         * Rerun
+         * @description Starts a new session repeating this one's original prompt, project and taint, optionally on another backend or model; 409 for App tools-only sessions.
+         */
         post: operations["rerun_sessions__ref__rerun_post"];
         delete?: never;
         options?: never;
@@ -4902,10 +5688,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Review Comments */
+        /**
+         * Review Comments
+         * @description Draft line comments on the session's Changes diff, not yet sent to the agent.
+         */
         get: operations["review_comments_sessions__ref__review_comments_get"];
         put?: never;
-        /** Add Review Comment */
+        /**
+         * Add Review Comment
+         * @description Saves a draft line comment on the Changes diff; nothing reaches the agent until the drafts are sent.
+         */
         post: operations["add_review_comment_sessions__ref__review_comments_post"];
         delete?: never;
         options?: never;
@@ -4943,7 +5735,10 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Delete Review Comment */
+        /**
+         * Delete Review Comment
+         * @description Removes one draft line comment; 404 if no draft has that id.
+         */
         delete: operations["delete_review_comment_sessions__ref__review_comments__comment_id__delete"];
         options?: never;
         head?: never;
@@ -5019,7 +5814,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Clear Taint */
+        /**
+         * Clear Taint
+         * @description Clears the session's untrusted-source taint and records the clear.
+         */
         post: operations["clear_taint_sessions__ref__taint_clear_post"];
         delete?: never;
         options?: never;
@@ -5034,7 +5832,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Transcript */
+        /**
+         * Get Transcript
+         * @description The session's transcript as plain text.
+         */
         get: operations["get_transcript_sessions__ref__transcript_get"];
         put?: never;
         post?: never;
@@ -5051,7 +5852,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Skills Overview */
+        /**
+         * Skills Overview
+         * @description List proposals and installed skills; returns empty lists with enabled false when the module is off.
+         */
         get: operations["skills_overview_skills_get"];
         put?: never;
         post?: never;
@@ -5068,7 +5872,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Skills Enabled */
+        /**
+         * Skills Enabled
+         * @description List installed skills that are enabled; returns an empty list when the module is off.
+         */
         get: operations["skills_enabled_skills_enabled_get"];
         put?: never;
         post?: never;
@@ -5085,11 +5892,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Skill Proposal */
+        /**
+         * Skill Proposal
+         * @description Return one proposal, including its body; 404 if no proposal has that id.
+         */
         get: operations["skill_proposal_skills_proposals__pid__get"];
         put?: never;
         post?: never;
-        /** Skill Delete Draft */
+        /**
+         * Skill Delete Draft
+         * @description Delete a proposal and its draft files; 409 if it has been installed.
+         */
         delete: operations["skill_delete_draft_skills_proposals__pid__delete"];
         options?: never;
         head?: never;
@@ -5105,7 +5918,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Install */
+        /**
+         * Skill Install
+         * @description Install a proposal whose content hash matches the reviewed bytes; 409 if the hash is stale, rejected, or fails validation.
+         */
         post: operations["skill_install_skills_proposals__pid__install_post"];
         delete?: never;
         options?: never;
@@ -5122,7 +5938,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Reject */
+        /**
+         * Skill Reject
+         * @description Reject a proposal and block its content hash; an installed proposal must be uninstalled first.
+         */
         post: operations["skill_reject_skills_proposals__pid__reject_post"];
         delete?: never;
         options?: never;
@@ -5139,7 +5958,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Reopen */
+        /**
+         * Skill Reopen
+         * @description Reopen a rejected proposal and lift its content-hash block; it returns to validated or draft.
+         */
         post: operations["skill_reopen_skills_proposals__pid__reopen_post"];
         delete?: never;
         options?: never;
@@ -5156,7 +5978,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Hosted Review */
+        /**
+         * Skill Hosted Review
+         * @description Queue an advisory hosted review that uses reviewer quota and returns before it runs; 400 if none is configured.
+         */
         post: operations["skill_hosted_review_skills_proposals__pid__review_post"];
         delete?: never;
         options?: never;
@@ -5173,7 +5998,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Disable */
+        /**
+         * Skill Disable
+         * @description Turn an installed skill off without changing its version or project allowlist.
+         */
         post: operations["skill_disable_skills__slug__disable_post"];
         delete?: never;
         options?: never;
@@ -5190,7 +6018,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Enable */
+        /**
+         * Skill Enable
+         * @description Turn an installed skill on without changing its version or project allowlist.
+         */
         post: operations["skill_enable_skills__slug__enable_post"];
         delete?: never;
         options?: never;
@@ -5205,7 +6036,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Skill Export */
+        /**
+         * Skill Export
+         * @description Return the installed skill's current version as an exportable bundle with its content hash.
+         */
         get: operations["skill_export_skills__slug__export_get"];
         put?: never;
         post?: never;
@@ -5223,7 +6057,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Skill Projects */
+        /**
+         * Skill Projects
+         * @description Replace the projects an installed skill is allowed in; unknown project names get 400.
+         */
         put: operations["skill_projects_skills__slug__projects_put"];
         post?: never;
         delete?: never;
@@ -5241,7 +6078,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Rollback */
+        /**
+         * Skill Rollback
+         * @description Roll an installed skill back to its previous version; 409 when no older version exists.
+         */
         post: operations["skill_rollback_skills__slug__rollback_post"];
         delete?: never;
         options?: never;
@@ -5258,7 +6098,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Skill Uninstall */
+        /**
+         * Skill Uninstall
+         * @description Remove an installed skill's files and project allowlist.
+         */
         post: operations["skill_uninstall_skills__slug__uninstall_post"];
         delete?: never;
         options?: never;
@@ -5273,9 +6116,15 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Smart Approvals */
+        /**
+         * Smart Approvals
+         * @description Smart-approval status and the 20 most recent reviews.
+         */
         get: operations["smart_approvals_smart_approvals_get"];
-        /** Update Smart Approvals */
+        /**
+         * Update Smart Approvals
+         * @description Sets the smart-approval mode; any mode but off needs smart_approvals configured in harness.yaml.
+         */
         put: operations["update_smart_approvals_smart_approvals_put"];
         post?: never;
         delete?: never;
@@ -5291,10 +6140,16 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Templates */
+        /**
+         * List Templates
+         * @description List saved task templates.
+         */
         get: operations["list_templates_templates_get"];
         put?: never;
-        /** Create Template */
+        /**
+         * Create Template
+         * @description Create a task template after checking its name, prompt, project, backend, and model.
+         */
         post: operations["create_template_templates_post"];
         delete?: never;
         options?: never;
@@ -5310,10 +6165,16 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Update Template */
+        /**
+         * Update Template
+         * @description Replace a task template's fields after the same checks as create; returns 404 if it does not exist.
+         */
         put: operations["update_template_templates__tid__put"];
         post?: never;
-        /** Delete Template */
+        /**
+         * Delete Template
+         * @description Delete a saved task template.
+         */
         delete: operations["delete_template_templates__tid__delete"];
         options?: never;
         head?: never;
@@ -5327,7 +6188,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** V1 Capabilities */
+        /**
+         * V1 Capabilities
+         * @description Describe the endpoint's routes, models, features, and GPU state; a disabled endpoint returns 401.
+         */
         get: operations["v1_capabilities_v1_capabilities_get"];
         put?: never;
         post?: never;
@@ -5344,7 +6208,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** V1 Models */
+        /**
+         * V1 Models
+         * @description List the models the endpoint serves; 404 while the endpoint is disabled.
+         */
         get: operations["v1_models_v1_models_get"];
         put?: never;
         post?: never;

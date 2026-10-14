@@ -7,6 +7,7 @@ public_routes = RouteTable()
 
 @public_routes.get("/v1/models")
 async def v1_models(request: Request):
+    """List the models the endpoint serves; 404 while the endpoint is disabled."""
     m = manager(request)
     if not m.cfg.endpoint.enabled:
         return error(flavor_of(request), 404, "not_found_error", "the inference endpoint is disabled")
@@ -16,6 +17,7 @@ async def v1_models(request: Request):
 
 @public_routes.get("/v1/capabilities")
 async def v1_capabilities(request: Request):
+    """Describe the endpoint's routes, models, features, and GPU state; a disabled endpoint returns 401."""
     m = manager(request)
     if not m.cfg.endpoint.enabled or authenticate(m, request) is None:
         return error("openai", 401, "authentication_error", BAD_KEY)

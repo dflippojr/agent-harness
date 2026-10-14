@@ -11,5 +11,6 @@ owner_routes = RouteTable()
 
 @owner_routes.post("/maintenance/backup")
 async def maintenance_backup(request: Request):
+    """Write a dated backup of the database, transcripts, and config, wait for it, then prune old backups."""
     m = require_owner(request)
     return await runtime(request, "backup").service.backup(context=operation_audit.request_context(request, m))
