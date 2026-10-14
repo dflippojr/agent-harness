@@ -86,14 +86,9 @@ def _seed_session(path: Path, sid: str = "s1") -> None:
 
 def test_baseline_is_frozen_at_45():
     assert BASELINE_VERSION == 45 and len(LEGACY_COLUMNS) == 45
-    # the real steps are valid and gap-free from 0046: 0046_session_taint (#262), 0047_canary_results (#265),
-    # 0048_canary_note (#316), 0049_checkpoints (#261), 0050_app_retention (#330), 0051_end_users (#365),
-    # 0052_member_api_keys (#393), 0053_audit_context (#467), 0054_namespace_audit (#471), 0055_catalog_app_id (#518),
-    # 0056_pairing_requests (#519), 0057_hub_claim (#543), 0058_idempotency_keys (#462), 0059_tool_profile (#638),
-    # 0060_endpoint_requests_key (#669), 0061_sessions_list_index (#663), 0062_sessions_owner_status_index (#668),
-    # 0063_stables_name (#334)
-    assert [n for n, _ in _REAL_DISCOVER()] == [46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
-                                                63]
+    # the real steps are gap-free from the one after the baseline, however many have been added since
+    versions = [n for n, _ in _REAL_DISCOVER()]
+    assert versions and versions == list(range(BASELINE_VERSION + 1, BASELINE_VERSION + 1 + len(versions)))
 
 
 def test_fresh_database_matches_pre_versioning_build(tmp_path):

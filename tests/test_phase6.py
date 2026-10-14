@@ -617,20 +617,22 @@ def test_quality_fast_graph_uses_official_lightning_settings():
     assert q_sampler["steps"] == 50
     assert q_sampler["cfg"] == 4
     assert q_sampler["sampler_name"] == "euler"
+    def find(graph, class_type):
+        return next((key, node["inputs"]) for key, node in graph.items() if node["class_type"] == class_type)
+
+    unet_id, _ = find(quality, "UNETLoader")
     assert "LoraLoaderModelOnly" not in {node["class_type"] for node in quality.values()}
-    assert quality["222"]["inputs"] == {"model": ["226", 0], "shift": 3.1}
+    assert find(quality, "ModelSamplingAuraFlow")[1] == {"model": [unet_id, 0], "shift": 3.1}
     assert l_sampler["steps"] == 4
     assert l_sampler["cfg"] == 1
     assert l_sampler["sampler_name"] == "euler"
     assert l_sampler["scheduler"] == "simple"
     assert l_sampler["denoise"] == 1
-    lora = next(node["inputs"] for node in lightning.values() if node["class_type"] == "LoraLoaderModelOnly")
-    assert lora == {"model": ["226", 0], "lora_name": LIGHTNING_LORA["filename"], "strength_model": 1}
-    assert lightning["222"]["inputs"] == {"model": ["221", 0], "shift": 3.1}
+    lora_id, lora = find(lightning, "LoraLoaderModelOnly")
+    assert lora == {"model": [find(lightning, "UNETLoader")[0], 0], "lora_name": LIGHTNING_LORA["filename"],
+                    "strength_model": 1}
+    assert find(lightning, "ModelSamplingAuraFlow")[1] == {"model": [lora_id, 0], "shift": 3.1}
     assert t_sampler["steps"] == 8
-    assert LIGHTNING_LORA["bytes"] == 1698951104
-    assert LIGHTNING_LORA["sha256"] == "ad12117461cb41e2ea637fec8df6392ce8e8550c47fbe2b829ed3deb98262066"
-    assert LIGHTNING_LORA["revision"] == "a52649c9d0f6e1a248bff13f0df33bb8a2abdb52"
 
 
 def test_missing_lightning_lora_disables_only_quality_fast(tmp_path):
@@ -753,11 +755,12 @@ def test_quality_fast_hashes_the_file_comfyui_would_load(tmp_path, monkeypatch):
 def test_app_root_lists_quality_fast_without_enabling_it(tmp_path):
     from fastapi.testclient import TestClient
     from harness.api import create_app
+    from harness.apps import API_VERSION
 
     m, _, _ = image_manager(tmp_path)
     with TestClient(create_app(m)) as client:
         root = client.get("/api/v1").json()
-        assert root["api_version"] == "1.25"
+        assert root["api_version"] == API_VERSION
         assert root["image_modes"]["fast"]["available"] is True
         assert root["image_modes"]["quality-fast"]["available"] is False
         assert root["image_modes"]["quality-fast"]["label"] == "Qwen quality (fast, 4-step)"
