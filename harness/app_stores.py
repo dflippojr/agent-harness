@@ -1,7 +1,7 @@
 """Per-App data stores (#330).
 
 Each App's sessions live in their own SQLite file, `<data_dir>/apps/<app_id>/harness.sqlite3`, which runs the same
-versioned migrations (#256) and has its own writer thread and read pool (#294). Agent Harness Web is an App too
+versioned migrations (#256) and has its own writer thread and read pool (#294). Stables is an App too
 (`WEB_APP_ID`, #330 decision 4): its store holds the sessions with no App, the owner's and members', and stays open
 for the daemon's life. The main store keeps everything else: the App registry (`api_keys`, Web's row included),
 per-App usage and error counters, provider credentials, settings, jobs, skills, accounts and the audit log.
@@ -80,7 +80,7 @@ EVERY_APP = "*"
 # Lists, searches and id lookups that take `with_app`; `scope(app_id)` fills it in.
 _SCOPED = frozenset({"list_sessions", "session_page", "search_events", "find_session_ids", "pending_approvals"})
 _APP_ERROR = "app_error:"  # meta key prefix: an App's failed-session count and last error (metadata, main store)
-# Agent Harness Web's reserved App id (#330 decision 4). Its store holds every session with no App (the owner's and
+# Stables' reserved App id (#330 decision 4). Its store holds every session with no App (the owner's and
 # members'); it has no token, is never revoked or erased, and its sessions keep their owner's folders (`storage`).
 WEB_APP_ID = "app-web"
 # `dry-run`: log what the move into Web's store would do and leave everything where it is (the main store keeps the
@@ -581,7 +581,7 @@ class SessionStores:
         the store is closed under any call still using it. It is never reopened: a later call about it raises.
         Web's store is never erased: it holds the owner's and members' sessions."""
         if app_id == WEB_APP_ID:
-            raise ValueError("Agent Harness Web's store is never erased")
+            raise ValueError("Stables' store is never erased")
         folder = self.store_path(app_id).parent
         with self._lock:
             self._erased.add(app_id)

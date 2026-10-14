@@ -4,7 +4,7 @@
     python -m harness.fake_instance stop --dir DIR
 
 Start writes a throwaway config and data directory (with the marker fake model mode requires), starts the real daemon
-on loopback with the scripted model, serves a separately hosted copy of Agent Harness Web next to it, seeds sessions,
+on loopback with the scripted model, serves a separately hosted copy of Stables next to it, seeds sessions,
 a chat and jobs, waits until they settle and prints a READY line. Ctrl+C stops it and deletes the directory unless
 --keep. `stop` ends the instance recorded in DIR from another shell and deletes DIR; it is safe to repeat. Nothing here
 reads or changes the real config, data, GPU or llama-server.
@@ -102,7 +102,7 @@ def write_instance(root: Path, port: int) -> tuple[Path, Path]:
 
 
 def connect_page(server: str, token: str) -> str:
-    """Signs the separately hosted copy in (the keys Agent Harness Web's client reads) and opens it."""
+    """Signs the separately hosted copy in (the keys Stables' client reads) and opens it."""
     values = json.dumps({"harness.daemonUrl": server, "harness.ownerToken": token})
     return ("<!doctype html><meta charset=utf-8><title>Connect</title>"
             f"<p>Connecting to {html.escape(server)}...</p><script>const v={values};"

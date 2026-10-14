@@ -7,7 +7,7 @@ sudo, or manual token copying.
 ## Install or update
 
 1. Configure Agent Harness Server's `public_url` and a `runners.macbook.token_file`, then restart the Server.
-2. In Agent Harness Web, open **Settings → Apps → Pair Agent Harness for Mac** and create an install command.
+2. In Stables, open **Settings → Apps → Pair Agent Harness for Mac** and create an install command.
 3. Run that command in Terminal on the Mac while its 10-minute code is valid.
 
 The script comes from Agent Harness Server, downloads a version-matched bundle from the same Server, and installs:
@@ -47,7 +47,7 @@ harness runner restart
 harness runner logs --follow
 ```
 
-The CLI also manages the server, so Agent Harness Web is optional. Every owner setting and action Web offers has a
+The CLI also manages the server, so Stables is optional. Every owner setting and action Web offers has a
 command; [management-parity.md](management-parity.md) maps each Web action to its owner API endpoint and command:
 
 ```bash
@@ -66,7 +66,7 @@ or as the Tailscale/localhost owner when there is no token, and print its JSON r
 `projects add` changes only the Mac runner's local repository-root allowlist and restarts it. It does not create or
 edit the tower's project catalog; add a matching `target: macbook` project to Agent Harness Server configuration separately.
 Shell commands continue to use the existing `sandbox-exec` profile, repository paths must be under an allowed root,
-and approvals use the same Agent Harness Server flow as Agent Harness Web.
+and approvals use the same Agent Harness Server flow as Stables.
 
 The older `ops/macbook/deploy.ps1` SSH deployment remains available for repair and development. It installs the same
 venv, Agent Harness CLI, and launchd layout, but native pairing is the normal first-install path.

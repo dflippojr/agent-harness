@@ -1,4 +1,4 @@
-"""Agent Harness Web is a versioned first-party Agent Harness Server client."""
+"""Stables is a versioned first-party Agent Harness Server client."""
 
 from __future__ import annotations
 
@@ -35,14 +35,14 @@ def wait_done(manager, sid: str, timeout: float = 10) -> None:
 def test_bundled_web_dogfoods_app_api_without_becoming_an_app(tmp_path):
     client, manager = make_client(tmp_path)
     with client:
-        created = client.post("/api/v1/sessions", json={"prompt": "from bundled Agent Harness Web"})
+        created = client.post("/api/v1/sessions", json={"prompt": "from bundled Stables"})
         assert created.status_code == 201
         sid = created.json()["id"]
         assert manager.db.get_session(sid)["app_id"] == ""
         wait_done(manager, sid)
         listed = client.get("/api/v1/sessions").json()[0]
         assert listed["id"] == sid
-        assert listed["chat_summary"] == "from bundled Agent Harness Web — done"
+        assert listed["chat_summary"] == "from bundled Stables — done"
         assert client.get(f"/api/v1/sessions/{sid}").status_code == 200
         assert client.get(f"/api/v1/sessions/{sid}/events?follow=false").status_code == 200
 
@@ -205,7 +205,7 @@ def test_independent_web_owner_token_cors_and_stream_ticket(tmp_path):
     with client:
         existing = client.post("/sessions", json={"prompt": "existing"}).json()["id"]
         minted = client.post("/api/admin/v1/keys", json={
-            "name": "agent-harness-web", "kind": "owner", "scopes": ["admin"], "origins": [ORIGIN],
+            "name": "stables", "kind": "owner", "scopes": ["admin"], "origins": [ORIGIN],
         })
         assert minted.status_code == 201
         assert minted.json()["origins"] == [ORIGIN]
@@ -296,7 +296,7 @@ def test_web_shell_includes_transport_module_and_canonical_names():
     assert '"short_name": "Stables"' in manifest
     assert "Agent Harness Server URL" in profile
     assert "Connect another copy of Stables" in profile
-    assert 'name: `agent-harness-web (' in profile
+    assert 'name: `stables (' in profile
     assert '"/client.mjs"' in worker
     # The shell cache name is derived from BUILD_ID so a client build bumps it automatically (#69).
     assert 'const BUILD_ID = "' in worker

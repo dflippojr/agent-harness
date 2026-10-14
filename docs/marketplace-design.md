@@ -2,7 +2,7 @@
 
 Design-only (issue [#28](https://github.com/dflippojr/agent-harness/issues/28)). This document specifies an optional
 catalog of third-party apps that talk to a user's own daemon. It does not ship a catalog service, installer, review
-runner, daemon enforcement, or Agent Harness Web marketplace UI.
+runner, daemon enforcement, or Stables marketplace UI.
 
 Companion artifacts:
 
@@ -70,7 +70,7 @@ of scope.
 | **Catalog signer** | Role that signs published snapshots | Publish immutable per-version records; rotate catalog keys | Re-sign a mutated version as if it were the original |
 | **Abuse/security intake** | Shared catalog mailbox | Receive vulnerability and abuse reports; open incident records | Store reporter secrets or provider keys in tickets |
 | **Provider** | Anthropic, OpenAI, Cursor (and future backends) | Their terms, billing, and enforcement | A party to the catalog contract. The catalog does not speak for them |
-| **Agent Harness Web** | Future first-party discovery UI | Display signed listings and owner-facing consent copy | Pair, install, or mint tokens by itself |
+| **Stables** | Future first-party discovery UI | Display signed listings and owner-facing consent copy | Pair, install, or mint tokens by itself |
 
 Control Center is a first-party owner client, not a catalog app. It uses `/api/v1` for sessions and
 `/api/admin/v1` with an `admin` owner credential (`ho-` or Tailscale/localhost). Catalog apps never receive `admin`.
@@ -609,7 +609,7 @@ None of these are built here. Proposed backlog keys:
    feed, audit retention.
 2. **`marketplace-review-automation`** — Stage A checkers, evidence bundle, optional Stage C sandbox with the
    boundaries in [§6.3](#63-stage-c--dynamic-analysis-future-not-run-here).
-3. **`marketplace-web-discovery`** — Agent Harness Web discovery and conspicuous consent UI; no pairing inside
+3. **`marketplace-web-discovery`** — Stables discovery and conspicuous consent UI; no pairing inside
    the catalog page except a deep-link into the owner's daemon Settings.
 4. **`marketplace-daemon-revocation-hooks`** — optional `catalog_app_id` on keys/pairing; warn / block-new-pair
    / recommend-revoke; never silent uninstall or data deletion.

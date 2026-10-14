@@ -116,7 +116,7 @@ def cors_origin_allowed(m, request: Request, origin: str) -> bool:
 
 
 def owner_key(key: dict | None) -> bool:
-    """An owner token lets Agent Harness Web dogfood app operations without becoming an app."""
+    """An owner token lets Stables dogfood app operations without becoming an app."""
     return bool(key and key.get("kind") == "owner" and "admin" in set((key.get("scopes") or "").split()))
 
 
@@ -422,7 +422,7 @@ route_table = RouteTable()
 
 def _bundled_identity(request: Request, m, token: str) -> dict:
     """The same-origin Web owner/member identity for a request without a valid app token, or 401."""
-    # Bundled Agent Harness Web has the Server's same-origin Tailscale/localhost owner identity.
+    # Bundled Stables has the Server's same-origin Tailscale/localhost owner identity.
     # Cross-origin Web connections need an origin-bound owner token; never promote an App origin.
     ident = getattr(request.state, "access", None)
     raw_origin = request.headers.get("origin", "")
@@ -432,7 +432,7 @@ def _bundled_identity(request: Request, m, token: str) -> dict:
         same_origin = False
     if not token and ident is not None and ident.allowed and same_origin:
         if ident.role == "owner":
-            return {"id": "", "name": "Agent Harness Web", "kind": "owner", "scopes": "admin",
+            return {"id": "", "name": "Stables", "kind": "owner", "scopes": "admin",
                     "scope_set": {"admin"}, "origins": [], "bundled": True, "user_id": "owner"}
         if ident.role == "member":
             return {"id": ident.user_id, "name": ident.display_name or "Member", "kind": "member",
@@ -500,7 +500,7 @@ def calling_app(key: dict) -> str:
 
 
 def reaches_web(key: dict) -> bool:
-    """Whether this principal may read Agent Harness Web's store, where the owner's and members' sessions live (#330
+    """Whether this principal may read Stables' store, where the owner's and members' sessions live (#330
     decision 4): owners and members, or an App/device with owner-granted, read-only `sessions:all`."""
     return key.get("kind") in ("owner", "member") or SESSIONS_ALL in key["scope_set"]
 

@@ -1,4 +1,4 @@
-"""Issue #334 stage (a): every owner action Agent Harness Web offers has an owner API endpoint and a CLI command.
+"""Issue #334 stage (a): every owner action Stables offers has an owner API endpoint and a CLI command.
 Issue #544: every owner API route (and so every Hub action) has a CLI command, whether or not Web calls it.
 
 docs/management-parity.md is the inventory. These tests tie it to Web's `api(...)` calls, to the routes mounted under

@@ -80,7 +80,7 @@ def test_discovery_is_always_reachable_and_omitted_header_has_transition_notice(
 def hosted_web_client(tmp_path):
     manager = manager_with_runner(tmp_path)
     origin = "https://web.example"
-    _, token = manager.db.create_api_key("Agent Harness Web", "admin", "owner", [origin])
+    _, token = manager.db.create_api_key("Stables", "admin", "owner", [origin])
     return manager, origin, {"Authorization": f"Bearer {token}", "Origin": origin}
 
 

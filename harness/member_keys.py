@@ -1,6 +1,6 @@
 """Household members' own provider API keys for hosted Claude Code and Codex (#393).
 
-A member adds an Anthropic key (Claude Code) or an OpenAI key (Codex) in Agent Harness Web and their hosted sessions
+A member adds an Anthropic key (Claude Code) or an OpenAI key (Codex) in Stables and their hosted sessions
 run on it, billed to their own account. The owner's login, token and keys are never used for a member's session.
 
 - **Storage:** the key is sealed with AES-GCM under a master key in `<data_dir>/member-keys.key` (created on first

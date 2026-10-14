@@ -1,4 +1,4 @@
-"""Issue #64: Google OpenID Connect sign-in for pre-provisioned household members in bundled Agent Harness Web.
+"""Issue #64: Google OpenID Connect sign-in for pre-provisioned household members in bundled Stables.
 
 Tailscale Serve admits the device; a linked Google `sub` selects an existing, enabled member. Google never creates an
 account, never makes anyone an owner, and never overrides a Tailscale login that already holds a role. Only same-origin
