@@ -165,6 +165,7 @@ def matrix(tmp_path_factory, gitleaks_tools):
     try:
         client, m = household(tmp_path_factory.mktemp("authz"),
                               guests=[GuestAccess(login=GUEST, until="2099-01-01T00:00:00+00:00")])
+        m._spawn = lambda sid: None  # sessions are created, not run, so no background run touches a snapshot
         with client:
             alice, bob = create_member(client, ALICE, "Alice"), create_member(client, BOB, "Bob")
             # The kinds and prefixes of each credential are part of the contract (#24).
