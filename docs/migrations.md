@@ -133,4 +133,6 @@ audit rows written since the upgrade are lost with it.
 
 Step 0063 (`stables_name`) renames the reserved `app-web` registry row from "Agent Harness Web" to "Stables", the
 client's new name (#334 stage (d)). It changes only that default display name; the row's id, kind and store, and every
-session in it, stay as they were. Rolling back to an older harness leaves the new name in place, which is harmless.
+session in it, stay as they were. There is no down-migration: an older harness refuses a version-63 database
+(`SchemaTooNewError`), so rolling back restores the pre-0063 snapshot as [above](#backups-and-rollback), which brings
+back the old name. Keys, settings and sessions written since the upgrade are lost with it.
