@@ -296,10 +296,7 @@ def test_feature_default_off_and_owner_controls(tmp_path, fake):
         view = client.get(f"{PREFIX}/github-member-auth", headers=H(OWNER)).json()
         assert view["configured"] and not view["enabled"]
         assert {row["status"] for row in view["members"]} == {"disconnected"}
-        # members cannot use the owner switch; the owner cannot connect as a member
-        assert client.put(f"{PREFIX}/github-member-auth", json={"enabled": True}, headers=H(ALICE)).status_code == 403
-        assert client.post(f"{ME}/connect", headers=H(OWNER)).status_code == 403
-        assert client.get(ME, headers=H(OWNER)).status_code == 403
+        # members cannot use the owner switch and the owner cannot connect as a member: tests/test_authz_matrix.py
         m.cfg.github_member_auth.gcm_path = ""
         r = client.put(f"{PREFIX}/github-member-auth", json={"enabled": True}, headers=H(OWNER))
         assert r.status_code == 409

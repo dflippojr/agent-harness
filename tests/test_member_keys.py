@@ -98,8 +98,7 @@ def test_a_canary_key_never_reaches_responses_logs_events_or_the_database_in_cle
 
 def test_the_key_endpoints_are_for_the_signed_in_member_alone(tmp_path, monkeypatch):
     with setup(tmp_path, monkeypatch) as (client, m, ids):
-        assert client.get(KEYS, headers=H(OWNER)).status_code == 403
-        assert client.put(f"{KEYS}/claude", json={"key": CANARY}, headers=H(OWNER)).status_code == 403
+        # The owner is refused these member routes: tests/test_authz_matrix.py
         assert client.put(f"{KEYS}/cursor", json={"key": CANARY}, headers=H(ALICE)).status_code == 400
         assert put(client, ALICE, "claude", "short").status_code == 400
         assert put(client, ALICE, "claude", CANARY).status_code == 200

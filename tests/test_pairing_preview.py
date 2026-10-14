@@ -13,8 +13,8 @@ from harness.apps import all_scopes
 from harness.config import GuestAccess
 from sdk.harness_client import Harness, HarnessError
 
-from test_household import ALICE, GUEST, H, OWNER, create_member, household
-from test_hub_claim import HUB_ORIGIN, _bearer, _claim
+from test_household import GUEST, H, OWNER, household
+from test_hub_claim import _bearer
 from test_pairing_requests import BASE, CATALOG_ID, _ask
 
 PREVIEW = BASE + "/preview"
@@ -121,35 +121,6 @@ def test_preview_leaves_all_database_state_untouched_even_after_expiry(hh, monke
     assert list(m.db.main.conn.iterdump()) == before
     if response.status_code == 200:
         assert set(response.json()[0]) == {"scope", "tier", "text"}
-
-
-def test_preview_accepts_owner_identity_owner_key_and_origin_bound_hub_key(hh):
-    client, m = hh
-    _, owner_token = m.db.main.create_api_key("owner", "admin", "owner")
-    hub_token, _, _ = _claim(client, m)
-    client.local_owner = False
-    for headers in (H(OWNER), _bearer(owner_token), _bearer(hub_token), _bearer(hub_token, HUB_ORIGIN)):
-        response = client.post(PREVIEW, headers=headers, json={"scopes": ["approvals"]})
-        assert response.status_code == 200, response.text
-        assert response.json() == [{"scope": "approvals", "tier": "elevated", "text": pr.DISCLOSURES["approvals"]}]
-    assert client.post(PREVIEW, headers=_bearer(hub_token, "https://other.example"),
-                       json={"scopes": ["sessions"]}).status_code == 403
-    assert client.post(PREVIEW, headers={**H(OWNER), "Origin": "https://other.example"},
-                       json={"scopes": ["sessions"]}).status_code == 403
-
-
-def test_preview_refuses_apps_devices_members_guests_and_unauthenticated_callers(hh):
-    client, m = hh
-    create_member(client, ALICE, "Alice")
-    client.local_owner = False
-    assert client.post(PREVIEW, json={"scopes": ["sessions"]}).status_code == 401
-    for headers in (H(ALICE), H(GUEST), H("stranger@example.com")):
-        assert client.post(PREVIEW, headers=headers, json={"scopes": ["sessions"]}).status_code == 403
-    for kind, scopes in (("app", "sessions approvals"), ("device", "inference"), ("owner", "sessions")):
-        _, token = m.db.main.create_api_key(kind, scopes, kind)
-        response = client.post(PREVIEW, headers={**H(OWNER), **_bearer(token)}, json={"scopes": ["sessions"]})
-        assert response.status_code == 403, response.text
-    assert client.post(PREVIEW, headers=_bearer("invalid"), json={"scopes": ["sessions"]}).status_code == 401
 
 
 def test_cli_previews_without_arming(hh, tmp_path, monkeypatch, capsys):

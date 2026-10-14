@@ -121,17 +121,6 @@ def test_actor_context_for_ambient_and_two_owner_keys(hh):
     assert _rows(client, key_id=k2["id"])["items"] == [r2]
 
 
-def test_app_token_and_members_cannot_read_or_act(hh):
-    client, _ = hh
-    app_key = _key(client, "app", kind="app", scopes=())
-    a = create_member(client, ALICE, "Alice")
-    for headers in ({**_bearer(app_key["key"]), **H(OWNER)}, H(ALICE)):
-        assert client.get(f"{PREFIX}/audit", headers=headers).status_code in (401, 403)
-        assert client.patch(f"{PREFIX}/accounts/{a['user_id']}", json={"max_running": 5},
-                            headers=headers).status_code in (401, 403)
-    assert client.delete(f"{PREFIX}/audit", headers=H(OWNER)).status_code in (404, 405)
-
-
 def test_metadata_allowlist_and_no_values(hh):
     client, _ = hh
     a = create_member(client, ALICE, "Alice Secret")

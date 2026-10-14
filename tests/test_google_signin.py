@@ -926,20 +926,16 @@ def test_owner_revoke_all_and_unlink(env):
     assert me(env.browser(ALICE)).status_code == 200
 
 
-def test_owner_actions_require_owner(env):
+def test_disable_reenable_and_rebind_revoke_sessions(env):
     env.link(ALICE, ALICE_SUB)
     b = env.kitchen_signin()
+    # A Google session acts as its member, never the owner. (Members signed in by Tailscale login are in
+    # tests/test_authz_matrix.py.)
     for method, path in (("POST", f"{PREFIX}/accounts/{env.ids[BOB]}/google/invitation"),
                          ("POST", f"{PREFIX}/accounts/{env.ids[BOB]}/google/revoke-sessions"),
                          ("GET", f"{PREFIX}/google-signin")):
         assert b.request(method, path).status_code == 403
-        assert env.browser(BOB).request(method, path).status_code == 403
     assert env.owner("POST", f"{PREFIX}/accounts/u-nope/google/invitation").status_code == 404
-
-
-def test_disable_reenable_and_rebind_revoke_sessions(env):
-    env.link(ALICE, ALICE_SUB)
-    b = env.kitchen_signin()
     env.owner("PATCH", f"{PREFIX}/accounts/{env.ids[ALICE]}", json={"enabled": False})
     assert me(b).status_code in (401, 403)
     assert env.flow(env.browser(KITCHEN), ALICE_SUB, ALICE).headers["location"] == "/#/signin/failed"

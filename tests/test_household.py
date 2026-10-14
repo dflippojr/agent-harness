@@ -252,16 +252,7 @@ def test_two_member_adversarial_matrix(tmp_path):
         assert me["capabilities"]["admin"] is False
         assert "secret" not in str(me)
 
-        admin = client.get(PREFIX, headers=ah)
-        assert admin.status_code == 403
-        assert "members cannot use the owner API" in admin.json()["detail"]
-        assert "accounts" not in admin.json().get("detail", "")
-        for path in (f"{PREFIX}/accounts", f"{PREFIX}/sessions", f"{PREFIX}/keys", f"{PREFIX}/gpu",
-                     f"{PREFIX}/jobs", f"{PREFIX}/maintenance", "/keys", "/jobs", "/images", "/gpu",
-                     "/memory", "/templates", "/metrics", "/runners", "/smart-approvals", "/skills"):
-            r = client.get(path, headers=ah)
-            assert r.status_code == 403, path
-        assert "runners" in client.get("/runners", headers=ah).json()["detail"]
+        # The owner API and owner routes refuse members: tests/test_authz_matrix.py
 
         app = client.post("/keys", json={"name": "shop", "kind": "app",
                                          "scopes": ["sessions", "sessions:all", "approvals"]},

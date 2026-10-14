@@ -9,7 +9,7 @@ from harness import apps
 from harness.access import guest_forbidden, resolve_access
 from harness.api import GLOBAL_TYPES
 from harness.config import GuestAccess
-from test_api import LOGIN, make_client as guest_client
+from test_api import make_client as guest_client
 from test_control_center import ORIGIN, make_client
 from test_phase7 import seed
 
@@ -18,29 +18,6 @@ OWNER_STATUS_PATHS = (
     "/memory", "/pairing-codes", "/runner-pairing-codes", "/runners", "/backends",
     "/gpu", "/resources", "/resources/diagnostics", "/models/status",
 )
-
-
-@pytest.mark.parametrize("path", OWNER_STATUS_PATHS)
-def test_guest_owner_status_denied_owner_still_allowed(tmp_path, monkeypatch, path):
-    from harness_modules.local_model import routes
-    from harness_modules.local_model import resources
-
-    client, m, _ = guest_client(tmp_path, [])
-    m.cfg.guests = [GuestAccess(login="guest@example.com", until="2099-01-01T00:00:00+00:00")]
-
-    async def fake_status(*_args):
-        return {"state": "unloaded"}
-
-    async def fake_model_state(*_args):
-        return "unloaded"
-
-    monkeypatch.setattr(routes, "_resources_status", fake_status)
-    monkeypatch.setattr(resources, "diagnostics", fake_status)
-    monkeypatch.setattr(m.warmer, "state", fake_model_state)
-    with client:
-        guest = {"Tailscale-User-Login": "guest@example.com"}
-        assert client.get(path, headers=guest).status_code == 403
-        assert client.get(path, headers={"Tailscale-User-Login": LOGIN}).status_code == 200
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
