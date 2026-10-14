@@ -14,6 +14,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import types
 import uuid
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from harness_modules.runners.service import RunnerError, RunnerHub
 
 from test_daemon import Script, call, events, make_cfg, wait_status
 from test_phase3 import make_repo, sh
+from waits import scaled
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "macrunner"))
 import harness_runner  # noqa: E402
@@ -244,23 +246,41 @@ def test_hub_redelivers_lost_requests_and_fails_on_restart(tmp_path):
 
 def test_hub_timeout_ignores_offline_time(tmp_path, monkeypatch):
     hub = RunnerHub({"macbook": RunnerConfig(name="macbook")})
+    clock, ticks = [1000.0], []
+
+    class FastTick:
+        """`asyncio` as the hub sees it, with the call loop's 2 s wait cut to 10 ms and every tick counted."""
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+        async def wait(self, fs, timeout=None, **kwargs):
+            ticks.append(timeout)
+            return await asyncio.wait(fs, timeout=0.01, **kwargs)
+
+    monkeypatch.setattr(remote, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(remote, "asyncio", FastTick())
+    monkeypatch.setattr(remote, "ONLINE_SECONDS", 45)
+    monkeypatch.setattr(remote, "POLL_HOLD_SECONDS", 0)
+
+    async def ticks_pass(n):
+        target, deadline = len(ticks) + n, asyncio.get_running_loop().time() + scaled(10)
+        while len(ticks) < target:
+            assert asyncio.get_running_loop().time() < deadline, "the call loop stopped ticking"
+            await asyncio.sleep(0.005)
 
     async def body():
         await hub.poll("macbook", "i", [], {})
         task = asyncio.create_task(hub.call("macbook", "shell", {}, timeout=1.0))
+        await asyncio.sleep(0)  # the request is queued
         await hub.poll("macbook", "i", [], {})  # delivered
-        await asyncio.sleep(4.5)  # offline after 0.6 s: most of this doesn't count
+        clock[0] += 100  # the runner went offline: none of this counts against the 1 s
+        await ticks_pass(3)
         assert not task.done()
-        async def poll_until_done():
-            for _ in range(6):  # online again: the remaining budget runs out
-                await hub.poll("macbook", "i", [], {})
-                await asyncio.sleep(0.4)
-                if task.done():
-                    break
-            await task
-
+        await hub.poll("macbook", "i", [], {})  # online again
+        clock[0] += 1.5  # the remaining budget runs out
         with pytest.raises(RunnerError) as e:
-            await poll_until_done()
+            await asyncio.wait_for(task, scaled(10))
         assert e.value.kind == "timeout"
         cancel = await hub.poll("macbook", "i", [], {})
         assert [r["op"] for r in cancel["requests"]] == ["cancel"]
