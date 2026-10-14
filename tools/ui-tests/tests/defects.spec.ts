@@ -81,7 +81,7 @@ test('#603 Chat starter tapped before options load fills the ready composer', as
   }
 });
 
-test('#592 New task and optional project labels name and focus their fields', async ({ signedIn: page }) => {
+test('#592 New task labels name and focus their fields', async ({ signedIn: page }) => {
   await page.goto('/#/new');
   for (const label of ['Project', 'Backend', 'Model', 'Title']) {
     const field = page.getByLabel(label, { exact: true });
@@ -91,15 +91,9 @@ test('#592 New task and optional project labels name and focus their fields', as
   }
   await page.getByLabel('Project', { exact: true }).selectOption('ui');
   await page.getByLabel('Title', { exact: true }).fill('Partly filled task');
-  await page.locator('details > summary').filter({ hasText: 'New project' }).click();
-  for (const label of ['Name', 'Description', 'Runs on', 'Workspace']) {
-    const field = page.getByLabel(label, { exact: true });
-    await expect(field).toHaveCount(1);
-    await page.locator('label').filter({ hasText: new RegExp('^' + label + '$') }).click();
-    await expect(field).toBeFocused();
-  }
-  await page.getByLabel('Workspace', { exact: true }).selectOption('repo');
-  await expect(page.getByLabel('Repository', { exact: true })).toBeVisible();
+  // Adding a project to the server's catalog is daemon administration (#545): the owner gets the pointer line instead.
+  await expect(page.locator('details > summary').filter({ hasText: 'New project' })).toHaveCount(0);
+  await expect(page.getByText('Daemon administration is in the Hub or the harness CLI.')).toBeVisible();
   await expect(page.getByLabel('Project', { exact: true })).toHaveValue('ui');
   await expect(page.getByLabel('Title', { exact: true })).toHaveValue('Partly filled task');
 });
