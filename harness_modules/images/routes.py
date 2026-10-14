@@ -103,6 +103,7 @@ async def read_upload(file: UploadFile | None, limit: int) -> bytes:
 
 @owner_routes.get("/images")
 async def list_images(request: Request, limit: int = 60):
+    """List gallery images newest first, up to the limit (default 60), with the service status."""
     svc = images_service(request)
     visible_operations = tuple(image_edit.PUBLIC_OPERATIONS) if request.state.access.role == "guest" else ()
     images = svc.db.list_images(limit=limit, operations=visible_operations)
@@ -112,6 +113,7 @@ async def list_images(request: Request, limit: int = 60):
 
 @owner_routes.post("/images", status_code=201)
 async def create_image(body: ImageRequest, request: Request):
+    """Queue an image generation and return its job; the image is not ready until its status is done."""
     svc = images_service(request)
     try:
         return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
@@ -122,6 +124,7 @@ async def create_image(body: ImageRequest, request: Request):
 
 @owner_routes.post("/images/uploads", status_code=201)
 async def upload_image(request: Request, file: UploadFile = File(...)):
+    """Store an uploaded photo as a finished gallery image, once image editing is set up."""
     require_owner(request)
     svc = images_service(request)
     try:
@@ -148,6 +151,7 @@ async def cooldown_images(request: Request):
 @owner_routes.post("/images/{iid}/edit", status_code=201)
 async def edit_image(iid: str, request: Request, prompt: str = Form(...), mask: UploadFile = File(...),
                      feather: int = Form(0), seed: int | None = Form(None)):
+    """Queue a masked edit of a finished image and return the queued job before it runs."""
     require_owner(request)
     svc = images_service(request)
     parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
@@ -160,6 +164,7 @@ async def edit_image(iid: str, request: Request, prompt: str = Form(...), mask: 
 
 @owner_routes.post("/images/{iid}/upscale", status_code=201)
 async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
+    """Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job."""
     svc = images_service(request)
     parent = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
     try:
@@ -170,6 +175,7 @@ async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
 
 @owner_routes.post("/images/{iid}/cancel")
 async def cancel_image(iid: str, request: Request):
+    """Cancel a queued or running image and wait until a running one stops; finished images are returned as they are."""
     require_owner(request)
     svc = images_service(request)
     job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
@@ -181,6 +187,7 @@ async def cancel_image(iid: str, request: Request):
 
 @owner_routes.delete("/images/{iid}")
 async def delete_image(iid: str, request: Request):
+    """Delete an image and its files, cancelling it first if it is still queued or running."""
     require_owner(request)
     svc = images_service(request)
     job = visible_job(svc.db.get_image(iid.removesuffix(".png")), request)
@@ -193,6 +200,7 @@ async def delete_image(iid: str, request: Request):
 
 @owner_routes.get("/images/{iid}")
 async def get_image(iid: str, request: Request):
+    """Return an image's JSON record, its PNG for ids ending in .png (404 until done), or its edit inputs for .source.png and .mask.png."""
     svc = images_service(request)
     variant = "json"
     raw = iid
@@ -221,12 +229,14 @@ async def get_image(iid: str, request: Request):
 
 @owner_routes.post("/maintenance/image-archive/retention/preview")
 async def image_archive_retention_preview(request: Request):
+    """Preview the archived images that retention would delete, with the confirmation to pass to apply."""
     require_owner(request)
     return await asyncio.to_thread(images_runtime(request).archive.retention_preview)
 
 
 @owner_routes.post("/maintenance/image-archive/retention/apply")
 async def image_archive_retention_apply(body: ImageArchiveRetentionApply, request: Request):
+    """Delete the archived images from a preview if its confirmation still matches; a missing or stale one returns 409."""
     from .archive import ImageArchiveError
     require_owner(request)
     try:
@@ -238,6 +248,7 @@ async def image_archive_retention_apply(body: ImageArchiveRetentionApply, reques
 # App API (/api/v1): app_auth checks the token and its images scope
 @app_routes.post("/api/v1/images", status_code=201)
 async def app_image(body: AppImageRequest, request: Request):
+    """Queue an image generation and return the job with a PNG URL that works once the image is done."""
     key = app_auth(request, "images")
     if key.get("kind") == "member":
         raise HarnessError(403, "members cannot use image generation")
@@ -254,6 +265,7 @@ async def app_image(body: AppImageRequest, request: Request):
 
 @app_routes.post("/api/v1/images/{iid}/upscale", status_code=201)
 async def app_image_upscale(iid: str, body: AppImageUpscaleRequest, request: Request):
+    """Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job."""
     key = app_auth(request, "images")
     svc = images_runtime(request).service
     if svc is None:
@@ -270,6 +282,7 @@ async def app_image_upscale(iid: str, body: AppImageUpscaleRequest, request: Req
 
 @app_routes.get("/api/v1/images/{iid}")
 async def app_image_status(iid: str, request: Request):
+    """Return an image's status and upscales, or its PNG (404 until done) for an id ending in .png; uploads and edits return 404."""
     app_auth(request, "images")
     svc = images_runtime(request).service
     job = svc.db.get_image(iid.removesuffix(".png")) if svc else None

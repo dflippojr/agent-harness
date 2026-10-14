@@ -66,6 +66,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
 
     @app.get("/api/v1/auth/session")
     async def auth_session(request: Request):
+        """Report Google sign-in availability and this browser's sign-in state; the CSRF token appears only with a session."""
         m = mgr(request)
         svc = m.google_signin
         ident = request.state.access
@@ -83,6 +84,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
 
     @app.post("/api/v1/auth/google/start")
     async def google_start(body: StartRequest, request: Request):
+        """Start a Google sign-in, link, or invite attempt bound to this browser and return its authorization URL; invite needs a link code."""
         m = mgr(request)
         _same_origin(request, m)
         try:
@@ -96,6 +98,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
 
     @app.get(gs.CALLBACK_PATH, include_in_schema=False)
     async def google_callback(request: Request):
+        """Finish a Google sign-in or link attempt and redirect the browser; every failure redirects to one generic page."""
         m = mgr(request)
         web = request.state.web_auth
         params = {k: request.query_params.get(k) for k in ("state", "code", "error", "iss")}
@@ -121,6 +124,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
 
     @app.post("/api/v1/auth/logout")
     async def logout(request: Request):
+        """End this browser's Web session and clear its cookie; a request with an active session must send the CSRF token."""
         m = mgr(request)
         web = request.state.web_auth
         _same_origin(request, m)
@@ -136,11 +140,13 @@ def register(app: FastAPI, mgr) -> list[dict]:
 
     @app.get("/api/v1/me/google")
     async def my_google(request: Request):
+        """Return this account's Google link state; `unlink_removes_this_device` is set when this device signed in with Google."""
         m, ident = _member(request, mgr)
         return JSONResponse(m.google_signin.member_view(ident.user_id, request.state.web_auth), headers=NO_STORE)
 
     @app.delete("/api/v1/me/google")
     async def my_google_unlink(body: ConfirmRequest, request: Request):
+        """Unlink this account's Google link, end its Web sessions, and clear this browser's cookie; `confirm` must be true."""
         m, ident = _member(request, mgr)
         _same_origin(request, m)
         if not body.confirm:
@@ -156,12 +162,14 @@ def register(app: FastAPI, mgr) -> list[dict]:
 
     @app.get(PREFIX + "/google-signin")
     async def google_status(request: Request, refresh: bool = False):
+        """Return Google sign-in configuration and readiness; `refresh` re-runs the OpenID discovery check, not the cached result."""
         require_admin(request, mgr)
         svc = mgr(request).google_signin
         return await asyncio.to_thread(svc.owner_view, refresh)
 
     @app.post(PREFIX + "/accounts/{user_id}/google/invitation", status_code=201)
     async def google_invite(user_id: str, request: Request):
+        """Create a one-time link code, replacing any pending one; 409 if the member is linked or disabled, and it expires in 15 minutes."""
         require_admin(request, mgr)
         svc = _account(request, user_id)
         try:
@@ -171,6 +179,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
 
     @app.delete(PREFIX + "/accounts/{user_id}/google/invitation")
     async def google_invite_cancel(user_id: str, request: Request):
+        """Cancel a member's pending link code; the call succeeds even when none is pending."""
         require_admin(request, mgr)
         svc = _account(request, user_id)
         svc.cancel_invitation(_actor(request), user_id)
@@ -178,6 +187,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
 
     @app.post(PREFIX + "/accounts/{user_id}/google/revoke-sessions")
     async def google_revoke(user_id: str, request: Request):
+        """Sign the member out of all Web sessions, leaving the Google link in place; returns the number revoked."""
         require_admin(request, mgr)
         svc = _account(request, user_id)
         revoked = svc.revoke_sessions(_actor(request), user_id)
@@ -185,6 +195,7 @@ def register(app: FastAPI, mgr) -> list[dict]:
 
     @app.delete(PREFIX + "/accounts/{user_id}/google")
     async def google_unlink(user_id: str, body: ConfirmRequest, request: Request):
+        """Unlink a member's Google account, cancel any pending link code, and end their Web sessions; `confirm` must be true."""
         require_admin(request, mgr)
         if not body.confirm:
             raise HarnessError(400, "confirm unlinking Google")

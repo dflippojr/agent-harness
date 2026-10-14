@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 import pytest
 from pydantic import ValidationError
@@ -69,3 +70,18 @@ def test_openapi_covers_web_contracts_and_static_serving_stays_native(tmp_path):
             client.close()
     finally:
         manager.db.close()
+
+
+def test_every_openapi_operation_has_a_description(tmp_path):
+    """#666: every operation needs a docstring (FastAPI's description) or an explicit summary=, so none shows blank."""
+    manager = Manager(make_cfg(tmp_path))
+    try:
+        app = create_app(manager)
+    finally:
+        manager.db.close()
+    # Read the routes, not the schema: the schema's summary falls back to the titled handler name, so it is
+    # never blank. Every schema operation is one of these routes (admin.py only adds /api/admin/v1 aliases).
+    blank = [f"{sorted(route.methods or ())} {route.path}" for route in app.routes
+             if isinstance(route, APIRoute) and route.include_in_schema
+             and not ((route.description or "").strip() or (route.summary or "").strip())]
+    assert blank == []

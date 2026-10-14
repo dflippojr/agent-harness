@@ -18,6 +18,7 @@ def rc_owner_surface(request):
 
 @owner_routes.get("/remote-control")
 async def rc_status(request: Request):
+    """Report whether Remote Control is enabled and each project's state."""
     m = manager(request)
     if m.remote_control is None:
         return {"enabled": False, "projects": []}
@@ -35,6 +36,7 @@ async def rc_status(request: Request):
 
 @owner_routes.post("/remote-control/{project}")
 async def rc_launch(project: str, request: Request):
+    """Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder."""
     from harness.modules import ToolError
     rc = remote_control(manager(request))
     try:
@@ -46,6 +48,7 @@ async def rc_launch(project: str, request: Request):
 
 @owner_routes.post("/remote-control/{project}/trust")
 async def rc_trust(project: str, request: Request):
+    """Open a Claude console window in a project so the user can accept workspace trust; Windows only."""
     from harness.modules import ToolError
     try:
         return remote_control(manager(request)).open_trust_prompt(project, include_owner_only=rc_owner_surface(request),
@@ -56,6 +59,7 @@ async def rc_trust(project: str, request: Request):
 
 @owner_routes.post("/remote-control/{project}/stop")
 async def rc_stop(project: str, request: Request):
+    """Stop a project's Remote Control server and its child processes; 404 if none was started."""
     from harness.modules import ToolError
     try:
         return await remote_control(manager(request)).stop(project, include_owner_only=rc_owner_surface(request))
@@ -63,6 +67,7 @@ async def rc_stop(project: str, request: Request):
         raise HarnessError(404, str(e))
 @app_routes.get("/api/v1/remote-control")
 async def app_rc_status(request: Request):
+    """Report whether Remote Control is enabled and each project's state."""
     m = manager(request)
     key = app_auth(request, "remote_control")
     if key.get("kind") == "member":
@@ -73,6 +78,7 @@ async def app_rc_status(request: Request):
 
 @app_routes.post("/api/v1/remote-control/{project}")
 async def app_rc_launch(project: str, request: Request):
+    """Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder."""
     m = manager(request)
     key = app_auth(request, "remote_control")
     if m.remote_control is None:
@@ -85,6 +91,7 @@ async def app_rc_launch(project: str, request: Request):
 
 @app_routes.post("/api/v1/remote-control/{project}/stop")
 async def app_rc_stop(project: str, request: Request):
+    """Stop a project's Remote Control server and its child processes; 404 if none was started."""
     m = manager(request)
     app_auth(request, "remote_control")
     if m.remote_control is None:

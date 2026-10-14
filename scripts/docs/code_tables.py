@@ -4,7 +4,7 @@ Routes are read statically (AST) from the route registrations, so no daemon impo
 once and only files with route markers are parsed. The settings table imports the real registry
 (`harness.settings_keys.build_registry`) under a pinned docs profile. Nothing here invents text: a route with no
 `summary=` and no docstring renders `TODO`,
-and `build.py --check` lists those as warnings.
+and `build.py --check` fails on those (#666).
 """
 
 from __future__ import annotations
@@ -267,7 +267,8 @@ def render_routes(routes: list[Route], surface: str) -> str:
 
 
 def route_warnings(routes: list[Route]) -> list[str]:
-    return [f"{r.method} {r.path} ({r.file} {r.func}) has no summary or docstring; the table says {TODO}"
+    return [f"{r.method} {r.path} ({r.file} {r.func}) has no summary or docstring, so the table says {TODO}; "
+            "add a one-sentence docstring to the handler"
             for r in sorted(routes, key=lambda r: (r.path, r.method)) if r.summary == TODO]
 
 
@@ -324,6 +325,7 @@ def settings_warnings(specs: list) -> list[str]:
 class CodeRegion:
     file: str
     render: object  # (root) -> (body, warnings)
+    strict: bool = False  # True: a warning fails --check (a route with no summary); False: it only prints
 
 
 def _routes_region(surface: str):
@@ -341,7 +343,7 @@ def _settings_region(root: Path) -> tuple[str, list[str]]:
 
 # region name -> where it lives and how it renders. Used by build.py for both writing and --check.
 CODE_REGIONS = {
-    "app-api-endpoints": CodeRegion("docs/app-api.md", _routes_region("app")),
-    "admin-api-endpoints": CodeRegion("docs/admin-api.md", _routes_region("admin")),
+    "app-api-endpoints": CodeRegion("docs/app-api.md", _routes_region("app"), strict=True),
+    "admin-api-endpoints": CodeRegion("docs/admin-api.md", _routes_region("admin"), strict=True),
     "config-registry-keys": CodeRegion("docs/config-registry.md", _settings_region),
 }

@@ -69,170 +69,170 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 <!-- generated:begin admin-api-endpoints -->
 | Method | Path | Auth | Summary | Source |
 | --- | --- | --- | --- | --- |
-| GET | `/api/admin/v1` | owner | TODO | `harness/admin.py` `admin_root` |
-| GET | `/api/admin/v1/accounts` | owner | TODO | `harness/admin.py` `list_accounts` |
-| POST | `/api/admin/v1/accounts` | owner | TODO | `harness/admin.py` `create_account` |
-| GET | `/api/admin/v1/accounts/audit` | owner | TODO | `harness/admin.py` `account_audit` |
-| GET | `/api/admin/v1/accounts/{user_id}` | owner | TODO | `harness/admin.py` `get_account` |
-| PATCH | `/api/admin/v1/accounts/{user_id}` | owner | TODO | `harness/admin.py` `update_account` |
-| POST | `/api/admin/v1/accounts/{user_id}/github-connection/reset` | owner | TODO | `harness/admin.py` `reset_member_github` |
-| DELETE | `/api/admin/v1/accounts/{user_id}/google` | owner | TODO | `harness/google_signin_api.py` `google_unlink` |
-| DELETE | `/api/admin/v1/accounts/{user_id}/google/invitation` | owner | TODO | `harness/google_signin_api.py` `google_invite_cancel` |
-| POST | `/api/admin/v1/accounts/{user_id}/google/invitation` | owner | TODO | `harness/google_signin_api.py` `google_invite` |
-| POST | `/api/admin/v1/accounts/{user_id}/google/revoke-sessions` | owner | TODO | `harness/google_signin_api.py` `google_revoke` |
-| GET | `/api/admin/v1/apps/erasures` | owner | TODO | `harness/admin.py` `app_erasures` |
+| GET | `/api/admin/v1` | owner | Return the API version, capabilities, hub claim state, owner logins, and the operations it serves. | `harness/admin.py` `admin_root` |
+| GET | `/api/admin/v1/accounts` | owner | List household member accounts with quotas, disk usage, and Google sign-in state. | `harness/admin.py` `list_accounts` |
+| POST | `/api/admin/v1/accounts` | owner | Create a household member account; needs an explicit owner allowlist, and a login can hold only one role. | `harness/admin.py` `create_account` |
+| GET | `/api/admin/v1/accounts/audit` | owner | List recent account audit rows, newest first; `limit` is clamped to 1 through 500. | `harness/admin.py` `account_audit` |
+| GET | `/api/admin/v1/accounts/{user_id}` | owner | Return one household member's account with disk usage and Google sign-in state; 404 for other ids. | `harness/admin.py` `get_account` |
+| PATCH | `/api/admin/v1/accounts/{user_id}` | owner | Update the fields sent for a household member; raising `max_running` can start a waiting session now. | `harness/admin.py` `update_account` |
+| POST | `/api/admin/v1/accounts/{user_id}/github-connection/reset` | owner | Erase a member's GitHub credential and stop their Git work, leaving them disconnected; `confirm` must be true. | `harness/admin.py` `reset_member_github` |
+| DELETE | `/api/admin/v1/accounts/{user_id}/google` | owner | Unlink a member's Google account, cancel any pending link code, and end their Web sessions; `confirm` must be true. | `harness/google_signin_api.py` `google_unlink` |
+| DELETE | `/api/admin/v1/accounts/{user_id}/google/invitation` | owner | Cancel a member's pending link code; the call succeeds even when none is pending. | `harness/google_signin_api.py` `google_invite_cancel` |
+| POST | `/api/admin/v1/accounts/{user_id}/google/invitation` | owner | Create a one-time link code, replacing any pending one; 409 if the member is linked or disabled, and it expires in 15 minutes. | `harness/google_signin_api.py` `google_invite` |
+| POST | `/api/admin/v1/accounts/{user_id}/google/revoke-sessions` | owner | Sign the member out of all Web sessions, leaving the Google link in place; returns the number revoked. | `harness/google_signin_api.py` `google_revoke` |
+| GET | `/api/admin/v1/apps/erasures` | owner | List revoked Apps and devices still waiting for their store and folder to be erased, soonest first. | `harness/admin.py` `app_erasures` |
 | GET | `/api/admin/v1/apps/{app_id}/limits` | owner | An App's session caps: what the owner set, what applies, and its sessions that count against them. | `harness/admin.py` `get_app_limits` |
 | PUT | `/api/admin/v1/apps/{app_id}/limits` | owner | Set how many sessions an App may have running and queued (#524); a field left out keeps its value and null restores the default. Only the owner can; an App cannot. | `harness/admin.py` `set_app_limits` |
-| POST | `/api/admin/v1/apps/{app_id}/restore` | owner | TODO | `harness/admin.py` `restore_app` |
-| PUT | `/api/admin/v1/apps/{app_id}/retention` | owner | TODO | `harness/admin.py` `set_app_retention` |
+| POST | `/api/admin/v1/apps/{app_id}/restore` | owner | Undo an App's revoke within its erasure grace and return a new key; 404 after the grace. | `harness/admin.py` `restore_app` |
+| PUT | `/api/admin/v1/apps/{app_id}/retention` | owner | Set an App's default session retention in days, or null to keep sessions until deleted; 404 for an unknown id. | `harness/admin.py` `set_app_retention` |
 | GET | `/api/admin/v1/audit` | owner | Owner-only review of every retained audit row, newest first, with a cursor (#467). | `harness/admin.py` `audit_review` |
-| GET | `/api/admin/v1/backends` | owner (`admin` scope) | TODO | `harness/api.py` `backends` |
+| GET | `/api/admin/v1/backends` | owner (`admin` scope) | Local and hosted backends with their model and sign-in state; `auth=skip` skips the sign-in checks. | `harness/api.py` `backends` |
 | PUT | `/api/admin/v1/backends/{name}` | owner (`admin` scope) | Settings → Backends: persist the default model (and effort, for hosted CLIs). | `harness/api.py` `update_backend` |
-| GET | `/api/admin/v1/chats` | owner (`admin` scope) | TODO | `harness/api.py` `list_chats` |
-| POST | `/api/admin/v1/chats` | owner (`admin` scope) | TODO | `harness/api.py` `create_chat` |
-| GET | `/api/admin/v1/chats/options` | owner (`admin` scope) | TODO | `harness/api.py` `chat_options` |
-| GET | `/api/admin/v1/chats/snippet-languages` | owner (`admin` scope) | TODO | `harness/api.py` `snippet_languages` |
-| DELETE | `/api/admin/v1/chats/{ref}` | owner (`admin` scope) | TODO | `harness/api.py` `delete_chat` |
-| GET | `/api/admin/v1/chats/{ref}` | owner (`admin` scope) | TODO | `harness/api.py` `get_chat` |
-| PATCH | `/api/admin/v1/chats/{ref}` | owner (`admin` scope) | TODO | `harness/api.py` `rename_chat` |
-| PUT | `/api/admin/v1/chats/{ref}` | owner (`admin` scope) | TODO | `harness/api.py` `rename_chat` |
-| POST | `/api/admin/v1/chats/{ref}/cancel` | owner (`admin` scope) | TODO | `harness/api.py` `cancel_chat` |
-| GET | `/api/admin/v1/chats/{ref}/events` | owner (`admin` scope) | TODO | `harness/api.py` `chat_events` |
-| POST | `/api/admin/v1/chats/{ref}/messages` | owner (`admin` scope) | TODO | `harness/api.py` `send_chat_message` |
+| GET | `/api/admin/v1/chats` | owner (`admin` scope) | The caller's chats, newest first, up to `limit` (1 to 200, default 50). | `harness/api.py` `list_chats` |
+| POST | `/api/admin/v1/chats` | owner (`admin` scope) | Starts a chat and returns before its first reply finishes; backend, model and effort are optional. | `harness/api.py` `create_chat` |
+| GET | `/api/admin/v1/chats/options` | owner (`admin` scope) | Backends, models and efforts a new chat can start with, and the default backend. | `harness/api.py` `chat_options` |
+| GET | `/api/admin/v1/chats/snippet-languages` | owner (`admin` scope) | Languages the snippet runner supports, with their aliases and size limits. | `harness/api.py` `snippet_languages` |
+| DELETE | `/api/admin/v1/chats/{ref}` | owner (`admin` scope) | Deletes an idle chat and its workspace; 409 while a reply or snippet is running. | `harness/api.py` `delete_chat` |
+| GET | `/api/admin/v1/chats/{ref}` | owner (`admin` scope) | Current state of one chat. | `harness/api.py` `get_chat` |
+| PATCH | `/api/admin/v1/chats/{ref}` | owner (`admin` scope) | Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters. | `harness/api.py` `rename_chat` |
+| PUT | `/api/admin/v1/chats/{ref}` | owner (`admin` scope) | Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters. | `harness/api.py` `rename_chat` |
+| POST | `/api/admin/v1/chats/{ref}/cancel` | owner (`admin` scope) | Stops a chat's running reply and returns once it has ended; 409 when no reply is active. | `harness/api.py` `cancel_chat` |
+| GET | `/api/admin/v1/chats/{ref}/events` | owner (`admin` scope) | Server-sent events for one chat, replaying events after `after`; `follow=false` ends after the replay. | `harness/api.py` `chat_events` |
+| POST | `/api/admin/v1/chats/{ref}/messages` | owner (`admin` scope) | Sends a chat message and returns before the reply finishes; snippets run since the last message are included. | `harness/api.py` `send_chat_message` |
 | POST | `/api/admin/v1/chats/{ref}/snippets` | owner (`admin` scope) | Run one snippet the owner chose, in a fresh sandbox. The result arrives as a snippet_result event. | `harness/api.py` `run_snippet` |
-| POST | `/api/admin/v1/chats/{ref}/snippets/{run_id}/cancel` | owner (`admin` scope) | TODO | `harness/api.py` `cancel_snippet` |
-| GET | `/api/admin/v1/config` | owner | TODO | `harness/config_api.py` `admin_config` |
-| PATCH | `/api/admin/v1/config` | owner | TODO | `harness/config_api.py` `admin_patch` |
-| POST | `/api/admin/v1/config/restart` | owner | TODO | `harness/config_api.py` `admin_restart` |
-| POST | `/api/admin/v1/config/rollback` | owner | TODO | `harness/config_api.py` `admin_rollback` |
-| GET | `/api/admin/v1/config/schema` | owner | TODO | `harness/config_api.py` `admin_schema` |
-| POST | `/api/admin/v1/config/validate` | owner | TODO | `harness/config_api.py` `admin_validate` |
+| POST | `/api/admin/v1/chats/{ref}/snippets/{run_id}/cancel` | owner (`admin` scope) | Asks a running snippet to stop; 409 if it is not running, and the final result arrives as a snippet_result event. | `harness/api.py` `cancel_snippet` |
+| GET | `/api/admin/v1/config` | owner | Return every admin setting with the active and pending revisions and restart state; the ETag is the active revision. | `harness/config_api.py` `admin_config` |
+| PATCH | `/api/admin/v1/config` | owner | Change settings; restart-only ones wait for a restart, `dry_run` previews without saving, and a stale `revision` returns 409. | `harness/config_api.py` `admin_patch` |
+| POST | `/api/admin/v1/config/restart` | owner | Restart into the pending or active config with `confirm` true; the process exits after responding, or 409 if unsupervised. | `harness/config_api.py` `admin_restart` |
+| POST | `/api/admin/v1/config/rollback` | owner | Restore the previous confirmed config; needs `confirm` true unless `dry_run` is set, and 409 when there is none. | `harness/config_api.py` `admin_rollback` |
+| GET | `/api/admin/v1/config/schema` | owner | Describe each admin setting's type, bounds, default, and apply mode, and whether a supervised restart is available. | `harness/config_api.py` `admin_schema` |
+| POST | `/api/admin/v1/config/validate` | owner | Plan proposed admin changes without saving or applying them; invalid changes return 400 and a stale `revision` returns 409. | `harness/config_api.py` `admin_validate` |
 | GET | `/api/admin/v1/events` | owner (`admin` scope) | Status-level events for every session (the session list). Live only; reload the list to catch up. | `harness/api.py` `all_events` |
-| GET | `/api/admin/v1/github-member-auth` | owner | TODO | `harness/admin.py` `github_member_auth` |
-| PUT | `/api/admin/v1/github-member-auth` | owner | TODO | `harness/admin.py` `set_github_member_auth` |
-| GET | `/api/admin/v1/github/projects/{project}/items` | owner (`admin` scope) | TODO | `harness/api.py` `github_items` |
-| GET | `/api/admin/v1/github/projects/{project}/items/{number}` | owner (`admin` scope) | TODO | `harness/api.py` `github_item` |
-| POST | `/api/admin/v1/github/sessions` | owner (`admin` scope) | TODO | `harness/api.py` `create_github_session` |
-| GET | `/api/admin/v1/google-signin` | owner | TODO | `harness/google_signin_api.py` `google_status` |
-| GET | `/api/admin/v1/gpu` | owner (`admin` scope) | TODO | `harness_modules/local_model/routes.py` `gpu` |
+| GET | `/api/admin/v1/github-member-auth` | owner | Return GitHub sign-in state and each member's coarse status; `refresh` forces a fresh preflight check. | `harness/admin.py` `github_member_auth` |
+| PUT | `/api/admin/v1/github-member-auth` | owner | Turn member GitHub sign-in on or off; enabling needs GitHub configured (409 otherwise), and disabling keeps credentials. | `harness/admin.py` `set_github_member_auth` |
+| GET | `/api/admin/v1/github/projects/{project}/items` | owner (`admin` scope) | Open issues and pull requests, 30 per page; results are cached for 60 seconds. | `harness/api.py` `github_items` |
+| GET | `/api/admin/v1/github/projects/{project}/items/{number}` | owner (`admin` scope) | One open issue or PR with its body and, for a PR, its line comments; closed and fork PRs are refused. | `harness/api.py` `github_item` |
+| POST | `/api/admin/v1/github/sessions` | owner (`admin` scope) | Starts a session from a GitHub issue or PR, whose text becomes the untrusted prompt; PR tasks need a tower project. | `harness/api.py` `create_github_session` |
+| GET | `/api/admin/v1/google-signin` | owner | Return Google sign-in configuration and readiness; `refresh` re-runs the OpenID discovery check, not the cached result. | `harness/google_signin_api.py` `google_status` |
+| GET | `/api/admin/v1/gpu` | owner (`admin` scope) | Return the resource guard's state, the model's status, and the default load-now duration. | `harness_modules/local_model/routes.py` `gpu` |
 | POST | `/api/admin/v1/gpu/{action}` | owner (`admin` scope) | pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the model stays unloaded until something needs it). load: load the model now and keep it loaded for duration_seconds. unload: unload it now without holding the queue. | `harness_modules/local_model/routes.py` `gpu_action` |
 | GET | `/api/admin/v1/hub` | owner | Read module, paired-app and local unsigned-entry status and metadata. | `harness_modules/hub/routes.py` `hub_inventory` |
 | GET | `/api/admin/v1/hub-claim` | owner | Whether a Hub is claimed, its record (never a token or hash), and Hub claim requests still open. | `harness/hub_claim.py` `hub_claim_status` |
 | POST | `/api/admin/v1/hub-claim/release` | see source | Revoke the Hub's key and clear the record so a new Hub may claim (`{"confirm": true}`). Host only; the secret is checked before the body. | `harness/hub_claim.py` `release_hub` |
 | POST | `/api/admin/v1/hub-claim/requests/{rid}/approve` | see source | Approve a Hub claim with the match code the Hub shows (`{"match": "..."}`). Host only: needs the approval secret header, checked before the body. | `harness/hub_claim.py` `approve_hub_claim` |
 | POST | `/api/admin/v1/hub-claim/requests/{rid}/deny` | see source | Deny a Hub claim request, or withdraw an approval the Hub has not redeemed yet. Host only. | `harness/hub_claim.py` `deny_hub_claim` |
-| GET | `/api/admin/v1/images` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `list_images` |
-| POST | `/api/admin/v1/images` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `create_image` |
+| GET | `/api/admin/v1/images` | owner (`admin` scope) | List gallery images newest first, up to the limit (default 60), with the service status. | `harness_modules/images/routes.py` `list_images` |
+| POST | `/api/admin/v1/images` | owner (`admin` scope) | Queue an image generation and return its job; the image is not ready until its status is done. | `harness_modules/images/routes.py` `create_image` |
 | POST | `/api/admin/v1/images/cooldown` | owner (`admin` scope) | Drop an unused Images-tab warmup so the language model can come back. | `harness_modules/images/routes.py` `cooldown_images` |
-| POST | `/api/admin/v1/images/uploads` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `upload_image` |
+| POST | `/api/admin/v1/images/uploads` | owner (`admin` scope) | Store an uploaded photo as a finished gallery image, once image editing is set up. | `harness_modules/images/routes.py` `upload_image` |
 | POST | `/api/admin/v1/images/warmup` | owner (`admin` scope) | Start ComfyUI without a checkpoint. Called when the owner opens the Images tab. | `harness_modules/images/routes.py` `warmup_images` |
-| DELETE | `/api/admin/v1/images/{iid}` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `delete_image` |
-| GET | `/api/admin/v1/images/{iid}` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `get_image` |
-| POST | `/api/admin/v1/images/{iid}/cancel` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `cancel_image` |
-| POST | `/api/admin/v1/images/{iid}/edit` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `edit_image` |
-| POST | `/api/admin/v1/images/{iid}/upscale` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `upscale_image` |
-| GET | `/api/admin/v1/jobs` | owner (`admin` scope) | TODO | `harness_modules/jobs/routes.py` `list_jobs` |
-| POST | `/api/admin/v1/jobs` | owner (`admin` scope) | TODO | `harness_modules/jobs/routes.py` `create_job` |
+| DELETE | `/api/admin/v1/images/{iid}` | owner (`admin` scope) | Delete an image and its files, cancelling it first if it is still queued or running. | `harness_modules/images/routes.py` `delete_image` |
+| GET | `/api/admin/v1/images/{iid}` | owner (`admin` scope) | Return an image's JSON record, its PNG for ids ending in .png (404 until done), or its edit inputs for .source.png and .mask.png. | `harness_modules/images/routes.py` `get_image` |
+| POST | `/api/admin/v1/images/{iid}/cancel` | owner (`admin` scope) | Cancel a queued or running image and wait until a running one stops; finished images are returned as they are. | `harness_modules/images/routes.py` `cancel_image` |
+| POST | `/api/admin/v1/images/{iid}/edit` | owner (`admin` scope) | Queue a masked edit of a finished image and return the queued job before it runs. | `harness_modules/images/routes.py` `edit_image` |
+| POST | `/api/admin/v1/images/{iid}/upscale` | owner (`admin` scope) | Queue a 2x or 4x upscale of a finished image; a repeat for a scale already queued or done returns that job. | `harness_modules/images/routes.py` `upscale_image` |
+| GET | `/api/admin/v1/jobs` | owner (`admin` scope) | List scheduled jobs, each with its most recent run. | `harness_modules/jobs/routes.py` `list_jobs` |
+| POST | `/api/admin/v1/jobs` | owner (`admin` scope) | Create a scheduled job after validating it; its next run is set from the cron schedule. | `harness_modules/jobs/routes.py` `create_job` |
 | GET | `/api/admin/v1/jobs/preview` | owner (`admin` scope) | The next few run times of a schedule, or why it's invalid. | `harness_modules/jobs/routes.py` `preview_cron` |
-| DELETE | `/api/admin/v1/jobs/{jid}` | owner (`admin` scope) | TODO | `harness_modules/jobs/routes.py` `delete_job` |
-| GET | `/api/admin/v1/jobs/{jid}` | owner (`admin` scope) | TODO | `harness_modules/jobs/routes.py` `get_job` |
-| PUT | `/api/admin/v1/jobs/{jid}` | owner (`admin` scope) | TODO | `harness_modules/jobs/routes.py` `update_job` |
+| DELETE | `/api/admin/v1/jobs/{jid}` | owner (`admin` scope) | Delete a scheduled job and record the deletion in the audit log. | `harness_modules/jobs/routes.py` `delete_job` |
+| GET | `/api/admin/v1/jobs/{jid}` | owner (`admin` scope) | Return one scheduled job with its 15 most recent runs. | `harness_modules/jobs/routes.py` `get_job` |
+| PUT | `/api/admin/v1/jobs/{jid}` | owner (`admin` scope) | Replace a scheduled job's settings after validation and recompute its next run. | `harness_modules/jobs/routes.py` `update_job` |
 | POST | `/api/admin/v1/jobs/{jid}/run` | owner (`admin` scope) | Run a job now, outside its schedule (the next scheduled run is unchanged). | `harness_modules/jobs/routes.py` `run_job` |
-| GET | `/api/admin/v1/keys` | owner (`admin` scope) | TODO | `harness/api.py` `list_keys` |
-| POST | `/api/admin/v1/keys` | owner (`admin` scope) | TODO | `harness/api.py` `create_key` |
-| DELETE | `/api/admin/v1/keys/{kid}` | owner (`admin` scope) | TODO | `harness/api.py` `revoke_key` |
-| GET | `/api/admin/v1/maintenance` | owner (`admin` scope) | TODO | `harness/api.py` `maintenance` |
-| POST | `/api/admin/v1/maintenance/backup` | owner (`admin` scope) | TODO | `harness_modules/backup/routes.py` `maintenance_backup` |
-| POST | `/api/admin/v1/maintenance/cleanup` | owner (`admin` scope) | TODO | `harness/api.py` `maintenance_cleanup` |
-| POST | `/api/admin/v1/maintenance/image-archive/retention/apply` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `image_archive_retention_apply` |
-| POST | `/api/admin/v1/maintenance/image-archive/retention/preview` | owner (`admin` scope) | TODO | `harness_modules/images/routes.py` `image_archive_retention_preview` |
-| GET | `/api/admin/v1/me` | owner (`admin` scope) | TODO | `harness/api.py` `me` |
+| GET | `/api/admin/v1/keys` | owner (`admin` scope) | Key metadata only; a key's secret is returned once, by the create response. | `harness/api.py` `list_keys` |
+| POST | `/api/admin/v1/keys` | owner (`admin` scope) | Mints an API key and returns its secret only in this response; a Hub's owner-kind request gets 403. | `harness/api.py` `create_key` |
+| DELETE | `/api/admin/v1/keys/{kid}` | owner (`admin` scope) | Revokes one key; an unknown or already revoked id returns 404, and the Hub's own key returns 409. | `harness/api.py` `revoke_key` |
+| GET | `/api/admin/v1/maintenance` | owner (`admin` scope) | Disk usage of session workspaces and checkpoints, and of the data volume. | `harness/api.py` `maintenance` |
+| POST | `/api/admin/v1/maintenance/backup` | owner (`admin` scope) | Write a dated backup of the database, transcripts, and config, wait for it, then prune old backups. | `harness_modules/backup/routes.py` `maintenance_backup` |
+| POST | `/api/admin/v1/maintenance/cleanup` | owner (`admin` scope) | Runs a cleanup pass now, after any pass in progress, and returns what it removed. | `harness/api.py` `maintenance_cleanup` |
+| POST | `/api/admin/v1/maintenance/image-archive/retention/apply` | owner (`admin` scope) | Delete the archived images from a preview if its confirmation still matches; a missing or stale one returns 409. | `harness_modules/images/routes.py` `image_archive_retention_apply` |
+| POST | `/api/admin/v1/maintenance/image-archive/retention/preview` | owner (`admin` scope) | Preview the archived images that retention would delete, with the confirmation to pass to apply. | `harness_modules/images/routes.py` `image_archive_retention_preview` |
+| GET | `/api/admin/v1/me` | owner (`admin` scope) | Caller's identity, role and capabilities, plus disk and queue usage where the account has it. | `harness/api.py` `me` |
 | GET | `/api/admin/v1/memory` | owner (`admin` scope) | The agent profile new sessions get, and the latest change agents saved to the memory library. | `harness_modules/memory_library/routes.py` `memory` |
 | PUT | `/api/admin/v1/memory/profile` | owner (`admin` scope) | Owner edit of the agent profile from Settings. Commits and pushes like an approved memory write. | `harness_modules/memory_library/routes.py` `update_memory_profile` |
-| GET | `/api/admin/v1/models` | owner (`admin` scope) | TODO | `harness/api.py` `models` |
-| GET | `/api/admin/v1/models/status` | owner (`admin` scope) | TODO | `harness_modules/local_model/routes.py` `models_status` |
+| GET | `/api/admin/v1/models` | owner (`admin` scope) | Configured models with their context sizes; one is marked as the default. | `harness/api.py` `models` |
+| GET | `/api/admin/v1/models/status` | owner (`admin` scope) | Report each model's load state and how long its current warm-up has been running. | `harness_modules/local_model/routes.py` `models_status` |
 | POST | `/api/admin/v1/models/warm` | owner (`admin` scope) | Load the default model if it's asleep. The web app calls this when it opens. | `harness_modules/local_model/routes.py` `models_warm` |
-| POST | `/api/admin/v1/notify/test` | owner (`admin` scope) | TODO | `harness_modules/notifications/routes.py` `notify_test` |
+| POST | `/api/admin/v1/notify/test` | owner (`admin` scope) | Send a test push notification through ntfy. | `harness_modules/notifications/routes.py` `notify_test` |
 | GET | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | Owner view. Codes themselves are shown only by the create response. | `harness/apps.py` `pairing_codes` |
-| POST | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | TODO | `harness/apps.py` `create_pairing_code` |
-| DELETE | `/api/admin/v1/pairing-codes/{pid}` | owner (`admin` scope) | TODO | `harness/apps.py` `revoke_pairing_code` |
+| POST | `/api/admin/v1/pairing-codes` | owner (`admin` scope) | Mint a single-use pairing code bound to one origin; it is returned only here and expires after its TTL. | `harness/apps.py` `create_pairing_code` |
+| DELETE | `/api/admin/v1/pairing-codes/{pid}` | owner (`admin` scope) | Expire an unused pairing code now; 404 when no such code is still active. | `harness/apps.py` `revoke_pairing_code` |
 | GET | `/api/admin/v1/pairing-requests` | owner | Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier. | `harness/pairing_requests.py` `list_pairing_requests` |
 | POST | `/api/admin/v1/pairing-requests` | owner | Arm a pre-approved slot for a Hub entry (#519): no secret; the App claims it with its own challenge. | `harness/pairing_requests.py` `arm_pairing_request` |
 | POST | `/api/admin/v1/pairing-requests/preview` | owner | Preview App scope disclosures before arming, without creating or changing pairing state. | `harness/pairing_requests.py` `preview_pairing_request` |
 | POST | `/api/admin/v1/pairing-requests/{rid}/approve` | owner | Approve an App's pairing request with the match code it shows. Elevated scopes need acknowledge_elevated. No token exists until the App redeems. | `harness/pairing_requests.py` `approve_pairing_request` |
 | POST | `/api/admin/v1/pairing-requests/{rid}/confirm` | owner | Confirm an App's claim on an armed slot with the match code it shows; then it may redeem. | `harness/pairing_requests.py` `confirm_pairing_request` |
 | POST | `/api/admin/v1/pairing-requests/{rid}/deny` | owner | Deny a pairing request, or withdraw an armed slot or an approval the App has not redeemed yet. | `harness/pairing_requests.py` `deny_pairing_request` |
-| GET | `/api/admin/v1/profile` | owner (`admin` scope) | TODO | `harness/api.py` `profile` |
-| PUT | `/api/admin/v1/profile` | owner (`admin` scope) | TODO | `harness/api.py` `update_profile` |
-| GET | `/api/admin/v1/projects` | owner (`admin` scope) | TODO | `harness/api.py` `projects` |
-| POST | `/api/admin/v1/projects` | owner (`admin` scope) | TODO | `harness/api.py` `create_project` |
-| GET | `/api/admin/v1/provider-credentials` | owner | TODO | `harness/admin.py` `provider_credentials` |
-| POST | `/api/admin/v1/provider-credentials` | owner | TODO | `harness/admin.py` `set_provider_credential` |
-| DELETE | `/api/admin/v1/provider-credentials/{credential_id}` | owner | TODO | `harness/admin.py` `revoke_provider_credential` |
-| GET | `/api/admin/v1/queue` | owner (`admin` scope) | TODO | `harness/api.py` `queue` |
-| GET | `/api/admin/v1/remote-control` | owner (`admin` scope) | TODO | `harness_modules/remote_control/routes.py` `rc_status` |
-| POST | `/api/admin/v1/remote-control/discovery/scans` | see source | TODO | `harness_modules/remote_control/discovery_api.py` `start` |
-| DELETE | `/api/admin/v1/remote-control/discovery/scans/{scan_id}` | see source | TODO | `harness_modules/remote_control/discovery_api.py` `cancel` |
-| GET | `/api/admin/v1/remote-control/discovery/scans/{scan_id}` | see source | TODO | `harness_modules/remote_control/discovery_api.py` `status` |
-| POST | `/api/admin/v1/remote-control/discovery/scans/{scan_id}/candidates/{candidate_id}/promote` | see source | TODO | `harness_modules/remote_control/discovery_api.py` `promote` |
-| DELETE | `/api/admin/v1/remote-control/folders/{slug}` | see source | TODO | `harness_modules/remote_control/discovery_api.py` `remove` |
-| POST | `/api/admin/v1/remote-control/{project}` | owner (`admin` scope) | TODO | `harness_modules/remote_control/routes.py` `rc_launch` |
-| POST | `/api/admin/v1/remote-control/{project}/stop` | owner (`admin` scope) | TODO | `harness_modules/remote_control/routes.py` `rc_stop` |
-| POST | `/api/admin/v1/remote-control/{project}/trust` | owner (`admin` scope) | TODO | `harness_modules/remote_control/routes.py` `rc_trust` |
-| GET | `/api/admin/v1/resources` | owner (`admin` scope) | TODO | `harness_modules/local_model/routes.py` `gpu` |
+| GET | `/api/admin/v1/profile` | owner (`admin` scope) | The profile icon and the list of icons to choose from. | `harness/api.py` `profile` |
+| PUT | `/api/admin/v1/profile` | owner (`admin` scope) | Sets the profile icon; the emoji must be one of the listed choices. | `harness/api.py` `update_profile` |
+| GET | `/api/admin/v1/projects` | owner (`admin` scope) | Projects visible to the caller, or an empty list for a read-only demo session. | `harness/api.py` `projects` |
+| POST | `/api/admin/v1/projects` | owner (`admin` scope) | Creates a project with an empty workspace or a repo cloned per session; `github` clones use the caller's GitHub sign-in. | `harness/api.py` `create_project` |
+| GET | `/api/admin/v1/provider-credentials` | owner | List provider grants, including revoked ones, newest first; `available` shows whether a key-based grant's secret file exists. | `harness/admin.py` `provider_credentials` |
+| POST | `/api/admin/v1/provider-credentials` | owner | Grant an App a provider backend, revoking its previous grant for that backend; key-based policies need a configured `secret_ref`. | `harness/admin.py` `set_provider_credential` |
+| DELETE | `/api/admin/v1/provider-credentials/{credential_id}` | owner | Revoke an active provider grant; an unknown or already revoked id returns 404. | `harness/admin.py` `revoke_provider_credential` |
+| GET | `/api/admin/v1/queue` | owner (`admin` scope) | Queue positions of the caller's queued agent sessions, in queue order. | `harness/api.py` `queue` |
+| GET | `/api/admin/v1/remote-control` | owner (`admin` scope) | Report whether Remote Control is enabled and each project's state. | `harness_modules/remote_control/routes.py` `rc_status` |
+| POST | `/api/admin/v1/remote-control/discovery/scans` | see source | Start a background folder scan, or return the scan already running; poll the scan for results. | `harness_modules/remote_control/discovery_api.py` `start` |
+| DELETE | `/api/admin/v1/remote-control/discovery/scans/{scan_id}` | see source | Ask a folder scan to stop and return its current view, which may still show it running. | `harness_modules/remote_control/discovery_api.py` `cancel` |
+| GET | `/api/admin/v1/remote-control/discovery/scans/{scan_id}` | see source | Return a folder scan's progress and candidates; an expired or unknown scan returns 404. | `harness_modules/remote_control/discovery_api.py` `status` |
+| POST | `/api/admin/v1/remote-control/discovery/scans/{scan_id}/candidates/{candidate_id}/promote` | see source | Add a scanned folder as a managed folder; the confirmed path and markers must match the scan exactly. | `harness_modules/remote_control/discovery_api.py` `promote` |
+| DELETE | `/api/admin/v1/remote-control/folders/{slug}` | see source | Remove a managed folder; returns 409 while its Remote Control server or trust window is open. | `harness_modules/remote_control/discovery_api.py` `remove` |
+| POST | `/api/admin/v1/remote-control/{project}` | owner (`admin` scope) | Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder. | `harness_modules/remote_control/routes.py` `rc_launch` |
+| POST | `/api/admin/v1/remote-control/{project}/stop` | owner (`admin` scope) | Stop a project's Remote Control server and its child processes; 404 if none was started. | `harness_modules/remote_control/routes.py` `rc_stop` |
+| POST | `/api/admin/v1/remote-control/{project}/trust` | owner (`admin` scope) | Open a Claude console window in a project so the user can accept workspace trust; Windows only. | `harness_modules/remote_control/routes.py` `rc_trust` |
+| GET | `/api/admin/v1/resources` | owner (`admin` scope) | Return the resource guard's state, the model's status, and the default load-now duration. | `harness_modules/local_model/routes.py` `gpu` |
 | GET | `/api/admin/v1/resources/diagnostics` | owner (`admin` scope) | One reading for Actions -> Resources (VRAM, RAM, GPU/CPU load, model and guard state). Not polled. | `harness_modules/local_model/routes.py` `resources_diagnostics` |
 | POST | `/api/admin/v1/resources/{action}` | owner (`admin` scope) | pause: hold the GPU for other uses until resumed. resume: end the hold, ignoring the current triggers (the model stays unloaded until something needs it). load: load the model now and keep it loaded for duration_seconds. unload: unload it now without holding the queue. | `harness_modules/local_model/routes.py` `gpu_action` |
 | GET | `/api/admin/v1/runner-pairing-codes` | owner (`admin` scope) | Owner view. Native pairing codes and runner tokens are never included. | `harness_modules/runners/routes.py` `runner_pairing_codes` |
-| POST | `/api/admin/v1/runner-pairing-codes` | owner (`admin` scope) | TODO | `harness_modules/runners/routes.py` `create_runner_pairing_code` |
-| DELETE | `/api/admin/v1/runner-pairing-codes/{pid}` | owner (`admin` scope) | TODO | `harness_modules/runners/routes.py` `revoke_runner_pairing_code` |
-| GET | `/api/admin/v1/runners` | owner (`admin` scope) | TODO | `harness_modules/runners/routes.py` `runners` |
-| POST | `/api/admin/v1/runners/{name}/update` | owner (`admin` scope) | TODO | `harness_modules/runners/routes.py` `runner_update` |
+| POST | `/api/admin/v1/runner-pairing-codes` | owner (`admin` scope) | Create a one-time Mac pairing code, returned only in this response, that expires after its lifetime. | `harness_modules/runners/routes.py` `create_runner_pairing_code` |
+| DELETE | `/api/admin/v1/runner-pairing-codes/{pid}` | owner (`admin` scope) | Revoke an unused, unexpired pairing code; 404 if no such code is active. | `harness_modules/runners/routes.py` `revoke_runner_pairing_code` |
+| GET | `/api/admin/v1/runners` | owner (`admin` scope) | List each runner's presence, compatibility, pending requests, and whether remote update is supported. | `harness_modules/runners/routes.py` `runners` |
+| POST | `/api/admin/v1/runners/{name}/update` | owner (`admin` scope) | Ask an online Mac runner to update itself and wait for the outcome; 409 if offline, too old, or failed. | `harness_modules/runners/routes.py` `runner_update` |
 | GET | `/api/admin/v1/search` | owner (`admin` scope) | Full-text search over past sessions. Passages mark matches with \u0002 ... \u0003. | `harness_modules/search/routes.py` `search_sessions` |
 | GET | `/api/admin/v1/sessions` | owner (`admin` scope) | One page of the caller's sessions, newest first. The first page (no `before`) also holds every session that is active or waits on an approval, whatever its age; `X-Next-Before` names the next older page (#663). | `harness/api.py` `list_sessions` |
-| POST | `/api/admin/v1/sessions` | owner (`admin` scope) | TODO | `harness/api.py` `create_session` |
-| GET | `/api/admin/v1/sessions/{ref}` | owner (`admin` scope) | TODO | `harness/api.py` `get_session` |
-| PATCH | `/api/admin/v1/sessions/{ref}` | owner (`admin` scope) | TODO | `harness/api.py` `patch_session` |
-| PUT | `/api/admin/v1/sessions/{ref}` | owner (`admin` scope) | TODO | `harness/api.py` `patch_session` |
-| GET | `/api/admin/v1/sessions/{ref}/approvals` | owner (`admin` scope) | TODO | `harness/api.py` `approvals` |
-| POST | `/api/admin/v1/sessions/{ref}/approvals/{approval_id}` | owner (`admin` scope) | TODO | `harness/api.py` `decide` |
-| POST | `/api/admin/v1/sessions/{ref}/cancel` | owner (`admin` scope) | TODO | `harness/api.py` `cancel` |
-| GET | `/api/admin/v1/sessions/{ref}/changes` | owner (`admin` scope) | TODO | `harness/api.py` `changes` |
-| GET | `/api/admin/v1/sessions/{ref}/checkpoints` | owner (`admin` scope) | TODO | `harness/api.py` `session_checkpoints` |
-| POST | `/api/admin/v1/sessions/{ref}/checkpoints/{turn}/fork` | owner (`admin` scope) | TODO | `harness/api.py` `fork_checkpoint` |
-| POST | `/api/admin/v1/sessions/{ref}/checkpoints/{turn}/rewind` | owner (`admin` scope) | TODO | `harness/api.py` `rewind_checkpoint` |
+| POST | `/api/admin/v1/sessions` | owner (`admin` scope) | Starts an agent session and returns before its run finishes. | `harness/api.py` `create_session` |
+| GET | `/api/admin/v1/sessions/{ref}` | owner (`admin` scope) | Current state of one session, with its queue position and any pending approvals. | `harness/api.py` `get_session` |
+| PATCH | `/api/admin/v1/sessions/{ref}` | owner (`admin` scope) | Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters. | `harness/api.py` `patch_session` |
+| PUT | `/api/admin/v1/sessions/{ref}` | owner (`admin` scope) | Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters. | `harness/api.py` `patch_session` |
+| GET | `/api/admin/v1/sessions/{ref}/approvals` | owner (`admin` scope) | Pending approvals for the session, or every approval when `all` is true. | `harness/api.py` `approvals` |
+| POST | `/api/admin/v1/sessions/{ref}/approvals/{approval_id}` | owner (`admin` scope) | Approves or denies an approval; `pending` works only when exactly one is waiting, and a decided one returns 409. | `harness/api.py` `decide` |
+| POST | `/api/admin/v1/sessions/{ref}/cancel` | owner (`admin` scope) | Stops an active session and returns once its run has ended; 409 when nothing is active. | `harness/api.py` `cancel` |
+| GET | `/api/admin/v1/sessions/{ref}/changes` | owner (`admin` scope) | The session's git diff by repository, with its secret-scan result; a removed workspace returns no repositories. | `harness/api.py` `changes` |
+| GET | `/api/admin/v1/sessions/{ref}/checkpoints` | owner (`admin` scope) | Checkpoints by turn, with flags for whether rewind and fork are allowed here. | `harness/api.py` `session_checkpoints` |
+| POST | `/api/admin/v1/sessions/{ref}/checkpoints/{turn}/fork` | owner (`admin` scope) | Starts a new session from this checkpoint with a non-blank prompt, and returns before its run finishes. | `harness/api.py` `fork_checkpoint` |
+| POST | `/api/admin/v1/sessions/{ref}/checkpoints/{turn}/rewind` | owner (`admin` scope) | Rewinds the session to this checkpoint; 409 while it runs, and hosted CLI sessions cannot rewind. | `harness/api.py` `rewind_checkpoint` |
 | GET | `/api/admin/v1/sessions/{ref}/events` | owner (`admin` scope) | Server-sent events: replays persisted events after `after`, then streams live ones. Ephemeral events (token deltas, queue moves) have `seq: null` and are never replayed. | `harness/api.py` `events` |
-| POST | `/api/admin/v1/sessions/{ref}/messages` | owner (`admin` scope) | TODO | `harness/api.py` `send_message` |
+| POST | `/api/admin/v1/sessions/{ref}/messages` | owner (`admin` scope) | Sends a follow-up and returns before the reply finishes; a running session reads it before its next model call. | `harness/api.py` `send_message` |
 | GET | `/api/admin/v1/sessions/{ref}/metrics` | owner (`admin` scope) | Owner-only per-turn context-efficiency metrics for one agent session (#159). | `harness/api.py` `session_metrics` |
-| POST | `/api/admin/v1/sessions/{ref}/rerun` | owner (`admin` scope) | TODO | `harness/api.py` `rerun` |
-| GET | `/api/admin/v1/sessions/{ref}/review-comments` | owner (`admin` scope) | TODO | `harness/api.py` `review_comments` |
-| POST | `/api/admin/v1/sessions/{ref}/review-comments` | owner (`admin` scope) | TODO | `harness/api.py` `add_review_comment` |
+| POST | `/api/admin/v1/sessions/{ref}/rerun` | owner (`admin` scope) | Starts a new session repeating this one's original prompt, project, model and taint; 409 for App tools-only sessions. | `harness/api.py` `rerun` |
+| GET | `/api/admin/v1/sessions/{ref}/review-comments` | owner (`admin` scope) | Draft line comments on the session's Changes diff, not yet sent to the agent. | `harness/api.py` `review_comments` |
+| POST | `/api/admin/v1/sessions/{ref}/review-comments` | owner (`admin` scope) | Saves a draft line comment on the Changes diff; nothing reaches the agent until the drafts are sent. | `harness/api.py` `add_review_comment` |
 | POST | `/api/admin/v1/sessions/{ref}/review-comments/send` | owner (`admin` scope) | Send the drafted line comments to the agent as one follow-up message. | `harness/api.py` `send_review_comments` |
-| DELETE | `/api/admin/v1/sessions/{ref}/review-comments/{comment_id}` | owner (`admin` scope) | TODO | `harness/api.py` `delete_review_comment` |
+| DELETE | `/api/admin/v1/sessions/{ref}/review-comments/{comment_id}` | owner (`admin` scope) | Removes one draft line comment; 404 if no draft has that id. | `harness/api.py` `delete_review_comment` |
 | POST | `/api/admin/v1/sessions/{ref}/review/{action}` | owner (`admin` scope) | merge \| push \| discard the session's git branch. | `harness/api.py` `review` |
 | POST | `/api/admin/v1/sessions/{ref}/secret-findings/fix` | owner (`admin` scope) | Ask agent to fix: one draft review comment per open secret-scan finding (send them like any draft). | `harness/api.py` `secret_findings_fix` |
 | POST | `/api/admin/v1/sessions/{ref}/secret-findings/{fingerprint}/dismiss` | owner (`admin` scope) | Owner-only: dismiss one secret-scan finding with a reason (audited). | `harness/api.py` `dismiss_secret_finding` |
-| POST | `/api/admin/v1/sessions/{ref}/taint/clear` | owner (`admin` scope) | TODO | `harness/api.py` `clear_taint` |
-| GET | `/api/admin/v1/sessions/{ref}/transcript` | owner (`admin` scope) | TODO | `harness/api.py` `get_transcript` |
-| GET | `/api/admin/v1/skills` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skills_overview` |
-| GET | `/api/admin/v1/skills/enabled` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skills_enabled` |
-| DELETE | `/api/admin/v1/skills/proposals/{pid}` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_delete_draft` |
-| GET | `/api/admin/v1/skills/proposals/{pid}` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_proposal` |
-| POST | `/api/admin/v1/skills/proposals/{pid}/install` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_install` |
-| POST | `/api/admin/v1/skills/proposals/{pid}/reject` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_reject` |
-| POST | `/api/admin/v1/skills/proposals/{pid}/reopen` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_reopen` |
-| POST | `/api/admin/v1/skills/proposals/{pid}/review` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_hosted_review` |
-| POST | `/api/admin/v1/skills/{slug}/disable` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_disable` |
-| POST | `/api/admin/v1/skills/{slug}/enable` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_enable` |
-| GET | `/api/admin/v1/skills/{slug}/export` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_export` |
-| PUT | `/api/admin/v1/skills/{slug}/projects` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_projects` |
-| POST | `/api/admin/v1/skills/{slug}/rollback` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_rollback` |
-| POST | `/api/admin/v1/skills/{slug}/uninstall` | owner (`admin` scope) | TODO | `harness_modules/skills/routes.py` `skill_uninstall` |
-| GET | `/api/admin/v1/smart-approvals` | owner (`admin` scope) | TODO | `harness/api.py` `smart_approvals` |
-| PUT | `/api/admin/v1/smart-approvals` | owner (`admin` scope) | TODO | `harness/api.py` `update_smart_approvals` |
-| GET | `/api/admin/v1/templates` | owner (`admin` scope) | TODO | `harness_modules/jobs/routes.py` `list_templates` |
-| POST | `/api/admin/v1/templates` | owner (`admin` scope) | TODO | `harness_modules/jobs/routes.py` `create_template` |
-| DELETE | `/api/admin/v1/templates/{tid}` | owner (`admin` scope) | TODO | `harness_modules/jobs/routes.py` `delete_template` |
-| PUT | `/api/admin/v1/templates/{tid}` | owner (`admin` scope) | TODO | `harness_modules/jobs/routes.py` `update_template` |
+| POST | `/api/admin/v1/sessions/{ref}/taint/clear` | owner (`admin` scope) | Clears the session's untrusted-source taint and records the clear. | `harness/api.py` `clear_taint` |
+| GET | `/api/admin/v1/sessions/{ref}/transcript` | owner (`admin` scope) | The session's transcript as plain text. | `harness/api.py` `get_transcript` |
+| GET | `/api/admin/v1/skills` | owner (`admin` scope) | List proposals and installed skills; returns empty lists with enabled false when the module is off. | `harness_modules/skills/routes.py` `skills_overview` |
+| GET | `/api/admin/v1/skills/enabled` | owner (`admin` scope) | List installed skills that are enabled; returns an empty list when the module is off. | `harness_modules/skills/routes.py` `skills_enabled` |
+| DELETE | `/api/admin/v1/skills/proposals/{pid}` | owner (`admin` scope) | Delete a proposal and its draft files; 409 if it has been installed. | `harness_modules/skills/routes.py` `skill_delete_draft` |
+| GET | `/api/admin/v1/skills/proposals/{pid}` | owner (`admin` scope) | Return one proposal, including its body; 404 if no proposal has that id. | `harness_modules/skills/routes.py` `skill_proposal` |
+| POST | `/api/admin/v1/skills/proposals/{pid}/install` | owner (`admin` scope) | Install a proposal whose content hash matches the reviewed bytes; 409 if the hash is stale, rejected, or fails validation. | `harness_modules/skills/routes.py` `skill_install` |
+| POST | `/api/admin/v1/skills/proposals/{pid}/reject` | owner (`admin` scope) | Reject a proposal and block its content hash; an installed proposal must be uninstalled first. | `harness_modules/skills/routes.py` `skill_reject` |
+| POST | `/api/admin/v1/skills/proposals/{pid}/reopen` | owner (`admin` scope) | Reopen a rejected proposal and lift its content-hash block; it returns to validated or draft. | `harness_modules/skills/routes.py` `skill_reopen` |
+| POST | `/api/admin/v1/skills/proposals/{pid}/review` | owner (`admin` scope) | Queue an advisory hosted review that uses reviewer quota and returns before it runs; 400 if none is configured. | `harness_modules/skills/routes.py` `skill_hosted_review` |
+| POST | `/api/admin/v1/skills/{slug}/disable` | owner (`admin` scope) | Turn an installed skill off without changing its version or project allowlist. | `harness_modules/skills/routes.py` `skill_disable` |
+| POST | `/api/admin/v1/skills/{slug}/enable` | owner (`admin` scope) | Turn an installed skill on without changing its version or project allowlist. | `harness_modules/skills/routes.py` `skill_enable` |
+| GET | `/api/admin/v1/skills/{slug}/export` | owner (`admin` scope) | Return the installed skill's current version as an exportable bundle with its content hash. | `harness_modules/skills/routes.py` `skill_export` |
+| PUT | `/api/admin/v1/skills/{slug}/projects` | owner (`admin` scope) | Replace the projects an installed skill is allowed in; unknown project names get 400. | `harness_modules/skills/routes.py` `skill_projects` |
+| POST | `/api/admin/v1/skills/{slug}/rollback` | owner (`admin` scope) | Roll an installed skill back to its previous version; 409 when no older version exists. | `harness_modules/skills/routes.py` `skill_rollback` |
+| POST | `/api/admin/v1/skills/{slug}/uninstall` | owner (`admin` scope) | Remove an installed skill's files and project allowlist. | `harness_modules/skills/routes.py` `skill_uninstall` |
+| GET | `/api/admin/v1/smart-approvals` | owner (`admin` scope) | Smart-approval status and the 20 most recent reviews. | `harness/api.py` `smart_approvals` |
+| PUT | `/api/admin/v1/smart-approvals` | owner (`admin` scope) | Sets the smart-approval mode; any mode but off needs smart_approvals configured in harness.yaml. | `harness/api.py` `update_smart_approvals` |
+| GET | `/api/admin/v1/templates` | owner (`admin` scope) | List saved task templates. | `harness_modules/jobs/routes.py` `list_templates` |
+| POST | `/api/admin/v1/templates` | owner (`admin` scope) | Create a task template after checking its name, prompt, project, backend, and model. | `harness_modules/jobs/routes.py` `create_template` |
+| DELETE | `/api/admin/v1/templates/{tid}` | owner (`admin` scope) | Delete a saved task template. | `harness_modules/jobs/routes.py` `delete_template` |
+| PUT | `/api/admin/v1/templates/{tid}` | owner (`admin` scope) | Replace a task template's fields after the same checks as create; returns 404 if it does not exist. | `harness_modules/jobs/routes.py` `update_template` |
 <!-- generated:end admin-api-endpoints -->
 
 ## Operations

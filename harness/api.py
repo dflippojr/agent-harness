@@ -463,11 +463,13 @@ async def harness_error(request: Request, exc: HarnessError):
 # Stables, the bundled browser client: installed only when its shell is present (see stables_shell)
 @web_router.get("/", include_in_schema=False)
 async def index(request: Request):
+    """Serves the web app's HTML shell; browsers revalidate it on every load."""
     return FileResponse(request.app.state.stables / "index.html", headers={"Cache-Control": "no-cache"})
 
 
 @web_router.get("/sw.js", include_in_schema=False)
 async def service_worker(request: Request):
+    """Serves the service worker from the root, so its scope covers the whole web app."""
     # Served from the root so its scope covers the whole app.
     return FileResponse(request.app.state.stables / "sw.js", media_type="text/javascript",
                         headers={"Cache-Control": "no-cache"})
@@ -475,12 +477,14 @@ async def service_worker(request: Request):
 
 @web_router.get("/manifest.webmanifest", include_in_schema=False)
 async def manifest(request: Request):
+    """Serves the web app manifest used when the app is installed."""
     return FileResponse(request.app.state.stables / "manifest.webmanifest", media_type="application/manifest+json")
 
 
 # API
 @api_router.get("/health")
 async def health(request: Request):
+    """Liveness check that also reports the build commit and configuration revision."""
     cfg = mgr(request).cfg
     settings = getattr(mgr(request), "settings", None)
     recovery = settings.store.read_status() if settings else {}
@@ -500,6 +504,7 @@ async def health(request: Request):
 
 @api_router.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
 async def metrics(request: Request):
+    """Metrics in Prometheus text format."""
     from .metrics import render
     m = mgr(request)
     return PlainTextResponse(await asyncio.to_thread(render, m), media_type="text/plain; version=0.0.4")
@@ -507,6 +512,7 @@ async def metrics(request: Request):
 
 @api_router.get("/me")
 async def me(request: Request):
+    """Caller's identity, role and capabilities, plus disk and queue usage where the account has it."""
     m = mgr(request)
     cfg = m.cfg
     ident = getattr(request.state, "access", None) or access_mod.resolve_access(
@@ -555,12 +561,14 @@ profile_emojis = ("🙂", "😎", "🤓", "🧠", "🤖", "👾", "🧑‍💻",
 
 @api_router.get("/profile")
 async def profile(request: Request):
+    """The profile icon and the list of icons to choose from."""
     m = mgr(request)
     return {"emoji": m.db.get_meta("profile_emoji", "🙂"), "choices": profile_emojis}
 
 
 @api_router.put("/profile")
 async def update_profile(body: ProfileUpdate, request: Request):
+    """Sets the profile icon; the emoji must be one of the listed choices."""
     if body.emoji not in profile_emojis:
         raise HarnessError(400, "choose one of the available profile icons")
     m = mgr(request)
@@ -570,6 +578,7 @@ async def update_profile(body: ProfileUpdate, request: Request):
 
 @api_router.get("/projects")
 async def projects(request: Request):
+    """Projects visible to the caller, or an empty list for a read-only demo session."""
     from . import catalog
     m = mgr(request)
     scope = owner_id(request)
@@ -580,6 +589,7 @@ async def projects(request: Request):
 
 @api_router.post("/projects", status_code=201)
 async def create_project(body: CreateProject, request: Request):
+    """Creates a project with an empty workspace or a repo cloned per session; `github` clones use the caller's GitHub sign-in."""
     ident = request.state.access
     if ident.role == "guest":
         raise HarnessError(403, "demo access is read-only")
@@ -620,6 +630,7 @@ def _log_safe(value: object) -> str:
 
 @api_router.get("/models")
 async def models(request: Request):
+    """Configured models with their context sizes; one is marked as the default."""
     cfg = mgr(request).cfg
     return [{"name": m.name, "context_tokens": m.context_tokens, "default": m.name == cfg.default_model}
             for m in cfg.models.values()]
@@ -627,6 +638,7 @@ async def models(request: Request):
 
 @api_router.get("/backends")
 async def backends(request: Request):
+    """Local and hosted backends with their model and sign-in state; `auth=skip` skips the sign-in checks."""
     m = mgr(request)
     from .backend_state import local_view, view as backend_view
     if request.state.access.role == "member":
@@ -661,16 +673,19 @@ async def update_backend(name: str, body: BackendUpdate, request: Request):
 
 @api_router.get("/smart-approvals")
 async def smart_approvals(request: Request):
+    """Smart-approval status and the 20 most recent reviews."""
     return require_owner(request).smart_approvals_status()
 
 
 @api_router.put("/smart-approvals")
 async def update_smart_approvals(body: SmartApprovalsUpdate, request: Request):
+    """Sets the smart-approval mode; any mode but off needs smart_approvals configured in harness.yaml."""
     return require_owner(request).set_smart_approvals_mode(body.mode)
 
 
 @api_router.get("/queue")
 async def queue(request: Request):
+    """Queue positions of the caller's queued agent sessions, in queue order."""
     m = mgr(request)
     scope = owner_id(request)
     positions = m.scheduler.positions()
@@ -716,6 +731,7 @@ async def list_sessions(request: Request, response: Response, limit: int = 50, b
 
 @api_router.post("/sessions", status_code=201, response_model=WebSessionResponse, response_model_exclude_unset=True)
 async def create_session(body: CreateSession, request: Request):
+    """Starts an agent session and returns before its run finishes."""
     m = mgr(request)
     s = m.create(body.prompt, project=body.project, target=body.target, backend=body.backend,
                  model=body.model, title=body.title, owner_id=owner_id(request), skills=body.skills,
@@ -735,6 +751,7 @@ def _github_project(request: Request, project: str):
 
 @api_router.get("/github/projects/{project}/items")
 async def github_items(request: Request, project: str, page: int = 1, q: str = ""):
+    """Open issues and pull requests, 30 per page; results are cached for 60 seconds."""
     from . import github_tasks
     m, _, repo = _github_project(request, project)
     return await asyncio.to_thread(github_tasks.list_items, m.cfg, repo, page, q)
@@ -742,6 +759,7 @@ async def github_items(request: Request, project: str, page: int = 1, q: str = "
 
 @api_router.get("/github/projects/{project}/items/{number}")
 async def github_item(request: Request, project: str, number: int):
+    """One open issue or PR with its body and, for a PR, its line comments; closed and fork PRs are refused."""
     from . import github_tasks
     m, _, repo = _github_project(request, project)
     return await asyncio.to_thread(github_tasks.item, m.cfg, repo, number)
@@ -749,6 +767,7 @@ async def github_item(request: Request, project: str, number: int):
 
 @api_router.post("/github/sessions", status_code=201)
 async def create_github_session(body: CreateGitHubSession, request: Request):
+    """Starts a session from a GitHub issue or PR, whose text becomes the untrusted prompt; PR tasks need a tower project."""
     from . import github_tasks
     m, spec, repo = _github_project(request, body.project)
     source = await asyncio.to_thread(github_tasks.item, m.cfg, repo, body.number)
@@ -768,17 +787,20 @@ async def create_github_session(body: CreateGitHubSession, request: Request):
 
 @api_router.post("/compare", status_code=201)
 async def create_compare(body: CreateCompare, request: Request):
+    """Starts one prompt on 2 to 4 backends in a git project, each on its own branch; pick a winner afterwards."""
     m = require_owner(request)
     return await m.create_compare(body.prompt, [c.model_dump() for c in body.choices], body.project, owner_id(request))
 
 
 @api_router.get("/compare/{group}")
 async def get_compare(group: str, request: Request):
+    """Members of a compare group with their status, cost and the start of each answer."""
     return require_owner(request).compare_view(group, owner_id(request))
 
 
 @api_router.post("/compare/{group}/pick")
 async def pick_compare(group: str, body: PickWinner, request: Request):
+    """Merges or pushes the winner and optionally discards the rest; retrying after a partial failure is safe."""
     m = require_owner(request)
     return await m.compare_pick(group, body.winner, body.action, body.discard_rest, owner_id(request),
                                 context=operation_audit.request_context(request, m))
@@ -786,12 +808,14 @@ async def pick_compare(group: str, body: PickWinner, request: Request):
 
 @api_router.post("/compare/{group}/discard")
 async def discard_compare(group: str, request: Request):
+    """Discards each group member not already merged, pushed or discarded."""
     m = require_owner(request)
     return await m.compare_discard(group, owner_id(request), context=operation_audit.request_context(request, m))
 
 
 @api_router.get("/sessions/{ref}", response_model=WebSessionResponse, response_model_exclude_unset=True)
 async def get_session(ref: str, request: Request):
+    """Current state of one session, with its queue position and any pending approvals."""
     m, _, session = owned_session(request, ref)
     return m.summary(session)
 
@@ -799,60 +823,70 @@ async def get_session(ref: str, request: Request):
 @api_router.patch("/sessions/{ref}")
 @api_router.put("/sessions/{ref}")
 async def patch_session(ref: str, body: SessionUpdate, request: Request):
+    """Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(m.rename(sid, body.title, context=operation_audit.request_context(request, m)))
 
 
 @api_router.post("/sessions/{ref}/messages")
 async def send_message(ref: str, body: SendMessage, request: Request):
+    """Sends a follow-up and returns before the reply finishes; a running session reads it before its next model call."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(await m.send(sid, body.content, context=operation_audit.request_context(request, m)))
 
 
 @api_router.post("/sessions/{ref}/rerun", status_code=201)
 async def rerun(ref: str, request: Request):
+    """Starts a new session repeating this one's original prompt, project, model and taint; 409 for App tools-only sessions."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(m.rerun(sid, context=operation_audit.request_context(request, m)))
 
 
 @api_router.get("/sessions/{ref}/checkpoints")
 async def session_checkpoints(ref: str, request: Request):
+    """Checkpoints by turn, with flags for whether rewind and fork are allowed here."""
     m, sid, _ = owned_session(request, ref)
     return m.checkpoints(sid)
 
 
 @api_router.post("/sessions/{ref}/checkpoints/{turn}/rewind")
 async def rewind_checkpoint(ref: str, turn: int, request: Request):
+    """Rewinds the session to this checkpoint; 409 while it runs, and hosted CLI sessions cannot rewind."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(await m.rewind(sid, turn, context=operation_audit.request_context(request, m)))
 
 
 @api_router.post("/sessions/{ref}/checkpoints/{turn}/fork", status_code=201)
 async def fork_checkpoint(ref: str, turn: int, body: ForkRequest, request: Request):
+    """Starts a new session from this checkpoint with a non-blank prompt, and returns before its run finishes."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(await m.fork(sid, turn, body.prompt, context=operation_audit.request_context(request, m)))
 
 
 @api_router.get("/sessions/{ref}/changes")
 async def changes(ref: str, request: Request):
+    """The session's git diff by repository, with its secret-scan result; a removed workspace returns no repositories."""
     m, sid, _ = owned_session(request, ref)
     return await m.changes(sid)
 
 
 @api_router.get("/sessions/{ref}/review-comments")
 async def review_comments(ref: str, request: Request):
+    """Draft line comments on the session's Changes diff, not yet sent to the agent."""
     m, sid, _ = owned_session(request, ref)
     return m.review_comments(sid)
 
 
 @api_router.post("/sessions/{ref}/review-comments", status_code=201)
 async def add_review_comment(ref: str, body: ReviewComment, request: Request):
+    """Saves a draft line comment on the Changes diff; nothing reaches the agent until the drafts are sent."""
     m, sid, _ = owned_session(request, ref)
     return m.add_review_comment(sid, body.model_dump())
 
 
 @api_router.delete("/sessions/{ref}/review-comments/{comment_id}", status_code=204)
 async def delete_review_comment(ref: str, comment_id: str, request: Request):
+    """Removes one draft line comment; 404 if no draft has that id."""
     m, sid, _ = owned_session(request, ref)
     m.delete_review_comment(sid, comment_id)
 
@@ -888,17 +922,20 @@ async def review(ref: str, action: str, request: Request):
 
 @api_router.get("/maintenance")
 async def maintenance(request: Request):
+    """Disk usage of session workspaces and checkpoints, and of the data volume."""
     return await require_owner(request).maintenance.usage()
 
 
 @api_router.post("/maintenance/cleanup")
 async def maintenance_cleanup(request: Request):
+    """Runs a cleanup pass now, after any pass in progress, and returns what it removed."""
     m = require_owner(request)
     return await m.maintenance.cleanup(context=operation_audit.request_context(request, m))
 
 
 @api_router.get("/sessions/{ref}/approvals")
 async def approvals(ref: str, request: Request, all: bool = False):
+    """Pending approvals for the session, or every approval when `all` is true."""
     m, sid, _ = owned_session(request, ref)
     rows = m.db.approvals(sid) if all else m.db.pending_approvals(sid)
     return [public_approval(a) for a in rows]
@@ -906,6 +943,7 @@ async def approvals(ref: str, request: Request, all: bool = False):
 
 @api_router.post("/sessions/{ref}/approvals/{approval_id}")
 async def decide(ref: str, approval_id: str, body: Decision, request: Request):
+    """Approves or denies an approval; `pending` works only when exactly one is waiting, and a decided one returns 409."""
     if body.decision not in ("approve", "deny"):
         raise HarnessError(400, "decision must be approve or deny")
     m, sid, _ = owned_session(request, ref)
@@ -928,6 +966,7 @@ def owned_chat(request: Request, ref: str) -> tuple[Manager, str, dict]:
 
 @api_router.get("/chats/options")
 async def chat_options(request: Request):
+    """Backends, models and efforts a new chat can start with, and the default backend."""
     m = require_owner(request)
     return await asyncio.to_thread(m.chat_options)
 
@@ -942,6 +981,7 @@ def owner_chat(request: Request, ref: str) -> tuple[Manager, str, dict]:
 
 @api_router.get("/chats/snippet-languages")
 async def snippet_languages(request: Request):
+    """Languages the snippet runner supports, with their aliases and size limits."""
     require_owner(request)
     from .snippets import LIMITS, SnippetService
     return {"languages": SnippetService.languages(), "limits": LIMITS}
@@ -949,6 +989,7 @@ async def snippet_languages(request: Request):
 
 @api_router.get("/chats")
 async def list_chats(request: Request, limit: int = 50):
+    """The caller's chats, newest first, up to `limit` (1 to 200, default 50)."""
     m = require_owner(request)
     rows = m.db.list_sessions(max(1, min(limit, 200)), owner_id=owner_id(request), kind="chat")
     return [m.summary(r) for r in rows]
@@ -956,6 +997,7 @@ async def list_chats(request: Request, limit: int = 50):
 
 @api_router.post("/chats", status_code=201)
 async def create_chat(body: CreateChat, request: Request):
+    """Starts a chat and returns before its first reply finishes; backend, model and effort are optional."""
     m = require_owner(request)
     s = m.create(body.prompt, backend=body.backend or None, model=body.model or None,
                  effort=body.effort or None, owner_id=owner_id(request), kind="chat")
@@ -964,6 +1006,7 @@ async def create_chat(body: CreateChat, request: Request):
 
 @api_router.get("/chats/{ref}")
 async def get_chat(ref: str, request: Request):
+    """Current state of one chat."""
     m, _, session = owned_chat(request, ref)
     return m.summary(session)
 
@@ -971,12 +1014,14 @@ async def get_chat(ref: str, request: Request):
 @api_router.patch("/chats/{ref}")
 @api_router.put("/chats/{ref}")
 async def rename_chat(ref: str, body: SessionUpdate, request: Request):
+    """Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters."""
     m, sid, _ = owned_chat(request, ref)
     return m.summary(m.rename(sid, body.title))
 
 
 @api_router.delete("/chats/{ref}")
 async def delete_chat(ref: str, request: Request):
+    """Deletes an idle chat and its workspace; 409 while a reply or snippet is running."""
     m, sid, _ = owned_chat(request, ref)
     m.delete_chat(sid)
     return {"deleted": sid}
@@ -984,6 +1029,7 @@ async def delete_chat(ref: str, request: Request):
 
 @api_router.post("/chats/{ref}/messages")
 async def send_chat_message(ref: str, body: SendMessage, request: Request):
+    """Sends a chat message and returns before the reply finishes; snippets run since the last message are included."""
     m, sid, _ = owned_chat(request, ref)
     return m.summary(await m.send(sid, body.content))
 
@@ -997,30 +1043,35 @@ async def run_snippet(ref: str, body: RunSnippet, request: Request):
 
 @api_router.post("/chats/{ref}/snippets/{run_id}/cancel")
 async def cancel_snippet(ref: str, run_id: str, request: Request):
+    """Asks a running snippet to stop; 409 if it is not running, and the final result arrives as a snippet_result event."""
     m, sid, _ = owner_chat(request, ref)
     return m.snippets.cancel(sid, run_id)
 
 
 @api_router.post("/chats/{ref}/cancel")
 async def cancel_chat(ref: str, request: Request):
+    """Stops a chat's running reply and returns once it has ended; 409 when no reply is active."""
     m, sid, _ = owned_chat(request, ref)
     return m.summary(await m.cancel(sid))
 
 
 @api_router.post("/sessions/{ref}/taint/clear")
 async def clear_taint(ref: str, request: Request):
+    """Clears the session's untrusted-source taint and records the clear."""
     m = require_owner(request)
     return m.summary(m.clear_taint(ref, context=operation_audit.request_context(request, m)))
 
 
 @api_router.post("/sessions/{ref}/cancel")
 async def cancel(ref: str, request: Request):
+    """Stops an active session and returns once its run has ended; 409 when nothing is active."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(await m.cancel(sid, context=operation_audit.request_context(request, m)))
 
 
 @api_router.get("/sessions/{ref}/transcript", response_class=PlainTextResponse)
 async def get_transcript(ref: str, request: Request):
+    """The session's transcript as plain text."""
     m, sid, _ = owned_session(request, ref)
     return transcript.render(m.db, sid)
 
@@ -1156,6 +1207,7 @@ async def events(ref: str, request: Request, after: int = 0, follow: bool = True
 
 @api_router.get("/chats/{ref}/events")
 async def chat_events(ref: str, request: Request, after: int = 0, follow: bool = True):
+    """Server-sent events for one chat, replaying events after `after`; `follow=false` ends after the replay."""
     _, sid, _ = owned_chat(request, ref)
     return conversation_event_stream(request, sid, after, follow)
 
@@ -1184,11 +1236,13 @@ def _key_catalog_app_id(body: dict) -> str:
 
 @api_router.get("/keys")
 async def list_keys(request: Request):
+    """Key metadata only; a key's secret is returned once, by the create response."""
     return mgr(request).db.list_api_keys()
 
 
 @api_router.post("/keys", status_code=201)
 async def create_key(request: Request):
+    """Mints an API key and returns its secret only in this response; a Hub's owner-kind request gets 403."""
     body = await request.json()
     from .admin import parse_key_spec
     m = mgr(request)
@@ -1217,6 +1271,7 @@ async def create_key(request: Request):
 
 @api_router.delete("/keys/{kid}", status_code=204)
 async def revoke_key(kid: str, request: Request):
+    """Revokes one key; an unknown or already revoked id returns 404, and the Hub's own key returns 409."""
     m = mgr(request)
     ctx = credential_audit.request_context(request, m)
 
