@@ -107,8 +107,8 @@ google_signin:
   admitted_logins: [kitchen-tablet@example.com]  # shared-device tailnet logins; no role of their own
 ```
 
-Restart the daemon. Then open **Actions → Accounts**. The **Google sign-in** card runs the preflight and lists anything
-that keeps the feature off:
+Restart the daemon. Then check it in the Hub or with `harness google-signin status`, which runs the preflight and lists
+anything that keeps the feature off:
 
 - `enabled` is set, `public_url` is `https://<machine>.<tailnet>.ts.net[:port]` with no path, and `listen.host` is
   loopback.
@@ -127,7 +127,8 @@ A member's Google account must be linked to their household account before it ca
 
 - **Self-link.** The member opens **Profile → Account** from a device with their own Tailscale login and chooses **Link
   Google account**.
-- **Owner link code.** In **Actions → Accounts**, the owner chooses **Google link code** for that member. The code
+- **Owner link code.** In the Hub, or with `harness accounts google-invite <user_id>`, the owner makes a Google link
+  code for that member. The code
   carries 256 bits of randomness, is shown once, works once, and expires after 15 minutes. Only its hash is stored. It
   is never put in a URL, QR code, log, or audit event. The owner gives it to the member privately. On the admitted
   device the member enters it on the sign-in screen and completes Google sign-in. Creating a new code, cancelling it,
