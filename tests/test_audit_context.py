@@ -47,6 +47,7 @@ def test_legacy_rows_survive_migration(tmp_path):
     db.conn.execute("DROP INDEX endpoint_requests_key")  # and before the request count's index (#669)
     db.conn.execute("DROP INDEX sessions_list")  # and before the session list's indexes (#663)
     db.conn.execute("DROP INDEX sessions_status")
+    db.conn.execute("DROP INDEX sessions_owner_status")  # and before the owner count's index (#668)
     db.conn.execute("ALTER TABLE sessions DROP COLUMN tool_profile")  # and before tool profiles (#638)
     db.conn.execute("ALTER TABLE usage DROP COLUMN tool_profile")
     db.conn.execute("ALTER TABLE api_keys DROP COLUMN role")
