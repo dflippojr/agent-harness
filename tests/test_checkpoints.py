@@ -17,6 +17,7 @@ from harness.manager import HarnessError, Manager
 
 from test_daemon import Script, call, events, make_cfg, wait_status
 from test_phase3 import finished, make_repo, project_cfg, sh
+from waits import scaled
 
 
 def two_edits() -> Script:
@@ -34,6 +35,17 @@ async def started(tmp_path, project="proj", script=None):
     await m.start(maintenance=False)
     s = await finished(m, m.create("go", project=project)["id"])
     return m, s
+
+
+@pytest.fixture(scope="module")
+def shared(tmp_path_factory):
+    """One finished two-edit session for the tests that only read it. A `started()` session spawns about 90 git
+    processes, so these tests share one and leave it as they found it."""
+    loop = asyncio.new_event_loop()
+    m, s = loop.run_until_complete(started(tmp_path_factory.mktemp("shared")))
+    yield m, s
+    loop.run_until_complete(m.stop())
+    loop.close()
 
 
 def test_checkpoint_per_mutating_turn_and_rewind(tmp_path):
@@ -58,8 +70,17 @@ def test_checkpoint_per_mutating_turn_and_rewind(tmp_path):
         assert events(m, sid, "rewound")[-1]["turn"] == 1
         assert len(events(m, sid, "tool_call")) >= 2                        # the event log keeps the history
 
+        assert [c["turn"] for c in m.checkpoints(sid)["checkpoints"]] == [1]  # the listing hides them too
+
         again = await m.rewind(sid, 2)                                      # redo while still retained
         assert (ws / "extra.txt").exists() and len(again["context"]) > len(rewound["context"])
+        assert [c["turn"] for c in m.checkpoints(sid)["checkpoints"]] == [1, 2]   # redo: turn 2 is listed again
+        assert not m.db.checkpoints(sid, hidden=True)
+        await m.rewind(sid, 1)                                              # and can be left again
+        await m.rewind(sid, 2)
+        fork = await m.fork(sid, 2, "from the redone turn")
+        await finished(m, fork["id"])
+        assert (Path(fork["workspace"]) / "extra.txt").exists()
 
     asyncio.run(body())
 
@@ -173,32 +194,29 @@ def test_cap_prunes_oldest(tmp_path, monkeypatch):
     asyncio.run(body())
 
 
-def test_over_quota_prunes_then_skips_without_failing_the_turn(tmp_path, monkeypatch):
-    async def body():
-        m, s = await started(tmp_path)
-        sid = s["id"]
-        cp = m.runner.checkpointer
-        usage = {"bytes": 10}
-        monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: usage["bytes"])
-        monkeypatch.setattr("harness.checkpointer.CAP", 50)
-        member = {**s, "owner_id": "member1"}
-        monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
-        store = cp.store(member)
-        # Over quota, but pruning every older checkpoint would fit: it prunes and keeps the new one.
-        usage["bytes"] = 150
-        monkeypatch.setattr("harness.fileops.dir_size", lambda p: 100)
-        monkeypatch.setattr(store, "reclaim", lambda: usage.update(bytes=50), raising=False)
-        before = [c["turn"] for c in m.db.checkpoints(sid, hidden=None)]
-        assert cp._within_quota(member, store, sid, keep=2) is True
-        # Unreachable objects only a reclaim frees (it is deferred) must not cost a live checkpoint.
-        assert [c["turn"] for c in m.db.checkpoints(sid, hidden=None)] == before
-        # Even an empty store would not fit: skipped, never raises.
-        monkeypatch.setattr("harness.fileops.dir_size", lambda p: 10)
-        monkeypatch.setattr(store, "reclaim", lambda: None, raising=False)
-        usage["bytes"] = 500
-        assert cp._within_quota(member, store, sid, keep=2) is False
-
-    asyncio.run(body())
+def test_over_quota_prunes_then_skips_without_failing_the_turn(shared, monkeypatch):
+    m, s = shared
+    sid = s["id"]
+    cp = m.runner.checkpointer
+    usage = {"bytes": 10}
+    monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: usage["bytes"])
+    monkeypatch.setattr("harness.checkpointer.CAP", 50)
+    member = {**s, "owner_id": "member1"}
+    monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
+    store = cp.store(member)
+    # Over quota, but pruning every older checkpoint would fit: it prunes and keeps the new one.
+    usage["bytes"] = 150
+    monkeypatch.setattr("harness.fileops.dir_size", lambda p: 100)
+    monkeypatch.setattr(store, "reclaim", lambda: usage.update(bytes=50), raising=False)
+    before = [c["turn"] for c in m.db.checkpoints(sid, hidden=None)]
+    assert cp._within_quota(member, store, sid, keep=2) is True
+    # Unreachable objects only a reclaim frees (it is deferred) must not cost a live checkpoint.
+    assert [c["turn"] for c in m.db.checkpoints(sid, hidden=None)] == before
+    # Even an empty store would not fit: skipped, never raises.
+    monkeypatch.setattr("harness.fileops.dir_size", lambda p: 10)
+    monkeypatch.setattr(store, "reclaim", lambda: None, raising=False)
+    usage["bytes"] = 500
+    assert cp._within_quota(member, store, sid, keep=2) is False
 
 
 def test_disk_view_and_usage_count_checkpoints_and_cleanup_removes_them(tmp_path):
@@ -247,20 +265,17 @@ def test_rewind_after_compaction_restores_the_saved_context(tmp_path):
     asyncio.run(body())
 
 
-def test_take_reports_a_reason_code_never_the_reason_text(tmp_path, monkeypatch):
-    async def body():
-        m, s = await started(tmp_path)
-        secret = str(Path(s["workspace"]) / "private-path")
+def test_take_reports_a_reason_code_never_the_reason_text(shared, monkeypatch):
+    m, s = shared
+    secret = str(Path(s["workspace"]) / "private-path")
 
-        def fail(*args, **kwargs):
-            raise checkpoints.GitError(f"git add failed in {secret}")
-        monkeypatch.setattr(checkpoints.Store, "snapshot", fail)
-        stats: dict = {}
-        event = m.runner.checkpointer.take(s["id"], stats=stats)
-        assert event["status"] == "skipped" and secret in event["reason"]     # the user sees the detail
-        assert stats == {"turn": 3, "skipped": "snapshot_failed"}            # the trace span does not
-
-    asyncio.run(body())
+    def fail(*args, **kwargs):
+        raise checkpoints.GitError(f"git add failed in {secret}")
+    monkeypatch.setattr(checkpoints.Store, "snapshot", fail)
+    stats: dict = {}
+    event = m.runner.checkpointer.take(s["id"], stats=stats)
+    assert event["status"] == "skipped" and secret in event["reason"]     # the user sees the detail
+    assert stats == {"turn": 3, "skipped": "snapshot_failed"}            # the trace span does not
 
 
 def test_fork_writes_through_the_writer_without_blocking_the_loop(tmp_path, monkeypatch):
@@ -307,34 +322,6 @@ def test_rewind_restores_a_detached_head_without_moving_the_branch(tmp_path):
 
         await m.rewind(sid, 2)                                              # an attached checkpoint re-attaches
         assert sh(ws, "rev-parse", "--abbrev-ref", "HEAD") == branch and not (ws / "detached.txt").exists()
-
-    asyncio.run(body())
-
-
-def test_over_quota_skip_leaves_the_rewound_past_checkpoints_redoable(tmp_path, monkeypatch):
-    async def body():
-        m, s = await started(tmp_path)
-        sid, ws = s["id"], Path(s["workspace"])
-        await m.rewind(sid, 1)
-        (ws / "after-rewind.txt").write_text("new work\n")
-        monkeypatch.setattr("harness.principal.OWNER_USER_ID", "nobody")      # measure this account like a member's
-        monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
-        monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: 10 ** 9)
-        event = await asyncio.to_thread(m.runner.checkpointer.take, sid)
-        monkeypatch.undo()
-        assert event["status"] == "skipped" and "quota" in event["reason"]
-        assert [c["turn"] for c in m.db.checkpoints(sid, hidden=True)] == [2]   # nothing existing was touched
-        assert m.db.get_session(sid)["turn_seq"] == 1
-        await m.rewind(sid, 2)                                                  # redo still works
-        assert (ws / "extra.txt").read_text() == "late\n"
-
-        await m.rewind(sid, 1)                                                  # with room, the new turn 2 replaces it
-        (ws / "after-rewind.txt").write_text("new work\n")
-        event = await asyncio.to_thread(m.runner.checkpointer.take, sid)
-        assert event["turn"] == 2 and not m.db.checkpoints(sid, hidden=True)
-        await m.rewind(sid, 1)
-        await m.rewind(sid, 2)
-        assert (ws / "after-rewind.txt").exists() and not (ws / "extra.txt").exists()
 
     asyncio.run(body())
 
@@ -586,23 +573,24 @@ def test_unchanged_hosted_runs_write_no_objects(tmp_path):
     asyncio.run(body())
 
 
-def test_unrecorded_snapshot_objects_are_reclaimed(tmp_path, monkeypatch):
-    async def body():
-        m, s = await started(tmp_path)
-        cp = m.runner.checkpointer
-        cp._unreclaimed.clear()
-        store = cp.store(s)
-        store.reclaim()
-        before = objects(store)
-        (Path(s["workspace"]) / "new.txt").write_text("never kept\n")      # new blob, tree and commit
+def test_unrecorded_snapshot_objects_are_reclaimed(shared, monkeypatch):
+    m, s = shared
+    cp = m.runner.checkpointer
+    cp._unreclaimed.clear()
+    store = cp.store(s)
+    store.reclaim()
+    before = objects(store)
+    new = Path(s["workspace"]) / "new.txt"
+    new.write_text("never kept\n")                                      # new blob, tree and commit
 
-        def fail(*args, **kwargs):
-            raise checkpoints.GitError("cannot pack the context")
-        monkeypatch.setattr(checkpoints.Store, "pack_context", fail)
+    def fail(*args, **kwargs):
+        raise checkpoints.GitError("cannot pack the context")
+    monkeypatch.setattr(checkpoints.Store, "pack_context", fail)
+    try:
         assert cp.take(s["id"])["status"] == "skipped"
         assert objects(store) == before
-
-    asyncio.run(body())
+    finally:
+        new.unlink()
 
 
 def assert_not_checkpointed(m, s):
@@ -617,32 +605,24 @@ def assert_not_checkpointed(m, s):
     assert not [o for o in objects(store) if " commit " in o]
 
 
-def test_a_failed_context_write_does_not_fail_the_turn(tmp_path, monkeypatch):
-    write_bytes = Path.write_bytes
+@pytest.mark.parametrize("failing", ["context-write", "record"])
+def test_a_failed_checkpoint_write_does_not_fail_the_turn(tmp_path, monkeypatch, failing):
+    from harness.checkpointer import Checkpointer
+    write_bytes, record = Path.write_bytes, Checkpointer._record
 
     def disk_full(self, data):
         if self.name.endswith(".json.gz"):
             write_bytes(self, data[:10])                                 # a partial file, then the error
             raise OSError(28, "No space left on device", str(self))
         return write_bytes(self, data)
-    monkeypatch.setattr(Path, "write_bytes", disk_full)
-
-    async def body():
-        m, s = await started(tmp_path)
-        assert_not_checkpointed(m, s)
-
-    asyncio.run(body())
-
-
-def test_a_failed_checkpoint_record_does_not_fail_the_turn(tmp_path, monkeypatch):
-    import sqlite3
-    from harness.checkpointer import Checkpointer
-    record = Checkpointer._record
 
     def locked(self, *args):
         record(self, *args)                                              # rolled back with the transaction
         raise sqlite3.OperationalError("database is locked")
-    monkeypatch.setattr(Checkpointer, "_record", locked)
+    if failing == "context-write":
+        monkeypatch.setattr(Path, "write_bytes", disk_full)
+    else:
+        monkeypatch.setattr(Checkpointer, "_record", locked)
 
     async def body():
         m, s = await started(tmp_path)
@@ -709,48 +689,23 @@ def test_a_mutating_call_the_policy_blocked_is_not_checkpointed(tmp_path, monkey
     asyncio.run(body())
 
 
-def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoable(tmp_path, monkeypatch):
-    write_bytes = Path.write_bytes
+@pytest.mark.parametrize("failing", ["context", "publish", "record", "quota"])
+def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoable(tmp_path, monkeypatch, failing):
+    write_bytes, replace = Path.write_bytes, os.replace
 
     def disk_full(self, data):
         if self.name.endswith(".json.gz"):
             raise OSError(28, "No space left on device", str(self))
         return write_bytes(self, data)
 
-    async def body():
-        m, s = await started(tmp_path)
-        sid, ws = s["id"], Path(s["workspace"])
-        cp = m.runner.checkpointer
-        cp._unreclaimed.clear()
-        store = cp.store(s)
-        await m.rewind(sid, 1)
-        hidden = m.db.checkpoints(sid, hidden=True)
-        (ws / "after-rewind.txt").write_text("new work\n")
-        monkeypatch.setattr(Path, "write_bytes", disk_full)          # the new turn 2's context cannot be written
-        event = await asyncio.to_thread(cp.take, sid)
-        monkeypatch.undo()
-        assert event["status"] == "skipped"
-        assert m.db.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
-        refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
-        assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
-        assert sorted(p.name for p in store.contexts.iterdir()) == ["1.json.gz", "2.json.gz"]
-        (ws / "after-rewind.txt").unlink()
-        await m.rewind(sid, 2)                                       # redo still works
-        assert (ws / "extra.txt").read_text() == "late\n"
-
-    asyncio.run(body())
-
-
-@pytest.mark.parametrize("failing", ["publish", "record"])
-def test_a_take_that_fails_naming_or_recording_after_a_rewind_keeps_the_rewound_past_checkpoint(
-        tmp_path, monkeypatch, failing):
-    replace = os.replace
-
     def rename_fails(src, dst):
         if Path(src).name.startswith("staged-"):                     # the last step: the old turn 2 is set aside
             raise PermissionError(13, "Access is denied", str(src))
         return replace(src, dst)
 
+    def record_fails(*args):
+        raise sqlite3.OperationalError("database is locked")
+
     async def body():
         m, s = await started(tmp_path)
         sid, ws = s["id"], Path(s["workspace"])
@@ -760,15 +715,21 @@ def test_a_take_that_fails_naming_or_recording_after_a_rewind_keeps_the_rewound_
         await m.rewind(sid, 1)
         hidden = m.db.checkpoints(sid, hidden=True)
         (ws / "after-rewind.txt").write_text("new work\n")
-        if failing == "publish":                                     # the new turn 2 cannot be named
+        if failing == "context":                                     # the new turn 2's context cannot be written
+            monkeypatch.setattr(Path, "write_bytes", disk_full)
+        elif failing == "publish":                                   # the new turn 2 cannot be named
             monkeypatch.setattr(checkpoints.os, "replace", rename_fails)
-        else:                                                        # or its row cannot be committed
-            def record_fails(*args):
-                raise sqlite3.OperationalError("database is locked")
+        elif failing == "record":                                    # or its row cannot be committed
             monkeypatch.setattr(cp, "_record", record_fails)
+        else:                                                        # or the account has no room for it
+            monkeypatch.setattr("harness.principal.OWNER_USER_ID", "nobody")   # measure it like a member's
+            monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
+            monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: 10 ** 9)
         event = await asyncio.to_thread(cp.take, sid)
         monkeypatch.undo()
         assert event["status"] == "skipped"
+        if failing == "quota":
+            assert "quota" in event["reason"]
         assert m.db.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
         refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
         assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
@@ -799,6 +760,9 @@ def test_a_take_after_a_rewind_replaces_the_rewound_past_checkpoint_of_its_turn(
         assert f"{checkpoints.ref_name(sid, 2)} {new['sha']}" in refs
         assert not [r for r in refs if "/staged/" in r or "/replaced/" in r]
         assert sorted(p.name for p in store.contexts.iterdir()) == ["1.json.gz", "2.json.gz"]
+        await m.rewind(sid, 1)                                       # the replacement is what a redo now restores
+        await m.rewind(sid, 2)
+        assert (ws / "after-rewind.txt").exists() and not (ws / "extra.txt").exists()
 
     asyncio.run(body())
 
@@ -840,24 +804,6 @@ def test_a_send_or_review_during_a_rewind_is_refused_until_it_ends(tmp_path, out
         await m.send(sid, "after the rewind")
         s = await finished(m, sid)
         assert {"role": "user", "content": "after the rewind"} in s["context"][before:]
-
-    asyncio.run(body())
-
-
-def test_redo_shows_the_restored_checkpoints_again(tmp_path):
-    async def body():
-        m, s = await started(tmp_path)
-        sid = s["id"]
-        await m.rewind(sid, 1)
-        assert [c["turn"] for c in m.checkpoints(sid)["checkpoints"]] == [1]
-        await m.rewind(sid, 2)                                             # redo: turn 2 is listed again
-        assert [c["turn"] for c in m.checkpoints(sid)["checkpoints"]] == [1, 2]
-        assert not m.db.checkpoints(sid, hidden=True)
-        await m.rewind(sid, 1)                                             # and can be left again
-        await m.rewind(sid, 2)
-        fork = await m.fork(sid, 2, "from the redone turn")
-        await finished(m, fork["id"])
-        assert (Path(fork["workspace"]) / "extra.txt").exists()
 
     asyncio.run(body())
 
@@ -943,28 +889,34 @@ def test_reclaim_waits_for_every_tenth_checkpoint_and_the_run_end(tmp_path, monk
 
 
 def test_the_next_model_call_does_not_wait_for_the_checkpoint(tmp_path, monkeypatch):
-    import time
-    calls, taken = [], []
     script = two_edits()
+    second_call, calls, steps = threading.Event(), [], []
 
     async def chat(*args, **kwargs):
-        calls.append(time.monotonic())
+        calls.append(1)
+        if len(calls) == 2:
+            second_call.set()
         return await script(*args, **kwargs)
 
     real = checkpointer.Checkpointer.take
+    seen_second_call = []
 
-    def slow_take(self, *args, **kwargs):
-        time.sleep(0.8)
-        taken.append(time.monotonic())
-        return real(self, *args, **kwargs)
+    def gated_take(self, *args, **kwargs):
+        steps.append("take")
+        if len(steps) == 1:                          # hold the first snapshot until the second model call starts
+            seen_second_call.append(second_call.wait(scaled(30)))
+        try:
+            return real(self, *args, **kwargs)
+        finally:
+            steps.append("taken")
 
-    monkeypatch.setattr(checkpointer.Checkpointer, "take", slow_take)
+    monkeypatch.setattr(checkpointer.Checkpointer, "take", gated_take)
 
     async def body():
         m, s = await started(tmp_path, script=chat)
         sid = s["id"]
-        assert calls[1] < taken[0]                   # the second model call began while the first snapshot ran
-        assert taken[0] < taken[1]                   # one at a time, in turn order
+        assert seen_second_call == [True]            # the second model call began while the first snapshot ran
+        assert steps == ["take", "taken", "take", "taken"]   # one at a time, in turn order
         assert [c["turn"] for c in m.db.checkpoints(sid)] == [1, 2]       # all there once the session reads as done
         seqs = [c["event_seq"] for c in m.db.checkpoints(sid)]
         first_reply = [e["seq"] for e in m.db.events(sid) if e["type"] == "tool_result"][0]
