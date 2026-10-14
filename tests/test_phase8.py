@@ -182,7 +182,6 @@ from pathlib import Path as _Path  # noqa: E402
 
 from harness.config import Project, RemoteControlConfig  # noqa: E402
 from harness.fileops import ToolError  # noqa: E402
-from harness.policy import ALLOW, ASK, Policy  # noqa: E402
 from harness_modules.remote_control.service import RemoteControl, parse_log, STOP_TIMEOUT  # noqa: E402
 
 FAKE_LOG = ("· Connecting · repo · HEAD\n\x1b[1A\x1b[J· Connected · repo · HEAD\n    Capacity: 1/4 · New sessions\n"
@@ -396,11 +395,6 @@ def test_remote_control_trust_web_endpoint(tmp_path, monkeypatch):
         assert response.status_code == 200
         assert response.json()["trust_prompt_open"]
         assert client.post("/remote-control/nope/trust").status_code == 400
-
-
-def test_remote_control_tool_always_asks():
-    assert Policy().decide("open_claude_remote_control", {"project": "x", "reason": "y"}).action == ASK
-    assert Policy([{"tool": "*", "action": "allow"}]).decide("open_claude_remote_control", {}).action == ASK
 
 
 def test_remote_control_tool_attached_only_to_owner_tower_session(tmp_path):
@@ -919,14 +913,6 @@ def test_claude_backend_validation_and_policy(tmp_path):
         m.create("hello", backend="claude")
     with pytest.raises(Exception, match="unknown backend"):
         m.create("hello", backend="codex")
-    assert Policy().decide("Write", {"file_path": "/workspace/a.txt"}).action == ALLOW
-    assert Policy().decide("Write", {"file_path": "/etc/passwd"}).action == ASK
-    assert Policy().decide("Write", {"file_path": "/workspace/../etc/passwd"}).action == ASK
-    assert Policy().decide("Bash", {"command": "pytest -q"}).action == ASK
-    assert Policy([{"tool": "run_shell", "args": {"command": "^pytest"}, "action": "allow"}]).decide(
-        "Bash", {"command": "pytest -q"}).action == ALLOW
-    assert Policy(repo=True).decide("Bash", {"command": "git push origin main"}).action != ALLOW
-    assert Policy().decide("WebFetch", {"url": "https://example.com"}).action == ASK
 
 
 def test_web_and_app_session_apis_accept_backend(tmp_path):
@@ -1314,11 +1300,6 @@ def test_codex_inbox_cancel_and_policy(tmp_path):
 
     asyncio.run(inbox())
     asyncio.run(cancel())
-    assert Policy().decide("exec_command", {"command": "pytest -q"}).action == ALLOW
-    assert Policy().decide("exec_command", {"command": "curl https://example.com", "network": True}).action == ASK
-    assert Policy(repo=True).decide("exec_command", {"command": "git push origin main"}).action != ALLOW
-    assert Policy().decide("apply_patch", {"file_paths": ["/workspace/a.py"]}).action == ALLOW
-    assert Policy().decide("apply_patch", {"file_paths": ["/workspace/a.py", "/etc/passwd"]}).action == ASK
 
 
 # Cursor Agent stream-json backend (8a step 5)

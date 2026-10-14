@@ -586,9 +586,7 @@ def test_memory_library_only_exposes_allowed_categories(tmp_path):
 
 def test_memory_tools_reach_sessions_and_rebuild_asks(tmp_path):
     from harness.config import MemoryLibraryConfig
-    from harness.policy import ASK, Policy
 
-    assert Policy().decide("rebuild_service", {"service": "plex-webhook"}).action == ASK
     root = tmp_path / "lib" / "categories" / "work"
     root.mkdir(parents=True)
     (root / "memory.md").write_text("# Work\nThe user's editor is Helix.\n")

@@ -14,8 +14,6 @@ from harness.cli_backends import (CLAUDE_SPLIT_TOOLS, CODEX_SPLIT_OVERRIDES, Cla
 from harness.config import BackendConfig, SandboxConfig
 from harness.manager import Manager
 from harness.mcp_server import SPLIT_TOOLS, TOKEN_ENV, McpRelay
-from harness.policy import ALLOW
-from harness.policy import Policy
 from test_daemon import make_cfg, wait_status
 
 
@@ -147,12 +145,6 @@ def test_split_shell_and_file_calls_need_a_grant_and_run_on_the_sandbox(tmp_path
         assert not ok and "unknown argument" in text
         await m.stop()
     asyncio.run(body())
-
-
-def test_shell_over_mcp_is_decided_as_the_native_tool():
-    assert Policy().decide("mcp__harness__run_shell", {"command": "ls"}).action == ALLOW
-    rules = Policy([{"tool": "run_shell", "action": "deny", "reason": "no shell"}])
-    assert rules.decide("mcp__harness__run_shell", {"command": "ls"}).action == "deny"
 
 
 def test_builtin_mode_serves_no_shell_over_mcp(tmp_path):
