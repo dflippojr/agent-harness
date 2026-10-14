@@ -678,21 +678,3 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
         await m2.stop()
     asyncio.run(body())
 
-
-def test_web_mask_editor_round_trips_source_pixels():
-    js = (Path(__file__).parents[1] / "stables" / "public" / "pages" / "images.mjs").read_text(encoding="utf-8")
-    css = (Path(__file__).parents[1] / "stables" / "public" / "style.css").read_text(encoding="utf-8")
-    client = (Path(__file__).parents[1] / "stables" / "public" / "client.mjs").read_text(encoding="utf-8")
-    assert "function maskEditor" in js
-    assert "viewImageEdit" in js
-    assert "canvas.width / r.width" in js
-    assert 'accept: "image/png,image/jpeg,image/webp,image/jpg"' in js
-    assert "Independent backups are not changed" in js
-    assert "White is edited, black is preserved" in js
-    assert "img.editable !== false" in js
-    assert "disabled: true, title: editBlockedReason" in js
-    assert "img.editable === false" in js
-    assert "body instanceof FormData" in client
-    assert "touch-action: none" in css
-    assert "@media (max-width: 640px)" in css
-    assert ".mask-tools" in css

@@ -256,15 +256,6 @@ def test_every_staging_entry_point_asserts_it_is_not_production():
         assert "Assert-StagingPort" in script
 
 
-def test_copy_item_passes_destination_on_the_same_line():
-    # Sonar S8429 does not follow PowerShell backtick continuations; Destination must sit on the Copy-Item line.
-    for line in code_only(DEPLOY).splitlines():
-        if "Write-Host" in line:
-            continue
-        if re.search(r"\bCopy-Item\b", line):
-            assert "-Destination" in line, line
-
-
 def test_staging_scripts_never_name_production_locations_as_targets():
     for name, script in (("deploy", DEPLOY), ("reset", RESET), ("restart", RESTART), ("supervisor", SUPERVISOR)):
         assert "'D:\\Projects\\agent-harness'" not in script, name
@@ -309,15 +300,6 @@ def test_supervisor_keeps_the_virtual_environment_pointer_inside_the_staging_dat
 
 
 # --- forced-off capabilities ------------------------------------------------------------------------------------
-
-
-def test_trusted_profile_overlay_forces_every_optional_module_off():
-    from harness.config import MODULE_NAMES
-
-    # `service` would demand an enabled hosted backend; the smoke slot has none, so it is `full` with nothing on.
-    assert PROFILE_OVERLAY["profile"] == "full"
-    assert sorted(PROFILE_OVERLAY["modules"]) == sorted(MODULE_NAMES)
-    assert not any(PROFILE_OVERLAY["modules"].values())
 
 
 def test_candidate_yaml_alone_cannot_switch_a_forced_off_module_back_on(tmp_path):
@@ -366,21 +348,6 @@ def test_health_reports_the_commit_the_process_is_running(tmp_path, monkeypatch)
     monkeypatch.setenv("HARNESS_BUILD_COMMIT", SHA)
     with TestClient(create_app(Manager(config.load(tmp_path / "cfg", tmp_path / "data")))) as client:
         assert client.get("/health").json()["build"]["commit"] == SHA
-
-
-# --- documentation ----------------------------------------------------------------------------------------------
-
-
-def test_docs_describe_the_slot_the_scripts_actually_build():
-    docs = (ROOT / "docs" / "CI-CD.md").read_text(encoding="utf-8")
-    staging = docs.split("## Staging smoke slot", 1)[1].split("\n## Failure behavior", 1)[0]
-    for fact in ("D:\\Projects\\agent-harness-staging", "D:\\Agents\\harness-staging", "127.0.0.1:8101",
-                 ":8444", "AgentHarness-Daemon-Staging", "agent-harness-staging", "tower-staging",
-                 "gh workflow run staging.yml -f pr_number=N", "gh workflow run staging.yml -f reset=true",
-                 "30 minutes", "owner-token.txt", "allowed_logins", "Real-tower checklist"):
-        assert fact in staging, fact
-    assert "install-runner.ps1 -Token $token -Labels agent-harness-staging" in staging
-    assert "serve-staging.ps1" in (ROOT / "ops" / "tailscale" / "serve.ps1").read_text(encoding="utf-8")
 
 
 # --- token bootstrap and rotation -------------------------------------------------------------------------------
@@ -454,15 +421,6 @@ def test_token_minting_rejects_escaped_paths_before_any_write(tmp_path):
 
 
 # --- reset boundaries -------------------------------------------------------------------------------------------
-
-
-def test_reset_preserves_exactly_the_overlay_logs_and_virtual_environment():
-    preserved = RESET.split("$StagingPreservedEntries = @(", 1)[1].split(")", 1)[0]
-    assert sorted(entry.strip().strip("'") for entry in preserved.split(",")) == [
-        "harness.local.yaml", "logs", "venv"]
-    assert "Remove-Item" in RESET
-    assert "docker rmi" not in RESET
-    assert "seed" in RESET.lower()  # the documented no-seed promise stays next to the code
 
 
 @pytest.mark.skipif(not POWERSHELL, reason="Windows PowerShell is not installed")

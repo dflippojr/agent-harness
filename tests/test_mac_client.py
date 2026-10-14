@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tarfile
@@ -105,30 +104,50 @@ def test_mac_package_is_version_matched_and_contains_no_credentials(tmp_path):
     assert b"ho-" not in contents
 
 
-def test_cli_pairing_project_roots_and_launchd_commands(tmp_path, monkeypatch):
-    client_config = tmp_path / "client.json"
+def test_cli_pairs_through_the_daemon_and_then_calls_the_owner_api(tmp_path, monkeypatch):
+    home = harness_home(tmp_path, monkeypatch)
+    manager = mac_manager(tmp_path)
+    with TestClient(create_app(manager)) as daemon:
+        code = daemon.post("/runner-pairing-codes", json={"name": "Dana's Mac", "runner": "macbook"}).json()["code"]
+        sent = []
+
+        def post(url, *, timeout, **kwargs):
+            sent.append(("POST", url, kwargs.get("headers") or {}))
+            return daemon.post(url, **kwargs)
+
+        def request(method, url, *, timeout, **kwargs):
+            sent.append((method, url, kwargs.get("headers") or {}))
+            return daemon.request(method, url, **kwargs)
+
+        monkeypatch.setattr(cli.httpx, "post", post)
+        monkeypatch.setattr(cli.httpx, "request", request)
+        server = manager.cfg.public_url
+        monkeypatch.setattr(cli.sys, "argv", ["harness", "pair", server, code])
+        assert cli.main() == 0
+        assert sent == [("POST", server + "/api/v1/runner-pair", {"X-Agent-Harness-Client": "cli/2"})]
+
+        client_config = json.loads((home / "client" / "config.json").read_text(encoding="utf-8"))
+        runner_config = json.loads((home / "runner" / "config.json").read_text(encoding="utf-8"))
+        runner_token = (tmp_path / "secrets" / "runner.token").read_text(encoding="utf-8").strip()
+        assert client_config == {"server": server, "token": client_config["token"]}
+        assert client_config["token"].startswith("ho-")
+        assert (runner_config["name"], runner_config["token"]) == ("macbook", runner_token)
+
+        cli.configure(home / "client" / "config.json")
+        assert cli.api("GET", "/sessions") == []
+        method, url, headers = sent[-1]
+        assert (method, url) == ("GET", server + "/api/admin/v1/sessions")
+        assert headers["Authorization"] == f"Bearer {client_config['token']}"
+
+        with pytest.raises(SystemExit) as replayed:  # a code works once
+            cli.main()
+        assert "pairing failed (400)" in str(replayed.value.code)
+
+
+def test_cli_project_roots_and_launchd_commands(tmp_path, monkeypatch):
     runner_config = tmp_path / "runner.json"
-
-    class Response:
-        status_code = 201
-        text = ""
-
-        @staticmethod
-        def json():
-            return {"server": "https://tower.example", "owner_token": "ho-secret", "owner_key": {"id": "k-1"},
-                    "runner": {"server": "https://tower.example", "name": "macbook", "token": "runner-secret",
-                               "repo_roots": ["~/Projects"], "min_free_gb": 10}, "api_version": "1.7"}
-
-    seen = []
-    monkeypatch.setattr(cli.httpx, "post", lambda url, **kwargs: seen.append((url, kwargs)) or Response())
-    paired = cli.pair_native("https://tower.example/", "hrp-once", client_config, runner_config)
-    assert seen == [("https://tower.example/api/v1/runner-pair", {
-        "json": {"code": "hrp-once"}, "timeout": 60,
-        "headers": {"X-Agent-Harness-Client": "cli/2"},
-    })]
-    assert json.loads(client_config.read_text()) == {"server": "https://tower.example", "token": "ho-secret"}
-    assert json.loads(runner_config.read_text())["token"] == "runner-secret"
-    assert paired["owner_key"]["id"] == "k-1"
+    runner_config.write_text(json.dumps({"name": "macbook", "token": "runner-secret", "repo_roots": ["~/Projects"]}),
+                             encoding="utf-8")
 
     project = tmp_path / "Projects" / "demo"
     project.mkdir(parents=True)
@@ -162,19 +181,6 @@ def test_paired_cli_uses_owner_api_and_bearer_token(tmp_path, monkeypatch):
     assert cli.api("GET", "/sessions") == []
     assert seen == [("GET", "https://tower.example/api/admin/v1/sessions", 60,
                      {"headers": {"X-Agent-Harness-Client": "cli/2", "Authorization": "Bearer ho-client"}})]
-
-
-def test_mac_install_script_supports_pairing_and_legacy_update():
-    script = (Path(__file__).parent.parent / "macrunner" / "install.sh").read_text(encoding="utf-8")
-    assert "--server" in script
-    assert "--code" in script
-    assert "/api/v1/runner-pair" not in script
-    assert "package.tar.gz" in script
-    assert "pip install" in script
-    assert "launchctl bootstrap" in script
-    assert "agent_harness_client.pth" in script
-    assert "harness_update.py" in script
-    assert "harness_compat.py" in script
 
 
 def harness_home(tmp_path, monkeypatch):

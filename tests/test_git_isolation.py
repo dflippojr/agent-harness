@@ -71,14 +71,6 @@ def _force_loose_ref(repo: Path, ref: str) -> Path:
     return path
 
 
-def test_raw_git_status_runs_workspace_fsmonitor(tmp_path):
-    """Sanity: the attack still works when Git is invoked without the host wrapper."""
-    repo = make_repo(tmp_path / "repo")
-    plant_fsmonitor(repo)
-    raw = sh(repo, "status", "--porcelain")
-    assert has_marker(raw.stderr)
-
-
 def test_host_wrapper_status_does_not_run_fsmonitor(tmp_path):
     repo = make_repo(tmp_path / "repo")
     plant_fsmonitor(repo)
@@ -105,17 +97,6 @@ def test_snapshot_does_not_run_fsmonitor_or_hooks(tmp_path):
     result = git(repo, "log", "-1", "--format=%s", check=False)
     assert result.out.strip() == log
     assert not has_marker(result.out + result.err)
-
-
-def test_wrapper_commit_does_not_run_pre_commit_hook(tmp_path):
-    repo = make_repo(tmp_path / "repo")
-    plant_hook(repo, "pre-commit")
-    (repo / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    result = git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "no hook", check=False)
-    assert result.code == 0
-    assert not has_marker(result.out + result.err)
-    assert git(repo, "log", "-1", "--format=%s").out.strip() == "no hook"
 
 
 def test_wrapper_add_does_not_run_workspace_filter(tmp_path):

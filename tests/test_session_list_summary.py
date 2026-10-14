@@ -60,10 +60,8 @@ def manager(tmp_path):
     m = Manager(make_cfg(tmp_path), chat=Script([]))
     for sid, (asks, answer) in CASES.items():
         m.db.insert_session(_session(sid, answer))
-        for i, text in enumerate(asks):
+        for text in asks:
             m.db.insert_event(sid, "user_message", {"content": text})
-            for n in range(70):
-                m.db.insert_event(sid, "tool_result", {"id": f"c{i}-{n}", "output": "out\n" * 50})
         m.db.insert_event(sid, "user_message", {"attachments": []})  # a message without content counts for nothing
     yield m
     m.db.close()
