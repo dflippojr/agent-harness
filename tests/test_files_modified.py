@@ -5,7 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from harness.state import FILES_MODIFIED_MAX, files_modified_since, snapshot_git_baseline
+from harness.state import (FILES_MODIFIED_MAX, files_modified_since, name_status_paths, porcelain_paths,
+                           snapshot_git_baseline)
 
 
 def _sh(repo: Path, *args: str) -> None:
@@ -103,6 +104,12 @@ def test_deleted_and_renamed_files(tmp_path):
     assert "gone.py" in committed
     assert "old.py" in committed
     assert "new.py" in committed
+
+
+def test_git_lines_that_name_no_path_yield_no_paths():
+    assert porcelain_paths("M") == [] and name_status_paths("M") == []
+    assert porcelain_paths("R  old.py -> new.py") == ["old.py", "new.py"]
+    assert name_status_paths("R100\told.py\tnew.py") == ["old.py", "new.py"]
 
 
 def test_non_git_workspace_returns_none(tmp_path):
