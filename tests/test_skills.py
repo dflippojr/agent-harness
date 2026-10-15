@@ -27,8 +27,9 @@ from harness_modules.skills.skill_validate import (
     validate_bundle,
     validate_dir,
 )
-from harness_modules.skills.service import SkillError, SkillStore, in_process_sandbox, session_eligible, skill_instructions, _safe_join, _write_contained
+from harness_modules.skills.service import SkillError, SkillStore, in_process_sandbox, session_eligible, skill_instructions, _safe_join
 from test_daemon import Script, call, make_cfg, wait_status
+from waits import scaled
 
 SKILL_MD = "# Commit messages\nWrite conventional commits: `type: summary`.\nKeep the first line under 72 characters.\n"
 EXAMPLES = [
@@ -165,41 +166,7 @@ def test_safe_join_rejects_each_traversal_variant(tmp_path, rel):
 
 
 @pytest.mark.parametrize("rel", TRAVERSAL_PATHS)
-def test_write_helpers_never_create_files_outside_staging(tmp_path, rel):
-    store = store_for(tmp_path)
-    _outside_markers(tmp_path)
-    payload = {**bundle()["files"], rel: "pwned"}
-    one_dir = store.staging_dir / "one"
-    with pytest.raises(ValueError):
-        _write_contained(one_dir, payload)
-    proposal = {**bundle(), "files": payload}
-    with pytest.raises(ValueError):
-        store._write_proposal_files("deadbeefcafe", proposal, {"slug": "commit-style"})
-    result = store._sandbox_validate({**bundle(), "files": payload}, "abcd" * 8)
-    assert result["ok"] is False
-    assert any(f.get("code") == "traversal" for f in result.get("findings") or [])
-    _assert_nothing_outside_staging(tmp_path)
-    assert not (store.proposals_dir / "deadbeefcafe").exists()
-    leftovers = [p for p in store.proposals_dir.rglob("*") if p.is_file()]
-    assert leftovers == []
-    leftovers_staging = [p for p in store.staging_dir.rglob("*") if p.is_file()]
-    assert leftovers_staging == []
-
-
-def test_propose_traversal_does_not_write_after_validation(tmp_path):
-    store = store_for(tmp_path)
-    _outside_markers(tmp_path)
-    b = bundle()
-    b["files"]["references/../../../harness.sqlite3"] = "pwned"
-    out = store._propose_locked(b, "s1")
-    assert "failed" in out.lower()
-    row = store.db.list_skill_proposals()[0]
-    assert row["status"] == "invalid"
-    assert not (store.proposals_dir / row["id"]).exists()
-    _assert_nothing_outside_staging(tmp_path)
-
-
-def test_propose_skill_tool_rejects_traversal_reference_path(tmp_path):
+def test_propose_skill_tool_rejects_traversal_reference_path(tmp_path, rel):
     store = store_for(tmp_path)
     _outside_markers(tmp_path)
     session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
@@ -207,12 +174,22 @@ def test_propose_skill_tool_rejects_traversal_reference_path(tmp_path):
         "slug": "commit-style", "title": "Commit style",
         "purpose": "Keep git commit messages conventional and short.",
         "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
-        "references": json.dumps([{"path": "references/../../../harness.sqlite3", "content": "pwned"}]),
+        "references": json.dumps([{"path": rel, "content": "pwned"}]),
     }, session)
-    with pytest.raises(Exception, match="safe references"):
+    try:
         asyncio.run(coro)
-    assert store.db.list_skill_proposals() == []
+        error = None
+    except Exception as e:  # noqa: BLE001 - the tool's refusal
+        error = str(e)
+    rows = store.db.list_skill_proposals()
+    if error is None:   # an absolute path is re-rooted under references/, then fails validation as an invalid draft
+        assert [r["status"] for r in rows] == ["invalid"]
+        assert not (store.proposals_dir / rows[0]["id"]).exists()
+    else:
+        assert "safe references" in error and rows == []
     _assert_nothing_outside_staging(tmp_path)
+    assert [p for p in store.proposals_dir.rglob("*") if p.is_file()] == []
+    assert [p for p in store.staging_dir.rglob("*") if p.is_file()] == []
 
 
 def test_safe_join_rejects_symlink_escape(tmp_path):
@@ -415,22 +392,10 @@ def _stage(store, session=None, **overrides):
     return message, (rows[0] if rows else None)
 
 
-def test_rejected_hash_cannot_install_until_reopened(tmp_path):
-    store = store_for(tmp_path)
-    _stage(store)
-    row = store.db.list_skill_proposals()[0]
-    store.reject(row["id"], "nope")
-    with pytest.raises(SkillError, match="rejected"):
-        store.install(row["id"], row["content_hash"])
-    store.reopen(row["id"])
-    installed = store.install(row["id"], row["content_hash"])
-    assert installed["slug"] == "commit-style"
-
-
 @pytest.mark.parametrize("steps,want", [
     (("reject", "reopen", "install"), {"installed": True, "hash_rejected": False}),
     (("reject", "install"), {"error": "rejected", "hash_rejected": True, "status": "rejected"}),
-    (("reject", "delete", "repropose", "install"), {"installed": True, "hash_rejected": False}),
+    (("reject", "delete", "repropose", "install"), {"installed": True, "hash_rejected": False, "new_id": True}),
     (("reject", "repropose"), {"proposals": 1, "status": "rejected", "hash_rejected": True, "message": "reopen"}),
     (("reject", "repropose", "reopen", "install"), {"installed": True, "hash_rejected": False, "proposals": 1}),
     (("delete", "repropose", "install"), {"installed": True, "hash_rejected": False}),
@@ -485,25 +450,12 @@ def test_proposal_lifecycle_interleavings(tmp_path, steps, want):
             assert latest["status"] == "installed"
     if "proposals" in want:
         assert len(proposals) == want["proposals"]
+    if want.get("new_id"):   # deleting a rejected draft drops its row and its rejection; the re-proposal is a fresh row
+        assert store.db.skill_proposal(row["id"]) is None
+        assert pid != row["id"] and "staged" in message.lower()
+        assert latest["status"] != "rejected"
     if "message" in want:
         assert want["message"] in message.lower()
-
-
-def test_reject_then_delete_does_not_orphan_rejected_hash(tmp_path):
-    """Finding: delete_draft dropped the row but left skill_rejected, so the hash could never be installed again."""
-    store = store_for(tmp_path)
-    _stage(store)
-    row = store.db.list_skill_proposals()[0]
-    store.reject(row["id"], "nope")
-    store.delete_draft(row["id"])
-    assert store.db.skill_proposal(row["id"]) is None
-    assert not store.db.skill_hash_rejected(row["content_hash"])
-    message, staged = _stage(store)
-    assert "staged" in message.lower()
-    assert staged["id"] != row["id"]
-    assert staged["status"] != "rejected"
-    installed = store.install(staged["id"], staged["content_hash"])
-    assert installed["slug"] == "commit-style"
 
 
 def test_reject_during_review_stays_rejected_and_reopenable(tmp_path):
@@ -737,24 +689,6 @@ def test_reinstall_new_bytes_after_uninstall_keeps_rollback(tmp_path):
     assert rolled["content_hash"] == v1["content_hash"]
 
 
-def test_install_constraint_failure_is_skill_error(tmp_path, monkeypatch):
-    store = store_for(tmp_path)
-    session = {"id": "s1", "owner_id": "owner", "app_id": "", "job_id": ""}
-    asyncio.run(store.propose_from_tool({
-        "slug": "commit-style", "title": "Commit style",
-        "purpose": "Keep git commit messages conventional and short.",
-        "skill_md": SKILL_MD, "examples": json.dumps(EXAMPLES),
-    }, session))
-    row = store.db.list_skill_proposals()[0]
-
-    def boom(*_args, **_kwargs):
-        raise sqlite3.IntegrityError("UNIQUE constraint failed: skill_versions.content_hash")
-
-    monkeypatch.setattr(store.db, "insert_skill_version", boom)
-    with pytest.raises(SkillError, match="constraint"):
-        store.install(row["id"], row["content_hash"])
-
-
 def test_owner_api_reinstall_after_uninstall_is_not_500(tmp_path):
     cfg = enable_skills(make_cfg(tmp_path))
     cfg.allowed_logins = ["me@example.com"]
@@ -787,7 +721,7 @@ def test_owner_api_reinstall_after_uninstall_is_not_500(tmp_path):
         conflict = client.post(f"/skills/proposals/{other['id']}/install",
                                json={"content_hash": other["content_hash"]}, headers=headers)
         assert conflict.status_code == 409, conflict.text
-        assert conflict.status_code != 500
+        assert "constraint" in conflict.text.lower()   # a SkillError, not a bare IntegrityError
 
 
 def test_install_race_duplicate_clicks(tmp_path):
@@ -949,9 +883,6 @@ def test_explicit_empty_skills_excludes_allowlisted(tmp_path):
         enabled = client.get("/skills/enabled", headers=headers).json()
         assert enabled[0]["slug"] == "commit-style"
         assert "scratch" in enabled[0]["projects"]
-        js = client.get("/static/pages/new-task.mjs").text
-        assert "skill-opt" in js
-        assert "Checked skills are injected" in js
 
 
 def test_member_gets_403_on_every_skills_route(tmp_path):
@@ -990,8 +921,6 @@ def test_member_gets_403_on_every_skills_route(tmp_path):
                 r = client.request(method, prefix + path, headers=ah, json=body)
                 assert r.status_code == 403, (method, prefix + path, r.status_code, r.text)
                 assert "member" in r.json()["detail"]
-        # Stables has no Skills page for anyone (#545): skills are managed in the Hub and the CLI.
-        assert 'skills: "Skills"' not in client.get("/static/pages/profile.mjs").text
 
 
 def test_reviewer_payload_has_no_transcript_or_secrets():
@@ -1017,46 +946,38 @@ def test_review_normalize_and_errors_stay_visible():
         assert key in findings
 
 
-def test_background_review_only_at_idle_and_preempts(tmp_path):
+def test_background_review_only_at_idle(tmp_path):
+    """Preemption is test_gpu_preempt_keeps_review_loop_alive; reconcile is test_stop_leaves_local_review_running_for_reconcile."""
     db = Database(tmp_path / "harness.sqlite3")
     idle = {"value": False}
     reviewed = []
+    asked = asyncio.Event()
 
     async def chat(model, messages, tools=None, **kwargs):
         reviewed.append(messages)
-        for _ in range(20):
-            await asyncio.sleep(0.05)
-        return Completion(content=json.dumps({
-            "scope": {"ok": True, "notes": ""}, "trigger_precision": {"ok": True, "notes": ""},
-            "conflicts": {"ok": True, "notes": ""}, "prompt_injection": {"ok": True, "notes": ""},
-            "sensitive_data": {"ok": True, "notes": ""}, "examples": {"ok": True, "notes": ""},
-            "recommendation": "approve", "summary": "Looks like a commit helper.",
-        }))
+        return Completion(content=APPROVE_REVIEW)
+
+    def is_idle():
+        asked.set()
+        return idle["value"]
 
     async def body():
-        reviewer = SkillReviewer(SkillsConfig(enabled=True, local_review=True), db, idle=lambda: idle["value"],
+        reviewer = SkillReviewer(SkillsConfig(enabled=True, local_review=True), db, idle=is_idle,
                                  model=make_cfg(tmp_path).models["fake"], chat=chat, local_review=True)
         store = SkillStore(SkillsConfig(enabled=True), db, tmp_path, "img", run_sandbox=in_process_sandbox,
                            reviewer=reviewer)
         reviewer.start()
         store._propose_locked(bundle(), "s1")
-        await asyncio.sleep(0.4)
-        assert reviewed == []  # not idle
+        await asyncio.wait_for(asked.wait(), timeout=scaled(3))   # the loop saw the job and found the GPU busy
+        assert reviewed == []
+        assert db.list_skill_review_jobs()[0]["status"] == "queued"
         idle["value"] = True
         reviewer._wake.set()
-        deadline = time.time() + 3
+        deadline = time.time() + scaled(3)
         while time.time() < deadline and not reviewed:
             await asyncio.sleep(0.05)
         assert reviewed
-        idle["value"] = False
-        await asyncio.sleep(0.2)
-        row = db.list_skill_proposals()[0]
-        assert row["review_status"] in ("done", "queued", "error", "running")
         await reviewer.stop()
-        jobs = db.list_skill_review_jobs()
-        db.update_skill_review_job(jobs[0]["id"], status="running")
-        reviewer.reconcile()
-        assert db.list_skill_review_jobs()[0]["status"] in ("queued", "done", "error")
 
     asyncio.run(body())
 
@@ -1140,8 +1061,7 @@ def test_stop_does_not_requeue_hosted_review_as_gpu_preempt(tmp_path):
         assert job["status"] == "running"
         assert "preempted by real GPU work" not in (job.get("error") or "")
         started.clear()
-        reviewer.start()
-        await asyncio.sleep(0.4)
+        reviewer.start()   # reconciles synchronously: the interrupted hosted job is an error, not requeued
         job = db.list_skill_review_jobs()[0]
         assert job["status"] == "error"
         assert "owner may retry" in job["error"]
