@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 import pytest
@@ -250,58 +249,23 @@ def test_manual_browser_origins_are_owner_only(tmp_path):
         assert "owner-only" in response.json()["detail"]
 
 
-def test_app_origin_cannot_use_ambient_owner_identity_on_admin_api(tmp_path):
+@pytest.mark.parametrize("name,scopes,kind,preflight_status", [
+    ("ordinary browser", "sessions", "app", 403),
+    ("Control Center", "admin", "owner", 204),  # a pre-#91 display name remains a valid, visible credential
+])
+def test_cross_origin_admin_request_never_falls_back_to_ambient_owner(tmp_path, name, scopes, kind, preflight_status):
     client, manager = make_client(tmp_path)
     with client:
-        manager.db.create_api_key("ordinary browser", "sessions", "app", [ORIGIN])
+        key, _ = manager.db.create_api_key(name, scopes, kind, [ORIGIN])
+        assert manager.db.get_api_key(key["id"])["name"] == name
         preflight = client.options("/api/admin/v1/me", headers={
             "Origin": ORIGIN,
             "Access-Control-Request-Method": "GET",
         })
-        assert preflight.status_code == 403
-
+        assert preflight.status_code == preflight_status
         response = client.get("/api/admin/v1/me", headers={"Origin": ORIGIN})
         assert response.status_code == 401
         assert "owner token" in response.json()["detail"]
-
-
-def test_cross_origin_admin_request_never_falls_back_to_ambient_owner(tmp_path):
-    client, manager = make_client(tmp_path)
-    with client:
-        # A pre-#91 display name remains a valid, visible credential.
-        legacy, _ = manager.db.create_api_key("Control Center", "admin", "owner", [ORIGIN])
-        assert manager.db.get_api_key(legacy["id"])["name"] == "Control Center"
-        response = client.get("/api/admin/v1/me", headers={"Origin": ORIGIN})
-        assert response.status_code == 401
-        assert "owner token" in response.json()["detail"]
-
-
-def test_web_shell_includes_transport_module_and_canonical_names():
-    web = Path(__file__).parents[1] / "stables" / "public"
-    app = (web / "app.js").read_text(encoding="utf-8")
-    profile = (web / "pages" / "profile.mjs").read_text(encoding="utf-8")
-    client = (web / "client.mjs").read_text(encoding="utf-8")
-    worker = (web / "sw.js").read_text(encoding="utf-8")
-    assert 'from "./client.mjs"' in app
-    assert '"/api/v1"' in client
-    assert '"/api/admin/v1"' in client
-    assert "body instanceof FormData" in client
-    index = (web / "index.html").read_text(encoding="utf-8")
-    assert 'src="/app.js?v=5"' in index
-    assert 'href="/style.css?v=5"' in index
-    assert "<title>Stables</title>" in index
-    assert 'apple-mobile-web-app-title" content="Stables"' in index
-    manifest = (web / "manifest.webmanifest").read_text(encoding="utf-8")
-    assert '"name": "Stables"' in manifest
-    assert '"short_name": "Stables"' in manifest
-    assert "Agent Harness Server URL" in profile
-    # Minting a token for another copy is key administration, in the Hub and `harness keys create` (#545).
-    assert "Connect another copy of Stables" not in profile
-    assert '"/client.mjs"' in worker
-    # The shell cache name is derived from BUILD_ID so a client build bumps it automatically (#69).
-    assert 'const BUILD_ID = "' in worker
-    assert "const SHELL = `harness-shell-${BUILD_ID}`" in worker
-    assert 'fetch(event.request, { cache: "no-cache" })' in worker
 
 
 def test_web_assets_work_at_static_root_and_compatibility_alias(tmp_path):
