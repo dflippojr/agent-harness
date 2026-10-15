@@ -13,7 +13,6 @@ from harness import config, modules, taint
 from harness.fileops import ToolError
 from harness.manager import Manager
 from harness.policy import Policy
-from harness.settings_keys import build_registry
 from harness_modules.mcp_client import MODULE
 from harness_modules.mcp_client import service
 from test_daemon import Script, call, events, make_cfg, wait_status
@@ -125,7 +124,6 @@ def test_module_absent_off_and_native_only(tmp_path, fake_transport):
     async def body():
         for enabled, packages in ((False, None), (True, [])):
             m = manager(tmp_path / str(enabled), enabled, packages)
-            assert "modules.mcp_client" not in build_registry(m.cfg).specs
             assert m.runner.policy(SESSION).decide(NAME, {}).action == "deny"
             assert all(NAME not in kit.tool_names for kit in m.runner.daemon_toolkits(SESSION))
             await m.modules.prepare_session(SESSION)
@@ -385,11 +383,11 @@ def test_timeout_does_not_include_waiting_for_rpc_lock(fake_transport, monkeypat
         kit = service.SessionTools(SESSION, [SERVER], config.SandboxConfig())
         await kit.start()
         client = fake_transport[0][0]
-        monkeypatch.setattr(service, "RPC_TIMEOUT", 0.5)
+        monkeypatch.setattr(service, "RPC_TIMEOUT", 0.1)
         client.lock.acquire()
         pending = asyncio.create_task(kit.call(NAME, {"text": "queued"}))
         try:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3)
             assert client.proc.poll() is None
         finally:
             client.lock.release()

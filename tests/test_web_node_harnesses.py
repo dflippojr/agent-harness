@@ -37,6 +37,8 @@ STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
         pytest.param("web_page_titles.mjs", 15, "ok", id="test_page_title_set_on_every_route"),
         # Pure web helpers extracted by the Sonar style cleanup keep their output (#229).
         pytest.param("web_pure_helpers.mjs", None, "ok", id="test_pure_helpers_keep_their_output"),
+        # Diagnostics read once and never poll (#311); Images names an upscale or edit in flight and its choices.
+        pytest.param("web_resources_and_images.mjs", 30, "ok", id="test_diagnostics_do_not_poll_and_image_stages_are_labelled"),
         # Agents list groups sessions and shows the pending ask inline (#509).
         pytest.param("web_session_groups.mjs", None, "ok", id="test_session_groups"),
         # Session jump arrows follow scroll position and page height (#184).

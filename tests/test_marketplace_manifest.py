@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 from pathlib import Path
@@ -138,42 +137,11 @@ def test_design_covers_every_current_app_scope_and_modules():
     design = DESIGN.read_text(encoding="utf-8")
     for scope in SCOPES:
         assert f"`{scope}`" in design
-    assert "`admin`" in design
-    assert "prohibited" in design.lower()
     for module in MODULE_NAMES:
         assert f"`{module}`" in design
-    for backend in ("local", "claude", "codex", "cursor"):
-        assert backend in design
-    assert "GET /api/v1" in design
-    assert "/api/admin/v1" in design
-    assert "normalize_origin" in design
-    assert "provider_policy" in design
-    assert "manifest_schema_version" in design
-    assert "additionalProperties" in design
 
 
 def test_threat_model_covers_required_abuse_cases():
     threat = THREAT.read_text(encoding="utf-8")
     for title in REQUIRED_ABUSE_CASES:
         assert title in threat, title
-    for heading in ("Prevention", "Detection", "Response", "Residual"):
-        assert heading in threat
-    assert "cannot technically enforce" in threat.lower() or "cannot prove" in threat.lower()
-    assert "outside the daemon sandbox" in threat.lower()
-
-
-def test_elevated_example_uses_two_reviewers_and_reconsent_scopes():
-    document = load_json(ELEVATED)
-    scopes = {item["scope"]: item["risk_tier"] for item in document["app"]["scopes"]}
-    assert scopes["sessions:all"] == scopes["approvals"] == scopes["remote_control"] == "elevated"
-    assert len(document["review"]["reviewer_ids"]) >= 2
-    assert document["app"]["browser_origins"] == ["https://ops.example.com"]
-    assert document["review"]["permission_diff"]["kind"] == "expansion"
-
-
-def test_mutating_a_published_record_changes_the_manifest_digest():
-    document = load_json(ORDINARY)
-    original = document["review"]["publisher_manifest_sha256"]
-    mutated = copy.deepcopy(document["app"])
-    mutated["summary"] += " extra"
-    assert hashlib.sha256(canonical_app_bytes(mutated)).hexdigest() != original

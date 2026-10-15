@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
@@ -47,16 +48,17 @@ def test_service_profile_is_hosted_only_and_discovers_capabilities(tmp_path, mon
         assert "local model is disabled" in rejected.json()["detail"]
 
 
-def test_service_module_opt_in_and_local_dependency(tmp_path):
-    setup_config.main(setup_args(tmp_path, "--profile", "service", "--enable-module", "jobs",
-                                 "--enable-module", "endpoint"))
+@pytest.mark.parametrize("module,local_model", [("hub", False), ("jobs", False), ("endpoint", True)])
+def test_service_module_opt_in_and_local_dependency(tmp_path, module, local_model):
+    """Opting a module into a service install turns it on; only the endpoint needs the local model underneath."""
+    assert setup_config.main(setup_args(tmp_path, "--profile", "service", "--enable-module", module)) == 0
     cfg = config.load(tmp_path / "cfg")
-    assert cfg.modules.jobs
-    assert cfg.jobs.enabled
-    assert cfg.modules.endpoint
-    assert cfg.endpoint.enabled
-    assert cfg.modules.local_model
-    assert cfg.default_model == "gpt-oss-20b"
+    assert getattr(cfg.modules, module) and getattr(cfg, module).enabled
+    assert cfg.installed.hub is (module == "hub")
+    assert cfg.capabilities()["modules"][module]
+    assert cfg.modules.local_model is local_model
+    assert list(cfg.models) == (["gpt-oss-20b"] if local_model else [])
+    assert cfg.default_model == ("gpt-oss-20b" if local_model else "")
     assert not cfg.modules.images
 
 

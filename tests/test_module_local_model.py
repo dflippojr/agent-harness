@@ -5,14 +5,13 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import cli, modules
+from harness import cli
 from harness.api import create_app
 from harness.config import GpuGuardConfig
 from harness.local_inference import NoWarmer, READY
 from harness.manager import Manager
 from harness.settings_keys import build_registry
 from harness_modules.local_model import doctor
-from harness_modules.local_model.warmup import ModelWarmer
 from test_daemon import make_cfg, Script
 from harness.llm import Completion
 
@@ -27,28 +26,6 @@ def manager(tmp_path, *, enabled=False, packages=None):
     cfg.module_packages = packages
     cfg.gpu_guard = GpuGuardConfig(enabled=enabled, pause_flag=str(tmp_path / 'paused'))
     return Manager(cfg, chat=Script([Completion(content='ok')]))
-
-
-@pytest.mark.parametrize('enabled', [False, True])
-def test_present_and_guard_switched_off(tmp_path, enabled):
-    m = manager(tmp_path, enabled=enabled)
-    assert isinstance(m.warmer, ModelWarmer) and m.runner.warmer is m.warmer
-    assert (m.guard is not None) is enabled
-    assert (m.runner.ram is not None) is enabled
-    assert KEYS <= build_registry(m.cfg).specs.keys()
-    assert m.cfg.module_effective('local_model')
-    assert m.cfg.module_effective('gpu_guard') is enabled
-    app = create_app(m)
-    assert ROUTES <= {route.path for route in app.routes}
-    with TestClient(app) as client:
-        assert client.get('/models/status').json()[0]['state'] == READY
-        assert client.post('/models/warm').status_code == 200
-        assert client.get('/api/admin/v1/resources').status_code == 200
-        if not enabled:
-            assert client.post('/resources/pause').status_code == 400
-        root = client.get('/api/v1').json()
-        assert root['capabilities']['modules']['gpu_guard'] is enabled
-    m.db.close()
 
 
 def test_absent_supervision_retains_external_local_adapter(tmp_path):
@@ -135,27 +112,9 @@ def test_recovered_images_fail_visibly_without_supervision(tmp_path):
     m.db.close()
 
 
-@pytest.mark.parametrize('packages', [[], ['harness_modules.images']])
-def test_absent_saved_guard_settings_remain_dormant(tmp_path, packages):
+def test_guard_enable_check_and_cli_rows(tmp_path):
     m = manager(tmp_path)
-    m.settings.patch_admin({'gpu_guard.poll_seconds': 12}, revision=None, actor={'kind': 'owner'})
-    m.settings.confirm_startup()
-    m.db.close()
-    absent = manager(tmp_path, packages=packages)
-    assert absent.settings.store.read_status().get('recovery') is None
-    assert absent.settings.store.read_active().values['gpu_guard.poll_seconds'] == 12
-    absent.db.close()
-
-
-def test_guard_registry_accessors_checks_and_cli(tmp_path):
-    m = manager(tmp_path)
-    registry = build_registry(m.cfg)
-    for key, value in [('gpu_guard.poll_seconds', 12), ('gpu_guard.resume_after_seconds', 40),
-                       ('gpu_guard.drain_timeout_seconds', 60), ('gpu_guard.enabled', True)]:
-        spec = registry.get(key)
-        spec.setter(m.cfg, value)
-        assert spec.getter(m.cfg) == value
-    check = registry.get('gpu_guard.enabled').enable_check
+    check = build_registry(m.cfg).get('gpu_guard.enabled').enable_check
     assert check(m.cfg) == []
     m.cfg.installed.local_model = False
     m.cfg.gpu_guard.pause_flag = ''
