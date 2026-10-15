@@ -4,7 +4,9 @@ Run AI agents on Windows, Linux, or Apple Silicon macOS and drive them from a br
 local model or your own hosted-provider CLI subscriptions. Agents work in Docker sandboxes and ask before risky
 actions.
 
-The installer sets up **Agent Harness Server**, which hosts the APIs and normally serves **Stables**. An
+The installer sets up **Agent Harness Server**, which hosts the APIs and serves **Stables** when it finds a copy.
+Stables lives in its own repository, [dflippojr/stables](https://github.com/dflippojr/stables); clone it into the checkout as `stables/` (or set
+`HARNESS_STABLES_DIR`) to serve it, as [the guide](web.md#where-the-server-finds-stables) describes. An
 **Agent Harness App** is a third-party API integration. **Agent Harness for Mac** installs the `harness` command
 (**Agent Harness CLI**) and a **Mac Runner** together; the Python library in `sdk/` is **Agent Harness SDK**.
 
@@ -81,7 +83,7 @@ Both are Apache 2.0.
 
 ## Hosted-provider service profile
 
-The service profile installs Agent Harness Server, Stables, the provider CLI image, and provider-specific
+The service profile installs Agent Harness Server, the provider CLI image, and provider-specific
 egress proxies.
 It skips llama.cpp, model downloads, GPU checks, and every optional integration unless selected:
 

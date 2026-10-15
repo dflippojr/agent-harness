@@ -1,13 +1,12 @@
-"""Issue #334 stage (d): Stables is a standalone client of the documented API, and the daemon does not depend on it.
+"""Issue #334: Stables is a standalone client of the documented API, and the daemon does not depend on it.
 
-Stables (`stables/public`) imports nothing from outside its own tree except the API contract types, reaches the daemon
-only through its transport (`client.mjs`, `lib/stream.mjs`) and the documented routes, and the server names the
-client's files in one place, `harness/stables_shell.py`, so it runs the API alone when the shell is absent.
+Stables lives in dflippojr/stables, which checks the client's side of the boundary (`tests/boundary.mjs` there: it
+loads only its own files and the API contract types, and only its transport opens connections). Here the Server
+names the client's files in one place, `harness/stables_shell.py`, and runs the API alone when no shell is found.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -17,78 +16,35 @@ from harness import stables_shell
 from tests.test_api import make_client
 
 ROOT = Path(__file__).resolve().parents[1]
-SHELL = ROOT / "stables" / "public"
-CONTRACTS = ROOT / "stables" / "types"
-OPENAPI = json.loads((CONTRACTS / "openapi.json").read_text(encoding="utf-8"))
 SERVER_TREES = ("harness", "harness_modules", "sdk")
 
-RUNTIME_IMPORT = re.compile(r"""(?:^|[;\s])(?:import|export)\b[^'"`;]*?\bfrom\s*['"]([^'"]+)['"]"""
-                            r"""|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)|^\s*import\s*['"]([^'"]+)['"]""", re.M)
-TYPE_IMPORT = re.compile(r"""@import\s*\{[^}]*\}\s*from\s*['"]([^'"]+)['"]""")
-NETWORK = re.compile(r"\bfetch\(|\bEventSource\(|\bXMLHttpRequest\b|\bWebSocket\(|\bsendBeacon\(")
-# The transport, and the service worker, which only refreshes the shell's own files.
-NETWORK_FILES = {"client.mjs", "lib/stream.mjs", "sw.js"}
+
+def _shell(path: Path) -> Path:
+    path.mkdir(parents=True)
+    for name in ("index.html", "sw.js", "manifest.webmanifest", "client.mjs"):
+        (path / name).write_text(f"stand-in {name}\n", encoding="utf-8")
+    return path
 
 
-def _sources() -> list[Path]:
-    return sorted([*SHELL.rglob("*.mjs"), *SHELL.rglob("*.js")])
-
-
-def _rel(path: Path) -> str:
-    return path.relative_to(SHELL).as_posix()
-
-
-def _resolve(source: Path, spec: str) -> Path:
-    return (SHELL / spec.lstrip("/")).resolve() if spec.startswith("/") else (source.parent / spec).resolve()
-
-
-def _strip_line_comments(text: str) -> str:
-    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(("//", "*", "/*")))
-
-
-def test_shell_is_found_in_the_checkout(monkeypatch):
+def test_shell_is_found_in_the_checkout_without_the_variable(tmp_path, monkeypatch):
+    """A Stables clone at `<checkout>/stables` (ignored by git) is served when HARNESS_STABLES_DIR is unset."""
+    shell = _shell(tmp_path / "stables" / "public")
     monkeypatch.delenv(stables_shell.ENV, raising=False)
-    assert stables_shell.locate() == SHELL.resolve()
-    assert {"/index.html", "/sw.js", "/manifest.webmanifest", "/client.mjs"} <= stables_shell.top_files(SHELL)
+    monkeypatch.setattr(stables_shell, "DEFAULT", shell)
+    assert stables_shell.locate() == shell.resolve()
+    assert {"/index.html", "/sw.js", "/manifest.webmanifest", "/client.mjs"} <= stables_shell.top_files(shell)
 
 
-def test_runtime_imports_stay_inside_the_shell():
-    outside = []
-    for source in _sources():
-        for match in RUNTIME_IMPORT.finditer(_strip_line_comments(source.read_text(encoding="utf-8"))):
-            spec = next(group for group in match.groups() if group)
-            target = _resolve(source, spec)
-            if not spec.startswith((".", "/")) or not target.is_relative_to(SHELL.resolve()) or not target.is_file():
-                outside.append(f"{_rel(source)}: {spec}")
-    assert not outside, f"Stables must load only its own files: {outside}"
+def test_checkout_default_is_the_ignored_stables_clone():
+    assert stables_shell.DEFAULT == ROOT / "stables" / "public"
+    assert "/stables/" in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
 
 
-def test_type_imports_reach_only_the_shell_or_the_api_contract():
-    outside = []
-    for source in _sources():
-        for spec in TYPE_IMPORT.findall(source.read_text(encoding="utf-8")):
-            target = _resolve(source, spec)
-            allowed = target.is_relative_to(SHELL.resolve()) or target.parent == CONTRACTS.resolve()
-            if not allowed:
-                outside.append(f"{_rel(source)}: {spec}")
-    assert not outside, f"type-only imports may name the shell or stables/types contracts: {outside}"
-
-
-def test_only_the_transport_opens_connections():
-    callers = sorted({_rel(source) for source in _sources()
-                      if NETWORK.search(_strip_line_comments(source.read_text(encoding="utf-8")))})
-    assert set(callers) <= NETWORK_FILES, f"route network calls through client.mjs: {sorted(set(callers) - NETWORK_FILES)}"
-
-
-def test_transport_uses_only_the_versioned_surfaces_and_documented_routes():
-    client = (SHELL / "client.mjs").read_text(encoding="utf-8")
-    assert 'const prefixes = { app: "/api/v1", admin: "/api/admin/v1" };' in client
-    unprefixed = set()
-    for source in _sources():
-        unprefixed |= set(re.findall(r"""request\(\s*['"]([^'"]+)['"]\s*,\s*\{[^}]*surface:\s*['"]{2}""",
-                                     source.read_text(encoding="utf-8")))
-    assert unprefixed == {"/health"}
-    assert unprefixed <= set(OPENAPI["paths"])
+def test_variable_wins_over_the_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(stables_shell, "DEFAULT", _shell(tmp_path / "checkout"))
+    named = _shell(tmp_path / "named")
+    monkeypatch.setenv(stables_shell.ENV, f"  {named}  ")
+    assert stables_shell.locate() == named.resolve()
 
 
 def test_server_names_the_client_only_in_its_locator():

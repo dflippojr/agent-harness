@@ -218,7 +218,13 @@ def test_validation_happens_off_tower_before_the_candidate_is_checked_out():
     assert stage["needs"] == "resolve"
     assert "refs/heads/main" in WORKFLOW_TEXT  # the control plane must be the trusted main workflow file
     checkouts = [step for step in stage["steps"] if "checkout" in str(step.get("uses", ""))]
-    assert [step["with"]["ref"] for step in checkouts] == ["main"]
+    # The only harness checkout is main; the other is the candidate's pinned Stables release, static files that
+    # deploy-staging.ps1 copies after checking the commit (#334).
+    harness = [step for step in checkouts if "repository" not in step["with"]]
+    assert [step["with"]["ref"] for step in harness] == ["main"]
+    stables = [step for step in checkouts if "repository" in step["with"]]
+    assert [(step["with"]["repository"], step["with"]["path"]) for step in stables] == [
+        ("${{ needs.resolve.outputs.stables_repository }}", "stables-release")]
     # The deployer is always main's copy; the candidate's deploy scripts are never executed as the deployer.
     assert "deploy-ci.ps1" not in WORKFLOW_TEXT
     assert all("deploy-staging.ps1" in step.get("run", "") or "report-staging.ps1" in step.get("run", "")
@@ -482,6 +488,47 @@ def test_deploy_dry_run_plans_stop_clean_checkout_overlay_start(tmp_path):
     assert "tailnet :8444" in plan
     assert "docker" not in plan.lower()
 
+
+
+def _pinned_candidate(tmp_path: Path) -> tuple[Path, str]:
+    """A staging checkout whose candidate pins a Stables release, and a git checkout of that release."""
+    release = tmp_path / "stables-release"
+    (release / "public").mkdir(parents=True)
+    (release / "public" / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "."],
+                 ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "v1"]):
+        subprocess.run(["git", "-C", str(release), *args], check=True, capture_output=True)
+    commit = subprocess.run(["git", "-C", str(release), "rev-parse", "HEAD"], check=True, capture_output=True,
+                            text=True).stdout.strip()
+    pin = tmp_path / "agent-harness-staging" / "tools" / "stables" / "pin.json"
+    pin.parent.mkdir(parents=True)
+    pin.write_text(f'{{"repository": "dflippojr/stables", "tag": "v1.0.0", "commit": "{commit}"}}', encoding="utf-8")
+    return release, commit
+
+
+@pytest.mark.skipif(not POWERSHELL, reason="Windows PowerShell is not installed")
+def test_deploy_dry_run_puts_the_candidates_pinned_stables_in_its_checkout(tmp_path):
+    release, _ = _pinned_candidate(tmp_path)
+    result = run_deploy(tmp_path, "-Commit", SHA, "-StablesRelease", str(release))
+    assert result.returncode == 0, output(result)
+    plan = result.stdout
+    assert plan.index(f"[staging] checkout at {SHA}") < plan.index("[staging] Stables v1.0.0 in place") < plan.index(
+        "[staging] dependencies installed")
+    assert f"-> {tmp_path / 'agent-harness-staging' / 'stables'}" in plan
+
+
+@pytest.mark.skipif(not POWERSHELL, reason="Windows PowerShell is not installed")
+def test_deploy_refuses_a_pinned_candidate_without_its_stables_release(tmp_path):
+    release, commit = _pinned_candidate(tmp_path)
+    missing = run_deploy(tmp_path, "-Commit", SHA)
+    assert missing.returncode != 0
+    assert "no checkout of it was passed" in " ".join(output(missing).split())
+    pin = tmp_path / "agent-harness-staging" / "tools" / "stables" / "pin.json"
+    pin.write_text(pin.read_text(encoding="utf-8").replace(commit, "c" * 40), encoding="utf-8")
+    other = run_deploy(tmp_path, "-Commit", SHA, "-StablesRelease", str(release))
+    assert other.returncode != 0
+    assert f"but the candidate pins v1.0.0 at {'c' * 40}" in " ".join(output(other).split())
+    assert "Stables v1.0.0 in place" not in other.stdout
 
 @pytest.mark.skipif(not POWERSHELL, reason="Windows PowerShell is not installed")
 def test_deploy_refuses_production_locations_and_bad_dispatches(tmp_path):

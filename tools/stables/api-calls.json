@@ -1,0 +1,1854 @@
+{
+  "build_id": "2026.10.10.1",
+  "snippet_languages": {
+    "python": {
+      "label": "Python",
+      "aliases": [
+        "py",
+        "python",
+        "python3"
+      ]
+    },
+    "javascript": {
+      "label": "JavaScript",
+      "aliases": [
+        "cjs",
+        "javascript",
+        "js",
+        "mjs",
+        "node"
+      ]
+    },
+    "java": {
+      "label": "Java",
+      "aliases": [
+        "java"
+      ]
+    },
+    "csharp": {
+      "label": "C#",
+      "aliases": [
+        "c#",
+        "cs",
+        "csharp"
+      ]
+    },
+    "cpp": {
+      "label": "C++",
+      "aliases": [
+        "c++",
+        "cc",
+        "cpp",
+        "cxx"
+      ]
+    }
+  },
+  "browser_keys": [
+    "harness.appIcon",
+    "harness.chatChoice",
+    "harness.daemonUrl",
+    "harness.draft",
+    "harness.imageDraft",
+    "harness.lastRole",
+    "harness.ownerToken",
+    "harness.sessionTarget",
+    "harness.target",
+    "harness.textSize",
+    "harness.theme",
+    "harness.themeHues",
+    "harness.webUpdateAttempt",
+    "harness.webUpdatePrompt"
+  ],
+  "calls": [
+    {
+      "where": "public/app.js:112",
+      "pattern": "/profile",
+      "sample": "/profile",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/lib/router.mjs:166",
+      "pattern": "/images/cooldown",
+      "sample": "/images/cooldown",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/lib/session-ui.mjs:54",
+      "pattern": "/sessions/[^/?]+",
+      "sample": "/sessions/x",
+      "methods": [
+        "PATCH"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/lib/session-ui.mjs:57",
+      "pattern": "/sessions/[^/?]+",
+      "sample": "/sessions/x",
+      "methods": [
+        "PUT"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/lib/session.mjs:102",
+      "pattern": "/me",
+      "sample": "/me",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/lib/session.mjs:106",
+      "pattern": "/me",
+      "sample": "/me",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": true
+    },
+    {
+      "where": "public/lib/session.mjs:116",
+      "pattern": "/auth/session",
+      "sample": "/auth/session",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": true
+    },
+    {
+      "where": "public/lib/signin.mjs:14",
+      "pattern": "/auth/google/start",
+      "sample": "/auth/google/start",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": true
+    },
+    {
+      "where": "public/lib/warm-model.mjs:12",
+      "pattern": "/gpu",
+      "sample": "/gpu",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/lib/warm-model.mjs:16",
+      "pattern": "/models/warm",
+      "sample": "/models/warm",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/actions.mjs:106",
+      "pattern": "/resources/[^/?]+",
+      "sample": "/resources/x",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/actions.mjs:159",
+      "pattern": "/resources/diagnostics",
+      "sample": "/resources/diagnostics",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/actions.mjs:205",
+      "pattern": "/resources/[^/?]+",
+      "sample": "/resources/x",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/actions.mjs:227",
+      "pattern": "/resources",
+      "sample": "/resources",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/actions.mjs:251",
+      "pattern": "/remote\\-control/[^/?]+/stop",
+      "sample": "/remote-control/x/stop",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/actions.mjs:251",
+      "pattern": "/remote\\-control/[^/?]+",
+      "sample": "/remote-control/x",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/actions.mjs:286",
+      "pattern": "/remote\\-control",
+      "sample": "/remote-control",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/actions.mjs:311",
+      "pattern": "/maintenance",
+      "sample": "/maintenance",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:260",
+      "pattern": "/chats",
+      "sample": "/chats",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:309",
+      "pattern": "/chats/[^/?]+",
+      "sample": "/chats/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:310",
+      "pattern": "/chats/options",
+      "sample": "/chats/options",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:335",
+      "pattern": "/chats",
+      "sample": "/chats",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:341",
+      "pattern": "/chats/[^/?]+/messages",
+      "sample": "/chats/x/messages",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:353",
+      "pattern": "/chats/[^/?]+/cancel",
+      "sample": "/chats/x/cancel",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:358",
+      "pattern": "/chats/[^/?]+/snippets",
+      "sample": "/chats/x/snippets",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:362",
+      "pattern": "/chats/[^/?]+/snippets/[^/?]+/cancel",
+      "sample": "/chats/x/snippets/x/cancel",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:379",
+      "pattern": "/chats/[^/?]+",
+      "sample": "/chats/x",
+      "methods": [
+        "PATCH"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/chat.mjs:384",
+      "pattern": "/chats/[^/?]+",
+      "sample": "/chats/x",
+      "methods": [
+        "DELETE"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:97",
+      "pattern": "/images",
+      "sample": "/images",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:100",
+      "pattern": "/gpu",
+      "sample": "/gpu",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:109",
+      "pattern": "/images/warmup",
+      "sample": "/images/warmup",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:196",
+      "pattern": "/images/uploads",
+      "sample": "/images/uploads",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:221",
+      "pattern": "/images",
+      "sample": "/images",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:223",
+      "pattern": "/images",
+      "sample": "/images",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:244",
+      "pattern": "/images",
+      "sample": "/images",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:282",
+      "pattern": "/images",
+      "sample": "/images",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:295",
+      "pattern": "/images/[^/?]+/cancel",
+      "sample": "/images/x/cancel",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:303",
+      "pattern": "/images/[^/?]+",
+      "sample": "/images/x",
+      "methods": [
+        "DELETE"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:313",
+      "pattern": "/images/[^/?]+",
+      "sample": "/images/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:325",
+      "pattern": "/images/[^/?]+/upscale",
+      "sample": "/images/x/upscale",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:437",
+      "pattern": "/images/[^/?]+",
+      "sample": "/images/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:485",
+      "pattern": "/images/[^/?]+/edit",
+      "sample": "/images/x/edit",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/images.mjs:502",
+      "pattern": "/images/[^/?]+",
+      "sample": "/images/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:92",
+      "pattern": "/jobs",
+      "sample": "/jobs",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:192",
+      "pattern": "/jobs/[^/?]+",
+      "sample": "/jobs/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:193",
+      "pattern": "/jobs/[^/?]+",
+      "sample": "/jobs/x",
+      "methods": [
+        "PUT"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:224",
+      "pattern": "/projects",
+      "sample": "/projects",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:224",
+      "pattern": "/models",
+      "sample": "/models",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:224",
+      "pattern": "/backends",
+      "sample": "/backends",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:224",
+      "pattern": "/jobs/[^/?]+",
+      "sample": "/jobs/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:304",
+      "pattern": "/jobs/[^/?]+/run",
+      "sample": "/jobs/x/run",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:328",
+      "pattern": "/jobs",
+      "sample": "/jobs",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:329",
+      "pattern": "/jobs/[^/?]+",
+      "sample": "/jobs/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:333",
+      "pattern": "/jobs/[^/?]+",
+      "sample": "/jobs/x",
+      "methods": [
+        "PUT"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:361",
+      "pattern": "/jobs/[^/?]+",
+      "sample": "/jobs/x",
+      "methods": [
+        "DELETE"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/jobs.mjs:375",
+      "pattern": "/jobs/preview",
+      "sample": "/jobs/preview",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:24",
+      "pattern": "/gpu",
+      "sample": "/gpu",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:89",
+      "pattern": "/templates",
+      "sample": "/templates",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:103",
+      "pattern": "/templates/[^/?]+",
+      "sample": "/templates/x",
+      "methods": [
+        "DELETE"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:119",
+      "pattern": "/me/api\\-keys",
+      "sample": "/me/api-keys",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:128",
+      "pattern": "/projects",
+      "sample": "/projects",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:128",
+      "pattern": "/models",
+      "sample": "/models",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:129",
+      "pattern": "/templates",
+      "sample": "/templates",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:130",
+      "pattern": "/backends",
+      "sample": "/backends",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:131",
+      "pattern": "/gpu",
+      "sample": "/gpu",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:170",
+      "pattern": "/runners",
+      "sample": "/runners",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:206",
+      "pattern": "/projects",
+      "sample": "/projects",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": true
+    },
+    {
+      "where": "public/pages/new-task.mjs:307",
+      "pattern": "/github/projects/[^/?]+/items/[^/?]+",
+      "sample": "/github/projects/x/items/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:323",
+      "pattern": "/github/projects/[^/?]+/items",
+      "sample": "/github/projects/x/items",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:351",
+      "pattern": "/gpu",
+      "sample": "/gpu",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:356",
+      "pattern": "/models/status",
+      "sample": "/models/status",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/new-task.mjs:382",
+      "pattern": "/skills/enabled",
+      "sample": "/skills/enabled",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:150",
+      "pattern": "/profile",
+      "sample": "/profile",
+      "methods": [
+        "PUT"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:196",
+      "pattern": "/me/google",
+      "sample": "/me/google",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": true
+    },
+    {
+      "where": "public/pages/profile.mjs:200",
+      "pattern": "/auth/logout",
+      "sample": "/auth/logout",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": true
+    },
+    {
+      "where": "public/pages/profile.mjs:212",
+      "pattern": "/me/google",
+      "sample": "/me/google",
+      "methods": [
+        "DELETE"
+      ],
+      "app_surface": true
+    },
+    {
+      "where": "public/pages/profile.mjs:242",
+      "pattern": "/me/api\\-keys",
+      "sample": "/me/api-keys",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:262",
+      "pattern": "/me/api\\-keys/[^/?]+/test",
+      "sample": "/me/api-keys/x/test",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:302",
+      "pattern": "/me/github\\-connection",
+      "sample": "/me/github-connection",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:430",
+      "pattern": "/me",
+      "sample": "/me",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:430",
+      "pattern": "/profile",
+      "sample": "/profile",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:449",
+      "pattern": "/me",
+      "sample": "/me",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:450",
+      "pattern": "/profile",
+      "sample": "/profile",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:500",
+      "pattern": "/me",
+      "sample": "/me",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:502",
+      "pattern": "/me",
+      "sample": "/me",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": true
+    },
+    {
+      "where": "public/pages/profile.mjs:508",
+      "pattern": "/profile",
+      "sample": "/profile",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:567",
+      "pattern": "/backends",
+      "sample": "/backends",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:568",
+      "pattern": "/smart\\-approvals",
+      "sample": "/smart-approvals",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:569",
+      "pattern": "/memory",
+      "sample": "/memory",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:570",
+      "pattern": "/resources",
+      "sample": "/resources",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:571",
+      "pattern": "/remote\\-control",
+      "sample": "/remote-control",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:629",
+      "pattern": "/",
+      "sample": "/",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:795",
+      "pattern": "/smart\\-approvals",
+      "sample": "/smart-approvals",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:819",
+      "pattern": "/backends",
+      "sample": "/backends",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:840",
+      "pattern": "/backends",
+      "sample": "/backends",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/profile.mjs:857",
+      "pattern": "/memory",
+      "sample": "/memory",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:73",
+      "pattern": "/sessions/[^/?]+",
+      "sample": "/sessions/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:132",
+      "pattern": "/sessions/[^/?]+/cancel",
+      "sample": "/sessions/x/cancel",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:139",
+      "pattern": "/backends",
+      "sample": "/backends",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:139",
+      "pattern": "/models",
+      "sample": "/models",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:153",
+      "pattern": "/sessions/[^/?]+/cancel",
+      "sample": "/sessions/x/cancel",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:156",
+      "pattern": "/sessions/[^/?]+/checkpoints",
+      "sample": "/sessions/x/checkpoints",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:162",
+      "pattern": "/sessions/[^/?]+/checkpoints/[^/?]+/fork",
+      "sample": "/sessions/x/checkpoints/x/fork",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:181",
+      "pattern": "/sessions/[^/?]+/rerun",
+      "sample": "/sessions/x/rerun",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:188",
+      "pattern": "/sessions/[^/?]+/taint/clear",
+      "sample": "/sessions/x/taint/clear",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:244",
+      "pattern": "/sessions/[^/?]+/messages",
+      "sample": "/sessions/x/messages",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:402",
+      "pattern": "/sessions/[^/?]+/approvals/[^/?]+",
+      "sample": "/sessions/x/approvals/x",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:653",
+      "pattern": "/sessions/[^/?]+/checkpoints/[^/?]+/[^/?]+",
+      "sample": "/sessions/x/checkpoints/x/x",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:801",
+      "pattern": "/sessions/[^/?]+/approvals",
+      "sample": "/sessions/x/approvals",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:812",
+      "pattern": "/sessions/[^/?]+",
+      "sample": "/sessions/x",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:845",
+      "pattern": "/sessions/[^/?]+/messages",
+      "sample": "/sessions/x/messages",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:865",
+      "pattern": "/sessions/[^/?]+/review/[^/?]+",
+      "sample": "/sessions/x/review/x",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:913",
+      "pattern": "/sessions/[^/?]+/changes",
+      "sample": "/sessions/x/changes",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:925",
+      "pattern": "/sessions/[^/?]+/review\\-comments",
+      "sample": "/sessions/x/review-comments",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:959",
+      "pattern": "/sessions/[^/?]+/secret\\-findings/fix",
+      "sample": "/sessions/x/secret-findings/fix",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:973",
+      "pattern": "/sessions/[^/?]+/secret\\-findings/[^/?]+/dismiss",
+      "sample": "/sessions/x/secret-findings/x/dismiss",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:1051",
+      "pattern": "/sessions/[^/?]+/review\\-comments",
+      "sample": "/sessions/x/review-comments",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:1101",
+      "pattern": "/sessions/[^/?]+/review\\-comments/[^/?]+",
+      "sample": "/sessions/x/review-comments/x",
+      "methods": [
+        "DELETE"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/session.mjs:1109",
+      "pattern": "/sessions/[^/?]+/review\\-comments/send",
+      "sample": "/sessions/x/review-comments/send",
+      "methods": [
+        "POST"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/sessions.mjs:188",
+      "pattern": "/search",
+      "sample": "/search",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/sessions.mjs:225",
+      "pattern": "/queue",
+      "sample": "/queue",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/sessions.mjs:226",
+      "pattern": "/gpu",
+      "sample": "/gpu",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    },
+    {
+      "where": "public/pages/sessions.mjs:226",
+      "pattern": "/projects",
+      "sample": "/projects",
+      "methods": [
+        "GET"
+      ],
+      "app_surface": false
+    }
+  ],
+  "path_literals": [
+    {
+      "where": "public/app.js:112",
+      "sample": "/profile"
+    },
+    {
+      "where": "public/app.js:116",
+      "sample": "/sw.js"
+    },
+    {
+      "where": "public/client.mjs:13",
+      "sample": "/"
+    },
+    {
+      "where": "public/client.mjs:69",
+      "sample": "/api/v1"
+    },
+    {
+      "where": "public/client.mjs:69",
+      "sample": "/api/admin/v1"
+    },
+    {
+      "where": "public/client.mjs:124",
+      "sample": "/health"
+    },
+    {
+      "where": "public/client.mjs:145",
+      "sample": "/sessions/x/events"
+    },
+    {
+      "where": "public/lib/chrome.mjs:53",
+      "sample": "/sessions"
+    },
+    {
+      "where": "public/lib/keys.mjs:18",
+      "sample": "/"
+    },
+    {
+      "where": "public/lib/keys.mjs:65",
+      "sample": "/"
+    },
+    {
+      "where": "public/lib/keys.mjs:94",
+      "sample": "/></svg>"
+    },
+    {
+      "where": "public/lib/layout.mjs:32",
+      "sample": "/></svg>"
+    },
+    {
+      "where": "public/lib/layout.mjs:79",
+      "sample": "/></svg>"
+    },
+    {
+      "where": "public/lib/router.mjs:10",
+      "sample": "/"
+    },
+    {
+      "where": "public/lib/router.mjs:110",
+      "sample": "/"
+    },
+    {
+      "where": "public/lib/router.mjs:166",
+      "sample": "/images/cooldown"
+    },
+    {
+      "where": "public/lib/session-ui.mjs:54",
+      "sample": "/sessions/x"
+    },
+    {
+      "where": "public/lib/session-ui.mjs:57",
+      "sample": "/sessions/x"
+    },
+    {
+      "where": "public/lib/session.mjs:14",
+      "sample": "/sessions"
+    },
+    {
+      "where": "public/lib/session.mjs:102",
+      "sample": "/me"
+    },
+    {
+      "where": "public/lib/session.mjs:106",
+      "sample": "/me"
+    },
+    {
+      "where": "public/lib/session.mjs:116",
+      "sample": "/auth/session"
+    },
+    {
+      "where": "public/lib/sheet.mjs:97",
+      "sample": "/></svg>"
+    },
+    {
+      "where": "public/lib/signin.mjs:14",
+      "sample": "/auth/google/start"
+    },
+    {
+      "where": "public/lib/stream.mjs:22",
+      "sample": "/"
+    },
+    {
+      "where": "public/lib/stream.mjs:22",
+      "sample": "//"
+    },
+    {
+      "where": "public/lib/stream.mjs:219",
+      "sample": "/events"
+    },
+    {
+      "where": "public/lib/warm-model.mjs:12",
+      "sample": "/gpu"
+    },
+    {
+      "where": "public/lib/warm-model.mjs:16",
+      "sample": "/models/warm"
+    },
+    {
+      "where": "public/pages/actions.mjs:106",
+      "sample": "/resources/x"
+    },
+    {
+      "where": "public/pages/actions.mjs:159",
+      "sample": "/resources/diagnostics"
+    },
+    {
+      "where": "public/pages/actions.mjs:205",
+      "sample": "/resources/x"
+    },
+    {
+      "where": "public/pages/actions.mjs:227",
+      "sample": "/resources"
+    },
+    {
+      "where": "public/pages/actions.mjs:251",
+      "sample": "/remote-control/x/stop"
+    },
+    {
+      "where": "public/pages/actions.mjs:251",
+      "sample": "/remote-control/x"
+    },
+    {
+      "where": "public/pages/actions.mjs:286",
+      "sample": "/remote-control"
+    },
+    {
+      "where": "public/pages/actions.mjs:311",
+      "sample": "/maintenance"
+    },
+    {
+      "where": "public/pages/chat.mjs:260",
+      "sample": "/chats"
+    },
+    {
+      "where": "public/pages/chat.mjs:309",
+      "sample": "/chats/x"
+    },
+    {
+      "where": "public/pages/chat.mjs:310",
+      "sample": "/chats/options"
+    },
+    {
+      "where": "public/pages/chat.mjs:335",
+      "sample": "/chats"
+    },
+    {
+      "where": "public/pages/chat.mjs:341",
+      "sample": "/chats/x/messages"
+    },
+    {
+      "where": "public/pages/chat.mjs:353",
+      "sample": "/chats/x/cancel"
+    },
+    {
+      "where": "public/pages/chat.mjs:358",
+      "sample": "/chats/x/snippets"
+    },
+    {
+      "where": "public/pages/chat.mjs:362",
+      "sample": "/chats/x/snippets/x/cancel"
+    },
+    {
+      "where": "public/pages/chat.mjs:379",
+      "sample": "/chats/x"
+    },
+    {
+      "where": "public/pages/chat.mjs:384",
+      "sample": "/chats/x"
+    },
+    {
+      "where": "public/pages/chat.mjs:459",
+      "sample": "/chats/x/events"
+    },
+    {
+      "where": "public/pages/images.mjs:25",
+      "sample": "/images/x.png"
+    },
+    {
+      "where": "public/pages/images.mjs:97",
+      "sample": "/images"
+    },
+    {
+      "where": "public/pages/images.mjs:100",
+      "sample": "/gpu"
+    },
+    {
+      "where": "public/pages/images.mjs:109",
+      "sample": "/images/warmup"
+    },
+    {
+      "where": "public/pages/images.mjs:196",
+      "sample": "/images/uploads"
+    },
+    {
+      "where": "public/pages/images.mjs:221",
+      "sample": "/images"
+    },
+    {
+      "where": "public/pages/images.mjs:223",
+      "sample": "/images"
+    },
+    {
+      "where": "public/pages/images.mjs:244",
+      "sample": "/images"
+    },
+    {
+      "where": "public/pages/images.mjs:282",
+      "sample": "/images"
+    },
+    {
+      "where": "public/pages/images.mjs:290",
+      "sample": "/images/x.png"
+    },
+    {
+      "where": "public/pages/images.mjs:295",
+      "sample": "/images/x/cancel"
+    },
+    {
+      "where": "public/pages/images.mjs:303",
+      "sample": "/images/x"
+    },
+    {
+      "where": "public/pages/images.mjs:313",
+      "sample": "/images/x"
+    },
+    {
+      "where": "public/pages/images.mjs:325",
+      "sample": "/images/x/upscale"
+    },
+    {
+      "where": "public/pages/images.mjs:338",
+      "sample": "/images/x.png"
+    },
+    {
+      "where": "public/pages/images.mjs:437",
+      "sample": "/images/x"
+    },
+    {
+      "where": "public/pages/images.mjs:451",
+      "sample": "/images/x.png"
+    },
+    {
+      "where": "public/pages/images.mjs:485",
+      "sample": "/images/x/edit"
+    },
+    {
+      "where": "public/pages/images.mjs:502",
+      "sample": "/images/x"
+    },
+    {
+      "where": "public/pages/images.mjs:506",
+      "sample": "/images/x.png"
+    },
+    {
+      "where": "public/pages/jobs.mjs:92",
+      "sample": "/jobs"
+    },
+    {
+      "where": "public/pages/jobs.mjs:192",
+      "sample": "/jobs/x"
+    },
+    {
+      "where": "public/pages/jobs.mjs:193",
+      "sample": "/jobs/x"
+    },
+    {
+      "where": "public/pages/jobs.mjs:224",
+      "sample": "/projects"
+    },
+    {
+      "where": "public/pages/jobs.mjs:224",
+      "sample": "/models"
+    },
+    {
+      "where": "public/pages/jobs.mjs:224",
+      "sample": "/backends"
+    },
+    {
+      "where": "public/pages/jobs.mjs:224",
+      "sample": "/jobs/x"
+    },
+    {
+      "where": "public/pages/jobs.mjs:304",
+      "sample": "/jobs/x/run"
+    },
+    {
+      "where": "public/pages/jobs.mjs:328",
+      "sample": "/jobs"
+    },
+    {
+      "where": "public/pages/jobs.mjs:329",
+      "sample": "/jobs/x"
+    },
+    {
+      "where": "public/pages/jobs.mjs:333",
+      "sample": "/jobs/x"
+    },
+    {
+      "where": "public/pages/jobs.mjs:361",
+      "sample": "/jobs/x"
+    },
+    {
+      "where": "public/pages/jobs.mjs:375",
+      "sample": "/jobs/preview"
+    },
+    {
+      "where": "public/pages/new-task.mjs:24",
+      "sample": "/gpu"
+    },
+    {
+      "where": "public/pages/new-task.mjs:71",
+      "sample": "/sessions"
+    },
+    {
+      "where": "public/pages/new-task.mjs:89",
+      "sample": "/templates"
+    },
+    {
+      "where": "public/pages/new-task.mjs:103",
+      "sample": "/templates/x"
+    },
+    {
+      "where": "public/pages/new-task.mjs:119",
+      "sample": "/me/api-keys"
+    },
+    {
+      "where": "public/pages/new-task.mjs:128",
+      "sample": "/projects"
+    },
+    {
+      "where": "public/pages/new-task.mjs:128",
+      "sample": "/models"
+    },
+    {
+      "where": "public/pages/new-task.mjs:129",
+      "sample": "/templates"
+    },
+    {
+      "where": "public/pages/new-task.mjs:130",
+      "sample": "/backends"
+    },
+    {
+      "where": "public/pages/new-task.mjs:131",
+      "sample": "/gpu"
+    },
+    {
+      "where": "public/pages/new-task.mjs:170",
+      "sample": "/runners"
+    },
+    {
+      "where": "public/pages/new-task.mjs:206",
+      "sample": "/projects"
+    },
+    {
+      "where": "public/pages/new-task.mjs:307",
+      "sample": "/github/projects/x/items/x"
+    },
+    {
+      "where": "public/pages/new-task.mjs:323",
+      "sample": "/github/projects/x/items"
+    },
+    {
+      "where": "public/pages/new-task.mjs:351",
+      "sample": "/gpu"
+    },
+    {
+      "where": "public/pages/new-task.mjs:356",
+      "sample": "/models/status"
+    },
+    {
+      "where": "public/pages/new-task.mjs:382",
+      "sample": "/skills/enabled"
+    },
+    {
+      "where": "public/pages/new-task.mjs:405",
+      "sample": "/github/sessions"
+    },
+    {
+      "where": "public/pages/new-task.mjs:405",
+      "sample": "/sessions"
+    },
+    {
+      "where": "public/pages/profile.mjs:150",
+      "sample": "/profile"
+    },
+    {
+      "where": "public/pages/profile.mjs:196",
+      "sample": "/me/google"
+    },
+    {
+      "where": "public/pages/profile.mjs:200",
+      "sample": "/auth/logout"
+    },
+    {
+      "where": "public/pages/profile.mjs:212",
+      "sample": "/me/google"
+    },
+    {
+      "where": "public/pages/profile.mjs:242",
+      "sample": "/me/api-keys"
+    },
+    {
+      "where": "public/pages/profile.mjs:258",
+      "sample": "/me/api-keys/x"
+    },
+    {
+      "where": "public/pages/profile.mjs:262",
+      "sample": "/me/api-keys/x/test"
+    },
+    {
+      "where": "public/pages/profile.mjs:278",
+      "sample": "/me/api-keys/x"
+    },
+    {
+      "where": "public/pages/profile.mjs:302",
+      "sample": "/me/github-connection"
+    },
+    {
+      "where": "public/pages/profile.mjs:319",
+      "sample": "/me/github-connection/connect"
+    },
+    {
+      "where": "public/pages/profile.mjs:340",
+      "sample": "/me/github-connection/cancel"
+    },
+    {
+      "where": "public/pages/profile.mjs:348",
+      "sample": "/me/github-connection"
+    },
+    {
+      "where": "public/pages/profile.mjs:430",
+      "sample": "/me"
+    },
+    {
+      "where": "public/pages/profile.mjs:430",
+      "sample": "/profile"
+    },
+    {
+      "where": "public/pages/profile.mjs:449",
+      "sample": "/me"
+    },
+    {
+      "where": "public/pages/profile.mjs:450",
+      "sample": "/profile"
+    },
+    {
+      "where": "public/pages/profile.mjs:500",
+      "sample": "/me"
+    },
+    {
+      "where": "public/pages/profile.mjs:502",
+      "sample": "/me"
+    },
+    {
+      "where": "public/pages/profile.mjs:508",
+      "sample": "/profile"
+    },
+    {
+      "where": "public/pages/profile.mjs:567",
+      "sample": "/backends"
+    },
+    {
+      "where": "public/pages/profile.mjs:568",
+      "sample": "/smart-approvals"
+    },
+    {
+      "where": "public/pages/profile.mjs:569",
+      "sample": "/memory"
+    },
+    {
+      "where": "public/pages/profile.mjs:570",
+      "sample": "/resources"
+    },
+    {
+      "where": "public/pages/profile.mjs:571",
+      "sample": "/remote-control"
+    },
+    {
+      "where": "public/pages/profile.mjs:678",
+      "sample": "/static/icon-180.png"
+    },
+    {
+      "where": "public/pages/profile.mjs:684",
+      "sample": "/static/icon-192.png"
+    },
+    {
+      "where": "public/pages/profile.mjs:724",
+      "sample": "/static/icon-180.png"
+    },
+    {
+      "where": "public/pages/profile.mjs:795",
+      "sample": "/smart-approvals"
+    },
+    {
+      "where": "public/pages/profile.mjs:819",
+      "sample": "/backends"
+    },
+    {
+      "where": "public/pages/profile.mjs:840",
+      "sample": "/backends"
+    },
+    {
+      "where": "public/pages/profile.mjs:857",
+      "sample": "/memory"
+    },
+    {
+      "where": "public/pages/session-info.mjs:31",
+      "sample": "/sessions/x/transcript"
+    },
+    {
+      "where": "public/pages/session.mjs:73",
+      "sample": "/sessions/x"
+    },
+    {
+      "where": "public/pages/session.mjs:132",
+      "sample": "/sessions/x/cancel"
+    },
+    {
+      "where": "public/pages/session.mjs:139",
+      "sample": "/backends"
+    },
+    {
+      "where": "public/pages/session.mjs:139",
+      "sample": "/models"
+    },
+    {
+      "where": "public/pages/session.mjs:153",
+      "sample": "/sessions/x/cancel"
+    },
+    {
+      "where": "public/pages/session.mjs:156",
+      "sample": "/sessions/x/checkpoints"
+    },
+    {
+      "where": "public/pages/session.mjs:162",
+      "sample": "/sessions/x/checkpoints/x/fork"
+    },
+    {
+      "where": "public/pages/session.mjs:181",
+      "sample": "/sessions/x/rerun"
+    },
+    {
+      "where": "public/pages/session.mjs:188",
+      "sample": "/sessions/x/taint/clear"
+    },
+    {
+      "where": "public/pages/session.mjs:190",
+      "sample": "/sessions/x/transcript"
+    },
+    {
+      "where": "public/pages/session.mjs:244",
+      "sample": "/sessions/x/messages"
+    },
+    {
+      "where": "public/pages/session.mjs:402",
+      "sample": "/sessions/x/approvals/x"
+    },
+    {
+      "where": "public/pages/session.mjs:653",
+      "sample": "/sessions/x/checkpoints/x/x"
+    },
+    {
+      "where": "public/pages/session.mjs:770",
+      "sample": "/sessions/x/events"
+    },
+    {
+      "where": "public/pages/session.mjs:801",
+      "sample": "/sessions/x/approvals"
+    },
+    {
+      "where": "public/pages/session.mjs:812",
+      "sample": "/sessions/x"
+    },
+    {
+      "where": "public/pages/session.mjs:845",
+      "sample": "/sessions/x/messages"
+    },
+    {
+      "where": "public/pages/session.mjs:865",
+      "sample": "/sessions/x/review/x"
+    },
+    {
+      "where": "public/pages/session.mjs:913",
+      "sample": "/sessions/x/changes"
+    },
+    {
+      "where": "public/pages/session.mjs:925",
+      "sample": "/sessions/x/review-comments"
+    },
+    {
+      "where": "public/pages/session.mjs:959",
+      "sample": "/sessions/x/secret-findings/fix"
+    },
+    {
+      "where": "public/pages/session.mjs:973",
+      "sample": "/sessions/x/secret-findings/x/dismiss"
+    },
+    {
+      "where": "public/pages/session.mjs:984",
+      "sample": "/"
+    },
+    {
+      "where": "public/pages/session.mjs:1051",
+      "sample": "/sessions/x/review-comments"
+    },
+    {
+      "where": "public/pages/session.mjs:1101",
+      "sample": "/sessions/x/review-comments/x"
+    },
+    {
+      "where": "public/pages/session.mjs:1109",
+      "sample": "/sessions/x/review-comments/send"
+    },
+    {
+      "where": "public/pages/sessions.mjs:14",
+      "sample": "/></svg>"
+    },
+    {
+      "where": "public/pages/sessions.mjs:15",
+      "sample": "/></svg>"
+    },
+    {
+      "where": "public/pages/sessions.mjs:38",
+      "sample": "/"
+    },
+    {
+      "where": "public/pages/sessions.mjs:42",
+      "sample": "/"
+    },
+    {
+      "where": "public/pages/sessions.mjs:43",
+      "sample": "/"
+    },
+    {
+      "where": "public/pages/sessions.mjs:66",
+      "sample": "/sessions"
+    },
+    {
+      "where": "public/pages/sessions.mjs:66",
+      "sample": "/sessions"
+    },
+    {
+      "where": "public/pages/sessions.mjs:102",
+      "sample": "/approval/x"
+    },
+    {
+      "where": "public/pages/sessions.mjs:188",
+      "sample": "/search"
+    },
+    {
+      "where": "public/pages/sessions.mjs:225",
+      "sample": "/queue"
+    },
+    {
+      "where": "public/pages/sessions.mjs:226",
+      "sample": "/gpu"
+    },
+    {
+      "where": "public/pages/sessions.mjs:226",
+      "sample": "/projects"
+    }
+  ],
+  "sources": 41
+}

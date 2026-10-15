@@ -1,9 +1,10 @@
 name: CI
 
-# One workflow, three jobs, all GitHub-hosted (free for this public repo):
-#   web-types - generated OpenAPI freshness and Stables type checking (stables/types)
-#   test  - the complete pytest suite with coverage (coverage.xml artifact)
-#   sonar - SonarCloud analysis of that coverage, with the quality-gate wait
+# One workflow, all GitHub-hosted (free for this public repo):
+#   openapi   - the committed OpenAPI document (tools/openapi/openapi.json) matches the Server
+#   test      - the complete pytest suite with coverage (coverage.xml artifact)
+#   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
+#   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
 # The suite runs once. Tests used to run a second time on a self-hosted
 # `agent-harness-ci` pool on the tower; that pool is retired so CI no longer
 # competes with llama-server and the desktop for RAM. The job ids `test` and
@@ -188,7 +189,9 @@ jobs:
             -Dsonar.host.url=https://sonarcloud.io
             -Dsonar.qualitygate.wait=true
 
-  web-types:
+  openapi:
+    # Clients pin this document: Stables (dflippojr/stables) copies it into types/openapi.json and type-checks
+    # against the copy, so a route or model change shows up here as a diff to the committed document.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -196,17 +199,10 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: stables/types/package-lock.json
-      - name: Install schema and type-check dependencies
-        run: |
-          python -m pip install -r requirements.txt -r tools/openapi/requirements.txt
-          npm --prefix stables/types ci
-      - name: Verify generated API contract and check native JavaScript
-        run: npm --prefix stables/types run check
+      - name: Install schema dependencies
+        run: python -m pip install -r requirements.txt -r tools/openapi/requirements.txt
+      - name: Verify the committed OpenAPI document
+        run: python tools/openapi/export_schema.py --check
 
   ui-tests:
     runs-on: windows-latest
@@ -216,6 +212,28 @@ jobs:
       - name: Configure disposable instance path
         run: |
           "HARNESS_UI_INSTANCE_DIR=$env:RUNNER_TEMP/harness-ui-tests" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      # Stables lives in the private dflippojr/stables (#334). STABLES_DEPLOY_KEY is a read-only deploy key there; it is
+      # in the Actions and Dependabot secret stores. Forks have neither, so their PRs stop here with this message.
+      - name: Read the Stables pin
+        id: stables
+        env:
+          STABLES_DEPLOY_KEY: ${{ secrets.STABLES_DEPLOY_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:STABLES_DEPLOY_KEY)) {
+            throw 'STABLES_DEPLOY_KEY is required to check out the pinned Stables release (dflippojr/stables).'
+          }
+          $pin = Get-Content -Raw tools/stables/pin.json | ConvertFrom-Json
+          "repository=$($pin.repository)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "tag=$($pin.tag)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "HARNESS_STABLES_DIR=$env:GITHUB_WORKSPACE\stables-release\public" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Check out the pinned Stables release
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.stables.outputs.repository }}
+          ref: refs/tags/${{ steps.stables.outputs.tag }}
+          path: stables-release
+          ssh-key: ${{ secrets.STABLES_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -230,6 +248,8 @@ jobs:
           python -m pip install -r requirements.txt
           npm --prefix tools/ui-tests ci
           npm --prefix tools/ui-tests exec -- playwright install chromium webkit
+      - name: The pinned commit and API call list match the Stables checkout
+        run: python tools/stables/pin.py --check stables-release
       - name: Run disposable fake-model UI journeys
         run: npm --prefix tools/ui-tests test -- --workers=1
       - name: Redact traces and stop the disposable instance

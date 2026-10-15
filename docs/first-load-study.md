@@ -235,7 +235,7 @@ the repo), so the ~1 s first-load saving is supported by the arithmetic but not 
 ## Follow-up: app.js split into ES modules, stage (a) (#258)
 
 Stage (a) moved the pure helpers into nine `harness/web/lib/*.mjs` modules, so a cold load fetches 11 scripts instead of
-2 (`app.js`, `client.mjs`, `lib/`). Measured with `scripts/web-first-paint.mjs` (in repo; headless Chromium 153.0.8010.12
+2 (`app.js`, `client.mjs`, `lib/`). Measured with `scripts/web-first-paint.mjs` (now `tools/first-paint.mjs` in dflippojr/stables; headless Chromium 153.0.8010.12
 over CDP, cold profile per run, 390x844 DPR 3, 4x CPU, +150 ms per request, 200 KB/s, gzip like `harness/webgzip.py`,
 `/api` answering 503 so the route renders its offline state). 5 runs, median (min-max) ms, route `#/agents`:
 

@@ -81,7 +81,7 @@ in `coverage.xml` resolve. Worker count is fixed at 4 (not pytest's auto count) 
 measure branches on Python 3.12 (this job; sysmon branch support starts at 3.14). The scan still uses
 `sonar.qualitygate.wait=true`. The suite is Windows-native; Ubuntu hosted runners fail coverage collection on
 `msvcrt`, console-creation flags, and Windows paths. Docker-image and GPU tests still skip on the hosted runner
-and do not contribute coverage. Non-Python trees (`stables/public`, `ops`, scripts that are not `.py`) are excluded
+and do not contribute coverage. Non-Python trees (`ops`, scripts that are not `.py`) are excluded
 from the coverage metric. Confirm the SonarCloud project still uses a gate that includes coverage on new code;
 the workflow cannot set that condition itself. PR analysis stays on GitHub-hosted Windows; it must not move to
 the tower.
@@ -569,7 +569,8 @@ a forced-off module back on. It selects the `full` profile with **every** module
 profile, which would require an enabled hosted backend. Off: local model / llama-server / inference endpoint,
 images and image edit, the GPU guard, hosted CLI backends, `homelab`, `remote_control`, Mac `runners`, `jobs`,
 notifications / ntfy, `backup`, `web` search and fetch, memory-library writes, `search`, `skills`, and repository
-cloning. On: the Server process, Stables, `/health`, the owner/admin API against staging data, the config
+cloning. On: the Server process, Stables (the release the candidate pins in `tools/stables/pin.json`, checked out
+by the workflow and copied into the staging checkout as `stables/`), `/health`, the owner/admin API against staging data, the config
 registry over the staging overlay, and creating or listing sessions, which fail closed with a "no backend" error.
 
 After the slot reports healthy, the deployer reads `/health` and refuses to leave staging up if any module or hosted

@@ -1,12 +1,18 @@
+import os
 import re
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from harness import backend_state, cli_domains, metrics, secret_scan
+from harness import backend_state, cli_domains, metrics, secret_scan, stables_shell
 from harness_modules.local_model import service as gpu_guard
 from harness_modules.local_model.warmup import READY, ModelWarmer
+
+# Stables lives in its own repository (#334). The Server's tests serve a stand-in shell instead of whatever copy the
+# machine has (tests/fixtures/stables_shell/README.md); tests that need no shell set the variable themselves.
+STABLES_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "stables_shell" / "public"
+os.environ[stables_shell.ENV] = str(STABLES_FIXTURE)
 
 
 def isolate_local_supervision(monkeypatch, flag_dir):

@@ -426,27 +426,13 @@ def test_daemon_stop_interrupts_a_running_snippet(tmp_path):
     assert result["data"]["reasons"] == ["daemon_restart"]
 
 
-def test_web_client_run_controls_and_untrusted_rendering(tmp_path):
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node isn't installed")
-    from pathlib import Path
-    script = Path(__file__).resolve().parents[1] / "stables" / "tests" / "web_chat_snippets.mjs"
-    result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "ok" in result.stdout
-
-
 def test_web_client_languages_match_the_server():
-    from pathlib import Path
-    js = (Path(__file__).resolve().parents[1] / "stables" / "public" / "lib" / "snippets.mjs").read_text(encoding="utf-8")
-    block = js[js.index("export const SNIPPET_LANGUAGES"):]
-    block = block[:block.index("};") + 2]
+    """The pinned Stables release (tools/stables/api-calls.json) offers the languages the Server runs."""
+    from stables_pin import FACTS
+    client = FACTS["snippet_languages"]
     for lang in SnippetService.languages():
-        entry = re.search(rf"\b{lang['id']}: \{{ label: \"([^\"]+)\", aliases: \[([^\]]*)\]", block)
-        assert entry, lang["id"]
-        assert entry[1] == lang["label"]
-        assert sorted(re.findall(r'"([^"]+)"', entry[2])) == sorted(lang["aliases"])
+        assert lang["id"] in client, lang["id"]
+        assert client[lang["id"]] == {"label": lang["label"], "aliases": sorted(lang["aliases"])}
 
 
 # ---------- live Docker: real toolchains and abuse cases ----------

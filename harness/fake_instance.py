@@ -118,7 +118,7 @@ def web_app(server: str, token: str, state: dict):
     from . import stables_shell
     web = stables_shell.locate()
     if web is None:
-        raise StartError(f"no Stables shell: set {stables_shell.ENV} or restore stables/public")
+        raise StartError(f"no Stables shell: set {stables_shell.ENV} to the public/ directory of a dflippojr/stables checkout")
 
     async def connect(_request):
         return HTMLResponse(connect_page(server, token), headers={"Cache-Control": "no-store"})

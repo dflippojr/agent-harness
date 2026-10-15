@@ -10,8 +10,10 @@ docstring of [`harness/fake_model.py`](../harness/fake_model.py).
 
 ## Scope and isolation
 
-- **Target.** Stables (`stables/public`, native JavaScript, no build step) served against Agent Harness Server
-  (`harness/`) from this repository, `dflippojr/agent-harness`.
+- **Target.** Stables (dflippojr/stables, native JavaScript, no build step) at the release pinned in
+  `tools/stables/pin.json`, served against Agent Harness Server (`harness/`) from this repository,
+  `dflippojr/agent-harness`. Point `HARNESS_STABLES_DIR` at that checkout's `public/` (CI checks the tag out into
+  `stables-release/`), or clone it into this checkout as `stables/`.
 - **Loopback only.** Both listeners bind `127.0.0.1` and nothing else:
   - the Server at `http://127.0.0.1:<port>`
   - a separately hosted copy of Web at `http://127.0.0.1:<web-port>`
@@ -258,9 +260,8 @@ readiness signal.
 ## Playwright and CI
 
 - **Current state.** The Playwright suite added by #589 lives at the paths below. The
-  existing web tests are Node scripts with DOM stubs in `stables/tests` (run by `npm --prefix stables test`), each
-  also wrapped by a pytest test (`tests/test_web_*.py`).
-- **Package manager and paths.** npm, in a self-contained package like `stables/types`:
+  client's Node scripts with DOM stubs live with it in dflippojr/stables (`tests/`, run by `npm test` there).
+- **Package manager and paths.** npm, in a self-contained package:
   - `tools/ui-tests/package.json` with `@playwright/test` pinned to an exact version, plus its `package-lock.json`
   - config `tools/ui-tests/playwright.config.ts`
   - tests `tools/ui-tests/tests/*.spec.ts`

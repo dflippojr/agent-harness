@@ -8,12 +8,18 @@ the current origin/main, pulls immutable SHA-tagged sandbox images, and resolves
 virtual environment before downtime. It then stops the daemon, swaps the virtual environment, fast-forwards,
 retags the images, and starts and health-checks the daemon. A failure after stop restores the old checkout and
 untouched virtual environment before restarting the old daemon. It never runs for pull requests.
+
+Stables, the browser client, ships from dflippojr/stables (#334). The workflow checks out the tag pinned in
+tools/stables/pin.json; this script verifies that checkout is the pinned commit, copies its public/ side by side
+before downtime, and points .stables-path at the copy with the virtual environment swap. run-daemon.ps1 hands that
+path to the daemon as HARNESS_STABLES_DIR. A rollback restores the previous pointer.
 #>
 param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit,
     [string]$ReleaseRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
     [string]$DeployDir = 'D:\Projects\agent-harness',
     [string]$Registry = 'ghcr.io/dflippojr',
+    [string]$StablesRelease = '',
     [switch]$DryRun,
     [ValidateSet('None', 'AfterStop', 'AfterSwap', 'AfterMerge', 'AfterStart')]
     [string]$DryRunFailure = 'None'
@@ -52,7 +58,7 @@ function Remove-DeploymentDirectory([string]$Path) {
     if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
 }
 
-function Set-DeploymentVenvPointer([string]$Pointer, [string]$TemporaryPointer, [string]$Target) {
+function Set-DeploymentPointer([string]$Pointer, [string]$TemporaryPointer, [string]$Target) {
     if ($DryRun) { Write-Host "[dry run] Set-Content $Pointer -> $Target"; return }
     [System.IO.File]::WriteAllText($TemporaryPointer, $Target)
     if (Test-Path -LiteralPath $Pointer) {
@@ -61,7 +67,7 @@ function Set-DeploymentVenvPointer([string]$Pointer, [string]$TemporaryPointer, 
     Move-Item -LiteralPath $TemporaryPointer -Destination $Pointer
 }
 
-function Restore-DeploymentVenvPointer(
+function Restore-DeploymentPointer(
     [string]$Pointer,
     [string]$TemporaryPointer,
     [bool]$PreviouslyExisted,
@@ -72,8 +78,14 @@ function Restore-DeploymentVenvPointer(
         else { Write-Host "[dry run] Remove-Item $Pointer" }
         return
     }
-    if ($PreviouslyExisted) { Set-DeploymentVenvPointer $Pointer $TemporaryPointer $PreviousTarget }
+    if ($PreviouslyExisted) { Set-DeploymentPointer $Pointer $TemporaryPointer $PreviousTarget }
     elseif (Test-Path -LiteralPath $Pointer) { Remove-Item -LiteralPath $Pointer -Force }
+}
+
+function Copy-DeploymentStables([string]$Source, [string]$Target) {
+    if ($DryRun) { Write-Host "[dry run] Copy-Item -Recurse $Source -> $Target"; return }
+    New-Item -ItemType Directory -Force -Path $Target | Out-Null
+    Copy-Item -LiteralPath $Source -Destination $Target -Recurse
 }
 
 function Invoke-DryRunFailure([string]$Stage) {
@@ -119,6 +131,21 @@ if (-not $DryRun) {
     if ($LASTEXITCODE -ne 0) { throw "live checkout is not an ancestor of $Commit; refusing a non-fast-forward deployment" }
 }
 Write-Host '[deploy] guards passed'
+
+$pinPath = Join-Path $release 'tools\stables\pin.json'
+if (-not (Test-Path -LiteralPath $pinPath)) { throw "Stables pin is missing: $pinPath" }
+$stablesPin = Get-Content -Raw -LiteralPath $pinPath | ConvertFrom-Json
+if ([string]$stablesPin.commit -notmatch '^[0-9a-f]{40}$') { throw "Stables pin names no commit: $pinPath" }
+if (-not $StablesRelease) { $StablesRelease = Join-Path $release 'stables-release' }
+if (-not (Test-Path -LiteralPath (Join-Path $StablesRelease 'public\index.html'))) {
+    throw "Stables checkout has no public\index.html: $StablesRelease"
+}
+$stablesCommit = Get-GitOutput -FailureMessage 'could not resolve the Stables checkout HEAD' `
+    -GitArguments @('-C', $StablesRelease, 'rev-parse', 'HEAD')
+if ($stablesCommit -ne $stablesPin.commit) {
+    throw "Stables checkout is $stablesCommit, but tools/stables/pin.json pins $($stablesPin.tag) at $($stablesPin.commit)"
+}
+Write-Host "[deploy] Stables $($stablesPin.tag) verified"
 
 $shaTag = "sha-$Commit"
 $sandbox = "$Registry/agent-harness-sandbox:$shaTag"
@@ -174,11 +201,34 @@ try {
 }
 Write-Host '[deploy] dependencies staged'
 
+$stablesPointer = Join-Path $deploy '.stables-path'
+$stablesPointerTemp = Join-Path $deployParent ".$deployName.stables-path-$Commit.tmp"
+$hadStablesPointer = Test-Path -LiteralPath $stablesPointer
+$previousStables = if ($hadStablesPointer) { ([string](Get-Content -Raw -LiteralPath $stablesPointer)).Trim() } else { '' }
+$managedStablesPrefix = Join-Path $deployParent ".$deployName.stables-"
+$stagedStablesRoot = "$managedStablesPrefix$stablesCommit"
+$stagedStables = Join-Path $stagedStablesRoot 'public'
+$stablesChanged = ($previousStables -ne $stagedStables) -or `
+    -not (Test-Path -LiteralPath (Join-Path $stagedStables 'index.html'))
+if ($stablesChanged) {
+    try {
+        # A copy left by an interrupted deployment is never the active one here, so it is replaced.
+        Remove-DeploymentDirectory $stagedStablesRoot
+        Copy-DeploymentStables (Join-Path $StablesRelease 'public') $stagedStablesRoot
+    } catch {
+        Remove-DeploymentDirectory $stagedStablesRoot
+        Remove-DeploymentDirectory $stagedVenv
+        throw
+    }
+}
+Write-Host '[deploy] Stables staged'
+
 $restart = Join-Path $release 'ops\harness\restart-daemon.ps1'
 if (-not $DryRun) {
     try { . $restart }
     catch {
         Remove-DeploymentDirectory $stagedVenv
+        if ($stablesChanged) { Remove-DeploymentDirectory $stagedStablesRoot }
         throw
     }
 }
@@ -198,6 +248,7 @@ function Start-DeploymentDaemon {
 }
 $stopInitiated = $false
 $venvSwitchInitiated = $false
+$stablesSwitchInitiated = $false
 $mergeInitiated = $false
 $imageRetagInitiated = $false
 try {
@@ -207,8 +258,13 @@ try {
     Invoke-DryRunFailure 'AfterStop'
 
     $venvSwitchInitiated = $true
-    Set-DeploymentVenvPointer $venvPointer $venvPointerTemp $stagedVenv
+    Set-DeploymentPointer $venvPointer $venvPointerTemp $stagedVenv
     Write-Host '[deploy] virtual environment swapped'
+    if ($stablesChanged) {
+        $stablesSwitchInitiated = $true
+        Set-DeploymentPointer $stablesPointer $stablesPointerTemp $stagedStables
+    }
+    Write-Host "[deploy] Stables $($stablesPin.tag) selected"
     Invoke-DryRunFailure 'AfterSwap'
 
     $mergeInitiated = $true
@@ -226,6 +282,7 @@ try {
     $deploymentError = $_.Exception.Message
     if (-not $stopInitiated) {
         Remove-DeploymentDirectory $stagedVenv
+        if ($stablesChanged) { Remove-DeploymentDirectory $stagedStablesRoot }
         throw
     }
 
@@ -248,11 +305,20 @@ try {
 
     try {
         if ($venvSwitchInitiated) {
-            Restore-DeploymentVenvPointer $venvPointer $venvPointerTemp $hadVenvPointer $previousVenv
+            Restore-DeploymentPointer $venvPointer $venvPointerTemp $hadVenvPointer $previousVenv
         }
         Write-Host '[rollback] restored previous virtual environment'
     } catch {
         $rollbackErrors.Add("virtual environment: $($_.Exception.Message)")
+    }
+
+    try {
+        if ($stablesSwitchInitiated) {
+            Restore-DeploymentPointer $stablesPointer $stablesPointerTemp $hadStablesPointer $previousStables
+        }
+        Write-Host '[rollback] restored previous Stables'
+    } catch {
+        $rollbackErrors.Add("Stables: $($_.Exception.Message)")
     }
 
     if ($imageRetagInitiated) {
@@ -290,6 +356,13 @@ try {
         }
     } catch { $rollbackErrors.Add("staged environment cleanup: $($_.Exception.Message)") }
 
+    try {
+        $activeStables = if (Test-Path -LiteralPath $stablesPointer) {
+            ([string](Get-Content -Raw -LiteralPath $stablesPointer)).Trim()
+        } else { '' }
+        if ($stablesChanged -and $activeStables -ne $stagedStables) { Remove-DeploymentDirectory $stagedStablesRoot }
+    } catch { $rollbackErrors.Add("staged Stables cleanup: $($_.Exception.Message)") }
+
     if ($rollbackErrors.Count -gt 0) {
         throw "deployment failed after daemon stop ($deploymentError); rollback also failed: $($rollbackErrors -join '; ')"
     }
@@ -302,6 +375,13 @@ if ($hadVenvPointer -and $previousVenv.StartsWith($managedVenvPrefix, [System.St
     catch { Write-Warning "deployment succeeded but old virtual environment cleanup failed: $($_.Exception.Message)" }
 }
 
+if ($stablesChanged -and $previousStables.StartsWith($managedStablesPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $previousStables -ne $stagedStables) {
+    try { Remove-DeploymentDirectory (Split-Path $previousStables -Parent) }
+    catch { Write-Warning "deployment succeeded but old Stables cleanup failed: $($_.Exception.Message)" }
+}
+
 Write-Host "Deployed $Commit"
 Write-Host "  sandbox: $sandbox -> $sandboxStable"
 Write-Host "  cli:     $cli -> $cliStable"
+Write-Host "  stables: $($stablesPin.tag) ($stablesCommit) -> $stagedStables"

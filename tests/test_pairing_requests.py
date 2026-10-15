@@ -7,7 +7,6 @@ import json
 import re
 import secrets
 import threading
-from pathlib import Path
 
 import httpx
 import pytest
@@ -24,7 +23,6 @@ ORIGIN = "https://shop.example"
 OTHER = "https://other.example"
 CATALOG_ID = "com.example.shopping-list"
 BASE = PREFIX + "/pairing-requests"
-WEB = Path(__file__).resolve().parents[1] / "stables" / "public"
 SECRET_PREFIXES = ("ha-", "ho-", "hp-")
 
 
@@ -566,13 +564,6 @@ def test_cli_rows_call_the_owner_routes_and_print_no_secret(hh, monkeypatch, cap
     assert cli.main() == 0
     out.append(capsys.readouterr().out)
     _assert_no_secrets(out + err, verifier, native_verifier, match, claimed["match_code"], hub.json()["match_code"])
-
-
-def test_web_never_calls_the_redeem_route_or_reads_a_token_from_it():
-    for path in [*WEB.rglob("*.mjs"), *WEB.rglob("*.js"), *WEB.rglob("*.html")]:
-        text = path.read_text(encoding="utf-8")
-        assert "pair/requests" not in text, path
-        assert not re.search(r"pairing-requests[^\"'`]*/token", text), path
 
 
 def test_sdk_requests_and_redeems_against_the_daemon(hh, monkeypatch):

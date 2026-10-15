@@ -1,5 +1,5 @@
 # Local checks
 
-With project Python dependencies and `tools/openapi/requirements.txt` installed and `npm --prefix stables/types ci` completed, run `npm --prefix stables/types run check` to verify generated API contracts and type-check Stables. Set `PYTHON` to your project interpreter if it is not on PATH.
+With project Python dependencies and `tools/openapi/requirements.txt` installed, run `python tools/openapi/export_schema.py --check` to verify the committed OpenAPI document.
 
-Stables ships native JavaScript without a build step. Its type tooling and generated declarations live in `stables/types`, outside the served `stables/public`; the Server's OpenAPI exporter stays in `tools/openapi`. After changing API models, regenerate with `npm --prefix stables/types run generate` and commit both generated files.
+Stables, the browser client, lives in its own repository, dflippojr/stables (#334). After changing API routes or models, regenerate the document with `python tools/openapi/export_schema.py --write` and commit it; Stables pins a copy. This repository pins a Stables release in `tools/stables/pin.json` (see `tools/stables/README.md`): the tower deploys it, the Playwright journeys in `tools/ui-tests` run against it, and the management-parity tests read its API calls from `tools/stables/api-calls.json`. The Server's own tests serve a stand-in shell (`tests/fixtures/stables_shell`).

@@ -25,6 +25,7 @@ param(
     [string]$Repository = '',
     [string]$ReleaseRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
     [string]$BootstrapPython = '',
+    [string]$StablesRelease = '',
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -107,6 +108,28 @@ try {
     Run git @('-C', $StagingCheckout, 'reset', '--hard', $Commit)
     Run git @('-C', $StagingCheckout, 'clean', '-ffdx')
     Write-Host "[staging] checkout at $Commit"
+
+    # Stables lives in dflippojr/stables (#334). A candidate that pins a release gets it as stables/ in its checkout
+    # (ignored by git), where the Server looks when HARNESS_STABLES_DIR is unset. An older candidate carries
+    # stables/public itself.
+    $candidatePin = Join-Path $StagingCheckout 'tools\stables\pin.json'
+    if (Test-Path -LiteralPath $candidatePin) {
+        $pin = Get-Content -Raw -LiteralPath $candidatePin | ConvertFrom-Json
+        if (-not $StablesRelease -or -not (Test-Path -LiteralPath (Join-Path $StablesRelease 'public\index.html'))) {
+            throw "the candidate pins Stables $($pin.tag), but no checkout of it was passed (-StablesRelease)"
+        }
+        $stablesHead = & git -C $StablesRelease rev-parse HEAD
+        if ($LASTEXITCODE -ne 0 -or ([string]$stablesHead).Trim() -ne $pin.commit) {
+            throw "Stables checkout is $stablesHead, but the candidate pins $($pin.tag) at $($pin.commit)"
+        }
+        $stablesTarget = Join-Path $StagingCheckout 'stables'
+        if ($planOnly) { Write-Host "[dry run] Copy-Item -Recurse $StablesRelease\public -> $stablesTarget" }
+        else {
+            New-Item -ItemType Directory -Force $stablesTarget | Out-Null
+            Copy-Item -LiteralPath (Join-Path $StablesRelease 'public') -Destination $stablesTarget -Recurse
+        }
+        Write-Host "[staging] Stables $($pin.tag) in place"
+    }
 
     $stagingPython = Join-Path $StagingVenv 'Scripts\python.exe'
     Initialize-StagingPython -Venv $StagingVenv -BootstrapPython $BootstrapPython -DryRun:$planOnly

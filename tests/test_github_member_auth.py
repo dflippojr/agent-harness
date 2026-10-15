@@ -737,19 +737,6 @@ def _assert_no_secrets(m, fake, tmp_path):
         assert secret not in rows
 
 
-def test_web_ui_member_card_keeps_nothing_in_the_browser():
-    pages = Path(__file__).resolve().parents[1] / "stables" / "public" / "pages"
-    new_task = (pages / "new-task.mjs").read_text(encoding="utf-8")
-    profile = (pages / "profile.mjs").read_text(encoding="utf-8")
-    start = profile.index("function githubConnectionCard(")
-    card = profile[start:profile.index("\n// Each profile subpage", start)]
-    for forbidden in ("localStorage", "sessionStorage", "storeSet", "window.open"):
-        assert forbidden not in card, forbidden  # no browser automation, nothing persisted in the browser
-    form = new_task[new_task.index('const githubConnect = h("div");'):new_task.index("const model = h(\"select\"")]
-    assert "localStorage" not in form and "sessionStorage" not in form
-    assert not [line for line in form.splitlines() if "storeSet(" in line and "repo" in line.lower()]
-
-
 def test_real_git_reaches_only_the_pinned_helper_in_the_member_namespace(tmp_path, fake):
     """Real `git credential fill` with the broker's env and -c overrides asks the pinned GCM, noninteractively."""
     import shutil

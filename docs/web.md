@@ -1,32 +1,43 @@
 # Stables
 
 Stables (formerly Agent Harness Web) is the first-party browser UI and installable PWA for Agent Harness Server. Each
-model is a horse; the agent system is its harness. Its static files live in `stables/public` and have no build step.
-Agent Harness Server serves that directory when it is present, so existing Tailscale PWA installs continue to work. The
-same directory can also be hosted at a separate HTTPS origin.
+model is a horse; the agent system is its harness. It lives in its own repository, [dflippojr/stables](https://github.com/dflippojr/stables), and its
+static files (`public/` there) have no build step. Agent Harness Server serves a copy when it finds one (see "Where the
+Server finds Stables" below), so existing Tailscale PWA installs continue to work. The same files can also be hosted at
+a separate HTTPS origin.
 
 The PWA manifest name, short name, browser title and Apple standalone title are **Stables**. Functional navigation
 labels such as Agents, Jobs, Images, Profile, and Settings remain task-oriented.
 
 ## A standalone client
 
-Stables is a client of the documented API, not part of the Server (#334 stage (d)). The rules, checked by
-`tests/test_stables_boundary.py`:
+Stables is a client of the documented API, not part of the Server (#334). The rules:
 
-- Stables loads only its own files. Its one reach outside `stables/public` is type-only: JSDoc `@import` of the API
-  contract types in `stables/types`, which are generated from the Server's OpenAPI document.
+- Stables loads only its own files. Its one reach outside `public/` is type-only: JSDoc `@import` of the API contract
+  types in its `types/`, which are generated from the Server's OpenAPI document (`tools/openapi/openapi.json` here,
+  pinned there). Stables' `tests/boundary.mjs` checks this and the next rule.
 - Only its transport (`client.mjs`, `lib/stream.mjs`) and the service worker open connections. Requests go to
   `/api/v1` or `/api/admin/v1`; the only unversioned call is `GET /health`, the compatibility probe.
-- The Server names the client's files in one place, `harness/stables_shell.py`. It serves the shell from the
-  directory in `HARNESS_STABLES_DIR` when that is set, else from the checkout's `stables/public`. With neither, it runs
-  the API alone: `/`, `/static/...` and the shell files return 404, and nothing else changes.
+- The Server names the client's files in one place, `harness/stables_shell.py` (checked by
+  `tests/test_stables_boundary.py`), and runs the API alone when it finds no shell: `/`, `/static/...` and the shell
+  files return 404, and nothing else changes.
 
-Stables carries its own checks, so they can move with it: the API contract types and type-check in `stables/types`,
-and the Node harnesses in `stables/tests`, which run without pytest (`npm --prefix stables test`, or
-`node stables/tests/run.mjs <name>` for a subset). This repository's pytest suite runs each harness too.
+Stables carries its own checks: the Node harnesses and file checks (`npm test` there) and the type check against the
+pinned OpenAPI document (`npm run check`). The Playwright journeys, which need a live Server, stay here in
+`tools/ui-tests` and run against the Stables release pinned in `tools/stables/pin.json`.
 
-Stables still offers daemon-administration settings; moving them to the Hub and the CLI is #545. A later stage moves
-`stables/` to its own repository.
+Daemon administration is not in Stables (#545); see below.
+
+## Where the Server finds Stables
+
+`harness/stables_shell.py` serves the first of:
+
+1. the directory in `HARNESS_STABLES_DIR` (the `public/` directory of a Stables checkout);
+2. `stables/public` inside the Server's checkout: clone dflippojr/stables there as `stables/`, which git ignores.
+
+The tower's deployment uses the first: `ops/harness/deploy-ci.ps1` copies the pinned release (`tools/stables/pin.json`)
+next to the checkout, writes its path to `.stables-path`, and `run-daemon.ps1` passes it to the daemon. To move the
+tower to another Stables release, tag it in dflippojr/stables and re-pin it here (`tools/stables/README.md`).
 
 The bundled Server accepts requests only for `127.0.0.1`, `localhost`, or `[::1]` on its configured listen port,
 or the exact authority in `public_url` (including its public port). Other Host headers receive **421** on every
@@ -94,7 +105,7 @@ the arrow keys, Home and End move through it, and Escape closes it and returns f
 
 ## Colours and touch targets
 
-Every colour comes from the CSS custom properties at the top of `stables/public/style.css`. The Light and Dark themes
+Every colour comes from the CSS custom properties at the top of Stables' `public/style.css`. The Light and Dark themes
 (and System, which follows the device) use the mobile redesign's palette. Midnight, Forest and Paper keep their own
 values. `--accent` colours text-like actions such as links, the current tab and running badges. `--primary` fills
 buttons, the New task button and your own chat bubbles, with `--on-primary` text. In Dark the accent is blue, not
@@ -139,7 +150,7 @@ putting a token in their URLs.
 
 ## Use a separately hosted copy
 
-1. Serve the contents of `stables/public` at the root of an HTTPS origin, with `index.html` as the root document.
+1. Serve the contents of Stables' `public/` directory at the root of an HTTPS origin, with `index.html` as the root document.
    Loopback HTTP is also accepted for local development. Asset URLs are root-relative, so deploy the directory at
    the origin root rather than below a path prefix.
 2. On the daemon host, create an owner token approved for the separate site's exact origin (scheme, host, and
