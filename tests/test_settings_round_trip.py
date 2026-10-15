@@ -56,6 +56,9 @@ def daemon(tmp_path):
     cfg.backup.enabled, cfg.backup.dir = True, str(tmp_path / "backups")
     cfg.installed.image_edit = True  # the opt-in module two images keys belong to
     manager = Manager(cfg, chat=Script([Completion(content="hi")]))
+    # Enable checks probe the host (ComfyUI, model weights, folders); each module's tests cover them.
+    registry = manager.settings.registry
+    registry.validators[:] = [v for v in registry.validators if v.__name__ != "validate_enables"]
     with TestClient(create_app(manager)) as client:
         yield manager, client
     manager.db.close()

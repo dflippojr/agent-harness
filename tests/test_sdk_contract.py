@@ -7,7 +7,6 @@ import json
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from harness.api import create_app
 from harness.manager import Manager
@@ -20,8 +19,7 @@ from test_daemon import make_cfg
 def schema(tmp_path_factory):
     """The live OpenAPI document, built once; each drift case edits its own copy."""
     manager = Manager(make_cfg(tmp_path_factory.mktemp("openapi")))
-    with TestClient(create_app(manager)) as client:
-        return client.get("/openapi.json").json()
+    return create_app(manager).openapi()  # what /openapi.json serves, without starting the daemon
 
 
 def test_sdk_validates_live_openapi_request_types_and_typed_responses(schema):
