@@ -1,8 +1,7 @@
-import { test, expect, expectDone, audit, onlyProjects, LIGHT } from './fixtures';
+import { test, expect, expectDone, audit } from './fixtures';
 import { randomUUID } from 'node:crypto';
 
-test('AH-11 job toggle, validation, CRUD, run and audit persist', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('AH-11 job toggle, validation, CRUD, run and audit persist', async ({ signedIn: page }) => {
   await page.goto('/#/jobs');
   const toggle = page.getByRole('switch', { name: 'Weekly cleanup enabled', exact: true });
   const wasEnabled = await toggle.isChecked();

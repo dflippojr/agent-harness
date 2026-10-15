@@ -1,5 +1,5 @@
 // Second pass (#625) over the mobile redesign (#506-#515): flows the #589 suite did not cover.
-import { test, expect, openSession, expectDone, expectReflow, onlyProjects, LIGHT, SELF_SIZING } from './fixtures';
+import { test, expect, openSession, expectDone, expectReflow, selfSizingTest } from './fixtures';
 import type { Page } from '@playwright/test';
 
 const settle = (page: Page) => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -18,8 +18,7 @@ async function openSeededChat(page: Page) {
   await expect(page.locator('.chat-feed')).toContainText('Hi! This is the fake model.');
 }
 
-test('Settings subpages and Actions tabs reflow at four widths and Back returns to Settings', async ({ signedIn: page }, info) => {
-  onlyProjects(info, SELF_SIZING);
+selfSizingTest('Settings subpages and Actions tabs reflow at four widths and Back returns to Settings', async ({ signedIn: page }) => {
   await page.goto('/#/settings');
   await expect(page.locator('.version-row')).toBeVisible();
   const rows = await page.locator('a.set-row[data-setting]').evaluateAll(els => els.map(a => a.getAttribute('href')!));
@@ -42,8 +41,7 @@ test('Settings subpages and Actions tabs reflow at four widths and Back returns 
   }
 });
 
-test('Chat thread and an existing job reflow at four widths', async ({ signedIn: page }, info) => {
-  onlyProjects(info, SELF_SIZING);
+selfSizingTest('Chat thread and an existing job reflow at four widths', async ({ signedIn: page }) => {
   await openSeededChat(page);
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
   await expectReflow(page);
@@ -54,8 +52,7 @@ test('Chat thread and an existing job reflow at four widths', async ({ signedIn:
   await expectReflow(page);
 });
 
-test('Rename chat sheet keeps its draft through rotation and closes with Escape, Back and the backdrop', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('Rename chat sheet keeps its draft through rotation and closes with Escape, Back and the backdrop', async ({ signedIn: page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   const { portrait, landscape } = rotations(page);
@@ -96,8 +93,7 @@ test('Rename chat sheet keeps its draft through rotation and closes with Escape,
   expect(errors).toEqual([]);
 });
 
-test('Session composer stays usable with the keyboard up in portrait and landscape', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('Session composer stays usable with the keyboard up in portrait and landscape', async ({ signedIn: page }) => {
   const { portrait, landscape } = rotations(page);
   await openSession(page, 'Tab bar tour');
   await expectDone(page);
@@ -116,8 +112,7 @@ test('Session composer stays usable with the keyboard up in portrait and landsca
   }
 });
 
-test('Live resize keeps the Delete job sheet, a partly edited name and focus inside the sheet', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('Live resize keeps the Delete job sheet, a partly edited name and focus inside the sheet', async ({ signedIn: page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 900 });

@@ -295,17 +295,18 @@ readiness signal.
   - Nothing is shared or persistent between runs.
 - **Projects.** Desktop light and dark at 1440×900, and phone light and dark with `devices['iPhone SE']` (WebKit) and
   `devices['Pixel 7']` (Chromium).
-- **Which journeys run where.** All six projects stay defined in `playwright.config.ts`, and each test calls
-  `onlyProjects(info, names)` from `tests/fixtures.ts` to skip the projects it does not need. Behaviour journeys and
+- **Which journeys run where.** All six projects stay defined in `playwright.config.ts`. The `signedIn` fixture in `tests/fixtures.ts`
+  calls `onlyProjects(info, names)` before it opens `/connect`, so a project a test does not need costs no server requests. The
+  `test` that specs import allows the light projects; `selfSizingTest` and `reflowTest` allow the narrower sets below. Behaviour journeys and
   defect regressions assert routes, persistence, audit rows, 44px targets and reflow overflow, none of which depends on
   the theme, so the dark projects would only repeat them (#703).
-  - **Light projects only** (`LIGHT`: `desktop-light`, `iphone-se-light`, `pixel7-light`): AH-01 to AH-14 and AH-16
+  - **Light projects only** (`test`: `desktop-light`, `iphone-se-light`, `pixel7-light`): AH-01 to AH-14 and AH-16
     (`journeys.spec.ts`, `jobs.spec.ts`), every other test in `defects.spec.ts` and `redesign.spec.ts`, and
     `layout.spec.ts` "live resize…". Tests that already skip a device class (phone-only, iPhone-only) still do.
-  - **`desktop-light` and `iphone-se-light` only** (`SELF_SIZING`): the tests that set their own viewport sizes. A
+  - **`desktop-light` and `iphone-se-light` only** (`selfSizingTest`): the tests that set their own viewport sizes. A
     `pixel7` run adds nothing to them, because they replace its viewport. They are #591, #593, "Settings subpages and
     Actions tabs reflow…" and "Chat thread and an existing job reflow…".
-  - **Light and dark, on `desktop` and `iphone-se` only**: `layout.spec.ts` "primary pages reflow…", which asserts the
+  - **Light and dark, on `desktop` and `iphone-se` only** (`reflowTest`): `layout.spec.ts` "primary pages reflow…", which asserts the
     scheme's `--bg` on every primary page. This is the one dark run.
   - The theme itself is checked by that `--bg` assertion, by AH-13 (the theme switch) and by the token contrast lint in
     `tests/test_web_tokens.py`.

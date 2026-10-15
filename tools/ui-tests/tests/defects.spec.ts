@@ -1,4 +1,4 @@
-import { test, expect, openSession, expectDone, onlyProjects, LIGHT, SELF_SIZING } from './fixtures';
+import { test, expect, openSession, expectDone, selfSizingTest } from './fixtures';
 import type { Locator, Page } from '@playwright/test';
 
 async function expectHitTarget(target: Locator) {
@@ -11,8 +11,7 @@ async function expectHitTarget(target: Locator) {
   })).toBe(true);
 }
 
-test('#591 Chat starters and recent chats remain reachable at four reflow widths', async ({ signedIn: page }, info) => {
-  onlyProjects(info, SELF_SIZING);
+selfSizingTest('#591 Chat starters and recent chats remain reachable at four reflow widths', async ({ signedIn: page }) => {
   // The welcome paints before options arrive; exercise that startup boundary too.
   await page.route('**/chats/options', async route => {
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -37,7 +36,6 @@ test('#591 Chat starters and recent chats remain reachable at four reflow widths
 });
 
 test('#603 Chat starter tapped before options load fills the ready composer', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
   let releaseOptions!: () => void;
   const optionsGate = new Promise<void>(resolve => { releaseOptions = resolve; });
   let optionsRequested!: () => void;
@@ -83,8 +81,7 @@ test('#603 Chat starter tapped before options load fills the ready composer', as
   }
 });
 
-test('#592 New task labels name and focus their fields', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('#592 New task labels name and focus their fields', async ({ signedIn: page }) => {
   await page.goto('/#/new');
   for (const label of ['Project', 'Backend', 'Model', 'Title']) {
     const field = page.getByLabel(label, { exact: true });
@@ -102,7 +99,6 @@ test('#592 New task labels name and focus their fields', async ({ signedIn: page
 });
 
 test('#594 Enabled label has a 44px target with separated actions in create and edit forms', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
   await page.goto('/#/jobs');
   const existing = await page.locator('.job-row').filter({ hasText: 'Weekly cleanup' }).locator('a.job-main').getAttribute('href');
   for (const route of ['/#/jobs/new', '/' + existing]) {
@@ -140,8 +136,7 @@ test('#594 Enabled label has a 44px target with separated actions in create and 
   }
 });
 
-test('#595 Session tabs retain 44px targets, 8px gaps and working labels at narrow widths', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('#595 Session tabs retain 44px targets, 8px gaps and working labels at narrow widths', async ({ signedIn: page }) => {
   await openSession(page, 'Tool rows');
   await expectDone(page);
   for (const width of [320, 375, 412]) {
@@ -166,8 +161,7 @@ test('#595 Session tabs retain 44px targets, 8px gaps and working labels at narr
   }
 });
 
-test('#593 Tool output actions work through portrait-landscape-portrait without forced taps', async ({ signedIn: page }, info) => {
-  onlyProjects(info, SELF_SIZING);
+selfSizingTest('#593 Tool output actions work through portrait-landscape-portrait without forced taps', async ({ signedIn: page }, info) => {
   await openSession(page, 'Tool rows');
   await expectDone(page);
   const row = page.locator('details.tool').filter({ has: page.locator('summary').filter({ hasText: /read_file.*notes\/log.txt/s }) });
@@ -216,8 +210,7 @@ async function openSeededChat(page: Page) {
   await expect(page.locator('.chat-feed')).toContainText('Hi! This is the fake model.');
 }
 
-test('#626 Actions sub-tabs keep whole-word labels, 44px targets and 8px gaps', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('#626 Actions sub-tabs keep whole-word labels, 44px targets and 8px gaps', async ({ signedIn: page }) => {
   await page.goto('/#/actions/resources');
   const tabs = page.getByRole('tablist', { name: 'Server settings', exact: true });
   await expect(tabs.getByRole('tab', { name: 'Resources', exact: true })).toHaveAttribute('aria-selected', 'true');
@@ -252,8 +245,7 @@ test('#626 Actions sub-tabs keep whole-word labels, 44px targets and 8px gaps', 
   await expect(page).toHaveURL(/#\/actions\/disk$/);
 });
 
-test('#627 Largest workspaces rows are 44px links 8px apart', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('#627 Largest workspaces rows are 44px links 8px apart', async ({ signedIn: page }) => {
   const links = page.locator('.disk-facts p:text-is("Largest workspaces") + ul a');
   for (const width of [375, 412]) {
     await page.setViewportSize({ width, height: 800 });
@@ -267,8 +259,7 @@ test('#627 Largest workspaces rows are 44px links 8px apart', async ({ signedIn:
   await expect.poll(() => new URL(page.url()).hash).toBe(href);
 });
 
-test('#628 Refresh diagnostics is a 44px target clear of its neighbours', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('#628 Refresh diagnostics is a 44px target clear of its neighbours', async ({ signedIn: page }) => {
   for (const width of [375, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto('/#/actions/resources');
@@ -290,8 +281,7 @@ test('#628 Refresh diagnostics is a 44px target clear of its neighbours', async 
   }
 });
 
-test('#629 Rewind here and Fork from here are 44px targets at least 8px apart', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('#629 Rewind here and Fork from here are 44px targets at least 8px apart', async ({ signedIn: page }) => {
   await openSession(page, 'Tool rows');
   await expectDone(page);
   const checkpoint = page.locator('.note.checkpoint').first();
@@ -306,7 +296,6 @@ test('#629 Rewind here and Fork from here are 44px targets at least 8px apart', 
 });
 
 test('#630 Cancel the whole task sits at least 8px below the phone decision buttons', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
   test.skip(!info.project.use.isMobile, 'phone approval sheet');
   await openSession(page, 'Protected settings');
   const sheet = page.getByRole('region', { name: 'Approval needed', exact: true });
@@ -323,7 +312,6 @@ test('#630 Cancel the whole task sits at least 8px below the phone decision butt
 });
 
 test('#631 Phone landscape keeps Deny and Approve on screen with transcript above the sheet', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
   test.skip(!info.project.use.isMobile, 'phone approval sheet');
   await openSession(page, 'Protected settings');
   const sheet = page.getByRole('region', { name: 'Approval needed', exact: true });
@@ -372,7 +360,6 @@ test('#631 Phone landscape keeps Deny and Approve on screen with transcript abov
 });
 
 test('#632 Chat thread keeps the conversation visible in phone landscape and with the keyboard up', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
   test.skip(!info.project.name.startsWith('iphone-se'), 'iPhone SE geometry');
   await openSeededChat(page);
   const message = page.getByRole('textbox', { name: 'Message', exact: true });
@@ -439,7 +426,6 @@ test('#632 Chat thread keeps the conversation visible in phone landscape and wit
 });
 
 test('#633 The page behind an open sheet does not scroll', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
   await openSeededChat(page);
   await page.setViewportSize({ width: info.project.use.viewport!.width, height: 420 });
   await page.evaluate(() => scrollTo(0, 0));
@@ -471,7 +457,6 @@ test('#633 The page behind an open sheet does not scroll', async ({ signedIn: pa
 });
 
 test('#634 Phone jump buttons keep 8px from the session tabs and the Session menu', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
   test.skip(!info.project.use.isMobile, 'phone jump buttons');
   await openSession(page, 'Tool rows');
   await expectDone(page);

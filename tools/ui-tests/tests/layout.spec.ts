@@ -1,4 +1,4 @@
-import { test, expect, openSession, expectDone, expectReflow, onlyProjects, LIGHT, SELF_SIZING } from './fixtures';
+import { test, expect, openSession, expectDone, expectReflow, reflowTest } from './fixtures';
 
 const surfaces = [
   { name: 'Chat landing', route: '/#/chat', ready: '.chat-welcome' },
@@ -12,8 +12,7 @@ const surfaces = [
   { name: 'Connection', route: '/#/profile/connection', ready: 'input' },
 ];
 
-test('primary pages reflow without overflow at 320/375/768/1440 CSS pixels', async ({ signedIn: page }, info) => {
-  onlyProjects(info, [...SELF_SIZING, 'desktop-dark', 'iphone-se-dark']);
+reflowTest('primary pages reflow without overflow at 320/375/768/1440 CSS pixels', async ({ signedIn: page }, info) => {
   const scheme = info.project.use.colorScheme;
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--bg').trim())).toBe(scheme === 'dark' ? '#000000' : '#f3f4f6');
   for (const surface of surfaces) {
@@ -39,8 +38,7 @@ test('primary pages reflow without overflow at 320/375/768/1440 CSS pixels', asy
   }
 });
 
-test('live resize keeps partially filled composer, selected tab, menu and focus', async ({ signedIn: page }, info) => {
-  onlyProjects(info, LIGHT);
+test('live resize keeps partially filled composer, selected tab, menu and focus', async ({ signedIn: page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => {
