@@ -46,7 +46,7 @@ def test_usage_windows_billing_zero_days_and_metadata_only(tmp_path, monkeypatch
     record(db, app["id"], now.timestamp(), 20, 6, .5)
     record(db, app["id"], now.timestamp(), 3, 1, .25, requests=3, backend="other")
     record(db, app["id"], week.timestamp(), 30, 8, .125, "subscription")
-    record(db, app["id"], (week - timedelta(seconds=1)).timestamp(), 40, 9, 1)
+    record(db, app["id"], (week - timedelta(microseconds=100)).timestamp(), 40, 9, 1)
     record(db, app["id"], first.timestamp(), 50, 10, 2)
     # Both temporal ends are bounded, including future records on the same calendar day.
     for when in [first - timedelta(seconds=1), now + timedelta(seconds=1), now + timedelta(days=1)]:
@@ -95,6 +95,31 @@ def test_usage_windows_billing_zero_days_and_metadata_only(tmp_path, monkeypatch
         assert short_app["month"] == used["month"]
         assert short_app["daily"] == [used["daily"][-1]]
         assert short_app["by_billing"]["local"]["daily"] == [used["by_billing"]["local"]["daily"][-1]]
+
+
+def test_fractional_timestamps_do_not_round_into_the_next_day(tmp_path, monkeypatch):
+    client, manager = make_client(tmp_path)
+    now = datetime(2026, 10, 15, 12)
+    freeze(monkeypatch, now)
+    db = manager.db.main
+    app, _ = db.create_api_key("Midnight", "sessions", "app")
+    midnight = datetime(2026, 10, 15)
+    week = midnight - timedelta(days=6)
+    first = midnight - timedelta(days=29)
+    record(db, app["id"], (midnight - timedelta(microseconds=100)).timestamp(), 11, 1, .125)
+    record(db, app["id"], (week - timedelta(microseconds=100)).timestamp(), 22, 1, .25)
+    record(db, app["id"], (midnight + timedelta(microseconds=100)).timestamp(), 33, 1, .5)
+    record(db, app["id"], (first - timedelta(microseconds=100)).timestamp(), 999, 999, 999)
+    with client:
+        used = client.get(PREFIX + "/apps/usage").json()["apps"][0]
+        assert used["today"] == tally(1, 33, 1, .5)
+        assert used["week"] == tally(2, 44, 2, .625)
+        assert used["month"] == tally(3, 66, 3, .875)
+        daily = {day["date"]: day for day in used["daily"]}
+        assert daily["2026-10-14"]["prompt_tokens"] == 11
+        assert daily["2026-10-08"]["prompt_tokens"] == 22
+        assert daily["2026-10-09"]["prompt_tokens"] == 0
+        assert used["by_billing"]["api_key"]["today"] == used["today"]
 
 
 def test_revoked_and_erased_app_usage_remains_visible(tmp_path, monkeypatch):
