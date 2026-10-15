@@ -154,10 +154,6 @@ agent-harness/
 │   ├── settings*.py       typed configuration registry
 │   └── managed_config.py  crash-safe config overlay: pending → active → last-known-good
 ├── harness_modules/       optional add-ons behind the module interface: images, runners, search, endpoint, jobs, backup, ... (docs/modules.md)
-├── stables/               Stables: the standalone browser client (docs/web.md)
-│   ├── public/            the vanilla JS PWA, served at / when present
-│   ├── types/             API contract types generated from the Server's OpenAPI, and the type checks
-│   └── tests/             Node harnesses with their own runner (npm --prefix stables test)
 ├── macrunner/             Mac Runner: stdlib-only Python 3.9, launchd, sandbox-exec profile
 ├── sdk/                   single-file Python SDK (depends only on httpx) + example app
 ├── bakeoff/               model and harness benchmarks, hidden-test tasks, recorded-web suite
@@ -165,7 +161,8 @@ agent-harness/
 ├── sandbox/               sandbox and hosted-CLI Dockerfiles
 ├── ops/                   egress proxies, service tasks, Tailscale, deployment, review runner
 ├── install/               PowerShell + POSIX installers and uninstallers
-├── tests/                 pytest suite (it also runs the Stables Node harnesses)
+├── tests/                 pytest suite
+├── tools/                 OpenAPI export (openapi/), the pinned Stables release (stables/), Playwright journeys (ui-tests/)
 ├── docs/                  API contracts, design docs, per-phase results
 └── .github/workflows/     CI, SonarCloud, AI review, staging, publish + deploy
 ```
@@ -176,7 +173,7 @@ agent-harness/
 | Component | What it is | Where it lives |
 | --- | --- | --- |
 | **Agent Harness Server** | The host daemon and its APIs | [`harness/`](harness) |
-| **Stables** | The first-party browser client and installable PWA, standalone over the documented API ([`docs/web.md`](docs/web.md)) | [`stables/public/`](stables/public) |
+| **Stables** | The first-party browser client and installable PWA, standalone over the documented API ([`docs/web.md`](docs/web.md)) | [dflippojr/stables](https://github.com/dflippojr/stables) |
 | **Agent Harness CLI** | The installed `harness` command | [`harness/cli.py`](harness/cli.py) |
 | **Agent Harness Runner** | A remote execution worker, such as the Mac Runner | [`macrunner/`](macrunner) |
 | **Agent Harness SDK** | The supported Python client library | [`sdk/`](sdk) |
@@ -229,7 +226,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | **Native macOS sandboxing** ([`sandbox.sb`](macrunner/sandbox.sb)) | Shell commands run under `sandbox-exec`: writes limited to the workspace and build caches, credentials and personal folders unreadable, no network unless approved. |
 | **Protocol-versioned clients** ([`compat.py`](harness/compat.py), [docs](docs/compatibility.md)) | Wire protocols are versioned separately from releases. The server accepts current and previous versions. Skew returns `426 client_update_required` or `426 daemon_update_required` while health and update discovery stay reachable. |
 | **Transactional self-update** ([`updater.py`](harness/updater.py)) | The Mac client downloads only from its own server, verifies size and SHA-256, swaps the runtime atomically, keeps credentials and config, and rolls back on failure. |
-| **No-build PWA on public contracts** ([`stables/public`](stables/public)) | The web UI is vanilla JS with a service worker. It uses the same `/api/v1` and `/api/admin/v1` contracts offered to third-party apps, and authenticated SSE, images, and downloads never put bearer tokens in URLs. |
+| **No-build PWA on public contracts** ([Stables](https://github.com/dflippojr/stables)) | The web UI is vanilla JS with a service worker. It uses the same `/api/v1` and `/api/admin/v1` contracts offered to third-party apps, and authenticated SSE, images, and downloads never put bearer tokens in URLs. |
 
 ### Configuration and data
 
@@ -246,7 +243,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | --- | --- |
 | **Self-validating benchmarks** ([`bakeoff/`](bakeoff)) | Each task ships with a reference solution. `--selftest` proves every checker passes on correct work and fails on no work. The hard suite grades mostly with hidden tests, and `rescore` regrades saved runs after a checker fix. |
 | **Isolated comparison harnesses** ([`reference.py`](bakeoff/reference.py)) | OpenHands and OpenCode run the same tasks on an internal Docker network whose only route out is a socat proxy to the local model. |
-| **One suite for everything** ([`tests/`](tests)) | Stables' JavaScript runs under Node harnesses (`stables/tests`) that pytest also drives. The CI and deploy workflows, the installers, and the docs' product naming have their own tests too. |
+| **One suite for everything** ([`tests/`](tests)) | The CI and deploy workflows, the installers, and the docs' product naming have their own tests. Stables, in its own repository, runs its Node harnesses there; this repository runs its Playwright journeys against the pinned release ([`tools/stables`](tools/stables)). |
 | **Fail-closed deployment** ([`ci-cd.yml`](.github/workflows/ci-cd.yml), [docs](docs/CI-CD.md)) | Deployment triggers from `workflow_run` on the exact tested SHA and pulls immutable `sha-` images. It builds a new venv side by side and switches a pointer, so rollback is instant, then waits for `/health`. |
 | **Trusted-code staging slot** ([`resolve_staging_ref.py`](scripts/resolve_staging_ref.py)) | A GitHub-hosted job resolves a branch or PR to one commit and rejects fork refs before anything reaches the server. Staging gets its own database and freshly minted tokens, never production credentials. |
 | **Multi-provider AI code review** ([`review.yml`](.github/workflows/review.yml)) | Pull requests are reviewed by Codex, Claude, or Cursor on a self-hosted runner pool, with incremental re-review when a prior review marker makes that safe. The `Automated Code Review` check fails when the review has findings, and other projects call the same workflow through a thin caller pinned to `review-v1`. |

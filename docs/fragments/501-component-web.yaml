@@ -5,5 +5,5 @@ title: Stables
 summary: 'The first-party browser client and installable PWA, standalone over the documented API ([`docs/web.md`](docs/web.md))'
 order: 20
 links:
-  - text: '`stables/public/`'
-    href: stables/public
+  - text: 'dflippojr/stables'
+    href: https://github.com/dflippojr/stables

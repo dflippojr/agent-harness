@@ -5,10 +5,11 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.testclient import TestClient
 
-from harness.stables_shell import DEFAULT as WEB
+from harness.stables_shell import locate
 from harness.webgzip import WebGzipMiddleware
 from tests.test_api import make_client
 
+WEB = locate()  # tests/conftest.py's stand-in shell
 GZ = {"Accept-Encoding": "gzip"}
 PLAIN = {"Accept-Encoding": "identity"}
 SHELL = [("/static/app.js", "app.js"), ("/static/style.css", "style.css"), ("/", "index.html"), ("/sw.js", "sw.js")]

@@ -81,7 +81,7 @@ in `coverage.xml` resolve. Worker count is fixed at 4 (not pytest's auto count) 
 measure branches on Python 3.12 (this job; sysmon branch support starts at 3.14). The scan still uses
 `sonar.qualitygate.wait=true`. The suite is Windows-native; Ubuntu hosted runners fail coverage collection on
 `msvcrt`, console-creation flags, and Windows paths. Docker-image and GPU tests still skip on the hosted runner
-and do not contribute coverage. Non-Python trees (`stables/public`, `ops`, scripts that are not `.py`) are excluded
+and do not contribute coverage. Non-Python trees (`ops`, scripts that are not `.py`) are excluded
 from the coverage metric. Confirm the SonarCloud project still uses a gate that includes coverage on new code;
 the workflow cannot set that condition itself. PR analysis stays on GitHub-hosted Windows; it must not move to
 the tower.

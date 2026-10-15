@@ -214,15 +214,6 @@ def test_a_members_usage_is_tallied_on_their_own_id(tmp_path, monkeypatch):
         assert body["usage"]["codex"]["sessions"] == 0
 
 
-def test_the_api_keys_card_keeps_nothing_in_the_browser():
-    from pathlib import Path
-    profile = (Path(__file__).resolve().parents[1] / "stables" / "public" / "pages" / "profile.mjs").read_text(
-        encoding="utf-8")
-    card = profile[profile.index("function apiKeysCard("):profile.index("const GITHUB_DEVICE_URL")]
-    for forbidden in ("localStorage", "sessionStorage", "storeSet"):
-        assert forbidden not in card
-
-
 def test_a_members_hosted_session_runs_through_the_runner_on_their_key(tmp_path, monkeypatch):
     import sys
     from test_daemon import wait_status

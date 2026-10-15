@@ -1,8 +1,9 @@
 """Issue #334 stage (a): every owner action Stables offers has an owner API endpoint and a CLI command.
 Issue #544: every owner API route (and so every Hub action) has a CLI command, whether or not Web calls it.
 
-docs/management-parity.md is the inventory. These tests tie it to Web's `api(...)` calls, to the routes mounted under
-the owner API and to the CLI parser, so a new Web call, endpoint or command can't drift out of parity silently."""
+docs/management-parity.md is the inventory. These tests tie it to the `api(...)` calls of the pinned Stables release
+(tools/stables/api-calls.json, generated from its tag by tools/stables/pin.py), to the routes mounted under the owner
+API and to the CLI parser, so a new Stables call, endpoint or command can't drift out of parity silently."""
 
 from __future__ import annotations
 
@@ -24,10 +25,10 @@ from harness.manager import Manager
 
 from test_admin import LOGIN
 from test_daemon import Script, make_cfg
+from stables_pin import FACTS as CALLS
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "management-parity.md"
-WEB = ROOT / "stables" / "public"
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
 # The CLI's hand-written commands (the rest come from cli.admin_commands()) and the owner API route each one calls.
@@ -70,98 +71,10 @@ def _client_only_keys() -> set[str]:
     return set(re.findall(r"^\| `(harness\.[A-Za-z]+)` \|", text, re.M))
 
 
-def _skip_string(text: str, i: int) -> int:
-    """Index just past the string literal opening at text[i] (template literals may nest `${...}`)."""
-    quote, i = text[i], i + 1
-    while i < len(text) and text[i] != quote:
-        if text[i] == "\\":
-            i += 2
-            continue
-        if quote == "`" and text.startswith("${", i):
-            i = _skip_expression(text, i + 2, "}")
-        i += 1
-    return i + 1
-
-
-def _skip_expression(text: str, i: int, close: str) -> int:
-    """Index of the `close` that ends the expression starting at text[i], skipping nested brackets and strings."""
-    depth = 0
-    while i < len(text):
-        ch = text[i]
-        if ch in "\"'`":
-            i = _skip_string(text, i)
-            continue
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                return i
-            depth -= 1
-        elif ch == "," and depth == 0 and close == ",":
-            return i
-        i += 1
-    return i
-
-
-def _path_patterns(expr: str) -> list[tuple[re.Pattern[str], str]]:
-    """(regex, sample) for each path literal in an api() first argument. In the regex `${...}` matches one segment
-    (or any suffix when it follows other text); in the sample it is `x`, for matching against `{param}` rows."""
-    patterns, i = [], 0
-    while i < len(expr):
-        if expr[i] not in "\"'`":
-            i += 1
-            continue
-        end = _skip_string(expr, i)
-        body, i = expr[i + 1:end - 1], end
-        if body and not body.startswith("/"):
-            continue
-        out, sample, j = "", "", 0
-        while j < len(body):
-            if body.startswith("${", j):
-                k = _skip_expression(body, j + 2, "}")
-                out += "[^/?]+" if out.endswith("/") else "(?:/[^?]*)?"
-                sample += "x"
-                j = k + 1
-            else:
-                out += re.escape(body[j])
-                sample += body[j]
-                j += 1
-        patterns.append((re.compile(out.split(r"\?")[0] or "/"), sample.split("?")[0] or "/"))
-    return patterns
-
-
-def _call_methods(options: str) -> set[str] | None:
-    """Methods named in an api() options object: GET when there is no `method`, None when it's not a literal."""
-    found = re.search(r"\bmethod\b\s*(:)?", options)
-    if not found:
-        return {"GET"}
-    if not found.group(1):
-        return None
-    start = found.end()
-    expr = options[start:_skip_expression(options, start, ",")]
-    verbs = set(re.findall(r"[\"'](GET|POST|PUT|PATCH|DELETE)[\"']", expr))
-    return verbs or None
-
-
-def _api_calls(text: str):
-    """(line, path expression, options text) for each `api(...)` or `agentHarnessWeb.request(...)` call in `text`."""
-    for m in re.finditer(r"(?<![\w.])api\(|agentHarnessWeb\.request\(", text):
-        start = m.end()
-        first_end = _skip_expression(text, start, ",")
-        close = _skip_expression(text, start, ")")
-        options = text[first_end:close] if first_end < close else ""
-        yield text.count(chr(10), 0, m.start()) + 1, text[start:min(first_end, close)], options
-
-
 def _web_calls() -> list[tuple[str, re.Pattern[str], str, set[str] | None]]:
-    calls = []
-    for path in sorted([*WEB.rglob("*.mjs"), WEB / "app.js"]):
-        text = path.read_text(encoding="utf-8")
-        for line, expr, options in _api_calls(text):
-            where = f"{path.relative_to(ROOT)}:{line}"
-            for pattern, sample in _path_patterns(expr):
-                calls.append((where, pattern, sample, _call_methods(options)))
-    return calls
+    """The pinned Stables release's api() calls (tools/stables/api-calls.json, generated from its tag)."""
+    return [(call["where"], re.compile(call["pattern"]), call["sample"],
+             None if call["methods"] is None else set(call["methods"])) for call in CALLS["calls"]]
 
 
 def _owner_app(tmp: Path):
@@ -306,9 +219,7 @@ def test_every_cli_admin_command_calls_an_owner_operation(operations):
 
 
 def test_web_browser_keys_are_documented_client_only():
-    keys = set()
-    for path in [*WEB.rglob("*.mjs"), WEB / "app.js"]:
-        keys |= set(re.findall(r"[\"'`](harness\.[A-Za-z]+)[\"'`]", path.read_text(encoding="utf-8")))
+    keys = set(CALLS["browser_keys"])
     assert keys, "no Web browser keys found"
     assert keys <= _client_only_keys(), sorted(keys - _client_only_keys())
 

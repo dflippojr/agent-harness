@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from harness.api import create_app
 from harness.api_models import SessionResponse, WebSessionResponse
 from harness.manager import Manager
+from conftest import STABLES_FIXTURE
 from test_daemon import make_cfg
 
 
@@ -63,7 +64,7 @@ def test_openapi_covers_web_contracts_and_static_serving_stays_native(tmp_path):
             for path in ("/client.mjs", "/static/client.mjs", "/app.js", "/sw.js"):
                 response = client.get(path)
                 assert response.status_code == 200
-                assert response.content == (ROOT / "stables/public" / Path(path).name).read_bytes()
+                assert response.content == (STABLES_FIXTURE / Path(path).name).read_bytes()
             for path in ("/package.json", "/api.d.ts", "/openapi-schema.json", "/types/package.json",
                          "/static/types/api.d.ts", "/stables/types/package.json"):
                 assert client.get(path).status_code == 404

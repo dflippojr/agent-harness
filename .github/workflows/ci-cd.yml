@@ -82,12 +82,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+      # The Stables release this commit pins (tools/stables/pin.json), from the private dflippojr/stables through a
+      # read-only deploy key. deploy-ci.ps1 checks it is the pinned commit and serves it (HARNESS_STABLES_DIR).
+      - name: Read the Stables pin
+        id: stables
+        shell: powershell
+        run: |
+          $pin = Get-Content -Raw tools/stables/pin.json | ConvertFrom-Json
+          "repository=$($pin.repository)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "tag=$($pin.tag)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+      - name: Check out the pinned Stables release
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.stables.outputs.repository }}
+          ref: refs/tags/${{ steps.stables.outputs.tag }}
+          path: stables-release
+          ssh-key: ${{ secrets.STABLES_DEPLOY_KEY }}
+          persist-credentials: false
       - name: Pull images, fast-forward the live checkout, and restart
         shell: powershell
         run: >-
           .\ops\harness\deploy-ci.ps1
           -Commit $env:DEPLOY_COMMIT
           -ReleaseRoot $env:GITHUB_WORKSPACE
+          -StablesRelease $env:GITHUB_WORKSPACE\stables-release
           -Registry ghcr.io/${{ github.repository_owner }}
         env:
           DEPLOY_COMMIT: ${{ github.event.workflow_run.head_sha }}

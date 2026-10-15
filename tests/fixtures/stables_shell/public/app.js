@@ -1,0 +1,43 @@
+// Stand-in for Stables' app.js (see ../README.md).
+import { request } from "./client.mjs";
+// stand-in line 0 for the Server's shell-serving tests.
+// stand-in line 1 for the Server's shell-serving tests.
+// stand-in line 2 for the Server's shell-serving tests.
+// stand-in line 3 for the Server's shell-serving tests.
+// stand-in line 4 for the Server's shell-serving tests.
+// stand-in line 5 for the Server's shell-serving tests.
+// stand-in line 6 for the Server's shell-serving tests.
+// stand-in line 7 for the Server's shell-serving tests.
+// stand-in line 8 for the Server's shell-serving tests.
+// stand-in line 9 for the Server's shell-serving tests.
+// stand-in line 10 for the Server's shell-serving tests.
+// stand-in line 11 for the Server's shell-serving tests.
+// stand-in line 12 for the Server's shell-serving tests.
+// stand-in line 13 for the Server's shell-serving tests.
+// stand-in line 14 for the Server's shell-serving tests.
+// stand-in line 15 for the Server's shell-serving tests.
+// stand-in line 16 for the Server's shell-serving tests.
+// stand-in line 17 for the Server's shell-serving tests.
+// stand-in line 18 for the Server's shell-serving tests.
+// stand-in line 19 for the Server's shell-serving tests.
+// stand-in line 20 for the Server's shell-serving tests.
+// stand-in line 21 for the Server's shell-serving tests.
+// stand-in line 22 for the Server's shell-serving tests.
+// stand-in line 23 for the Server's shell-serving tests.
+// stand-in line 24 for the Server's shell-serving tests.
+// stand-in line 25 for the Server's shell-serving tests.
+// stand-in line 26 for the Server's shell-serving tests.
+// stand-in line 27 for the Server's shell-serving tests.
+// stand-in line 28 for the Server's shell-serving tests.
+// stand-in line 29 for the Server's shell-serving tests.
+// stand-in line 30 for the Server's shell-serving tests.
+// stand-in line 31 for the Server's shell-serving tests.
+// stand-in line 32 for the Server's shell-serving tests.
+// stand-in line 33 for the Server's shell-serving tests.
+// stand-in line 34 for the Server's shell-serving tests.
+// stand-in line 35 for the Server's shell-serving tests.
+// stand-in line 36 for the Server's shell-serving tests.
+// stand-in line 37 for the Server's shell-serving tests.
+// stand-in line 38 for the Server's shell-serving tests.
+// stand-in line 39 for the Server's shell-serving tests.
+export const ready = Boolean(request);

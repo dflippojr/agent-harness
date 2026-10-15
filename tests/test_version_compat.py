@@ -19,7 +19,6 @@ from harness.config import RunnerConfig
 from harness.manager import Manager
 from test_daemon import make_cfg
 
-STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
 
 
 def manager_with_runner(tmp_path: Path) -> Manager:
@@ -446,21 +445,8 @@ def test_old_runner_gets_exact_manual_update_fallback(tmp_path):
     assert status["manual_update"] == "harness update"
 
 
-def test_web_bundle_has_safe_cache_update_and_version_handshake():
-    root = Path(__file__).parents[1] / "stables/public"
-    app = (root / "lib" / "update.mjs").read_text(encoding="utf-8")
-    client = (root / "client.mjs").read_text(encoding="utf-8")
-    worker = (root / "sw.js").read_text(encoding="utf-8")
-    assert f'WEB_BUILD_ID = "{compat.WEB_BUILD_ID}"' in client
-    assert f'BUILD_ID = "{compat.WEB_BUILD_ID}"' in worker
-    assert "X-Agent-Harness-Client" in client
-    assert "compatibility()" in client
-    assert "Reload and update" in app
-    assert "sessionStorage" in app
-    assert "harness.webUpdatePrompt.${available}" not in app
-    assert "harness-shell-${BUILD_ID}" in worker
-    assert '"/client.mjs"' in worker
-    assert 'fetch(event.request, { cache: "no-cache" })' in worker
-    assert "event.origin !== self.location.origin" in worker
-    assert "api/v1" not in worker
-    assert "api/admin" not in worker
+def test_server_advertises_the_pinned_stables_build():
+    """The Server's compatibility answer names the build of the Stables release it serves (tools/stables/pin.json).
+    Stables checks its own side (client.mjs and sw.js share the id) in its tests/client_contracts.mjs."""
+    from stables_pin import FACTS
+    assert FACTS["build_id"] == compat.WEB_BUILD_ID

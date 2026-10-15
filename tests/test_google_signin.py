@@ -1014,13 +1014,3 @@ def test_access_log_redacts_callback_query():
     text = record.getMessage()
     assert "s3cr3t" not in text and "4/abc" not in text and gs.CALLBACK_PATH in text
 
-
-def test_web_bundle_keeps_csrf_in_memory_only():
-    from harness.stables_shell import DEFAULT as web
-    client_js = (web / "client.mjs").read_text(encoding="utf-8")
-    session_js = (web / "lib" / "session.mjs").read_text(encoding="utf-8")
-    for source in (client_js, session_js):
-        for line in source.splitlines():
-            if "csrf" in line.lower():
-                assert "localStorage" not in line and "sessionStorage" not in line and "setItem" not in line
-    assert "X-Agent-Harness-CSRF" in client_js

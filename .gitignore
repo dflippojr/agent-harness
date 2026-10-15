@@ -21,3 +21,8 @@ output/ui-pass/
 .playwright-cli/
 tools/ui-tests/playwright-report/
 tools/ui-tests/test-results/
+
+# A local Stables checkout (dflippojr/stables) the daemon serves when HARNESS_STABLES_DIR is unset
+/stables/
+# The tower deploy's pointer to the pinned Stables copy (ops/harness/deploy-ci.ps1)
+.stables-path

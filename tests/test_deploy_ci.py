@@ -15,6 +15,25 @@ import pytest
 ROOT = Path(__file__).parents[1]
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
 COMMIT = "1" * 40
+STABLES_COMMIT = "3" * 40
+# Answers `git -C <Stables checkout> rev-parse HEAD` in the fake git scripts below.
+FAKE_STABLES_GIT = """if /I "%~2"=="%FAKE_STABLES%" if "%~3"=="rev-parse" (
+  echo %FAKE_STABLES_COMMIT%
+  exit /b 0
+)
+"""
+
+
+def write_stables_release(release: Path, *, pin: bool = True) -> Path:
+    """The pinned Stables tag the workflow checks out next to the release (tools/stables/pin.json)."""
+    if pin:
+        (release / "tools" / "stables").mkdir(parents=True)
+        (release / "tools" / "stables" / "pin.json").write_text(json.dumps(
+            {"repository": "dflippojr/stables", "tag": "v9.9.9", "commit": STABLES_COMMIT}), encoding="utf-8")
+    checkout = release / "stables-release"
+    (checkout / "public").mkdir(parents=True)
+    (checkout / "public" / "index.html").write_text("<!doctype html><title>Stables</title>\n", encoding="utf-8")
+    return checkout
 
 
 def run_deploy(
@@ -24,6 +43,8 @@ def run_deploy(
     release_failure: bool = False,
     branch_failure: bool = False,
     dry_run_failure: str | None = None,
+    stables_commit: str = STABLES_COMMIT,
+    pin: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     if not POWERSHELL:
         pytest.skip("Windows PowerShell is not installed")
@@ -35,11 +56,11 @@ def run_deploy(
     python = deploy / ".venv" / "Scripts" / "python.exe"
     python.parent.mkdir(parents=True)
     python.touch()
+    stables = write_stables_release(release, pin=pin)
 
     fake_git = tmp_path / "git.cmd"
     fake_git.write_text(
-        """@echo off
-if "%FAKE_RELEASE_FAILURE%"=="1" if "%~3"=="rev-parse" exit /b 17
+        "@echo off\n" + FAKE_STABLES_GIT + """if "%FAKE_RELEASE_FAILURE%"=="1" if "%~3"=="rev-parse" exit /b 17
 if "%FAKE_BRANCH_FAILURE%"=="1" if "%~3"=="branch" exit /b 19
 if "%~3"=="rev-parse" (
   echo %FAKE_COMMIT%
@@ -61,6 +82,8 @@ exit /b 99
         "FAKE_BRANCH": branch,
         "FAKE_RELEASE_FAILURE": "1" if release_failure else "0",
         "FAKE_BRANCH_FAILURE": "1" if branch_failure else "0",
+        "FAKE_STABLES": str(stables),
+        "FAKE_STABLES_COMMIT": stables_commit,
     }
     command = [
         POWERSHELL,
@@ -104,12 +127,19 @@ def test_deploy_plan_resolves_dependencies_before_stopping_and_swapping(tmp_path
     assert f"Deployed {COMMIT}" in plan  # a clean main checkout is accepted
     assert "[dry run] git" in plan
     guards = plan.index("[deploy] guards passed")
+    verified = plan.index("[deploy] Stables v9.9.9 verified")
     resolve = plan.index("[deploy] dependencies staged")
+    staged = plan.index("[deploy] Stables staged")
     stop = plan.index("[deploy] daemon stopped")
     swap = plan.index("[deploy] virtual environment swapped")
+    selected = plan.index("[deploy] Stables v9.9.9 selected")
     merge = plan.index("[deploy] checkout fast-forwarded")
     start = plan.index("[deploy] daemon started and healthy")
-    assert guards < resolve < stop < swap < merge < start
+    assert guards < verified < resolve < staged < stop < swap < selected < merge < start
+    # Stables is copied side by side before downtime and selected by pointer with the virtual environment swap.
+    copy = plan.index("[dry run] Copy-Item -Recurse")
+    assert resolve < copy < staged and f".deploy.stables-{STABLES_COMMIT}" in plan[copy:staged]
+    assert ".stables-path ->" in plan[swap:selected]
     assert ".venv\\Scripts\\python.exe -m pip install" not in plan
     assert ".venv.deploy-" in plan
     assert "requirements.txt" in plan
@@ -148,6 +178,28 @@ def test_daemon_supervisor_honors_deployment_venv_pointer():
     assert ".venv-path" in supervisor
     assert "IsPathRooted" in supervisor
     assert "Join-Path $venv 'Scripts\\python.exe'" in supervisor
+
+
+def test_daemon_supervisor_serves_the_deployed_stables_copy():
+    supervisor = (ROOT / "ops/harness/run-daemon.ps1").read_text(encoding="utf-8")
+    assert "Join-Path $root '.stables-path'" in supervisor
+    assert '"set HARNESS_STABLES_DIR=$stables&& "' in supervisor
+    assert "$stablesSetting`\"$python`\"" in supervisor
+
+
+def test_deploy_rejects_a_stables_checkout_that_is_not_the_pin(tmp_path):
+    result = run_deploy(tmp_path, stables_commit="4" * 40)
+    assert result.returncode != 0
+    message = " ".join(output(result).split())  # PowerShell wraps long error lines
+    assert f"Stables checkout is {'4' * 40}, but tools/stables/pin.json pins v9.9.9 at {STABLES_COMMIT}" in message
+    assert "[deploy] dependencies staged" not in output(result)
+
+
+def test_deploy_requires_the_stables_pin(tmp_path):
+    result = run_deploy(tmp_path, pin=False)
+    assert result.returncode != 0
+    assert "Stables pin is missing" in output(result)
+    assert "[deploy] dependencies staged" not in output(result)
 
 
 def test_deploy_rejects_detached_head_with_clear_error(tmp_path):
@@ -194,8 +246,7 @@ def deploy_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def _write_fake_deploy_commands(tmp_path: Path) -> None:
     (tmp_path / "git.cmd").write_text(
-        """@echo off
-if "%~3"=="rev-parse" (
+        "@echo off\n" + FAKE_STABLES_GIT + """if "%~3"=="rev-parse" (
   if "%~4"=="origin/main" (
     echo %FAKE_COMMIT%
   ) else if /I "%~2"=="%FAKE_RELEASE%" (
@@ -352,6 +403,12 @@ def run_real_rollback(
     restart.parent.mkdir(parents=True)
     shutil.copy2(ROOT / "ops/harness/restart-daemon.ps1", restart)
     shutil.copytree(deploy_venv, deploy / ".venv")
+    stables = write_stables_release(release)
+    old_stables = tmp_path / f".deploy.stables-{'5' * 40}" / "public"
+    old_stables.mkdir(parents=True)
+    (old_stables / "index.html").write_text("old Stables", encoding="utf-8")
+    stables_pointer = deploy / ".stables-path"
+    stables_pointer.write_text(str(old_stables), encoding="utf-8")
 
     previous_venv = deploy / ".venv"
     pointer = deploy / ".venv-path"
@@ -391,6 +448,8 @@ def run_real_rollback(
         "FAKE_PROCESS_STATE": str(process_state),
         "FAKE_SANDBOX_STATE": str(sandbox_state),
         "FAKE_CLI_STATE": str(cli_state),
+        "FAKE_STABLES": str(stables),
+        "FAKE_STABLES_COMMIT": STABLES_COMMIT,
     }
     result = subprocess.run(
         [
@@ -432,6 +491,9 @@ def run_real_rollback(
         "processes": process_state,
         "sandbox": sandbox_state,
         "cli": cli_state,
+        "stables_pointer": stables_pointer,
+        "old_stables": old_stables,
+        "staged_stables": tmp_path / f".deploy.stables-{STABLES_COMMIT}",
     }
     return result, status, paths
 
@@ -453,6 +515,21 @@ def test_real_rollback_restores_previous_deployment(
     assert paths["checkout"].read_text(encoding="utf-8").strip() == "2" * 40
     assert paths["sandbox"].read_text(encoding="utf-8").strip() == "sha256:old-sandbox"
     assert paths["cli"].read_text(encoding="utf-8").strip() == "sha256:old-cli"
+    assert paths["stables_pointer"].read_text(encoding="utf-8") == str(paths["old_stables"])
+    assert (paths["old_stables"] / "index.html").is_file()
+    assert not paths["staged_stables"].exists()
+
+
+def test_real_deploy_serves_the_pinned_stables_and_drops_the_old_copy(tmp_path, deploy_venv):
+    result, status, paths = run_real_rollback(tmp_path, deploy_venv, "None")
+
+    assert result.returncode == 0, output(result)
+    assert status["task_state"] == "Running"
+    staged = paths["staged_stables"] / "public"
+    assert paths["stables_pointer"].read_text(encoding="utf-8") == str(staged)
+    assert (staged / "index.html").read_text(encoding="utf-8").startswith("<!doctype html>")
+    assert not paths["old_stables"].parent.exists()
+    assert f"stables: v9.9.9 ({STABLES_COMMIT})" in output(result)
 
 
 def test_rollback_continues_after_unexpected_daemon_stop_error(tmp_path, deploy_venv):
