@@ -104,7 +104,7 @@ def daemon(tmp_path_factory):
     finally:
         try:
             subprocess.run([sys.executable, "-m", "harness.fake_instance", "stop", "--dir", str(instance)],
-                           cwd=ROOT, timeout=120, capture_output=True)
+                           cwd=ROOT, timeout=120, capture_output=True, check=False)
         finally:
             if proc.poll() is None:
                 proc.kill()
@@ -151,7 +151,7 @@ def cli_plain(text: str) -> str:
 
 
 def session_id(output: str) -> str:
-    match = re.search(r"^session (\S+) \(", output, re.M)
+    match = re.search(r"^session (\S+) \(", output, re.MULTILINE)
     assert match, output
     return match.group(1)
 
