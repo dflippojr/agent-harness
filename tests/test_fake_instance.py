@@ -254,3 +254,11 @@ def test_ready_answers_503_until_seeded():
 def test_connect_page_signs_the_web_copy_in():
     page = fake_instance.connect_page("http://127.0.0.1:1", "ho-<x>")
     assert '"harness.daemonUrl": "http://127.0.0.1:1"' in page and '"harness.ownerToken": "ho-<x>"' in page
+
+
+def test_web_app_needs_a_stables_shell(tmp_path, monkeypatch):
+    """Stables lives in dflippojr/stables (#334): without a copy the separately hosted site cannot start."""
+    from harness import stables_shell
+    monkeypatch.setenv(stables_shell.ENV, str(tmp_path / "no-shell"))
+    with pytest.raises(fake_instance.StartError, match="public/ directory of a dflippojr/stables checkout"):
+        fake_instance.web_app("http://127.0.0.1:1", "token", {})
