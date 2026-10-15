@@ -844,7 +844,7 @@ def test_the_time_budget_ends_a_run_during_a_long_model_call(tmp_path):
         app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
         started = time.monotonic()
         sid = m.create("slow", app=app)["id"]
-        s = await wait_status(m, sid, "done", "failed", timeout=scaled(8))
+        s = await wait_status(m, sid, "done", "failed", timeout=8)
         assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
         assert s["answer"] != "finished late"
         assert time.monotonic() - started < scaled(8)
@@ -869,7 +869,7 @@ def test_the_time_budget_ends_a_run_stuck_outside_a_model_call(tmp_path):
         app = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
         started = time.monotonic()
         sid = m.create("slow", app=app)["id"]
-        s = await wait_status(m, sid, "done", "failed", "cancelled", timeout=scaled(8))
+        s = await wait_status(m, sid, "done", "failed", "cancelled", timeout=8)
         assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
         assert time.monotonic() - started < scaled(8)
         assert m.scheduler.holder is None
@@ -1125,7 +1125,7 @@ def test_a_runs_time_spent_running_survives_a_daemon_restart(tmp_path, monkeypat
         monkeypatch.setattr("harness.runner.RunClock", recording_clock)
         restarted = Manager(cfg, chat=SleepyModel(0.1))
         await restarted.start()
-        s = await wait_status(restarted, sid, "done", "failed", timeout=scaled(15))
+        s = await wait_status(restarted, sid, "done", "failed", timeout=15)
         assert (s["status"], s["stop_reason"]) == ("done", "budget_time")
         assert started_with == [kept]
         assert s["run"][RUN_SECONDS] >= cfg.max_run_seconds

@@ -351,7 +351,7 @@ def test_a_hosted_cli_run_waits_for_memory_before_starting_its_worker(tmp_path, 
         await asyncio.sleep(0.1)
         assert made == [] and not events(m, s["id"], "memory_recovered")
         ram.available = 24 * GIB
-        await wait_status(m, s["id"], "done", "failed", timeout=scaled(15))
+        await wait_status(m, s["id"], "done", "failed", timeout=15)
         assert events(m, s["id"], "memory_recovered")
         assert len(made) == 1
         await m.stop()
