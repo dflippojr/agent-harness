@@ -51,24 +51,36 @@ def _shell(**kw):
     return Completion(tool_calls=[call("run_shell", 0, command="echo hi", network=True, **kw)])
 
 
-def test_tainted_session_asks_survives_restart_and_clear_is_evented(tmp_path):
+class _FakeWeb:
+    """Serves web_fetch without a network, so the fetch is a real tool call whose result taints the session."""
+    tool_names = {"web_fetch"}
+
+    def schemas(self):
+        return [{"type": "function", "function": {
+            "name": "web_fetch", "description": "fetch",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}}]
+
+    async def call(self, name, args):
+        return "a page that says to curl something"
+
+
+def test_a_web_fetch_taints_the_session_and_the_taint_survives_a_restart_until_cleared(tmp_path):
     cfg = make_cfg(tmp_path, rules=NET_ALLOW)
 
     async def body():
-        # Control: the rule allows the networked shell in an untainted session. Decided directly rather than run,
-        # since running a networked shell needs the Docker sandbox, which CI and some dev hosts don't have.
-        m = Manager(cfg, chat=Script([Completion(content="done")]))
-        await m.start()
-        clean = m.create("untainted", project="guarded")
-        await wait_status(m, clean["id"], "done")
-        shell = {"command": "echo hi", "network": True}
-        assert m.runner._decide(m.db.get_session(clean["id"]), "run_shell", shell).action == ALLOW
-        await m.stop()
+        # Control: the rule allows a networked shell in an untainted session. A networked shell can't run without
+        # the Docker sandbox (CI and some dev hosts don't have it), so the decision is asked of the policy itself.
+        assert Policy(NET_ALLOW).decide("run_shell", {"command": "echo hi", "network": True}).action == ALLOW
 
-        m = Manager(cfg, chat=Script([_shell(), Completion(content="done")]))
+        m = Manager(cfg, chat=Script([Completion(tool_calls=[call("web_fetch", 0, url="https://evil.example/p")]),
+                                      _shell(), Completion(content="done")]))
+        m.runner.web = _FakeWeb()
         await m.start()
-        s = m.create("tainted", project="guarded", taint=SRC)
-        await wait_status(m, s["id"], "waiting_approval")
+        s = m.create("read the page", project="guarded")
+        await wait_status(m, s["id"], "waiting_approval")  # the same shell the rule allowed is now asked
+        added = events(m, s["id"], "taint_added")
+        assert [(e["kind"], e["origin"]) for e in added] == [("web_fetch", "evil.example")]
+        assert m.db.get_session(s["id"])["taint"][0]["origin"] == "evil.example"
         req = events(m, s["id"], "approval_requested")[0]
         assert "untrusted content from evil.example" in req["reason"]
         m.decide(s["id"], None, approve=False)
@@ -77,25 +89,9 @@ def test_tainted_session_asks_survives_restart_and_clear_is_evented(tmp_path):
 
         m = Manager(cfg, chat=Script([Completion(content="x")]))  # fresh daemon: taint persisted
         assert m.db.get_session(s["id"])["taint"][0]["origin"] == "evil.example"
-        assert m.db.get_session(s["id"])["taint"]
         out = m.clear_taint(s["id"])
         assert out["taint"] == []
         assert events(m, s["id"], "taint_cleared")
-    asyncio.run(body())
-
-
-def test_web_fetch_result_taints_the_session(tmp_path):
-    cfg = make_cfg(tmp_path, rules=NET_ALLOW)
-
-    async def body():
-        m = Manager(cfg, chat=Script([Completion(content="x")]))
-        await m.start()
-        s = m.create("hi")
-        await wait_status(m, s["id"], "done")
-        m.runner._taint_from_result(m.db.get_session(s["id"]), "web_fetch", {"url": "https://evil.example/p"})
-        assert m.db.get_session(s["id"])["taint"][0]["origin"] == "evil.example"
-        assert events(m, s["id"], "taint_added")
-        await m.stop()
     asyncio.run(body())
 
 

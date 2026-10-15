@@ -13,23 +13,15 @@ from test_daemon import make_cfg, Script
 from test_phase3 import lab
 
 
-@pytest.mark.parametrize("selection", ["present", "off", "absent"])
-def test_presence_and_workspace_gates(tmp_path, selection):
+def test_workspace_gates(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.runners = {}
     for section in (cfg.memory_library, cfg.remote_control, cfg.notify, cfg.gpu_guard):
         section.enabled = False
-    cfg.installed.homelab = selection != "off"
-    if selection == "absent":
-        cfg.module_packages = ["harness_modules.images"]
     m = Manager(cfg, chat=Script([Completion(content="hi")]))
     project = Project(name="lab", homelab=True)
     rt = m.modules.get("homelab")
-    if selection != "present":
-        assert rt is None
-        assert "Homelab access" not in m._optional_prompts(project, {}, None)
-        m.db.close()
-        return
+    assert "Homelab access" in m._optional_prompts(project, {}, None)
     assert cfg.capabilities()["modules"]["homelab"]
     assert rt.workspace_toolkit(project, {}, False) is rt.service
     assert rt.workspace_toolkit(project, {}, True) is None

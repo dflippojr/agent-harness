@@ -131,128 +131,9 @@ def test_pushed_session_links_to_github_pull_request(tmp_path):
                                         "?expand=1&title=Fix%20A%20%26%20B%20%232%20now")
 
 
-def test_web_app_and_guard(tmp_path):
+def test_profile_identity_and_csrf_guard(tmp_path):
     client, m, _ = make_client(tmp_path, [Completion(content="hi")])
     with client:
-        assert "<title>Stables</title>" in client.get("/").text
-        js = client.get("/static/app.js").text
-        chrome_js = client.get("/static/lib/chrome.mjs").text
-        router_js = client.get("/static/lib/router.mjs").text
-        tabs_js = client.get("/static/lib/tabs.mjs").text
-        warm_js = client.get("/static/lib/warm-model.mjs").text
-        actions_js = client.get("/static/pages/actions.mjs").text
-        profile_js = client.get("/static/pages/profile.mjs").text
-        new_task_js = client.get("/static/pages/new-task.mjs").text
-        sessions_js = client.get("/static/pages/sessions.mjs").text
-        session_js = client.get("/static/pages/session.mjs").text
-        session_ui_js = client.get("/static/lib/session-ui.mjs").text
-        assert 'go(name === "transcript" ? `#/s/${sid}` : `#/s/${sid}/${name}`, true)' in session_js
-        assert "session-chrome" in session_js
-        assert "jump-top" in session_ui_js
-        assert 'method: "PATCH"' in session_ui_js
-        assert "session-title" in session_ui_js
-        assert "harness.theme" in profile_js
-        assert "harness.textSize" in profile_js
-        assert "TEXT_SIZES" in profile_js
-        assert "applyTextSize" in js
-        assert 'setHeader("agents", "New task", { page: true })' in new_task_js
-        assert "sessionJumpHidden" in session_ui_js
-        assert "Math.min(160, 0.75 * vh)" in client.get("/static/lib/layout.mjs").text
-        assert 'type: "color"' not in js
-        assert "swatch split" in profile_js
-        assert "Scratch is a fresh empty folder" in new_task_js
-        assert '"＋ New project"' in new_task_js
-        assert 'api("/projects", { method: "POST"' in new_task_js
-        assert "Only tower projects with a local folder appear" in actions_js
-        assert 'id="guest-banner"' in client.get("/").text
-        assert 'id="bar"' in client.get("/").text
-        assert 'id="tab-bar"' in client.get("/").text
-        assert "harness.textSize" in client.get("/").text
-        assert "paintGuestChrome" in chrome_js
-        assert "isGuest()" in chrome_js
-        css = client.get("/static/style.css").text
-        assert "safe-area-inset-top, 0px) + 18px" in css
-        assert "-webkit-transform: translate3d(0, 0, 0)" in css
-        assert "#bar.paint-refresh" in css
-        assert "#bar > *" in css
-        assert 'window.addEventListener("pageshow", repaintBar)' in chrome_js
-        assert 'window.addEventListener("orientationchange", repaintBar)' in chrome_js
-        assert "if (!document.hidden) repaintBar()" in chrome_js
-        assert ".session-chrome" in css
-        assert ".jump-top" in css
-        assert ".swatch.split" in css
-        assert ".hue-preview" in css
-        assert "#fab-host" in css
-        assert "width: 9.75rem" in css
-        assert "#guest-banner" in css
-        assert "--text-scale" in css
-        assert "max(16px, 1rem)" in css
-        assert ".size-grid" in css
-        assert ".action-item" in css
-        assert ".action-subitem.disabled" in css
-        assert ".switch:checked" in css
-        assert "prefers-reduced-motion: reduce" in css
-        assert ".image-status .progress.indeterminate > span" in css
-        assert 'showListAction("#/new", "+ New task")' in sessions_js
-        jobs_page = client.get("/static/pages/jobs.mjs").text
-        assert 'showListAction("#/jobs/new", "+ New job")' in jobs_page
-        assert 'api("/backends?auth=skip")' in jobs_page
-        assert 'if (images && !route.onImages) api("/images/warmup"' not in js
-        images_page = client.get("/static/pages/images.mjs").text
-        assert "function imageModeEntries" in images_page
-        assert "function installedImageModeEntries" in images_page
-        assert "spec.available !== false" in images_page
-        assert "quality-fast" in images_page
-        assert 'if (prompt.value.trim()) startWarmup()' in images_page
-        assert 'await startWarmup().catch(() => {})' in images_page
-        assert "updateImageStatusView(phase, d.status)" in images_page
-        assert "IMAGE_MODELS_EMPTY" in images_page
-        assert "Queue Generation" in images_page
-        assert "not installed" in images_page
-        assert "ops/images-models.ps1" in images_page
-        assert "grid.dataset.keys" in images_page
-        assert 'upscaling ? "Upscaling"' in images_page
-        assert 'editing ? "Editing"' in images_page
-        assert "function maskEditor" in images_page
-        assert "viewImageEdit" in images_page
-        assert "canvas.width / r.width" in images_page
-        assert "Independent backups are not changed" in images_page
-        assert ".mask-stage" in css
-        assert "touch-action: none" in css
-        assert '"Upscale 2×"' in images_page
-        assert '"Upscale 4×"' in images_page
-        assert "upscale: upscale.value" in images_page
-        assert 'href: "#/profile/account"' in profile_js
-        assert "gpuActionRow(model.render)" in actions_js
-        assert "function diagnosticsCard()" in actions_js and "setInterval" not in actions_js.split(
-            "function diagnosticsCard()")[1].split("function gpuActionRow")[0]  # one reading, no polling (#311)
-        assert "function gpuCard()" not in js
-        assert 'h("span", {}, "Duration:")' in actions_js
-        assert 'duration.disabled = isGuest() || !g.manual' in actions_js
-        assert "function viewActions" in actions_js
-        assert 'go(`#/actions/${parts[1]}`, true)' in router_js
-        assert actions_js.index('["resources", "Resources"]') < actions_js.index('["remote-control", "Claude Remote Control"]')
-        assert '["accounts", "Accounts"]' not in actions_js  # household members are in the Hub and the CLI (#545)
-        assert actions_js.index('["remote-control", "Claude Remote Control"]') < actions_js.index('["disk", "Disk"]')
-        assert "member && (tab === \"jobs\" || tab === \"images\")" in tabs_js
-        assert 'href: "#/profile/remote-control"' not in js
-        assert 'href: "#/profile/disk"' not in js
-        # Actions are the owner-only rows of Settings → Server (#512).
-        assert "Object.hasOwn(ACTION_PAGES, id) ? isOwner()" in profile_js
-        assert '["Server", ["resources", "remote-control", "disk"]]' in profile_js
-        view_profile_js = profile_js.split("async function viewProfile")[1].split("function connectionCard")[0]
-        assert "gpuActionRow()" not in view_profile_js
-        assert "Claude Remote Control" not in view_profile_js
-        assert '"smart-approvals": "Smart approvals"' in profile_js
-        assert "function smartApprovalsCard()" in profile_js
-        assert 'skills: "Skills"' not in profile_js and "Install hash" not in profile_js  # skills: Hub and CLI (#545)
-        assert 'api("/skills/enabled")' in new_task_js
-        assert "confirmGpuQueue" in js
-        assert "gpu.manual" in warm_js
-        assert "picker.hidden = !picker.hidden" not in js
-        assert "if (holding)" in sessions_js
-        assert 'id="fab-host"' in client.get("/").text
-        assert client.get("/static/app.js").status_code == 200
         profile = client.get("/profile").json()
         assert profile["emoji"] == "🙂"
         assert "🚀" in profile["choices"]
@@ -448,7 +329,7 @@ def test_sleeping_model_is_announced_and_warmed(tmp_path):
 def test_guest_demo_access(tmp_path):
     from datetime import datetime, timedelta, timezone
 
-    from harness.access import guest_forbidden, parse_guest_until, resolve_access
+    from harness.access import parse_guest_until
     from harness.config import GuestAccess
 
     now = datetime.now(timezone.utc)
@@ -463,20 +344,6 @@ def test_guest_demo_access(tmp_path):
     m.cfg.guests = [GuestAccess(login=guest, until=future)]
     gh = {"Tailscale-User-Login": guest, "Tailscale-User-Name": "Buddy"}
     oh = {"Tailscale-User-Login": LOGIN}
-
-    ident = resolve_access(m.cfg, guest)
-    assert ident.allowed
-    assert ident.role == "guest"
-    assert guest_forbidden(ident, "GET", "/sessions") is None
-    assert guest_forbidden(ident, "POST", "/sessions") == "demo access is read-only"
-    assert guest_forbidden(ident, "GET", "/keys") == "demo access cannot view owner credentials"
-    assert guest_forbidden(ident, "GET", "/api/admin/v1") == "demo access cannot use the owner API"
-    assert guest_forbidden(ident, "POST", "/runners/macbook/poll") is None
-    owner = resolve_access(m.cfg, LOGIN)
-    assert owner.role == "owner"
-    assert owner.allowed
-    assert resolve_access(m.cfg, None).role == "owner"
-    assert resolve_access(m.cfg, "intruder@example.com").allowed is False
 
     with client:
         me = client.get("/me", headers=gh).json()

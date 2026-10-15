@@ -1,9 +1,8 @@
 """Remote Control extraction contracts. No Claude processes or real connections."""
-import pytest
 from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
-from harness import cli, config
+from harness import config
 from harness.api import create_app
 from harness.manager import Manager
 from harness_modules.remote_control import LIMITS, settings
@@ -13,55 +12,19 @@ from test_daemon import make_cfg, Script
 from harness.llm import Completion
 
 
-def rc_manager(tmp_path, selection='off'):
+def rc_manager(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.runners = {}
     for section in (cfg.memory_library, cfg.remote_control, cfg.notify, cfg.gpu_guard):
         section.enabled = False
-    if selection == 'absent':
-        cfg.module_packages = ['harness_modules.images']
-    if selection == 'uninstalled':
-        cfg.installed.remote_control = False
     return Manager(cfg, chat=Script([Completion(content='fake')]))
 
 
-@pytest.mark.parametrize('selection', ['off', 'absent', 'uninstalled'])
-def test_registration_and_absence(tmp_path, selection):
-    m = rc_manager(tmp_path, selection)
-    present = selection == 'off'
-    assert ('remote_control' in m.modules) == present
-    assert m.remote_control is None
-    assert ('remote_control.enabled' in m.settings.registry.specs) == present
-    assert ('remote_control.discovery.roots' in m.settings.registry.specs) == present
-    assert ('remote_control' in m.settings.registry.get('app.capabilities').bounds.enum) == present
-    assert ('remote_control' in m.cfg.capabilities()['modules']) == present
-    assert any(row[0] == 'remote-control promote' for row in cli.admin_commands())
-    with TestClient(create_app(m)) as client:
-        response = client.get('/api/admin/v1/remote-control')
-        assert response.status_code == (200 if present else 404)
-        if present:
-            assert response.json() == {'enabled': False, 'projects': []}
-            assert client.post('/remote-control/missing').status_code == 400
-            assert client.post('/remote-control/missing/trust').status_code == 400
-            assert client.post('/remote-control/missing/stop').status_code == 400
-        root = client.get('/api/v1').json()
-        assert ('remote_control' in root['features']) == present
-        assert ('remote_control' in root['scopes']) == present
-        schema = client.get('/api/admin/v1/config/schema').json()
-        assert ('discovery_limits' in schema) == present
-        if present:
-            assert schema['discovery_limits'] == LIMITS
-        operations = client.get('/api/admin/v1').json()['operations']
-        assert any('/remote-control/discovery/' in op['path'] for op in operations) == present
-
-
-def test_runtime_and_settings_without_starting_connections(tmp_path):
+def test_runtime_without_starting_connections(tmp_path):
     m = rc_manager(tmp_path)
     cfg = m.cfg
-    specs = {s.key: s for s in settings.specs()}
-    enabled = specs['remote_control.enabled']
-    enabled.setter(cfg, True)
-    assert enabled.getter(cfg) and enabled.enable_check(cfg) == []
+    cfg.remote_control.enabled = True
+    assert {s.key: s for s in settings.specs()}['remote_control.enabled'].enable_check(cfg) == []
     runtime = m.modules.get('remote_control')
     runtime.init()
     assert runtime.toolkit() is m.remote_control
@@ -74,8 +37,7 @@ def test_runtime_and_settings_without_starting_connections(tmp_path):
     m.modules.get('notifications').service = monkey_notifier
     runtime._ready({'title': 'fake'})
     assert sent == [{'topic': cfg.notify.topic, 'title': 'fake'}]
-    enabled.setter(cfg, False)
-    assert not enabled.getter(cfg)
+    cfg.remote_control.enabled = False
     assert not config.module_effective(cfg, 'remote_control')
 
 

@@ -6,16 +6,7 @@ import subprocess
 
 import pytest
 
-from harness import config, setup_config
-
-
-def test_service_setup_can_enable_hub_without_local_model(tmp_path):
-    assert setup_config.main(["--config-dir", str(tmp_path / "cfg"), "--data-dir", str(tmp_path / "data"),
-                              "--pause-flag", str(tmp_path / "paused"),
-                              "--profile", "service", "--enable-module", "hub"]) == 0
-    cfg = config.load(tmp_path / "cfg")
-    assert cfg.hub.enabled and cfg.installed.hub and cfg.modules.hub
-    assert cfg.models == {} and not cfg.modules.local_model
+from harness import config
 
 
 def test_windows_installer_binds_hub_and_allowlist_matches_core(tmp_path):

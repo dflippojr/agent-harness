@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -15,10 +14,8 @@ from harness.config import Project, _reset_at, _state_max_chars
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.metrics import render as render_metrics
-from harness.runner import Runner, new_run
-from harness.state import (
-    git_porcelain, inject_payload, is_dead_end_retry, is_valid_state, paths_since, validate_state,
-)
+from harness.runner import new_run
+from harness.state import inject_payload, is_dead_end_retry, is_valid_state, validate_state
 from harness.tools import ToolError
 from test_daemon import Script, call, events, make_cfg, wait_status
 
@@ -93,17 +90,6 @@ def test_apply_round_reset_keeps_head_and_atomic_tail():
     assert "hello.txt" in new[2]["content"]
 
 
-def test_git_porcelain_paths_and_baseline_diff(tmp_path):
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    assert git_porcelain(tmp_path) == []
-    (tmp_path / "new.txt").write_text("x", encoding="utf-8")
-    current = git_porcelain(tmp_path)
-    assert current is not None
-    assert "new.txt" in paths_since([], current)
-    assert paths_since(current, current) == []
-    assert git_porcelain(tmp_path / "missing") is None
-
-
 def test_reset_at_and_state_max_chars_fallback():
     assert _reset_at(None) == 0.60
     assert _reset_at("nope") == 0.60
@@ -136,22 +122,6 @@ def test_new_run_carries_state():
     assert run["notes"] == "n"
     assert run["state"] == {"goal": "g"}
     assert "pending_round_reset" not in run
-
-
-def test_config_yaml_loads_reset_keys(tmp_path):
-    from harness import config
-    cfg_dir = tmp_path / "cfg"
-    shutil.copytree(config.ROOT / "config", cfg_dir)
-    loaded = config.load(cfg_dir, tmp_path / "data")
-    assert loaded.reset_at == 0.60
-    assert loaded.state_max_chars == 8000
-    text = (cfg_dir / "harness.yaml").read_text(encoding="utf-8")
-    (cfg_dir / "harness.yaml").write_text(
-        text.replace("reset_at: 0.60", "reset_at: no").replace("state_max_chars: 8000", "state_max_chars: 12"),
-        encoding="utf-8")
-    loaded = config.load(cfg_dir, tmp_path / "data")
-    assert loaded.reset_at == 0.60
-    assert loaded.state_max_chars == 8000
 
 
 def test_update_notes_alias_preserves_other_fields(tmp_path):
@@ -294,70 +264,42 @@ def test_reset_lists_files_after_commit(tmp_path):
     asyncio.run(body())
 
 
-def test_threshold_without_state_falls_through(tmp_path):
-    cfg = make_cfg(tmp_path, context_tokens=8000)
-    cfg.reset_at = 0.50
-    cfg.stuck_stop_after = cfg.stuck_invalid_after = 0  # eight unknown-tool calls stand in for real tools
-    big = "line of output\n" * 400
+def test_threshold_resets_the_round_only_when_state_is_saved(tmp_path):
+    """A model that saved its state and then reports a prompt near the window gets a round reset, with no elide or
+    summary; the same prompt size without saved state falls through to elide or summary."""
+    def step(messages):
+        saved = "with state" in messages[1]["content"]
+        turns = sum(1 for m in messages if m["role"] == "assistant")
+        if turns:
+            return Completion(content="done", prompt_tokens=100)
+        first = call("update_state", 0, goal="g", plan="p") if saved else call("run_fake", 0)
+        return Completion(tool_calls=[first], prompt_tokens=1900)  # 95% of the 2,000-token window
 
-    def step(msgs):
-        n = sum(1 for m in msgs if m["role"] == "assistant")
-        if n < 8:
-            return Completion(tool_calls=[call("run_fake", n)], prompt_tokens=sum(
-                compaction.message_chars(m) for m in msgs) // 3)
-        return Completion(content="final", prompt_tokens=1000)
+    async def tiers(m, prompt, after_tool=None):
+        """The compaction tiers of a run, from the result of `after_tool` on if one is named."""
+        sid = m.create(prompt)["id"]
+        await wait_status(m, sid, "done")
+        await asyncio.gather(*m.tasks.values())
+        log = m.db.events(sid)
+        start = next((i for i, e in enumerate(log) if e["type"] == "tool_result" and e["data"]["name"] == after_tool), 0)
+        return sid, [e["data"]["tier"] for e in log[start:] if e["type"] == "compaction"]
 
     async def body():
-        m = Manager(cfg, chat=Script([step]))
-        orig = m.runner._record_result
-
-        async def padded(sid, c, name, output, ok, seconds=0.0, **kwargs):
-            await orig(sid, c, name, output + big, ok, seconds, **kwargs)
-        m.runner._record_result = padded
+        m = Manager(make_cfg(tmp_path, context_tokens=2000), chat=Script([step]))
         await m.start()
-        s = await wait_status(m, m.create("long task")["id"], "done", timeout=20)
-        comp = events(m, s["id"], "compaction")
-        assert not any(item["tier"] == "round_reset" for item in comp)
-        assert any(item["tier"] in ("elide", "summary") for item in comp)
-        assert "harness_round_resets_total 0" in render_metrics(m)
+        # the window is tiny, so the first pass (before any state exists) elides; once state is saved it resets
+        sid, saved_tiers = await tiers(m, "task with state", after_tool="update_state")
+        assert saved_tiers == ["round_reset"]
+        context = m.db.get_session(sid)["context"]
+        assert _state_from_context(context)["goal"] == "g"
+        _assert_tool_groups_intact(context)
+
+        _, bare_tiers = await tiers(m, "task without it")
+        assert "round_reset" not in bare_tiers
+        assert any(tier in ("elide", "summary") for tier in bare_tiers)
+        assert "harness_round_resets_total 1" in render_metrics(m)  # only the first session reset
         await m.stop()
     asyncio.run(body())
-
-
-def test_threshold_with_state_resets_without_elide(tmp_path):
-    async def body():
-        m = Manager(make_cfg(tmp_path, context_tokens=2000), chat=Script([Completion(content="done")]))
-        await m.start()
-        s = await wait_status(m, m.create("task")["id"], "done")
-        sid = s["id"]
-        state = validate_state({"goal": "g", "errors": [
-            {"command": "run_fake", "args": FAIL_ARGS, "message": "nope"}]}, 8000)
-        run = {**m.db.get_session(sid)["run"], "state": state, "chars_per_token": 3.0}
-        padded = s["context"] + [
-            {"role": "assistant", "content": "x" * 4000, "tool_calls": [call("read_file", 9, path="a")]},
-            {"role": "tool", "tool_call_id": "c9-read_file", "content": "y" * 4000},
-            {"role": "assistant", "content": "used it"},
-        ]
-        m.db.update_session(sid, context=padded, run=run)
-        before = len(m.db.events(sid))
-        await m.runner._maybe_compact(m.db.get_session(sid))
-        s = m.db.get_session(sid)
-        payload = _state_from_context(s["context"])
-        assert payload["goal"] == "g"
-        _assert_tool_groups_intact(s["context"])
-        tiers = [e["data"]["tier"] for e in m.db.events(sid)[before:] if e["type"] == "compaction"]
-        assert "round_reset" in tiers
-        assert "elide" not in tiers
-        assert "summary" not in tiers
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_has_valid_saved_state_predicate():
-    assert not Runner.has_valid_saved_state({"run": {}})
-    assert not Runner.has_valid_saved_state({"run": {"state": None}})
-    assert not Runner.has_valid_saved_state({"run": {"state": {"plan": "no goal"}}})
-    assert Runner.has_valid_saved_state({"run": {"state": validate_state({"goal": "g"}, 8000)}})
 
 
 def test_reset_round_without_state_is_tool_error(tmp_path):

@@ -146,22 +146,15 @@ def test_token_errors_are_generic(cfg, tmp_path):
         gh.token(cfg)
 
 
-@pytest.mark.parametrize("code,expected", [(401, 503), (404, 404), (500, 502)])
-def test_status_codes_map_to_errors_and_never_use_cache(cfg, monkeypatch, code, expected):
+@pytest.mark.parametrize("code,expected", [(401, 503), (404, 404), (500, 502), (429, 429)])
+def test_status_codes_map_to_errors_and_only_a_rate_limit_uses_cache(cfg, monkeypatch, code, expected):
     gh._CACHE.clear()
-    gh._CACHE[("a/b", "", 1)] = (0, {"items": [{"number": 1}]})
+    if code != 429:   # a rate limit serves the stale cache (test_list_cache_only_on_rate_limit); without one it errors
+        gh._CACHE[("a/b", "", 1)] = (0, {"items": [{"number": 1}]})
     status_transport(monkeypatch, code)
     with pytest.raises(HarnessError) as err:
         gh.list_items(cfg, "a/b")
     assert err.value.status == expected
-
-
-def test_rate_limit_without_cache_and_429(cfg, monkeypatch):
-    gh._CACHE.clear()
-    status_transport(monkeypatch, 429, content=b"not json")
-    with pytest.raises(HarnessError) as err:
-        gh.list_items(cfg, "a/b")
-    assert err.value.status == 429
 
 
 def test_unreachable_and_invalid_json(cfg, monkeypatch):

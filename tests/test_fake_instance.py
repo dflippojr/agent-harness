@@ -17,7 +17,7 @@ def run(coro):
 
 
 def test_stop_is_safe_to_repeat_and_only_deletes_instance_dirs(tmp_path):
-    assert fake_instance.stop(tmp_path / "absent") == 0
+    assert fake_instance.main(["stop", "--dir", str(tmp_path / "absent")]) == 0
     stranger = tmp_path / "stranger"
     stranger.mkdir()
     (stranger / "notes.txt").write_text("keep me", encoding="utf-8")
@@ -238,10 +238,6 @@ def test_stop_preserves_directory_when_shutdown_fails(monkeypatch, tmp_path, fai
     assert fake_instance.stop(instance) == 1
     remove.assert_not_called()
     assert (instance / fake_instance.HANDLE).is_file()
-
-
-def test_main_stop_subcommand(tmp_path):
-    assert fake_instance.main(["stop", "--dir", str(tmp_path / "absent")]) == 0
 
 
 def test_ready_answers_503_until_seeded():

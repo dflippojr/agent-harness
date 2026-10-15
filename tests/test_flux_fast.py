@@ -26,7 +26,8 @@ from harness_modules.images.models import (
     promote_comfyui, redact_url, remove_flux_fast, rollback_comfyui, stage_comfyui, validate_comfyui,
 )
 
-from test_phase6 import PNG, image_manager
+from test_phase6 import PNG, image_manager, wait_for
+from waits import scaled
 
 
 def _sha(data: bytes) -> str:
@@ -576,10 +577,7 @@ def test_http_and_tool_select_flux_fast_without_fallback(tmp_path):
         assert r.status_code == 400
         assert "does not support" in r.json()["detail"]
         job = client.post("/images", json={"prompt": "a cat", "model": "flux-fast"}).json()
-        for _ in range(200):
-            if client.get(f"/images/{job['id']}").json()["status"] == "done":
-                break
-            time.sleep(0.02)
+        wait_for(lambda: client.get(f"/images/{job['id']}").json()["status"] == "done", timeout=scaled(5))
         done = client.get(f"/images/{job['id']}").json()
         assert done["status"] == "done"
         assert done["model"] == "flux-fast"
@@ -641,7 +639,7 @@ def test_api_root_and_health_stay_responsive_during_cold_flux_hash(tmp_path, mon
         hashing.set()
         # Held until the requests below finish; a hash that blocks the event
         # loop would stall them for the full 5 s and blow the bound.
-        release.wait(5)
+        release.wait(scaled(5))
         return real(path, expected)
 
     monkeypatch.setattr(images_models_mod, "sha256_file", slow_hash)
@@ -651,7 +649,7 @@ def test_api_root_and_health_stay_responsive_during_cold_flux_hash(tmp_path, mon
 
     thread = threading.Thread(target=hash_in_background, daemon=True)
     thread.start()
-    assert hashing.wait(2)
+    assert hashing.wait(scaled(2))
     with TestClient(create_app(m)) as client:
         started = time.monotonic()
         health = client.get("/health")
@@ -661,11 +659,11 @@ def test_api_root_and_health_stay_responsive_during_cold_flux_hash(tmp_path, mon
         assert health.json()["ok"] is True
         release.set()
         # Generous on purpose: loaded runners took ~1 s here, a blocked loop takes >= 5 s.
-        assert elapsed < 2.5
+        assert elapsed < scaled(2.5)
         flux = root_json["image_modes"]["flux-fast"]
         assert flux["available"] is False
         assert flux["verifying"] is True or "verifying" in (flux.get("unavailable_reason") or "")
-    thread.join(timeout=8)
+    thread.join(timeout=scaled(8))
 
 
 def test_flux_status_hashes_files_installed_while_daemon_running(tmp_path):
@@ -735,14 +733,7 @@ def test_flux_warmup_error_surfaces_then_recovers(tmp_path, monkeypatch):
     assert flux.get("verifying") is False
 
     fail_hash = False
-    recovered = None
-    for _ in range(80):
-        recovered = m.images.flux_status()
-        if recovered["available"]:
-            break
-        time.sleep(0.05)
-    assert recovered is not None
-    assert recovered["available"] is True
+    wait_for(lambda: m.images.flux_status()["available"], timeout=scaled(4))
 
 
 def test_quality_fast_and_flux_fast_share_one_gpu_batch(tmp_path):

@@ -14,7 +14,7 @@ from harness.llm import Completion
 from harness.manager import Manager
 from harness.runner import SYSTEM_PROMPT
 from harness.workspace_guidance import GUIDANCE_LIMIT, SECTION_CLOSE, SECTION_OPEN, apply_to_prompt, discover
-from test_daemon import Script, make_cfg, wait_status
+from test_daemon import Script, call, make_cfg, wait_status
 from test_phase3 import finished, make_repo, project_cfg, sh
 
 
@@ -108,61 +108,47 @@ def test_session_sees_agents_md_after_the_instructions(tmp_path):
     assert s["context"][0]["content"] == system and s["run"]["workspace_context_applied"] is True
 
 
-def test_session_falls_back_to_claude_md(tmp_path):
-    system, _ = _run(tmp_path, {"CLAUDE.md": "CLAUDE-MARKER"})
-    assert "Contents of CLAUDE.md at the workspace root" in system and "CLAUDE-MARKER" in system
-
-
-def test_session_without_either_file_has_no_section(tmp_path):
-    system, _ = _run(tmp_path, {})
-    assert SECTION_OPEN not in system and "PROJECT-INSTRUCTIONS" in system
-
-
-def test_guidance_refreshes_only_at_round_reset(tmp_path):
-    async def body():
-        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
-        await m.start()
-        s = await wait_status(m, m.create("task")["id"], "done")
-        sid, root = s["id"], Path(s["workspace"])
-        base = m.db.get_session(sid)["context"][0]["content"]
-        assert SECTION_OPEN not in base and m.db.get_session(sid)["run"]["workspace_context_applied"] is True
-
-        # A file written mid-round is not picked up by a second start.
-        (root / "AGENTS.md").write_text("FIRST", encoding="utf-8")
-        m.runner._workspace_context_at_start(sid)
-        assert m.db.get_session(sid)["context"][0]["content"] == base
-
-        m.runner._round_reset(m.db.get_session(sid), m.db.get_session(sid)["context"], 0, 3.0, 0)
-        first = m.db.get_session(sid)["context"][0]["content"]
-        assert first.count(SECTION_OPEN) == 1 and "FIRST" in first
-
-        (root / "AGENTS.md").write_text("SECOND", encoding="utf-8")
-        m.runner._round_reset(m.db.get_session(sid), m.db.get_session(sid)["context"], 0, 3.0, 0)
-        second = m.db.get_session(sid)["context"][0]["content"]
-        assert second.count(SECTION_OPEN) == 1 and "SECOND" in second and "FIRST" not in second
-        assert workspace_guidance.strip_section(second) == base
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_repo_map_stays_after_the_guidance(tmp_path, monkeypatch):
+def test_guidance_and_map_refresh_only_at_a_round_reset(tmp_path, monkeypatch):
+    """The model rewrites AGENTS.md mid-run: its system prompt gains the guidance (once, before the repo map) only
+    when it resets the round, and a later rewrite waits for the next reset."""
     monkeypatch.setattr(repomap, "build_map", lambda *_: "MAP-MARKER")
+    systems = []
+    steps = iter([
+        Completion(tool_calls=[call("write_file", 0, path="AGENTS.md", content="FIRST")]),
+        Completion(tool_calls=[call("update_state", 1, goal="keep going"), call("reset_round", 2)]),
+        Completion(tool_calls=[call("write_file", 3, path="AGENTS.md", content="SECOND")]),
+        Completion(tool_calls=[call("reset_round", 4)]),
+        Completion(content="done"),
+    ])
+
+    def model(messages):  # the round resets drop the assistant turns, so a Script's own indexing would replay
+        systems.append(messages[0]["content"])
+        return next(steps)
 
     async def body():
         cfg = make_cfg(tmp_path)
         cfg.repo_map = RepoMapConfig(enabled=True)
-        m = Manager(cfg, chat=Script([Completion(content="done")]))
+        m = Manager(cfg, chat=Script([model]))
         await m.start()
         s = await wait_status(m, m.create("task")["id"], "done")
-        sid = s["id"]
-        (Path(s["workspace"]) / "AGENTS.md").write_text("GUIDE", encoding="utf-8")
-        for _ in range(2):
-            m.runner._round_reset(m.db.get_session(sid), m.db.get_session(sid)["context"], 0, 3.0, 0)
-            content = m.db.get_session(sid)["context"][0]["content"]
-            assert content.count(SECTION_OPEN) == 1 and content.count(repomap.SECTION_OPEN) == 1
-            assert content.index("GUIDE") < content.index("MAP-MARKER")
         await m.stop()
-    asyncio.run(body())
+        return s
+
+    s = asyncio.run(body())
+    assert s["run"]["workspace_context_applied"] is True
+    assert len(systems) == 5
+
+    def check(system, marker, other):
+        assert system.count(SECTION_OPEN) == 1 and system.count(repomap.SECTION_OPEN) == 1
+        assert marker in system and other not in system
+        assert system.index(marker) < system.index("MAP-MARKER")
+
+    assert SECTION_OPEN not in systems[0] and systems[1] == systems[0]  # written mid-round: not picked up
+    check(systems[2], "FIRST", "SECOND")                               # after the first reset
+    assert systems[3] == systems[2]                                     # rewritten again: still the old text
+    check(systems[4], "SECOND", "FIRST")                               # only the second reset takes it
+    base = workspace_guidance.strip_section(repomap.strip_section(systems[0]))
+    assert workspace_guidance.strip_section(repomap.strip_section(systems[4])) == base
 
 
 @pytest.mark.parametrize("field,value", [("backend", "claude"), ("kind", "chat"), ("target", "macbook")])

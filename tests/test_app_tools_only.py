@@ -114,6 +114,11 @@ def test_local_session_sends_only_app_tools_and_denies_a_builtin_the_model_tries
                            json={"content": "And now?"}).status_code == 200
         wait_for(lambda: client.get(f"/api/v1/sessions/{sid}", headers=auth).json()["answer"] == "Still $120.")
 
+        # Its tools were the calling App's alone, so nobody else can rerun it.
+        with pytest.raises(HarnessError) as e:
+            m.rerun(sid)
+        assert e.value.status == 409
+
 
 def test_local_session_answers_the_hosted_alias_instead_of_leaving_it_pending(tmp_path):
     """The policy allows mcp__harness__<tool>, but locally it is no tool name: the call must still get a result."""
@@ -133,84 +138,34 @@ def test_local_session_answers_the_hosted_alias_instead_of_leaving_it_pending(tm
         assert "unknown tool 'mcp__harness__get_balance'" in result["content"]
 
 
-def test_owner_phone_never_gets_a_tools_only_sessions_events(tmp_path):
-    """run_finished carries the title and answer: a tools-only session's must not reach the owner's ntfy."""
-    from harness_modules.notifications.service import Notifier
-    client, m, _ = _client(tmp_path, [Completion(content="Checking has $120."), Completion(content="hi")])
-    with client:
-        auth, _ = _app(client)
-        sid = client.post("/api/v1/sessions", headers=auth, json={
-            "prompt": "How much is in checking?", "tools_only": True, "tools": [BALANCE]}).json()["id"]
-        wait_for(lambda: client.get(f"/api/v1/sessions/{sid}", headers=auth).json()["status"] == "done")
-        owner = client.post("/sessions", json={"prompt": "hello", "project": "scratch"}).json()
-        wait_for(lambda: client.get(f"/sessions/{owner['id']}").json()["status"] == "done")
-    m.cfg.notify.enabled = True
-    notifier = Notifier(m.cfg, m.db)
-    notifier.listener({"type": "run_finished", "session_id": sid, "data": {"answer": "$120"}})
-    assert notifier.queue.empty()
-    notifier.listener({"type": "run_finished", "session_id": owner["id"], "data": {"answer": "hi"}})
-    assert notifier.queue.qsize() == 1
-
-
-def test_tools_only_sessions_are_the_creating_apps_alone(tmp_path):
-    client, m, _ = _client(tmp_path, [Completion(content="hi")])
-    with client:
-        auth, _ = _app(client)
-        broad, _ = _app(client, "reader", ("sessions", "sessions:all"))
-        sid = client.post("/api/v1/sessions", headers=auth, json={
-            "prompt": "hello", "tools_only": True, "tools": [BALANCE]}).json()["id"]
-        agent = client.post("/api/v1/sessions", headers=auth, json={"prompt": "agent work"}).json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
-        assert {s["id"] for s in client.get("/api/v1/sessions", headers=auth).json()} == {sid, agent}
-        assert client.get(f"/api/v1/sessions/{sid}", headers=auth).status_code == 200
-        assert client.get(f"/api/v1/sessions/{sid}", headers=broad).status_code == 404
-        assert sid not in {s["id"] for s in client.get("/api/v1/sessions", headers=broad).json()}
-        assert client.get(f"/api/v1/sessions/{sid}").status_code == 404  # the owner's surface too
-        assert sid not in {s["id"] for s in client.get("/api/v1/sessions").json()}
-        assert sid not in {s["id"] for s in m.db.list_sessions(50, owner_id="owner")}
-        with pytest.raises(HarnessError) as e:
-            m.rerun(sid)
-        assert e.value.status == 409
-
-
-@pytest.mark.parametrize("body,status,code", [
-    ({"backend": "codex"}, 400, "app_tools_only_unsupported"),  # backends.codex.mcp off
-    ({"backend": "cursor"}, 400, "app_tools_only_unsupported"),
-    ({"backend": "claude-nomcp"}, 400, "app_tools_only_unsupported"),
-    ({"project": "scratch"}, 400, "invalid_request"),
-    ({"tools": []}, 400, "invalid_request"),
+@pytest.mark.parametrize("credential,body,status,code", [
+    ("app", {"backend": "codex"}, 400, "app_tools_only_unsupported"),  # backends.codex.mcp off
+    ("app", {"backend": "cursor"}, 400, "app_tools_only_unsupported"),
+    ("app", {"backend": "claude-nomcp"}, 400, "app_tools_only_unsupported"),
+    ("app", {"project": "scratch"}, 400, "invalid_request"),
+    ("app", {"tools": []}, 400, "invalid_request"),
+    ("owner", {}, 403, None),
+    # Only an App can see a tools-only session, so a device key must not create one it could never read.
+    ("device", {}, 403, None),
 ])
-def test_refusals(tmp_path, body, status, code):
+def test_refusals(tmp_path, credential, body, status, code):
     backends = {"codex": BackendConfig(enabled=True, model="gpt", mcp=False),
                 "cursor": BackendConfig(enabled=True, model="c"),
                 "claude-nomcp": BackendConfig(enabled=True, model="opus", mcp=False)}
     client, m, _ = _client(tmp_path, [Completion(content="hi")], **backends)
     with client:
-        auth, _ = _app(client)
+        auth = {}
+        if credential == "app":
+            auth, _ = _app(client)
+        elif credential == "device":
+            key = client.post("/keys", json={"name": "phone", "kind": "device", "scopes": ["sessions"]}).json()
+            auth = {"Authorization": f"Bearer {key['key']}"}
+            assert client.get("/api/v1/sessions", headers=auth).status_code == 200  # a working device key
         r = client.post("/api/v1/sessions", headers=auth,
                         json={"prompt": "hi", "tools_only": True, "tools": [BALANCE], **body})
         assert r.status_code == status, r.text
-        assert r.json()["error"]["code"] == code
-        assert m.db.list_sessions(50, kind=TOOLS_ONLY) == []
-
-
-def test_owner_token_cannot_start_one(tmp_path):
-    client, m, _ = _client(tmp_path, [Completion(content="hi")])
-    with client:
-        r = client.post("/api/v1/sessions", json={"prompt": "hi", "tools_only": True, "tools": [BALANCE]})
-        assert r.status_code == 403
-
-
-def test_device_token_cannot_start_one(tmp_path):
-    """Only an App can see a tools-only session, so a device key must not create one it could never read."""
-    client, m, _ = _client(tmp_path, [Completion(content="hi")])
-    with client:
-        key = client.post("/keys", json={"name": "phone", "kind": "device", "scopes": ["sessions"]}).json()
-        headers = {"Authorization": f"Bearer {key['key']}"}
-        assert client.get("/api/v1/sessions", headers=headers).status_code == 200  # a working device key
-        r = client.post("/api/v1/sessions", json={"prompt": "hi", "tools_only": True, "tools": [BALANCE]},
-                        headers=headers)
-        assert r.status_code == 403
+        if code:
+            assert r.json()["error"]["code"] == code
         assert m.db.list_sessions(50, kind=TOOLS_ONLY) == []
 
 

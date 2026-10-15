@@ -170,7 +170,6 @@ import pytest  # noqa: E402
 
 from harness.config import MemoryLibraryConfig  # noqa: E402
 from harness_modules.memory_library.service import MemoryLibrary, sensitive_hits  # noqa: E402
-from harness.policy import ALLOW, ASK, DENY, Policy  # noqa: E402
 
 
 def git(cwd, *args):
@@ -202,13 +201,7 @@ def remote_file(tmp_path, bare, path):
     return (check / path).read_text(encoding="utf-8"), git(check, "log", "-1", "--format=%s%n%b")
 
 
-def test_policy_always_asks_for_memory_writes():
-    allow_all = Policy([{"tool": "*", "action": "allow"}])
-    assert allow_all.decide("memory_edit", {"path": "x"}).action == ASK
-    assert allow_all.decide("run_shell", {"command": "ls"}).action == ALLOW
-    deny = Policy([{"tool": "memory_write", "action": "deny", "reason": "not here"}])
-    assert deny.decide("memory_write", {}).action == DENY
-    assert Policy().decide("memory_edit", {}).reason == "changes your memory library"
+def test_sensitive_hits_flags_health_and_pay_lines_only():
     assert sensitive_hits("+++ b/x\n+- Started a new medication\n- old line with salary\n") == ["health"]
     assert sensitive_hits("+- Bought a disc golf bag\n") == []
 

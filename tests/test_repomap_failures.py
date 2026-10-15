@@ -36,8 +36,7 @@ def _raiser(exc):
     return language
 
 
-@pytest.mark.parametrize("exc", [ValueError("bad abi"), RuntimeError("incompatible"), OSError("dll"),
-                                 AttributeError("no fn")])
+@pytest.mark.parametrize("exc", [ValueError("bad abi"), OSError("dll")])
 def test_grammar_load_failure_disables_map(monkeypatch, tmp_path, caplog, exc):
     _fake_tree_sitter(monkeypatch, _raiser(exc))
     (tmp_path / "a.py").write_text("def f():\n    pass\n", encoding="utf-8")

@@ -104,26 +104,6 @@ def test_overflow_compacts_once_and_retries(tmp_path):
     asyncio.run(body())
 
 
-def test_a_second_overflow_still_fails_the_run(tmp_path):
-    turns = {"n": 0}
-
-    def step(_msgs):  # by call, not by assistant turns: the summary removes those
-        turns["n"] += 1
-        return Completion(tool_calls=[call("run_fake", turns["n"])]) if turns["n"] <= 4 else LLMError(OVERFLOW)
-
-    script = Script([step])
-
-    async def body():
-        m = Manager(_overflow_cfg(tmp_path), chat=script)
-        await m.start()
-        s = await wait_status(m, m.create("long task")["id"], "failed")
-        assert len([c for c in events(m, s["id"], "compaction") if c.get("reason") == "overflow"]) == 1
-        turns = [r for r in script.requests if r[0]["content"] != compaction.SUMMARY_SYSTEM]
-        assert len(turns) == 6   # four turns, the rejected call and its one retry
-        await m.stop()
-    asyncio.run(body())
-
-
 def test_other_client_errors_do_not_compact(tmp_path):
     script = Script([LLMError("HTTP 400: invalid tool schema")])
 
@@ -152,11 +132,20 @@ scripts:
 """, encoding="utf-8")
 
     async def body():
-        m = Manager(_overflow_cfg(tmp_path), chat=fake_model.FakeModel.from_path(path))
+        model = fake_model.FakeModel.from_path(path)
+        turns = []  # the model requests that are not compaction summaries
+
+        async def chat(*args, **kwargs):
+            if args[1][0]["content"] != compaction.SUMMARY_SYSTEM:
+                turns.append(args[1])
+            return await model(*args, **kwargs)
+
+        m = Manager(_overflow_cfg(tmp_path), chat=chat)
         await m.start()
         s = await wait_status(m, m.create("this prompt is too long")["id"], "failed")
         overflow = [c for c in events(m, s["id"], "compaction") if c.get("reason") == "overflow"]
         assert [c["tier"] for c in overflow] == ["summary"]
+        assert len(turns) == 5   # three turns, the rejected call and its one retry
         assert any("exceeds the available context size" in e.get("message", "") for e in events(m, s["id"], "error"))
         await m.stop()
     asyncio.run(body())

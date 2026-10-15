@@ -114,29 +114,17 @@ def test_hosted_web_compatibility_errors_keep_cors_headers(tmp_path):
             ("/api/v1/backends", "web/0", 426, "client_update_required"),
             ("/api/admin/v1/me", "not-a-client", 400, "invalid_client_identity"),
             ("/api/v1/backends", "web", 400, "invalid_client_identity"),
+            # Household (#102), config registry (#103), skills (#100) and smart approvals (#99) stay behind the guard.
+            ("/api/admin/v1/accounts", "web/99", 426, "daemon_update_required"),
+            ("/api/admin/v1/config", "web/99", 426, "daemon_update_required"),
+            ("/api/admin/v1/skills", "web/99", 426, "daemon_update_required"),
+            ("/api/admin/v1/smart-approvals", "web/99", 426, "daemon_update_required"),
         ):
             response = client.get(path, headers={**headers, compat.CLIENT_HEADER: header})
             assert response.status_code == status, response.text
             assert response.headers["access-control-allow-origin"] == origin
             assert response.headers["vary"] == "Origin"
             assert response.json()["error"]["code"] == code
-
-
-def test_new_main_routes_reject_version_skew_with_cors(tmp_path):
-    """Household, config-registry, skills, and smart-approvals routes stay behind the compatibility guard."""
-    manager, origin, headers = hosted_web_client(tmp_path)
-    with TestClient(create_app(manager)) as client:
-        for path in (
-            "/api/admin/v1/accounts",  # #102 household accounts
-            "/api/admin/v1/config",    # #103 typed config registry
-            "/api/admin/v1/skills",    # #100 agent-written skills
-            "/api/admin/v1/smart-approvals",  # #99 smart approvals
-        ):
-            response = client.get(path, headers={**headers, compat.CLIENT_HEADER: "web/99"})
-            assert response.status_code == 426, (path, response.text)
-            assert response.headers["access-control-allow-origin"] == origin
-            assert response.headers["vary"] == "Origin"
-            assert response.json()["error"]["code"] == "daemon_update_required"
 
 
 def test_mac_package_manifest_is_version_matched_and_hash_verified(tmp_path):
@@ -471,6 +459,8 @@ def test_web_bundle_has_safe_cache_update_and_version_handshake():
     assert "sessionStorage" in app
     assert "harness.webUpdatePrompt.${available}" not in app
     assert "harness-shell-${BUILD_ID}" in worker
+    assert '"/client.mjs"' in worker
+    assert 'fetch(event.request, { cache: "no-cache" })' in worker
     assert "event.origin !== self.location.origin" in worker
     assert "api/v1" not in worker
     assert "api/admin" not in worker

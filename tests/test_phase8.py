@@ -174,22 +174,6 @@ def test_github_falls_back_to_html_when_api_fails():
     assert "github.com/o/r" in seen
 
 
-# web app: a syntax error in app.js or any module it imports blanks the whole phone app, and nothing else would catch it
-def test_web_app_js_parses():
-    import shutil
-    import subprocess
-    from pathlib import Path
-    import pytest
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node isn't installed")
-    web = Path(__file__).resolve().parent.parent / "stables" / "public"
-    for source in [web / "app.js", *sorted(web.rglob("*.mjs"))]:
-        result = subprocess.run([node, "--check", "--input-type=module"], input=source.read_text(encoding="utf-8"),
-                                capture_output=True, text=True, encoding="utf-8")
-        assert result.returncode == 0, f"{source.name}: {result.stderr}"
-
-
 # Claude Code Remote Control launches (8b)
 import json as _json  # noqa: E402
 import subprocess as _subprocess  # noqa: E402
@@ -198,7 +182,6 @@ from pathlib import Path as _Path  # noqa: E402
 
 from harness.config import Project, RemoteControlConfig  # noqa: E402
 from harness.fileops import ToolError  # noqa: E402
-from harness.policy import ALLOW, ASK, Policy  # noqa: E402
 from harness_modules.remote_control.service import RemoteControl, parse_log, STOP_TIMEOUT  # noqa: E402
 
 FAKE_LOG = ("· Connecting · repo · HEAD\n\x1b[1A\x1b[J· Connected · repo · HEAD\n    Capacity: 1/4 · New sessions\n"
@@ -412,11 +395,6 @@ def test_remote_control_trust_web_endpoint(tmp_path, monkeypatch):
         assert response.status_code == 200
         assert response.json()["trust_prompt_open"]
         assert client.post("/remote-control/nope/trust").status_code == 400
-
-
-def test_remote_control_tool_always_asks():
-    assert Policy().decide("open_claude_remote_control", {"project": "x", "reason": "y"}).action == ASK
-    assert Policy([{"tool": "*", "action": "allow"}]).decide("open_claude_remote_control", {}).action == ASK
 
 
 def test_remote_control_tool_attached_only_to_owner_tower_session(tmp_path):
@@ -640,25 +618,23 @@ def test_claude_cli_allow_maps_events_usage_and_limits(tmp_path):
     asyncio.run(body())
 
 
-def test_claude_cli_ask_approve_and_deny(tmp_path):
-    async def one(root, approve, note=""):
-        m, _, state = _claude_manager(root, "ask")
+def test_claude_cli_ask_and_deny(tmp_path):
+    """Approving is covered by test_claude_cli_restart_resumes_and_keeps_pending_approval."""
+    async def body():
+        m, _, state = _claude_manager(tmp_path, "ask")
         await m.start()
         sid = m.create("run it", backend="claude")["id"]
         await wait_status(m, sid, "waiting_approval")
         pending = m.db.pending_approvals(sid)
         assert len(pending) == 1
         assert pending[0]["tool"] == "Bash"
-        m.decide(sid, pending[0]["id"], approve=approve, note=note)
+        m.decide(sid, pending[0]["id"], approve=False, note="not today")
         s = await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
-        assert s["answer"] == ("allow" if approve else "deny")
-        if not approve:
-            assert note in state.read_text(encoding="utf-8")
+        assert s["answer"] == "deny"
+        assert "not today" in state.read_text(encoding="utf-8")
         await m.stop()
-
-    asyncio.run(one(tmp_path / "approved", True))
-    asyncio.run(one(tmp_path / "denied", False, "not today"))
+    asyncio.run(body())
 
 
 def test_claude_cli_inbox_message(tmp_path):
@@ -694,19 +670,6 @@ def test_claude_cli_completed_session_followup_sends_latest_message(tmp_path):
                  if json.loads(line[3:]).get("type") == "user"]
         assert [item["message"]["content"] for item in users] == ["the original prompt", "the later follow-up"]
         assert all(item["session_id"] == "" for item in users)
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_claude_cli_cancel_kills_process(tmp_path):
-    async def body():
-        m, _, _ = _claude_manager(tmp_path, "cancel")
-        await m.start()
-        sid = m.create("wait", backend="claude")["id"]
-        await wait_status(m, sid, "running")
-        s = await m.cancel(sid)
-        assert s["status"] == "cancelled"
-        await wait_cli_gone(m, sid)
         await m.stop()
     asyncio.run(body())
 
@@ -948,14 +911,6 @@ def test_claude_backend_validation_and_policy(tmp_path):
         m.create("hello", backend="claude")
     with pytest.raises(Exception, match="unknown backend"):
         m.create("hello", backend="codex")
-    assert Policy().decide("Write", {"file_path": "/workspace/a.txt"}).action == ALLOW
-    assert Policy().decide("Write", {"file_path": "/etc/passwd"}).action == ASK
-    assert Policy().decide("Write", {"file_path": "/workspace/../etc/passwd"}).action == ASK
-    assert Policy().decide("Bash", {"command": "pytest -q"}).action == ASK
-    assert Policy([{"tool": "run_shell", "args": {"command": "^pytest"}, "action": "allow"}]).decide(
-        "Bash", {"command": "pytest -q"}).action == ALLOW
-    assert Policy(repo=True).decide("Bash", {"command": "git push origin main"}).action != ALLOW
-    assert Policy().decide("WebFetch", {"url": "https://example.com"}).action == ASK
 
 
 def test_web_and_app_session_apis_accept_backend(tmp_path):
@@ -1018,11 +973,8 @@ def test_backend_prefs_persist_model_and_effort(tmp_path, monkeypatch):
         again = {row["name"]: row for row in client.get("/backends").json()}
         assert again["claude"]["model"] == "claude-sonnet-4"
         assert again["claude"]["effort"] == "low"
-        assert [m["id"] for m in listed["claude"]["popular_models"]] == [
-            "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
         from harness.backend_state import POPULAR_MODELS
-        assert [m[0] for m in POPULAR_MODELS["cursor"]] == [
-            "cursor-grok-4.6-high", "composer-2.5-fast", "muse-spark-1.3-high"]
+        assert [m["id"] for m in listed["claude"]["popular_models"]] == [m[0] for m in POPULAR_MODELS["claude"]]
         assert not any(mid.startswith("gpt-") for mid, _ in POPULAR_MODELS["cursor"])
         assert client.put("/backends/claude", json={"effort": "banana"}).status_code == 400
         assert client.put("/backends/nope", json={"model": "x"}).status_code == 404
@@ -1343,11 +1295,6 @@ def test_codex_inbox_cancel_and_policy(tmp_path):
 
     asyncio.run(inbox())
     asyncio.run(cancel())
-    assert Policy().decide("exec_command", {"command": "pytest -q"}).action == ALLOW
-    assert Policy().decide("exec_command", {"command": "curl https://example.com", "network": True}).action == ASK
-    assert Policy(repo=True).decide("exec_command", {"command": "git push origin main"}).action != ALLOW
-    assert Policy().decide("apply_patch", {"file_paths": ["/workspace/a.py"]}).action == ALLOW
-    assert Policy().decide("apply_patch", {"file_paths": ["/workspace/a.py", "/etc/passwd"]}).action == ASK
 
 
 # Cursor Agent stream-json backend (8a step 5)

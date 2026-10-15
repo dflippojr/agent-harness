@@ -31,6 +31,8 @@ without the file returns an error instead of running 50-step `quality`.
 
 ## Comparison protocol
 
+> `bakeoff/compare_qwen_lightning.py` was removed in #702. Recover it from git history (before that change) to rerun this study.
+
 Run against a daemon that already has images enabled and the LoRA installed:
 
 ```

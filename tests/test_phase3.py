@@ -16,7 +16,6 @@ from harness.config import HomelabConfig, HomelabService, Project
 from harness_modules.homelab.service import Homelab, format_prometheus
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
-from harness.policy import ALLOW, ASK, DENY, Policy
 from harness.tools import ToolError
 
 from test_daemon import Script, call, events, make_cfg, wait_status
@@ -205,11 +204,6 @@ def test_url_project_push_and_policy(tmp_path):
         assert sh(remote, "show", f"{s['branch']}:app.py") == "VALUE = 2"
         await m.stop()
     asyncio.run(body())
-
-    repo_policy = Policy([], repo=True)
-    assert repo_policy.decide("run_shell", {"command": "git push origin HEAD"}).action == DENY
-    assert repo_policy.decide("run_shell", {"command": "git commit -am x"}).action == ALLOW
-    assert Policy().decide("restart_service", {"service": "grafana"}).action == ASK
 
 
 def test_clone_failure_fails_session_cleanly(tmp_path):

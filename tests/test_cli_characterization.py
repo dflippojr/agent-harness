@@ -63,93 +63,12 @@ def test_main_requires_a_command(home, monkeypatch, capsys):
     assert "required" in capsys.readouterr().err
 
 
-def test_main_loads_config_server_and_token(home, monkeypatch, calls):
-    (home / "client").mkdir(parents=True)
-    (home / "client" / "config.json").write_text(json.dumps({"server": "https://x.example/", "token": " tok "}))
-    calls.responses[("GET", "/queue")] = []
-    assert run_main(monkeypatch, "queue") == 0
-    assert (cli.BASE, cli.TOKEN) == ("https://x.example", "tok")
-
-
 def test_main_invalid_config_exits_with_message(home, monkeypatch):
     (home / "client").mkdir(parents=True)
     (home / "client" / "config.json").write_text("{not json")
     with pytest.raises(SystemExit) as exit_:
         run_main(monkeypatch, "queue")
     assert "invalid client config" in str(exit_.value.code)
-
-
-def test_main_env_overrides_config(home, monkeypatch, calls):
-    monkeypatch.setenv("HARNESS_URL", "http://env.example/")
-    monkeypatch.setenv("HARNESS_TOKEN", "envtok")
-    calls.responses[("GET", "/queue")] = []
-    run_main(monkeypatch, "queue")
-    assert (cli.BASE, cli.TOKEN) == ("http://env.example", "envtok")
-
-
-def test_main_list_show_transcript_cancel_queue(home, monkeypatch, calls, capsys):
-    calls.responses[("GET", "/sessions")] = [
-        {"id": "s1", "created_at": 0, "status": "done", "project": "scratch", "title": "hello"}]
-    calls.responses[("GET", "/sessions/s1")] = {"id": "s1"}
-    calls.responses[("GET", "/sessions/s1/transcript")] = "# transcript"
-    calls.responses[("POST", "/sessions/s1/cancel")] = {"status": "cancelled"}
-    calls.responses[("GET", "/queue")] = [{"position": 1, "session_id": "s9"}]
-    assert run_main(monkeypatch, "list") == 0
-    out = capsys.readouterr().out
-    assert out.startswith("s1  ")
-    assert "done" in out
-    assert "scratch" in out
-    assert out.rstrip().endswith("hello")
-    assert run_main(monkeypatch, "show", "s1") == 0
-    assert json.loads(capsys.readouterr().out) == {"id": "s1"}
-    assert run_main(monkeypatch, "transcript", "s1") == 0
-    assert capsys.readouterr().out == "# transcript\n"
-    assert run_main(monkeypatch, "cancel", "s1") == 0
-    assert capsys.readouterr().out == "cancelled\n"
-    assert run_main(monkeypatch, "queue") == 0
-    assert capsys.readouterr().out == "1  s9\n"
-
-
-def test_main_approve_and_deny(home, monkeypatch, calls, capsys):
-    calls.responses[("POST", "/sessions/s1/approvals/pending")] = {"id": "a1", "status": "approved"}
-    calls.responses[("POST", "/sessions/s1/approvals/a2")] = {"id": "a2", "status": "denied"}
-    assert run_main(monkeypatch, "approve", "s1") == 0
-    assert run_main(monkeypatch, "deny", "s1", "a2", "--note", "no") == 0
-    assert capsys.readouterr().out == "a1 approved\na2 denied\n"
-    assert calls == [("POST", "/sessions/s1/approvals/pending", {"decision": "approve", "note": ""}),
-                     ("POST", "/sessions/s1/approvals/a2", {"decision": "deny", "note": "no"})]
-
-
-def test_main_new_detached_and_watching(home, monkeypatch, calls, capsys):
-    calls.responses[("POST", "/sessions")] = {"id": "s1", "project": "p", "model": "m"}
-    watched = []
-    monkeypatch.setattr(cli, "watch", lambda sid, args, after=0: watched.append((sid, args, after)) or 7)
-    assert run_main(monkeypatch, "new", "do it", "--project", "p", "--detach") == 0
-    assert capsys.readouterr().out == "session s1 (p, m)\n"
-    assert watched == []
-    assert calls[0][2] == {"prompt": "do it", "project": "p", "backend": "local", "model": None, "title": None}
-    assert run_main(monkeypatch, "new", "do it", "--reasoning", "--full") == 7
-    sid, args, after = watched[0]
-    assert (sid, after, args.reasoning, args.full, args.no_prompt) == ("s1", 0, True, True, False)
-
-
-def test_main_watch_resolves_session_id(home, monkeypatch, calls):
-    calls.responses[("GET", "/sessions/abc")] = {"id": "abc-full"}
-    monkeypatch.setattr(cli, "watch", lambda sid, args, after=0: (sid, after))
-    assert run_main(monkeypatch, "watch", "abc") == ("abc-full", 0)
-
-
-def test_main_send_without_and_with_watch(home, monkeypatch, calls, capsys):
-    calls.responses[("GET", "/sessions/s1")] = {"id": "s1", "last_event_seq": 41}
-    calls.responses[("POST", "/sessions/s1/messages")] = {"id": "s1", "status": "running"}
-    seen = []
-    monkeypatch.setattr(cli, "watch", lambda sid, args, after=0: seen.append((sid, args, after)) or 3)
-    assert run_main(monkeypatch, "send", "s1", "hi") == 0
-    assert capsys.readouterr().out == "sent; session is running\n"
-    assert seen == []
-    assert run_main(monkeypatch, "send", "s1", "hi", "--watch") == 3
-    sid, args, after = seen[0]
-    assert (sid, after, args.reasoning, args.full, args.no_prompt) == ("s1", 41, False, False, False)
 
 
 def test_main_pair_prints_summary_without_secrets(home, monkeypatch, capsys):
@@ -388,19 +307,7 @@ class FakeStream:
         return b"nope"
 
 
-def test_iter_sse_parses_events_and_reports_drops(monkeypatch, capsys):
-    lines = ["data: " + json.dumps({"type": "a", "seq": 1, "data": {}}), "", ": comment",
-             'data: {"type": "b",', 'data: "seq": 2, "data": {}}', ""]
-    seen = {}
-
-    def stream(method, url, params, **kw):
-        seen["params"] = params
-        return FakeStream(200, lines)
-
-    monkeypatch.setattr(cli.httpx, "stream", stream)
-    assert [e["type"] for e in cli.iter_sse("s1", 5)] == ["a", "b"]
-    assert seen["params"] == {"after": 5}
-
+def test_iter_sse_reports_drops_and_http_errors(monkeypatch, capsys):
     def drop(*a, **k):
         raise httpx.ReadError("x")
 
@@ -450,21 +357,6 @@ def plain(text):
     return text
 
 
-def test_watch_streams_deltas_then_assistant_and_done(calls, stream, capsys):
-    calls.responses[("GET", "/sessions/s1")] = {"status": "done"}
-    assistant = dict(content=" hi ", tool_calls=[{"function": {"name": "run", "arguments": "{}"}}],
-                     prompt_tokens=10, completion_tokens=2, gen_tps=5)
-    stream.script.append([
-        ev("delta", 1, kind="reasoning", text="think"),   # hidden without --reasoning
-        ev("delta", 2, kind="content", text="hi"),
-        ev("assistant", 3, **assistant),
-        ev("status", 4, status="done", answer="hi", stop_reason=None)])
-    assert cli.watch("s1", args_ns()) == 0
-    assert plain(capsys.readouterr().out) == (
-        "assistant: hi\n  → run {}\n  [10 prompt / 2 completion tokens, 5 tok/s]\nstatus: done\n")
-    assert stream == [0]
-
-
 def test_watch_reasoning_visible_and_resets_before_content(calls, stream, capsys):
     calls.responses[("GET", "/sessions/s1")] = {"status": "failed"}
     stream.script.append([
@@ -501,25 +393,6 @@ def test_watch_ignores_replayed_terminal_status_and_reconnects(calls, stream, ca
     assert plain(capsys.readouterr().out).count("status: done") == 2
 
 
-def test_print_event_mask_compaction(capsys):
-    cli._print_event("compaction", {"tier": "mask", "tokens_saved": 4200, "characters_saved": 12600},
-                     args_ns())
-    out = plain(capsys.readouterr().out)
-    assert out.strip() == "Replaced old tool outputs with recoverable receipts (~4200 tokens saved)"
-
-
-def test_print_event_trim_compaction(capsys):
-    cli._print_event("compaction", {"tier": "trim", "tokens_saved": 900, "characters_saved": 2700}, args_ns())
-    out = plain(capsys.readouterr().out)
-    assert out.strip() == "Removed repeated, stale and noisy tool output (~900 tokens saved)"
-
-
-def test_print_event_elide_compaction_unchanged(capsys):
-    cli._print_event("compaction", {"tier": "elide", "tokens_before": 100, "tokens_after": 50}, args_ns())
-    out = plain(capsys.readouterr().out)
-    assert "context compacted (elide): ~100 → ~50 tokens" in out
-
-
 def test_watch_queue_compaction_and_print_only_events(calls, stream, capsys):
     calls.responses[("GET", "/sessions/s1")] = {"status": "done"}
     stream.script.append([
@@ -532,6 +405,9 @@ def test_watch_queue_compaction_and_print_only_events(calls, stream, capsys):
         ev("tool_result", 4, ok=True, name="run", seconds=1.5, output="l1\nl2"),
         ev("tool_result", 5, ok=False, name="bad", seconds=2, output="\n".join(f"L{i}" for i in range(20))),
         ev("compaction", 6, tier="t1", tokens_before=100, tokens_after=50),
+        ev("compaction", 60, tier="mask", tokens_saved=4200, characters_saved=12600),
+        ev("compaction", 62, tier="trim", tokens_saved=900, characters_saved=2700),
+        ev("compaction", 63, tier="elide", tokens_before=100, tokens_after=50),
         ev("compaction", 61, tier="round_reset", tokens_before=200, tokens_after=40),
         ev("error", 7, message="oops"), ev("llm_retry", 8, error="again"),
         ev("model_waking", 9, expected_seconds=30), ev("model_ready", 10, seconds=12),
@@ -550,6 +426,9 @@ def test_watch_queue_compaction_and_print_only_events(calls, stream, capsys):
     assert "← bad (2s)" in out
     assert "    L11\n    ... (8 more lines)" in out
     assert "context compacted (t1): ~100 → ~50 tokens" in out
+    assert "Replaced old tool outputs with recoverable receipts (~4200 tokens saved)" in out
+    assert "Removed repeated, stale and noisy tool output (~900 tokens saved)" in out
+    assert "context compacted (elide): ~100 → ~50 tokens" in out
     assert "round reset: ~200 → ~40 tokens" in out
     assert "error: oops" in out
     assert "llm_retry: again" in out
@@ -566,22 +445,6 @@ def test_watch_full_output_not_truncated(calls, stream, capsys):
     out = capsys.readouterr().out
     assert "more lines" not in out
     assert "    29" in out
-
-
-def test_watch_approval_flow_non_interactive(calls, stream, capsys):
-    calls.responses[("GET", "/sessions/s1")] = {"status": "done"}
-    stream.script.append([
-        ev("approval_requested", 1, id="a1", tool="run", reason="risky", args={"x": 1}, detail="why\nnow"),
-        ev("approval_decided", 2, id="a1", status="approved"),
-        ev("approval_requested", 3, id="a2", tool="run", reason="r", args={}),
-        ev("status", 4, status="done")])
-    assert cli.watch("s1", args_ns(no_prompt=True)) == 0
-    out = plain(capsys.readouterr().out)
-    assert "approval needed [a1]: run — risky" in out
-    assert '"x": 1' in out
-    assert "    why\n    now" in out
-    assert "approval a1 approved" in out
-    assert not any(c[1].endswith("/approvals") for c in calls)
 
 
 @pytest.mark.parametrize("answer,expected,notes", [

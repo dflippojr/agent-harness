@@ -233,14 +233,19 @@ def test_erasing_an_app_session_on_a_runner_discards_its_branch_there(tmp_path, 
 
 def test_erase_continues_when_the_local_branch_cannot_be_deleted(tmp_path, monkeypatch):
     src = make_repo(tmp_path / "src")
-    m = Manager(project_cfg(tmp_path, str(src)))
 
-    def fail(project, branch):
-        raise projects.GitError("locked")
-
-    monkeypatch.setattr(projects, "discard", fail)
-    m._erase_app_branch({"app_id": "ha-test", "branch": "agent/s1", "project": "proj", "target": "tower"})
-    m._erase_app_branch({"app_id": "ha-test", "branch": "agent/s1", "project": "missing", "target": "tower"})
+    async def body():
+        m = Manager(project_cfg(tmp_path, str(src)), chat=edit_steps())
+        await m.start(maintenance=False)
+        s = await finished(m, m.create("bump the value", project="proj", app=APP)["id"])
+        def fail(project, branch):
+            raise projects.GitError("locked")
+        monkeypatch.setattr(projects, "discard", fail)
+        assert await m.erase_session(s["id"])
+        assert m.db.get_session(s["id"]) is None
+        assert sh(src, "branch", "--list", s["branch"]) != ""  # the branch was left behind, not the erase
+        await m.stop()
+    asyncio.run(body())
 
 
 def test_app_session_on_a_runner_asks_for_a_base_only_clone(tmp_path):

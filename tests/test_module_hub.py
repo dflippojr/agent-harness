@@ -17,11 +17,10 @@ import pytest
 from harness import cli, config, modules
 from harness.api import create_app
 from harness.manager import Manager
-from harness.settings_keys import build_registry
 from harness_modules.hub import MODULE
 from harness_modules.hub.entries import EXAMPLE, EntriesError, initialize, load
 from harness_modules.hub.service import connection_state
-from sdk.harness_client import ContractError, Harness
+from sdk.harness_client import Harness
 from test_daemon import make_cfg
 
 PATH = "/api/admin/v1/hub"
@@ -186,20 +185,9 @@ def test_entries_match_ids_pending_and_do_not_open_app_stores(tmp_path, monkeypa
         assert client.get(PATH).json()["entries"][0]["pending_pairing"] is False
 
 
-def test_presence_disabled_absent_and_owner_auth(tmp_path):
+def test_owner_and_hub_keys_read_the_inventory_and_apps_and_devices_do_not(tmp_path):
     m = make(tmp_path)
-    registry = build_registry(m.cfg)
-    assert "hub.enabled" in registry.specs
-    setting = registry.get("hub.enabled")
-    setting.setter(m.cfg, False)
-    assert setting.getter(m.cfg) is False
     with TestClient(create_app(m)) as client:
-        assert client.get(PATH).status_code == 400
-        assert "disabled" in client.get(PATH).text
-        setting.setter(m.cfg, True)
-        response = client.get(PATH)
-        assert response.status_code == 200
-        assert ("GET", PATH) in {(r["method"], r["path"]) for r in client.get("/api/admin/v1").json()["operations"]}
         owner, owner_token = m.db.create_api_key("owner", "admin", kind="owner")
         hub, hub_token = m.db.create_api_key("hub", "admin", kind="owner")
         app, app_token = m.db.create_api_key("app", "sessions", kind="app")
@@ -214,13 +202,6 @@ def test_presence_disabled_absent_and_owner_auth(tmp_path):
             assert m.db.api_key_by_secret(token)["last_used_at"] is not None
         for token in (app_token, device_token):
             assert client.get(PATH, headers={"Authorization": f"Bearer {token}"}).status_code == 403
-    absent = make(tmp_path / "absent", [])
-    assert "hub.enabled" not in build_registry(absent.cfg).specs
-    with TestClient(create_app(absent)) as client:
-        assert client.get(PATH).status_code == 404
-        assert "harness_hub_" not in client.get("/metrics").text
-        assert client.get("/api/admin/v1/keys").status_code == 200
-        assert client.get("/api/admin/v1/hub-claim").status_code == 200
 
 
 def test_optional_status_failure_and_first_implementers(tmp_path, monkeypatch, caplog):
@@ -259,22 +240,16 @@ def test_doctor_and_invalid_entries_api(tmp_path):
         assert client.get(PATH).status_code == 400
 
 
-def test_config_yaml_and_service_opt_in(tmp_path):
+def test_a_switched_off_hub_stays_installed(tmp_path):
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()
     path = cfg_dir / "harness.yaml"
     path.write_text("hub: {enabled: false}\nmodels: {fake: {base_url: http://unused}}\n", encoding="utf-8")
     cfg = config.load(cfg_dir, tmp_path / "data")
     assert cfg.installed.hub and not cfg.hub.enabled and not cfg.modules.hub
-    path.write_text("profile: service\nmodules: {hub: true}\nbackends: {codex: {enabled: true}}\n", encoding="utf-8")
-    cfg = config.load(cfg_dir, tmp_path / "data")
-    assert cfg.installed.hub and cfg.hub.enabled and cfg.capabilities()["modules"]["hub"]
 
 
-def test_sdk_hub_inventory_and_openapi(tmp_path):
-    m = make(tmp_path)
-    with TestClient(create_app(m)) as client:
-        schema = client.get("/openapi.json").json()
+def test_sdk_reads_the_hub_inventory():
     seen = []
     def handler(request):
         seen.append(request)
@@ -285,11 +260,6 @@ def test_sdk_hub_inventory_and_openapi(tmp_path):
     try:
         assert sdk.hub_status() == {"modules": [], "apps": [], "entries": []}
         assert seen[0].url.path == PATH
-        sdk.validate_openapi(schema)
-        drifted = copy.deepcopy(schema)
-        drifted["components"]["schemas"]["HubInventory"]["properties"].pop("entries")
-        with pytest.raises(ContractError, match="entries"):
-            sdk.validate_openapi(drifted)
     finally:
         sdk.close()
 

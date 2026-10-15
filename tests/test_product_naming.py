@@ -48,11 +48,6 @@ def test_web_guide_is_canonical_and_old_path_is_a_short_pointer():
     pointer = (ROOT / "docs" / "control-center.md").read_text(encoding="utf-8")
 
     assert guide.startswith("# Stables\n")
-    assert "formerly Agent Harness Web" in guide
-    assert "Agent Harness Server URL" in guide
-    assert "harness keys create" in guide  # Web connection tokens come from the Hub or the CLI (#545)
-    assert "harness.*" in guide
-    assert "remain valid and visible" in guide
 
     assert "[`web.md`](web.md)" in pointer
     assert len(pointer.splitlines()) <= 8

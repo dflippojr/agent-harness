@@ -16,7 +16,7 @@ from harness.fileops import ToolError
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.principal import Principal
-from harness.policy import ChatPolicy
+from harness.policy import ChatPolicy, Policy
 from harness.runner import Runner
 from harness_modules.search.service import SessionSearch, search
 
@@ -104,6 +104,7 @@ def test_chat_is_separate_from_agent_sessions(tmp_path):
 
 def test_chat_denies_agent_tools_without_approval_cards(tmp_path):
     policy = ChatPolicy()
+    assert policy.fingerprint() != Policy().fingerprint()  # approval records are keyed per policy
     assert policy.decide("web_search", {}).action == "allow"
     for name in ("run_shell", "Bash", "write_file", "git_push", "remote_control_start", "Edit"):
         assert policy.decide(name, {}).action == "deny"
@@ -129,31 +130,9 @@ def test_chat_owner_only(tmp_path):
         assert client.get(f"/chats/{chat['id']}", headers=gh).status_code in (403, 404)
         assert client.get(f"/sessions/{chat['id']}", headers=gh).status_code == 404
         assert client.get("/sessions", headers=gh).json() == []
-
-
-def test_web_shell_has_chat_home_and_tab_bar(tmp_path):
-    client, _, _ = make_client(tmp_path, [Completion(content="ok")])
-    with client:
-        html = client.get("/").text
-        js = client.get("/static/lib/router.mjs").text
-        tabs_js = client.get("/static/lib/tabs.mjs").text
-        chat_js = client.get("/static/pages/chat.mjs").text
-        css = client.get("/static/style.css").text
-    order = [html.index(f'data-tab="{n}"') for n in ("chat", "agents", "jobs", "images", "profile")]
-    assert order == sorted(order)
-    assert ">Tasks<" not in html
-    assert 'id="menu-btn"' not in html
-    assert 'id="settings-btn"' in html
-    assert 'go(canChat() ? "#/chat" : "#/agents", true)' in js
-    assert 'parts[0] === "chat"' in js
-    assert 'tab === "chat" && !canChat' in tabs_js
-    assert 'api("/chats?limit=30")' in chat_js  # recent chats moved from the drawer to the Chat home
-    assert "visualViewport" in chat_js
-    assert "`/chats/${encodeURIComponent(id)}/events?after=${lastSeq}`" in chat_js
-    assert "safe-area-inset-bottom" in css
-    assert "#tab-bar" in css
-    assert "#nav-drawer" not in css
-    assert ".chat-welcome" in css
+        with pytest.raises(HarnessError) as err:  # and below the HTTP layer
+            m.create("hi", owner_id="guest:someone@example.com", kind="chat")
+        assert err.value.status == 403
 
 
 def test_household_member_cannot_use_chat():
@@ -292,23 +271,6 @@ def test_chat_delete_rename_and_cancel_guards(tmp_path):
         assert client.post(f"/chats/{chat['id']}/cancel").status_code == 409
         assert client.post(f"/sessions/{agent['id']}/cancel").json()["status"] == "cancelled"
         assert client.delete(f"/chats/{chat['id']}").status_code == 200
-
-
-def test_chat_create_is_owner_only_and_uses_chat_toolkit(tmp_path):
-    client, m, _ = make_client(tmp_path, [Completion(content="")])
-    m._spawn = lambda *_a, **_k: None
-    with client:
-        with pytest.raises(HarnessError) as err:
-            m.create("hi", owner_id="guest:someone@example.com", kind="chat")
-        assert err.value.status == 403
-        chat = client.post("/chats", json={"prompt": "hi"}).json()
-        s = m.db.get_session(chat["id"])
-        assert isinstance(m.runner.policy(s), ChatPolicy)
-        assert ChatPolicy().fingerprint() == "chat-allowlist"
-        assert m.runner.daemon_toolkits(s) == ([m.runner.web] if m.runner.web is not None else [])
-        m.runner.web, web = None, m.runner.web
-        assert m.runner.daemon_toolkits(s) == []
-        m.runner.web = web
 
 
 def test_queue_lists_only_owned_agent_sessions(tmp_path):

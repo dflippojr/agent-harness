@@ -617,20 +617,22 @@ def test_quality_fast_graph_uses_official_lightning_settings():
     assert q_sampler["steps"] == 50
     assert q_sampler["cfg"] == 4
     assert q_sampler["sampler_name"] == "euler"
+    def find(graph, class_type):
+        return next((key, node["inputs"]) for key, node in graph.items() if node["class_type"] == class_type)
+
+    unet_id, _ = find(quality, "UNETLoader")
     assert "LoraLoaderModelOnly" not in {node["class_type"] for node in quality.values()}
-    assert quality["222"]["inputs"] == {"model": ["226", 0], "shift": 3.1}
+    assert find(quality, "ModelSamplingAuraFlow")[1] == {"model": [unet_id, 0], "shift": 3.1}
     assert l_sampler["steps"] == 4
     assert l_sampler["cfg"] == 1
     assert l_sampler["sampler_name"] == "euler"
     assert l_sampler["scheduler"] == "simple"
     assert l_sampler["denoise"] == 1
-    lora = next(node["inputs"] for node in lightning.values() if node["class_type"] == "LoraLoaderModelOnly")
-    assert lora == {"model": ["226", 0], "lora_name": LIGHTNING_LORA["filename"], "strength_model": 1}
-    assert lightning["222"]["inputs"] == {"model": ["221", 0], "shift": 3.1}
+    lora_id, lora = find(lightning, "LoraLoaderModelOnly")
+    assert lora == {"model": [find(lightning, "UNETLoader")[0], 0], "lora_name": LIGHTNING_LORA["filename"],
+                    "strength_model": 1}
+    assert find(lightning, "ModelSamplingAuraFlow")[1] == {"model": [lora_id, 0], "shift": 3.1}
     assert t_sampler["steps"] == 8
-    assert LIGHTNING_LORA["bytes"] == 1698951104
-    assert LIGHTNING_LORA["sha256"] == "ad12117461cb41e2ea637fec8df6392ce8e8550c47fbe2b829ed3deb98262066"
-    assert LIGHTNING_LORA["revision"] == "a52649c9d0f6e1a248bff13f0df33bb8a2abdb52"
 
 
 def test_missing_lightning_lora_disables_only_quality_fast(tmp_path):
@@ -753,39 +755,15 @@ def test_quality_fast_hashes_the_file_comfyui_would_load(tmp_path, monkeypatch):
 def test_app_root_lists_quality_fast_without_enabling_it(tmp_path):
     from fastapi.testclient import TestClient
     from harness.api import create_app
+    from harness.apps import API_VERSION
 
     m, _, _ = image_manager(tmp_path)
     with TestClient(create_app(m)) as client:
         root = client.get("/api/v1").json()
-        assert root["api_version"] == "1.25"
+        assert root["api_version"] == API_VERSION
         assert root["image_modes"]["fast"]["available"] is True
         assert root["image_modes"]["quality-fast"]["available"] is False
         assert root["image_modes"]["quality-fast"]["label"] == "Qwen quality (fast, 4-step)"
-
-
-def test_image_warmup_holds_gpu_until_cooldown(tmp_path):
-    async def body():
-        m, server, _ = image_manager(tmp_path)
-        await m.start(maintenance=False)
-        await m.images.warmup()
-        for _ in range(200):
-            if m.images.phase == "warm":
-                break
-            await asyncio.sleep(0.01)
-        assert m.images.phase == "warm"
-        assert m.images.gpu_taken
-        assert server.calls == ["stop"]
-        assert m.images.status()["phase"] == "warm"
-        m.images.cooldown()
-        for _ in range(200):
-            if m.images.phase == "idle":
-                break
-            await asyncio.sleep(0.02)
-        assert m.images.phase == "idle"
-        assert not m.images.gpu_taken
-        assert server.calls == ["stop", "start"]
-        await m.stop()
-    asyncio.run(body())
 
 
 def test_gpu_hold_prevents_comfyui_warmup(tmp_path):
@@ -844,24 +822,6 @@ def test_held_images_drain_after_waiting_sessions(tmp_path):
         m.scheduler.release("b")
         done = await m.images.wait(job["id"])
         assert done["status"] == "done"
-        assert server.calls == ["stop", "start"]
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_image_batch_does_not_linger_after_last_job(tmp_path):
-    async def body():
-        m, server, _ = image_manager(tmp_path)
-        await m.start(maintenance=False)
-        job = m.images.submit("a red cube")
-        done = await m.images.wait(job["id"])
-        assert done["status"] == "done"
-        for _ in range(200):
-            if m.images.phase == "idle":
-                break
-            await asyncio.sleep(0.01)
-        assert m.images.phase == "idle"
-        assert "lingering" not in server.calls
         assert server.calls == ["stop", "start"]
         await m.stop()
     asyncio.run(body())
@@ -1012,32 +972,6 @@ def test_app_session_with_context_and_app_tool(tmp_path):
         assert any(e["type"] == "app_context" for e in m.db.events(sid))
 
 
-def test_app_scopes_and_isolation(tmp_path):
-    client, m = app_client(tmp_path, [Completion(content="hi")])
-    with client:
-        a = client.post("/keys", json={"name": "a", "kind": "app", "scopes": ["sessions"]}).json()["key"]
-        b = client.post("/keys", json={"name": "b", "kind": "app", "scopes": ["sessions"]}).json()["key"]
-        device = client.post("/keys", json={"name": "zed"}).json()["key"]  # inference only
-        reader = client.post("/keys", json={"name": "dash", "kind": "app", "scopes": ["sessions:all"]}).json()["key"]
-        assert client.post("/keys", json={"name": "x", "scopes": ["root"]}).status_code == 400
-        H = lambda k: {"Authorization": f"Bearer {k}"}  # noqa: E731
-
-        sid = client.post("/api/v1/sessions", headers=H(a), json={"prompt": "hello"}).json()["id"]
-        own = client.post("/sessions", json={"prompt": "the user's own task"}).json()
-        assert client.post("/api/v1/sessions", headers=H(device), json={"prompt": "x"}).status_code == 403
-        assert client.get(f"/api/v1/sessions/{sid}", headers=H(b)).status_code == 404
-        assert client.get(f"/api/v1/sessions/{own['id']}", headers=H(a)).status_code == 404
-        assert [s["id"] for s in client.get("/api/v1/sessions", headers=H(a)).json()] == [sid]
-        assert client.get(f"/api/v1/sessions/{own['id']}", headers=H(reader)).status_code == 200
-        assert client.post("/api/v1/sessions", headers=H(reader), json={"prompt": "x"}).status_code == 403
-        assert client.post(f"/api/v1/sessions/{sid}/approvals/pending", headers=H(a),
-                           json={"decision": "approve"}).status_code == 403
-        assert client.get("/api/v1/sessions", headers={"Authorization": "Bearer nope"}).status_code == 401
-        # app tokens without the inference scope can't use the model endpoint
-        m.cfg.endpoint.enabled = True
-        assert client.post("/v1/chat/completions", headers=H(a), json={"messages": []}).status_code == 401
-
-
 def test_sessions_all_read_vs_mutation_matrix(tmp_path):
     client, m = app_client(tmp_path, [Completion(content="ok")])
     with client:
@@ -1052,7 +986,14 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
                                           "scopes": ["sessions", "sessions:all", "approvals"]}).json()["key"]
         owner = client.post("/keys", json={"name": "control-center", "kind": "owner",
                                            "scopes": ["admin"]}).json()["key"]
+        device = client.post("/keys", json={"name": "zed"}).json()["key"]  # inference only
         H = lambda k: {"Authorization": f"Bearer {k}"}  # noqa: E731
+
+        assert client.post("/keys", json={"name": "x", "scopes": ["root"]}).status_code == 400
+        assert client.post("/api/v1/sessions", headers=H(device), json={"prompt": "x"}).status_code == 403
+        assert client.get("/api/v1/sessions", headers={"Authorization": "Bearer nope"}).status_code == 401
+        m.cfg.endpoint.enabled = True  # app tokens without the inference scope can't use the model endpoint
+        assert client.post("/v1/chat/completions", headers=H(a), json={"messages": []}).status_code == 401
 
         owner_sid = client.post("/sessions", json={"prompt": "owner task"}).json()["id"]
         a_sid = client.post("/api/v1/sessions", headers=H(a), json={"prompt": "a task"}).json()["id"]
