@@ -748,10 +748,40 @@ Owner operational settings live on `/api/admin/v1/config` (schema, GET, validate
 restart). The typed allowlist, persistence, recovery, and error codes are documented in
 [`config-registry.md`](config-registry.md). App tokens, device tokens, and guests receive 403.
 
+## Per-App usage
+
+`GET /api/admin/v1/apps/usage?days=30` is a read-only Owner API route (also available to the Hub's owner
+credential). It returns registered App and device keys, including revoked and erased keys whose usage metadata
+is retained. Keys with no usage are included with zero totals. Owner keys, Stables' `app-web` registry row,
+unassigned usage (`app_id: ""`) and usage without a matching App/device registry row are excluded.
+It reads only the main store's usage metadata and never opens an App's session store.
+
+The response has `days`, `start_date`, `end_date` (inclusive ISO calendar dates) and `apps`. Each App has
+`app_id`, `name`, `kind`, `today`, `week`, `month`, `daily` and `by_billing`:
+
+- Every tally contains `requests` (the sum of recorded request counts), `prompt_tokens`, `completion_tokens`
+  and `cost_usd`.
+- `today` starts at the daemon host's local midnight. `week` covers today and the preceding six local calendar
+  days; `month` covers today and the preceding 29. These are calendar windows, including across daylight-saving
+  changes, rather than rolling 168/720-hour intervals. All windows end at the request's snapshot time;
+  future-dated records are excluded.
+- `daily` is an ascending list of `{date, requests, prompt_tokens, completion_tokens, cost_usd}`, with every
+  local calendar day included, even when zero. `days` is an integer from 1 through 30 (default 30) and controls
+  only this series; the three named windows always keep their fixed lengths. Invalid values return 422.
+- `by_billing` maps each billing value recorded within the 30-day window to its own `today`, `week`, `month`
+  and zero-filled `daily` series. An App with no usage has `by_billing: {}`. Billing values are preserved
+  independently of backend and credential source. Clients should show tokens only for `local`, with no
+  notional dollar cost; this route reports the ledger's recorded cost without estimating one.
+
+Only recorded usage appears. In particular, built-in local-loop sessions currently do not record usage; this
+read-only addition does not change session accounting or introduce spend/token caps (#686 owner decision).
+The response schema is declared in OpenAPI and the generated Stables API types.
+
 ## Changelog
 
 | Version | Date | Changes |
 | --- | --- | --- |
+| 1.28 | 2026-10-15 | Read-only `GET /api/admin/v1/apps/usage?days=30`: per-App local-calendar today, 7-day and 30-day totals, zero-filled daily series, and billing splits (#686). |
 | 1.27 | 2026-10-12 | Session `totals` adds `read_artifact_calls`, `read_artifact_repeats`, `edit_mismatches` and `elide_only_compactions` (#639), also in each `turn_metrics` row and the `/sessions/{ref}/metrics` aggregate; Prometheus `harness_edit_mismatch_total` and `harness_compaction_elide_only_total` |
 | 1.26 | 2026-10-12 | `GET /api/admin/v1` adds `allowed_logins` (#620): the owner's tailnet logins from `harness.local.yaml`, read-only, for the Hub's tailnet sign-in (dflippojr/agent-harness-hub#8). Shown by `harness capabilities`. |
 | 1.25 | 2026-10-11 | Read-only `POST /pairing-requests/preview` (#604), CLI `harness pairing-requests preview --scopes ...`, SDK `Harness.preview_pairing(scopes)`: shared daemon App scope disclosures before arming, including module fallback copy and elevated tiers, without pairing side effects. |
