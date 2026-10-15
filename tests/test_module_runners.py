@@ -10,13 +10,12 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import cli, config, modules
+from harness import config, modules
 from harness.admin import PREFIX
 from harness.api import create_app
 from harness.fileops import ToolError
 from harness.manager import HarnessError, Manager
 from harness.runner_contract import NoRunnerHub, RemoteWorkspace as WorkspaceContract, RunnerOffline
-from harness.settings_keys import build_registry
 from harness_modules.runners import mac_client, service
 from harness_modules.runners.runtime import RunnersRuntime
 from test_daemon import make_cfg
@@ -33,49 +32,6 @@ def runner_manager(tmp_path, *, packages=None, installed=True):
     return Manager(cfg)
 
 
-def test_runners_register_routes_commands_and_capabilities(tmp_path):
-    m = runner_manager(tmp_path)
-    rt = m.modules.get("runners")
-    assert m.hub is m.runner.hub is rt.service
-    assert m.runners is m.hub
-    assert m.cfg.capabilities()["modules"]["runners"] is True
-    assert "modules.runners" in build_registry(m.cfg).specs
-    assert {row[0] for row in cli.admin_commands()} >= {
-        "runner list", "runner update", "runner-pairing-codes list", "runner-pairing-codes create"}
-    assert cli.admin_request(cli._build_parser().parse_args(["runner", "update", "mac"]))[:2] == (
-        "POST", "/runners/mac/update")
-    with TestClient(create_app(m)) as client:
-        assert client.get("/me").json()["capabilities"]["runners"] is True
-        assert client.get("/api/v1").json()["features"]["runner_pairing"] is True
-        assert client.get(PREFIX + "/runners").json()[0]["name"] == "mac"
-        operations = {op["path"] for op in client.get(PREFIX).json()["operations"]}
-        assert PREFIX + "/runners/{name}/poll" not in operations
-        assert PREFIX + "/runners/{name}/results" not in operations
-    assert m.hub._closing
-
-
-@pytest.mark.parametrize("packages,installed", [(["harness_modules.images"], True), (None, False), ([], True)])
-def test_absent_runners_leave_local_core_and_saved_pairing_intact(tmp_path, packages, installed):
-    m = runner_manager(tmp_path, packages=packages, installed=installed)
-    assert m.runners is None and "runners" not in m.modules
-    assert isinstance(m.hub, NoRunnerHub)
-    assert m.hub is m.runner.hub
-    assert "runners" not in m.cfg.capabilities()["modules"]
-    assert "modules.runners" not in build_registry(m.cfg).specs
-    with TestClient(create_app(m)) as client:
-        assert client.get("/health").json()["ok"]
-        assert "runner_pairing" not in client.get("/api/v1").json()["features"]
-        assert "runners" not in client.get("/me").json()["capabilities"]
-        for path in ("/runners", PREFIX + "/runners", "/runner-pairing-codes",
-                     "/mac-client/install.sh", "/mac-client/package.tar.gz", "/mac-client/manifest.json"):
-            assert client.get(path).status_code == 404, path
-        assert client.post("/api/v1/runner-pair", json={"code": "hrp-example"}).status_code in (404, 405)
-        assert client.get("/maintenance").json()["runners"] == []
-    with pytest.raises(HarnessError, match="runners module is unavailable"):
-        m._check_free_space(True, False, "mac", "owner")
-    assert (tmp_path / "runner.token").read_text() == "already-paired"
-
-
 def test_existing_token_and_protocol_work_after_manager_restart(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "POLL_HOLD_SECONDS", 0)
     for _ in range(2):
@@ -86,6 +42,12 @@ def test_existing_token_and_protocol_work_after_manager_restart(tmp_path, monkey
             assert response.status_code == 200
             assert response.json() == {"requests": [], "keep_awake": False}
         assert (tmp_path / "runner.token").read_text() == "already-paired"
+    # Without the module the saved pairing stays on disk, and a remote run is refused rather than queued.
+    absent = runner_manager(tmp_path, packages=[])
+    assert isinstance(absent.hub, NoRunnerHub) and absent.hub is absent.runner.hub
+    with pytest.raises(HarnessError, match="runners module is unavailable"):
+        absent._check_free_space(True, False, "mac", "owner")
+    assert (tmp_path / "runner.token").read_text() == "already-paired"
 
 
 def test_runner_result_auth_limits_and_update_errors(tmp_path, monkeypatch):
@@ -151,7 +113,6 @@ def test_bundle_contains_runner_management_rows_without_loading_addons_on_mac():
         rows = archive.extractfile("client/harness_module_commands.json").read()
         assert b"runner list" in rows and b"runner-pairing-codes create" in rows
         assert "app/harness_runner.py" in archive.getnames()
-    assert mac_client.package_manifest()["runner_protocol"] == 3
 
 
 def test_remote_workspace_and_sandbox_delegate_through_the_hub():

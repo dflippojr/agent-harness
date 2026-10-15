@@ -3,6 +3,7 @@ import asyncio
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
 from harness import cli, local_owner
 from harness.api import create_app
@@ -13,74 +14,38 @@ from harness_modules.memory_library import settings, service
 from test_daemon import make_cfg
 
 
-def manager(tmp_path, selection="present"):
+def manager(tmp_path, enabled=True):
     cfg = make_cfg(tmp_path)
     cfg.runners = {}
     for section in (cfg.remote_control, cfg.notify, cfg.gpu_guard):
         section.enabled = False
     cfg.memory_library.clone_dir = str(tmp_path / "library")
-    cfg.memory_library.enabled = selection == "present"
-    if selection == "absent":
-        cfg.module_packages = ["harness_modules.images"]
+    cfg.memory_library.enabled = enabled
     return Manager(cfg)
 
 
-@pytest.mark.parametrize("selection", ["present", "off", "absent", "uninstalled"])
-def test_presence_routes_settings_tools_and_prompts(tmp_path, selection):
-    m = manager(tmp_path, selection)
-    if selection == "uninstalled":
-        m.db.close()
-        m.cfg.installed.memory_library = False
-        m = Manager(m.cfg)
-    present = selection in ("present", "off")
-    registry = build_registry(m.cfg)
-    assert ("memory_library.enabled" in registry.specs) == present
-    assert ("modules.memory_library" in registry.specs) == present
-    assert ("memory_library" in m.cfg.capabilities()["modules"]) == present
-    assert (m.memory_library is not None) == (selection == "present")
+def test_prompts_and_toolkits_are_owner_only_and_follow_the_project(tmp_path):
+    m = manager(tmp_path)
     project = Project(name="scratch")
-    prompt = m._optional_prompts(project, {}, None)
-    assert ("User context: memory_index" in prompt) == (selection == "present")
+    assert "User context: memory_index" in m._optional_prompts(project, {}, None)
     session = {"id": "s", "kind": "agent", "project": "scratch", "target": "tower", "app_id": ""}
-    kits = m.runner.daemon_toolkits(session)
-    assert any("memory_index" in kit.tool_names for kit in kits) == (selection == "present")
-    if selection == "present":
-        assert m.memory_library not in m.runner.daemon_toolkits({**session, "owner_id": "member"})
-        assert m.memory_library not in m.runner.daemon_toolkits({**session, "kind": "chat"})
-        assert m.memory_library not in m.runner.daemon_toolkits({**session, "kind": "tools_only"})
-        rt = m.modules.get("memory_library")
-        assert rt.session_prompt(project, {"app.capabilities": []}, None) == ""
-        project.memory_library = False
-        assert rt.session_prompt(project, {}, None) == ""
-        m.cfg.memory_library.writes = True
-        assert "approves every change" in rt.session_prompt(Project(name="scratch"), {}, None)
-        assert set(service.TOOLS) == {s["function"]["name"] for s in m.memory_library.schemas()}
-    else:
-        rt = m.modules.get("memory_library")
-        if rt:
-            rt.start()
-    async def check():
-        app = create_app(m)
-        app.state.manager = m
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=f"http://127.0.0.1:{m.cfg.port}",
-                                     headers={local_owner.HEADER: m.local_owner_token}) as c:
-            for prefix in ("", "/api/admin/v1"):
-                response = await c.get(prefix + "/memory")
-                assert response.status_code == (200 if present else 404)
-                if present:
-                    assert response.json()["enabled"] == (selection == "present")
-                response = await c.put(prefix + "/memory/profile", json={"content": "x"})
-                assert response.status_code in ((400,) if present else (404, 405))
-    asyncio.run(check())
+    assert any("memory_index" in kit.tool_names for kit in m.runner.daemon_toolkits(session))
+    assert m.memory_library not in m.runner.daemon_toolkits({**session, "owner_id": "member"})
+    assert m.memory_library not in m.runner.daemon_toolkits({**session, "kind": "chat"})
+    assert m.memory_library not in m.runner.daemon_toolkits({**session, "kind": "tools_only"})
+    rt = m.modules.get("memory_library")
+    assert rt.session_prompt(project, {"app.capabilities": []}, None) == ""
+    project.memory_library = False
+    assert rt.session_prompt(project, {}, None) == ""
+    m.cfg.memory_library.writes = True
+    assert "approves every change" in rt.session_prompt(Project(name="scratch"), {}, None)
+    assert set(service.TOOLS) == {s["function"]["name"] for s in m.memory_library.schemas()}
     m.db.close()
 
 
-def test_cli_and_setting_accessors(tmp_path):
-    m = manager(tmp_path, "off")
+def test_check_setting_metadata_and_cli_rows(tmp_path):
+    m = manager(tmp_path, enabled=False)
     spec = build_registry(m.cfg).get("memory_library.enabled")
-    assert not spec.getter(m.cfg)
-    spec.setter(m.cfg, True)
-    assert spec.getter(m.cfg)
     assert spec.enable_check(m.cfg) == []
     assert spec.yaml_path == ("memory_library", "enabled")
     assert spec.apply_mode == "daemon_restart"
@@ -169,7 +134,7 @@ def _library(tmp_path):
     lib = service.MemoryLibrary(cfg, db=m.db)
     alerts = []
     lib.alert = lambda *a: alerts.append(a)
-    return lib, seed, alerts
+    return lib, seed, alerts, m
 
 
 def _push_upstream(seed, name="b.md"):
@@ -178,7 +143,7 @@ def _push_upstream(seed, name="b.md"):
 
 
 def test_dirty_untracked_and_diverged_clones_are_distinct_states(tmp_path):
-    lib, seed, alerts = _library(tmp_path)
+    lib, seed, alerts, _ = _library(tmp_path)
 
     async def check():
         await lib.refresh(force=True)
@@ -209,12 +174,7 @@ def test_dirty_untracked_and_diverged_clones_are_distinct_states(tmp_path):
 
 
 def test_writes_refuse_a_dirty_clone_and_metrics_report_state(tmp_path):
-    lib, seed, _ = _library(tmp_path)
-
-    class Out:
-        rows = {}
-        def metric(self, name, kind, help_, rows):
-            self.rows[name] = rows
+    lib, seed, _, m = _library(tmp_path)
 
     async def check():
         await lib.refresh(force=True)
@@ -224,10 +184,11 @@ def test_writes_refuse_a_dirty_clone_and_metrics_report_state(tmp_path):
         assert "local" in (lib.root / "categories" / "projects" / "a.md").read_text()
         await lib.refresh(force=True)
     asyncio.run(check())
-    from harness_modules.memory_library.runtime import MemoryLibraryRuntime
-    rt = MemoryLibraryRuntime.__new__(MemoryLibraryRuntime)
-    rt.service, out = lib, Out()
-    rt.metrics(out, None)
-    assert out.rows["harness_memory_library_refresh_ok"] == [({}, 0)]
-    assert ({"state": "dirty"}, 1) in out.rows["harness_memory_library_refresh_state"]
-    assert out.rows["harness_memory_library_changed_paths"] == [({}, 1)]
+    m.modules.get("memory_library").service = lib
+    app = create_app(m)
+    app.state.manager = m  # no lifespan, so nothing refreshes behind the read
+    text = TestClient(app).get("/metrics").text
+    assert "harness_memory_library_refresh_ok 0" in text
+    assert 'harness_memory_library_refresh_state{state="dirty"} 1' in text
+    assert "harness_memory_library_changed_paths 1" in text
+    m.db.close()

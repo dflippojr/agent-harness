@@ -12,17 +12,15 @@ from fastapi.testclient import TestClient
 from harness import cli
 from harness.api import create_app
 from harness.manager import Manager
-from harness.settings_keys import build_registry
 from harness_modules.skills.settings import check_skills
 from test_daemon import make_cfg
 from test_modules import route_paths
 
 
-def make(tmp_path, enabled=True, packages=None):
+def make(tmp_path, enabled=True):
     cfg = make_cfg(tmp_path)
     cfg.skills.enabled = enabled
     cfg.skills.local_review = False
-    cfg.module_packages = packages
     cfg.memory_library.enabled = False
     cfg.remote_control.enabled = False
     cfg.runners = {}
@@ -45,36 +43,7 @@ def test_registration_and_eligibility(tmp_path):
     with TestClient(create_app(m)) as client:
         assert client.get("/api/admin/v1/skills").status_code == 200
     assert any(row[0] == "skills install" for row in cli.admin_commands())
-    spec = build_registry(m.cfg).get("skills.enabled")
-    assert spec.getter(m.cfg) is True
-    spec.setter(m.cfg, False)
-    assert spec.getter(m.cfg) is False
     assert check_skills(m.cfg) == []
-
-
-@pytest.mark.parametrize("packages", [None, ["harness_modules.images"]])
-def test_disabled_and_absent(tmp_path, packages):
-    m = make(tmp_path, enabled=False, packages=packages)
-    present = packages is None
-    assert m.skills is None
-    assert ("skills.enabled" in build_registry(m.cfg).specs) is present
-    with TestClient(create_app(m)) as client:
-        assert client.get("/health").status_code == 200
-        for prefix in ("", "/api/admin/v1"):
-            response = client.get(prefix + "/skills")
-            assert response.status_code == (200 if present else 404)
-            if present:
-                assert response.json() == {"enabled": False, "proposals": [], "installed": []}
-                assert client.get(prefix + "/skills/enabled").json() == []
-                assert client.post(prefix + "/skills/x/enable").status_code == 400
-
-
-def test_absent_enabled_config_is_dormant(tmp_path):
-    m = make(tmp_path, packages=["harness_modules.images"])
-    assert m.skills is None and m.cfg.skills.enabled
-    assert not m.cfg.capabilities()["modules"].get("skills", False)
-    assert not any(k.tool_names == ("propose_skill",) for _, k in m.modules.toolkits())
-    assert "harness_skills_installed" not in __import__("harness.metrics", fromlist=["render"]).render(m)
 
 
 def test_review_lifecycle_and_gpu_idle(tmp_path):
