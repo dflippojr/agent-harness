@@ -21,7 +21,7 @@ import logging
 import math
 import re
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,11 +29,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import access as access_mod
 from . import audit_context, credential_audit
 from . import compat
+from .app_usage import AppsUsageResponse, snapshot as app_usage_snapshot
 from .manager import HarnessError
 
 log = logging.getLogger("harness.admin")
 
-API_VERSION = "1.27"
+API_VERSION = "1.28"
 ADMIN_SCOPE = "admin"
 OWNER_KIND = "owner"
 ADMIN_SCOPE_HELP = "owner-only Server administration under /api/admin/v1 (Stables, the Hub and the CLI)"
@@ -279,6 +280,7 @@ def _collect_operations(app: FastAPI, mgr, paths: frozenset[str] = ADMIN_PATHS, 
         {"method": "GET", "path": PREFIX + "/github-member-auth"},
         {"method": "PUT", "path": PREFIX + "/github-member-auth"},
         {"method": "POST", "path": PREFIX + "/accounts/{user_id}/github-connection/reset"},
+        {"method": "GET", "path": PREFIX + "/apps/usage"},
         {"method": "GET", "path": PREFIX + "/apps/erasures"},
         {"method": "POST", "path": PREFIX + "/apps/{app_id}/restore"},
         {"method": "PUT", "path": PREFIX + "/apps/{app_id}/retention"},
@@ -411,6 +413,12 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             return False
         if not await manager.db.main.awrite(commit):
             raise HarnessError(404, "no active provider credential with that id")
+
+    @app.get(PREFIX + "/apps/usage", response_model=AppsUsageResponse)
+    async def apps_usage(request: Request, days: int = Query(default=30, ge=1, le=30)):
+        """Per-App today, 7-day and 30-day calendar totals and daily usage, also split by billing."""
+        require_admin(request, mgr)
+        return await asyncio.to_thread(app_usage_snapshot, mgr(request).db.main, days)
 
     # #330 decision 5: an App's default retention, and the erasures that revoking Apps scheduled.
     @app.get(PREFIX + "/apps/erasures")

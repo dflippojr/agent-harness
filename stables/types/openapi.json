@@ -642,6 +642,57 @@
         "title": "AppToolCallResponse",
         "type": "object"
       },
+      "AppUsage": {
+        "properties": {
+          "app_id": {
+            "title": "App Id",
+            "type": "string"
+          },
+          "by_billing": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/UsageWindows"
+            },
+            "title": "By Billing",
+            "type": "object"
+          },
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/DailyUsage"
+            },
+            "title": "Daily",
+            "type": "array"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "month": {
+            "$ref": "#/components/schemas/UsageTally"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "today": {
+            "$ref": "#/components/schemas/UsageTally"
+          },
+          "week": {
+            "$ref": "#/components/schemas/UsageTally"
+          }
+        },
+        "required": [
+          "today",
+          "week",
+          "month",
+          "daily",
+          "app_id",
+          "name",
+          "kind",
+          "by_billing"
+        ],
+        "title": "AppUsage",
+        "type": "object"
+      },
       "ApprovalResponse": {
         "additionalProperties": true,
         "properties": {
@@ -700,6 +751,37 @@
           "match"
         ],
         "title": "ApprovePairingRequest",
+        "type": "object"
+      },
+      "AppsUsageResponse": {
+        "properties": {
+          "apps": {
+            "items": {
+              "$ref": "#/components/schemas/AppUsage"
+            },
+            "title": "Apps",
+            "type": "array"
+          },
+          "days": {
+            "title": "Days",
+            "type": "integer"
+          },
+          "end_date": {
+            "title": "End Date",
+            "type": "string"
+          },
+          "start_date": {
+            "title": "Start Date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "days",
+          "start_date",
+          "end_date",
+          "apps"
+        ],
+        "title": "AppsUsageResponse",
         "type": "object"
       },
       "ArmPairingRequest": {
@@ -1523,6 +1605,39 @@
           "next"
         ],
         "title": "CronPreviewSuccess",
+        "type": "object"
+      },
+      "DailyUsage": {
+        "properties": {
+          "completion_tokens": {
+            "default": 0,
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "default": 0,
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "default": 0,
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "requests": {
+            "default": 0,
+            "title": "Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date"
+        ],
+        "title": "DailyUsage",
         "type": "object"
       },
       "Decision": {
@@ -3051,6 +3166,60 @@
         "title": "ToolResult",
         "type": "object"
       },
+      "UsageTally": {
+        "properties": {
+          "completion_tokens": {
+            "default": 0,
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "default": 0,
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "prompt_tokens": {
+            "default": 0,
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "requests": {
+            "default": 0,
+            "title": "Requests",
+            "type": "integer"
+          }
+        },
+        "title": "UsageTally",
+        "type": "object"
+      },
+      "UsageWindows": {
+        "properties": {
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/DailyUsage"
+            },
+            "title": "Daily",
+            "type": "array"
+          },
+          "month": {
+            "$ref": "#/components/schemas/UsageTally"
+          },
+          "today": {
+            "$ref": "#/components/schemas/UsageTally"
+          },
+          "week": {
+            "$ref": "#/components/schemas/UsageTally"
+          }
+        },
+        "required": [
+          "today",
+          "week",
+          "month",
+          "daily"
+        ],
+        "title": "UsageWindows",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -3741,6 +3910,49 @@
           }
         },
         "summary": "App Erasures"
+      }
+    },
+    "/api/admin/v1/apps/usage": {
+      "get": {
+        "description": "Per-App today, 7-day and 30-day calendar totals and daily usage, also split by billing.",
+        "operationId": "apps_usage_api_admin_v1_apps_usage_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 30,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppsUsageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Apps Usage"
       }
     },
     "/api/admin/v1/apps/{app_id}/limits": {

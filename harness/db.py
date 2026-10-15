@@ -1379,6 +1379,20 @@ class Database:
         return dict(row)
 
     @_reads
+    def app_usage_daily(self, since: float, until: float) -> list[dict]:
+        """One metadata-only scan for registered Apps/devices, including revoked/erased keys and idle Apps."""
+        # SQLite rounds fractional epochs to milliseconds; truncate so 23:59:59.9999 stays on its own day.
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT k.id app_id, k.name, k.kind, date(CAST(u.created_at AS INTEGER), 'unixepoch', 'localtime') day, u.billing, "
+                "COALESCE(SUM(u.requests),0) requests, COALESCE(SUM(u.prompt_tokens),0) prompt_tokens, "
+                "COALESCE(SUM(u.completion_tokens),0) completion_tokens, COALESCE(SUM(u.cost_usd),0) cost_usd "
+                "FROM api_keys k LEFT JOIN usage u ON u.app_id = k.id AND u.created_at >= ? AND u.created_at <= ? "
+                "WHERE k.kind IN ('app', 'device') GROUP BY k.id, day, u.billing ORDER BY k.id, day, u.billing",
+                (since, until)).fetchall()
+        return [dict(row) for row in rows]
+
+    @_reads
     def usage_tally(self, backend: str, since: float, app_id: str | None = None) -> dict:
         app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
         with self.lock:

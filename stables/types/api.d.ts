@@ -212,6 +212,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/v1/apps/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Apps Usage
+         * @description Per-App today, 7-day and 30-day calendar totals and daily usage, also split by billing.
+         */
+        get: operations["apps_usage_api_admin_v1_apps_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/v1/apps/{app_id}/limits": {
         parameters: {
             query?: never;
@@ -6489,6 +6509,24 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** AppUsage */
+        AppUsage: {
+            /** App Id */
+            app_id: string;
+            /** By Billing */
+            by_billing: {
+                [key: string]: components["schemas"]["UsageWindows"];
+            };
+            /** Daily */
+            daily: components["schemas"]["DailyUsage"][];
+            /** Kind */
+            kind: string;
+            month: components["schemas"]["UsageTally"];
+            /** Name */
+            name: string;
+            today: components["schemas"]["UsageTally"];
+            week: components["schemas"]["UsageTally"];
+        };
         /** ApprovalResponse */
         ApprovalResponse: {
             /** Args */
@@ -6529,6 +6567,17 @@ export interface components {
              * @description The match code the App shows
              */
             match: string;
+        };
+        /** AppsUsageResponse */
+        AppsUsageResponse: {
+            /** Apps */
+            apps: components["schemas"]["AppUsage"][];
+            /** Days */
+            days: number;
+            /** End Date */
+            end_date: string;
+            /** Start Date */
+            start_date: string;
         };
         /** ArmPairingRequest */
         ArmPairingRequest: {
@@ -6927,6 +6976,31 @@ export interface components {
              * @constant
              */
             ok: true;
+        };
+        /** DailyUsage */
+        DailyUsage: {
+            /**
+             * Completion Tokens
+             * @default 0
+             */
+            completion_tokens?: number;
+            /**
+             * Cost Usd
+             * @default 0
+             */
+            cost_usd?: number;
+            /** Date */
+            date: string;
+            /**
+             * Prompt Tokens
+             * @default 0
+             */
+            prompt_tokens?: number;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests?: number;
         };
         /** Decision */
         Decision: {
@@ -7722,6 +7796,37 @@ export interface components {
             /** Output */
             output: string;
         };
+        /** UsageTally */
+        UsageTally: {
+            /**
+             * Completion Tokens
+             * @default 0
+             */
+            completion_tokens?: number;
+            /**
+             * Cost Usd
+             * @default 0
+             */
+            cost_usd?: number;
+            /**
+             * Prompt Tokens
+             * @default 0
+             */
+            prompt_tokens?: number;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests?: number;
+        };
+        /** UsageWindows */
+        UsageWindows: {
+            /** Daily */
+            daily: components["schemas"]["DailyUsage"][];
+            month: components["schemas"]["UsageTally"];
+            today: components["schemas"]["UsageTally"];
+            week: components["schemas"]["UsageTally"];
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -8235,6 +8340,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    apps_usage_api_admin_v1_apps_usage_get: {
+        parameters: {
+            query?: {
+                days?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppsUsageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

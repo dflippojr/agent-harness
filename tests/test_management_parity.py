@@ -315,6 +315,8 @@ def test_web_browser_keys_are_documented_client_only():
 
 def test_admin_command_builds_query_body_and_upload(tmp_path):
     parser = cli._build_parser()
+    assert cli.admin_request(parser.parse_args(["apps", "usage", "--days", "7"])) == (
+        "GET", "/apps/usage", {"params": {"days": 7}})
     assert cli.admin_request(parser.parse_args(["jobs", "preview", "*/5 * * * *"])) == (
         "GET", "/jobs/preview", {"params": {"cron": "*/5 * * * *"}})
     assert cli.admin_request(parser.parse_args(["config", "set", "a.b=3", "c=x", "--dry-run"])) == (

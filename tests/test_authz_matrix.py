@@ -61,6 +61,8 @@ def routes_table(alice_id: str, bob_id: str) -> list[Route]:
         Route("owner", "GET", f"{PREFIX}/jobs", ok=400), Route("owner", "GET", f"{PREFIX}/sessions"),
         Route("owner", "GET", f"{PREFIX}/audit"), Route("owner", "GET", f"{PREFIX}/google-signin"),
         Route("owner", "GET", f"{PREFIX}/github-member-auth"),
+        Route("owner", "GET", f"{PREFIX}/apps/usage", origin=True,
+              override={"owner@elsewhere": (401, "owner token")}),
         Route("owner", "POST", f"{PREFIX}/pairing-requests/preview", body={"scopes": ["approvals"]}, origin=True),
         # Mutations: a refused caller changes nothing; the Hub key may not mint another owner key.
         Route("owner", "POST", f"{PREFIX}/sessions", ok=201, body={"prompt": "x"}, mutates=True),
