@@ -21,8 +21,11 @@ test('AH-01/AH-02 connection persists; Agents groups and transcript search', asy
   const firstData = events.findIndex(e => e.phase === 'start' && !notRouteData.includes(e.path));
   expect(firstData).toBeGreaterThan(0);
   for (const path of ['/health', '/me']) {
-    expect(events.findIndex(e => e.phase === 'end' && e.path === path), path + ' finished before route data').toBeLessThan(firstData);
-    expect(events.findIndex(e => e.phase === 'start' && e.path === path), path + ' started before route data').toBeGreaterThanOrEqual(0);
+    const started = events.findIndex(e => e.phase === 'start' && e.path === path);
+    const finished = events.findIndex(e => e.phase === 'end' && e.path === path);
+    expect(started, path + ' was asked').toBeGreaterThanOrEqual(0);
+    expect(finished, path + ' finished').toBeGreaterThanOrEqual(0);
+    expect(finished, path + ' finished before route data').toBeLessThan(firstData);
   }
   for (const name of ['Chat', 'Agents', 'Jobs', 'Images', 'Profile']) {
     await expect(page.locator('#tab-bar').getByRole('link', { name: new RegExp(name) })).toBeAttached();
