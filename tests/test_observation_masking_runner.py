@@ -36,62 +36,56 @@ def _finish_turn(m: Manager, sid: str) -> None:
     m.db.update_session(sid, context=s["context"] + [{"role": "assistant", "content": "used it"}])
 
 
-def test_masking_loads_the_full_stored_output_not_the_capped_read(tmp_path):
-    async def body():
-        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
-        s = await _session(m)
-        sid = s["id"]
-        call_id = await _seed_result(m, sid, 1, BIG)
-        _finish_turn(m, sid)
-        await m.runner._maybe_compact(m.db.get_session(sid))
+def test_masking_and_recovery_through_a_scripted_session(tmp_path):
+    """A big read is masked once it has been used, the receipt's digest recovers it by range, and what the model
+    recovers is neither masked again nor missing from the grounding sources."""
+    from harness import grounding
 
-        tool = next(x for x in m.db.get_session(sid)["context"] if x.get("tool_call_id") == call_id)
-        assert f"characters={len(BIG)}" in tool["content"] and _digest(BIG) in tool["content"]
-        assert m.db.full_artifact(sid, _digest(BIG)) == BIG
-        rest, truncated = m.db.read_artifact(sid, _digest(BIG), 40000, len(BIG))
-        assert rest == BIG[40000:] and not truncated
+    live = {}
+
+    def digest() -> str:
+        """The digest the model would copy from the receipt of the big read."""
+        return next(r["artifact_id"] for r in events(live["m"], live["sid"], "tool_result") if r["id"] == "c2-read_file")
+
+    script = Script([
+        Completion(tool_calls=[call("write_file", 0, path="big.txt", content=BIG),
+                               call("write_file", 1, path="small.txt", content="small file")]),
+        Completion(tool_calls=[call("read_file", 2, path="big.txt"), call("read_file", 3, path="small.txt")]),
+        Completion(tool_calls=[call("list_files", 4)]),
+        lambda _messages: Completion(tool_calls=[call("read_artifact", 5, artifact_id=digest(), start=40000, end=40010)]),
+        lambda _messages: Completion(tool_calls=[call("read_artifact", 6, artifact_id=digest(), start=100, end=9100)]),
+        lambda _messages: Completion(tool_calls=[call("read_artifact", 7, artifact_id=digest())]),
+        Completion(tool_calls=[call("list_files", 8)]),
+        Completion(content="done"),
+    ])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path, context_tokens=100_000), chat=script)  # roomy: only masking compacts
+        await m.start()
+        sid = m.create("read the big file")["id"]
+        live.update(m=m, sid=sid)
+        await wait_status(m, sid, "done")
+        full = m.db.full_artifact(sid, digest())
+        assert full and len(full) > 20000  # over the 20,000-character read_artifact cap
+
+        big, small = _ctx_text(m, sid, "c2-read_file"), _ctx_text(m, sid, "c3-read_file")
+        assert big.startswith(compaction.RECEIPT_PREFIX)
+        assert f"characters={len(full)}" in big and digest() in big
+        assert not small.startswith(compaction.RECEIPT_PREFIX) and "small file" in small
         assert [e["characters_saved"] for e in events(m, sid, "compaction") if e["tier"] == "mask"] == [
-            20000 - len(tool["content"])]
-        await m.stop()
-    asyncio.run(body())
+            len(full) - len(big)]  # one event, for the one masked result
 
+        assert _ctx_text(m, sid, "c5-read_artifact") == full[40000:40010]
+        recovered = _ctx_text(m, sid, "c6-read_artifact")
+        assert recovered == full[100:9100]  # over the mask threshold, and still verbatim after later turns
+        assert _result_event(m, sid, "c6-read_artifact")["artifact_id"] is None  # no receipt of its own to loop on
+        assert any(recovered in src for src in grounding.session_sources(
+            m.db.get_session(sid)["context"], m.db.events(sid)))
 
-def test_masking_is_idempotent_and_emits_once(tmp_path):
-    async def body():
-        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
-        s = await _session(m)
-        sid = s["id"]
-        await _seed_result(m, sid, 1, BIG)
-        _finish_turn(m, sid)
-        await m.runner._maybe_compact(m.db.get_session(sid))
-        masked_context = m.db.get_session(sid)["context"]
-        for _ in range(3):
-            await m.runner._maybe_compact(m.db.get_session(sid))
-        assert m.db.get_session(sid)["context"] == masked_context
-        assert len([e for e in events(m, sid, "compaction") if e["tier"] == "mask"]) == 1
-
-        # A new result still gets masked later, and only that one produces a second event.
-        await _seed_result(m, sid, 2, "y" * 3000)
-        _finish_turn(m, sid)
-        await m.runner._maybe_compact(m.db.get_session(sid))
-        assert len([e for e in events(m, sid, "compaction") if e["tier"] == "mask"]) == 2
-        assert all(x["content"].startswith(compaction.RECEIPT_PREFIX)
-                   for x in m.db.get_session(sid)["context"] if x["role"] == "tool")
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_masking_skips_fresh_and_small_results(tmp_path):
-    async def body():
-        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
-        s = await _session(m)
-        sid = s["id"]
-        await _seed_result(m, sid, 1, "small")
-        await _seed_result(m, sid, 2, BIG)  # newest turn: the model has not read it yet
-        before = m.db.get_session(sid)["context"]
-        await m.runner._maybe_compact(m.db.get_session(sid))
-        assert m.db.get_session(sid)["context"] == before
-        assert not [e for e in events(m, sid, "compaction") if e["tier"] == "mask"]
+        chunk = _ctx_text(m, sid, "c7-read_artifact")  # no range: the first 20,000 characters, flagged as truncated
+        assert chunk.startswith(full[:20000]) and "[truncated; request a smaller range" in chunk
+        event = _result_event(m, sid, "c7-read_artifact")
+        assert event["ok"] is True and len(event["output"]) <= 20000 + 100  # events keep a bounded copy
         await m.stop()
     asyncio.run(body())
 
@@ -171,39 +165,6 @@ def test_parallel_read_artifact_calls_share_the_turn_budget(tmp_path):
     asyncio.run(body())
 
 
-def test_read_artifact_output_counts_as_used_and_refreshes_the_turn(tmp_path):
-    async def body():
-        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
-        s = await _session(m)
-        sid = s["id"]
-        digest = _digest(BIG)
-        m.db.put_artifact(sid, digest, BIG)
-        c = call("read_artifact", 1, artifact_id=digest, start=0, end=100)
-        assert await m.runner._resolve_call(s, c, [], {}, 10**9, []) == (None, 100)
-        c = call("read_artifact", 2, artifact_id="f" * 64)  # errors are counted too, like any tool's
-        done, used = await m.runner._resolve_call(m.db.get_session(sid), c, [], {}, 10**9, [])
-        assert (done, used) == (None, len("Error: artifact not found"))
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_read_artifact_full_chunk_is_recorded_whole_and_event_is_capped(tmp_path):
-    async def body():
-        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
-        s = await _session(m)
-        sid = s["id"]
-        digest = _digest(BIG)
-        m.db.put_artifact(sid, digest, BIG)
-        c = call("read_artifact", 1, artifact_id=digest)
-        await m.runner._resolve_calls(s, [c])
-        text = _ctx_text(m, sid, c["id"])
-        assert text.startswith(BIG[:20000]) and "[truncated; request a smaller range" in text
-        event = _result_event(m, sid, c["id"])
-        assert event["ok"] is True and len(event["output"]) <= 20000 + 100  # events keep a bounded copy
-        await m.stop()
-    asyncio.run(body())
-
-
 def test_read_artifact_goes_through_policy_and_emits_tool_call(tmp_path):
     from harness.policy import Policy
 
@@ -257,33 +218,6 @@ def test_read_artifact_is_only_available_where_it_is_offered(tmp_path):
         c = call("read_artifact", 1, artifact_id=digest)
         await m.runner._resolve_calls(m.db.get_session(sid), [c])
         assert "unknown tool 'read_artifact'" in _ctx_text(m, sid, c["id"])
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_read_artifact_result_is_grounded_and_never_masked_again(tmp_path):
-    from harness import grounding
-
-    async def body():
-        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
-        s = await _session(m)
-        sid = s["id"]
-        digest = _digest(BIG)
-        m.db.put_artifact(sid, digest, BIG)
-        c = call("read_artifact", 1, artifact_id=digest, start=100, end=9100)  # 9,000 chars: over the mask threshold
-        m.db.update_session(sid, context=m.db.get_session(sid)["context"]
-                            + [{"role": "assistant", "content": None, "tool_calls": [c]}])
-        await m.runner._resolve_calls(m.db.get_session(sid), [c])
-        recovered = _ctx_text(m, sid, c["id"])
-        assert recovered == BIG[100:9100]
-        assert _result_event(m, sid, c["id"])["artifact_id"] is None  # no artifact of its own, so no receipt loop
-        assert any(recovered in src for src in grounding.session_sources(
-            m.db.get_session(sid)["context"], m.db.events(sid)))
-
-        _finish_turn(m, sid)
-        await m.runner._maybe_compact(m.db.get_session(sid))
-        assert _ctx_text(m, sid, c["id"]) == recovered  # still verbatim after a later turn
-        assert not any(e["type"] == "compaction" and e["data"].get("tier") == "mask" for e in m.db.events(sid))
         await m.stop()
     asyncio.run(body())
 

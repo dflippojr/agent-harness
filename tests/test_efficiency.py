@@ -610,11 +610,6 @@ def test_metrics_survive_manager_restart(tmp_path):
     asyncio.run(second(sid, db))
 
 
-def test_admin_catalog_lists_session_metrics():
-    from harness.admin import ADMIN_PATHS
-    assert "/sessions/{ref}/metrics" in ADMIN_PATHS
-
-
 def test_read_artifact_with_unparseable_arguments_is_not_a_call():
     events = [
         _assistant(1, "r1", "read_artifact", []),

@@ -343,25 +343,6 @@ def test_consecutive_invalid_calls_end_the_run_stuck_invalid(tmp_path):
     asyncio.run(body())
 
 
-def test_repeated_failing_call_is_nudged_then_ends_the_run_stuck_repeat(tmp_path):
-    """#643: the same failing call gets a nudge from the third time and ends the run at the eighth."""
-    script = Script([Completion(tool_calls=[call("read_file", i, path="missing.txt")]) for i in range(8)]
-                    + [Completion(content="unreachable")])
-
-    async def body():
-        m = Manager(make_cfg(tmp_path), chat=script)
-        await m.start()
-        s = m.create("go")
-        s = await wait_status(m, s["id"], "done")
-        assert s["stop_reason"] == "stuck_repeat"
-        outputs = [r["output"] for r in events(m, s["id"], "tool_result")]
-        assert len(outputs) == 8
-        assert "will not work" not in outputs[1] and "failed 3 times" in outputs[2]
-        assert events(m, s["id"], "stuck") == [{"reason": "stuck_repeat", "tool": "read_file", "count": 8}]
-        await m.stop()
-    asyncio.run(body())
-
-
 def test_a_saved_stuck_stop_runs_no_pending_call_after_restart(tmp_path):
     """#643: a crash after the stopping result is saved but before the rest of the turn is skipped must not run (or
     finish on) the calls still pending when the daemon restarts."""

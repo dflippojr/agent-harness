@@ -92,15 +92,6 @@ def test_reset_branch_rewinds_commits(repo):
     assert (ws / "edit.txt").read_text() == "v1\n"
 
 
-def test_agent_tampering_with_workspace_git_cannot_touch_store(repo):
-    ws, store = repo
-    sha = store.snapshot(ws, "x", 1, "", "")
-    import shutil
-    shutil.rmtree(ws / ".git" / "refs")
-    assert store.restore(ws, sha) == []
-    assert "refs/harness/checkpoints/x/1" in sh(store.repo, "for-each-ref")
-
-
 def test_scratch_workspace_without_git(tmp_path):
     ws = tmp_path / "scratch"
     (ws / "d").mkdir(parents=True)

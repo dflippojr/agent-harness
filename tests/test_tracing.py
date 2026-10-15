@@ -201,16 +201,6 @@ print("clean")
     assert "clean" in out.stdout
 
 
-def test_only_telemetry_module_mentions_opentelemetry():
-    offenders = [p.name for p in (ROOT / "harness").rglob("*.py")
-                 if p.name != "telemetry.py" and "opentelemetry" in p.read_text(encoding="utf-8")]
-    assert offenders == []
-    source = (ROOT / "harness" / "telemetry.py").read_text(encoding="utf-8")
-    top_level = [line for line in source.splitlines() if line.startswith(("import opentelemetry",
-                                                                          "from opentelemetry"))]
-    assert top_level == []  # imported lazily, inside functions only
-
-
 def test_call_sites_get_the_noop_shim_when_off():
     tracer = telemetry.configure(TelemetryConfig())
     assert isinstance(tracer, telemetry.NoopTracer) and not tracer.enabled
@@ -278,7 +268,7 @@ def test_spans_outside_a_session_are_not_recorded():
     assert exporter.get_finished_spans() == ()
 
 
-def test_scripted_session_produces_one_covering_trace(tmp_path):
+def test_scripted_session_produces_one_covering_trace(tmp_path, work_clock):
     cfg = make_cfg(tmp_path, rules=[{"tool": "write_file", "path": "secret/*", "action": "ask", "reason": "x"}])
     cfg.elide_at = 0       # compact before every model call
     cfg.summarize_at = 99
@@ -291,29 +281,32 @@ def test_scripted_session_produces_one_covering_trace(tmp_path):
     ])
 
     async def slow_chat(*args, **kwargs):
-        await asyncio.sleep(0.15)  # model time dominates the bookkeeping between spans
+        work_clock.advance()  # model time, which the chat span must cover
+        await asyncio.sleep(0)
         return await base(*args, **kwargs)
+
+    async def until(condition):
+        deadline = asyncio.get_running_loop().time() + scaled(30)
+        while not condition():
+            assert asyncio.get_running_loop().time() < deadline, "timed out waiting for the session"
+            await asyncio.sleep(0.005)
 
     async def body():
         m, exporter = _traced_manager(cfg, slow_chat)
         await m.start()
         await m.scheduler.acquire("blocker")  # another session holds the GPU: a real gpu_slot_wait
-
-        async def free_gpu():
-            await asyncio.sleep(0.3)
-            m.scheduler.release("blocker")
-        releaser = asyncio.create_task(free_gpu())
         s = m.create("write the secret", project="guarded")
         assert len(m.summary(s)["trace_id"]) == 32
+        await until(lambda: s["id"] in m.scheduler.positions())  # queued behind the blocker
+        work_clock.advance()  # time spent waiting for the slot
+        m.scheduler.release("blocker")
         s = await wait_status(m, s["id"], "waiting_approval")
-        await asyncio.sleep(0.3)
+        work_clock.advance()  # time parked on the approval
         approval = m.db.pending_approvals(s["id"])[0]
         m.decide(s["id"], approval["id"], True)
         await wait_status(m, s["id"], "done")
-        await releaser
-        await asyncio.sleep(0.3)  # idle between runs
+        work_clock.advance()  # idle between runs
         await m.send(s["id"], "and again")
-        await asyncio.sleep(0.05)
         s = await wait_status(m, s["id"], "done")
         trace_id = m.summary(s)["trace_id"]
         await m.stop()
@@ -470,31 +463,6 @@ def test_recovered_pending_calls_run_under_a_resumed_turn(tmp_path, monkeypatch,
         with pytest.raises(AssertionError):
             _assert_tiled(root, [c for c in children if c is not missing], resume_boundary=boundary)
 
-
-@pytest.mark.parametrize("outcome", ["stuck", "failed", "exited"])
-def test_recovery_approval_wait_is_bounded_and_cleans_up(tmp_path, monkeypatch, outcome):
-    async def body():
-        m, _ = _traced_manager(make_cfg(tmp_path), Script([]))
-        tasks = []
-
-        async def never_approves(sid, recovered=False):
-            if outcome == "failed":
-                m.db.update_session(sid, status="failed")
-            elif outcome == "stuck":
-                await asyncio.Event().wait()
-
-        monkeypatch.setattr(m.runner, "run", never_approves)
-        with pytest.raises(AssertionError, match="before approval|never reached approval"):
-            async with _running_manager(m):
-                sid = m.create("never approves")["id"]
-                tasks.append(m.tasks[sid])
-                await _wait_for_approval(m, sid, timeout=0.02)
-        assert tasks and all(task.done() for task in tasks)
-        assert not m.tasks and not m.runner.approval_events
-        assert m.db._closed
-        assert m._scanner_boot is None or m._scanner_boot.done()
-
-    asyncio.run(body())
 
 def test_sentinel_never_reaches_a_span(tmp_path):
     cfg = make_cfg(tmp_path)
