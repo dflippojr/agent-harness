@@ -274,6 +274,7 @@ on New task; that call goes over the App API (`/api/v1`).
 | Household audit log | GET | `/accounts/audit` | `harness accounts audit` |
 | Retained audit log (cursor, filters) | GET | `/audit` | `harness audit list` |
 | One member | GET | `/accounts/{user_id}` | `harness accounts show <user_id>` |
+| Per-App usage windows, daily series and billing splits | GET | `/apps/usage` | `harness apps usage` |
 | Apps waiting to be erased | GET | `/apps/erasures` | `harness apps erasures` |
 | App retention | PUT | `/apps/{app_id}/retention` | `harness apps retention <app_id>` |
 | App session caps | GET | `/apps/{app_id}/limits` | `harness apps limits <app_id>` |

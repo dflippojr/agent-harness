@@ -433,6 +433,7 @@ ADMIN_COMMANDS = (
     ("keys create", "POST", "/keys", "create a key (its secret is shown once)",
      ("name", "--kind", "--scopes:list", "--origins:list", "--catalog_app_id")),
     ("keys revoke", "DELETE", "/keys/{kid}", "revoke a key", ()),
+    ("apps usage", "GET", "/apps/usage", "show per-App usage windows and daily billing splits", ("--days:int",)),
     ("apps erasures", "GET", "/apps/erasures", "list Apps waiting to be erased", ()),
     ("apps restore", "POST", "/apps/{app_id}/restore", "cancel a revoked App's pending erasure", ()),
     ("apps retention", "PUT", "/apps/{app_id}/retention", "set how many days an App's sessions are kept",
@@ -530,7 +531,7 @@ ADMIN_COMMANDS = (
 )
 _GROUP_HELP = {
     "profile": "server profile", "accounts": "household members", "github-member-auth": "members' GitHub access",
-    "google-signin": "members' Google sign-in", "keys": "App, device and owner keys", "apps": "App data retention and session caps",
+    "google-signin": "members' Google sign-in", "keys": "App, device and owner keys", "apps": "App usage, data retention and session caps",
     "provider-credentials": "per-App provider credentials", "pairing-codes": "App pairing codes",
     "pairing-requests": "zero-touch App pairing requests", "hub": "Hub inventory and claim",
     "models": "local models", "backends": "model backends",

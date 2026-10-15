@@ -775,7 +775,8 @@ The response has `days`, `start_date`, `end_date` (inclusive ISO calendar dates)
 
 Only recorded usage appears. In particular, built-in local-loop sessions currently do not record usage; this
 read-only addition does not change session accounting or introduce spend/token caps (#686 owner decision).
-The response schema is declared in OpenAPI and the generated Stables API types.
+The response schema is declared in OpenAPI and the generated Stables API types. The CLI reads the same route
+with `harness apps usage` or `harness apps usage --days 7`.
 
 ## Changelog
 
