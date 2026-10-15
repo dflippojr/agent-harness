@@ -1,4 +1,4 @@
-import { test, expect, openSession, expectDone } from './fixtures';
+import { test, expect, openSession, expectDone, selfSizingTest } from './fixtures';
 import type { Locator, Page } from '@playwright/test';
 
 async function expectHitTarget(target: Locator) {
@@ -11,7 +11,7 @@ async function expectHitTarget(target: Locator) {
   })).toBe(true);
 }
 
-test('#591 Chat starters and recent chats remain reachable at four reflow widths', async ({ signedIn: page }) => {
+selfSizingTest('#591 Chat starters and recent chats remain reachable at four reflow widths', async ({ signedIn: page }) => {
   // The welcome paints before options arrive; exercise that startup boundary too.
   await page.route('**/chats/options', async route => {
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -161,7 +161,7 @@ test('#595 Session tabs retain 44px targets, 8px gaps and working labels at narr
   }
 });
 
-test('#593 Tool output actions work through portrait-landscape-portrait without forced taps', async ({ signedIn: page }, info) => {
+selfSizingTest('#593 Tool output actions work through portrait-landscape-portrait without forced taps', async ({ signedIn: page }, info) => {
   await openSession(page, 'Tool rows');
   await expectDone(page);
   const row = page.locator('details.tool').filter({ has: page.locator('summary').filter({ hasText: /read_file.*notes\/log.txt/s }) });
