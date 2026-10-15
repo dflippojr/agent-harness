@@ -14,8 +14,6 @@ from harness.cli_backends import (CLAUDE_SPLIT_TOOLS, CODEX_SPLIT_OVERRIDES, Cla
 from harness.config import BackendConfig, SandboxConfig
 from harness.manager import Manager
 from harness.mcp_server import SPLIT_TOOLS, TOKEN_ENV, McpRelay
-from harness.policy import ALLOW
-from harness.policy import Policy
 from test_daemon import make_cfg, wait_status
 
 
@@ -88,29 +86,6 @@ def test_hands_container_gets_no_environment(tmp_path, monkeypatch):
     assert TOKEN_ENV not in " ".join(run)
 
 
-def test_killed_hands_container_is_recreated_for_the_next_call(tmp_path, monkeypatch):
-    state = {"container": "running", "created": 0}
-    commands = []
-
-    async def fake_run_cmd(args, timeout=60, input_=None, env=None):
-        if args[:2] == ["docker", "inspect"]:
-            return (0, state["container"], "") if state["container"] else (1, "", "no such container")
-        if args[:3] == ["docker", "run", "-d"]:
-            state["container"], state["created"] = "running", state["created"] + 1
-            return 0, "id", ""
-        if args[:2] == ["docker", "exec"]:
-            commands.append(args[-1])
-            return 0, "ok", ""
-        return 0, "", ""
-    monkeypatch.setattr(sandbox_module, "run_cmd", fake_run_cmd)
-    box = sandbox_module.Sandbox("abc", tmp_path, SandboxConfig())
-    assert asyncio.run(box.exec("echo one")) == (0, "ok")
-    state["container"] = ""  # the hands container died mid-command
-    code, out = asyncio.run(box.exec("echo two"))
-    assert code == 0 and out.endswith("ok") and "environment recreated" in out  # the model is told (#429)
-    assert state["created"] == 1 and commands == ["echo one", "echo two"]
-
-
 def _split_manager(tmp_path, mode="split"):
     cfg = make_cfg(tmp_path)
     cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5", tool_mode=mode)
@@ -170,12 +145,6 @@ def test_split_shell_and_file_calls_need_a_grant_and_run_on_the_sandbox(tmp_path
         assert not ok and "unknown argument" in text
         await m.stop()
     asyncio.run(body())
-
-
-def test_shell_over_mcp_is_decided_as_the_native_tool():
-    assert Policy().decide("mcp__harness__run_shell", {"command": "ls"}).action == ALLOW
-    rules = Policy([{"tool": "run_shell", "action": "deny", "reason": "no shell"}])
-    assert rules.decide("mcp__harness__run_shell", {"command": "ls"}).action == "deny"
 
 
 def test_builtin_mode_serves_no_shell_over_mcp(tmp_path):

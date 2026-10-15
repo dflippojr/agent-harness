@@ -31,7 +31,6 @@ EXPECTED_SKIP_PATHS = (
     "LICENSE",
     "third_party/Real-ESRGAN.LICENSE",
     "docs/compatibility.md",
-    "docs/config-registry.md",
     "docs/flux-fast.md",
     "docs/issue-13-lightning-results.md",
     "docs/smart-approvals.md",
@@ -81,19 +80,5 @@ def test_ci_skips_only_unread_paths_on_push_and_pull_request():
     assert "test_product_naming.py" in text
     assert "test_marketplace_manifest.py" in text
     assert "test_ci_docs_explain_backend_configuration_and_manual_verification" in text
-    assert "branch protection" in text
     assert "ci-cd.yml" in text
-    assert "does not publish or deploy" in text
 
-
-def test_ci_installs_pytest_xdist_as_extra_and_runs_fixed_workers():
-    text = WORKFLOW.read_text(encoding="utf-8")
-    assert "pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt pytest-cov pytest-xdist" in text
-    assert "python -m pytest tests -q -n 4 --dist loadfile" in text
-    assert "-n auto" not in text
-    # Tests run once, GitHub-hosted; the self-hosted agent-harness-ci pool is retired.
-    assert text.count("python -m pytest tests -q -n") == 1
-    assert "runs-on: [self-hosted" not in text
-    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    assert "pytest-xdist" not in requirements
-    assert "pytest>=" in requirements

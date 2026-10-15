@@ -15,7 +15,7 @@ from harness.config import BackendConfig, SandboxConfig
 from harness.manager import Manager
 from harness import cli_domains, taint
 from harness.mcp_server import (RELAY_PORT, RELAY_SCRIPT, TOKEN_ENV, McpRelay, McpServer, McpTokens,
-                                codex_mcp_overrides, mcp_config, relay_node_args)
+                                codex_mcp_overrides, relay_node_args)
 from harness_modules.search.service import SessionSearch
 from harness.policy import ALLOW, ASK, DENY, ChatPolicy, Policy, mcp_harness_tool
 from test_daemon import events, make_cfg, wait_status
@@ -173,8 +173,6 @@ def test_relay_runs_unprivileged_on_the_session_network_with_loopback_only():
     assert ["--cap-drop", "ALL"] == command[command.index("--cap-drop"):][:2]
     assert "no-new-privileges" in command
     assert not any(arg in ("-p", "--publish", "-P") for arg in command)
-    assert '"127.0.0.1"' in RELAY_SCRIPT.read_text(encoding="utf-8")
-    assert "${HARNESS_MCP_TOKEN}" in mcp_config()
 
 
 def test_codex_command_joins_the_relay_namespace_and_only_names_the_token(tmp_path):

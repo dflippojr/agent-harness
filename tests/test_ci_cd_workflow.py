@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import yaml
+
 
 ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci-cd.yml"
@@ -45,3 +47,17 @@ def test_docs_regen_workflow_cannot_loop_or_deploy():
 def test_main_ci_only_validates_fragments():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "build.py --check --fragments-only" in ci
+
+
+def test_publish_and_deploy_require_a_successful_main_push_ci_run():
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    for name in ("publish-images", "deploy-tower"):
+        condition = " ".join(str(jobs[name]["if"]).split())
+        for required in (
+            "github.event.workflow_run.conclusion == 'success'",
+            "github.event.workflow_run.head_branch == 'main'",
+            "github.event.workflow_run.event == 'push'",
+        ):
+            assert required in condition, (name, required)
+        # Every term must be ANDed: an `||` would let one of them stand alone.
+        assert "||" not in condition, name

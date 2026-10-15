@@ -158,16 +158,38 @@ def test_propose_then_apply_keeps_snippets_out_of_the_worker_context(tmp_path):
     delegate = Delegate(_reply([{"path": "app.py", "old_text": old, "new_text": new},
                                 {"path": "other.py", "old_text": "VALUE = 1", "new_text": "VALUE = 2"}]))
 
+    propose = call("delegate_edit", 1, paths=["app.py", "other.py"], instruction="greet the world")
+    live, untouched = {}, []
+
+    def apply_what_was_proposed(messages):
+        """The model's next turn: it read the patch_id from the propose result, which is all it knows of the patch."""
+        result = json.loads(next(x["content"] for x in messages if x.get("tool_call_id") == propose["id"]))
+        untouched.append((live["root"] / "app.py").read_text(encoding="utf-8") == SOURCE)  # nothing written yet
+        return Completion(tool_calls=[call("apply_delegated_edit", 2, patch_id=result["patch_id"])])
+
+    script = Script([
+        Completion(tool_calls=[propose]),
+        apply_what_was_proposed,
+        Completion(content="done"),
+    ])
+
+    async def chat(model, messages, tools, *args, **kwargs):
+        """Delegate calls (no tools) go to the delegate model, the worker's own turns to the script."""
+        return await (delegate if tools is None else script)(model, messages, tools, *args, **kwargs)
+
     async def body():
-        m = _manager(tmp_path, delegate)
-        s, root = await _session(m)
-        sid = s["id"]
-        propose = call("delegate_edit", 1, paths=["app.py", "other.py"], instruction="greet the world")
-        await _run(m, sid, propose)
+        m = Manager(make_cfg(tmp_path), chat=chat)
+        await m.start()
+        sid = m.create("task")["id"]
+        root = Path(m.db.get_session(sid)["workspace"])
+        for name, text in {"app.py": SOURCE, "other.py": OTHER}.items():  # before the run's first turn, not by the worker
+            (root / name).write_text(text, encoding="utf-8", newline="")
+        live.update(m=m, sid=sid, root=root)
+        await wait_status(m, sid, "done")
         result = _payload(m, sid, propose)
         assert result["status"] == "proposed" and result["error"] is None
         assert "app.py: 1 edit, +1 -1 lines" in result["summary"] and "renamed things" in result["summary"]
-        assert (root / "app.py").read_text(encoding="utf-8") == SOURCE  # nothing written yet
+        assert untouched == [True]
 
         # The delegate got a fresh context: the files and the instruction, nothing of the worker's conversation.
         sent = delegate.requests[0]
@@ -176,9 +198,7 @@ def test_propose_then_apply_keeps_snippets_out_of_the_worker_context(tmp_path):
         assert "task" not in sent[1]["content"].split("Instruction:")[0]
         assert delegate.kwargs[0]["max_tokens"] == delegate_edit.DELEGATE_MAX_TOKENS
 
-        apply = call("apply_delegated_edit", 2, patch_id=result["patch_id"])
-        await _run(m, sid, apply)
-        assert _payload(m, sid, apply)["status"] == "applied"
+        assert _payload(m, sid, {"id": "c2-apply_delegated_edit"})["status"] == "applied"
         assert (root / "app.py").read_text(encoding="utf-8") == SOURCE.replace(old, new)
         assert (root / "other.py").read_text(encoding="utf-8") == "VALUE = 2\n"
 
@@ -361,7 +381,8 @@ def test_apply_is_decided_and_previewed_as_an_edit_of_each_file(tmp_path):
     asyncio.run(body())
 
 
-def test_apply_rolls_back_earlier_files_and_raises_tool_error_when_a_write_fails(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", ["oserror", "other-exception"])
+def test_apply_rolls_back_earlier_files_and_raises_tool_error_when_a_write_fails(tmp_path, monkeypatch, failure):
     (tmp_path / "a.py").write_text("X = 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("Y = 1\n", encoding="utf-8")
     files = FileOps(tmp_path, 8000)
@@ -377,7 +398,10 @@ def test_apply_rolls_back_earlier_files_and_raises_tool_error_when_a_write_fails
             raise PermissionError("denied")
         return real_write(p, shown, data)
     flaky.failed = False
-    monkeypatch.setattr(files, "write_replacing", flaky)
+    if failure == "oserror":
+        monkeypatch.setattr(files, "write_replacing", flaky)
+    else:   # a surrogate fails the write with something that is not an OSError
+        monkeypatch.setattr(delegate_edit, "apply_to_texts", lambda t, e: {"a.py": "X = 2\n", "b.py": "Y = \ud800"})
     with pytest.raises(ToolError, match="rolled back"):
         delegate_edit.apply(files, proposal)
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "X = 1\n"
@@ -397,21 +421,6 @@ def test_surrogate_text_is_rejected_before_any_file_is_touched(tmp_path):
     with pytest.raises(ToolError):
         delegate_edit.apply(files, proposal)
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "X = 1\n"
-
-
-def test_non_oserror_write_failure_rolls_back_and_raises_tool_error(tmp_path, monkeypatch):
-    (tmp_path / "a.py").write_text("X = 1\n", encoding="utf-8")
-    (tmp_path / "b.py").write_text("Y = 1\n", encoding="utf-8")
-    files = FileOps(tmp_path, 8000)
-    texts = {"a.py": "X = 1\n", "b.py": "Y = 1\n"}
-    edits = [{"path": "a.py", "old_text": "X = 1", "new_text": "X = 2"},
-             {"path": "b.py", "old_text": "Y = 1", "new_text": "Y = 2"}]
-    _, proposal = delegate_edit.new_proposal(texts, edits, "k", "s")
-    monkeypatch.setattr(delegate_edit, "apply_to_texts", lambda t, e: {"a.py": "X = 2\n", "b.py": "Y = \ud800"})
-    with pytest.raises(ToolError, match="rolled back"):
-        delegate_edit.apply(files, proposal)
-    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "X = 1\n"
-    assert (tmp_path / "b.py").read_text(encoding="utf-8") == "Y = 1\n"
 
 
 def test_content_based_edit_rules_apply_to_apply_delegated_edit(tmp_path):

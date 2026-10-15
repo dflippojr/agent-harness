@@ -1,6 +1,15 @@
-import { test as base, expect, type Page } from '@playwright/test';
-export const test = base.extend<{ signedIn: Page }>({
-  signedIn: async ({ page }, use) => {
+import { test as base, expect, type Page, type TestInfo } from '@playwright/test';
+// Behaviour journeys and defect regressions assert nothing that depends on the theme, so they run in the light projects.
+const LIGHT = ['desktop-light', 'iphone-se-light', 'pixel7-light'];
+// Tests that set their own viewport sizes need one mouse and one touch (WebKit) run; pixel7 adds nothing for them.
+const SELF_SIZING = ['desktop-light', 'iphone-se-light'];
+export function onlyProjects(info: TestInfo, names: readonly string[]) {
+  base.skip(!names.includes(info.project.name), 'theme-independent');
+}
+// The skip runs before the sign-in navigation, so a project a test does not need costs a page and no server requests.
+const signedInOn = (names: readonly string[]) => base.extend<{ signedIn: Page }>({
+  signedIn: async ({ page }, use, info) => {
+    onlyProjects(info, names);
     await page.goto('/connect');
     await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
@@ -8,6 +17,10 @@ export const test = base.extend<{ signedIn: Page }>({
     finally { await page.context().setOffline(false); }
   },
 });
+export const test = signedInOn(LIGHT);
+export const selfSizingTest = signedInOn(SELF_SIZING);
+// The one dark run: the primary-page sweep also asserts each scheme's --bg.
+export const reflowTest = signedInOn([...SELF_SIZING, 'desktop-dark', 'iphone-se-dark']);
 export { expect };
 export async function openSession(page: Page, title: string) {
   await page.goto('/#/agents');

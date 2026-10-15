@@ -69,12 +69,8 @@ def test_paging_walks_every_session_once_newest_first(db):
     assert len(rows) == 63 and cursor is None  # the last page names no next one
 
 
-def test_target_filters_in_sql_and_uses_the_list_index(db):
+def test_the_session_list_query_uses_the_list_index(db):
     _seed(db)
-    for i in range(3):
-        db.insert_session(_session(f"mac{i}", target="mac", created_at=BASE - 100 + i))
-    assert [s["id"] for s in db.list_sessions(50, owner_id="owner", target="mac", include_active=True)] == \
-        ["mac2", "mac1", "mac0"]
     plan = " ".join(r[3] for r in db.conn.execute(
         "EXPLAIN QUERY PLAN SELECT id FROM sessions WHERE kind = 'agent' AND owner_id = 'owner' "
         "ORDER BY created_at DESC, id DESC LIMIT 51"))

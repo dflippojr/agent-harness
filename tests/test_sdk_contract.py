@@ -7,7 +7,6 @@ import json
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from harness.api import create_app
 from harness.manager import Manager
@@ -16,21 +15,34 @@ from sdk.harness_client import ContractError, Harness, HarnessError, RunResult
 from test_daemon import make_cfg
 
 
-def test_sdk_validates_live_openapi_request_types_and_typed_responses(tmp_path):
-    manager = Manager(make_cfg(tmp_path))
-    with TestClient(create_app(manager)) as client:
-        schema = client.get("/openapi.json").json()
+@pytest.fixture(scope="module")
+def schema(tmp_path_factory):
+    """The live OpenAPI document, built once; each drift case edits its own copy."""
+    manager = Manager(make_cfg(tmp_path_factory.mktemp("openapi")))
+    return create_app(manager).openapi()  # what /openapi.json serves, without starting the daemon
+
+
+def test_sdk_validates_live_openapi_request_types_and_typed_responses(schema):
     sdk = Harness("http://unused.invalid")
     try:
         sdk.validate_openapi(schema)
         create_response = schema["paths"]["/api/v1/sessions"]["post"]["responses"]["201"]
         assert create_response["content"]["application/json"]["schema"]["$ref"].endswith("SessionResponse")
+    finally:
+        sdk.close()
 
-        drifted = copy.deepcopy(schema)
-        request = drifted["paths"]["/api/v1/sessions"]["post"]["requestBody"]["content"]["application/json"]["schema"]
-        model = sdk._resolve_schema(drifted, request)
-        model["properties"].pop("backend")
-        with pytest.raises(ContractError, match="create_session.*backend"):
+
+@pytest.mark.parametrize("component,field,message", [
+    ("CreateAppSession", "backend", "create_session.*backend"),
+    ("PairedAppResponse", "catalog_app_id", "catalog_app_id"),
+    ("HubInventory", "entries", "entries"),
+])
+def test_sdk_rejects_an_openapi_document_that_dropped_a_field(schema, component, field, message):
+    drifted = copy.deepcopy(schema)
+    drifted["components"]["schemas"][component]["properties"].pop(field)
+    sdk = Harness("http://unused.invalid")
+    try:
+        with pytest.raises(ContractError, match=message):
             sdk.validate_openapi(drifted)
     finally:
         sdk.close()
@@ -339,7 +351,7 @@ def test_attach_propagates_not_found_without_creating_anything():
     assert exc.value.status == 404
 
 
-def test_sdk_pair_keeps_the_minted_app_and_its_catalog_app_id(tmp_path):
+def test_sdk_pair_keeps_the_minted_app_and_its_catalog_app_id():
     """Synthetic round trip: the pairing response's typed `app` object reaches `Harness.paired_app`."""
     app = {"id": "k-1234abcd", "name": "shop", "prefix": "ha-abcdefg", "created_at": 1.0, "scopes": "sessions",
            "kind": "app", "origins": ["https://shop.example"], "catalog_app_id": "com.example.shop"}
@@ -362,15 +374,3 @@ def test_sdk_pair_keeps_the_minted_app_and_its_catalog_app_id(tmp_path):
         assert json.loads(seen[0].content) == {"code": "hp-code"}
     finally:
         paired.close()
-
-    manager = Manager(make_cfg(tmp_path))
-    with TestClient(create_app(manager)) as client:
-        schema = client.get("/openapi.json").json()
-    sdk = Harness("http://unused.invalid")
-    try:
-        drifted = copy.deepcopy(schema)
-        drifted["components"]["schemas"]["PairedAppResponse"]["properties"].pop("catalog_app_id")
-        with pytest.raises(ContractError, match="catalog_app_id"):
-            sdk.validate_openapi(drifted)
-    finally:
-        sdk.close()

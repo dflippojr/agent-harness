@@ -175,8 +175,9 @@ with personal context withhold it from Apps. These hooks contribute nothing by d
    point at the heavy parts with small functions that import them on demand.
 2. Import the core only from `harness.modules`. If you need a core object it doesn't export, add it to `_PUBLIC`.
 3. Put the profile switch in `config.MODULE_NAMES` so profiles and the installer accept it (see below).
-4. Add tests next to the module's behaviour, and check `tests/test_modules.py` still passes with your package absent
-   (`module_packages: []`).
+4. Add one row to the table in `tests/test_module_lifecycle.py`: its probe route, settings keys, capability, routes,
+   CLI row, metrics and tools. The table runs every module on, off, absent and uninstalled through `create_app`, so the
+   lifecycle needs no test file of its own. Add tests next to the module's behaviour for the rest.
 
 ## What stage (b) leaves in the core
 

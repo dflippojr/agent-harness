@@ -335,7 +335,6 @@ def test_doctor_not_started_preserves_config_and_image_checks(monkeypatch, tmp_p
     monkeypatch.setattr(doctor, "check_docker", lambda report, cfg: report.fail("Docker image", "missing"))
     assert doctor.main(["--not-started"]) == 1
     assert "[[ $no_start -eq 1 ]] && doctor_args+=(--not-started)" in (ROOT / "install/install.sh").read_text()
-    assert "if ($NoTasks) { $doctorArgs += '--not-started' }" in (ROOT / "install/install.ps1").read_text()
 
 
 def test_partial_install_without_config_is_removable(tmp_path, monkeypatch, capsys):

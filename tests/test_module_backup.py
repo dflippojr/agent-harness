@@ -1,5 +1,5 @@
-"""Issue #334 stage (c): the nightly backup is an add-on module. Present it behaves as before (a manual backup, the
-schedule, /maintenance, metrics); absent the daemon runs without the route, the settings and the schedule."""
+"""Issue #334 stage (c): the nightly backup is an add-on module: a manual backup, the schedule, /maintenance and
+metrics. Whether it is present, off or absent is the lifecycle table in test_module_lifecycle.py."""
 
 from __future__ import annotations
 
@@ -9,38 +9,21 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import cli
 from harness.api import create_app
 from harness.config import BackupConfig
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.metrics import render
-from harness.settings_keys import build_registry
 from harness_modules.backup import settings as backup_settings
 from harness_modules.backup.runtime import doctor
 
 from test_daemon import Script, make_cfg
-from test_modules import route_paths
-
-KEYS = ("backup.enabled", "backup.at", "backup.keep_days", "backup.dir", "backup.member_key_dir")
 
 
-def make(tmp_path, packages=None, enabled=False) -> Manager:
+def make(tmp_path, enabled=False) -> Manager:
     cfg = make_cfg(tmp_path)
     cfg.backup = BackupConfig(enabled=enabled, dir=str(tmp_path / "backups"))
-    cfg.module_packages = packages
     return Manager(cfg, chat=Script([Completion(content="hi")]))
-
-
-def test_backup_registers_through_the_interface(tmp_path):
-    m = make(tmp_path)
-    runtime = m.modules.get("backup")
-    assert runtime is not None and runtime.service is m.backup
-    assert "/maintenance/backup" in route_paths(create_app(m))
-    specs = build_registry(m.cfg).specs
-    assert all(key in specs for key in KEYS)
-    assert any(row[0] == "maintenance backup" for row in cli.admin_commands())
-    assert runtime.module.doctor is not None  # `python -m harness.doctor` runs it through Module.doctor
 
 
 def test_a_manual_backup_works_while_the_schedule_is_off(tmp_path):
@@ -73,11 +56,7 @@ def test_the_schedule_starts_with_the_daemon_and_follows_a_live_change(tmp_path)
     asyncio.run(run())
 
 
-def test_apply_schedule_without_the_module_does_nothing():
-    backup_settings.apply_backup_schedule(SimpleNamespace(modules=SimpleNamespace(get=lambda name: None)), 1, 2)
-
-
-def test_settings_accessors_and_checks(tmp_path):
+def test_checks_and_hidden_paths(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.backup = BackupConfig(dir=str(tmp_path / "x" / "backups"))
     assert backup_settings.check_backup(cfg) == ["backup.dir parent is missing"]
@@ -85,11 +64,6 @@ def test_settings_accessors_and_checks(tmp_path):
     assert backup_settings.check_backup(cfg) == ["backup.dir is not configured"]
     cfg.backup.dir = str(tmp_path / "ok")
     assert backup_settings.check_backup(cfg) == []
-    backup_settings._set_enabled(cfg, 1)
-    backup_settings._set_at(cfg, "04:15")
-    backup_settings._set_keep(cfg, "7")
-    assert (backup_settings._get_enabled(cfg), backup_settings._get_at(cfg), backup_settings._get_keep(cfg)) \
-        == (True, "04:15", 7)
     with pytest.raises(ValueError):
         backup_settings._set_at(cfg, "25:00")
     specs = {spec.key: spec for spec in backup_settings.specs()}
@@ -127,15 +101,3 @@ def test_doctor_reports_backup_status(monkeypatch):
     assert report.lines == []
 
 
-def test_absent_backup_runs_without_it(tmp_path):
-    m = make(tmp_path, packages=["harness_modules.images"], enabled=True)
-    assert "backup" not in m.modules and m.backup is None
-    paths = route_paths(create_app(m))
-    assert "/maintenance/backup" not in paths
-    specs = build_registry(m.cfg).specs
-    assert not any(key in specs for key in KEYS)
-    assert "backup" not in m.maintenance.status_extras
-    m.modules.start()  # nothing schedules a backup
-    with TestClient(create_app(m)) as client:
-        assert client.post("/maintenance/backup").status_code in (404, 405)
-    assert "harness_backup_last_success_timestamp_seconds" not in render(m)

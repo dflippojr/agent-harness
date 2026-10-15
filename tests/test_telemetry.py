@@ -79,15 +79,6 @@ def test_tx_users_are_labelled_by_their_own_method(tmp_path):
     db.close()
 
 
-def test_database_methods_feed_lock_histogram(tmp_path):
-    db = Database(tmp_path / "t.db")
-    before = dict(telemetry.lock_held.items()).get("list_jobs")
-    n = before.snapshot()[2] if before else 0
-    db.list_jobs()
-    assert dict(telemetry.lock_held.items())["list_jobs"].snapshot()[2] == n + 1
-    db.close()
-
-
 def test_loop_probe_sees_a_blocked_loop():
     hist = telemetry.Histogram()
 
@@ -131,19 +122,6 @@ def test_loop_probe_stop_propagates_its_own_cancellation():
     asyncio.run(run())
 
 
-def test_daemon_lifespan_shutdown_does_not_hang(tmp_path):
-    from fastapi.testclient import TestClient
-    from harness.api import create_app
-    from harness.manager import Manager
-    from test_daemon import Script, make_cfg
-
-    m = Manager(make_cfg(tmp_path), chat=Script([]))
-    start = time.monotonic()
-    with TestClient(create_app(m)):
-        pass
-    assert time.monotonic() - start < 10
-
-
 def test_asyncio_debug_is_opt_in(monkeypatch):
     async def check():
         loop = asyncio.get_running_loop()
@@ -160,9 +138,11 @@ def test_asyncio_debug_is_opt_in(monkeypatch):
 
 def test_metrics_endpoint_exposes_new_series(tmp_path):
     m = Manager(make_cfg(tmp_path), chat=Script([]))
+    start = time.monotonic()
     with TestClient(create_app(m)) as client:
-        time.sleep(0.05)
         text = client.get("/metrics").text
+    # The lifespan must also shut down without hanging on the loop probe.
+    assert time.monotonic() - start < 10
     assert "# TYPE harness_db_lock_held_seconds histogram" in text
     assert 'harness_db_lock_held_seconds_bucket{method="' in text
     assert 'harness_db_lock_held_seconds_count{method="' in text

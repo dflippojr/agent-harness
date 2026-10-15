@@ -15,9 +15,7 @@ from harness.cli_backends import CliBackendError
 from harness.config import BackendConfig
 from harness.manager import BACKEND_OVERRIDE_UNSUPPORTED, HarnessError, Manager
 
-from harness.llm import Completion
-
-from test_api import make_client, wait_for
+from test_api import LOGIN, wait_for
 from test_checkpoints import two_edits
 from test_daemon import events
 from test_phase3 import finished, make_repo, project_cfg
@@ -97,24 +95,15 @@ def test_hosted_fork_to_local_keeps_the_digest_in_its_checkpoint(tmp_path):
     asyncio.run(body())
 
 
-def test_a_forks_inherited_task_reaches_another_backend(tmp_path):
+@pytest.mark.parametrize("via", ["local", "claude"], ids=["local-fork", "hosted-fork"])
+def test_a_forks_inherited_task_reaches_another_backend(tmp_path, via):
+    """The task survives a fork through `via` and on to Codex: the digest has it though the middle fork's own event
+    log starts later (a hosted one's does)."""
     async def body():
         m, s = await started(tmp_path)
-        child = await finished(m, (await m.fork(s["id"], 1, "Continue the task."))["id"])
-        moved = m.db.get_session((await m.fork(child["id"], 1, "Continue the task.", backend="codex"))["id"])
-        digest = moved["context"][1]["content"]
-        assert "User: go" in digest            # the original task, from the child's saved context, not its event log
-        await finished(m, moved["id"])
-
-    asyncio.run(body())
-
-
-def test_a_hosted_forks_inherited_task_reaches_the_next_backend(tmp_path):
-    async def body():
-        m, s = await started(tmp_path)
-        hosted = await finished(m, (await m.fork(s["id"], 1, "Continue the task.", backend="claude"))["id"])
-        moved = m.db.get_session((await m.fork(hosted["id"], 1, "Continue the task.", backend="codex"))["id"])
-        assert "User: go" in moved["context"][1]["content"]   # inherited, though the Claude fork's log starts later
+        middle = await finished(m, (await m.fork(s["id"], 1, "Continue the task.", backend=via))["id"])
+        moved = m.db.get_session((await m.fork(middle["id"], 1, "Continue the task.", backend="codex"))["id"])
+        assert "User: go" in moved["context"][1]["content"]   # the original task, from the saved context
         await finished(m, moved["id"])
 
     asyncio.run(body())
@@ -197,27 +186,30 @@ async def _now(value):
     return value
 
 
-def test_routes_pass_the_override_and_rerun_still_takes_no_body(tmp_path, monkeypatch):
-    client, m, _ = make_client(tmp_path, [Completion(content="done")])
-    seen = []
+def test_override_routes_start_sessions_on_the_chosen_backend_and_rerun_still_takes_no_body(tmp_path):
+    cfg = project_cfg(tmp_path, str(make_repo(tmp_path / "src")))
+    cfg.backends["codex"] = BackendConfig(enabled=True, model="gpt-5.5", effort="medium")
+    cfg.allowed_logins = [LOGIN]
+    m = Manager(cfg, chat=two_edits())
+    m.runner.codex_factory = _no_cli
+    owner = {"Tailscale-User-Login": LOGIN}
+    with TestClient(create_app(m)) as client:
+        sid = client.post("/sessions", json={"prompt": "go", "project": "proj"}, headers=owner).json()["id"]
+        original = wait_for(lambda: (s := m.db.get_session(sid))["status"] == "done" and s)
 
-    def rerun(sid, **kw):
-        seen.append(kw)
-        return m.db.get_session(sid)
+        def stored(response, backend, model, effort):
+            assert response.status_code == 201, response.text
+            row = m.db.get_session(response.json()["id"])
+            assert (response.json()["backend"], response.json()["model"]) == (backend, model)
+            assert (row["backend"], row["model"], row["effort"]) == (backend, model, effort)
 
-    async def fork(sid, turn, prompt, **kw):
-        seen.append(kw)
-        return m.db.get_session(sid)
-    monkeypatch.setattr(m, "rerun", rerun)
-    monkeypatch.setattr(m, "fork", fork)
-    with client:
-        sid = client.post("/sessions", json={"prompt": "go"}).json()["id"]
-        assert client.post(f"/sessions/{sid}/rerun").status_code == 201
-        assert client.post(f"/sessions/{sid}/rerun", json={"backend": "codex"}).status_code == 201
-        assert client.post(f"/sessions/{sid}/checkpoints/1/fork",
-                           json={"prompt": "go", "backend": "codex", "model": "gpt-5.5"}).status_code == 201
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
-    assert [(kw["backend"], kw["model"]) for kw in seen] == [(None, None), ("codex", None), ("codex", "gpt-5.5")]
+        stored(client.post(f"/sessions/{sid}/rerun", headers=owner), "local", original["model"], original["effort"])
+        stored(client.post(f"/sessions/{sid}/rerun", json={"backend": "codex"}, headers=owner),
+               "codex", "gpt-5.5", "medium")
+        stored(client.post(f"/sessions/{sid}/checkpoints/1/fork", headers=owner,
+                           json={"prompt": "go", "backend": "codex", "model": "gpt-5.5"}), "codex", "gpt-5.5", "medium")
+        refused = client.post(f"/sessions/{sid}/rerun", json={"backend": "nope"}, headers=owner)
+        assert refused.status_code == 400 and "unknown backend" in refused.text
 
 
 def test_audit_metadata_keeps_backend_and_model_names_only():

@@ -121,20 +121,6 @@ def _posix(path: str) -> str:
     return path.replace("\\", "/").strip().strip('"')
 
 
-def paths_since(baseline: list[str] | None, current: list[str]) -> list[str]:
-    changed = [line for line in current if line not in set(baseline or [])]
-    out: list[str] = []
-    seen: set[str] = set()
-    for line in changed:
-        for path in porcelain_paths(line):
-            if path and path not in seen:
-                seen.add(path)
-                out.append(path)
-            if len(out) >= FILES_MODIFIED_MAX:
-                return out
-    return out
-
-
 def git_porcelain(root: Path) -> list[str] | None:
     """`git status --porcelain` lines at the workspace root, or None if this is not a usable git repo."""
     return _git_lines(root, "status", "--porcelain=v1", "--untracked-files=all")

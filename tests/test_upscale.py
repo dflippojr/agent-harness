@@ -6,7 +6,6 @@ from harness_modules.images.store import ImageStore
 
 import asyncio
 import io
-import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,7 +15,8 @@ from harness.fileops import ToolError
 from harness_modules.images import upscale as upscale_mod
 from harness.api import create_app
 
-from test_phase6 import PNG, image_manager
+from test_phase6 import PNG, image_manager, wait_for
+from waits import scaled
 
 
 def rgba_png(width: int, height: int, color=(10, 20, 30, 128)) -> bytes:
@@ -222,10 +222,7 @@ def test_upscale_api_authorization_and_app_default(tmp_path):
     m.cfg.guests = [GuestAccess(login=guest, until="2099-01-01T00:00:00+00:00")]
     with TestClient(create_app(m)) as client:
         job = client.post("/images", json={"prompt": "a cat"}).json()
-        for _ in range(200):
-            if client.get(f"/images/{job['id']}").json()["status"] == "done":
-                break
-            time.sleep(0.02)
+        wait_for(lambda: client.get(f"/images/{job['id']}").json()["status"] == "done", timeout=scaled(5))
         detail = client.get(f"/images/{job['id']}").json()
         assert detail["requested_upscale"] == "none"
         assert detail["children"] == []
@@ -237,10 +234,7 @@ def test_upscale_api_authorization_and_app_default(tmp_path):
         ImageStore(m.db).update_image(job["id"], width=32, height=32)
         up = client.post(f"/images/{job['id']}/upscale", json={"upscale": "2x"}, headers=owner)
         assert up.status_code == 201
-        for _ in range(200):
-            if client.get(f"/images/{up.json()['id']}").json()["status"] in ("done", "failed"):
-                break
-            time.sleep(0.02)
+        wait_for(lambda: client.get(f"/images/{up.json()['id']}").json()["status"] in ("done", "failed"), timeout=scaled(5))
         app_key = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions"]}).json()
         assert client.post(f"/api/v1/images/{job['id']}/upscale", json={"upscale": "2x"},
                            headers={"Authorization": f"Bearer {app_key['key']}"}).status_code == 403

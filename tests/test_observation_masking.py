@@ -1,5 +1,6 @@
 import hashlib
-import shutil
+
+import pytest
 
 from harness import compaction
 from harness.config import _mask_min_chars
@@ -62,11 +63,13 @@ def test_failures_and_unknown_legacy_outcomes_stay_verbatim():
     assert artifacts
 
 
-def test_mask_threshold_config_fallback():
-    assert _mask_min_chars(None) == 2000
-    assert _mask_min_chars("invalid") == 2000
-    assert _mask_min_chars(0) == 2000
-    assert _mask_min_chars(3500) == 3500
+@pytest.mark.parametrize("value, expected", [
+    (None, 2000), ("invalid", 2000), (0, 2000), (3500, 3500),
+    (1, 1), (10_000_000, 10_000_000), (10_000_001, 2000), (-5, 2000), (True, 2000), (float("inf"), 2000),
+    ("4096", 4096),
+])
+def test_mask_threshold_from_config_values(value, expected):
+    assert _mask_min_chars(value) == expected
 
 
 def test_mask_receipt_uses_full_output_when_context_result_was_capped():
@@ -77,51 +80,6 @@ def test_mask_receipt_uses_full_output_when_context_result_was_capped():
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()
     assert f"characters={len(full)}" in masked[1]["content"]
     assert digest in artifacts and artifacts[digest] == full
-
-
-def test_artifact_full_text_ranges_hash_and_resume(tmp_path):
-    text = "😀" * 22001
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    path = tmp_path / "harness.sqlite3"
-    db = Database(path)
-    db.put_artifact("session-a", digest, text)
-    db.close()
-
-    db = Database(path)
-    first, truncated = db.read_artifact("session-a", digest)
-    assert first == text[:20000]
-    assert truncated
-    rest, truncated = db.read_artifact("session-a", digest, 20000, len(text))
-    assert rest == text[20000:]
-    assert not truncated
-    assert hashlib.sha256((first + rest).encode("utf-8")).hexdigest() == digest
-    assert db.read_artifact("other-session", digest) is None
-    db.delete_session("session-a")
-    assert db.read_artifact("session-a", digest) is None
-    db.close()
-
-
-def test_mask_threshold_bounds_and_odd_types():
-    assert _mask_min_chars(1) == 1
-    assert _mask_min_chars(10_000_000) == 10_000_000
-    assert _mask_min_chars(10_000_001) == 2000
-    assert _mask_min_chars(-5) == 2000
-    assert _mask_min_chars(True) == 2000
-    assert _mask_min_chars(float("inf")) == 2000
-    assert _mask_min_chars("4096") == 4096
-
-
-def test_mask_threshold_loaded_from_yaml(tmp_path):
-    from harness import config
-    cfg_dir = tmp_path / "cfg"
-    shutil.copytree(config.ROOT / "config", cfg_dir)
-    text = (cfg_dir / "harness.yaml").read_text(encoding="utf-8")
-    assert "mask_min_chars: 2000" in text
-    assert config.load(cfg_dir, tmp_path / "data").mask_min_chars == 2000
-    for value, expected in ((5000, 5000), (0, 2000), ("many", 2000)):
-        (cfg_dir / "harness.yaml").write_text(
-            text.replace("mask_min_chars: 2000", f"mask_min_chars: {value}"), encoding="utf-8")
-        assert config.load(cfg_dir, tmp_path / "data").mask_min_chars == expected
 
 
 def test_receipts_are_not_masked_again():
@@ -136,7 +94,8 @@ def test_receipts_are_not_masked_again():
 
 
 def test_artifact_cap_scoping_and_ranges(tmp_path):
-    db = Database(tmp_path / "harness.sqlite3")
+    path = tmp_path / "harness.sqlite3"
+    db = Database(path)
     text = "abcdefghij" * 3000
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     db.put_artifact("s1", digest, text)
@@ -156,6 +115,19 @@ def test_artifact_cap_scoping_and_ranges(tmp_path):
     db.delete_session("s1")
     assert db.read_artifact("s1", digest) is None
     assert db.read_artifact("s2", digest) is not None
+
+    emoji = "😀" * 22001                              # multi-byte: ranges count characters, not bytes
+    emoji_digest = hashlib.sha256(emoji.encode("utf-8")).hexdigest()
+    db.put_artifact("s4", emoji_digest, emoji)
+    db.close()
+
+    db = Database(path)                                # a reopened database resumes where the first left off
+    first, truncated = db.read_artifact("s4", emoji_digest)
+    assert first == emoji[:20000] and truncated
+    rest, truncated = db.read_artifact("s4", emoji_digest, 20000, len(emoji))
+    assert rest == emoji[20000:] and not truncated
+    assert hashlib.sha256((first + rest).encode("utf-8")).hexdigest() == emoji_digest
+    assert db.read_artifact("other-session", emoji_digest) is None
     db.close()
 
 

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import time
 from types import SimpleNamespace
 from contextlib import asynccontextmanager
 
@@ -16,6 +17,7 @@ from harness.llm import Completion
 from test_phase3 import make_repo, sh
 from test_phase4 import FakeRunner, executor, harness_runner, mac_cfg, settle
 from test_secret_scan import KEY, _commit_then_remove_key, _leaks
+from waits import scaled
 
 
 @asynccontextmanager
@@ -33,6 +35,13 @@ async def session(tmp_path, *, url=False):
     finally:
         await runner.stop()
         await m.stop()
+
+
+async def runner_online(m, name="macbook"):
+    deadline = time.monotonic() + scaled(10)
+    while not m.hub.online(name):
+        assert time.monotonic() < deadline, f"runner {name} never came back"
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.parametrize("action", ["merge", "push"])
@@ -90,8 +99,12 @@ def test_remote_history_matrix(tmp_path, action):
     asyncio.run(body())
 
 
-@pytest.mark.parametrize("failure", ["offline", "timeout", "deadline", "old", "unknown_op", "cap", "malformed"])
-@pytest.mark.parametrize("action", ["merge", "push"])
+# Push and merge share the gate (Manager._review_remote -> _remote_scan_input and _secret_gate), so every failure mode
+# runs on push and one runs on merge.
+@pytest.mark.parametrize("failure,action", [
+    *((failure, "push") for failure in ("offline", "timeout", "deadline", "old", "unknown_op", "cap", "malformed")),
+    ("timeout", "merge"),
+])
 def test_remote_scan_failures_close_gate_but_not_discard(tmp_path, monkeypatch, failure, action):
     async def body():
         async with session(tmp_path, url=action == "push") as (m, s, ws, src, ex, runner):
@@ -135,7 +148,7 @@ def test_remote_scan_failures_close_gate_but_not_discard(tmp_path, monkeypatch, 
                     info = ex.info
                     monkeypatch.setattr(ex, "info", lambda: {**info(), "protocol": 2})
                 runner.start()
-                await asyncio.sleep(0.05)
+                await runner_online(m)
             assert (await m.review(s["id"], "discard"))["review"] == "discarded"
     asyncio.run(body())
 
@@ -160,25 +173,6 @@ def test_scan_input_fails_on_git_errors_and_changes_during_collection(tmp_path, 
     with pytest.raises(harness_runner.OpError) as error:
         ex.op_scan_input({"session": sid, "base_commit": base})
     assert error.value.kind == "head_changed"
-
-
-@pytest.mark.parametrize("action", ["merge", "push"])
-def test_head_change_during_scan_reaches_owner_as_conflict(tmp_path, monkeypatch, action):
-    async def body():
-        async with session(tmp_path, url=action == "push") as (m, s, ws, src, ex, runner):
-            def changed(params):
-                raise harness_runner.OpError("the branch changed; review again", "head_changed")
-
-            monkeypatch.setattr(ex, "op_scan_input", changed)
-            with pytest.raises(HarnessError) as error:
-                await m.review(s["id"], action)
-            assert (error.value.status, error.value.code) == (409, "secret_scan_head_changed")
-            assert "branch changed; review again" in str(error.value)
-            assert action not in runner.seen_ops
-            scan = (await m.changes(s["id"]))["secret_scan"]
-            assert "branch changed; review again" in scan["message"]
-            assert "reconnect" not in scan["message"]
-    asyncio.run(body())
 
 
 def test_runner_requires_expected_head(tmp_path):
@@ -259,6 +253,20 @@ def test_remote_head_change_refuses_publication(tmp_path, monkeypatch, action, c
             assert not (src / "late.py").exists()
             if action == "push":
                 assert sh(src, "branch", "--list", s["branch"]) == ""
+            # The owner's preview says the same when a real change lands while the runner collects the diffs.
+            real_diffs, late = harness_runner.repo_diffs, []
+
+            def changed_while_collecting(workspace, base_commit, **kwargs):
+                diffs = real_diffs(workspace, base_commit, **kwargs)
+                late.append(len(late))
+                (ws / f"later-{late[-1]}.txt").write_text("late change")
+                projects.snapshot(ws, "changed while collecting")
+                return diffs
+
+            monkeypatch.setattr(harness_runner, "repo_diffs", changed_while_collecting)
+            scan = (await m.changes(s["id"]))["secret_scan"]
+            assert "branch changed; review again" in scan["message"]
+            assert "reconnect" not in scan["message"]
     asyncio.run(body())
 
 

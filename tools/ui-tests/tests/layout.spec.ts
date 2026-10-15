@@ -1,4 +1,4 @@
-import { test, expect, openSession, expectDone, expectReflow } from './fixtures';
+import { test, expect, openSession, expectDone, expectReflow, reflowTest } from './fixtures';
 
 const surfaces = [
   { name: 'Chat landing', route: '/#/chat', ready: '.chat-welcome' },
@@ -12,7 +12,7 @@ const surfaces = [
   { name: 'Connection', route: '/#/profile/connection', ready: 'input' },
 ];
 
-test('primary pages reflow without overflow at 320/375/768/1440 CSS pixels', async ({ signedIn: page }, info) => {
+reflowTest('primary pages reflow without overflow at 320/375/768/1440 CSS pixels', async ({ signedIn: page }, info) => {
   const scheme = info.project.use.colorScheme;
   await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--bg').trim())).toBe(scheme === 'dark' ? '#000000' : '#f3f4f6');
   for (const surface of surfaces) {

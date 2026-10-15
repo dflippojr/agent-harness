@@ -52,14 +52,6 @@ def test_run_cmd_returns_output_and_passes_input():
     assert err.strip() == "warn"
 
 
-def test_run_cmd_reports_a_timeout_with_the_output_so_far():
-    code, out, err = asyncio.run(sandbox.run_cmd(
-        [sys.executable, "-c", "import sys, time; print('early', flush=True); time.sleep(60)"], timeout=1))
-    assert code == 124
-    assert "early" in out
-    assert "[timed out after 1s]" in err
-
-
 def test_run_cmd_caps_each_stream_at_one_million_characters():
     from harness.fileops import CAPTURE_CAPPED_NOTE, OUTPUT_CAP
     code, out, err = asyncio.run(sandbox.run_cmd(
@@ -76,12 +68,15 @@ def test_run_cmd_caps_each_stream_at_one_million_characters():
 
 
 def test_run_cmd_timeout_stays_124_when_output_exceeds_the_cap():
+    """A timeout reports the output so far (`early`, then output past the cap) and the exit code 124."""
     from harness.fileops import CAPTURE_CAPPED_NOTE
     code, out, err = asyncio.run(sandbox.run_cmd(
         [sys.executable, "-c",
-         "import sys, time; sys.stdout.write('A'*2_000_000); sys.stdout.flush(); time.sleep(60)"],
+         "import sys, time; print('early', flush=True); sys.stdout.write('A'*2_000_000); sys.stdout.flush(); "
+         "time.sleep(60)"],
         timeout=2))
     assert code == 124
+    assert out.startswith("early")
     assert CAPTURE_CAPPED_NOTE in out
     assert "[timed out after 2s]" in err
     assert len(out) < 1_200_000

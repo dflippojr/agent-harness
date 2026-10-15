@@ -4,7 +4,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tomllib
 
 import pytest
 
@@ -28,18 +27,13 @@ def initialize(venv, bootstrap=None, dry_run=False):
     return subprocess.run([POWERSHELL, "-NoProfile", "-Command", command], capture_output=True, text=True)
 
 
-def test_project_declares_supported_python_floor():
-    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    assert metadata["project"]["requires-python"] == ">=3.12"
-
-
-@pytest.mark.parametrize("existing", [False, True])
-def test_staging_builds_312_and_preserves_a_compatible_venv(tmp_path, existing):
+def test_staging_builds_312_and_preserves_a_compatible_venv(tmp_path):
+    """Starts from a stale environment, so one run covers both creating the venv and preserving it afterwards. It
+    bootstraps from the running interpreter (sys.executable), so it needs a Python 3.12 one."""
     venv = tmp_path / "venv"
-    if existing:
-        # A broken/old environment must be rebuilt, including stale installed packages.
-        venv.mkdir()
-        (venv / "stale-package.txt").write_text("old environment", encoding="utf-8")
+    # A broken/old environment must be rebuilt, including stale installed packages.
+    venv.mkdir()
+    (venv / "stale-package.txt").write_text("old environment", encoding="utf-8")
     result = initialize(venv, sys.executable)
     assert result.returncode == 0, result.stdout + result.stderr
     assert not (venv / "stale-package.txt").exists()

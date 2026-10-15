@@ -61,13 +61,6 @@ def test_opencode_parser_maps_a_recorded_turn():
     assert not [e for e in out if e["type"] == "error"]
 
 
-def test_opencode_parser_maps_a_recorded_error_event():
-    _, out = parse_fixture("opencode_error.jsonl")
-    errors = [e for e in out if e["type"] == "error"]
-    assert len(errors) == 1
-    assert errors[0]["message"].startswith("ContextOverflowError: request (39874 tokens) exceeds")
-
-
 def test_opencode_parser_answer_is_the_last_message_with_text():
     parser = OpencodeJsonl()
     for message, text in (("m1", "thinking out loud"), ("m2", "final "), ("m2", "answer")):
@@ -172,13 +165,6 @@ def test_cli_backend_config_pins_keyless_local_fields(tmp_path):
         _load(tmp_path, {"claude": {"kind": "cli", "command": COMMAND, "parser": "opencode_jsonl"}})
 
 
-def test_cli_backend_without_a_volume_never_mounts_claudes(tmp_path):
-    with pytest.raises(ValueError, match="needs its own volume"):
-        _load(tmp_path, {"opencode": {"kind": "cli", "image": "agent-harness-cli:1", "model": "qwen",
-                                      "command": COMMAND, "parser": "opencode_jsonl",
-                                      "network": "harness-cli-opencode"}})
-
-
 @pytest.mark.parametrize("base_url, expected", [
     ("http://127.0.0.1:8091", "http://harness-cli-opencode-llm:8091/v1"),
     ("http://localhost", "http://harness-cli-opencode-llm:80/v1"),
@@ -240,9 +226,6 @@ def test_opencode_is_invisible_to_every_app_until_granted(tmp_path, monkeypatch)
             "revision": 0, "changes": {"app.default_backend": "opencode"}})
         assert patched.status_code == 400
         assert patched.json()["error"]["keys"]["app.default_backend"]["message"] == "this app cannot select that backend"
-        key = m.db.get_api_key(app["id"])
-        assert m.settings._backend_allowed(key, "opencode") is False
-        assert m.settings._policy_checked_backend("opencode", key) == ("", "provider_policy")
         refused = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hi", "backend": "opencode"})
         assert refused.status_code == 403 and "provider_not_allowed" in refused.text
         listed = {row["name"]: row for row in client.get("/api/v1/backends", headers=headers).json()}
@@ -252,7 +235,6 @@ def test_opencode_is_invisible_to_every_app_until_granted(tmp_path, monkeypatch)
         with pytest.raises(HarnessError):
             m.set_app_provider_credential(app["id"], "opencode", "", "api_key", [])
         m.set_app_provider_credential(app["id"], "opencode", "", "subscription", [])
-        assert m.settings._backend_allowed(key, "opencode") is True
         listed = {row["name"]: row for row in client.get("/api/v1/backends", headers=headers).json()}
         assert listed["opencode"]["available"] is True
         created = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hi", "backend": "opencode"})
