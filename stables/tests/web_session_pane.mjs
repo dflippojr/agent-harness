@@ -1,6 +1,6 @@
-// Desktop session pane (#564): at 768 px+ the status strip and the Transcript / Changes / Info control join the bar (one
-// header row) and move back below it on a phone; a pending approval keeps focus where it was unless it was in the pane;
-// Changes and Info show the pending decision as a one-line bar with Review that follows the app-wide stream.
+// The Changes and Info approval bar (#564) follows the app-wide stream: one debounced refresh per burst, the newest answer
+// wins when they arrive out of order, and leaving cancels what is pending. The bar's text, its Review link and the desktop
+// header and docked approval are the AH-22 journey in tools/ui-tests.
 import assert from "node:assert/strict";
 import { El as BaseEl, Node, createDocument, walk } from "./web_stub_dom.mjs";
 import { h, fill, append } from "../public/lib/dom.mjs";
@@ -77,56 +77,6 @@ const page = mountSession({
   browser, onDaemonChange: (fn) => { daemonListeners.add(fn); return () => daemonListeners.delete(fn); },
 });
 const leave = () => { const fns = leaves; leaves = []; fns.forEach((fn) => fn()); fill(byId.app); };
-const bar = byId.bar;
-const classes = (parent) => parent.childNodes.filter((n) => n instanceof El).map((n) => n.id || n.className);
-
-// ---------- one header row ----------
-await page.viewSession("s1", "transcript");
-assert.ok(doc.body.classList.contains("session-page"), "the body says a session is open, for the desktop rules");
-assert.deepEqual(classes(bar), ["back", "title", "session-strip", "tabs session-tabs", "conn", "settings-btn", "session-menu-wrap"],
-  "desktop: the strip sits under the title's slot and the segmented control before ⋯, all in the bar");
-const chrome = walk(byId.app, (n) => n.className === "session-chrome")[0];
-assert.deepEqual(classes(chrome), ["conn-strip"], "only the reconnecting strip stays under the bar");
-resize(false);
-assert.deepEqual(classes(chrome), ["session-strip", "tabs session-tabs", "conn-strip"], "a phone keeps the strip and tabs under the bar");
-assert.deepEqual(classes(bar), ["back", "title", "conn", "settings-btn", "session-menu-wrap"]);
-resize(true);
-assert.deepEqual(classes(bar).slice(1, 4), ["title", "session-strip", "tabs session-tabs"], "widening moves them back into the bar");
-
-// ---------- the docked approval ----------
-// Focus outside the pane (the list beside it): an arriving approval leaves it there.
-const elsewhere = new El("a");
-doc.activeElement = elsewhere;
-focused = null;
-streams[0].approval_requested({ seq: 1, data: approval });
-const sheet = doc.body.childNodes.filter((n) => n instanceof El && n.className === "approval-sheet").at(-1);
-assert.ok(sheet, "the approval sheet is on the body");
-assert.equal(focused, null, "focus never jumps to the card, let alone to Approve");
-for (const part of ["approval-head", "approval-what", "smart-rec", "approval-diff", "approval-tool", "approval-note-toggle", "approval-actions"]) {
-  assert.ok(walk(sheet, (n) => n.classList.contains(part)).length, `the card has its ${part} part for the desktop layout`);
-}
-const heading = walk(sheet, (n) => n.tagName === "H4")[0];
-assert.equal(heading.attributes.tabindex, "-1", "the heading can take focus without joining the tab order");
-// Focus in the transcript: a newer approval moves it to the card's heading, without scrolling.
-const inTranscript = new El("button");
-byId.app.append(inTranscript);
-doc.activeElement = inTranscript;
-streams[0].approval_requested({ seq: 2, data: { ...approval, id: "ap2" } });
-const sheet2 = doc.body.childNodes.filter((n) => n instanceof El && n.className === "approval-sheet").at(-1);
-assert.notEqual(sheet2, sheet);
-assert.equal(focused, walk(sheet2, (n) => n.tagName === "H4")[0], "focus lands on the heading, not on Approve");
-assert.deepEqual(focused.focusOpts, { preventScroll: true });
-// Focus in the superseded card follows to the new one too, since that card is removed.
-const deny = walk(sheet2, (n) => n.classList.contains("approval-deny"))[0];
-doc.activeElement = deny;
-focused = null;
-streams[0].approval_requested({ seq: 3, data: { ...approval, id: "ap3" } });
-assert.equal(focused?.tagName, "H4");
-leave();
-assert.ok(!doc.body.classList.contains("session-page"), "leaving drops the body class");
-assert.deepEqual(classes(bar), ["back", "title", "conn", "settings-btn"], "leaving takes the strip, the control and ⋯ out of the shared bar");
-assert.equal(media.listeners.size, 0, "the width listener goes with the page");
-
 // ---------- the approval bar on Changes and Info ----------
 const approvalBars = () => doc.body.childNodes.filter((n) => n instanceof El && n.className === "approval-bar");
 const event = () => [...daemonListeners][0]();
@@ -143,11 +93,7 @@ for (const tab of ["changes", "info"]) {
   assert.equal(timers.size, 1, `${tab}: the bar catches up once after subscribing`);
   await run();
   assert.equal(abar.hidden, false);
-  assert.equal(abar.attributes.role, "status");
-  assert.match(abar.textContent, /Approval needed · Edit outside the project allowlist/);
   const review = walk(abar, (n) => n.tagName === "A")[0];
-  assert.equal(review.textContent, "Review");
-  assert.equal(review.attributes.href, "#/s/s1/approval/ap1", "Review opens the transcript on that approval");
   assert.equal(daemonListeners.size, 1, "the bar follows the app-wide stream");
   // A burst of events is one refresh.
   event();

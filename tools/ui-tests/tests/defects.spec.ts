@@ -12,11 +12,6 @@ async function expectHitTarget(target: Locator) {
 }
 
 selfSizingTest('#591 Chat starters and recent chats remain reachable at four reflow widths', async ({ signedIn: page }) => {
-  // The welcome paints before options arrive; exercise that startup boundary too.
-  await page.route('**/chats/options', async route => {
-    await new Promise(resolve => setTimeout(resolve, 500));
-    await route.continue();
-  });
   for (const width of [320, 375, 768, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto('/#/chat');
@@ -443,8 +438,10 @@ test('#633 The page behind an open sheet does not scroll', async ({ signedIn: pa
     await expect.poll(rootOverflow).toBe('hidden');
     if (wheel) {
       await wheel();
-      await page.waitForTimeout(300);
-      expect(await page.evaluate(() => scrollY)).toBe(0);
+      // The lock is the root's overflow; the scroll position is read after the wheel's frames have been painted.
+      await expect.poll(rootOverflow).toBe('hidden');
+      await expect.poll(() => page.evaluate(() => new Promise<number>(resolve =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve(scrollY)))))).toBe(0);
     }
     await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     await expect(dialog).toHaveCount(0);

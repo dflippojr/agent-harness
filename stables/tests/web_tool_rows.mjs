@@ -1,5 +1,5 @@
-// Tool-call rows (#508): a 48 px summary whose output and arguments are built only when the row opens, previews that
-// carry the first lines only, Copy with a select-by-hand fallback, and a full-screen viewer with the whole text.
+// Tool-call rows (#508): output and arguments are built only when the row opens, previews carry the first lines only, and
+// trimmed or empty output says so. Copy, the full-screen viewer, Wrap, Escape and focus are AH-03 and #593 in tools/ui-tests.
 import assert from "node:assert/strict";
 import { createToolRows } from "../public/lib/tool-row.mjs";
 import { lineCount, previewText, resultState, toolKind } from "../public/lib/tools.mjs";
@@ -25,7 +25,6 @@ const find = (n, pred) => {
   return null;
 };
 const button = (n, label) => find(n, (x) => x.tag === "button" && text(x).trim() === label);
-const click = (b) => (b.attrs.onclick ? b.attrs.onclick() : b.fire("click"));
 
 // Pure helpers.
 assert.equal(lineCount(""), 0);
@@ -41,16 +40,8 @@ assert.equal(toolKind("web_fetch", {}), "web");
 assert.equal(toolKind("read_file", { path: "a" }), "file");
 assert.equal(toolKind("memory_search", null), "other");
 
-const body = [];
-const toasts = [];
-let clipboard = null;
-let clipboardFails = false;
-const browser = {
-  document: { body: { append: (...n) => body.push(...n) } },
-  navigator: { clipboard: { writeText: async (t) => { if (clipboardFails) throw new Error("denied"); clipboard = t; } } },
-  window: {},
-};
-const { toolRow, closeViewer } = createToolRows({ h: el, fill, toast: (m) => toasts.push(m), browser });
+const browser = { document: { body: { append() {} } }, navigator: {}, window: {} };
+const { toolRow } = createToolRows({ h: el, fill, toast() {}, browser });
 
 const output = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
 const row = toolRow({ name: "run_shell", summary: "pytest -x", kind: "shell", args: { command: "pytest -x" } });
@@ -82,51 +73,6 @@ assert.doesNotMatch(text(fold), /"command"/);
 fold.open = true;
 fold.fire("toggle");
 assert.match(text(fold), /"command": "pytest -x"/);
-
-// Copy puts the whole output on the clipboard.
-await click(button(row.body, "Copy"));
-assert.equal(clipboard, output);
-assert.equal(toasts.at(-1), "Copied");
-
-// Open shows the whole text full screen; Close removes it.
-const opener = button(row.body, "Open");
-opener.focus();
-click(opener);
-const viewer = body.at(-1);
-assert.equal(viewer.tag, "dialog");
-assert.equal(viewer.attrs.class, "tool-viewer");
-assert.equal(browser.document.activeElement, button(viewer, "Close"), "viewer starts on Close");
-assert.equal(viewer.attrs.open, "", "without showModal the dialog is opened by attribute");
-assert.match(text(viewer), /line 40/);
-const wrap = button(viewer, "Wrap");
-assert.equal(wrap.attrs["aria-pressed"], "true", "the viewer wraps by default");
-click(wrap);
-assert.equal(wrap.attrs["aria-pressed"], "false");
-assert.equal(find(viewer, (x) => x.tag === "pre").className, "tool-viewer-text");
-click(button(viewer, "Close"));
-assert.ok(viewer.removed, "Close removes the viewer");
-assert.equal(browser.document.activeElement, opener, "Close returns focus to Open");
-click(opener);
-let prevented = false;
-body.at(-1).fire("cancel", { preventDefault() { prevented = true; } });
-assert.ok(prevented && body.at(-1).removed, "Escape dismisses and removes the viewer");
-assert.equal(browser.document.activeElement, opener);
-click(opener);
-const backdropViewer = body.at(-1);
-backdropViewer.fire("click", { target: backdropViewer });
-assert.equal(backdropViewer.removed, false, "dragging text onto the backdrop does not dismiss");
-backdropViewer.fire("pointerdown", { target: backdropViewer });
-backdropViewer.fire("click", { target: backdropViewer });
-assert.ok(backdropViewer.removed, "a backdrop press dismisses");
-
-// Without clipboard access, Copy opens the viewer so the text can be copied by hand.
-clipboardFails = true;
-const before = body.length;
-await click(button(row.body, "Copy"));
-assert.match(toasts.at(-1), /copy it by hand/);
-assert.equal(body.length, before + 1, "the fallback opens the viewer");
-closeViewer();
-assert.ok(body.at(-1).removed, "closeViewer (route change) removes an open viewer");
 
 // A result that lands while the row is open renders straight away; before that the row says it is waiting.
 const live = toolRow({ name: "read_file", summary: "a.py", kind: "file", args: { path: "a.py" } });

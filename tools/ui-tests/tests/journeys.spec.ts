@@ -1,14 +1,41 @@
+import type { Request } from '@playwright/test';
 import { test, expect, openSession, expectDone, createTask, audit } from './fixtures';
 import { randomUUID } from 'node:crypto';
 
 test('AH-01/AH-02 connection persists; Agents groups and transcript search', async ({ signedIn: page }) => {
+  // Boot asks /health and /me together, once, before any route data, and never warms the model.
+  const events: { phase: 'start' | 'end'; method: string; path: string }[] = [];
+  const entry = (phase: 'start' | 'end') => (request: Request) => {
+    const url = new URL(request.url());
+    if (url.port === '18800') events.push({ phase, method: request.method(), path: url.pathname.replace(/^\/api\/(admin\/)?v1/, '') });
+  };
+  page.on('request', entry('start'));
+  page.on('requestfinished', entry('end'));
   await page.reload();
   await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
+  await expect(page.locator('#boot-splash')).toHaveCount(0);
+  const starts = events.filter(e => e.phase === 'start');
+  expect(starts.filter(e => e.path === '/me')).toHaveLength(1);
+  expect(starts.filter(e => e.method === 'POST' && e.path === '/models/warm')).toEqual([]);
+  const notRouteData = ['/health', '/me', '/profile', '/gpu', '/models/warm', '/auth/session', '/events'];
+  const firstData = events.findIndex(e => e.phase === 'start' && !notRouteData.includes(e.path));
+  expect(firstData).toBeGreaterThan(0);
+  for (const path of ['/health', '/me']) {
+    const started = events.findIndex(e => e.phase === 'start' && e.path === path);
+    const finished = events.findIndex(e => e.phase === 'end' && e.path === path);
+    expect(started, path + ' was asked').toBeGreaterThanOrEqual(0);
+    expect(finished, path + ' finished').toBeGreaterThanOrEqual(0);
+    expect(finished, path + ' finished before route data').toBeLessThan(firstData);
+  }
   for (const name of ['Chat', 'Agents', 'Jobs', 'Images', 'Profile']) {
     await expect(page.locator('#tab-bar').getByRole('link', { name: new RegExp(name) })).toBeAttached();
   }
   await page.goto('/#/agents');
   await expect(page.getByRole('region', { name: 'Needs you', exact: true })).toBeVisible();
+  // The pending approval is on the row: it links to the approval and names the tool and file.
+  const ask = page.locator('a.agent-row', { hasText: 'Protected settings' }).first();
+  await expect(ask).toHaveAttribute('href', /approval/);
+  await expect(ask).toContainText('write_file protected/settings.json');
   await page.getByRole('searchbox', { name: 'Search', exact: true }).fill('compaction');
   await expect(page.getByRole('heading', { name: 'Long task with compaction', exact: true })).toBeVisible();
   await page.getByRole('searchbox', { name: 'Search', exact: true }).fill('');
@@ -189,6 +216,14 @@ test('AH-14 connection loss and reconnect', async ({ signedIn: page }) => {
   await page.context().setOffline(false);
   await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
   await expect(page.locator('.conn-strip[role=status]')).toBeHidden();
+  // The Agents list says when it may be stale while the connection is down, and drops the note once it is back.
+  await page.goto('/#/agents');
+  await page.getByRole('searchbox', { name: 'Search', exact: true }).fill('');
+  await expect(page.locator('a.agent-row:visible').first()).toBeVisible();
+  await page.context().setOffline(true);
+  await expect(page.locator('.stale-note')).toContainText('List may be stale');
+  await page.context().setOffline(false);
+  await expect(page.locator('.stale-note')).toBeHidden();
 });
 
 test('AH-16 Agents list pages older sessions with Show older', async ({ signedIn: page }) => {

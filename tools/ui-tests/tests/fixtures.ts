@@ -21,6 +21,9 @@ export const test = signedInOn(LIGHT);
 export const selfSizingTest = signedInOn(SELF_SIZING);
 // The one dark run: the primary-page sweep also asserts each scheme's --bg.
 export const reflowTest = signedInOn([...SELF_SIZING, 'desktop-dark', 'iphone-se-dark']);
+// Journeys that assert layout and chrome with their own viewport sizes run on one mouse and one touch project.
+export const desktopTest = signedInOn(['desktop-light']);
+export const desktopAndPhoneTest = signedInOn(SELF_SIZING);
 export { expect };
 export async function openSession(page: Page, title: string) {
   await page.goto('/#/agents');

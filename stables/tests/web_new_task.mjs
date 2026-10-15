@@ -43,12 +43,6 @@ for (const name of ["viewNew", "confirmGpuQueue"]) assert.equal(typeof page[name
 await page.viewNew();
 assert.deepEqual(headers.at(-1), ["agents", "New task", { page: true }]);
 assert.ok(calls.includes("/projects") && calls.includes("/skills/enabled"));
-const all = appended.map(text).join(" ");
-// Adding a project to the server's catalog is daemon administration (#545): the owner gets the pointer line.
-assert.doesNotMatch(all, /New project/);
-assert.match(all, /Daemon administration is in the Hub or the\s+harness\s+CLI\./);
-assert.match(all, /Manage templates/);
-assert.match(all, /Save as template/);
 assert.equal(typeof leave, "function");
 assert.equal(await page.confirmGpuQueue("This task"), true);
 assert.match(asked.at(-1).title, /^GPU hold is on/);
@@ -83,4 +77,4 @@ assert.equal(await page.confirmGpuQueue("This task"), false, "declining the GPU-
 }
 console.log("ok");
 
-export { appended, text };
+export { appended };

@@ -29,8 +29,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const LATENCY = 15;
 const log = [];
 const NOT_ROUTE_DATA = new Set(["/health", "/me", "/profile", "/gpu", "/models/warm", "/auth/session"]);
-const adminRange = scenario === "client-update" ? { min: 99, max: 100 }
-  : scenario === "daemon-update" ? { min: 0, max: 0 } : { min: 1, max: 4 };
+const adminRange = { min: 1, max: 4 };
 const me = { owner: { role: "owner", name: "Owner", login: "owner" }, member: { role: "member", name: "M", login: "m" },
   guest: { role: "guest" } }[scenario] || { role: "owner", name: "Owner", login: "owner" };
 
@@ -51,7 +50,6 @@ const fakeFetch = async (url, init = {}) => {
       return jsonResp({ role: "member", name: "M", login: "m" });
     }
     if (scenario === "me-fail") return jsonResp({ error: "nope" }, 500);
-    if (scenario.endsWith("-update")) return jsonResp({ error: { code: "client_update_required" } }, 426);
     return jsonResp(me);
   }
   if (path === "/profile") return jsonResp({ emoji: "🙂", choices: ["🙂"] });
@@ -80,7 +78,7 @@ Object.assign(win, {
   cancelAnimationFrame: (id) => clearTimeout(id),
 });
 
-if (scenario === "offline-cached" || scenario === "client-update" || scenario === "daemon-update") {
+if (scenario === "offline-cached") {
   win.localStorage.setItem("harness.lastRole", "owner");
 }
 globalThis.window = win;
@@ -159,11 +157,6 @@ if (scenario.startsWith("offline")) {
   if (/Can't reach|Retry/.test(byId.app.textContent)) fail("the online event did not re-run boot identity");
   if (win.localStorage.getItem("harness.lastRole") !== "owner") fail("a successful /me caches the role");
   console.log("ok");
-} else if (scenario === "client-update" || scenario === "daemon-update") {
-  if (routeData.length || paths.includes("POST /models/warm") || first("/profile") || first("/gpu")) fail("blocked boot must not request route data, warm or profile");
-  if (!/Update/.test(byId.app.textContent)) fail("update card was not shown");
-  if (win.localStorage.getItem("harness.lastRole") !== "owner") fail("a discarded /me must not touch the cached role (#368)");
-  console.log("ok");
 } else {
   const health = first("/health");
   if (!health || !mes[0] || mes[0].tick - health.tick !== 1 || mes[0].start - health.start > 5) fail("/health and /me must start together");
@@ -181,10 +174,6 @@ if (scenario.startsWith("offline")) {
   if (scenario === "member" && first("/gpu")) fail("member must not request /gpu");
   if (warm) fail("boot must not warm the model; only a local-model selection does (#311)");
 
-  // Round trips before route data: waves of requests that had to finish before the next began.
-  const starts = before.filter((e) => ["/health", "/me", "/auth/session"].includes(e.path)).map((e) => e.start).sort((x, y) => x - y);
-  const waves = { size: starts.filter((t, i) => i === 0 || t - starts[i - 1] > LATENCY / 2).length };
-  if (scenario === "owner" && waves.size > 2) fail(`expected <=2 round trips before route data, got ${waves.size}`);
   console.log("ok");
 }
 process.exit(0);

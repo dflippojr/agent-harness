@@ -1,7 +1,7 @@
-// Agents list grouping (#509): Needs you / Running / Recent membership, sort by activity, hidden empty groups, the
-// inline approval line, and the rendered sections.
+// Agents list grouping (#509): Needs you / Running / Recent membership, sort by activity, hidden empty groups and the
+// inline approval line. The rendered rows, their approval links and the ask are checked in AH-02 (tools/ui-tests).
 import assert from "node:assert/strict";
-import { FAILED_NEEDS_YOU_SECONDS, groupSessions, mountSessions, sessionGroup } from "../public/pages/sessions.mjs";
+import { FAILED_NEEDS_YOU_SECONDS, groupSessions, sessionGroup } from "../public/pages/sessions.mjs";
 import { approvalLine } from "../public/lib/tools.mjs";
 
 const now = 1_800_000_000;
@@ -33,35 +33,4 @@ assert.equal(approvalLine({ tool: "noop", args: {} }), "noop");
 const long = approvalLine({ tool: "mcp_call", args: { blob: "z".repeat(300) } });
 assert.ok(long.startsWith("mcp_call {") && long.endsWith("…") && !long.includes("\n"), long);
 
-// Rendered page: one section per non-empty group, approval rows link to the approval and show the ask.
-const el = (tag, attrs, ...kids) => ({ tag, attrs: attrs || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined),
-  value: "", hidden: false, dataset: {}, addEventListener() {}, querySelector: () => null });
-const text = (n) => (n && typeof n === "object" ? [...(n.kids || [])].map(text).join(" ") : String(n ?? ""));
-const walk = (n, out = []) => { if (n && typeof n === "object") { out.push(n); (n.kids || []).forEach((k) => walk(k, out)); } return out; };
-const t = Date.now() / 1000;
-const sessions = [
-  { id: "s1", title: "Ship it", status: "done", updated_at: t - 7200, target: "tower", project: "web", review: "merged" },
-  { id: "s2", title: "Rotate creds", status: "waiting_approval", updated_at: t - 60, target: "tower", project: "homelab",
-    pending_approvals: [{ id: "a9", tool: "run_shell", args: { command: "systemctl restart ntfy" } }] },
-  { id: "s3", title: "On the Mac", status: "running", updated_at: t - 30, target: "macbook", project: "web" },
-];
-const rendered = [];
-const api = async (path) => (path === "/sessions" ? sessions : path === "/projects" ? [{ name: "web", target: "tower" }] : path === "/gpu" ? { state: "clear" } : []);
-const browser = { window: { addEventListener() {}, removeEventListener() {} }, document: { visibilityState: "visible", addEventListener() {}, removeEventListener() {} },
-  localStorage: { getItem: () => null, setItem() {} } };
-const page = mountSessions({
-  $app: "APP", h: el, fill: (_t, ...n) => rendered.push(n.flat(Infinity)), append() {}, api, setHeader() {}, showListAction() {}, onLeave() {},
-  isMember: () => false, isGuest: () => false, badge: (st) => el("badge", {}, st), reviewBadge: (_r, l) => el("rb", {}, l), REVIEW_LABEL: { merged: "merged" },
-  jobStatusBadge: () => el("jb"), onDaemonChange: () => () => {}, onDaemonState: () => () => {}, browser,
-});
-await page.viewList();
-const sections = rendered.flat().filter((n) => n && n.tag === "section");
-assert.deepEqual(sections.map((n) => n.attrs["aria-label"]), ["Needs you", "Running", "Recent"]);
-const rows = sections.flatMap((n) => walk(n)).filter((n) => n.tag === "a");
-assert.deepEqual(rows.map((r) => r.attrs.href), ["#/s/s2/approval/a9", "#/s/s3", "#/s/s1"]);
-assert.match(text(rows[0]), /\$ systemctl restart ntfy/);
-assert.match(text(rows[0]), /Needs approval/);
-assert.ok(walk(rows[1]).some((n) => n.attrs?.class === "agent-target"), "non-tower rows carry the laptop icon");
-assert.ok(!walk(rows[2]).some((n) => n.attrs?.class === "agent-target"), "tower rows don't");
-assert.match(text(sections[0]), /Needs you 1/);
 console.log("ok");

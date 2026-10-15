@@ -1,7 +1,10 @@
 // Jobs list (#511): attention groups, the inline Enabled switch that saves at once with an Undo toast, and the row body
 // that still opens the full form. Renders pages/jobs.mjs with the real dom.mjs helpers over the shared stub DOM.
 import assert from "node:assert/strict";
-import { El, Emitter, Node, createDocument, walk } from "./web_stub_dom.mjs";
+import { El, Emitter, Node, createDocument, fakeClock, walk } from "./web_stub_dom.mjs";
+
+// The list refresh debounce and pointer release timers run on a manual clock: advance() crosses them, nothing sleeps.
+const clock = fakeClock();
 import { h, fill, append } from "../public/lib/dom.mjs";
 import { SPLITS, splitRoute } from "../public/lib/layout.mjs";
 import { mountJobs } from "../public/pages/jobs.mjs";
@@ -67,7 +70,6 @@ const jobs = [
   job("j4", "Dependabot triage", { enabled: false }),
 ];
 const calls = [];
-let failPut = false;
 let listGate = null;
 let gate = null;  // while set, PUTs wait on it, so a test can hold saves in flight
 const api = async (path, opts = {}) => {
@@ -90,7 +92,6 @@ const api = async (path, opts = {}) => {
   const j = jobs.find((x) => path === `/jobs/${x.id}`);
   if (j && opts.method === "PUT") {
     if (gate) await gate;
-    if (failPut) throw new Error("no such project: homelab");
     Object.assign(j, opts.body);
     return structuredClone(j);
   }
@@ -109,7 +110,7 @@ const mount = (guest, extra = {}) => {
     confirmGpuQueue: async () => true, badge: (s) => h("span", {}, s), jobStatusBadge: () => null, location, confirmSheet: async () => true, ...extra });
   return { $app, page, leaves, location, navigation };
 };
-const flush = () => new Promise((r) => setTimeout(r, 0));
+const flush = () => clock.advance(0);
 const { $app, page } = mount(false);
 await page.viewJobs();
 
@@ -117,66 +118,7 @@ const sections = () => walk($app, (e) => e.classList.contains("job-section")).ma
 const rows = () => walk($app, (e) => e.classList.contains("job-row"));
 const toggleOf = (id) => rows().find((r) => r.attributes["data-job"] === id)
   .childNodes.find((c) => c.tagName === "LABEL").childNodes[0];
-assert.deepEqual(sections(), ["Needs attention1", "Scheduled2", "Paused1"]);
-assert.deepEqual(rows().map((r) => r.attributes["data-job"]), ["j1", "j2", "j3", "j4"]);
-const text = $app.textContent;
-assert.ok(!text.includes("⏸"), "no emoji marks a paused job");
-assert.match(text, /Couldn't start: GPU hold is on/);
-assert.match(text, /Paused/);
-
-// The switch sits beside the link, never inside it, and the link still opens the full form.
-for (const row of rows()) {
-  const id = row.attributes["data-job"];
-  const link = row.childNodes.find((c) => c.tagName === "A");
-  assert.equal(link.href, `#/jobs/${id}`);
-  assert.equal(walk(link, (e) => e.tagName === "INPUT").length, 0, "no control inside the row link");
-  const sw = toggleOf(id);
-  assert.equal(sw.attributes.role, "switch");
-  assert.match(sw.attributes["aria-label"], / enabled$/);
-  assert.equal(sw.disabled, false);
-}
-assert.equal(toggleOf("j4").checked, false);
-assert.equal(toggleOf("j2").checked, true);
-
-// Pausing saves at once: re-read, then a full-body PUT with only enabled flipped; the row moves to Paused.
-calls.length = 0;
-let sw = toggleOf("j2");
-sw.checked = false;
-sw.dispatchEvent({ type: "change" });
-assert.equal(toggleOf("j2").disabled, true, "the switch waits for the save");
-assert.equal(toggleOf("j2").checked, false);
-await flush(); await flush();
-assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /jobs/j2", "PUT /jobs/j2"]);
-assert.deepEqual(Object.keys(calls[1].body).sort(), [...JOB_FIELDS].sort());
-assert.equal(calls[1].body.enabled, false);
-assert.equal(calls[1].body.catch_up_minutes, 90);
-assert.deepEqual(sections(), ["Needs attention1", "Scheduled1", "Paused2"]);
-const undoToast = toasts.at(-1);
-assert.equal(undoToast.text, "Morning homelab check paused");
-assert.equal(undoToast.action.label, "Undo");
-assert.ok(undoToast.ms >= 5000);
-
-// Undo sends the reverse PUT and the row returns to Scheduled.
-calls.length = 0;
-undoToast.action.onClick();
-await flush(); await flush();
-assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), ["GET /jobs/j2", "PUT /jobs/j2"]);
-assert.equal(calls[1].body.enabled, true);
-assert.deepEqual(sections(), ["Needs attention1", "Scheduled2", "Paused1"]);
-assert.equal(toasts.at(-1).text, "Morning homelab check resumed");
-assert.equal(toasts.at(-1).action, undefined, "undoing an undo isn't offered");
-
-// A failed save puts the switch back and says why.
-failPut = true;
-sw = toggleOf("j4");
-sw.checked = true;
-sw.dispatchEvent({ type: "change" });
-await flush(); await flush();
-assert.equal(toggleOf("j4").checked, false);
-assert.equal(toggleOf("j4").disabled, false);
-assert.equal(toasts.at(-1).text, "no such project: homelab");
-assert.deepEqual(sections(), ["Needs attention1", "Scheduled2", "Paused1"]);
-failPut = false;
+let sw;
 
 // Two saves in flight: when one finishes and the list repaints, the other row stays locked on its pending state.
 let open;
@@ -381,19 +323,19 @@ const changedJob = jobs.find((j) => j.id === "j2");
 const beforeRun = structuredClone(changedJob.recent);
 changedJob.recent = [{ id: "late-failure", status: "failed", created_at: now }];
 daemonChange();
-await new Promise((resolve) => setTimeout(resolve, 350));
+await clock.advance(350);
 assert.match(liveBody.textContent, /Failed/, "a run failure repaints the mounted Jobs list");
 changedJob.recent = [{ id: "late-ok", status: "done", job_status: "ok", created_at: now }];
 freshLocation.hash = "#/jobs";
 freshWindow.dispatchEvent({ type: "hashchange" });
-await new Promise((resolve) => setTimeout(resolve, 350));
+await clock.advance(350);
 assert.match(liveBody.textContent, /OK/, "returning to Jobs also refreshes, even if a daemon event was missed");
 liveLeaves.forEach((fn) => fn());
 assert.equal(daemonStopped, true);
 calls.length = 0;
 daemonChange();
 freshWindow.dispatchEvent({ type: "hashchange" });
-await new Promise((resolve) => setTimeout(resolve, 350));
+await clock.advance(350);
 assert.equal(calls.length, 0, "a disposed pane does not fetch or repaint");
 changedJob.recent = beforeRun;
 
@@ -418,7 +360,7 @@ const stableBody = new StrictEl("section");
 const stableLeaves = [];
 const stableOpening = stable.page.viewJobs({ body: stableBody, header() {}, paint() {}, onLeave: (fn) => stableLeaves.push(fn) });
 notifyStable();
-await new Promise((resolve) => setTimeout(resolve, 350));
+await clock.advance(350);
 assert.equal(reads, 1, "a notification queues behind the initial request");
 resolveInitial(structuredClone([stableJob]));
 await stableOpening;
@@ -433,12 +375,12 @@ stableList.querySelector = (selector) => {
 const stableSwitch = walk(stableBody, (e) => e.classList.contains("switch"))[0];
 stableSwitch.focus();
 notifyStable();
-await new Promise((resolve) => setTimeout(resolve, 350));
+await clock.advance(350);
 assert.equal(walk(stableBody, (e) => e.classList.contains("switch"))[0], stableSwitch, "unchanged data keeps native row elements");
 assert.equal(doc.activeElement, stableSwitch);
 stableJob.name = "Renamed stable job";
 notifyStable();
-await new Promise((resolve) => setTimeout(resolve, 350));
+await clock.advance(350);
 const newStableSwitch = walk(stableBody, (e) => e.classList.contains("switch"))[0];
 assert.notEqual(newStableSwitch, stableSwitch);
 assert.equal(doc.activeElement, newStableSwitch, "a changed row restores focus to the same job control");
@@ -594,7 +536,7 @@ const queuedSave = await jobFixture([job("queued", "Before save")],
 try {
   await queuedSave.page.viewJob("queued");
   queuedSave.notify();
-  await new Promise((resolve) => setTimeout(resolve, 350));
+  await clock.advance(350);
   assert.equal(queuedSave.readCount(), 2);
   walk(queuedSave.$app, (e) => e.id === "job-name")[0].value = "After save";
   walk(queuedSave.$app, (e) => e.tagName === "FORM")[0].dispatchEvent({ type: "submit" });
@@ -620,7 +562,7 @@ try {
     list.dispatchEvent({ type: "pointerdown", target: control });
     pressedRows.data[1].name += " changed";
     pressedRows.notify();
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    await clock.advance(350);
     assert.equal(rowControl(kind), control, "a background response preserves the pressed " + kind);
     pressedRows.document.dispatchEvent({ type: "pointerup" });
     assert.equal(rowControl(kind), control, "pointerup keeps the element for the following click");

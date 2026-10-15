@@ -1,7 +1,11 @@
-// Agents list paging (#663): an old session that waits on you shows under Needs you and counts toward the badge,
-// "Show older" appends the next page by the server's cursor, and the machine switch asks the server for that machine.
+// Agents list paging races (#677): refreshes that read every shown page again, a page of rows already shown, a late page
+// after the machine switch. The first page, "Show older" and the machine switch are AH-16 in tools/ui-tests.
 import assert from "node:assert/strict";
-import { mountSessions, sessionGroup } from "../public/pages/sessions.mjs";
+import { mountSessions } from "../public/pages/sessions.mjs";
+import { fakeClock } from "./web_stub_dom.mjs";
+
+// Debounces and refresh timers run on a manual clock: sleep(ms) advances it, so nothing waits in real time.
+const clock = fakeClock();
 
 const el = (tag, attrs, ...kids) => ({ tag, attrs: attrs || {}, kids: kids.flat(Infinity).filter((k) => k !== null && k !== undefined),
   value: "", hidden: !!attrs?.hidden, dataset: {}, addEventListener() {}, querySelector: () => null, after() {} });
@@ -55,21 +59,13 @@ const page = mountSessions({
   jobStatusBadge: () => el("jb"), onDaemonChange: (fn) => { changed = fn; return () => {}; }, onDaemonState: () => () => {}, browser,
 });
 await page.viewList();
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => clock.advance(ms);
 const section = (label) => painted.flatMap(nodes).find((n) => n.tag === "section" && n.attrs["aria-label"] === label);
 const rowIds = (n) => nodes(n).filter((x) => x.attrs?.class === "agent-row").map((x) => x.attrs["data-split-key"]);
 
-assert.deepEqual(rowIds(section("Needs you")), ["old-wait"], "the old waiting session is under Needs you");
-// The rail badge counts Needs you from the same first page (lib/chrome.mjs), so it includes that session too.
-assert.equal(firstPage.filter((s) => sessionGroup(s) === "needs").length, 1);
-assert.deepEqual(rowIds(section("Recent")), ["new1", "new2"]);
-
+// Setup: one older page is shown, so each refresh below has to read it again.
 const more = painted.flatMap(nodes).find((n) => n.tag === "button" && text(n) === "Show older");
-assert.ok(more, "a next cursor shows the Show older button");
 await more.attrs.onclick({ currentTarget: more });
-assert.equal(calls.at(-1), "/sessions?before=c-new2", "it asks for the page before the cursor");
-assert.deepEqual(rowIds(section("Recent")), ["new1", "new2", "old1", "old2"], "older rows are appended");
-assert.ok(!painted.flatMap(nodes).some((n) => n.tag === "button" && text(n) === "Show older"), "the last page hides it");
 
 // Review on #677: each refresh reads every shown page again, so an older row's status is current and a row pushed off
 // the first page by a new session is still shown.

@@ -1,4 +1,5 @@
 import { test, expect, expectDone, audit } from './fixtures';
+import type { Route } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 
 test('AH-11 job toggle, validation, CRUD, run and audit persist', async ({ signedIn: page }) => {
@@ -10,6 +11,30 @@ test('AH-11 job toggle, validation, CRUD, run and audit persist', async ({ signe
   expect((await toggled).ok()).toBe(true);
   await page.reload();
   await expect(page.getByRole('switch', { name: 'Weekly cleanup enabled', exact: true })).toBeChecked({ checked: !wasEnabled });
+  // Pausing saves at once: the row moves to Paused with an Undo toast, Undo restores it, and a refused save reverts the switch.
+  const weekly = page.getByRole('switch', { name: 'Weekly cleanup enabled', exact: true });
+  const section = weekly.locator('xpath=ancestor::div[contains(@class,"job-list")][1]/preceding-sibling::p[contains(@class,"job-section")][1]');
+  if (!(await weekly.isChecked())) {
+    const resumed = page.waitForResponse(r => r.request().method() === 'PUT' && /\/jobs\//.test(r.url()));
+    await weekly.click();
+    expect((await resumed).ok()).toBe(true);
+  }
+  await expect(weekly).toBeChecked();
+  await expect(section).toContainText('Scheduled');
+  await weekly.click();
+  await expect(section).toContainText('Paused');
+  await expect(page.locator('#toast')).toContainText('Weekly cleanup paused');
+  await page.locator('#toast').getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(section).toContainText('Scheduled');
+  await expect(weekly).toBeChecked();
+  const refuse = (route: Route) => route.request().method() === 'PUT'
+    ? route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'refused' }) }) : route.fallback();
+  await page.route(/\/jobs\/[^/?]+$/, refuse);
+  await weekly.click();
+  await expect(page.locator('#toast')).toContainText('HTTP 400');
+  await expect(weekly).toBeChecked();
+  await expect(section).toContainText('Scheduled');
+  await page.unroute(/\/jobs\/[^/?]+$/, refuse);
   await page.goto('/#/jobs/new');
   const name = 'UI job ' + randomUUID();
   await page.getByLabel('Name', { exact: true }).fill(name);
