@@ -50,14 +50,14 @@ def _module_session(tmp_path_factory, name, rewind_to=None):
 
 
 @pytest.fixture(scope="module")
-def shared(tmp_path_factory):
+def shared(tmp_path_factory, module_isolation):
     """One finished two-edit session for the tests that only read it. A `started()` session spawns about 90 git
     processes, so these tests share one and leave it as they found it."""
     yield from _module_session(tmp_path_factory, "shared")
 
 
 @pytest.fixture(scope="module")
-def rewound(tmp_path_factory):
+def rewound(tmp_path_factory, module_isolation):
     """The same session rewound to turn 1, so turn 2 is hidden and redoable. The tests that fail the next take
     assert that it stays so, and put it back the way it was."""
     yield from _module_session(tmp_path_factory, "rewound", rewind_to=1)

@@ -9,8 +9,7 @@ from harness_modules.local_model import service as gpu_guard
 from harness_modules.local_model.warmup import READY, ModelWarmer
 
 
-@pytest.fixture(autouse=True)
-def isolated_local_supervision(monkeypatch, tmp_path):
+def isolate_local_supervision(monkeypatch, flag_dir):
     """Supervision tests use temporary flags and fake hardware/process readings only."""
     import psutil
     from types import SimpleNamespace
@@ -21,7 +20,7 @@ def isolated_local_supervision(monkeypatch, tmp_path):
     def init(self, cfg, model):
         original_init(self, cfg, model)
         if str(self.flag).replace('\\', '/').lower().startswith('c:/ai/'):
-            self.flag = tmp_path / 'llama-server.paused'
+            self.flag = flag_dir / 'llama-server.paused'
 
     async def fake_command(*args, **kwargs):
         return 0, '', ''
@@ -39,19 +38,28 @@ def isolated_local_supervision(monkeypatch, tmp_path):
     monkeypatch.setattr(psutil, 'virtual_memory', lambda: SimpleNamespace(available=64 * 1024**3, total=128 * 1024**3))
     monkeypatch.setattr(resources, '_run', run)
 
+
+@pytest.fixture(autouse=True)
+def isolated_local_supervision(monkeypatch, tmp_path):
+    isolate_local_supervision(monkeypatch, tmp_path)
+
+
 # One pinned gitleaks per machine, fetched once and checked against harness/gitleaks/pin.json (issue #263).
 SCANNER_TOOLS = Path(tempfile.gettempdir()) / "agent-harness-test-tools"
 _real_download = secret_scan._download
 
 
-@pytest.fixture(autouse=True)
-def fresh_metrics(monkeypatch):
+def fresh_metric_values(monkeypatch):
     """Tests read /metrics right after changing the database; the 10 s aggregate cache would hide the change."""
     monkeypatch.setattr(metrics, "CORE_CACHE_SECONDS", 0.0)
 
 
 @pytest.fixture(autouse=True)
-def no_real_cli_volumes(monkeypatch):
+def fresh_metrics(monkeypatch):
+    fresh_metric_values(monkeypatch)
+
+
+def block_real_cli_volumes(monkeypatch):
     """No test reaches the server's hosted-CLI volumes (#371): preparing a domain is a no-op, and a docker call from
     cli_domains that names a standard harness volume fails. Container tests use their own uniquely named volumes."""
     real = cli_domains.run_cmd
@@ -71,7 +79,11 @@ def no_real_cli_volumes(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def plenty_of_ram(monkeypatch):
+def no_real_cli_volumes(monkeypatch):
+    block_real_cli_volumes(monkeypatch)
+
+
+def fixed_ram(monkeypatch):
     """The resource guard's RAM check must not depend on how busy the test machine is."""
     gib = 1024 ** 3
     monkeypatch.setattr(gpu_guard, "memory_reading", lambda: {"available": 64 * gib, "total": 128 * gib,
@@ -79,11 +91,20 @@ def plenty_of_ram(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def model_awake(monkeypatch):
+def plenty_of_ram(monkeypatch):
+    fixed_ram(monkeypatch)
+
+
+def awake_model(monkeypatch):
     """Scripted-model tests have no llama-server to ask whether the model is asleep."""
     async def state(self, model):
         return READY
     monkeypatch.setattr(ModelWarmer, "state", state)
+
+
+@pytest.fixture(autouse=True)
+def model_awake(monkeypatch):
+    awake_model(monkeypatch)
 
 
 @pytest.fixture(scope="session")
@@ -95,14 +116,33 @@ def gitleaks_tools() -> Path:
     return SCANNER_TOOLS
 
 
-@pytest.fixture(autouse=True)
-def pinned_scanner(monkeypatch, gitleaks_tools):
+def pin_scanner(monkeypatch, gitleaks_tools):
     """Every Manager scans with the shared pinned binary; no test downloads anything by accident."""
     monkeypatch.setattr(secret_scan, "tools_dir", lambda cfg: gitleaks_tools)
 
     def no_download(url):
         raise RuntimeError("tests don't download; use the gitleaks_tools fixture")
     monkeypatch.setattr(secret_scan, "_download", no_download)
+
+
+@pytest.fixture(autouse=True)
+def pinned_scanner(monkeypatch, gitleaks_tools):
+    pin_scanner(monkeypatch, gitleaks_tools)
+
+
+@pytest.fixture(scope="module")
+def module_isolation(tmp_path_factory, gitleaks_tools):
+    """The isolation every test gets from the autouse fixtures above, for a fixture that outlives one test (a
+    module-scoped Manager is started before any function-scoped fixture applies)."""
+    patcher = pytest.MonkeyPatch()
+    isolate_local_supervision(patcher, tmp_path_factory.mktemp("supervision"))
+    fresh_metric_values(patcher)
+    block_real_cli_volumes(patcher)
+    fixed_ram(patcher)
+    awake_model(patcher)
+    pin_scanner(patcher, gitleaks_tools)
+    yield
+    patcher.undo()
 
 
 @pytest.fixture(autouse=True, scope="session")
