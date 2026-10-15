@@ -622,6 +622,19 @@ def test_overlay_property_corpus_includes_reported_interleavings(tmp_path, monke
     _apply_success(booted, model, "patch_restart", {"web.enabled": True}, history, pending_before, tmp_path)
     pending_before = _distinct_pending_restart(model)
     _apply_success(booted, model, "patch_live", {"sessions.max_turns": 40}, history, pending_before, tmp_path)
+    # The live PATCH leaves the pending restart candidate untouched and active still on the old value.
+    assert booted.store.read_pending().values.get("web.enabled") is True
+    assert booted.store.read_active().values.get("web.enabled") is False
+    assert booted.cfg.max_turns == 40
+    # The restart then promotes the candidate and keeps the live value.
+    _apply_success(booted, model, "confirm_restart", None, history, None, tmp_path)
+    history.append("reboot")
+    rebooted = _reboot(tmp_path)
+    assert model.reboot() != "lkg_restore"
+    rebooted.confirm_startup()
+    assert model.confirm_startup() == "ok"
+    assert rebooted.cfg.web.enabled is True
+    assert rebooted.cfg.max_turns == 40
 
     other = tmp_path / "pending-only"
     other.mkdir()
@@ -632,6 +645,16 @@ def test_overlay_property_corpus_includes_reported_interleavings(tmp_path, monke
     _apply_success(svc2, model2, "patch_restart", {"web.enabled": True}, history2, pending_before, other)
     pending_before = _distinct_pending_restart(model2)
     _apply_success(svc2, model2, "rollback", None, history2, pending_before, other)
+    # A restart after the rollback must not apply the first-time key that was only ever pending.
+    assert svc2.admin_view()["restart_required"] is False
+    history2.append("reboot")
+    svc2 = _reboot(other)
+    assert model2.reboot() != "lkg_restore"
+    svc2.confirm_startup()
+    assert model2.confirm_startup() in ("ok", "noop")
+    assert svc2.cfg.web.enabled is False
+    assert svc2.store.read_pending() is None
+    assert svc2.store.read_status().get("recovery") != "lkg_restore"
 
     confirmed = tmp_path / "confirmed-restart-rollback"
     confirmed.mkdir()

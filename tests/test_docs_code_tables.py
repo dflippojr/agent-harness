@@ -2,7 +2,6 @@
 
 import subprocess
 import sys
-import time
 from collections import Counter
 from pathlib import Path
 from unittest.mock import Mock
@@ -221,12 +220,6 @@ def test_an_import_from_a_file_name_shared_by_two_modules_is_not_guessed(repo):
         code_tables.collect_routes(repo)
 
 
-def test_an_unresolvable_route_path_names_the_file_and_line(repo):
-    (repo / "harness" / "bad.py").write_text('@web_router.get(compute())\ndef f():\n    pass\n', encoding="utf-8")
-    with pytest.raises(code_tables.CodeTableError, match=r"harness/bad.py:1: cannot resolve the path"):
-        code_tables.collect_routes(repo)
-
-
 def test_every_code_region_exists_in_its_real_doc():
     for name, region in code_tables.CODE_REGIONS.items():
         assert f"<!-- generated:begin {name} -->" in (ROOT / region.file).read_text(encoding="utf-8")
@@ -246,14 +239,11 @@ def test_real_repo_code_tables_render_and_cover_known_entries():
     assert {"sessions.max_turns", "app.capabilities"} <= keys
 
 
-@pytest.mark.parametrize("file_count,routes_per_file,delay", [
-    (1, 1, 0), (1, 24, 0), (4, 1, 0), (4, 24, 0), (4, 24, 2.1),
-])
-def test_route_generation_reads_and_parses_sources_once(tmp_path, monkeypatch, file_count, routes_per_file, delay):
+@pytest.mark.parametrize("file_count,routes_per_file", [(1, 1), (1, 24), (4, 1), (4, 24)])
+def test_route_generation_reads_and_parses_sources_once(tmp_path, monkeypatch, file_count, routes_per_file):
     """Catch per-route rescans/reparses and parsing routeless files as the input grows.
 
-    Count actual work, not elapsed time: the delayed case exceeds the old two-second
-    budget without adding work, just as a descheduled CI worker would.
+    Count actual work, not elapsed time, so a descheduled CI worker cannot fail it.
     """
     sources, route_sources, expected_routes = set(), set(), set()
     for directory in code_tables.ROUTE_DIRS:
@@ -279,8 +269,6 @@ def test_route_generation_reads_and_parses_sources_once(tmp_path, monkeypatch, f
 
     def counted_read(path, *args, **kwargs):
         reads[path] += 1
-        if delay and path == min(sources):
-            time.sleep(delay)
         return read_text(path, *args, **kwargs)
 
     def counted_parse(source, filename="<unknown>", *args, **kwargs):

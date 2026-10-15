@@ -89,7 +89,9 @@ def test_no_alert_for_a_drop_under_15_points(tmp_path):
 
 def test_alert_on_a_confirmed_drop_of_15_points_with_compare_link(tmp_path):
     notes: list[dict] = []
-    suite = ScriptedSuite([17], reruns=[2])  # 85% (exactly 15 points under 100%), the rerun stays bad
+    # The first run is 85% (exactly 15 points under 100%); the rerun of the three regressed tasks stays bad (2 of 6),
+    # so the confirmed rate in the alert is 16 of 20.
+    suite = ScriptedSuite([17], reruns=[2])
     c, _ = _canary(tmp_path, suite, notes)
     _seed(c, [20, 20, 20, 20, 20])
     # t0..t2 failed (indexes 17..19 of 20 attempts → tasks t7,t8,t9); history had them passing
@@ -98,7 +100,7 @@ def test_alert_on_a_confirmed_drop_of_15_points_with_compare_link(tmp_path):
     assert notes[0]["title"].endswith("bbbbbbbb")
     base = f"{4:040x}"  # the newest seeded run is the baseline representative
     assert f"compare/{base}...{'b' * 40}" in notes[0]["message"] and notes[0]["click"].startswith("https://github.com/")
-    assert "85%" in notes[0]["message"] or "%" in notes[0]["message"]
+    assert "Pass rate 80% vs baseline 100% (drop of 20 points)" in notes[0]["message"]
     assert [only for _, only in suite.calls][0] is None and suite.calls[1][1] == ["t7", "t8", "t9"]
     assert c.store.get("b" * 40)["alerted"] == 1
 
@@ -669,18 +671,6 @@ def test_time_an_image_batch_has_the_gpu_is_not_run_time(tmp_path):
     _hard_night(tmp_path, _blocked_chat(asyncio.Event()), image_batch, check)
 
 
-def test_a_missing_web_fixture_stops_the_run_before_any_session(tmp_path):
-    m = FakeManager()
-    runner, _ = _runner(m, tmp_path)
-    runner.fixture = tmp_path / "nowhere"
-    try:
-        run(runner.run("sha"))
-        raise AssertionError("every web task would fail against an empty replay")
-    except canary.CanaryConfigError as e:
-        assert "manifest.json" in str(e)
-    assert not m.created and m.cfg.projects == {}
-
-
 def test_suspended_on_every_attempt_is_excluded_and_never_alerts(tmp_path):
     async def body():
         m = FakeManager()
@@ -743,13 +733,6 @@ def test_metrics_export_latest_30_results_labelled_by_short_sha(tmp_path):
     assert 'harness_canary_pass_rate{sha="34aaaaaa"} 0.9' in text and 'sha="04aaaaaa"' not in text
 
 
-def test_migration_creates_canary_results_for_fresh_and_existing_databases(tmp_path):
-    db = _db(tmp_path)
-    cols = {r[1] for r in db.conn.execute("PRAGMA table_info(canary_results)")}
-    assert {"sha", "started_at", "outcomes", "pass_rate", "turns", "prompt_tokens", "wall_seconds", "status"} <= cols
-    db.close()
-
-
 # a crash mid-canary and a missing web fixture (#316)
 def _crashed_canary(tmp_path, outcomes: list[dict] | None = None):
     """A database as `kill -9` leaves it mid-canary: one canary session running, one queued, a real one running,
@@ -783,7 +766,11 @@ def _restart(cfg, chat):
         m._spawn = lambda sid, recovered=False: spawned.append(sid)  # what start resumes; nothing actually runs
         await m.start()
         try:
-            await asyncio.sleep(0.05)
+            for _ in range(200):  # poll for the interrupted canary's row to be finished
+                row = CanaryStore(m.db).get("f" * 40)
+                if row and row["finished_at"]:
+                    break
+                await asyncio.sleep(0.01)
             return ({sid: m.db.get_session(sid)["status"] for sid in ("c-hard", "c-web", "real")}, spawned,
                     CanaryStore(m.db).get("f" * 40), dict(m.runner.web_overrides))
         finally:

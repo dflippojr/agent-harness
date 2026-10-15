@@ -69,6 +69,8 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     assert "pytest-cov" in workflow
     assert "pytest-xdist" in workflow
     assert "python -m pytest tests" in workflow
+    # Tests run once in the workflow, so the coverage run is the only pytest invocation.
+    assert workflow.count("python -m pytest tests -q -n") == 1
     assert "-n 4 --dist loadfile" in workflow  # the verbosity flag is free to change; the worker split is not
     coverage_step = workflow[workflow.index("Run tests with coverage") : workflow.index("Scan with SonarCloud")]
     assert "-n auto" not in coverage_step
@@ -88,6 +90,7 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert "pytest-xdist" not in requirements
     assert "pytest-cov" not in requirements
+    assert "pytest>=" in requirements
 
 
 def test_sonar_properties_feed_coverage_into_the_quality_gate():

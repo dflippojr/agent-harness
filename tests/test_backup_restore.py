@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import http.server
+import shutil
 import sqlite3
 import threading
 import zipfile
@@ -31,6 +32,11 @@ def _cfg(tmp_path):
 def _hashes(root: Path) -> dict:
     return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _settled(root: Path) -> dict:
+    """File hashes without the managed-config lock file, which the CLI's config load rewrites on any run."""
+    return {name: digest for name, digest in _hashes(root).items() if name != "managed-config.lock"}
 
 
 def _write(path: Path, text: str) -> None:
@@ -69,6 +75,18 @@ async def _seed_and_back_up(cfg) -> tuple[Path, dict]:
     return Path(result["path"]), apps
 
 
+async def _booted_sessions(cfg) -> tuple[dict, list]:
+    """Boot a fresh Manager on the data dir and read back what the restored stores hold."""
+    m = Manager(cfg, chat=Script([Completion(content="ok")]))
+    await m.start(maintenance=False)
+    try:
+        return {sid: (m.db.get_session(sid) or {}).get("app_id")
+                for sid in ("own1", "a1", "a2", "b1")}, [e["data"] for e in m.db.events("a1")]
+    finally:
+        await m.stop()
+        m.db.close()
+
+
 def test_round_trip_restores_every_store_and_transcript_to_a_working_daemon(tmp_path):
     cfg = _cfg(tmp_path)
     folder, apps = asyncio.run(_seed_and_back_up(cfg))
@@ -104,53 +122,64 @@ def test_round_trip_restores_every_store_and_transcript_to_a_working_daemon(tmp_
     first_transcript = storage.transcripts_dir(cfg, "owner", apps["first"]) / "s.md"
     assert first_transcript.read_text() == "first transcript"
 
-    async def fresh():
-        m = Manager(cfg, chat=Script([Completion(content="ok")]))
-        await m.start(maintenance=False)
-        try:
-            return {sid: (m.db.get_session(sid) or {}).get("app_id")
-                    for sid in ("own1", "a1", "a2", "b1")}, [e["data"] for e in m.db.events("a1")]
-        finally:
-            await m.stop()
-            m.db.close()
-
-    sessions, events = asyncio.run(fresh())
+    sessions, events = asyncio.run(_booted_sessions(cfg))
     assert sessions == {"own1": "", "a1": apps["first"], "a2": apps["first"], "b1": apps["second"]}
     assert {"content": "hello a1"} in events
     assert _hashes(folder) == backup  # verify and restore never write into the backup
 
 
-def test_restore_without_apply_changes_nothing(tmp_path):
+def test_the_cli_verifies_dry_runs_restores_and_boots_from_the_configured_data_dir(tmp_path, capsys):
     cfg = _cfg(tmp_path)
-    folder, _ = asyncio.run(_seed_and_back_up(cfg))
-    _write(storage.transcripts_dir(cfg, "owner") / "own1.md", "newer")
-    before = _hashes(Path(cfg.data_dir))
-    lines: list[str] = []
-    assert restore(cfg, folder, out=lines.append) is None
-    assert _hashes(Path(cfg.data_dir)) == before
-    assert not list(Path(cfg.data_dir).glob("restore-*"))
-    assert any(line.startswith("replace file") and "main store" in line for line in lines)
-    assert lines[-1].startswith("Dry run")
-
-
-def test_include_config_restores_config_and_overlay(tmp_path):
-    cfg = _cfg(tmp_path)
-    folder, _ = asyncio.run(_seed_and_back_up(cfg))
-    _write(folder / "config" / "harness.yaml", "port: 1\n")
-    _write(folder / "managed-config.json", "{}\n")
+    data = Path(cfg.data_dir)
     config_dir = tmp_path / "config"
-    _write(config_dir / "harness.yaml", "port: 2\n")
+    live_yaml = (
+        "listen: {host: 127.0.0.1, port: 0}\n"
+        f"data_dir: {data.as_posix()}\n"
+        "default_model: fake\n"
+        "models: {fake: {base_url: http://unused, context_tokens: 1024}}\n"
+        "sandbox: {image: agent-harness-sandbox:py312}\n"
+    )
+    _write(config_dir / "harness.yaml", live_yaml)
+    folder, apps = asyncio.run(_seed_and_back_up(cfg))
 
-    lines: list[str] = []
-    restore(cfg, folder, apply_changes=True, out=lines.append)
-    assert (config_dir / "harness.yaml").read_text() == "port: 2\n"  # not without --include-config
-    assert any("--include-config" in line for line in lines)
+    assert backup_restore.main(["verify", str(folder)]) == 0
+    assert capsys.readouterr().out.strip().endswith("OK")
 
-    previous = restore(cfg, folder, apply_changes=True, include_config=True, config_dir=config_dir, out=_quiet)
-    assert previous is not None
-    assert (config_dir / "harness.yaml").read_text() == "port: 1\n"
-    assert (Path(cfg.data_dir) / "managed-config.json").read_text() == "{}\n"
-    assert (previous / "config" / "harness.yaml").read_text() == "port: 2\n"
+    # Config in the backup differs from the live config; only --include-config may bring it back.
+    backup_yaml = live_yaml + "# from the backup\n"
+    _write(folder / "config" / "harness.yaml", backup_yaml)
+    _write(folder / "managed-config.json", "{}\n")
+    _write(storage.transcripts_dir(cfg, "owner") / "own1.md", "newer")
+    before = _settled(data)
+    config_before = _settled(config_dir)
+
+    # A damaged copy of the backup is refused by the CLI and nothing changes.
+    damaged = tmp_path / "damaged"
+    shutil.copytree(folder, damaged)
+    _too_new(damaged / "harness.sqlite3")
+    assert backup_restore.main(["--config-dir", str(config_dir), "restore", str(damaged), "--apply"]) == 1
+    assert "Refused, nothing changed" in capsys.readouterr().err
+    assert _settled(data) == before and _settled(config_dir) == config_before
+
+    # Without --apply the CLI only prints the plan, and leaves the data and config as they were.
+    assert backup_restore.main(["--config-dir", str(config_dir), "restore", str(folder)]) == 0
+    out = capsys.readouterr().out
+    assert "replace file" in out and "main store" in out and out.strip().splitlines()[-1].startswith("Dry run")
+    assert _settled(data) == before and _settled(config_dir) == config_before
+    assert not list(data.glob("restore-*"))
+
+    assert backup_restore.main(["--config-dir", str(config_dir), "restore", str(folder), "--apply",
+                                "--include-config"]) == 0
+    assert (config_dir / "harness.yaml").read_text() == backup_yaml
+    assert (data / "managed-config.json").read_text() == "{}\n"
+    assert storage.transcripts_dir(cfg, "owner").joinpath("own1.md").read_text() == "owner transcript"
+    (previous,) = data.glob("restore-*-previous")
+    assert (previous / "config" / "harness.yaml").read_text() == live_yaml
+    assert (previous / "transcripts" / "own1.md").read_text() == "newer"
+
+    sessions, events = asyncio.run(_booted_sessions(cfg))
+    assert sessions == {"own1": "", "a1": apps["first"], "a2": apps["first"], "b1": apps["second"]}
+    assert {"content": "hello a1"} in events
 
 
 # refusals
@@ -269,28 +298,20 @@ def test_a_failed_copy_puts_the_moved_files_back(backed_up, monkeypatch):
     assert not list(Path(cfg.data_dir).glob("restore-*"))
 
 
-def test_the_cli_verifies_and_dry_runs_against_the_configured_data_dir(backed_up, monkeypatch, capsys):
-    from harness import config as config_mod
-
-    cfg, folder = backed_up
-    seen = []
-    monkeypatch.setattr(config_mod, "load", lambda config_dir=None: seen.append(config_dir) or cfg)
-    assert backup_restore.main(["verify", str(folder)]) == 0
-    assert capsys.readouterr().out.strip().endswith("OK")
-    before = _hashes(Path(cfg.data_dir))
-    assert backup_restore.main(["--config-dir", "cfgdir", "restore", str(folder)]) == 0
-    assert seen == ["cfgdir"]
-    assert "Dry run" in capsys.readouterr().out
-    assert _hashes(Path(cfg.data_dir)) == before
-    _too_new(folder / "harness.sqlite3")
-    assert backup_restore.main(["restore", str(folder), "--apply"]) == 1
-    assert "Refused, nothing changed" in capsys.readouterr().err
-    assert _hashes(Path(cfg.data_dir)) == before
-
-
 # the configuration audit trail (#469)
 AUDIT = "config-audit.jsonl"
 RECORDS = b'{"actor":"owner","rev":1}\n{"actor":"app-1","rev":2}\n'
+
+
+def _light_backup(cfg) -> Path:
+    """A backup made by the real BackupService over a bare database, without starting a Manager."""
+    Path(cfg.data_dir).mkdir(parents=True, exist_ok=True)
+    db = Database(cfg.db_path)
+    try:
+        db.insert_session(_session("s1"))
+        return Path(asyncio.run(BackupService(cfg, db).backup())["path"])
+    finally:
+        db.close()
 
 
 def _audit_backup(tmp_path, content: bytes = RECORDS):
@@ -298,8 +319,7 @@ def _audit_backup(tmp_path, content: bytes = RECORDS):
     if content is not None:
         (Path(cfg.data_dir)).mkdir(parents=True, exist_ok=True)
         (Path(cfg.data_dir) / AUDIT).write_bytes(content)
-    folder, _ = asyncio.run(_seed_and_back_up(cfg))
-    return cfg, folder
+    return cfg, _light_backup(cfg)
 
 
 def test_backup_keeps_complete_prefix_and_restore_to_fresh_dir_retains_it(tmp_path):
@@ -374,12 +394,12 @@ def test_backup_fails_on_malformed_or_non_file_trail(tmp_path):
         Path(cfg.data_dir).mkdir(parents=True, exist_ok=True)
         (Path(cfg.data_dir) / AUDIT).write_bytes(bad)
         with pytest.raises(RuntimeError) as e:
-            asyncio.run(_seed_and_back_up(cfg))
+            _light_backup(cfg)
         assert "secret-token" not in str(e.value)
     cfg = _cfg(tmp_path / "dir")
     (Path(cfg.data_dir) / AUDIT).mkdir(parents=True)
     with pytest.raises(RuntimeError):
-        asyncio.run(_seed_and_back_up(cfg))
+        _light_backup(cfg)
 
 
 def test_symlinked_trail_is_rejected(tmp_path):

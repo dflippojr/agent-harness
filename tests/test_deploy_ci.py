@@ -96,18 +96,13 @@ def output(result: subprocess.CompletedProcess[str]) -> str:
     return result.stdout + result.stderr
 
 
-def test_deploy_dry_run_accepts_clean_main_checkout(tmp_path):
-    result = run_deploy(tmp_path)
-    assert result.returncode == 0, output(result)
-    assert f"Deployed {COMMIT}" in result.stdout
-    assert "[dry run] git" in result.stdout
-
-
 def test_deploy_plan_resolves_dependencies_before_stopping_and_swapping(tmp_path):
     result = run_deploy(tmp_path)
     assert result.returncode == 0, output(result)
 
     plan = result.stdout
+    assert f"Deployed {COMMIT}" in plan  # a clean main checkout is accepted
+    assert "[dry run] git" in plan
     guards = plan.index("[deploy] guards passed")
     resolve = plan.index("[deploy] dependencies staged")
     stop = plan.index("[deploy] daemon stopped")

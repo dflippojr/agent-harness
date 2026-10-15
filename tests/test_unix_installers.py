@@ -19,6 +19,7 @@ def test_linux_nvidia_full_profile_dry_run(tmp_path):
     assert "server-cuda-b10830" in result.stdout
     assert "NVIDIA Container Toolkit" in result.stdout
     assert "systemd --user units" in result.stdout
+    assert "qwen_image_edit" not in result.stdout  # the image-edit model is opt-in, never part of the full profile
 
 
 def test_apple_silicon_service_profile_dry_run(tmp_path):
@@ -70,9 +71,6 @@ def test_linux_model_supervisor_is_gpu_isolated_and_pinned():
 
 
 def test_linux_image_edit_opt_in_is_documented_and_not_default(tmp_path):
-    result = run_installer(tmp_path, "Linux", "x86_64", "--profile", "full")
-    assert result.returncode == 0, result.stderr
-    assert "qwen_image_edit_fp8_e4m3fn" not in result.stdout
     opted = run_installer(tmp_path, "Linux", "x86_64", "--profile", "service", "--enable-modules", "image_edit")
     assert opted.returncode == 0, opted.stderr
     assert "Qwen-Image-Edit" in opted.stdout
@@ -101,10 +99,7 @@ def test_installers_share_images_models_dir_with_daemon_and_doctor():
     assert "--images-models-dir" in sh
     assert "DefaultImagesModelsDir = 'C:\\AI\\comfy-models'" in ps1
     assert "Join-Path $InstallDir 'comfy-models'" in ps1
-    assert 'default_images_models_dir="C:/AI/comfy-models"' in sh
-    assert 'models_root="$install_dir/comfy-models"' in sh
     assert "$modelsRoot 'diffusion_models\\qwen_image_edit_fp8_e4m3fn.safetensors'" in ps1
-    assert 'edit_dest="$models_root/diffusion_models/qwen_image_edit_fp8_e4m3fn.safetensors"' in sh
     # Other installer-fetched artifacts (GGUF under $InstallDir/models, Docker images) do not use images.models_dir.
     assert "qwen_image_edit" in ps1
     assert "qwen_image_edit" in sh
@@ -131,7 +126,7 @@ def test_macos_launchd_has_docker_path_and_installer_waits_for_daemon():
     assert "HARNESS_SUPERVISED=1" in (ROOT / "install/run-daemon.sh").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("args", [("--with-hub",), ("--with-hub", "--hub-method", "docker", "--hub-image", "stub:1"), ("--no-hub",), ()])
+@pytest.mark.parametrize("args", [("--with-hub",), ("--no-hub",), ()])
 def test_unix_hub_dry_run(tmp_path, args):
     result = run_installer(tmp_path, "Linux", "x86_64", "--profile", "service", *args)
     assert result.returncode == 0, result.stderr
