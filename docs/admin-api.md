@@ -81,6 +81,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | POST | `/api/admin/v1/accounts/{user_id}/google/invitation` | owner | Create a one-time link code, replacing any pending one; 409 if the member is linked or disabled, and it expires in 15 minutes. | `harness/google_signin_api.py` `google_invite` |
 | POST | `/api/admin/v1/accounts/{user_id}/google/revoke-sessions` | owner | Sign the member out of all Web sessions, leaving the Google link in place; returns the number revoked. | `harness/google_signin_api.py` `google_revoke` |
 | GET | `/api/admin/v1/apps/erasures` | owner | List revoked Apps and devices still waiting for their store and folder to be erased, soonest first. | `harness/admin.py` `app_erasures` |
+| GET | `/api/admin/v1/apps/usage` | owner | Per-App today, 7-day and 30-day calendar totals and daily usage, also split by billing. | `harness/admin.py` `apps_usage` |
 | GET | `/api/admin/v1/apps/{app_id}/limits` | owner | An App's session caps: what the owner set, what applies, and its sessions that count against them. | `harness/admin.py` `get_app_limits` |
 | PUT | `/api/admin/v1/apps/{app_id}/limits` | owner | Set how many sessions an App may have running and queued (#524); a field left out keeps its value and null restores the default. Only the owner can; an App cannot. | `harness/admin.py` `set_app_limits` |
 | POST | `/api/admin/v1/apps/{app_id}/restore` | owner | Undo an App's revoke within its erasure grace and return a new key; 404 after the grace. | `harness/admin.py` `restore_app` |
