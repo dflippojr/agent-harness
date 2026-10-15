@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -94,3 +95,47 @@ def test_the_canary_cli_runs_the_held_out_suite_only_on_request(monkeypatch):
     assert [t.id for t in suite["hard"]] == [t.id for t in HELDOUT_TASKS]
     assert suite["repeats"] == 3 and suite["web"] == []
     assert not {t.id for t in canary.load_suite()["hard"]} & {t.id for t in HELDOUT_TASKS}
+
+
+def test_a_held_out_calibration_gets_room_for_every_attempt():
+    """The nightly cap (45 min) would mark most of an 18-attempt calibration as timeout."""
+    from bakeoff import canary
+    suite = canary.heldout_suite(3)
+    per_attempt = HARD_LIMITS["wall_limit"] + 60
+    assert canary.heldout_cap_seconds(suite, None) == 6 * 3 * per_attempt
+    assert canary.heldout_cap_seconds(suite, ["cali_draw", "ordered_events"]) == 2 * 3 * per_attempt
+
+
+def test_run_standalone_passes_the_held_out_cap_to_the_runner(monkeypatch, tmp_path):
+    import asyncio
+
+    from bakeoff import canary
+    from harness import config as config_mod
+    from harness.canary import Report
+    seen = {}
+
+    class FakeManager:
+        def __init__(self, cfg):
+            self.cfg, self.db = cfg, type("Db", (), {"close": lambda self: None})()
+
+        async def start(self, maintenance=True):
+            pass
+
+        async def stop(self):
+            pass
+
+    async def fake_run(self, sha, only):
+        seen.update(cap=self.cfg.total_cap_seconds, only=only, repeats=self.suite["repeats"],
+                    ids=[t.id for t in self.suite["hard"]])
+        return Report("complete", [])
+
+    base = SimpleNamespace(default_model="m", models={}, sandbox=None, canary=config_mod.CanaryConfig(),
+                           web=SimpleNamespace(page_chars=1000))
+    monkeypatch.setattr(config_mod, "load", lambda: base)
+    monkeypatch.setattr(config_mod, "Config", lambda **kw: SimpleNamespace(**kw))
+    monkeypatch.setattr("harness.manager.Manager", FakeManager)
+    monkeypatch.setattr(canary.CanaryRunner, "run", fake_run)
+    monkeypatch.setattr(canary, "ROOT", tmp_path)
+    asyncio.run(canary.run_standalone(["recurring_charges"], 2, tmp_path, heldout=True))
+    assert seen == {"cap": 2 * (HARD_LIMITS["wall_limit"] + 60), "only": ["recurring_charges"], "repeats": 2,
+                    "ids": [t.id for t in HELDOUT_TASKS]}

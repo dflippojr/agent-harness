@@ -254,7 +254,8 @@ like the canary, in a window clear of the 03:00 canary and of worker waves, with
     python -m bakeoff.canary --heldout --repeats 3
 
 That runs the six candidates × 3 attempts (about 18 × 30 min at worst, usually far less; Qwen's typical hard task
-takes about a minute) and writes `runs/heldout-<timestamp>.json`. If fewer than four land on 1–2 passes, make the
+takes about a minute) and writes `runs/heldout-<timestamp>.json`. It gets its own total cap, room for every
+selected attempt's full limit plus a minute, instead of the nightly 45 minutes. If fewer than four land on 1–2 passes, make the
 misses harder (3/3) or easier (0/3) and rerun those once (`--tasks <ids>`). Then record the table below, delete the
 two dropped candidates from `HELDOUT_TASKS`, and hand the four to #673.
 
