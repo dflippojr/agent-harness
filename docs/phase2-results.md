@@ -17,7 +17,7 @@ no-build vanilla JS.
 | Security guard | `harness/api.py` middleware (below) |
 | Autostart | `ops/harness/run-daemon.ps1` + `install-task.ps1` → logon task `AgentHarness-Daemon` (registered). Logs: `D:\Agents\harness\logs\` |
 | Tailnet publishing | `ops/tailscale/serve.ps1`: `:443` → daemon, `:8443` → ntfy (**not applied yet**: Serve/HTTPS must be enabled for the tailnet) |
-| UI screenshots | `scripts/ui-shot.mjs` drives headless Edge over DevTools (Node 24, no packages) at phone size |
+| UI screenshots | `scripts/ui-shot.mjs` (removed in #702) drove headless Edge over DevTools (Node 24, no packages) at phone size |
 | Tests | `tests/test_api.py` (web app, guard, notification payloads, token buttons, templates, changes, rerun); 27 total |
 
 ## Notifications

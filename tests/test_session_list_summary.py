@@ -74,6 +74,21 @@ def test_card_text_matches_the_previous_builder(manager):
         assert manager.list_summary(manager.db.get_session(sid))["chat_summary"] == _reference_summary(manager.db, sid), sid
 
 
+def test_card_bits_hold_the_answer_and_every_user_message(tmp_path):
+    db = Database(tmp_path / "bits.db")
+    try:
+        db.insert_session(_session("s1", "Finished the change. " * 20))
+        db.insert_event("s1", "user_message", {"content": "Make dark mode black"})
+        db.insert_event("s1", "tool_result", {"id": "c0", "output": "out\n" * 50})
+        db.insert_event("s1", "user_message", {"content": "Also move the profile control"})
+        bits = db.session_card_bits("s1")
+        assert bits["asks"] == ["Make dark mode black", "Also move the profile control"]
+        assert bits["answer_length"] == len("Finished the change. " * 20)
+        assert db.session_card_bits("missing") == {"answer": "", "answer_length": 0, "asks": []}
+    finally:
+        db.close()
+
+
 def test_a_card_reads_neither_events_nor_the_full_session(manager, monkeypatch):
     sid = "big"
     manager.db.insert_session(_session(sid, "Finished."))

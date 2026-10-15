@@ -232,8 +232,12 @@ def test_every_code_region_exists_in_its_real_doc():
         assert f"<!-- generated:begin {name} -->" in (ROOT / region.file).read_text(encoding="utf-8")
 
 
-def test_real_repo_tables_are_in_sync_and_cover_known_entries():
-    assert build.check(ROOT) == []
+def test_real_repo_code_tables_render_and_cover_known_entries():
+    # Same semantics as CI's docs step: a PR may leave a generated region alone (docs-regen rewrites it after
+    # merge), so staleness is checked there with --base, not here. This test checks that every table still renders.
+    for name, region in code_tables.CODE_REGIONS.items():
+        _, warnings = region.render(ROOT)
+        assert not (warnings and region.strict), (name, warnings)
     routes = {(r.method, r.path) for r in code_tables.collect_routes(ROOT)}
     assert ("POST", "/api/v1/sessions") in routes
     assert ("PATCH", "/api/admin/v1/config") in routes
