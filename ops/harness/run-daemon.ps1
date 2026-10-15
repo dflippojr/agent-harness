@@ -23,7 +23,8 @@ $stablesPointer = Join-Path $root '.stables-path'
 if (Test-Path -LiteralPath $stablesPointer) {
     $stables = ([string](Get-Content -Raw -LiteralPath $stablesPointer)).Trim()
     if (-not [System.IO.Path]::IsPathRooted($stables)) { throw "invalid Stables pointer: $stablesPointer" }
-    $stablesSetting = "set HARNESS_STABLES_DIR=$stables&& "
+    # Quoted, so cmd reads characters such as & in the path as part of the value.
+    $stablesSetting = "set `"HARNESS_STABLES_DIR=$stables`"&& "
 }
 $python = Join-Path $venv 'Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) { throw "harness Python is missing: $python" }

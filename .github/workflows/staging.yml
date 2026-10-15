@@ -41,6 +41,8 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref_label: ${{ steps.resolve.outputs.ref_label }}
       reset_only: ${{ steps.resolve.outputs.reset_only }}
+      stables_repository: ${{ steps.stables.outputs.repository }}
+      stables_tag: ${{ steps.stables.outputs.tag }}
     steps:
       - name: Require the trusted control plane
         # The control plane is always this workflow file on the default branch; a candidate copy must not deploy.
@@ -65,6 +67,29 @@ jobs:
           INPUT_BRANCH: ${{ inputs.branch }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
           INPUT_RESET: ${{ inputs.reset }}
+      # Stables lives in the private dflippojr/stables (#334). The candidate's tools/stables/pin.json names the
+      # release it serves; a candidate from before the move has no pin and still carries stables/public itself.
+      - name: Read the candidate's Stables pin
+        id: stables
+        if: steps.resolve.outputs.reset_only != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ steps.resolve.outputs.sha }}
+        run: |
+          if ! pin="$(gh api -H 'Accept: application/vnd.github.raw' \
+              "repos/$GITHUB_REPOSITORY/contents/tools/stables/pin.json?ref=$CANDIDATE" 2>err.txt)"; then
+            grep -q 'HTTP 404' err.txt || { cat err.txt >&2; exit 1; }
+            echo "the candidate pins no Stables release"
+            exit 0
+          fi
+          repository="$(jq -r .repository <<<"$pin")"
+          tag="$(jq -r .tag <<<"$pin")"
+          if [ "$repository" != "dflippojr/stables" ] || ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "staging dispatch rejected: unexpected Stables pin $repository $tag" >&2
+            exit 1
+          fi
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   stage:
     name: stage
@@ -84,10 +109,20 @@ jobs:
         if: needs.resolve.outputs.reset_only == 'true'
         shell: powershell
         run: .\ops\harness\deploy-staging.ps1 -Reset
+      # Static files only: deploy-staging.ps1 checks the commit against the candidate's pin and copies public/.
+      - name: Check out the candidate's pinned Stables release
+        if: needs.resolve.outputs.reset_only != 'true' && needs.resolve.outputs.stables_tag != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.resolve.outputs.stables_repository }}
+          ref: refs/tags/${{ needs.resolve.outputs.stables_tag }}
+          path: stables-release
+          ssh-key: ${{ secrets.STABLES_DEPLOY_KEY }}
+          persist-credentials: false
       - name: Deploy the resolved commit to the staging slot
         if: needs.resolve.outputs.reset_only != 'true'
         shell: powershell
-        run: .\ops\harness\deploy-staging.ps1 -Commit $env:STAGING_COMMIT
+        run: .\ops\harness\deploy-staging.ps1 -Commit $env:STAGING_COMMIT -StablesRelease $env:GITHUB_WORKSPACE\stables-release
         env:
           STAGING_COMMIT: ${{ needs.resolve.outputs.sha }}
       - name: Report the staging slot

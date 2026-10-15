@@ -183,7 +183,7 @@ def test_daemon_supervisor_honors_deployment_venv_pointer():
 def test_daemon_supervisor_serves_the_deployed_stables_copy():
     supervisor = (ROOT / "ops/harness/run-daemon.ps1").read_text(encoding="utf-8")
     assert "Join-Path $root '.stables-path'" in supervisor
-    assert '"set HARNESS_STABLES_DIR=$stables&& "' in supervisor
+    assert '"set `"HARNESS_STABLES_DIR=$stables`"&& "' in supervisor
     assert "$stablesSetting`\"$python`\"" in supervisor
 
 
