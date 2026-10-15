@@ -7,6 +7,7 @@ no Docker, GPU or model server. The prompts below pick scripts from harness/fake
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -202,22 +203,38 @@ def test_new_list_show_transcript_approve_deny_and_send_watch(harness, daemon):
 
 def test_watch_prints_the_approval_needed_line_while_the_owner_approves_elsewhere(harness, daemon):
     approved: list[dict] = []
+    failures: list[BaseException] = []
+
+    def mine():
+        return [x for x in daemon.get("/sessions") if x["title"].startswith(PROTECTED[:20])]
+
+    def post(sid: str, path: str, body: dict):
+        response = httpx.post(f"{daemon.url}{ADMIN}/sessions/{sid}/{path}", json=body, headers=daemon.headers(),
+                              timeout=30, trust_env=False)
+        response.raise_for_status()
+        return response.json()
 
     def owner_elsewhere():
         deadline = time.monotonic() + scaled(60)
-        while not approved and time.monotonic() < deadline:
-            for session in daemon.get("/sessions"):
-                if session["status"] == "waiting_approval" and session["title"].startswith(PROTECTED[:20]):
-                    response = httpx.post(f"{daemon.url}{ADMIN}/sessions/{session['id']}/approvals/pending",
-                                          json={"decision": "approve", "note": ""}, headers=daemon.headers(),
-                                          timeout=30, trust_env=False)
-                    approved.append(response.json())
-            time.sleep(0.2)
+        try:
+            while not approved and time.monotonic() < deadline:
+                for session in mine():
+                    if session["status"] == "waiting_approval":
+                        approved.append(post(session["id"], "approvals/pending", {"decision": "approve", "note": ""}))
+                time.sleep(0.2)
+        except BaseException as e:  # noqa: BLE001 - reported by the test thread
+            failures.append(e)
+        finally:
+            if not approved:   # never leave the blocking watch waiting for an approval that is not coming
+                with contextlib.suppress(Exception):
+                    for session in mine():
+                        post(session["id"], "cancel", {})
 
     helper = threading.Thread(target=owner_elsewhere, daemon=True)
     helper.start()
     code, out = harness("new", PROTECTED, "--project", "ui", "--no-prompt")
     helper.join(timeout=scaled(30))
+    assert not failures, failures
     assert code == 0 and approved
     assert re.search(r"approval needed \[\S+\]: write_file — protected file \(fake-model UI testing\)", out)
     assert '"path": "protected/settings.json"' in out
@@ -239,7 +256,10 @@ def test_queue_lists_waiting_sessions_and_cancel_stops_the_running_one(harness, 
     assert daemon.wait_status(running, "cancelled")["status"] == "cancelled"
     code, out = harness("watch", waiting, "--no-prompt")   # the queued session runs once the slot is free
     assert code == 0 and "assistant: Hi! This is the fake model." in out
-    assert harness("queue") == (0, "")
+    deadline = time.monotonic() + scaled(30)
+    while harness("queue") != (0, ""):   # the slot frees just after the session's last event
+        assert time.monotonic() < deadline, "the queue never drained"
+        time.sleep(0.1)
 
 
 def test_version_reports_a_compatible_server(harness):
