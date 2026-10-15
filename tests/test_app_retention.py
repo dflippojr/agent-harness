@@ -247,14 +247,20 @@ def test_an_erase_right_after_done_waits_for_the_run_to_end_and_leaves_nothing(t
     for it, so nothing is written after the erase, in the App's folder or the owner's."""
     cfg = make_cfg(tmp_path)
     m = Manager(cfg, chat=Script([Completion(content="ok")]))
-    ended, release = threading.Event(), threading.Event()
-    save_branch = m.runner.save_branch
+    ended, release, started, order = threading.Event(), threading.Event(), threading.Event(), []
+    save_branch, stop_run = m.runner.save_branch, m._stop_run
 
     async def held(sid: str) -> None:  # the run's end, held at a gate before its transcript
         await save_branch(sid)
         ended.set()
         await asyncio.to_thread(release.wait, 30)
-    m.runner.save_branch = held
+        order.append("run over")
+
+    async def stopping(sid: str) -> None:  # the erase stops the run and waits for its task, its end included
+        started.set()
+        await stop_run(sid)
+        order.append("erase continues")
+    m.runner.save_branch, m._stop_run = held, stopping
     client = TestClient(create_app(m))
     with client:
         a_id, a = _key(client, "app-a", "sessions")
@@ -276,11 +282,12 @@ def test_an_erase_right_after_done_waits_for_the_run_to_end_and_leaves_nothing(t
                 assert client.portal.call(m.sweep_app_data, later)["apps_erased"] == [a_id]
         worker = threading.Thread(target=run)
         worker.start()
-        time.sleep(0.3)
+        assert started.wait(30)
         waited = m.db.get_session(sid) is not None and m.db.app_of(sid) == a_id  # the erase waits for the run's end
         release.set()
         worker.join(30)
         assert waited and not worker.is_alive()
+        assert order == ["run over", "erase continues"]
         assert m.db.get_session(sid) is None and sid not in m.tasks
         main = Path(m.db.main.path)
         store = Path(cfg.data_dir) / "apps" / a_id / APP_STORE_FILE
