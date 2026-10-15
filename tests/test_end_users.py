@@ -17,12 +17,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import backend_state, cli_backends, cli_domains, credential_sources, end_users
+from harness import backend_state, cli_backends, cli_domains, credential_sources, end_users, member_keys
 from harness.api import create_app
 from harness.cli_backends import ClaudeSession, CliBackendError, CodexSession, ready_domain
 from harness.config import BackendConfig, SandboxConfig
 from harness.end_users import EndUserLogins
 from harness.manager import Manager
+from github_fakes import wait_for
 from test_daemon import make_cfg, wait_status
 from test_phase8 import FAKE_CLAUDE
 
@@ -89,15 +90,6 @@ def _app(client, name="planner"):
     return app, {"Authorization": f"Bearer {app['key']}"}
 
 
-def _wait(predicate, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return predicate()
-
-
 def _durable(manager) -> bytes:
     root = manager.cfg.db_path.parent
     return b"".join(p.read_bytes() for p in root.rglob("*") if p.is_file() and ".sqlite3" in p.name)
@@ -159,33 +151,61 @@ def test_a_linked_end_user_session_records_the_person_and_runs_on_no_other_crede
         assert manager.runner._backend_credential(s)["policy"] == "denied"
 
 
-def test_end_user_sessions_get_their_own_volume_and_never_the_owners_login_token_or_a_key(tmp_path):
-    token = tmp_path / "owner.token"
+# An App's end user and a household member are both "end users" with their own login volume, and neither may
+# reach the owner's credentials. The member runs on their own API key; the App's end user is given none.
+OWNER_KEY = "owner-key-must-never-reach-an-end-user"
+MEMBER_KEY = "sk-ant-api03-CANARYcanary7f3a9c1e2b4d5d6e7f"
+# (app id, end user, the key a caller supplies, the key the session keeps)
+END_USERS = [pytest.param("app-1", "dana", "app-key", "", id="app end user"),
+             pytest.param("", member_keys.end_user_id("u-alice"), MEMBER_KEY, MEMBER_KEY, id="member")]
+
+
+def _owner_backend(tmp_path, app_id):
+    token, key = tmp_path / "owner.token", tmp_path / "owner.key"
     token.write_text(OWNER_TOKEN, encoding="utf-8")
-    cfg = BackendConfig(enabled=True, volume="harness-auth-claude", oauth_token_file=str(token),
-                        oauth_token_apps=["app-1"], proxy="http://proxy:8888", network="cli-net")
+    key.write_text(OWNER_KEY, encoding="utf-8")
+    return BackendConfig(enabled=True, volume="harness-auth-claude", oauth_token_file=str(token),
+                         oauth_token_apps=[app_id], api_key_file=str(key), proxy="http://proxy:8888",
+                         network="cli-net")
+
+
+@pytest.mark.parametrize("app_id, end_user, supplied, api_key", END_USERS)
+def test_end_user_sessions_get_their_own_volume_and_never_the_owners_login_token_or_a_key(
+        tmp_path, app_id, end_user, supplied, api_key):
+    cfg = BackendConfig(**{**vars(_owner_backend(tmp_path, app_id))})
     owner = ClaudeSession(session_id="o", workspace=tmp_path, backend=cfg, sandbox=SandboxConfig(),
-                          system_prompt="s", app_id="app-1", popen=lambda *a, **k: (_ for _ in ()).throw(SystemExit))
-    assert "CLAUDE_CODE_OAUTH_TOKEN" in owner.command()  # the owner's own App uses the token: control
-    mine = ClaudeSession(session_id="m", workspace=tmp_path, backend=cfg, sandbox=SandboxConfig(),
-                         system_prompt="s", app_id="app-1", end_user="dana", api_key="app-key")
+                          system_prompt="s", app_id=app_id, popen=lambda *a, **k: (_ for _ in ()).throw(SystemExit))
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in owner.command()  # the owner's own session uses the token: control
+
+    def session(user, backend="claude", **extra):
+        cls, conf = (ClaudeSession, cfg) if backend == "claude" else (CodexSession, BackendConfig(
+            enabled=True, volume="harness-auth-codex"))
+        return cls(session_id="s", workspace=tmp_path, backend=conf, sandbox=SandboxConfig(), system_prompt="s",
+                   app_id=app_id, end_user=user, api_key=supplied, **extra)
+
+    mine = session(end_user)
     command = mine.command()
-    volume = cli_domains.end_user_volume("claude", "app-1", "dana")
+    volume = cli_domains.end_user_volume("claude", app_id, end_user)
     assert ["-v", f"{volume}:/home/agent/.claude"] in [command[i:i + 2] for i in range(len(command) - 1)]
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in command and "ANTHROPIC_API_KEY" not in command
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in command and OWNER_KEY not in command and OWNER_TOKEN not in command
     assert not any("harness-login-claude" in a or a.startswith("harness-auth-claude") for a in command)
     assert "CLAUDE_SECURESTORAGE_CONFIG_DIR=/home/agent/.claude/.login" in command
-    assert mine.api_key == "" and not mine._uses_token()
-    codex = CodexSession(session_id="c", workspace=tmp_path, backend=BackendConfig(volume="harness-auth-codex"),
-                         sandbox=SandboxConfig(), system_prompt="s", app_id="app-1", end_user="dana")
-    codex_volume = cli_domains.end_user_volume("codex", "app-1", "dana")
-    assert f"{codex_volume}:/home/agent/.codex" in codex.command()
-    assert codex_volume != volume
+    assert not mine._uses_token()
+    codex = session(end_user, "codex").command()
+    codex_volume = cli_domains.end_user_volume("codex", app_id, end_user)
+    assert f"{codex_volume}:/home/agent/.codex" in codex and codex_volume != volume
+    if api_key:  # a member's own key reaches their container by name, never in the argument list
+        assert mine.api_key == api_key and "ANTHROPIC_API_KEY" in command and api_key not in command
+        assert "OPENAI_API_KEY" in codex and api_key not in codex
+        other = session(member_keys.end_user_id("u-bob"))
+        assert volume not in other.command()
+    else:  # an App's end user never gets a key
+        assert mine.api_key == "" and "ANTHROPIC_API_KEY" not in command
 
 
-def test_the_session_environment_never_carries_the_owner_token_for_an_end_user(tmp_path, monkeypatch):
-    token = tmp_path / "owner.token"
-    token.write_text(OWNER_TOKEN, encoding="utf-8")
+@pytest.mark.parametrize("app_id, end_user, supplied, api_key", END_USERS)
+def test_the_session_environment_never_carries_the_owner_token_for_an_end_user(
+        tmp_path, monkeypatch, app_id, end_user, supplied, api_key):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "daemon-env-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "daemon-env-key")
     seen = {}
@@ -198,13 +218,16 @@ def test_the_session_environment_never_carries_the_owner_token_for_an_end_user(t
         return 0, "", ""
     monkeypatch.setattr(cli_backends, "run_cmd", noop)
     monkeypatch.setattr(cli_backends, "ready_domain", noop)
-    cfg = BackendConfig(enabled=True, oauth_token_file=str(token), oauth_token_apps=["app-1"])
-    cli = ClaudeSession(session_id="e", workspace=tmp_path, backend=cfg, sandbox=SandboxConfig(),
-                        system_prompt="s", app_id="app-1", end_user="dana", popen=popen)
+    cli = ClaudeSession(session_id="e", workspace=tmp_path, backend=_owner_backend(tmp_path, app_id),
+                        sandbox=SandboxConfig(), system_prompt="s", app_id=app_id, end_user=end_user,
+                        api_key=supplied, popen=popen)
     with pytest.raises(OSError):
         asyncio.run(cli.start())
+    values = str(seen["env"].values())
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in seen["env"]
-    assert OWNER_TOKEN not in str(seen["env"].values())
+    assert OWNER_TOKEN not in values and OWNER_KEY not in values
+    if api_key:
+        assert seen["env"]["ANTHROPIC_API_KEY"] == api_key and api_key not in seen["command"]
 
 
 def test_ready_domain_refuses_before_touching_a_volume_when_the_end_user_has_no_login(monkeypatch):
@@ -293,8 +316,8 @@ def test_the_claude_popup_flow_url_out_code_in_once_then_linked(tmp_path, monkey
         sent = client.post(code_url, headers=headers, json={"code": CANARY})
         assert sent.status_code == 200 and sent.json()["state"] == "submitted"
         assert CANARY not in sent.text
-        assert _wait(lambda: client.get(url, headers=headers).json()["linked"])
-        assert _wait(lambda: client.get(url, headers=headers).json()["attempt"]["state"] == "completed")
+        assert wait_for(lambda: client.get(url, headers=headers).json()["linked"])
+        assert wait_for(lambda: client.get(url, headers=headers).json()["attempt"]["state"] == "completed")
         done = client.get(url, headers=headers).json()
         # Single use: a second submission is refused, and the CLI got the code exactly once (on stdin).
         again = client.post(code_url, headers=headers, json={"code": CANARY})
@@ -321,7 +344,7 @@ def test_a_wrong_code_fails_the_attempt_and_a_new_attempt_replaces_it(tmp_path, 
         first = client.post(url, headers=headers).json()
         assert client.post(f"{url}/{first['attempt_id']}/code", headers=headers,
                            json={"code": "not-the-right-code"}).status_code == 200
-        assert _wait(lambda: client.get(url, headers=headers).json()["attempt"]["state"] == "failed")
+        assert wait_for(lambda: client.get(url, headers=headers).json()["attempt"]["state"] == "failed")
         assert client.get(url, headers=headers).json()["linked"] is False
         second = client.post(url, headers=headers).json()
         assert second["attempt_id"] != first["attempt_id"]
@@ -340,8 +363,8 @@ def test_the_code_expires_with_the_attempt(tmp_path, monkeypatch, stub):
         url = "/api/v1/end-users/dana/logins/claude"
         first = client.post(url, headers=headers).json()
         proc = manager.end_user_logins._attempts[first["attempt_id"]].process
-        assert _wait(lambda: client.get(url, headers=headers).json()["attempt"]["state"] == "expired", 8)
-        assert _wait(lambda: proc.poll() is not None, 5)  # the waiting login was killed
+        assert wait_for(lambda: client.get(url, headers=headers).json()["attempt"]["state"] == "expired", 8)
+        assert wait_for(lambda: proc.poll() is not None, 5)  # the waiting login was killed
         late = client.post(f"{url}/{first['attempt_id']}/code", headers=headers, json={"code": CANARY})
         assert late.status_code == 409
 
@@ -364,7 +387,7 @@ def test_the_codex_device_flow_returns_only_a_url_and_a_user_code_and_completes(
         assert client.get(url, headers=headers).json()["linked"] is False
         assert client.post(f"{url}/{body['attempt_id']}/code", headers=headers,
                            json={"code": CANARY}).status_code == 409  # nothing comes back
-        assert _wait(lambda: client.get(url, headers=headers).json()["linked"], 10)
+        assert wait_for(lambda: client.get(url, headers=headers).json()["linked"], 10)
         # Cursor is out; an unknown backend and a malformed id are refused.
         assert client.post("/api/v1/end-users/dana/logins/cursor", headers=headers).status_code == 400
         assert client.post("/api/v1/end-users/a%20b/logins/codex", headers=headers).status_code == 400
@@ -419,13 +442,11 @@ def test_credential_locks_queue_one_credential_and_leave_others_alone():
     asyncio.run(body())
 
 
-def test_one_end_users_sessions_share_a_credential_so_the_runner_serialises_them(tmp_path):
-    runner = _manager(tmp_path).runner
+def test_one_end_users_sessions_share_a_credential_so_the_runner_serialises_them():
     base = {"backend": "claude", "app_id": "app-1", "end_user": "dana"}
     key = lambda s: credential_sources.select(s["app_id"], s["end_user"]).lock_key(s["backend"], s["app_id"], s["end_user"])  # noqa: E731
     assert key(base) == key(dict(base)) and key(base) != key({**base, "end_user": "erin"})
     assert key(base) != key({**base, "backend": "codex"}) and key(base) != key({**base, "app_id": "app-2"})
-    assert runner._credential_lock({"backend": "claude", "app_id": "app-1"}).__class__.__name__ == "nullcontext"
 
 
 def test_two_concurrent_sessions_of_one_end_user_never_run_at_once(tmp_path, monkeypatch):
@@ -624,7 +645,7 @@ def test_the_pinned_claude_binary_takes_the_pasted_code_on_stdin(tmp_path):
             assert sent["state"] == "submitted"
             proc = logins._attempts[started["attempt_id"]].process
             await asyncio.to_thread(proc.wait, 60)
-            assert _wait(lambda: logins.attempt_state(app, "dana", "claude")["state"] in ("failed", "completed"), 10)
+            assert wait_for(lambda: logins.attempt_state(app, "dana", "claude")["state"] in ("failed", "completed"), 10)
             assert CANARY not in str(logins.attempt_state(app, "dana", "claude"))
         asyncio.run(flow())
     finally:

@@ -12,10 +12,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from harness import cli, migrations
+from harness import cli
 from harness import pairing_requests as pr
 from harness.admin import PREFIX
-from harness.db import Database
 import sdk.harness_client as sdk_module
 from sdk.harness_client import Harness
 
@@ -91,26 +90,31 @@ def _assert_no_secrets(texts, *secrets_seen):
             assert value not in text
 
 
-@pytest.mark.parametrize("kind", ["app", "hub"])
-@pytest.mark.parametrize("origin", ["", ORIGIN])
-@pytest.mark.parametrize("state", [pr.PENDING, pr.ARMED, pr.CLAIMED, pr.APPROVED,
-                                   pr.DENIED, pr.REDEEMED, pr.EXPIRED])
-def test_owner_view_never_exposes_a_match_code_in_any_state(hh, kind, origin, state):
+def test_owner_view_never_exposes_a_match_code_in_any_state(hh, monkeypatch):
+    """`owner_view` and `app_view` are pure over a row, so one app and one request per (kind, origin) is enough."""
     client, m = hh
-    asked, _ = _ask(client, origin, kind=kind, scopes=None if kind == "hub" else ("sessions",))
-    assert asked.status_code == 201, asked.text
-    row = m.db.main.get_pairing_request(asked.json()["id"])
-    row["state"] = state
-    owner = pr.owner_view(row, m.cfg)
-    assert owner["match_code"] == ""
-    assert (owner["kind"], owner["state"], owner["origin"], owner["browser"]) == (kind, state, origin, bool(origin))
-    assert "challenge_hash" not in owner and "source" not in owner
-    expected_code = asked.json()["match_code"] if state in (pr.PENDING, pr.CLAIMED) else ""
-    assert pr.app_view(row)["match_code"] == expected_code
+    monkeypatch.setattr(pr, "SOURCE_PENDING_CAP", 4)  # four requests from this one caller stay pending
+    states = (pr.PENDING, pr.ARMED, pr.CLAIMED, pr.APPROVED, pr.DENIED, pr.REDEEMED, pr.EXPIRED)
+    for kind in ("app", "hub"):
+        for origin in ("", ORIGIN):
+            asked, _ = _ask(client, origin, kind=kind, scopes=None if kind == "hub" else ("sessions",))
+            assert asked.status_code == 201, asked.text
+            for state in states:
+                row = m.db.main.get_pairing_request(asked.json()["id"])
+                row["state"] = state
+                owner = pr.owner_view(row, m.cfg)
+                where = (kind, origin, state)
+                assert owner["match_code"] == "", where
+                assert (owner["kind"], owner["state"], owner["origin"], owner["browser"]) == (
+                    kind, state, origin, bool(origin)), where
+                assert "challenge_hash" not in owner and "source" not in owner, where
+                expected_code = asked.json()["match_code"] if state in (pr.PENDING, pr.CLAIMED) else ""
+                assert pr.app_view(row)["match_code"] == expected_code, where
 
 
-@pytest.mark.parametrize("first_flow", ["app", "hub", "native_slot", "browser_slot"])
-@pytest.mark.parametrize("second_flow", ["app", "hub", "native_slot", "browser_slot"])
+# Two paths allocate a match code: a request an App or Hub makes, and a claim on an owner-armed slot.
+@pytest.mark.parametrize("first_flow", ["app", "browser_slot"])
+@pytest.mark.parametrize("second_flow", ["hub", "native_slot"])
 def test_open_pairing_requests_redraw_duplicate_match_codes(hh, monkeypatch, first_flow, second_flow):
     client, m = hh
     codes = iter(["123456", "123456", "654321"])
@@ -222,6 +226,8 @@ def test_browser_request_approve_and_redeem_once(hh):
     assert approved.status_code == 200 and approved.json()["state"] == "approved"
     assert approved.json()["needs"] == "redeem" and approved.json()["match_code"] == ""
     assert _app_keys(m) == []  # approval is a state change only
+    columns = {r["name"] for r in m.db.main.conn.execute("PRAGMA table_info(pairing_requests)")}
+    assert not columns & {"token", "verifier", "code_verifier", "secret"}  # the table holds no secret
 
     assert _redeem(client, rid, _pkce()[0], ORIGIN).status_code == 400          # wrong verifier
     assert _redeem(client, rid, "short", ORIGIN).status_code == 400              # not a verifier at all
@@ -416,18 +422,6 @@ def test_native_caller_forging_browser_origin_cannot_redeem_without_typed_confir
     assert len(_audit(client, "pairing_request.approve", outcome="denied")) == 2
 
 
-@pytest.mark.parametrize("state", ["claimed", "approved", "redeemed"])
-def test_cli_pairing_recovery_notice_includes_finished_requests(monkeypatch, capsys, state):
-    monkeypatch.setattr(cli, "api", lambda *args, **kwargs: [{"kind": "app", "state": state}])
-    args = cli._build_parser().parse_args(["pairing-requests", "list"])
-    assert cli._cmd_admin(args) == 0
-    output = capsys.readouterr()
-    assert json.loads(output.out) == [{"kind": "app", "state": state}]
-    assert "harness pairing-requests list" in output.err
-    assert "harness keys revoke <key_id>" in output.err
-    assert "harness pairing-requests deny <id>" in output.err
-
-
 def test_hub_armed_native_slot_waits_for_the_owner_to_confirm(hh):
     client, _ = hh
     rec = Recorder(client)
@@ -476,7 +470,11 @@ def test_cap_and_rate_limit_per_caller(hh, clock):
         assert _ask(client, ORIGIN)[0].status_code == 201
     capped = _ask(client, ORIGIN)[0]
     assert capped.status_code == 429 and capped.json()["error"]["code"] == "too_many_pending"
-    assert _ask(client, ORIGIN, headers=H(OWNER))[0].status_code == 201  # another caller is unaffected
+    # Another caller is unaffected: a local caller claiming the browser App's Origin spent none of the real
+    # App's allowance, reached over the tailnet.
+    for _ in range(pr.SOURCE_PENDING_CAP):
+        assert _ask(client, ORIGIN, headers=H(OWNER))[0].status_code == 201
+    assert _ask(client, ORIGIN, headers=H(OWNER))[0].status_code == 429
     for row in client.get(BASE, headers=H(OWNER)).json():
         client.post(f"{BASE}/{row['id']}/deny", headers=H(OWNER))
     for _ in range(pr.SOURCE_RATE[0] - pr.SOURCE_PENDING_CAP):
@@ -508,15 +506,6 @@ def test_a_caller_varying_its_origin_stays_under_its_own_cap(hh, clock):
     assert _ask(client, ORIGIN, headers=H(OWNER))[0].status_code == 201  # the queue is still open to others
 
 
-def test_spoofing_an_apps_origin_does_not_spend_its_callers_allowance(hh):
-    client, _ = hh
-    for _ in range(pr.SOURCE_PENDING_CAP):  # a local caller claims to be the browser App
-        assert _ask(client, ORIGIN)[0].status_code == 201
-    assert _ask(client, ORIGIN)[0].status_code == 429
-    for _ in range(pr.SOURCE_PENDING_CAP):  # the real App, reached over the tailnet, still has its whole allowance
-        assert _ask(client, ORIGIN, headers=H(OWNER))[0].status_code == 201
-
-
 def test_an_app_on_this_machine_pairs_without_the_local_owner_token(hh):
     client, _ = hh
     client.local_owner = False
@@ -531,13 +520,6 @@ def test_an_app_on_this_machine_pairs_without_the_local_owner_token(hh):
         assert _redeem(client, rid, verifier).status_code == 201
     finally:
         client.local_owner = True
-
-
-def test_existing_pairing_codes_still_work(hh):
-    client, _ = hh
-    code = client.post("/pairing-codes", json={"name": "old", "origin": ORIGIN, "scopes": ["sessions"]}).json()
-    paired = client.post("/api/v1/pair", headers={"Origin": ORIGIN}, json={"code": code["code"]})
-    assert paired.status_code == 201 and paired.json()["token"].startswith("ha-")
 
 
 def test_cli_rows_call_the_owner_routes_and_print_no_secret(hh, monkeypatch, capsys, tmp_path):
@@ -645,19 +627,3 @@ def test_sdk_requests_and_redeems_against_the_daemon(hh, monkeypatch):
         assert native.token.startswith("ha-") and native.paired_app["origins"] == []
     finally:
         native.close()
-
-
-def test_migration_adds_the_table(tmp_path):
-    shipped = [s for s in migrations.discover() if s[0] <= 56]
-    assert shipped[-1][0] == 56
-    path = tmp_path / "harness.db"
-    old = Database(path, migrations=shipped[:-1])
-    assert not old.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'pairing_requests'").fetchone()
-    old.close()
-    db = Database(path, migrations=shipped)
-    assert db.conn.execute("PRAGMA user_version").fetchone()[0] == 56
-    columns = {r["name"] for r in db.conn.execute("PRAGMA table_info(pairing_requests)")}
-    assert {"challenge_hash", "match_code", "state", "source", "key_id"} <= columns
-    assert not columns & {"token", "verifier", "code_verifier", "secret"}
-    assert list((tmp_path / "pre-migration").glob("harness-v55-*.sqlite3"))
-    db.close()

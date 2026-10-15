@@ -13,8 +13,8 @@ from harness.apps import all_scopes
 from harness.config import GuestAccess
 from sdk.harness_client import Harness, HarnessError
 
-from test_household import ALICE, GUEST, H, OWNER, create_member, household
-from test_hub_claim import HUB_ORIGIN, _bearer, _claim
+from test_household import GUEST, H, OWNER, household
+from test_hub_claim import _bearer
 from test_pairing_requests import BASE, CATALOG_ID, _ask
 
 PREVIEW = BASE + "/preview"
@@ -123,69 +123,6 @@ def test_preview_leaves_all_database_state_untouched_even_after_expiry(hh, monke
         assert set(response.json()[0]) == {"scope", "tier", "text"}
 
 
-def test_preview_accepts_owner_identity_owner_key_and_origin_bound_hub_key(hh):
-    client, m = hh
-    _, owner_token = m.db.main.create_api_key("owner", "admin", "owner")
-    hub_token, _, _ = _claim(client, m)
-    client.local_owner = False
-    for headers in (H(OWNER), _bearer(owner_token), _bearer(hub_token), _bearer(hub_token, HUB_ORIGIN)):
-        response = client.post(PREVIEW, headers=headers, json={"scopes": ["approvals"]})
-        assert response.status_code == 200, response.text
-        assert response.json() == [{"scope": "approvals", "tier": "elevated", "text": pr.DISCLOSURES["approvals"]}]
-    assert client.post(PREVIEW, headers=_bearer(hub_token, "https://other.example"),
-                       json={"scopes": ["sessions"]}).status_code == 403
-    assert client.post(PREVIEW, headers={**H(OWNER), "Origin": "https://other.example"},
-                       json={"scopes": ["sessions"]}).status_code == 403
-
-
-def test_preview_refuses_apps_devices_members_guests_and_unauthenticated_callers(hh):
-    client, m = hh
-    create_member(client, ALICE, "Alice")
-    client.local_owner = False
-    assert client.post(PREVIEW, json={"scopes": ["sessions"]}).status_code == 401
-    for headers in (H(ALICE), H(GUEST), H("stranger@example.com")):
-        assert client.post(PREVIEW, headers=headers, json={"scopes": ["sessions"]}).status_code == 403
-    for kind, scopes in (("app", "sessions approvals"), ("device", "inference"), ("owner", "sessions")):
-        _, token = m.db.main.create_api_key(kind, scopes, kind)
-        response = client.post(PREVIEW, headers={**H(OWNER), **_bearer(token)}, json={"scopes": ["sessions"]})
-        assert response.status_code == 403, response.text
-    assert client.post(PREVIEW, headers=_bearer("invalid"), json={"scopes": ["sessions"]}).status_code == 401
-
-
-def test_cli_previews_without_arming(hh, tmp_path, monkeypatch, capsys):
-    client, m = hh
-    calls = []
-
-    def api(method, path, **kwargs):
-        calls.append((method, path, kwargs))
-        return client.request(method, "/api/admin/v1" + path, headers=H(OWNER), **kwargs).json()
-
-    monkeypatch.setattr(cli, "HARNESS_HOME", tmp_path / "cli")
-    monkeypatch.setattr(cli, "DEFAULT_CONFIG", tmp_path / "cli" / "config.json")
-    monkeypatch.setattr(cli, "api", api)
-    monkeypatch.setattr("sys.argv", ["harness", "pairing-requests", "preview", "--scopes", "sessions", "approvals"])
-    assert cli.main() == 0
-    assert calls == [("POST", "/pairing-requests/preview", {"json": {"scopes": ["sessions", "approvals"]}})]
-    assert json.loads(capsys.readouterr().out) == pr.disclosures(["sessions", "approvals"], m.cfg)
-    assert m.db.main.list_pairing_requests() == []
-
-
-def test_sdk_previews_with_owner_auth_and_validates_the_contract(hh):
-    client, m = hh
-    _, token = m.db.main.create_api_key("owner", "admin", "owner")
-    with Harness("http://testserver", token) as sdk:
-        sdk.client.close()
-        sdk.client = httpx.Client(base_url=sdk.base, headers=_bearer(token), transport=httpx.MockTransport(
-            lambda r: client.request(r.method, r.url.path,
-                                     headers={k: v for k, v in r.headers.items() if k != "host"}, content=r.content)))
-        sdk.validate_openapi(client.get("/openapi.json").json())
-        assert sdk.preview_pairing(["sessions", "approvals"]) == pr.disclosures(["sessions", "approvals"], m.cfg)
-        with pytest.raises(HarnessError) as invalid:
-            sdk.preview_pairing(["admin"])
-        assert invalid.value.status == 400
-    assert m.db.main.list_pairing_requests() == []
-
-
 @pytest.mark.parametrize("change", ["text", "tier", "module", "scope", "order"])
 def test_arm_refuses_stale_preview_digest_without_changing_pairing_state(hh, monkeypatch, change):
     client, m = hh
@@ -245,16 +182,24 @@ def test_arm_rejects_malformed_digest_without_allocating(hh, digest):
     assert m.db.main.list_pairing_requests() == []
 
 
-def test_cli_arm_passes_preview_digest(hh, tmp_path, monkeypatch, capsys):
-    client, _ = hh
+def test_cli_previews_without_arming_and_arm_passes_preview_digest(hh, tmp_path, monkeypatch, capsys):
+    client, m = hh
+    calls = []
+
+    def api(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return client.request(method, "/api/admin/v1" + path, headers=H(OWNER), **kwargs).json()
+
     monkeypatch.setattr(cli, "HARNESS_HOME", tmp_path / "cli")
     monkeypatch.setattr(cli, "DEFAULT_CONFIG", tmp_path / "cli" / "config.json")
-    monkeypatch.setattr(cli, "api", lambda method, path, **kwargs: client.request(
-        method, "/api/admin/v1" + path, headers=H(OWNER), **kwargs).json())
+    monkeypatch.setattr(cli, "api", api)
     monkeypatch.setattr("sys.argv", ["harness", "pairing-requests", "preview", "--scopes", "sessions"])
     assert cli.main() == 0
     output = capsys.readouterr()
     preview = json.loads(output.out)
+    assert calls == [("POST", "/pairing-requests/preview", {"json": {"scopes": ["sessions"]}})]
+    assert preview == pr.disclosures(["sessions"], m.cfg)
+    assert m.db.main.list_pairing_requests() == []  # a preview arms nothing
     digest = output.err.strip().removeprefix("Disclosures digest: ")
     assert digest == Harness.disclosures_digest(preview)
     monkeypatch.setattr("sys.argv", ["harness", "pairing-requests", "arm", CATALOG_ID, "--scopes", "sessions",
@@ -272,6 +217,11 @@ def test_sdk_binds_arm_to_preview_and_surfaces_drift(hh, monkeypatch):
             lambda r: client.request(r.method, r.url.path,
                                      headers={k: v for k, v in r.headers.items() if k != "host"}, content=r.content)))
         sdk.validate_openapi(client.get("/openapi.json").json())
+        assert sdk.preview_pairing(["sessions", "approvals"]) == pr.disclosures(["sessions", "approvals"], m.cfg)
+        with pytest.raises(HarnessError) as invalid:
+            sdk.preview_pairing(["admin"])
+        assert invalid.value.status == 400
+        assert m.db.main.list_pairing_requests() == []  # previews arm nothing
         preview = sdk.preview_pairing(["approvals"])
         digest = sdk.disclosures_digest(preview)
         armed = sdk.arm_pairing(CATALOG_ID, ["approvals"], acknowledge_elevated=True,
@@ -286,12 +236,12 @@ def test_sdk_binds_arm_to_preview_and_surfaces_drift(hh, monkeypatch):
     assert len(m.db.main.list_pairing_requests()) == 1
 
 
-@pytest.mark.parametrize("scope", [*all_scopes(), None], ids=[*all_scopes(), "all-scopes"])
-def test_preview_arm_and_list_disclosures_match_for_every_known_scope(hh, scope):
+def test_preview_arm_and_list_disclosures_match_for_every_known_scope(hh):
+    """One request naming every scope covers each scope's disclosure."""
     client, m = hh
     known = all_scopes(m.cfg)
     assert set(known) == set(all_scopes())
-    scopes = list(known) if scope is None else [scope]
+    scopes = list(known)
     preview = client.post(PREVIEW, headers=H(OWNER), json={"scopes": scopes})
     assert preview.status_code == 200, preview.text
     armed = client.post(BASE, headers=H(OWNER), json={

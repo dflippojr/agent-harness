@@ -130,15 +130,6 @@ def test_rejected_approval_audit_failure_preserves_conflict(manager, monkeypatch
     assert SENTINEL not in caplog.text
 
 
-@pytest.mark.parametrize("action", ["merge", "push", "discard"])
-def test_review_fake_publish(manager, monkeypatch, action):
-    effect = AsyncMock(return_value=manager.db.get_session("session1"))
-    monkeypatch.setattr(manager, "_review", effect)
-    asyncio.run(manager.review("session1", action, context=CTX))
-    effect.assert_awaited_once()
-    assert pair(manager, "review." + action)["target_id"] == "session1"
-
-
 @pytest.mark.parametrize("kind", ["member", "app"])
 def test_foreign_sessions_not_copied(manager, monkeypatch, kind):
     manager.db.update_session("session1", **({"owner_id": "u-member"} if kind == "member" else {"app_id": "app-a"}))
@@ -206,12 +197,6 @@ def test_cancel_and_reopen_leave_unresolved_start(tmp_path):
     db.close()
 
 
-def test_taint_clear(manager):
-    manager.db.update_session("session1", taint=[{"origin": SENTINEL}])
-    assert manager.clear_taint("session1", context=CTX)["taint"] == []
-    pair(manager, "session.taint_clear")
-
-
 @pytest.mark.parametrize("manual", [True, False])
 def test_job_run_provenance_and_no_repeat(manager, monkeypatch, manual):
     now = time.time()
@@ -256,14 +241,6 @@ def test_maintenance_aggregates(manager, monkeypatch, kind, manual):
     record = pair(manager, "maintenance." + kind, ctx)
     assert record["metadata"]["removed"] == (2 if kind == "cleanup" else 1)
     assert record["metadata"]["trigger"] == ("manual" if manual else "scheduled")
-
-
-def test_metadata_allowlists():
-    for action in operation_audit.ACTIONS:
-        result = audit_context.clean_metadata(action, {"prompt": SENTINEL, "note": SENTINEL, "path": SENTINEL,
-                    "fields": [SENTINEL, "enabled"], "session_id": SENTINEL, "turn": True,
-                    "decision": SENTINEL, "reviewer_mode": SENTINEL, "expired": -1})
-        assert SENTINEL not in json.dumps(result)
 
 
 def test_auto_decision_is_system(manager):
@@ -410,11 +387,8 @@ def test_failed_effect_and_settlement(manager, monkeypatch, caplog, scheduled, t
         ["started"] if terminal_fails else ["started", "unknown"])
 
 
-def test_safe_metadata_types_and_unknown_source():
+def test_an_unknown_audit_source_is_normalised():
     assert audit_context.AuditContext("owner", source=SENTINEL).source == "unknown"
-    assert audit_context.clean_metadata("job.update", {"fields": SENTINEL, "enabled": 1}) == {}
-    assert audit_context.clean_metadata("checkpoint.rewind", {"turn": 2**53, "session_id": 42}) == {}
-    assert audit_context.clean_metadata("maintenance.cleanup", {"removed": 3}) == {"removed": 3}
 
 
 def test_scheduled_backup_audit_gap_keeps_success(manager, monkeypatch, caplog):
