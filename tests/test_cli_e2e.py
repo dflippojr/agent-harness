@@ -30,7 +30,8 @@ TWO_APPROVALS = "Please make two approvals"       # script approval-batch: a.jso
 PROTECTED = "Update the protected settings"       # script approval-sheet: protected/settings.json, then "Finished."
 SLOW = "Run a slow task"                          # script slow-running: six turns 8 s apart
 HELLO = "Hello there"                             # script tab-bar-tour
-# The end of its answer. Streamed deltas are not replayed, so a watch that connects late prints only the tail.
+# The end of its answer, read from the stored session: streamed deltas are not replayed, so what a watch prints of the
+# answer depends on when it connects.
 FAKE_ANSWER_END = "see its compact header and its overflow menu."
 
 
@@ -198,9 +199,10 @@ def test_new_list_show_transcript_approve_deny_and_send_watch(harness, daemon):
     before = daemon.get(f"/sessions/{sid}")["last_event_seq"]
     code, out = harness("send", sid, HELLO, "--watch")   # a follow-up streams only the new events
     assert code == 0 and out.startswith("sent; session is ")
-    assert FAKE_ANSWER_END in out and out.rstrip().splitlines()[-1].startswith("status: done")
+    assert out.rstrip().splitlines()[-1].startswith("status: done")
     assert f"approval needed [{first['id']}]" not in out
     assert daemon.get(f"/sessions/{sid}")["last_event_seq"] > before
+    assert daemon.get(f"/sessions/{sid}")["answer"].endswith(FAKE_ANSWER_END)
 
 
 def test_watch_prints_the_approval_needed_line_while_the_owner_approves_elsewhere(harness, daemon):
@@ -241,7 +243,8 @@ def test_watch_prints_the_approval_needed_line_while_the_owner_approves_elsewher
     assert re.search(r"approval needed \[\S+\]: write_file — protected file \(fake-model UI testing\)", out)
     assert '"path": "protected/settings.json"' in out
     assert f"approval {approved[0]['id']} approved" in out
-    assert "Finished. The tool row shows whether the write was approved or denied." in out
+    [stored] = mine()
+    assert daemon.get(f"/sessions/{stored['id']}")["answer"] == "Finished. The tool row shows whether the write was approved or denied."
     assert out.rstrip().splitlines()[-1].startswith("status: done")
 
 
@@ -257,7 +260,8 @@ def test_queue_lists_waiting_sessions_and_cancel_stops_the_running_one(harness, 
     assert code == 0 and out.strip() in ("cancelled", "cancelling")
     assert daemon.wait_status(running, "cancelled")["status"] == "cancelled"
     code, out = harness("watch", waiting, "--no-prompt")   # the queued session runs once the slot is free
-    assert code == 0 and FAKE_ANSWER_END in out
+    assert code == 0 and out.rstrip().splitlines()[-1].startswith("status: done")
+    assert daemon.get(f"/sessions/{waiting}")["answer"].endswith(FAKE_ANSWER_END)
     deadline = time.monotonic() + scaled(30)
     while harness("queue") != (0, ""):   # the slot frees just after the session's last event
         assert time.monotonic() < deadline, "the queue never drained"
