@@ -44,23 +44,15 @@ def _session(cfg, tmp_path, app_id="", api_key="", popen=None):
 
 
 def test_token_sessions_mount_no_login_volume_and_pass_the_token_by_name(tmp_path):
-    cfg = _cfg(tmp_path)
-    for app in ("", "k-owner"):
+    state = {"": "harness-auth-claude", "k-owner": "harness-cli-claude-app-k-owner"}
+    for app in state:   # two sessions build the same command: the only volume is the state one
         command = _session(_cfg(tmp_path, apps=["k-owner"]), tmp_path, app_id=app).command()
         assert not any("harness-login-claude" in a for a in command)
         assert not any(a.startswith("CLAUDE_SECURESTORAGE_CONFIG_DIR=") for a in command)
         assert ["-e", claude_token.ENV] in [command[i:i + 2] for i in range(len(command) - 1)]
         assert not any(SECRET in a for a in command)
-    assert cfg.oauth_token_file
-
-
-def test_two_concurrent_sessions_share_nothing_writable_that_holds_a_credential(tmp_path):
-    cfg = _cfg(tmp_path)
-    a = _session(cfg, tmp_path).command()
-    b = _session(cfg, tmp_path).command()
-    for command in (a, b):
         volumes = [command[i + 1] for i, arg in enumerate(command) if arg == "-v"]
-        assert volumes == ["harness-auth-claude:/home/agent/.claude"]  # state only; the login volume is gone
+        assert volumes == [f"{state[app]}:/home/agent/.claude"]  # state only; the login volume is gone
 
 
 def test_without_a_token_file_the_login_volume_is_still_used(tmp_path):

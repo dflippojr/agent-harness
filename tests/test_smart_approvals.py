@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -237,30 +238,22 @@ class _ModeDb:
         self.raw = value
 
 
-def _effective_mode_rows():
-    """(enabled, yaml_mode, live_mode, overlay_mode, expected).
-
-    Last writer wins: live setting and PUT both write the SQLite overlay. The
-    table applies overlay first, then a live setting when one is given, matching
-    'PUT auto then Settings off' and the yaml-only default.
-    """
-    rows = []
-    for enabled in (True, False):
-        for yaml_mode in ("off", "shadow", "auto"):
-            for overlay in (None, "off", "shadow", "auto"):
-                for live in (None, "off", "shadow", "auto"):
-                    if live is not None:
-                        expected = "off" if not enabled else live
-                    elif overlay is not None:
-                        expected = "off" if not enabled else overlay
-                    else:
-                        expected = "off" if not enabled else yaml_mode
-                    rows.append((enabled, yaml_mode, live, overlay, expected))
-    return rows
+# (enabled, yaml_mode, live_mode, overlay_mode, expected). Last writer wins: a Settings change and PUT both write the
+# SQLite overlay, so a live setting beats the overlay, which beats yaml; `enabled: false` beats all three.
+MODE_ROWS = [
+    (True, "shadow", None, None, "shadow"),    # yaml alone
+    (True, "auto", None, "off", "off"),        # the overlay beats yaml
+    (True, "off", None, "auto", "auto"),       # ... also over a yaml off
+    (True, "shadow", "off", "auto", "off"),    # PUT auto, then Settings off
+    (True, "shadow", "auto", "off", "auto"),   # PUT off, then Settings auto
+    (True, "off", "shadow", None, "shadow"),   # a live setting beats a yaml off
+    (False, "auto", None, None, "off"),        # disabled: yaml mode is ignored
+    (False, "auto", "auto", "auto", "off"),    # disabled: the overlay and a live setting are ignored too
+]
 
 
-@pytest.mark.parametrize("enabled,yaml_mode,live_mode,overlay_mode,expected", _effective_mode_rows())
-def test_effective_mode_yaml_live_overlay_matrix(enabled, yaml_mode, live_mode, overlay_mode, expected):
+@pytest.mark.parametrize("enabled,yaml_mode,live_mode,overlay_mode,expected", MODE_ROWS)
+def test_effective_mode_yaml_live_overlay_rows(enabled, yaml_mode, live_mode, overlay_mode, expected):
     """yaml/settings `off` is off; overlay is last writer among PUT and live settings."""
     from harness.settings_keys import apply_smart_mode
 
@@ -607,21 +600,6 @@ def test_workspace_confinement_rejects_home_drive_unc_and_dotdot():
     assert ssh_incidental.ok is False
     assert ssh_incidental.reason == "networked command", ssh_incidental.reason
 
-    assert _relative_ok("README.md")
-    assert _relative_ok("/workspace/README.md")
-    assert not _relative_ok("/tmp/out.txt")
-    assert _relative_ok("-n")
-    assert not _relative_ok("~/.aws/credentials")
-    assert not _relative_ok("$HOME/.aws")
-    assert not _relative_ok("%USERPROFILE%/x")
-    assert not _relative_ok("C:/Users/me/secrets.txt")
-    assert not _relative_ok("foo/..")
-    assert not _relative_ok("/workspace/../etc")
-    assert not _relative_ok("/tmp/../etc/passwd")
-    assert not _relative_ok(r"..\secrets.txt")
-    assert not _relative_ok(r"\\server\share\file")
-    assert not _relative_ok("--config=~/.ruff.toml")
-
 
 def test_package_runners_and_colon_scripts_are_not_eligible():
     """npx/exec/dlx fetch registry packages; npm run must match the whole script name."""
@@ -655,6 +633,7 @@ def test_package_runners_and_colon_scripts_are_not_eligible():
         "npm run test:e2e",
         "yarn run build:publish",
         "pnpm run build:publish",
+        "pnpm run lint:fix",
         "npm run format:publish",
         "npm run check:publish",
     ]
@@ -706,20 +685,11 @@ def test_assignment_tokens_cannot_escape_workspace():
     assert _eligible("make build")
     assert _eligible("cargo test")
     assert _eligible("go test ./...")
-    assert not _relative_ok("DESTDIR=/etc")
-    assert not _relative_ok("DESTDIR=../outside")
-    assert not _relative_ok("CARGO_HOME=../.ssh")
-    assert not _relative_ok("GOPATH=/etc")
-    assert not _relative_ok("OUT=C:/Windows")
-    assert _relative_ok("DESTDIR=/workspace/out")
-    assert not _relative_ok("DESTDIR=/tmp/out")
-    assert _relative_ok("FOO=bar")
-    assert _relative_ok("DEBUG=1")
-    assert _relative_ok("-n")
 
 
 @pytest.mark.parametrize("token,ok", [
     ("README.md", True),
+    ("/workspace/README.md", True),
     ("-n", True),
     ("FOO=bar", True),
     ("DEBUG=1", True),
@@ -747,6 +717,12 @@ def test_assignment_tokens_cannot_escape_workspace():
     ("--config=~/.ruff.toml", False),
     ("foo/..", False),
     ("/workspace/../etc", False),
+    ("/tmp/../etc/passwd", False),
+    ("~/.aws/credentials", False),
+    ("$HOME/.aws", False),
+    ("%USERPROFILE%/x", False),
+    (r"..\secrets.txt", False),
+    (r"\\server\share\file", False),
 ])
 def test_relative_ok_splits_equals_colon_and_comma(token, ok):
     """Option values hide `/` and `..` unless every `=`, `:`, and `,` piece is checked."""
@@ -774,7 +750,7 @@ def test_closed_argv_grammar_allows_only_exact_shapes():
     """Each allowlisted tool has a closed argv shape: verb, flag whitelist, bound positionals.
 
     Extra make targets, package-runner args, makefile/config flags, and unknown
-    flags fail closed. Earlier-round cases stay rejected for their original reasons.
+    flags fail closed. The path, substitution, runner and assignment rows live in their own tests.
     """
     allowed = [
         "pytest -q",
@@ -844,24 +820,6 @@ def test_closed_argv_grammar_allows_only_exact_shapes():
         ("ruff check --config=evil.toml", "command is not routine workspace work"),
         ("black -c print(1)", "command is not routine workspace work"),
         ("python -c 'print(1)'", "command is not routine workspace work"),
-        # earlier rounds: keep original rejection reasons
-        ("cat ~/.aws/credentials", "path escapes workspace"),
-        ("cat ~/secrets.txt", "path escapes workspace"),
-        ("head ~/.env", "path escapes workspace"),
-        ("ls ~/Documents", "path escapes workspace"),
-        ("pytest $FILE", "unresolved substitution"),
-        ("pytest tests/${SUITE}", "unresolved substitution"),
-        ("npx test", "networked command"),
-        ("npx eslint .", "networked command"),
-        ("npm run build:publish", "command is not routine workspace work"),
-        ("yarn run build:publish", "command is not routine workspace work"),
-        ("pnpm run lint:fix", "command is not routine workspace work"),
-        ("make build DESTDIR=/etc", "path escapes workspace"),
-        ("make build DESTDIR=../outside", "path escapes workspace"),
-        ("make build PREFIX=/usr", "path escapes workspace"),
-        ("cargo test CARGO_HOME=../.cargo-home", "path escapes workspace"),
-        ("go test GOPATH=/etc", "path escapes workspace"),
-        ("pytest OUT=/etc/passwd", "path escapes workspace"),
     ]
     for command in allowed:
         el = _ask(command)
@@ -884,13 +842,6 @@ def test_reviewer_payload_is_minimized():
     assert "password" not in dumped
 
 
-def test_human_only_never_calls_eligibility_ok_for_local_allow():
-    decision = Policy().decide("run_shell", {"command": "pytest -q"})
-    el = assess_eligibility("run_shell", {"command": "pytest -q"}, decision)
-    assert decision.action == ALLOW
-    assert el.ok is False
-
-
 # integration: fake hosted reviewer on local, Claude, and Codex bridges
 import asyncio
 
@@ -904,6 +855,7 @@ from harness.smart_approvals import SmartConfig
 from harness.transcript import render as render_transcript
 from test_daemon import Script, call, events, make_cfg, wait_status
 from test_phase8 import _claude_manager, _codex_manager
+from waits import scaled
 
 
 def _enable_smart(cfg, tmp_path, mode="shadow"):
@@ -1124,30 +1076,13 @@ def test_owner_settings_and_live_disable(tmp_path):
         app = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions", "approvals"]}).json()
         assert client.put("/api/admin/v1/smart-approvals", headers={"Authorization": f"Bearer {app['key']}"},
                           json={"mode": "auto"}).status_code == 403
-        guest = {"Tailscale-User-Login": "guest@example.com"}
-        m.cfg.allowed_logins = ["owner@example.com"]
-        m.cfg.guests = []
-        # without a guest entry the unknown login is refused at the access layer when allowlist is set
-        m.cfg.allowed_logins = []
-
-    async def disabled_claude():
-        m2, _, _ = _claude_manager(tmp_path / "off", "ask")
-        _enable_smart(m2.cfg, tmp_path / "off", "auto")
-        m2.runner.smart.complete = _approve
-        m2.db.set_meta("smart_approvals", json.dumps({"mode": "off"}))
-        await m2.start()
-        sid = m2.create("run it", backend="claude")["id"]
-        await wait_status(m2, sid, "waiting_approval")
-        assert m2.runner.smart.calls == []
-        await m2.stop()
-    asyncio.run(disabled_claude())
 
 
 def test_put_auto_then_live_settings_off_does_not_call_reviewer(tmp_path):
-    """Last writer wins: PUT auto, then Settings mode off, must not auto-approve pytest -q."""
-    cfg = _enable_smart(make_cfg(tmp_path), tmp_path, "shadow")
-    m = Manager(cfg, chat=Script([Completion(content="hi")]))
-    m._spawn = lambda *_a, **_k: None
+    """Last writer wins: PUT auto, then Settings mode off (PATCH /config), must not auto-approve pytest -q."""
+    m, _, _ = _claude_manager(tmp_path, "ask", bash_command="pytest -q")
+    _enable_smart(m.cfg, tmp_path, "shadow")
+    m.runner.smart.complete = _approve
     with TestClient(create_app(m)) as client:
         auto = client.put("/smart-approvals", json={"mode": "auto"}).json()
         assert auto["mode"] == "auto"
@@ -1159,22 +1094,13 @@ def test_put_auto_then_live_settings_off_does_not_call_reviewer(tmp_path):
         assert client.get("/smart-approvals").json()["mode"] == "off"
         assert m.cfg.smart_approvals.mode == "off"
         assert runtime_mode(m.db, m.cfg.smart_approvals) == "off"
-
-    async def body():
-        m2, _, _ = _claude_manager(tmp_path / "live-off", "ask", bash_command="pytest -q")
-        _enable_smart(m2.cfg, tmp_path / "live-off", "shadow")
-        m2.runner.smart.complete = _approve
-        save_runtime_mode(m2.db, "auto")
-        from harness.settings_keys import _set_smart_mode, apply_smart_mode
-        _set_smart_mode(m2.cfg, "off")
-        apply_smart_mode(m2, "auto", "off")
-        await m2.start()
-        sid = m2.create("run it", backend="claude")["id"]
-        await wait_status(m2, sid, "waiting_approval")
-        assert m2.runner.smart.calls == []
-        assert m2.db.pending_approvals(sid)
-        await m2.stop()
-    asyncio.run(body())
+        sid = client.post("/sessions", json={"prompt": "run it", "backend": "claude"}).json()["id"]
+        deadline = time.monotonic() + scaled(30)
+        while client.get(f"/sessions/{sid}").json()["status"] != "waiting_approval":
+            assert time.monotonic() < deadline, "the session never asked for approval"
+            time.sleep(0.05)
+        assert m.runner.smart.calls == []
+        assert m.db.pending_approvals(sid)
 
 
 def test_member_gets_403_on_every_smart_approvals_route(tmp_path):

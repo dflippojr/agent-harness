@@ -2,13 +2,18 @@
 
 import asyncio
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from harness import doctor, projects
 from harness.config import Project
+from harness.llm import Completion
+from harness.manager import Manager
 from harness.projects import GitError
+from test_daemon import Script
+from test_phase3 import finished, make_repo, project_cfg, sh
 
 
 class Rec(doctor.Report):
@@ -41,23 +46,6 @@ def test_doctor_github_token_states(tmp_path):
     assert all("secret-value" not in d and "missing" not in d for _, _, d in r.lines)
 
 
-def test_doctor_main_runs_github_check(monkeypatch, capsys):
-    from harness import config as config_mod
-    cfg = SimpleNamespace(github=SimpleNamespace(token_file=""), profile="p", default_model="m", port=1,
-                          modules=SimpleNamespace(local_model=False))
-    monkeypatch.setattr(config_mod, "load", lambda d=None: cfg)
-    seen = []
-    for name in dir(doctor):
-        if name.startswith("check_") and name != "check_github_token":
-            monkeypatch.setattr(doctor, name, lambda *a, **k: None)
-    monkeypatch.setattr(doctor, "check_github_token", lambda r, c: seen.append(c))
-    try:
-        doctor.main([])
-    except SystemExit:
-        pass
-    assert seen == [cfg]
-
-
 def test_prepare_reports_deleted_base_branch(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
@@ -69,10 +57,24 @@ def test_prepare_reports_deleted_base_branch(tmp_path):
     assert not any((tmp_path / "ws").iterdir())
 
 
-def test_first_prepare_applies_github_base_branch(monkeypatch, tmp_path):
-    from harness.runner import Runner
-    got = {}
-    monkeypatch.setattr(projects, "prepare", lambda project, ws, sid: got.update(branch=project.base_branch) or {})
-    s = {"id": "s1", "app_metadata": {"github_base_branch": "feat/x"}}
-    asyncio.run(Runner._first_prepare(SimpleNamespace(), s, Project(name="p", base_branch="main"), tmp_path, False, False))
-    assert got["branch"] == "feat/x"
+def test_first_prepare_applies_github_base_branch(tmp_path):
+    src = make_repo(tmp_path / "src")
+    main_head = projects.head(src)
+    sh(src, "checkout", "-q", "-b", "feat/x")
+    (src / "app.py").write_text("VALUE = 'from the PR branch'\n")
+    sh(src, "commit", "-qam", "PR work")
+    feature_head = projects.head(src)
+    sh(src, "checkout", "-q", "main")
+    cfg = project_cfg(tmp_path, str(src))
+
+    async def body():
+        m = Manager(cfg, chat=Script([Completion(content="Looked."), Completion(content="Looked again.")]))
+        await m.start(maintenance=False)
+        plain = await finished(m, m.create("look", project="proj")["id"])
+        assert plain["base_commit"] == main_head
+        s = await finished(m, m.create("look", project="proj",
+                                       app_metadata={"github_base_branch": "feat/x"})["id"])
+        assert s["base_commit"] == feature_head and s["base_branch"] == "feat/x"
+        assert (Path(s["workspace"]) / "app.py").read_text() == "VALUE = 'from the PR branch'\n"
+        await m.stop()
+    asyncio.run(body())

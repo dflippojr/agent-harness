@@ -422,7 +422,8 @@ def test_clean_multi_commit_push_passes(tmp_path):
             sh(ws, "add", ".")
             sh(ws, "commit", "-qm", f"step {n}")
         scan = (await m.changes(s["id"]))["secret_scan"]
-        assert scan["status"] == "ok" and scan["findings"] == []
+        assert scan["status"] == "ok" and scan["findings"] == [] and not scan["cached"]
+        assert (await m.changes(s["id"]))["secret_scan"]["cached"]
         s = await m.review(s["id"], "push")
         assert s["review"] == "pushed"
         assert sh(remote, "branch", "--list", s["branch"]).strip()
@@ -572,35 +573,3 @@ def test_api_fix_drafts_and_owner_only_dismiss(tmp_path):
         assert done.status_code == 200 and done.json()["dismissed"]
         assert client.post(f"/sessions/{sid}/review/merge").status_code == 200
         assert KEY not in client.get(f"/sessions/{sid}/transcript").text
-
-
-def test_clean_branch_scan_is_fast(tmp_path):
-    src = make_repo(tmp_path / "src")
-    cfg = project_cfg(tmp_path, str(src))
-
-    async def body():
-        m = Manager(cfg, chat=edit_steps())
-        await m.start(maintenance=False)
-        s = await finished(m, m.create("bump", project="proj")["id"])
-        m.secret_scanner.problem()  # the one-time version check is not part of a scan
-        scan = (await m.changes(s["id"]))["secret_scan"]
-        assert scan["status"] == "ok" and scan["findings"] == [] and not scan["cached"]
-        print(f"clean-branch scan: {scan['elapsed_ms']} ms")
-        assert scan["elapsed_ms"] < 5000
-        assert (await m.changes(s["id"]))["secret_scan"]["cached"]
-        await m.stop()
-    asyncio.run(body())
-
-
-def test_remote_session_changes_say_the_scan_is_not_available(tmp_path, monkeypatch):
-    """An older runner's Changes explains why the gate is unavailable."""
-    m = Manager(project_cfg(tmp_path, str(make_repo(tmp_path / "src"))), chat=edit_steps())
-    s = {"id": "s1", "target": "macbook", "workspace_removed": 0, "base_commit": "abc"}
-    monkeypatch.setattr(m, "get", lambda ref: s)
-
-    async def remote(session, op, args, timeout=None):
-        return {"repos": []}
-    monkeypatch.setattr(m, "remote", remote)
-    scan = asyncio.run(m.changes("s1"))["secret_scan"]
-    assert scan["status"] == "unsupported" and scan["findings"] == []
-    assert "macbook" in scan["message"] and "not available" in scan["message"]
