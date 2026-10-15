@@ -10,6 +10,9 @@ Describe 'Review publication safety' {
         @{ Payload = 'sk-synthetic12345678' }
         @{ Payload = 'ghp_synthetic12345678' }
         @{ Payload = ('T' * 48) }
+        @{ Payload = (('T' * 48) + '/unknown.py') }
+        @{ Payload = ('./' + ('T' * 48) + '/unknown.py') }
+        @{ Payload = ('./' + ('T1' * 24) + '/unknown.py') }
         @{ Payload = (('A' * 38) + '==') }
         @{ Payload = ('a1' * 24) }
         @{ Payload = (('ab_' * 15) + '9') }
@@ -65,6 +68,10 @@ Describe 'Review publication safety' {
         @{ Payload = '\Device\HarddiskVolume1\USERS~1\reviewer\auth.json' }
         @{ Payload = '\Documents and Settings\reviewer\auth.json' }
         @{ Payload = 'app/[locale]/home/components/Nav.tsx' }
+        # An unknown relative path with a profile directory segment fails closed too.
+        @{ Payload = 'docs/root/code.md' }
+        @{ Payload = 'examples/home/reviewer/file.py' }
+        @{ Payload = 'examples/Users/reviewer/file.py' }
         # Encodings a reader would see decoded.
         @{ Payload = '/h%6fme/reviewer/.codex/auth.json' }
         @{ Payload = '&#47;home&#47;reviewer&#47;auth.json' }
@@ -97,6 +104,9 @@ Describe 'Review publication safety' {
         @{ Payload = 'ops/review/run-review.ps1:340: the regex `[\\/]` misses `"\\n"`.' }
         @{ Payload = 'See https://learn.microsoft.com/dotnet/standard/io/file-path-formats#trim-characters.' }
         @{ Payload = 'docs/users.md, docs/root-ca.md and src/rooted/homepage.py' }
+        # A long word-like name is an identifier, not a token, even when it is not a known path.
+        @{ Payload = 'outside/harness_modules/remote_control/folder_discovery.py' }
+        @{ Payload = '/harness_modules/remote_control/folder_discovery.py' }
         @{ Payload = 'The old side is /dev/null; the shebang is /usr/bin/env.' }
         @{ Payload = '`$env:USERPROFILE` and `~/.claude/settings.json` are inherited.' }
         @{ Payload = 'Call 127.0.0.1:8100/gpu or localhost:8100/gpu.' }
@@ -195,6 +205,26 @@ Describe 'Review publication safety' {
         catch { $failure = $_.Exception.Message }
         if ($failure -notlike 'Review did not complete*') { throw 'Base ref bypassed the publication gate' }
         if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'Unsafe base ref was published' }
+    }
+
+    It 'redacts every spelling of a profile path from diagnostics' -TestCases @(
+        @{ Stderr = 'C:/temp/../Users/reviewer/.codex/auth.json /home//reviewer/.codex/auth.json' }
+        @{ Stderr = 'profile file:///h%6fme/reviewer/.codex/auth.json' }
+        # A preceding path must not hide a later one.
+        @{ Stderr = 'C:/public/config.py followed by file:///h%6fme/reviewer/.codex/auth.json' }
+        @{ Stderr = 'C:/public/config.py followed by C:/temp/../../Users/reviewer/.codex/auth.json' }
+        @{ Stderr = '\\?\C:\Users\reviewer\.codex\auth.json' }
+        @{ Stderr = '"C:\Program Files\..\Users\reviewer\.codex\auth.json"' }
+        # Unicode directory names in front of a profile segment, as Git would list them.
+        @{ Stderr = ('caf' + [char]0xe9 + '/home/reviewer/config.py') }
+        @{ Stderr = ('cafe' + [char]0x301 + '/Users/reviewer/config.py') }
+        @{ Stderr = ([string][char]0x8CC7 + [string][char]0x6599 + '/root/config.py') }
+        @{ Stderr = ([string][char]0xe9 + '/Device/Volume1/Users/reviewer/config.py') }
+    ) {
+        param($Stderr)
+        $tail = Get-ReviewDiagnosticTail -Stderr $Stderr
+        if ($tail -like '*reviewer*') { throw "Profile segment survived: $tail" }
+        if ($tail -notlike '*[[]REDACTED PATH]') { throw "Path was not redacted: $tail" }
     }
 
     It 'keeps the diagnostic message before a path and redacts the rest of the line' {
