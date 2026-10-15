@@ -161,10 +161,9 @@ def test_propose_then_apply_keeps_snippets_out_of_the_worker_context(tmp_path):
     propose = call("delegate_edit", 1, paths=["app.py", "other.py"], instruction="greet the world")
     live, untouched = {}, []
 
-    def apply_what_was_proposed(_messages):
+    def apply_what_was_proposed(messages):
         """The model's next turn: it read the patch_id from the propose result, which is all it knows of the patch."""
-        result = json.loads(next(x["content"] for x in live["m"].db.get_session(live["sid"])["context"]
-                                 if x.get("tool_call_id") == propose["id"]))
+        result = json.loads(next(x["content"] for x in messages if x.get("tool_call_id") == propose["id"]))
         untouched.append((live["root"] / "app.py").read_text(encoding="utf-8") == SOURCE)  # nothing written yet
         return Completion(tool_calls=[call("apply_delegated_edit", 2, patch_id=result["patch_id"])])
 

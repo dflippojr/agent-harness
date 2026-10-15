@@ -732,31 +732,37 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
     store = cp.store(s)
     hidden = m.db.checkpoints(sid, hidden=True)
     assert [c["turn"] for c in hidden] == [2]
-    (ws / "after-rewind.txt").write_text("new work\n")
-    if failing == "context":                                     # the new turn 2's context cannot be written
-        monkeypatch.setattr(Path, "write_bytes", disk_full)
-    elif failing == "publish":                                   # the new turn 2 cannot be named
-        monkeypatch.setattr(checkpoints.os, "replace", rename_fails)
-    elif failing == "record":                                    # or its row cannot be committed
-        monkeypatch.setattr(cp, "_record", record_fails)
-    else:                                                        # or the account has no room for it
-        monkeypatch.setattr("harness.principal.OWNER_USER_ID", "nobody")   # measure it like a member's
-        monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
-        monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: 10 ** 9)
-    event = cp.take(sid)
-    monkeypatch.undo()
-    assert event["status"] == "skipped"
-    if failing == "quota":
-        assert "quota" in event["reason"]
-    assert m.db.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
-    refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
-    assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
-    assert not [r for r in refs if "/staged/" in r or "/replaced/" in r]
-    assert sorted(p.name for p in store.contexts.iterdir()) == ["1.json.gz", "2.json.gz"]
-    (ws / "after-rewind.txt").unlink()
-    rewound.run(m.rewind(sid, 2))                                # redo still works
-    assert (ws / "extra.txt").read_text() == "late\n"
-    rewound.run(m.rewind(sid, 1))                                # and the next case starts rewound again
+    try:
+        (ws / "after-rewind.txt").write_text("new work\n")
+        if failing == "context":                                     # the new turn 2's context cannot be written
+            monkeypatch.setattr(Path, "write_bytes", disk_full)
+        elif failing == "publish":                                   # the new turn 2 cannot be named
+            monkeypatch.setattr(checkpoints.os, "replace", rename_fails)
+        elif failing == "record":                                    # or its row cannot be committed
+            monkeypatch.setattr(cp, "_record", record_fails)
+        else:                                                        # or the account has no room for it
+            monkeypatch.setattr("harness.principal.OWNER_USER_ID", "nobody")   # measure it like a member's
+            monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
+            monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: 10 ** 9)
+        event = cp.take(sid)
+        monkeypatch.undo()
+        assert event["status"] == "skipped"
+        if failing == "quota":
+            assert "quota" in event["reason"]
+        assert m.db.checkpoints(sid, hidden=True) == hidden and m.db.get_session(sid)["turn_seq"] == 1
+        refs = store._git(None, None, "for-each-ref", "--format=%(refname) %(objectname)").out.split("\n")
+        assert f"{checkpoints.ref_name(sid, 2)} {hidden[0]['sha']}" in refs
+        assert not [r for r in refs if "/staged/" in r or "/replaced/" in r]
+        assert sorted(p.name for p in store.contexts.iterdir()) == ["1.json.gz", "2.json.gz"]
+        (ws / "after-rewind.txt").unlink()
+        rewound.run(m.rewind(sid, 2))                                # redo still works
+        assert (ws / "extra.txt").read_text() == "late\n"
+        rewound.run(m.rewind(sid, 1))                                # and the next case starts rewound again
+    finally:                                                     # a failed case must not leak into the next
+        monkeypatch.undo()
+        (ws / "after-rewind.txt").unlink(missing_ok=True)
+        if m.db.get_session(sid)["turn_seq"] != 1:
+            rewound.run(m.rewind(sid, 1))
 
 
 def test_a_take_after_a_rewind_replaces_the_rewound_past_checkpoint_of_its_turn(tmp_path):
