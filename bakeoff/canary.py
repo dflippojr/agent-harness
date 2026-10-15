@@ -6,6 +6,7 @@ The daemon calls `CanaryRunner.run` from its nightly trigger (harness/canary.py)
 
     python -m bakeoff.canary                       # the whole set, repeats from bakeoff/canary.yaml
     python -m bakeoff.canary --tasks sqlite_report --repeats 1
+    python -m bakeoff.canary --heldout --repeats 3  # #674 calibration: the held-out tasks, never the nightly set
 
 Hard tasks are written into the session's workspace and graded by their existing hidden checkers (Docker sandbox, as
 in the bake-off). Web tasks replay the recorded web (web_suite.py) through a per-session WebTools.
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import shutil
 import sys
@@ -51,6 +53,19 @@ def load_suite(path: Path = SUITE) -> dict:
         raise CanaryConfigError(f"{path.name}: unknown task ids {unknown}")
     return {"repeats": int(raw.get("repeats", 2)), "hard": [hard[i] for i in raw.get("hard", [])],
             "web": [web[i] for i in raw.get("web", [])]}
+
+
+def heldout_suite(repeats: int) -> dict:
+    """The #673 held-out hard tasks (bakeoff/tasks_heldout.py), run through Manager like the canary but by hand only."""
+    from .tasks_heldout import HELDOUT_TASKS
+    return {"repeats": repeats, "hard": list(HELDOUT_TASKS), "web": []}
+
+
+def heldout_cap_seconds(suite: dict, only: list[str] | None) -> int:
+    """Room for every selected attempt to use its whole wall-clock limit, plus a minute each for setup and grading.
+    The nightly `total_cap_seconds` (45 min) would cut a calibration off after two slow attempts."""
+    tasks = [t for t in suite["hard"] if not only or t.id in only]
+    return int(sum(t.wall_limit + 60 for t in tasks) * suite["repeats"])
 
 
 class CanaryRunner:
@@ -231,29 +246,32 @@ def grade_hard_task(task, ws: Path, answer: str, baseline: dict[str, str]) -> tu
 
 
 # by hand, daemon stopped
-async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path) -> Path:
+async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path, heldout: bool = False) -> Path:
     from harness import config as config_mod
     from harness.manager import Manager
 
     base = config_mod.load()
+    suite = heldout_suite(3) if heldout else load_suite()
+    if repeats:
+        suite["repeats"] = repeats
+    canary_cfg = base.canary
+    if heldout:
+        canary_cfg = dataclasses.replace(canary_cfg, total_cap_seconds=heldout_cap_seconds(suite, task_ids or None))
     tmp = Path(tempfile.mkdtemp(prefix="canary-"))
     cfg = config_mod.Config(host="127.0.0.1", port=0, data_dir=tmp, repos_dir=tmp / "repos",
                             default_model=base.default_model, models=base.models, sandbox=base.sandbox,
-                            projects={"scratch": config_mod.Project(name="scratch")}, canary=base.canary,
+                            projects={"scratch": config_mod.Project(name="scratch")}, canary=canary_cfg,
                             web=config_mod.WebConfig(enabled=True, page_chars=base.web.page_chars,
                                                      fixture_dir=str(fixture)))
     m = Manager(cfg)
     await m.start(maintenance=False)
     try:
-        suite = load_suite()
-        if repeats:
-            suite["repeats"] = repeats
         report = await CanaryRunner(m, cfg.canary, fixture, suite).run("manual", task_ids or None)
     finally:
         await m.stop()
         m.db.close()
         shutil.rmtree(tmp, ignore_errors=True)
-    out = ROOT / "runs" / f"canary-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    out = ROOT / "runs" / f"{'heldout' if heldout else 'canary'}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps({"status": report.status, "outcomes": report.outcomes}, indent=1), encoding="utf-8")
     passed = sum(o["ok"] for o in report.outcomes)
@@ -266,8 +284,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tasks", default="")
     parser.add_argument("--repeats", type=int, default=0)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
+    parser.add_argument("--heldout", action="store_true", help="the #673 held-out tasks (3 repeats unless --repeats)")
     args = parser.parse_args(argv)
-    asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture))
+    asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture,
+                               heldout=args.heldout))
     return 0
 
 

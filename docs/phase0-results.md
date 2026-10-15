@@ -224,3 +224,46 @@ charging GPU allocations against commit. With ~22 GB already committed at idle (
 auto-managed page file of only ~3 GB, total commit reached 36.7/37.8 GB and Claude Code's low-memory watchdog killed
 the bake-off twice. Physical RAM was not exhausted. Fix candidate: a larger fixed page file on the C: SSD
 (admin + reboot, user decision).
+
+## Held-out hard tasks for #673 (#674)
+
+The harness-learning experiment (#673) shows its proposer the 6 canary hard tasks, so its held-out set needs new
+ones, and the 4 non-canary hard tasks are no use there because Qwen scored 2/2 on each of them. `bakeoff/tasks_heldout.py`
+holds six candidates modeled on domain logic from the owner's projects and written as standalone tasks with
+synthetic data. Each has a prompt, starting files (all but one with visible tests that fail), a hidden checker and
+a reference solution, under `HARD_LIMITS` (50 turns, 30 min).
+
+| Task | Seed | Starting state | Hidden checks |
+| --- | --- | --- | --- |
+| `cali_draw` | disc-golf-league doubles draw | draft ignoring the docstring | exact draw for a seed (sorted, then shuffled A then B), input order, cali from the larger pool and never twice running, odd and even counts, pool balance |
+| `ace_pot_ledger` | disc-golf-league ace pot | five bugs | remainder cents stay in the pot, two aces by one player, unclaimed CTP into the pot, cap overflow to payout, season reset, money conserved |
+| `recurring_charges` | financial-planner recurring detection (#426) | stub plus spec | billing day from the first charge (31st to Feb 28/29), grace boundary, skipped month vs cancelled series, drift vs price change at exactly 5% |
+| `reimport_overlap` | financial-planner CSV fingerprints | naive matcher | newline field separator, casefold and whitespace normalization, same-day identical rows, user-edited descriptions, manual rows never match, exact matches before ambiguity |
+| `ordered_events` | integration-failure-lab duplicate and out-of-order scenarios | applies in arrival order | reordering, redelivery with a new id, per-claim buffer limit, replay after a restart with the buffer lost |
+| `bank_csv_shapes` | financial-planner bank CSV shapes | one shape, float amounts | exact cents (`-0.29`, `1.15`), thousands separators, BOM and CRLF, blank trailing rows, three `$`/parentheses forms, rejects |
+
+CI (`tests/test_heldout_tasks.py`) proves for each one that the hidden checker rejects the starting files and
+accepts the reference solution, and that none of them is in `canary.yaml` or `HARD_TASKS`. The Docker sandbox
+agrees: `python -m bakeoff.run --suite heldout --selftest` reports OK for all six.
+
+### Calibration (tower, GPU)
+
+Keep the four candidates that the production native model passes 1 or 2 times out of 3. Run them through `Manager`
+like the canary, in a window clear of the 03:00 canary and of worker waves, with the daemon stopped:
+
+    python -m bakeoff.canary --heldout --repeats 3
+
+That runs the six candidates × 3 attempts (about 18 × 30 min at worst, usually far less; Qwen's typical hard task
+takes about a minute) and writes `runs/heldout-<timestamp>.json`. It gets its own total cap, room for every
+selected attempt's full limit plus a minute, instead of the nightly 45 minutes. If fewer than four land on 1–2 passes, make the
+misses harder (3/3) or easier (0/3) and rerun those once (`--tasks <ids>`). Then record the table below, delete the
+two dropped candidates from `HELDOUT_TASKS`, and hand the four to #673.
+
+| Task | Qwen3.6 passes / 3 | Kept |
+| --- | --- | --- |
+| `cali_draw` | pending | |
+| `ace_pot_ledger` | pending | |
+| `recurring_charges` | pending | |
+| `reimport_overlap` | pending | |
+| `ordered_events` | pending | |
+| `bank_csv_shapes` | pending | |

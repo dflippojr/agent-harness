@@ -5,6 +5,7 @@
     python -m bakeoff.run --models gpt-oss-20b --tasks repo_qa,fix_failing_test --skip-perf
     python -m bakeoff.run --suite hard --models qwen3.6-35b-a3b --skip-perf
     python -m bakeoff.run --suite large --repo-map --repeats 3 --skip-perf   # repo-map study arm (#264)
+    python -m bakeoff.run --suite heldout --selftest   # #674 held-out checkers (calibrate with bakeoff.canary)
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from .sandbox import Sandbox, build_image
 from .server import GpuSampler, LlamaServer, load_config
 from .tasks import TASKS, Context, Task, hash_tree, materialize
 from .tasks_hard import HARD_TASKS
+from .tasks_heldout import HELDOUT_TASKS
 from .tasks_large import LARGE_TASKS
 from .tasks_memory import MEMORY_TASKS
 
@@ -152,8 +154,8 @@ def write_report(summaries: list[dict], out_dir: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", default="all")
-    parser.add_argument("--suite", choices=["core", "hard", "memory", "large", "all"], default="core",
-                        help="'large' is the repo-map study's pinned-checkout group (not part of 'all')")
+    parser.add_argument("--suite", choices=["core", "hard", "memory", "large", "heldout", "all"], default="core",
+                        help="'large' (the repo-map study) and 'heldout' (#673's held-out set) are not part of 'all'")
     parser.add_argument("--tasks", default="all", help="comma-separated task ids within the suite")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--skip-perf", action="store_true")
@@ -171,7 +173,7 @@ def main() -> None:
     config = load_config()
     if args.ctx_size:
         config["ctx_size"] = args.ctx_size
-    suite = {"core": TASKS, "hard": HARD_TASKS, "memory": MEMORY_TASKS, "large": LARGE_TASKS,
+    suite = {"core": TASKS, "hard": HARD_TASKS, "memory": MEMORY_TASKS, "large": LARGE_TASKS, "heldout": HELDOUT_TASKS,
              "all": TASKS + HARD_TASKS + MEMORY_TASKS}[args.suite]
     tasks = suite if args.tasks == "all" else [t for t in suite if t.id in args.tasks.split(",")]
     models = list(config["models"]) if args.models == "all" else args.models.split(",")
