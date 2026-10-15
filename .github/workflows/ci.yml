@@ -132,7 +132,7 @@ jobs:
           --cov-report=xml:coverage.xml --cov-report=term
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage.xml
@@ -243,7 +243,7 @@ jobs:
           }
       - name: Upload sanitized UI evidence
         if: always() && steps.cleanup.outcome == 'success'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ui-test-evidence
           path: |
