@@ -34,114 +34,18 @@ scrollPage(300, browser);
 assert.equal(docEl.scrollTop, 300);
 assert.equal(body.scrollTop, 300);
 
-const requests = [];
-const api = async (path, opts) => {
-  requests.push([opts.method, path]);
-  if (opts.method === "PATCH") throw new Error("405 Method Not Allowed");
-  return { title: opts.body.title };
-};
-const make = (isGuest) => mountSessionUi({ h: el, api, setHeader() {}, toast() {}, isGuest: () => isGuest, onLeave() {}, layoutBar() {}, browser });
+const make = (isGuest) => mountSessionUi({ h: el, api: async () => ({}), setHeader() {}, toast() {}, isGuest: () => isGuest, onLeave() {}, layoutBar() {}, browser });
 
 const jumps = make(false).bindSessionJumps();
 assert.equal(typeof jumps.updateJumps, "function");
 assert.equal(jumps.pageHeight(), 2000);
 
-// The overflow menu (#514): entries follow status and taint; guests get none.
+// The overflow menu (#514): entries follow status and taint; guests get none. Opening it, its keys, rename and focus are
+// the AH-10 journey and layout.spec.ts in tools/ui-tests.
 const TERMINAL = new Set(["done", "failed", "cancelled"]);
 assert.deepEqual(sessionMenuItems({ status: "running" }, { guest: false, terminal: TERMINAL }), ["rename", "cancel", "download"]);
 assert.deepEqual(sessionMenuItems({ status: "done", taint: [{ origin: "x" }] }, { guest: false, terminal: TERMINAL }), ["rename", "rerun", "clear-taint", "download"]);
 assert.deepEqual(sessionMenuItems({ status: "running", taint: [{ origin: "x" }] }, { guest: true, terminal: TERMINAL }), [], "guests get no owner-only entries");
 for (const id of ["rename", "cancel", "rerun", "clear-taint", "download"]) assert.ok(SESSION_MENU_LABELS[id], id);
 
-// Rename lives in the menu now: picking it swaps the header title for an input; the title itself is not a button.
-const renamed = [];
-const leaves = [];
-const session = { id: "s1", title: "Hello" };
-let announced = 0;
-const ui = mountSessionUi({ h: el, api, setHeader: (...a) => renamed.push(a), toast() {}, isGuest: () => false, onLeave: (fn) => leaves.push(fn), layoutBar() {}, browser,
-  onRenamed: () => { announced++; } });
-assert.equal(ui.sessionTitle, undefined, "tapping the title no longer starts a rename");
-const picked = [];
-let status = "running";
-const menu = ui.sessionMenu({ items: () => sessionMenuItems({ status }, { guest: false, terminal: TERMINAL }), run: (id) => picked.push(id) });
-assert.ok(bar.kids.length === 1 && bar.kids[0].contains(menu.button), "the ⋯ button sits in the header bar");
-assert.equal(menu.button.attrs["aria-haspopup"], "menu");
-assert.equal(menu.menu.hidden, true);
-menu.button.listeners.click();
-assert.equal(menu.menu.hidden, false);
-assert.equal(menu.button.attrs["aria-expanded"], "true");
-assert.deepEqual(menu.menu.kids.map((b) => b.textContent), ["Rename", "Cancel task", "Download transcript"]);
-assert.ok(menu.menu.kids.every((b) => b.attrs.role === "menuitem"));
-assert.ok(docListeners.pointerdown, "an outside tap closes the open menu");
-docListeners.pointerdown({ target: {} });
-assert.equal(menu.menu.hidden, true);
-assert.equal(docListeners.pointerdown, undefined);
-status = "done";
-menu.button.listeners.click();
-assert.deepEqual(menu.menu.kids.map((b) => b.textContent), ["Rename", "Run again as new session", "Download transcript"], "entries are rebuilt on each open");
-// Keys (#564): arrows move and wrap, Home/End jump, Escape closes back to ⋯, Tab closes.
-const focusLog = [];
-const track = (n) => { n.focus = () => { doc.activeElement = n; focusLog.push(n.textContent); }; };
-track(menu.button);
-const press = (key) => {
-  let prevented = false;
-  menu.menu.listeners.keydown({ key, preventDefault() { prevented = true; } });
-  return prevented;
-};
-menu.menu.kids.forEach(track);
-doc.activeElement = menu.menu.kids[0];
-assert.equal(press("ArrowDown"), true);
-assert.equal(doc.activeElement, menu.menu.kids[1]);
-press("ArrowDown");
-press("ArrowDown");
-assert.equal(doc.activeElement, menu.menu.kids[0], "ArrowDown wraps to the first entry");
-press("ArrowUp");
-assert.equal(doc.activeElement, menu.menu.kids[2], "ArrowUp wraps to the last entry");
-press("Home");
-assert.equal(doc.activeElement, menu.menu.kids[0]);
-press("End");
-assert.equal(doc.activeElement, menu.menu.kids[2]);
-assert.equal(press("a"), false, "other keys pass through");
-assert.equal(menu.menu.hidden, false);
-press("Escape");
-assert.equal(menu.menu.hidden, true);
-assert.equal(doc.activeElement, menu.button, "Escape returns focus to ⋯");
-menu.button.listeners.click();
-assert.equal(press("Tab"), false, "Tab moves on as usual");
-assert.equal(menu.menu.hidden, true, "and closes the menu");
-menu.button.listeners.click();
-menu.menu.kids[0].listeners.click();
-assert.deepEqual(picked, ["rename"]);
-assert.equal(menu.menu.hidden, true, "picking an entry closes the menu");
-
-ui.renameTitle(session, () => true);
-assert.equal(title.hidden, true, "the title hides behind the rename input");
-const input = title.next;
-assert.equal(input.tag, "input");
-assert.equal(input.attrs.class, "session-title-edit");
-input.value = "  New   name ";
-input.listeners.keydown({ key: "Enter", preventDefault() {} });
-await new Promise((resolve) => setTimeout(resolve, 0));
-assert.deepEqual(requests.slice(-2), [["PATCH", "/sessions/s1"], ["PUT", "/sessions/s1"]]); // a 405 retries once with PUT
-assert.equal(session.title, "New name");
-assert.equal(announced, 1, "a saved rename is announced, so the Agents list beside the session refreshes (#563)");
-assert.deepEqual(renamed.at(-1), ["agents", "New name", { page: true }]);
-assert.equal(title.hidden, false);
-assert.ok(input.removed);
-
-// A save that resolves after the page left leaves the shared #title to the next page's setHeader (review on #536).
-let active = true;
-ui.renameTitle(session, () => active);
-const late = title.next;
-late.value = "Later name";
-late.listeners.keydown({ key: "Enter", preventDefault() {} });
-active = false;
-title.hidden = true;  // the next page's setHeader hid it (a chat still loading)
-await new Promise((resolve) => setTimeout(resolve, 0));
-assert.equal(title.hidden, true, "a late rename does not unhide the next page's title");
-assert.equal(announced, 2, "the list still hears about a rename saved after the page left");
-title.hidden = false;
-
-leaves.forEach((fn) => fn());
-assert.ok(bar.kids[0].removed, "the menu leaves with the page");
 console.log("ok");

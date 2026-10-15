@@ -217,3 +217,37 @@ export function createDocument({ ElClass = El } = {}) {
   byId["tab-bar"].querySelectorAll = (sel) => (sel === "a[data-tab]" ? tabLinks : []);
   return { byId, make, doc };
 }
+
+// A manual clock for the timers a page sets, so a debounce is crossed by advance(ms) and not by sleeping through it.
+// Installing it replaces the global timer functions; the harness settles promise chains with settle() (a real
+// setImmediate), never with setTimeout. advance() runs the timers that fall due in order, awaiting each callback and the
+// promise chains it starts; advance(0) runs the zero-delay ones.
+export function fakeClock() {
+  const timers = new Map();
+  let now = 0;
+  let serial = 0;
+  const add = (fn, ms, every) => {
+    const delay = Math.max(0, Number(ms) || 0);
+    timers.set(++serial, { fn, at: now + delay, every: every ? Math.max(1, delay) : 0 });
+    return serial;
+  };
+  globalThis.setTimeout = (fn, ms) => add(fn, ms, false);
+  globalThis.setInterval = (fn, ms) => add(fn, ms, true);
+  globalThis.clearTimeout = globalThis.clearInterval = (id) => { timers.delete(id); };
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  async function advance(ms = 0) {
+    const end = now + ms;
+    for (;;) {
+      const due = [...timers.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+      if (!due) break;
+      const [id, timer] = due;
+      now = Math.max(now, timer.at);
+      if (timer.every) timer.at = now + timer.every; else timers.delete(id);
+      await timer.fn();
+      await settle();
+    }
+    now = end;
+    await settle();
+  }
+  return { advance, settle, pending: () => timers.size };
+}
