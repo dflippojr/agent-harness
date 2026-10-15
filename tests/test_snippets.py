@@ -19,7 +19,7 @@ from harness.config import GuestAccess
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.runner import Runner
-from harness.snippets import (LANGUAGES, SnippetRunner, SnippetService, _Budget, _exec_blocking,
+from harness.snippets import (LANGUAGES, LIMITS, SnippetRunner, SnippetService, _Budget, _exec_blocking,
                               _parse_stats, container_args, java_names, new_result)
 
 from test_api import LOGIN, make_client, wait_for

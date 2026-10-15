@@ -93,7 +93,7 @@ def daemon(tmp_path_factory):
             except queue.Empty:
                 line = None
             assert line is not None and time.monotonic() < deadline, (
-                f"the instance never got ready:\n" + "\n".join(seen) + "\n" + (base / "server.log").read_text("utf-8"))
+                "the instance never got ready:\n" + "\n".join(seen) + "\n" + (base / "server.log").read_text("utf-8"))
             seen.append(line)
         text = "\n".join(seen)
         handle = json.loads((instance / "instance.json").read_text(encoding="utf-8"))
