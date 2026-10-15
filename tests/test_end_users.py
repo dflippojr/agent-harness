@@ -155,8 +155,9 @@ def test_a_linked_end_user_session_records_the_person_and_runs_on_no_other_crede
 # reach the owner's credentials. The member runs on their own API key; the App's end user is given none.
 OWNER_KEY = "owner-key-must-never-reach-an-end-user"
 MEMBER_KEY = "sk-ant-api03-CANARYcanary7f3a9c1e2b4d5d6e7f"
-END_USERS = [pytest.param("app-1", "dana", "", id="app end user"),
-             pytest.param("", member_keys.end_user_id("u-alice"), MEMBER_KEY, id="member")]
+# (app id, end user, the key a caller supplies, the key the session keeps)
+END_USERS = [pytest.param("app-1", "dana", "app-key", "", id="app end user"),
+             pytest.param("", member_keys.end_user_id("u-alice"), MEMBER_KEY, MEMBER_KEY, id="member")]
 
 
 def _owner_backend(tmp_path, app_id):
@@ -168,9 +169,9 @@ def _owner_backend(tmp_path, app_id):
                          network="cli-net")
 
 
-@pytest.mark.parametrize("app_id, end_user, api_key", END_USERS)
+@pytest.mark.parametrize("app_id, end_user, supplied, api_key", END_USERS)
 def test_end_user_sessions_get_their_own_volume_and_never_the_owners_login_token_or_a_key(
-        tmp_path, app_id, end_user, api_key):
+        tmp_path, app_id, end_user, supplied, api_key):
     cfg = BackendConfig(**{**vars(_owner_backend(tmp_path, app_id))})
     owner = ClaudeSession(session_id="o", workspace=tmp_path, backend=cfg, sandbox=SandboxConfig(),
                           system_prompt="s", app_id=app_id, popen=lambda *a, **k: (_ for _ in ()).throw(SystemExit))
@@ -180,7 +181,7 @@ def test_end_user_sessions_get_their_own_volume_and_never_the_owners_login_token
         cls, conf = (ClaudeSession, cfg) if backend == "claude" else (CodexSession, BackendConfig(
             enabled=True, volume="harness-auth-codex"))
         return cls(session_id="s", workspace=tmp_path, backend=conf, sandbox=SandboxConfig(), system_prompt="s",
-                   app_id=app_id, end_user=user, api_key=api_key, **extra)
+                   app_id=app_id, end_user=user, api_key=supplied, **extra)
 
     mine = session(end_user)
     command = mine.command()
@@ -202,9 +203,9 @@ def test_end_user_sessions_get_their_own_volume_and_never_the_owners_login_token
         assert mine.api_key == "" and "ANTHROPIC_API_KEY" not in command
 
 
-@pytest.mark.parametrize("app_id, end_user, api_key", END_USERS)
+@pytest.mark.parametrize("app_id, end_user, supplied, api_key", END_USERS)
 def test_the_session_environment_never_carries_the_owner_token_for_an_end_user(
-        tmp_path, monkeypatch, app_id, end_user, api_key):
+        tmp_path, monkeypatch, app_id, end_user, supplied, api_key):
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "daemon-env-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "daemon-env-key")
     seen = {}
@@ -219,7 +220,7 @@ def test_the_session_environment_never_carries_the_owner_token_for_an_end_user(
     monkeypatch.setattr(cli_backends, "ready_domain", noop)
     cli = ClaudeSession(session_id="e", workspace=tmp_path, backend=_owner_backend(tmp_path, app_id),
                         sandbox=SandboxConfig(), system_prompt="s", app_id=app_id, end_user=end_user,
-                        api_key=api_key, popen=popen)
+                        api_key=supplied, popen=popen)
     with pytest.raises(OSError):
         asyncio.run(cli.start())
     values = str(seen["env"].values())

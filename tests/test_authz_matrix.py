@@ -46,9 +46,9 @@ class Route(SimpleNamespace):
     """One route: its family (which callers it admits), the status an admitted caller gets, and exceptions."""
 
     def __init__(self, family, method, path, ok=200, body=None, member=(200, ""), override=None, mutates=False,
-                 callers=None, role=False, origin=False, **kw):
+                 role=False, origin=False):
         super().__init__(family=family, method=method, path=path, ok=ok, body=body, member=member,
-                         override=override or {}, mutates=mutates, callers=callers, role=role, origin=origin, **kw)
+                         override=override or {}, mutates=mutates, role=role, origin=origin)
 
     def __repr__(self):
         return f"{self.method} {self.path}"
@@ -207,6 +207,7 @@ def snapshot(m) -> dict:
     for row in state["api_keys"] + state["accounts"]:  # a presented credential's last-use stamp is not a change
         row.pop("last_used_at", None)
         row.pop("last_activity_at", None)
+    state["session_ids"] = sorted(m.db.find_session_ids(""))  # Web's store and every App's store
     return state
 
 
