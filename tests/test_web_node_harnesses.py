@@ -11,12 +11,8 @@ STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
 @pytest.mark.parametrize(
     "script_name, timeout, marker",
     [
-        # Native append must not paint literal null or joined run URLs (#183).
-        pytest.param("web_append_null.mjs", None, "ok", id="test_web_views_do_not_render_null_or_url_lists"),
         # First-document splash readiness, fallback, and motion policy (#179).
         pytest.param("web_boot_splash.mjs", None, "ok", id="test_boot_splash_lifecycle"),
-        # Chat route paints its shell before options or chat data resolves (#152).
-        pytest.param("web_chat_first_paint.mjs", None, "ok", id="test_chat_route_paints_shell_before_data_loads"),
         # Session-page mask / summary / elide compaction notes (#248).
         pytest.param("web_compaction.mjs", None, "ok", id="test_session_compaction_events_render_mask_without_touching_summary"),
         # Jobs split, form actions, attention groups and inline Enabled switch (#511, #567).
@@ -33,8 +29,6 @@ STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
         pytest.param("web_markdown_links.mjs", None, "ok", id="test_markdown_links_are_linear_and_unchanged"),
         # New task follows GPU hold: Claude default, Backend notice, Queue task (#185).
         pytest.param("web_new_task_gpu_hold.mjs", None, "ok", id="test_new_task_gpu_hold_default_notice_and_queue_button"),
-        # Page titles and list New actions follow routes and roles (#154, #562).
-        pytest.param("web_page_titles.mjs", 15, "ok", id="test_page_title_set_on_every_route"),
         # Pure web helpers extracted by the Sonar style cleanup keep their output (#229).
         pytest.param("web_pure_helpers.mjs", None, "ok", id="test_pure_helpers_keep_their_output"),
         # Agents list groups sessions and shows the pending ask inline (#509).

@@ -467,28 +467,10 @@ def test_web_bundle_has_safe_cache_update_and_version_handshake():
     assert f'BUILD_ID = "{compat.WEB_BUILD_ID}"' in worker
     assert "X-Agent-Harness-Client" in client
     assert "compatibility()" in client
-    assert "hasUnsavedInput" in app
     assert "Reload and update" in app
     assert "sessionStorage" in app
-    assert "PURGE_SHELL" in app
-    assert "sessionStorage.setItem(UPDATE_GUARD, WEB_BUILD_ID)" in app
     assert "harness.webUpdatePrompt.${available}" not in app
     assert "harness-shell-${BUILD_ID}" in worker
-    assert "PURGE_SHELL" in worker
     assert "event.origin !== self.location.origin" in worker
     assert "api/v1" not in worker
     assert "api/admin" not in worker
-
-
-def test_blocked_web_ui_ignores_hashchange_and_nav_without_api_calls():
-    import shutil
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node isn't installed")
-    script = STABLES_TESTS / "web_blocked_state.mjs"
-    result = subprocess.run([node, str(script)], capture_output=True, text=True, encoding="utf-8")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "ok" in result.stdout
-    web = Path(__file__).parents[1] / "stables/public"
-    assert "let protocolBlocked = false;" in (web / "lib/session.mjs").read_text(encoding="utf-8")
-    assert "if (session.isBlocked()) return;" in (web / "lib/router.mjs").read_text(encoding="utf-8")

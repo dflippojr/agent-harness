@@ -1,6 +1,11 @@
-import { test as base, expect, type Page } from '@playwright/test';
-export const test = base.extend<{ signedIn: Page }>({
-  signedIn: async ({ page }, use) => {
+import { test as base, expect, type Page, type TestInfo } from '@playwright/test';
+// The `signedIn` fixture skips before it opens `/connect`, so a project a journey does not need costs no server requests.
+export function onlyProjects(info: TestInfo, names: readonly string[]) {
+  base.skip(!names.includes(info.project.name), 'theme-independent');
+}
+const signedInOn = (names?: readonly string[]) => base.extend<{ signedIn: Page }>({
+  signedIn: async ({ page }, use, info) => {
+    if (names) onlyProjects(info, names);
     await page.goto('/connect');
     await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
     await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
@@ -8,6 +13,10 @@ export const test = base.extend<{ signedIn: Page }>({
     finally { await page.context().setOffline(false); }
   },
 });
+export const test = signedInOn();
+// Journeys that assert layout and chrome with their own viewport sizes run on one mouse and one touch project.
+export const desktopTest = signedInOn(['desktop-light']);
+export const desktopAndPhoneTest = signedInOn(['desktop-light', 'iphone-se-light']);
 export { expect };
 export async function openSession(page: Page, title: string) {
   await page.goto('/#/agents');

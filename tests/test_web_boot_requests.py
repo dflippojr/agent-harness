@@ -1,5 +1,6 @@
-"""Boot issues /health and /me together, one /me, and route data without waiting on warm-up (#289).
-Offline boot keeps the shell instead of becoming a guest (#368)."""
+"""Member and guest boots issue /health and /me together, one /me, and route data without waiting on warm-up (#289).
+Offline boot keeps the shell instead of becoming a guest (#368). The owner boot and the protocol-skew cards are
+journeys AH-01 and AH-20 in tools/ui-tests."""
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,7 +9,7 @@ import pytest
 
 STABLES_TESTS = Path(__file__).resolve().parents[1] / "stables" / "tests"
 # stables/tests/run.mjs runs the same scenarios (test_web_harness_coverage.py checks they match).
-SCENARIOS = ["owner", "member", "guest", "me-fallback", "client-update", "daemon-update", "offline", "offline-cached"]
+SCENARIOS = ["member", "guest", "me-fallback", "offline", "offline-cached"]
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)

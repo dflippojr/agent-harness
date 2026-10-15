@@ -10,8 +10,7 @@ const directory = fileURLToPath(new URL("./", import.meta.url));
 export const HELPERS = new Set(["run.mjs", "web_app_loader.mjs", "web_stub_dom.mjs"]);
 // Harnesses that take a scenario argument run once per scenario.
 export const SCENARIOS = {
-  "web_boot_requests.mjs": ["owner", "member", "guest", "me-fallback", "client-update", "daemon-update", "offline",
-    "offline-cached"],
+  "web_boot_requests.mjs": ["member", "guest", "me-fallback", "offline", "offline-cached"],
 };
 const TIMEOUT_MS = 60_000;
 

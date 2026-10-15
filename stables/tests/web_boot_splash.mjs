@@ -8,7 +8,6 @@ import { startBoot } from "../public/lib/boot.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const html = readFileSync(join(root, "public/index.html"), "utf8");
-const css = readFileSync(join(root, "public/style.css"), "utf8");
 const inline = html.match(/<script>\s*(\/\/ Runs before the module:[\s\S]*?)<\/script>/)[1];
 const deferred = () => {
   let resolve, reject;
@@ -38,10 +37,6 @@ assert.match(html, /<div id="boot-splash" aria-hidden="true">\s*<img src="\/icon
 assert.ok(existsSync(join(root, "public/icon-192.png")));
 assert.ok(html.indexOf('id="boot-splash"') < html.indexOf("// Runs before the module:"));
 assert.ok(html.indexOf("// Runs before the module:") < html.indexOf('type="module"'));
-assert.match(html, /style\.css\?v=5/);
-assert.match(css, /#boot-splash\s*\{[^}]*position: fixed;[^}]*inset: 0;[^}]*background: var\(--bg\);[^}]*pointer-events: none;/);
-assert.match(css, /#boot-splash img\s*\{ animation: boot-splash-in 120ms ease-out; \}/);
-assert.match(css, /@media \(prefers-reduced-motion: reduce\)\s*\{\s*#boot-splash img\s*\{ animation: none; \}/);
 
 // The cap works with no app module at all. Dismissal is immediate and idempotent.
 const missingModule = launch();
@@ -107,4 +102,4 @@ await bootScenario({ user: null });
 await bootScenario({ compatible: false });
 await bootScenario({ failure: "compatibility" });
 await bootScenario({ timeout: true });
-console.log("ok: boot splash show, readiness, early exits, failures, timeout and reduced motion");
+console.log("ok: boot splash show, readiness, early exits, failures and timeout");

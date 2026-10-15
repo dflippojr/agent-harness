@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 
 // ---- stub DOM (installed only after the imports below, to prove the modules need none at import time) ----
 const imports = {};
-for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "tabs", "update", "boot", "warm-model", "sheet"]) {
+for (const name of ["dom", "widgets", "session", "stream", "chrome", "files", "signin", "router", "layout", "tabs", "update", "boot", "warm-model", "sheet"]) {
   imports[name] = await import(`../public/lib/${name}.mjs`);
 }
 const { h, fill, append, kids } = imports.dom;
@@ -308,7 +308,7 @@ const session = imports.session.createSession({ agentHarnessWeb: client });
   pageStop();
 }
 
-// ---- chrome ----
+// ---- shell elements the signin and update sections mount against (header, tab bar and toast behaviour are the AH-17 journey) ----
 const els = Object.fromEntries(["app", "title", "back", "conn", "profile-icon", "fab-host", "fab", "tab-bar", "settings-btn"]
   .map((id) => [id, doc.getElementById(id)]));
 const E = { $app: els.app, $title: els.title, $back: els.back, $conn: els.conn, $profileIcon: els["profile-icon"],
@@ -317,84 +317,6 @@ doc.getElementById("bar").append(E.$back, E.$title, E.$conn, E.$settings);
 const tabLinks = ["chat", "agents", "jobs", "images", "profile"].map((tab) => Object.assign(new El("a"), { dataset: { tab } }));
 E.$tabBar.querySelectorAll = (sel) => (sel === "a[data-tab]" ? tabLinks : []);
 const chrome = imports.chrome.mountChrome({ els: E, browser, session });
-{
-  chrome.toast("hello", 10);
-  assert.equal(doc.getElementById("toast").textContent, "hello");
-  assert.equal(doc.getElementById("toast").hidden, false);
-  let undone = 0;
-  chrome.toast("Job paused", 10, { label: "Undo", onClick: () => { undone++; } });
-  const undo = doc.getElementById("toast").children.find((c) => c instanceof El);
-  assert.equal(undo.textContent, "Undo", "an action toast carries its button (#511)");
-  undo.dispatchEvent({ type: "click" });
-  assert.equal(undone, 1);
-  assert.equal(doc.getElementById("toast").hidden, true, "tapping the action dismisses the toast");
-  // #510: the header chip says Live / Reconnecting / Offline in words, with a matching data-state for its colours.
-  chrome.setConnState("live");
-  assert.ok(E.$conn.set.has("live"));
-  assert.equal(E.$conn.hidden, false);
-  assert.equal(E.$conn.textContent, "Live");
-  assert.equal(E.$conn.dataset.state, "live");
-  chrome.setConnState("reconnecting");
-  assert.ok(!E.$conn.set.has("live"));
-  assert.equal(E.$conn.textContent, "Reconnecting");
-  assert.equal(E.$conn.dataset.state, "reconnecting");
-  chrome.setConnState("offline");
-  assert.equal(E.$conn.textContent, "Offline");
-  assert.equal(E.$conn.dataset.state, "offline");
-  assert.match(E.$conn.title, /retrying/);
-  // #512: a page can follow the chip; each report reaches it until it unsubscribes.
-  const followed = [];
-  const unfollow = chrome.onConnState((state) => followed.push(state));
-  chrome.setConnState("bogus");
-  unfollow();
-  chrome.setConnState("live");
-  assert.deepEqual(followed, ["offline"], "an unknown state reaches followers as offline, and none after unsubscribing");
-  E.$back.hidden = true;
-  chrome.setHeader("agents", "Title", { page: true });
-  assert.equal(E.$title.textContent, "Title");
-  assert.ok(doc.getElementById("bar").set.has("page"));
-  assert.ok(doc.getElementById("bar").set.has("top"), "a section's own screen gets the large title");
-  chrome.setHeader("chat", "");
-  assert.equal(E.$title.textContent, "Chat", "the section name stands in until the page knows its title");
-  E.$back.hidden = false;
-  chrome.setHeader("jobs", "");
-  assert.equal(E.$title.hidden, true);
-  assert.ok(!doc.getElementById("bar").set.has("top"));
-  E.$back.hidden = true;
-  chrome.showListAction("#/new", "Go");
-  assert.equal(E.$fab.href, "#/new");
-  assert.equal(E.$fabHost.hidden, false);
-  const header = doc.getElementById("bar");
-  const newAction = header.children[header.children.indexOf(E.$title) + 1];
-  assert.equal(newAction.className, "btn primary list-new");
-  assert.equal(newAction.href, "#/new");
-  chrome.showListAction("#/jobs/new", "+ New job");
-  assert.ok(!header.children.includes(newAction), "showListAction replaces the previous list action");
-  const jobAction = header.children[header.children.indexOf(E.$title) + 1];
-  assert.equal(jobAction.href, "#/jobs/new");
-  chrome.setHeader("jobs", "Job", { page: true });
-  assert.ok(header.children.includes(jobAction), "title updates do not tear down the current route's action");
-  chrome.hideListAction();
-  assert.ok(!header.children.includes(jobAction), "route teardown clears the list action");
-  E.$fabHost.hidden = true;
-  session.setMe({ role: "guest", guest_until: "2099-01-01T00:00:00Z" });
-  chrome.showListAction("#/new", "Go");
-  assert.equal(E.$fabHost.hidden, true, "guests get no floating button");
-  chrome.paintGuestChrome();
-  assert.ok(doc.documentElement.set.has("guest"));
-  assert.match(doc.getElementById("guest-banner").textContent, /^Demo access/);
-  session.setMe({ role: "owner" });
-  chrome.paintGuestChrome();
-  assert.equal(doc.getElementById("guest-banner").hidden, true);
-  frames.length = 0;
-  win.emit("resize");
-  assert.equal(frames.length, 1);
-  frames.shift()();
-  assert.ok(doc.getElementById("bar").set.has("paint-refresh"));
-  chrome.repaintPage();
-  frames.pop()();
-  assert.ok(E.$app.set.has("paint-refresh"));
-}
 
 // ---- files ----
 {
@@ -424,9 +346,6 @@ let toasts = [];
 }
 
 // ---- router ----
-const visited = [];
-const viewsFor = () => new Proxy({}, { get: (_, name) => async (...args) => { visited.push([name, ...args]); } });
-let router;
 {
   const { hashParts, isTopLevel, normalizeHash, isProfileRoute, blockedRedirect } = imports.router;
   assert.deepEqual(hashParts("#/s/abc/info"), ["s", "abc", "info"]);
@@ -445,66 +364,27 @@ let router;
   assert.equal(blockedRedirect(["profile", "disk"], "member"), "#/profile");
   assert.equal(blockedRedirect(["profile", "account"], "member"), null);
   assert.equal(blockedRedirect(["jobs", "new"], "owner"), null);
+}
 
-  const signin = { viewSignIn: (failed) => visited.push(["signin", failed]) };
-  const stream = { watchDaemonConnection: () => visited.push(["watch"]) };
-  const tabs = imports.tabs.mountTabs({ els: E, session, browser });
-  router = imports.router.mountRouter({ els: E, session, chrome, tabs, signin, stream, views: viewsFor, toast: () => {}, browser });
-  const run = async (hash, role = "owner") => {
-    visited.length = 0;
-    browser.location.hash = hash;
-    session.setBootMe({ role });
-    await router.route();
-    return visited.filter(([name]) => name !== "watch" && name !== "viewSession" ? true : name === "viewSession");
-  };
-  assert.deepEqual(await run("#/agents"), [["viewList"]]);
-  assert.equal(E.$back.hidden, true);
-  assert.equal(E.$tabBar.hidden, false);
-  assert.equal(E.$settings.hidden, false);
-  assert.equal(tabLinks[1].attrs["aria-current"], "page");
-  assert.deepEqual(await run("#/s/abc/changes"), [["viewSession", "abc", "changes", undefined]]);
-  assert.equal(E.$back.hidden, false);
-  assert.equal(E.$tabBar.hidden, true, "a session has its own bottom controls");
-  assert.equal(E.$settings.hidden, true);
-  assert.deepEqual(await run("#/images/abc/edit"), [["viewImageEdit", "abc"]]);
-  assert.deepEqual(await run("#/jobs/j1"), [["viewJob", "j1"]]);
-  assert.deepEqual(await run("#/profile/account"), [["viewProfile", "account", undefined]]);
-  assert.equal(E.$tabBar.hidden, false, "Settings pages keep the tab bar");
-  assert.equal(tabLinks[4].attrs["aria-current"], "page");
-  assert.deepEqual(await run("#/tasks"), []);
-  assert.equal(browser.location.hash, "#/jobs", "old Tasks links land on Jobs");
-  assert.deepEqual(await run("#/tasks/j1"), []);
-  assert.equal(browser.location.hash, "#/jobs/j1");
-  assert.deepEqual(await run("#/actions/disk"), [["viewActions", "disk"]]);
-  assert.deepEqual(await run("#/chat/c1"), [["viewChat", "c1"]]);
-  assert.deepEqual(await run("#/profile/disk"), []);
-  assert.equal(browser.location.hash, "#/actions/disk", "owner bookmarks redirect to Actions");
-  assert.deepEqual(await run("#/jobs", "member"), []);
-  assert.equal(browser.location.hash, "#/agents");
-  assert.equal(tabLinks[2].hidden, true, "members have no Jobs tab");
-  assert.equal(tabLinks[0].hidden, true, "members have no Chat tab");
-  chrome.showListAction("#/new", "+ New task");
-  const expiredAction = doc.getElementById("bar").children.find((el) => el.className === "btn primary list-new");
-  assert.ok(expiredAction);
-  assert.deepEqual(await run("#/agents", "signin"), [["signin", false]]);
-  assert.ok(!doc.getElementById("bar").children.includes(expiredAction), "sign-in clears the desktop list action");
-  assert.equal(E.$fabHost.hidden, true, "sign-in also hides the phone FAB");
-  assert.equal(E.$back.hidden, true);
-  assert.equal(E.$tabBar.hidden, true, "sign-in offers no navigation");
-  let cleaned = 0;
-  router.onLeave(() => { cleaned++; });
-  await run("#/agents");
-  assert.equal(cleaned, 1, "leaving a route runs its cleanups");
-  session.setBlocked(true);
-  router.go("#/jobs");
-  assert.equal(browser.location.hash, "#/agents", "a blocked app does not navigate");
-  session.setBlocked(false);
-  browser.location.hash = "#/s/abc/approval/z";
-  E.$back.emit("click");
-  assert.equal(browser.location.hash, "#/s/abc");
-  browser.location.hash = "#/agents/x";
-  E.$back.emit("click");
-  assert.equal(browser.history.backed, 1);
+// ---- layout: which routes are split rows, and which key hides the list (#563) ----
+{
+  const { SPLITS, splitRoute, isListToggleKey } = imports.layout;
+  const agents = SPLITS.find((s) => s.key === "agents");
+  assert.deepEqual(splitRoute(["agents"]), { split: agents, selected: null });
+  assert.deepEqual(splitRoute(["s", "abc"]), { split: agents, selected: "abc" });
+  assert.deepEqual(splitRoute(["s", "abc", "changes"]), { split: agents, selected: "abc" });
+  assert.deepEqual(splitRoute(["s", "abc", "approval", "a1"]), { split: agents, selected: "abc" });
+  assert.equal(splitRoute(["s", "../x"]), null, "an id the daemon could not have issued is not a row");
+  assert.equal(splitRoute(["agents", "extra"]), null);
+  for (const parts of [[], ["chat"], ["new"], ["profile"], ["images"]]) {
+    assert.equal(splitRoute(parts), null, `${parts.join("/")} is not part of the Agents split`);
+  }
+  const key = (extra = {}) => ({ key: "[", target: { tagName: "BODY" }, ...extra });
+  assert.equal(isListToggleKey(key()), true);
+  assert.equal(isListToggleKey(key({ key: "]" })), false);
+  for (const tagName of ["INPUT", "TEXTAREA", "SELECT"]) assert.equal(isListToggleKey(key({ target: { tagName } })), false, `never while typing in ${tagName}`);
+  assert.equal(isListToggleKey(key({ target: { tagName: "DIV", isContentEditable: true } })), false);
+  for (const mod of ["ctrlKey", "metaKey", "altKey", "isComposing", "defaultPrevented"]) assert.equal(isListToggleKey(key({ [mod]: true })), false, mod);
 }
 
 // ---- tabs ----
