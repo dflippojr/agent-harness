@@ -1,7 +1,8 @@
-import { test, expect, openSession, expectDone, createTask, audit } from './fixtures';
+import { test, expect, openSession, expectDone, createTask, audit, onlyProjects, LIGHT } from './fixtures';
 import { randomUUID } from 'node:crypto';
 
-test('AH-01/AH-02 connection persists; Agents groups and transcript search', async ({ signedIn: page }) => {
+test('AH-01/AH-02 connection persists; Agents groups and transcript search', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   await page.reload();
   await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
   for (const name of ['Chat', 'Agents', 'Jobs', 'Images', 'Profile']) {
@@ -16,7 +17,8 @@ test('AH-01/AH-02 connection persists; Agents groups and transcript search', asy
   await expect(page.getByRole('region', { name: 'Recent', exact: true })).toBeVisible();
 });
 
-test('AH-03 tool output viewer, Changes and Info survive navigation', async ({ signedIn: page }) => {
+test('AH-03 tool output viewer, Changes and Info survive navigation', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   await openSession(page, 'Tool rows');
   const row = page.locator('details.tool').filter({ has: page.locator('summary').filter({ hasText: /read_file.*notes\/log.txt/s }) });
   await row.locator('summary').first().click();
@@ -45,7 +47,8 @@ test('AH-03 tool output viewer, Changes and Info survive navigation', async ({ s
 });
 
 for (const decision of ['approve', 'deny'] as const) {
-  test('AH-04/AH-05 ' + decision + ' persists with matching owner audit', async ({ signedIn: page }) => {
+  test('AH-04/AH-05 ' + decision + ' persists with matching owner audit', async ({ signedIn: page }, info) => {
+    onlyProjects(info, LIGHT);
     await createTask(page, 'UI ' + randomUUID(), 'Edit the protected settings file.');
     const sessionId = page.url().split('/').pop()!;
     const sheet = page.getByRole('region', { name: 'Approval needed', exact: true });
@@ -70,7 +73,8 @@ for (const decision of ['approve', 'deny'] as const) {
   });
 }
 
-test('AH-06 empty validation then markdown task persists', async ({ signedIn: page }) => {
+test('AH-06 empty validation then markdown task persists', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   await page.goto('/#/new');
   await page.getByLabel('Prompt', { exact: true }).fill('');
   await page.getByRole('button', { name: 'Start', exact: true }).click();
@@ -86,7 +90,8 @@ test('AH-06 empty validation then markdown task persists', async ({ signedIn: pa
   await expect(page.locator('#title')).toHaveText(title);
 });
 
-test('AH-07 running queue and cancellation persist', async ({ signedIn: page }) => {
+test('AH-07 running queue and cancellation persist', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   const slowUrl = await createTask(page, 'UI slow ' + randomUUID(), 'Run a slow task so I can watch it running.');
   await expect(page.locator('.session-strip .badge').first()).toHaveText('running');
   const queuedUrl = await createTask(page, 'UI queued ' + randomUUID(), 'Hello again');
@@ -104,7 +109,8 @@ test('AH-07 running queue and cancellation persist', async ({ signedIn: page }) 
   await expectDone(page);
 });
 
-test('AH-08/AH-09 retry, fatal rerun and compaction', async ({ signedIn: page }) => {
+test('AH-08/AH-09 retry, fatal rerun and compaction', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   await openSession(page, 'Retry after a model error');
   await expect(page.getByText('Model call retried (1)', { exact: true })).toBeVisible();
   await expect(page.locator('main')).toContainText('This reply came from the retry.');
@@ -126,7 +132,8 @@ test('AH-08/AH-09 retry, fatal rerun and compaction', async ({ signedIn: page })
   await expect(page.locator('main .compacting')).toHaveCount(2);
 });
 
-test('AH-10 rename saves; Escape drops another edit', async ({ signedIn: page }) => {
+test('AH-10 rename saves; Escape drops another edit', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   await createTask(page, 'UI original ' + randomUUID(), 'Hello');
   await expectDone(page);
   const title = 'UI renamed ' + randomUUID();
@@ -144,7 +151,8 @@ test('AH-10 rename saves; Escape drops another edit', async ({ signedIn: page })
   await expect(page.locator('#title')).toHaveText(title);
 });
 
-test('AH-12 chat streams, rename persists and delete persists', async ({ signedIn: page }) => {
+test('AH-12 chat streams, rename persists and delete persists', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Hello UI chat');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.locator('.msg.assistant.final')).toContainText('Hi! This is the fake model.');
@@ -165,7 +173,8 @@ test('AH-12 chat streams, rename persists and delete persists', async ({ signedI
   await expect(page.getByRole('region', { name: 'Recent chats' })).not.toContainText(title);
 });
 
-test('AH-13 app theme and connection settings persist', async ({ signedIn: page }) => {
+test('AH-13 app theme and connection settings persist', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   await page.goto('/#/settings');
   await expect(page.locator('.version-row')).toBeVisible();
   await page.goto('/#/profile/appearance');
@@ -180,7 +189,8 @@ test('AH-13 app theme and connection settings persist', async ({ signedIn: page 
   await expect(page.locator('main')).toContainText('http://127.0.0.1:18800');
 });
 
-test('AH-14 connection loss and reconnect', async ({ signedIn: page }) => {
+test('AH-14 connection loss and reconnect', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   await openSession(page, 'Tool rows');
   await expectDone(page);
   await page.context().setOffline(true);
@@ -191,7 +201,8 @@ test('AH-14 connection loss and reconnect', async ({ signedIn: page }) => {
   await expect(page.locator('.conn-strip[role=status]')).toBeHidden();
 });
 
-test('AH-16 Agents list pages older sessions with Show older', async ({ signedIn: page }) => {
+test('AH-16 Agents list pages older sessions with Show older', async ({ signedIn: page }, info) => {
+  onlyProjects(info, LIGHT);
   // Pages of two rows instead of fifty, so the seeded sessions span several pages; everything else is the real server.
   await page.route(url => url.pathname.endsWith('/v1/sessions'), async route => {
     if (route.request().method() !== 'GET') return route.fallback();

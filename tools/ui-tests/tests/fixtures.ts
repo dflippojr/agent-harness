@@ -1,4 +1,4 @@
-import { test as base, expect, type Page } from '@playwright/test';
+import { test as base, expect, type Page, type TestInfo } from '@playwright/test';
 export const test = base.extend<{ signedIn: Page }>({
   signedIn: async ({ page }, use) => {
     await page.goto('/connect');
@@ -51,4 +51,11 @@ export async function audit(page: Page, query: Record<string, string>) {
     if (!response.ok) throw new Error('Audit read failed: ' + response.status);
     return (await response.json()).items;
   }, query);
+}
+// Behaviour journeys and defect regressions assert nothing that depends on the theme, so they run in the light projects.
+export const LIGHT = ['desktop-light', 'iphone-se-light', 'pixel7-light'];
+// Tests that set their own viewport sizes need one mouse and one touch (WebKit) run; pixel7 adds nothing for them.
+export const SELF_SIZING = ['desktop-light', 'iphone-se-light'];
+export function onlyProjects(info: TestInfo, names: readonly string[]) {
+  test.skip(!names.includes(info.project.name), 'theme-independent');
 }

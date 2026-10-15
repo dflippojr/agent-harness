@@ -295,6 +295,20 @@ readiness signal.
   - Nothing is shared or persistent between runs.
 - **Projects.** Desktop light and dark at 1440×900, and phone light and dark with `devices['iPhone SE']` (WebKit) and
   `devices['Pixel 7']` (Chromium).
+- **Which journeys run where.** All six projects stay defined in `playwright.config.ts`, and each test calls
+  `onlyProjects(info, names)` from `tests/fixtures.ts` to skip the projects it does not need. Behaviour journeys and
+  defect regressions assert routes, persistence, audit rows, 44px targets and reflow overflow, none of which depends on
+  the theme, so the dark projects would only repeat them (#703).
+  - **Light projects only** (`LIGHT`: `desktop-light`, `iphone-se-light`, `pixel7-light`): AH-01 to AH-14 and AH-16
+    (`journeys.spec.ts`, `jobs.spec.ts`), every other test in `defects.spec.ts` and `redesign.spec.ts`, and
+    `layout.spec.ts` "live resize…". Tests that already skip a device class (phone-only, iPhone-only) still do.
+  - **`desktop-light` and `iphone-se-light` only** (`SELF_SIZING`): the tests that set their own viewport sizes. A
+    `pixel7` run adds nothing to them, because they replace its viewport. They are #591, #593, "Settings subpages and
+    Actions tabs reflow…" and "Chat thread and an existing job reflow…".
+  - **Light and dark, on `desktop` and `iphone-se` only**: `layout.spec.ts` "primary pages reflow…", which asserts the
+    scheme's `--bg` on every primary page. This is the one dark run.
+  - The theme itself is checked by that `--bg` assertion, by AH-13 (the theme switch) and by the token contrast lint in
+    `tests/test_web_tokens.py`.
 - **Teardown.** Playwright stops the start process when the run ends. On Windows that is a hard kill, so the instance
   directory can remain: always run Teardown afterwards. Add a `globalTeardown` that runs it, plus a CI step with
   `if: always()`.
@@ -359,7 +373,7 @@ where they are.
 ## First pass coverage and limitations (#589)
 
 - Regression commands use one Playwright worker. On the tower, local pytest uses at most `-n 2` under the dispatcher memory limit. Hosted CI retains its existing four-worker pytest cap.
-- Passing flow tests cover AH-01 through AH-14 and AH-16; AH-15 remains not applicable. The no-overflow regression covers Agents, New task, Jobs, Job form, Profile, Settings, Appearance, Connection, approval, and session Transcript/Changes/Info at 320/375/768/1440 in both themes and phone projects. The #591–#595 follow-up adds Chat landing to the same reflow sweep and behavioral regressions in `defects.spec.ts`: reachable starters/recent chats, New task and optional project label focus, create/edit Enabled targets and keyboard toggles, 8px session-tab gaps, and ordinary tool-action taps through portrait → 667×375 landscape → portrait. These run in all six browser/theme projects with no expected failures, retries, forced taps, or hidden page overflow.
+- Passing flow tests cover AH-01 through AH-14 and AH-16; AH-15 remains not applicable. The no-overflow regression covers Agents, New task, Jobs, Job form, Profile, Settings, Appearance, Connection, approval, and session Transcript/Changes/Info at 320/375/768/1440 in both themes and phone projects. The #591–#595 follow-up adds Chat landing to the same reflow sweep and behavioral regressions in `defects.spec.ts`: reachable starters/recent chats, New task and optional project label focus, create/edit Enabled targets and keyboard toggles, 8px session-tab gaps, and ordinary tool-action taps through portrait → 667×375 landscape → portrait. These run in the projects listed under "Which journeys run where" (the primary-page sweep covers both themes on desktop and iPhone SE) with no expected failures, retries, forced taps, or hidden page overflow.
 - Optional disabled modules currently yield 404 probes for `/gpu`, `/models/status`, `/resources`, `/memory`, and `/remote-control`. Record these as expected feature-detection diagnostics in fake mode, separately from unexpected HTTP failures and JavaScript exceptions. No request reaches a GPU or real model provider.
 - Installed iPhone SE descriptors can be 320×568; explicitly use 375×667 while retaining the descriptor UA/DPR/mobile/touch settings. Windows WebKit reports `navigator.maxTouchPoints=0` despite a context with `hasTouch=true`; record both rather than claiming physical touch hardware. Chromium Pixel emulation reports touch=1.
 - Root-font scaling is only a text-size approximation: fixed 16px form text stays 16px. Record that limitation separately from actual 320 CSS px reflow. The desktop breakpoint sweep includes 2560px, and short-screen checks include 1280×600, 1024×500, and phone landscapes.
@@ -367,7 +381,7 @@ where they are.
 ## Second pass coverage (#625)
 
 - The second pass ran after the mobile redesign (#506–#515) on iPhone SE, iPhone 15, Pixel 7, iPad Mini and desktop, in light and dark. It covered every Settings subpage and Actions tab, chat threads, sheets, rotation mid-flow, the keyboard approximation, short screens and zoom.
-- `tests/redesign.spec.ts` locks in the flows it found passing, in all six projects:
+- `tests/redesign.spec.ts` locks in the flows it found passing, in the light projects (the self-sizing reflow tests in `desktop-light` and `iphone-se-light` only):
   - every Settings subpage and Actions tab reflows at 320, 375, 768 and 1440 px, and Back returns to Settings
   - the chat thread and an existing job's form reflow at the same widths
   - the Rename chat sheet keeps its draft and focus through portrait → landscape → portrait and closes with Escape, browser Back and a backdrop tap
