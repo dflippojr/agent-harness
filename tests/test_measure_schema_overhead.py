@@ -22,7 +22,7 @@ def test_kits_cover_every_toolkit_and_split_is_a_core_subset():
     assert {name for _, names in module.PROFILES for name in names} <= set(kits)
     core = {s["function"]["name"] for s in kits["core"]}
     split = {s["function"]["name"] for s in kits["split"]}
-    assert len(kits["core"]) == 12 and {"verify", "update_notes"} <= core
+    assert len(kits["core"]) == len(core) and {"verify", "update_notes"} <= core  # names are unique
     assert split == set(module.SPLIT_TOOLS) and split <= core
     assert {s["function"]["name"] for s in kits["memory"]} >= {"memory_edit", "memory_write"}
 
@@ -42,8 +42,14 @@ def test_load_config_leaves_the_real_data_dir_alone(monkeypatch):
 
 
 def test_main_prints_both_tables(capsys):
-    _load().main()
+    module = _load()
+    module.main()
     out = capsys.readouterr().out
     assert "| Toolkit | Schemas | Characters | Est. tokens |" in out
-    assert "| Every built-in toolkit | 33 |" in out
+    # The all-toolkits profile row is the sum of the per-toolkit rows, whatever tools are added.
+    counts = {cells[0]: int(cells[1]) for cells in (
+        [c.strip() for c in line.strip("|").split("|")] for line in out.splitlines()
+        if line.startswith("| ") and "---" not in line) if cells[1].isdigit()}
+    every = dict(module.PROFILES)["Every built-in toolkit"]
+    assert counts["Every built-in toolkit"] == sum(counts[name] for name in every)
     assert "% of 64K" in out
