@@ -102,42 +102,6 @@ def test_revoked_sessions_all_does_not_unrestrict(tmp_path):
     assert "aaaa000001" not in own
 
 
-def test_direct_tools_isolate_owner_two_apps_and_read_all(tmp_path):
-    db, tools = _tools(tmp_path)
-    app_a, app_b, reader = _apps(db)
-    _history(db, app_a, app_b, reader)
-
-    owner_search = tools.session_search(APP_A_MARKER, _session="aaaa000001")
-    assert "aaaa00000a" in owner_search
-    assert APP_A_MARKER in owner_search
-    a_own = tools.session_search(APP_A_MARKER, _session="bbbb00000a")
-    assert "aaaa00000a" in a_own
-    assert APP_A_MARKER in a_own
-    assert "aaaa000001" not in a_own
-    assert "cccc00000b" not in a_own
-
-    b_owner = tools.session_search(OWNER_MARKER, _session="bbbb00000b")
-    assert_no_hit(b_owner, "aaaa000001")
-    b_other = tools.session_search(APP_A_MARKER, _session="bbbb00000b")
-    assert_no_hit(b_other, "aaaa00000a")
-
-    all_search = tools.session_search(OWNER_MARKER, _session="dddd00000r")
-    assert "aaaa000001" in all_search
-    assert OWNER_MARKER in all_search
-
-    owner_read = tools.session_read("aaaa00000a", _session="aaaa000001")
-    assert APP_A_MARKER in owner_read
-    own_read = tools.session_read("aaaa00000a", _session="bbbb00000a")
-    assert APP_A_MARKER in own_read
-    assert "listed" in own_read
-    with pytest.raises(ToolError, match="no session matches"):
-        tools.session_read("aaaa000001", _session="bbbb00000a")
-    with pytest.raises(ToolError, match="no session matches"):
-        tools.session_read("cccc00000b", _session="bbbb00000a")
-    read_all = tools.session_read("aaaa000001", _session="dddd00000r")
-    assert OWNER_MARKER in read_all
-
-
 def test_prefix_and_guessed_ids_do_not_bypass_authorization(tmp_path):
     db, tools = _tools(tmp_path)
     app_a, app_b, reader = _apps(db)
@@ -182,26 +146,6 @@ def test_visibility_applies_before_ranking_and_limits(tmp_path):
     assert "owner 0" not in text
 
 
-def test_http_api_still_hides_foreign_sessions(tmp_path):
-    cfg = search_cfg(tmp_path)
-    m = Manager(cfg, chat=Script([Completion(content="ok")]))
-    m._spawn = lambda *_args, **_kwargs: None
-    with TestClient(create_app(m)) as client:
-        owner = client.post("/sessions", json={"prompt": f"remember {OWNER_MARKER}"}).json()
-        app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions"]}).json()
-        auth = {"Authorization": f"Bearer {app['key']}"}
-        app_session = client.post("/api/v1/sessions", headers=auth,
-                                  json={"prompt": f"buy {APP_A_MARKER}"}).json()
-        assert client.get(f"/api/v1/sessions/{owner['id']}", headers=auth).status_code == 404
-        tools = SessionSearch(m.db)
-        with pytest.raises(ToolError, match="no session matches"):
-            tools.session_read(owner["id"], _session=app_session["id"])
-        hidden = tools.session_search(OWNER_MARKER, _session=app_session["id"])
-        assert_no_hit(hidden, owner["id"])
-        # The owner's sessions never reach an App's sessions either (#330 decision 3).
-        assert_no_hit(tools.session_search(APP_A_MARKER, _session=owner["id"]), app_session["id"])
-
-
 def test_call_ignores_spoofed_session_argument(tmp_path):
     db, tools = _tools(tmp_path)
     app_a, app_b, reader = _apps(db)
@@ -235,7 +179,7 @@ def test_agent_tool_path_owner_two_apps_own_session_and_read_all(tmp_path):
         await m.start(maintenance=False)
         owner = m.create(f"keep {OWNER_MARKER} secret")
         await wait_status(m, owner["id"], "done")
-        app_a, _ = m.db.create_api_key("shop", "sessions", "app")
+        app_a, app_a_secret = m.db.create_api_key("shop", "sessions", "app")
         app_b, _ = m.db.create_api_key("other", "sessions", "app")
         reader, _ = m.db.create_api_key("dash", "sessions sessions:all", "app")
         a_hist = m.create(f"buy {APP_A_MARKER} milk", app=app_a)
@@ -247,6 +191,8 @@ def test_agent_tool_path_owner_two_apps_own_session_and_read_all(tmp_path):
         await wait_status(m, a_search_own["id"], "done")
         a_search_owner = m.create(f"search {OWNER_MARKER}", app=app_a)
         await wait_status(m, a_search_owner["id"], "done")
+        a_read_own = m.create(f"read {a_hist['id']}", app=app_a)
+        await wait_status(m, a_read_own["id"], "done")
         a_read_owner = m.create(f"read {owner['id']}", app=app_a)
         await wait_status(m, a_read_owner["id"], "done")
         a_read_b = m.create(f"read {b_hist['id']}", app=app_a)
@@ -257,6 +203,8 @@ def test_agent_tool_path_owner_two_apps_own_session_and_read_all(tmp_path):
         await wait_status(m, owner_search["id"], "done")
         all_search = m.create(f"search {OWNER_MARKER}", app=reader)
         await wait_status(m, all_search["id"], "done")
+        all_read_owner = m.create(f"read {owner['id']}", app=reader)
+        await wait_status(m, all_read_owner["id"], "done")
         all_read_b = m.create(f"read {b_hist['id']}", app=reader)
         await wait_status(m, all_read_b["id"], "done")
 
@@ -268,6 +216,8 @@ def test_agent_tool_path_owner_two_apps_own_session_and_read_all(tmp_path):
         assert a_hist["id"] in own["output"]
         assert APP_A_MARKER in own["output"]
         assert owner["id"] not in own["output"]
+        read_own = output(a_read_own["id"])
+        assert read_own["ok"] and APP_A_MARKER in read_own["output"] and "milk" in read_own["output"]
         hidden_owner = output(a_search_owner["id"])
         assert hidden_owner["ok"]
         assert_no_hit(hidden_owner["output"], owner["id"])
@@ -288,9 +238,16 @@ def test_agent_tool_path_owner_two_apps_own_session_and_read_all(tmp_path):
         assert visible_to_all["ok"]
         assert owner["id"] in visible_to_all["output"]
         assert OWNER_MARKER in visible_to_all["output"]
+        read_all_owner = output(all_read_owner["id"])
+        assert read_all_owner["ok"] and OWNER_MARKER in read_all_owner["output"]
         denied_all_b = output(all_read_b["id"])  # sessions:all adds the owner's sessions, never another App's
         assert not denied_all_b["ok"]
         assert "no session matches" in denied_all_b["output"]
         assert APP_B_MARKER not in denied_all_b["output"]
         await m.stop()
-    asyncio.run(body())
+        return owner["id"], app_a_secret
+    owner_id, app_secret = asyncio.run(body())
+    # Over HTTP an App cannot see the owner's session either.
+    with TestClient(create_app(Manager(cfg, chat=Script([Completion(content="ok")])))) as client:
+        hidden = client.get(f"/api/v1/sessions/{owner_id}", headers={"Authorization": f"Bearer {app_secret}"})
+        assert hidden.status_code == 404

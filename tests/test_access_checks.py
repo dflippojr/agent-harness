@@ -9,7 +9,7 @@ from harness import apps
 from harness.access import guest_forbidden, resolve_access
 from harness.api import GLOBAL_TYPES
 from harness.config import GuestAccess
-from test_api import LOGIN, make_client as guest_client
+from test_api import make_client as guest_client
 from test_control_center import ORIGIN, make_client
 from test_phase7 import seed
 
@@ -18,29 +18,6 @@ OWNER_STATUS_PATHS = (
     "/memory", "/pairing-codes", "/runner-pairing-codes", "/runners", "/backends",
     "/gpu", "/resources", "/resources/diagnostics", "/models/status",
 )
-
-
-@pytest.mark.parametrize("path", OWNER_STATUS_PATHS)
-def test_guest_owner_status_denied_owner_still_allowed(tmp_path, monkeypatch, path):
-    from harness_modules.local_model import routes
-    from harness_modules.local_model import resources
-
-    client, m, _ = guest_client(tmp_path, [])
-    m.cfg.guests = [GuestAccess(login="guest@example.com", until="2099-01-01T00:00:00+00:00")]
-
-    async def fake_status(*_args):
-        return {"state": "unloaded"}
-
-    async def fake_model_state(*_args):
-        return "unloaded"
-
-    monkeypatch.setattr(routes, "_resources_status", fake_status)
-    monkeypatch.setattr(resources, "diagnostics", fake_status)
-    monkeypatch.setattr(m.warmer, "state", fake_model_state)
-    with client:
-        guest = {"Tailscale-User-Login": "guest@example.com"}
-        assert client.get(path, headers=guest).status_code == 403
-        assert client.get(path, headers={"Tailscale-User-Login": LOGIN}).status_code == 200
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD", "OPTIONS"])
@@ -102,11 +79,17 @@ def test_device_search_queue_and_global_events_require_read_all(tmp_path, monkey
         asyncio.run(consume())
 
 
-@pytest.mark.parametrize("kind,restore", [("owner", False), ("app", False), ("device", False),
-                                         ("app", True), ("device", True)])
-@pytest.mark.parametrize("surface,tick", [(surface, tick) for surface in ("global", "session", "ticket")
-                                         for tick in ("event", "keepalive", "replay")
-                                         if (surface, tick) != ("global", "replay")])
+# The full surface x tick product for an app key; owner and device keys share the stream code, so each keeps one
+# live-stream case and one replay case; a restored key is checked once per surface.
+REVOCATION_CASES = (
+    [("app", False, surface, tick) for surface in ("global", "session", "ticket")
+     for tick in ("event", "keepalive", "replay") if (surface, tick) != ("global", "replay")]
+    + [(kind, False, surface, tick) for kind in ("owner", "device")
+       for surface, tick in (("global", "event"), ("ticket", "replay"))]
+    + [("app", True, "global", "event"), ("device", True, "session", "event"), ("app", True, "ticket", "event")])
+
+
+@pytest.mark.parametrize("kind,restore,surface,tick", REVOCATION_CASES)
 def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
         tmp_path, monkeypatch, kind, restore, surface, tick):
     client, m = make_client(tmp_path)

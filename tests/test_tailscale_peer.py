@@ -43,13 +43,79 @@ def forged(tmp_path):
         yield client, m
 
 
-def test_a_login_header_from_another_local_program_is_ignored(forged):
-    client, m = forged
-    owner = {"Tailscale-User-Login": LOGIN}
-    assert client.get("/me", headers=owner).status_code == 401
-    assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
-                       headers=owner).status_code == 401
+def _broken_lookup(client, server):
+    raise PermissionError("connection table unavailable")
+
+
+def _missing_service():
+    raise LookupError("service 'Tailscale' does not exist")
+
+
+def _unavailable_node_addresses():
+    raise FileNotFoundError("tailscale.exe not found")
+
+
+def _unreadable_serve_config():
+    raise OSError("LocalAPI access denied")
+
+
+def with_tcp_forward(target, where="TCP"):
+    """The fake serve config plus a raw TCP forward (`tailscale serve --tcp`), on the node or in a foreground session
+    or a service."""
+    handler = {"TCP": {"8443": {"TCPForward": target}}}
+    if where == "TCP":
+        return {**FAKE_SERVE_CONFIG, "TCP": {**FAKE_SERVE_CONFIG["TCP"], "8443": {"TCPForward": target}}}
+    if where == "Foreground":
+        return {**FAKE_SERVE_CONFIG, "Foreground": {"session-1": handler}}
+    return {**FAKE_SERVE_CONFIG, "Services": {"svc:harness": handler}}
+
+
+def _raw_forward(target, where):
+    return dict(check=fake_tailscaled_check, forward=(target, where))
+
+
+# Each variant is one way the Tailscale headers cannot be trusted. Every one must refuse the owner's login on a
+# read and on a key mint, leave no key behind, and (where it says so) show how often the peer was looked up.
+UNVERIFIED_PEERS = {
+    "another local program": dict(check=not_tailscaled),
+    "open owner mode, forged login": dict(check=not_tailscaled, allowed=[], logins=(LOGIN, "anyone@example.com")),
+    "failed lookup is not cached": dict(check=lambda: fake_tailscaled_check(owner=_broken_lookup), lookups=2),
+    "service lookup raises": dict(check=lambda: fake_tailscaled_check(service=_missing_service)),
+    "service has no PID": dict(check=lambda: fake_tailscaled_check(service=lambda: None)),  # a stopped service
+    "unknown node addresses": dict(check=lambda: fake_tailscaled_check(tailscale_ips=_unavailable_node_addresses)),
+    "unreadable serve config is not cached": dict(
+        check=lambda: fake_tailscaled_check(serve=_unreadable_serve_config), lookups=2),
+    # Any local user can start the installed tailscaled.exe in userspace mode as a proxy and pick its headers (#623).
+    "real tailscaled run by someone else": dict(
+        check=lambda: fake_tailscaled_check(owner=lambda client, server: 5151, service=lambda: 4242), uncached=True),
+    "unsupported platform": dict(check=lambda: fake_tailscaled_check(platform_ok=lambda: False), lookups=0),
+    # tailscaled adds no headers on a raw TCP forward, so a tailnet peer could write its own login (#623).
+    "raw TCP forward on the node": _raw_forward("127.0.0.1:{port}", "TCP"),
+    "raw TCP forward in a foreground session": _raw_forward("localhost:{port}", "Foreground"),
+    "raw TCP forward in a service": _raw_forward("[::1]:{port}", "Services"),
+    "raw TCP forward to an unparseable port": _raw_forward("127.0.0.1:not-a-port", "TCP"),
+}
+
+
+@pytest.mark.parametrize("variant", UNVERIFIED_PEERS)
+def test_unverified_peer_refuses_tailnet_identity(tmp_path, variant):
+    spec = UNVERIFIED_PEERS[variant]
+    check = spec["check"]()
+    client, m = make_client(tmp_path, spec.get("allowed", [LOGIN]), check)
+    if "forward" in spec:
+        target, where = spec["forward"]
+        check.serve = lambda: with_tcp_forward(target.format(port=m.cfg.port), where)
+    with client:
+        for login in spec.get("logins", (LOGIN,)):
+            owner = {"Tailscale-User-Login": login}
+            assert client.get("/me", headers=owner).status_code == 401
+            assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
+                               headers=owner).status_code == 401
     assert m.db.list_api_keys() == []
+    if "lookups" in spec:  # a failure is not cached, so each of the two requests asks; an unsupported platform never asks
+        assert check.lookups == spec["lookups"]
+    if spec.get("uncached"):
+        assert check.cached(CLIENT) is False
 
 
 def test_the_same_login_from_tailscaled_is_the_owner(tmp_path):
@@ -63,28 +129,6 @@ def test_the_same_login_from_tailscaled_is_the_owner(tmp_path):
     with client:
         assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()["role"] == "owner"
     assert seen and seen[0][0] == CLIENT
-
-
-def test_open_owner_mode_cannot_be_reached_with_a_forged_login(tmp_path):
-    client, m = make_client(tmp_path, [], not_tailscaled())
-    with client:
-        for login in (LOGIN, "anyone@example.com"):
-            assert client.get("/me", headers={"Tailscale-User-Login": login}).status_code == 401
-            assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
-                               headers={"Tailscale-User-Login": login}).status_code == 401
-        assert m.db.list_api_keys() == []
-
-
-def test_a_failed_lookup_ignores_the_headers(tmp_path):
-    def broken(client, server):
-        raise PermissionError("connection table unavailable")
-
-    check = fake_tailscaled_check(owner=broken)
-    client, _ = make_client(tmp_path, [LOGIN], check)
-    with client:
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-    assert check.lookups == 2  # a failure is not cached
 
 
 def test_ignored_headers_are_removed_before_any_route_reads_them(forged):
@@ -106,26 +150,12 @@ def test_the_local_owner_token_and_api_tokens_still_work_beside_ignored_headers(
         **header, "Authorization": f"Bearer {created.json()['key']}"}).status_code == 200
 
 
-def test_unsupported_platforms_ignore_the_headers_unless_configured(tmp_path):
+def test_unsupported_platforms_trust_the_headers_only_when_configured(tmp_path):
     client, m = make_client(tmp_path, [LOGIN], fake_tailscaled_check(platform_ok=lambda: False))
     with client:
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
         m.cfg.trust_unverified_identity_headers = True
         assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).json()["role"] == "owner"
     assert m.tailscale_peer.lookups == 0
-
-
-def test_the_real_tailscaled_run_by_someone_else_is_not_the_service(tmp_path):
-    """Any local user can start the installed tailscaled.exe in userspace mode as a proxy and pick its headers (#623)."""
-    check = fake_tailscaled_check(owner=lambda client, server: 5151, service=lambda: 4242)
-    client, m = make_client(tmp_path, [LOGIN], check)
-    with client:
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN,
-                                          "X-Forwarded-For": FAKE_PEER_IP}).status_code == 401
-        assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
-                           headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-        assert m.db.list_api_keys() == []
-    assert check.cached(CLIENT) is False
 
 
 def test_the_network_child_the_service_starts_is_tailscaled(tmp_path):
@@ -145,16 +175,6 @@ def test_the_network_child_the_service_starts_is_tailscaled(tmp_path):
     # Not the service's own child: the real tailscaled.exe started by some other process.
     assert not fake_tailscaled_check(owner=lambda client, server: 5151, service=lambda: 7500,
                                      child_of=child_of).verify(CLIENT, SERVER)
-
-
-def test_a_missing_or_unreadable_service_ignores_the_headers(tmp_path):
-    def missing():
-        raise LookupError("service 'Tailscale' does not exist")
-
-    for service in (missing, lambda: None):  # psutil gives no PID for a stopped service
-        client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check(service=service))
-        with client:
-            assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
 
 
 def test_tailscaled_forwarding_this_node_itself_is_not_the_owner(tmp_path):
@@ -229,41 +249,6 @@ def test_a_forwarded_address_from_an_unverified_peer_changes_nothing(forged):
     assert not m.tailscale_peer.own_ips_cached()
 
 
-def test_unknown_node_addresses_refuse_every_forwarded_request(tmp_path):
-    def unavailable():
-        raise FileNotFoundError("tailscale.exe not found")
-
-    client, _ = make_client(tmp_path, [LOGIN], fake_tailscaled_check(tailscale_ips=unavailable))
-    with client:
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN,
-                                          "X-Forwarded-For": FAKE_PEER_IP}).status_code == 401
-
-
-def with_tcp_forward(target, where="TCP"):
-    """The fake serve config plus a raw TCP forward (`tailscale serve --tcp`), on the node or in a foreground session
-    or a service."""
-    handler = {"TCP": {"8443": {"TCPForward": target}}}
-    if where == "TCP":
-        return {**FAKE_SERVE_CONFIG, "TCP": {**FAKE_SERVE_CONFIG["TCP"], "8443": {"TCPForward": target}}}
-    if where == "Foreground":
-        return {**FAKE_SERVE_CONFIG, "Foreground": {"session-1": handler}}
-    return {**FAKE_SERVE_CONFIG, "Services": {"svc:harness": handler}}
-
-
-@pytest.mark.parametrize("target, where", [("127.0.0.1:{port}", "TCP"), ("localhost:{port}", "Foreground"),
-                                           ("[::1]:{port}", "Services"), ("127.0.0.1:not-a-port", "TCP")])
-def test_a_raw_tcp_forward_to_the_daemon_port_refuses_every_tailnet_identity(tmp_path, target, where):
-    """tailscaled adds no headers on a raw TCP forward, so a tailnet peer could write its own login (#623)."""
-    check = fake_tailscaled_check()
-    client, m = make_client(tmp_path, [LOGIN], check)
-    check.serve = lambda: with_tcp_forward(target.format(port=m.cfg.port), where)
-    with client:
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-        assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
-                           headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-    assert m.db.list_api_keys() == []
-
-
 def test_a_raw_tcp_forward_to_another_port_leaves_the_daemon_alone(tmp_path):
     check = fake_tailscaled_check()
     client, m = make_client(tmp_path, [LOGIN], check)
@@ -295,18 +280,6 @@ def test_a_raw_forward_seen_on_another_connection_withdraws_cached_approvals(tmp
     assert not check.verify(("127.0.0.1", 51299), SERVER)
     assert not check.verify(CLIENT, SERVER)
     assert check.lookups == 2
-
-
-def test_an_unreadable_serve_config_refuses_every_tailnet_identity(tmp_path):
-    def unreadable():
-        raise OSError("LocalAPI access denied")
-
-    check = fake_tailscaled_check(serve=unreadable)
-    client, _ = make_client(tmp_path, [LOGIN], check)
-    with client:
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-        assert client.get("/me", headers={"Tailscale-User-Login": LOGIN}).status_code == 401
-    assert check.lookups == 2  # a failure is not cached, so the next request asks again
 
 
 # --- the check itself -------------------------------------------------------------------------------------------

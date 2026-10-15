@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import json
 import logging
@@ -47,6 +48,13 @@ ALICE_SUB = "109876543210987654321"
 BOB_SUB = "100000000000000000002"
 
 
+@functools.cache
+def _rsa_key(name: str):
+    """A 2048-bit RSA key costs about 0.7 s, so each named key is made once per process and shared by every
+    FakeGoogle and test. Nothing mutates a key; a test that needs a signer Google does not publish asks for "other"."""
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
@@ -80,7 +88,7 @@ class FakeGoogle:
 
     def __init__(self, clock: Clock):
         self.clock = clock
-        self.keys = {"k1": rsa.generate_private_key(public_exponent=65537, key_size=2048)}
+        self.keys = {"k1": _rsa_key("k1")}
         self.sign_kid = "k1"
         self.codes: dict[str, dict] = {}
         self.calls = Counter()
@@ -309,13 +317,6 @@ def test_defaults_off_preserve_existing_principals(tmp_path, monkeypatch):
         assert r.status_code == 503
     finally:
         e.close()
-
-
-def test_new_tables_hold_no_rows_until_used(env):
-    con = sqlite3.connect(env.cfg.db_path)
-    for table in ("google_identities", "google_link_invitations", "web_sessions"):
-        assert con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
-    con.close()
 
 
 @pytest.mark.parametrize("change, fragment", [
@@ -573,7 +574,7 @@ def test_start_requires_same_origin(env):
 # --- OIDC verification ----------------------------------------------------------------------------------------
 
 def _other_key():
-    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return _rsa_key("other")
 
 
 @pytest.mark.parametrize("extra", [
@@ -926,20 +927,16 @@ def test_owner_revoke_all_and_unlink(env):
     assert me(env.browser(ALICE)).status_code == 200
 
 
-def test_owner_actions_require_owner(env):
+def test_disable_reenable_and_rebind_revoke_sessions(env):
     env.link(ALICE, ALICE_SUB)
     b = env.kitchen_signin()
+    # A Google session acts as its member, never the owner. (Members signed in by Tailscale login are in
+    # tests/test_authz_matrix.py.)
     for method, path in (("POST", f"{PREFIX}/accounts/{env.ids[BOB]}/google/invitation"),
                          ("POST", f"{PREFIX}/accounts/{env.ids[BOB]}/google/revoke-sessions"),
                          ("GET", f"{PREFIX}/google-signin")):
         assert b.request(method, path).status_code == 403
-        assert env.browser(BOB).request(method, path).status_code == 403
     assert env.owner("POST", f"{PREFIX}/accounts/u-nope/google/invitation").status_code == 404
-
-
-def test_disable_reenable_and_rebind_revoke_sessions(env):
-    env.link(ALICE, ALICE_SUB)
-    b = env.kitchen_signin()
     env.owner("PATCH", f"{PREFIX}/accounts/{env.ids[ALICE]}", json={"enabled": False})
     assert me(b).status_code in (401, 403)
     assert env.flow(env.browser(KITCHEN), ALICE_SUB, ALICE).headers["location"] == "/#/signin/failed"

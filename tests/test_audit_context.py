@@ -1,10 +1,11 @@
 """Audit actor context and owner review (#467)."""
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 
-from harness import audit_context
+from harness import audit_context, migrations, operation_audit
 from harness.admin import PREFIX
 from harness.db import Database
 import pytest
@@ -37,27 +38,12 @@ def _rows(client, **params) -> dict:
 
 def test_legacy_rows_survive_migration(tmp_path):
     path = tmp_path / "x.sqlite3"
-    db = Database(path)
-    db.conn.execute("DROP TABLE namespace_audit")  # recreate an actual v52 schema, before private trails
-    db.conn.execute("ALTER TABLE api_keys DROP COLUMN catalog_app_id")  # and before catalog app ids (#518)
-    db.conn.execute("ALTER TABLE pairing_codes DROP COLUMN catalog_app_id")
-    db.conn.execute("DROP TABLE pairing_requests")  # and before pairing requests (#519)
-    db.conn.execute("DROP TABLE idempotency_keys")  # and before idempotent creates (#462)
-    db.conn.execute("DROP TABLE hub_claim")  # and before the Hub claim (#543)
-    db.conn.execute("DROP INDEX endpoint_requests_key")  # and before the request count's index (#669)
-    db.conn.execute("DROP INDEX sessions_list")  # and before the session list's indexes (#663)
-    db.conn.execute("DROP INDEX sessions_status")
-    db.conn.execute("DROP INDEX sessions_owner_status")  # and before the owner count's index (#668)
-    db.conn.execute("ALTER TABLE sessions DROP COLUMN tool_profile")  # and before tool profiles (#638)
-    db.conn.execute("ALTER TABLE usage DROP COLUMN tool_profile")
-    db.conn.execute("ALTER TABLE api_keys DROP COLUMN role")
-    db.conn.execute("DROP TABLE account_audit")
-    db.conn.execute("CREATE TABLE account_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL,"
-                    " actor_id TEXT NOT NULL, target_id TEXT NOT NULL, action TEXT NOT NULL,"
-                    " outcome TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')")
+    shipped = [step for step in migrations.discover() if step[0] <= 52]
+    assert shipped[-1][0] == 52
+    db = Database(path, migrations=shipped)  # an actual v52 schema, before the audit context columns
     db.conn.execute("INSERT INTO account_audit (ts, actor_id, target_id, action, outcome, detail) "
                     "VALUES (?, 'owner', 'u', 'create', 'ok', 'old')", (time.time(),))
-    db.conn.execute("PRAGMA user_version = 52")
+    assert db.conn.execute("PRAGMA user_version").fetchone()[0] == 52
     db.close()
     db = Database(path)
     row = db.audit_page()["items"][0]
@@ -74,17 +60,17 @@ def test_pagination_same_timestamp_inserts_and_clock_step(tmp_path, monkeypatch)
     db = Database(tmp_path / "x.sqlite3")
     base = time.time()
     monkeypatch.setattr(time, "time", lambda: base)
-    for i in range(1203):
+    for i in range(13):  # the cursor logic is the same at any size; a page of 5 takes three pages
         db.insert_audit("owner", f"t{i}", "quota", "ok")
-    first = db.audit_page(500)
+    first = db.audit_page(5)
     seen = [r["id"] for r in first["items"]]
     monkeypatch.setattr(time, "time", lambda: base - 3600)  # the clock steps backwards
     db.insert_audit("owner", "late", "quota", "ok")
     page = first
     while page["next_before_id"] is not None:
-        page = db.audit_page(500, page["next_before_id"])
+        page = db.audit_page(5, page["next_before_id"])
         seen += [r["id"] for r in page["items"]]
-    assert len(seen) == len(set(seen)) == 1203
+    assert len(seen) == len(set(seen)) == 13
     assert seen == sorted(seen, reverse=True)
     assert db.audit_page(5, actor_id="owner", target_id="t7")["items"][0]["target_id"] == "t7"
     assert db.audit_page(5, since=base, until=base + 1)["items"]
@@ -121,17 +107,6 @@ def test_actor_context_for_ambient_and_two_owner_keys(hh):
     assert _rows(client, key_id=k2["id"])["items"] == [r2]
 
 
-def test_app_token_and_members_cannot_read_or_act(hh):
-    client, _ = hh
-    app_key = _key(client, "app", kind="app", scopes=())
-    a = create_member(client, ALICE, "Alice")
-    for headers in ({**_bearer(app_key["key"]), **H(OWNER)}, H(ALICE)):
-        assert client.get(f"{PREFIX}/audit", headers=headers).status_code in (401, 403)
-        assert client.patch(f"{PREFIX}/accounts/{a['user_id']}", json={"max_running": 5},
-                            headers=headers).status_code in (401, 403)
-    assert client.delete(f"{PREFIX}/audit", headers=H(OWNER)).status_code in (404, 405)
-
-
 def test_metadata_allowlist_and_no_values(hh):
     client, _ = hh
     a = create_member(client, ALICE, "Alice Secret")
@@ -142,10 +117,36 @@ def test_metadata_allowlist_and_no_values(hh):
     rows = {r["action"]: r for r in _rows(client)["items"]}
     assert rows["rename"]["metadata"] == {"fields": ["display_name"]}
     assert rows["quota"]["metadata"]["new_disk_quota_bytes"] == 5_000_000
-    cleaned = audit_context.clean_metadata("quota", {
+
+
+SENTINEL = "SECRET/path/prompt/note/financial/health/command"
+# (id, action, raw metadata, what survives). Only allowlisted, safely typed values are kept; nothing else is stored.
+CLEAN_METADATA = [
+    ("account-fields-and-types", "quota", {
         "fields": ["login", "/etc/passwd"], "path": "C:/secret", "new_disk_quota_bytes": "x", "token": "sk-1",
-        "old_disk_quota_bytes": True, "reason": "free text secret"})
-    assert cleaned == {"fields": ["login"]}
+        "old_disk_quota_bytes": True, "reason": "free text secret"}, {"fields": ["login"]}),
+    ("credential-grant", "provider_grant.set", {
+        "grant_id": "pc-abc12", "secret_ref": "billing-sentinel-ref", "path": "C:/x", "backend": "claude",
+        "policy": "api_key; drop", "fields": ["policy", "/etc/passwd"], "models": ["m"], "replaced": "yes",
+        "reason": "free text"}, {"grant_id": "pc-abc12", "backend": "claude", "fields": ["policy"]}),
+    ("key-scopes", "key.create", {"scopes": ["sessions", "bad scope!"], "kind": "x"}, {"scopes": ["sessions"]}),
+    ("job-fields-must-be-a-list", "job.update", {"fields": SENTINEL, "enabled": 1}, {}),
+    ("checkpoint-bounds", "checkpoint.rewind", {"turn": 2**53, "session_id": 42}, {}),
+    ("maintenance-count", "maintenance.cleanup", {"removed": 3}, {"removed": 3}),
+    ("every-operation-action", None, {
+        "prompt": SENTINEL, "note": SENTINEL, "path": SENTINEL, "fields": [SENTINEL, "enabled"],
+        "session_id": SENTINEL, "turn": True, "decision": SENTINEL, "reviewer_mode": SENTINEL, "expired": -1}, None),
+]
+
+
+@pytest.mark.parametrize("action, raw, expected", [row[1:] for row in CLEAN_METADATA],
+                         ids=[row[0] for row in CLEAN_METADATA])
+def test_clean_metadata_keeps_only_allowlisted_safe_values(action, raw, expected):
+    if action is None:  # no operation action keeps a free-text value
+        for operation in operation_audit.ACTIONS:
+            assert SENTINEL not in json.dumps(audit_context.clean_metadata(operation, raw)), operation
+        return
+    assert audit_context.clean_metadata(action, raw) == expected
 
 
 def test_audit_failure_rolls_back_account_change(hh, monkeypatch):

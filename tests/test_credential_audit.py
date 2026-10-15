@@ -7,7 +7,7 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from harness import audit_context, credential_audit
+from harness import credential_audit
 from harness.admin import PREFIX
 from harness.api import create_app
 from harness.config import BackendConfig, RunnerConfig
@@ -305,12 +305,3 @@ def test_unknown_denials_are_capped(hh, monkeypatch):
     for _ in range(6):
         client.post("/api/v1/pair", headers={"Origin": ORIGIN}, json={"code": "hp-nope-nope-nope"})
     assert len(_by_action(client, "pairing.redeem", outcome="denied")) == 3
-
-
-def test_metadata_allowlist_drops_everything_else():
-    cleaned = audit_context.clean_metadata("provider_grant.set", {
-        "grant_id": "pc-abc12", "secret_ref": REF, "path": "C:/x", "backend": "claude", "policy": "api_key; drop",
-        "fields": ["policy", "/etc/passwd"], "models": ["m"], "replaced": "yes", "reason": "free text"})
-    assert cleaned == {"grant_id": "pc-abc12", "backend": "claude", "fields": ["policy"]}
-    assert audit_context.clean_metadata("key.create", {"scopes": ["sessions", "bad scope!"], "kind": "x"}) == {
-        "scopes": ["sessions"]}

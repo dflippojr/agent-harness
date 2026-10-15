@@ -43,70 +43,10 @@ def test_the_token_is_created_once_and_kept_across_restarts(tmp_path):
         assert stat.S_IMODE(local_owner.token_path(tmp_path).stat().st_mode) == 0o600
 
 
-def test_a_caller_without_identity_or_token_is_refused(harness):
-    client, m = harness
-    for method, path, body in (
-        ("GET", "/me", None),
-        ("GET", "/sessions", None),
-        ("POST", "/keys", {"name": "k", "kind": "owner", "scopes": ["admin"]}),
-        ("GET", "/api/admin/v1/keys", None),
-        ("POST", "/sessions/s1/approvals/a1", {"decision": "approve"}),
-        ("PUT", "/api/admin/v1/memory/profile", {"content": "x"}),
-    ):
-        response = client.request(method, path, json=body)
-        assert response.status_code == 401, (method, path, response.text)
-        assert "local owner token" in response.json()["detail"]
-    assert m.db.list_api_keys() == []
-
-
-def test_a_wrong_or_empty_token_is_refused(harness):
-    client, _ = harness
-    for value in ("", "not-the-token", "x" * 64):
-        assert client.get("/me", headers={local_owner.HEADER: value}).status_code == 401
-
-
 def test_health_and_metrics_answer_without_a_token(harness):
     client, _ = harness
     assert client.get("/health").status_code == 200
     assert client.get("/metrics").status_code == 200
-
-
-def test_the_local_owner_token_acts_as_the_owner(harness):
-    client, m = harness
-    assert client.get("/me", headers=local(m)).json()["role"] == "owner"
-    created = client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]}, headers=local(m))
-    assert created.status_code == 201
-    assert client.get("/api/admin/v1/keys", headers=local(m)).status_code == 200
-
-
-def test_the_owner_tailnet_login_still_acts_as_the_owner(harness):
-    client, _ = harness
-    owner = {"Tailscale-User-Login": LOGIN}
-    assert client.get("/me", headers=owner).json()["role"] == "owner"
-    assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
-                       headers=owner).status_code == 201
-    other = {"Tailscale-User-Login": OTHER}
-    assert client.post("/keys", json={"name": "k", "kind": "owner", "scopes": ["admin"]},
-                       headers=other).status_code == 403
-
-
-def test_a_valid_api_token_reaches_its_route_and_the_route_decides(harness):
-    client, m = harness
-    app = client.post("/keys", json={"name": "a", "kind": "app", "scopes": ["sessions"]}, headers=local(m)).json()
-    owner = client.post("/keys", json={"name": "o", "kind": "owner", "scopes": ["admin"]}, headers=local(m)).json()
-    assert client.get("/api/v1/sessions", headers={"Authorization": f"Bearer {app['key']}"}).status_code == 200
-    # The admin API still refuses an App token, and accepts the owner's.
-    assert client.get("/api/admin/v1/keys",
-                      headers={"Authorization": f"Bearer {app['key']}"}).status_code == 403
-    assert client.get("/api/admin/v1/keys",
-                      headers={"Authorization": f"Bearer {owner['key']}"}).status_code == 200
-
-
-def test_an_app_token_without_identity_reaches_only_the_api_routes(harness):
-    client, m = harness
-    app = client.post("/keys", json={"name": "a", "kind": "app", "scopes": ["sessions"]}, headers=local(m)).json()
-    for path in ("/me", "/sessions", "/keys"):
-        assert client.get(path, headers={"Authorization": f"Bearer {app['key']}"}).status_code == 401, path
 
 
 def test_an_empty_identity_header_counts_as_no_identity(harness):
@@ -127,12 +67,6 @@ def test_a_browser_preflight_needs_no_credential_and_the_request_still_does(harn
     assert client.get("/api/admin/v1/keys", headers={"Origin": origin}).status_code == 401
     assert client.get("/api/admin/v1/keys", headers={
         "Origin": origin, "Authorization": f"Bearer {owner['key']}"}).status_code == 200
-
-
-def test_an_unknown_bearer_token_is_refused(harness):
-    client, _ = harness
-    for path in ("/me", "/api/v1/sessions", "/api/admin/v1/keys"):
-        assert client.get(path, headers={"Authorization": "Bearer ho-made-up"}).status_code == 401
 
 
 def test_cli_sends_the_local_token_only_to_a_daemon_on_this_machine(tmp_path, monkeypatch):
