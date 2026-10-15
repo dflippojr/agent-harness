@@ -129,12 +129,14 @@ def test_app_caps_are_owner_only_and_reset_to_the_default(tmp_path):
 
 
 @pytest.mark.parametrize("rows, eligible", [
-    pytest.param([("parked", "waiting_approval"), ("queued", "queued"), ("owners", "queued", "owner")],
+    pytest.param([("parked", "waiting_approval", "app"), ("queued", "queued", "app"), ("owners", "queued", "owner")],
                  {"parked": True, "queued": False, "owners": True}, id="a-parked-session-holds-its-slot-and-comes-back"),
-    pytest.param([("parked", "done"), ("queued", "queued")], {"queued": True}, id="a-slot-frees-when-the-parked-one-ends"),
-    pytest.param([("parked", "waiting_approval"), ("parked2", "waiting_approval"), ("queued", "queued")],
+    pytest.param([("parked", "done", "app"), ("queued", "queued", "app")], {"queued": True},
+                 id="a-slot-frees-when-the-parked-one-ends"),
+    pytest.param([("parked", "waiting_approval", "app"), ("parked2", "waiting_approval", "app"),
+                  ("queued", "queued", "app")],
                  {"parked": True, "parked2": True, "queued": False}, id="parked-sessions-over-a-lowered-cap-come-back"),
-    pytest.param([("running", "running", "lagging"), ("queued", "queued")], {"queued": False},
+    pytest.param([("running", "running", "lagging"), ("queued", "queued", "app")], {"queued": False},
                  id="a-committed-running-counts-before-the-index-catches-up"),
 ])
 def test_the_apps_running_cap_decides_who_the_scheduler_may_admit(tmp_path, rows, eligible):
@@ -144,9 +146,10 @@ def test_the_apps_running_cap_decides_who_the_scheduler_may_admit(tmp_path, rows
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
     app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
     assert m.db.set_app_limits(app_id, {"max_running": 1})
-    for sid, status, *how in rows:
-        _insert(m, sid, "queued" if how == ["lagging"] else status, app_id="" if how == ["owner"] else app_id)
-        if how == ["lagging"]:
+    for sid, status, owned_by in rows:  # owned_by: "app", "owner" (outside the App's cap) or "lagging"
+        lagging = owned_by == "lagging"  # its row says `status` already, but the index still says `queued`
+        _insert(m, sid, "queued" if lagging else status, app_id="" if owned_by == "owner" else app_id)
+        if lagging:
             with m.db._using(app_id, write=True) as store:  # the row, without the index's callback
                 store.update_session(sid, status=status)
     for sid, expected in eligible.items():
