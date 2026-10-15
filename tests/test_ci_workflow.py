@@ -31,7 +31,6 @@ EXPECTED_SKIP_PATHS = (
     "LICENSE",
     "third_party/Real-ESRGAN.LICENSE",
     "docs/compatibility.md",
-    "docs/config-registry.md",
     "docs/flux-fast.md",
     "docs/issue-13-lightning-results.md",
     "docs/smart-approvals.md",
