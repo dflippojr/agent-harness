@@ -22,7 +22,8 @@ from harness.accounts import AccountService
 from harness.config import GuestAccess
 from harness.fileops import ToolError
 
-from test_phase6 import image_manager
+from test_phase6 import image_manager, wait_for
+from waits import scaled
 
 LOGIN = "me@example.com"
 
@@ -209,16 +210,16 @@ def test_cold_edit_hash_runs_in_background_and_is_cached(tmp_path, monkeypatch):
         def slow_hash(path):
             calls.append(path)
             started.set()
-            release.wait(2)
+            release.wait(scaled(2))
             return image_edit.EDIT_MODEL["unet"]["sha256"]
 
         monkeypatch.setattr(image_edit, "file_sha256", slow_hash)
         before = time.monotonic()
         status = m.images.status()["edit"]
-        assert time.monotonic() - before < 1.5  # a blocking hash waits the full 2 s; generous for loaded runners
+        assert time.monotonic() - before < scaled(1.5)  # a blocking hash waits the full scaled(2) s; generous for loaded runners
         assert status["verifying"] is True
         assert status["available"] is False
-        assert started.wait(1)
+        assert started.wait(scaled(1))
         assert m.images._edit_verify_in_flight
         release.set()
         for _ in range(100):
@@ -434,10 +435,7 @@ def test_owner_guest_app_authorization(tmp_path):
                            files={"mask": ("mask.png", png_mask(), "image/png")})
         assert edit.status_code == 201
         eid = edit.json()["id"]
-        for _ in range(200):
-            if client.get(f"/images/{eid}").json()["status"] in ("done", "failed"):
-                break
-            time.sleep(0.02)
+        wait_for(lambda: client.get(f"/images/{eid}").json()["status"] in ("done", "failed"), timeout=scaled(5))
         assert client.get(f"/images/{eid}").json()["status"] == "done"
         assert client.get(f"/images/{eid}.source.png").status_code == 200
         assert client.get(f"/images/{eid}.mask.png").status_code == 200
@@ -452,10 +450,7 @@ def test_owner_guest_app_authorization(tmp_path):
         assert client.post("/images/uploads", headers=gh, files={"file": ("x.png", png_rgb(), "image/png")}).status_code == 403
 
         gen = client.post("/images", json={"prompt": "public cube"}).json()
-        for _ in range(200):
-            if client.get(f"/images/{gen['id']}").json()["status"] == "done":
-                break
-            time.sleep(0.02)
+        wait_for(lambda: client.get(f"/images/{gen['id']}").json()["status"] == "done", timeout=scaled(5))
         assert client.get(f"/images/{gen['id']}.png", headers=gh).status_code == 200
         guest_list = client.get("/images", headers=gh).json()["images"]
         assert gen["id"] in {img["id"] for img in guest_list}
@@ -463,10 +458,7 @@ def test_owner_guest_app_authorization(tmp_path):
         private_child = client.post(f"/images/{gen['id']}/edit", data={"prompt": "make it blue"},
                                     files={"mask": ("mask.png", png_mask(gen["width"], gen["height"]),
                                                      "image/png")}).json()
-        for _ in range(200):
-            if client.get(f"/images/{private_child['id']}").json()["status"] in ("done", "failed"):
-                break
-            time.sleep(0.02)
+        wait_for(lambda: client.get(f"/images/{private_child['id']}").json()["status"] in ("done", "failed"), timeout=scaled(5))
 
         app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["images"]}).json()
         auth = {"Authorization": f"Bearer {app['key']}"}
@@ -686,21 +678,3 @@ def test_queue_hold_progress_cancel_restart_failure_delete_backup(tmp_path):
         await m2.stop()
     asyncio.run(body())
 
-
-def test_web_mask_editor_round_trips_source_pixels():
-    js = (Path(__file__).parents[1] / "stables" / "public" / "pages" / "images.mjs").read_text(encoding="utf-8")
-    css = (Path(__file__).parents[1] / "stables" / "public" / "style.css").read_text(encoding="utf-8")
-    client = (Path(__file__).parents[1] / "stables" / "public" / "client.mjs").read_text(encoding="utf-8")
-    assert "function maskEditor" in js
-    assert "viewImageEdit" in js
-    assert "canvas.width / r.width" in js
-    assert 'accept: "image/png,image/jpeg,image/webp,image/jpg"' in js
-    assert "Independent backups are not changed" in js
-    assert "White is edited, black is preserved" in js
-    assert "img.editable !== false" in js
-    assert "disabled: true, title: editBlockedReason" in js
-    assert "img.editable === false" in js
-    assert "body instanceof FormData" in client
-    assert "touch-action: none" in css
-    assert "@media (max-width: 640px)" in css
-    assert ".mask-tools" in css

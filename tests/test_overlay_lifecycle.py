@@ -12,6 +12,7 @@ candidate restores LKG.
 from __future__ import annotations
 
 import copy
+import os
 import random
 from typing import Any
 
@@ -65,7 +66,7 @@ LIVE_VALUES = {
     "backends.local.model": ("fake", "qwen-a"),
 }
 BASE_MODELS = ("fake", "qwen-a")
-N_SEQUENCES = 200
+N_SEQUENCES = int(os.environ.get("HARNESS_OVERLAY_SEQUENCES", "200"))  # CI keeps all 200
 STEPS = 12
 SEED = 66
 UNSET = object()

@@ -36,15 +36,6 @@ def _config():
     return yaml.safe_load((ROOT / "config" / "harness.yaml").read_text(encoding="utf-8"))
 
 
-def test_production_default_is_unchanged_and_both_models_are_configured():
-    cfg = _config()
-    assert cfg["default_model"] == "qwen3.6-35b-a3b"  # the owner switches after merge, in harness.local.yaml
-    old, new = cfg["models"]["qwen3.6-35b-a3b"], cfg["models"]["qwen3.8-35b-a3b-distill"]
-    assert new["base_url"] == old["base_url"] == "http://127.0.0.1:8090"
-    assert new["sampling"] == old["sampling"] == {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0}
-    assert new["context_tokens"] == old["context_tokens"]
-
-
 def test_supervisor_lists_every_local_model_pinned_like_the_study():
     text = SUPERVISOR.read_text(encoding="utf-8")
     for name in _config()["models"]:

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
-from harness.config import GpuGuardConfig
+from harness.cli_backends import ClaudeSession
+from harness.config import BackendConfig, GpuGuardConfig
 from harness_modules.local_model.service import CLEAR, GIB, PAUSED, MemoryWatch
 from harness_modules.local_model.service import memory_reading as real_memory_reading  # before conftest's plenty_of_ram patches it
 from harness.llm import Completion
@@ -16,6 +19,7 @@ from harness_modules.local_model.warmup import LOW_MEMORY, PAUSED as MODEL_PAUSE
 
 from test_daemon import Script, events, make_cfg, wait_status
 from test_phase5 import GAME, FakeControl, FakeDetect, make_guard
+from test_phase8 import FAKE_CLAUDE
 from waits import scaled
 
 
@@ -39,8 +43,9 @@ class FakeRam:
         return {"available": int(self.available), "total": 32 * GIB, "commit": 20 * GIB, "commit_limit": 40 * GIB}
 
 
-def guarded_manager(tmp_path, steps=None, ram: FakeRam | None = None, **guard_cfg):
+def guarded_manager(tmp_path, steps=None, ram: FakeRam | None = None, backends: dict | None = None, **guard_cfg):
     cfg = make_cfg(tmp_path)
+    cfg.backends.update(backends or {})
     cfg.gpu_guard = GpuGuardConfig(enabled=True, resume_after_seconds=0, poll_seconds=3600, **guard_cfg)
     m = Manager(cfg, chat=Script(steps or [Completion(content="done")]))
     m.guard.detector, m.guard.control = FakeDetect(), FakeControl()
@@ -58,46 +63,50 @@ async def hold_and_release(m) -> None:
     await m.guard.check()
 
 
+async def _until(predicate, timeout: float = 5) -> None:
+    """Poll until `predicate()` holds, for up to `timeout` seconds (scaled for slow runners)."""
+    deadline = time.monotonic() + scaled(timeout)
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not met in time"
+        await asyncio.sleep(0.01)
+
+
 # lazy resume
-def test_hold_ending_with_nothing_queued_leaves_model_unloaded():
+@pytest.mark.parametrize("ram_gb, want_model, trigger, state, starts, flag", [
+    pytest.param(None, False, "hold", CLEAR, 0, True, id="hold-ends-with-nothing-queued-stays-parked"),
+    pytest.param(None, True, "hold", CLEAR, 1, False, id="hold-ends-with-work-waiting-reloads"),
+    pytest.param(None, False, "manual", CLEAR, 0, True, id="manual-resume-does-not-load"),
+    pytest.param(30, False, "manual", CLEAR, 0, True, id="enough-ram-but-no-waiting-request-stays-parked"),
+    pytest.param(9, True, "manual", PAUSED, 0, True, id="a-waiting-request-without-enough-ram-keeps-the-pause"),
+])
+def test_what_a_guard_does_when_the_pause_ends(ram_gb, want_model, trigger, state, starts, flag):
+    """A pause ends because the game quit (`hold`) or the owner resumed it (`manual`): the model loads again only when
+    a request is waiting for it and (if RAM is watched) enough is free; otherwise it stays parked, flag kept."""
     async def body():
-        guard, detect, control, scheduler, log = make_guard(lazy_load=True, resume_after_seconds=0)
-        detect.signals = [GAME]
+        watched = {"min_available_ram_gb": 4, "model_ram_gb": 14} if ram_gb is not None else {}
+        guard, detect, control, scheduler, log = make_guard(
+            lazy_load=True, resume_after_seconds=0 if trigger == "hold" else 999, **watched)
+        if ram_gb is not None:
+            guard.memory = MemoryWatch(4, model_gb=14, read=FakeRam(ram_gb), ttl=0)
+        guard.want_model = lambda: want_model
+        if trigger == "hold":
+            detect.signals = [GAME]
+        else:
+            guard.pause()
         await guard.check()
         assert guard.state == PAUSED and control.flag
-        detect.signals = []
-        await guard.check()
-        assert guard.state == CLEAR
-        assert not scheduler.paused
-        assert control.starts == 0 and control.flag  # parked: nothing loads the model
-        assert guard.status()["parked"]
-        assert [k for k, _ in log] == ["pause", "resume"]
-    asyncio.run(body())
-
-
-def test_hold_ending_with_work_waiting_reloads_the_model():
-    async def body():
-        guard, detect, control, scheduler, _ = make_guard(lazy_load=True, resume_after_seconds=0)
-        guard.want_model = lambda: True
-        detect.signals = [GAME]
-        await guard.check()
-        detect.signals = []
+        if trigger == "hold":
+            detect.signals = []
+        else:
+            guard.resume()
         await guard.check()
         await guard.check()
-        assert control.starts == 1 and not control.flag
-        assert guard.state == CLEAR
-    asyncio.run(body())
-
-
-def test_manual_resume_does_not_load_the_model():
-    async def body():
-        guard, _, control, scheduler, _ = make_guard(lazy_load=True, resume_after_seconds=999)
-        guard.pause()
-        await guard.check()
-        assert guard.state == PAUSED
-        guard.resume()
-        await guard.check()
-        assert guard.state == CLEAR and control.starts == 0 and control.flag
+        assert (guard.state, control.starts, control.flag) == (state, starts, flag)
+        assert scheduler.paused == (state == PAUSED)
+        if trigger == "hold":
+            assert [k for k, _ in log] == ["pause", "resume"]
+        if not starts:
+            assert guard.status()["parked"] or state == PAUSED
     asyncio.run(body())
 
 
@@ -111,6 +120,7 @@ def _guard_with_ram(gb, want):
 
 
 def test_resume_with_load_low_keeps_the_flag_and_reports_why():
+    """And once RAM frees up, the next check loads the model and clears the flag (the enough-RAM end state)."""
     async def body():
         guard, control, scheduler, ram = _guard_with_ram(9, True)
         guard.pause()
@@ -123,28 +133,6 @@ def test_resume_with_load_low_keeps_the_flag_and_reports_why():
         ram.available = 30 * GIB  # RAM frees up: the next check admits the load
         await guard.check()
         assert control.starts == 1 and not control.flag and guard.status()["memory_hold"] == ""
-    asyncio.run(body())
-
-
-def test_resume_with_enough_ram_and_a_waiting_request_removes_the_flag():
-    async def body():
-        guard, control, _, _ = _guard_with_ram(30, True)
-        guard.pause()
-        await guard.check()
-        guard.resume()
-        await guard.check()
-        assert control.starts == 1 and not control.flag
-    asyncio.run(body())
-
-
-def test_resume_with_no_waiting_request_stays_parked_even_with_enough_ram():
-    async def body():
-        guard, control, _, _ = _guard_with_ram(30, False)
-        guard.pause()
-        await guard.check()
-        guard.resume()
-        await guard.check()
-        assert guard.state == CLEAR and control.starts == 0 and control.flag
     asyncio.run(body())
 
 
@@ -206,24 +194,27 @@ def test_selection_warm_loads_only_with_headroom(tmp_path):
 
 
 def test_load_now_pins_and_keeps_alive(tmp_path, monkeypatch):
+    import harness_modules.local_model.warmup as warmup
     pings = []
 
     async def ping(self, model, verb):
         pings.append(verb)
     monkeypatch.setattr(ModelWarmer, "_ping", ping)
+    now = [time.time()]
+    monkeypatch.setattr(warmup, "time", SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic))  # the pin's clock
 
     async def body():
         m = guarded_manager(tmp_path)
         model = m.cfg.models[m.cfg.default_model]
         m.guard.control.flag = True
         m.warmer.keepalive_seconds = 0.05
-        assert await m.warmer.load_now(model, 0.3) == UNLOADED
+        assert await m.warmer.load_now(model, 300) == UNLOADED
         assert m.warmer.pinned()
-        await asyncio.sleep(0.2)
-        assert m.guard.control.starts == 1
-        assert "kept" in pings
-        await asyncio.sleep(0.3)
-        assert not m.warmer.pinned() and m.warmer.pinned_until is None
+        await _until(lambda: m.guard.control.starts == 1 and "kept" in pings)
+        assert m.warmer.pinned()
+        now[0] += 301  # the pin runs out
+        assert not m.warmer.pinned()
+        await _until(lambda: m.warmer.pinned_until is None)
     asyncio.run(body())
 
 
@@ -336,11 +327,35 @@ def test_worker_container_start_waits_for_memory(tmp_path, monkeypatch):
     asyncio.run(body())
 
 
-def test_cli_run_checks_memory_before_starting_a_container():
-    import inspect
-    from harness.runner import Runner
-    source = inspect.getsource(Runner._run_cli)
-    assert source.index("_memory_gate") < source.index("_start_cli")
+def test_a_hosted_cli_run_waits_for_memory_before_starting_its_worker(tmp_path, monkeypatch):
+    from harness_modules.local_model import service as gpu_guard
+    monkeypatch.setattr(gpu_guard, "MEMORY_POLL_SECONDS", 0.02)
+    fake = tmp_path / "fake_claude.py"
+    fake.write_text(FAKE_CLAUDE, encoding="utf-8")
+
+    async def body():
+        ram = FakeRam(2)
+        m = guarded_manager(tmp_path, ram=ram,
+                            backends={"claude": BackendConfig(enabled=True, model="claude-opus-5", max_sessions=1)})
+        made = []
+
+        def factory(**kwargs):
+            made.append(kwargs)
+            return ClaudeSession(**kwargs, command=[sys.executable, "-u", str(fake), "allow",
+                                                    str(tmp_path / "state.jsonl"), "tool-1", "python build.py"])
+        m.runner.cli_factory = factory
+        await m.start(maintenance=False)
+        s = m.create("hello", backend="claude")
+        await _until(lambda: events(m, s["id"], "waiting_memory"))
+        assert events(m, s["id"], "waiting_memory")[0]["waiting_for"] == "claude worker container"
+        await asyncio.sleep(0.1)
+        assert made == [] and not events(m, s["id"], "memory_recovered")
+        ram.available = 24 * GIB
+        await wait_status(m, s["id"], "done", "failed", timeout=15)
+        assert events(m, s["id"], "memory_recovered")
+        assert len(made) == 1
+        await m.stop()
+    asyncio.run(body())
 
 
 def test_image_batch_waits_for_memory_and_stays_parked(tmp_path, monkeypatch):
@@ -531,8 +546,8 @@ def test_a_hold_stops_a_load_waiting_on_health_without_polling(tmp_path, monkeyp
         control = m.guard.control
         control.flag, control.health = True, False  # loading: /health not OK yet
         load = asyncio.create_task(m.warmer.ensure_loaded(model))
-        await asyncio.sleep(0.05)
-        assert control.starts == 1 and not load.done()
+        await _until(lambda: control.starts == 1)
+        assert not load.done()
         m.guard.detector.signals = [GAME]
         await m.guard.check()  # PAUSING: the warmer hears about it
         await asyncio.wait_for(load, 2)
@@ -847,11 +862,10 @@ def test_guard_hold_during_a_load_keeps_the_pause_flag(tmp_path, monkeypatch):
         control = m.guard.control = SlowUnlink()
         model = m.cfg.models[m.cfg.default_model]
         load = asyncio.create_task(m.warmer.ensure_loaded(model))
-        await asyncio.sleep(0.02)
-        assert control.starts == 1
+        await _until(lambda: control.starts == 1)
         m.guard.detector.signals = [GAME]
         check = asyncio.create_task(m.guard.check())  # PAUSING, then (nothing running) stop
-        await asyncio.sleep(0.02)
+        await _until(lambda: m.guard.state != CLEAR)
         control.go.set()
         await asyncio.wait_for(check, 2)
         await asyncio.wait_for(load, 2)
@@ -872,8 +886,7 @@ def test_unload_during_a_load_now_aborts_it_and_keeps_the_model_unloaded(tmp_pat
         model = m.cfg.models[m.cfg.default_model]
         m.warmer.keepalive_seconds = 0.05
         assert await m.warmer.load_now(model, 3600) == UNLOADED
-        await asyncio.sleep(0.02)
-        assert control.starts == 1
+        await _until(lambda: control.starts == 1)
         unload = asyncio.create_task(m.guard.unload(before_stop=m.warmer.unpin))
         await asyncio.sleep(0.02)
         control.go.set()  # the unlink lands after the unload began
@@ -896,8 +909,8 @@ def test_unload_during_the_health_wait_stops_the_load(tmp_path, monkeypatch):
         control.flag, control.health = True, False
         model = m.cfg.models[m.cfg.default_model]
         await m.warmer.load_now(model, 3600)
-        await asyncio.sleep(0.02)
-        assert control.starts == 1 and not control.flag  # waiting on /health
+        await _until(lambda: control.starts == 1)
+        assert not control.flag  # waiting on /health
         assert await asyncio.wait_for(m.guard.unload(before_stop=m.warmer.unpin), 2)
         await asyncio.sleep(0.05)
         assert control.flag and control.starts == 1 and not m.warmer.pinned()
