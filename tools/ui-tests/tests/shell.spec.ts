@@ -196,6 +196,8 @@ desktopTest('AH-19 keyboard shortcuts', async ({ signedIn: page }) => {
   await expect(page).toHaveURL(/#\/agents$/);
   await search.fill('');
   await search.evaluate(el => (el as HTMLElement).blur());
+  // The cleared search shows the list again only after its 250 ms debounce; j would otherwise focus a search result.
+  await expect(rows.first()).toBeVisible();
   // j j k walks the rows, g j goes to Jobs, n starts a new task.
   await page.keyboard.press('j');
   await expect(rows.nth(0)).toBeFocused();
