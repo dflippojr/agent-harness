@@ -596,7 +596,7 @@ def test_live_hook_failure_restores_disk_and_memory(tmp_path, monkeypatch):
         raise RuntimeError("nope")
 
     spec = manager.settings.registry.get("sessions.max_turns")
-    spec.live_apply = boom
+    monkeypatch.setattr(spec, "live_apply", boom)  # the spec is shared by every registry in this process
     with client:
         response = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {"sessions.max_turns": 12}})
         assert response.status_code == 500
