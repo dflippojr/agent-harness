@@ -1944,7 +1944,7 @@ def test_review_script_spec_mode_fences_the_injected_issue_and_publishes_the_sum
         ["pr", "view", "7", "--json", "title,body,closingIssuesReferences"],
         # Only this repository's issue is read; owner/elsewhere#99 is not.
         ["api", "repos/owner/repo/issues/12"],
-        ["api", "repos/owner/repo/issues/12/comments?per_page=100"],
+        ["api", "repos/owner/repo/issues/12/comments?per_page=100&page=1"],
     ]
     _assert_backend_environment_is_scrubbed(run)
 
@@ -2016,6 +2016,53 @@ def test_review_script_spec_mode_fails_closed_when_an_issue_cannot_be_read(tmp_p
         assert failed.result.returncode != 0
         assert "could not read issue #12 (the workflow needs issues: read)" in failed.text
         assert not failed.backends and failed.body is None
+
+
+def test_review_script_spec_mode_reads_every_comment_page(tmp_path, fake_cli_launcher):
+    """GitHub lists comments oldest first, so a maintainer's refinement after 100 older comments is on page 2."""
+    responses = _spec_gh_responses()
+    page1 = [{"user": {"login": "outsider"}, "author_association": "NONE", "body": f"noise {i}"} for i in range(100)]
+    page2 = [{"user": {"login": "maintainer"}, "author_association": "OWNER", "body": "LATE DECISION: CSV only."}]
+    responses[1:2] = [
+        {"match": ["repos/owner/repo/issues/12/comments?per_page=100&page=1"], "stdout": json.dumps(page1)},
+        {"match": ["repos/owner/repo/issues/12/comments?per_page=100&page=2"], "stdout": json.dumps(page2)},
+    ]
+    run = _run_review_script(
+        tmp_path, fake_cli_launcher,
+        {"gh": responses, "claude": [{"match": ["-p"], "stdout": SPEC_REVIEW}]},
+        {"REVIEW_BACKEND": "claude", "REVIEW_SPEC": "on", "REVIEW_MAX_SPEC_BYTES": "4096"},
+    )
+    assert run.result.returncode == 0, run.text
+    assert [call["argv"][-1] for call in run.gh if "issues/12/comments" in call["argv"][-1]] == [
+        "repos/owner/repo/issues/12/comments?per_page=100&page=1",
+        "repos/owner/repo/issues/12/comments?per_page=100&page=2",
+    ]
+    # Even with a small budget and 100 outside comments, the maintainer's late comment reaches the reviewer.
+    assert "| LATE DECISION: CSV only." in run.backends[0]["stdin"]
+
+
+def test_review_script_spec_mode_resolves_the_repository_when_the_job_does_not_name_it(tmp_path, fake_cli_launcher):
+    """A local run without GITHUB_REPOSITORY still filters out closing references to other repositories."""
+    responses = [{"match": ["repo view", "nameWithOwner"], "stdout": "owner/repo\n"}] + _spec_gh_responses()
+    run = _run_review_script(
+        tmp_path, fake_cli_launcher,
+        {"gh": responses, "claude": [{"match": ["-p"], "stdout": SPEC_REVIEW}]},
+        {"REVIEW_BACKEND": "claude", "REVIEW_SPEC": "on", "GITHUB_REPOSITORY": ""},
+    )
+    assert run.result.returncode == 0, run.text
+    issue_calls = [call["argv"][-1] for call in run.gh if "/issues/" in call["argv"][-1] and "/7/" not in call["argv"][-1]]
+    # owner/elsewhere#99 is not read as this repository's issue #99.
+    assert issue_calls == ["repos/owner/repo/issues/12", "repos/owner/repo/issues/12/comments?per_page=100&page=1"]
+
+    unresolved = [{"match": ["repo view"], "exit": 1, "stderr": "no git remotes"}] + _spec_gh_responses()
+    failed = _run_review_script(
+        tmp_path / "unresolved", fake_cli_launcher,
+        {"gh": unresolved, "claude": [{"match": ["-p"], "stdout": SPEC_REVIEW}]},
+        {"REVIEW_BACKEND": "claude", "REVIEW_SPEC": "on", "GITHUB_REPOSITORY": ""},
+    )
+    assert failed.result.returncode != 0
+    assert "could not determine the repository for the spec review" in failed.text
+    assert not failed.backends
 
 
 def test_review_script_without_spec_mode_keeps_the_review_v2_contract(tmp_path, fake_cli_launcher):

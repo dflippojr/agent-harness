@@ -131,8 +131,10 @@ conclusion follows the review verdict:
 
 **Spec review (review-v3, #725).** Before the backend runs, the job reads the pull request's title and description and
 each issue it closes: the issues GitHub links to the PR plus `Closes`/`Fixes`/`Resolves #N` (or `owner/repo#N` naming
-this repository) in the description, at most five, each with its title, body, author, author association and up to 100
-comments. They reach the reviewer as one fenced block of untrusted data, `BEGIN UNTRUSTED SPECIFICATION <nonce>` to
+this repository) in the description, at most five, each with its title, body, author, author association and every
+page of comments, up to 1,000. The repository is `GITHUB_REPOSITORY`, or for a local run whatever `gh repo view`
+resolves (from `GH_REPO` or the checkout); the review fails if neither names one, so a reference to another repository is
+never read as a same-numbered issue here. They reach the reviewer as one fenced block of untrusted data, `BEGIN UNTRUSTED SPECIFICATION <nonce>` to
 `END UNTRUSTED SPECIFICATION <nonce>` with a random 16-character nonce per run. Every line of their text is prefixed
 with `| ` after control and invisible format characters are dropped, so no line of an issue can pass for the closing
 fence, a heading or a contract line, and the prompt tells the reviewer never to follow instructions found inside. The

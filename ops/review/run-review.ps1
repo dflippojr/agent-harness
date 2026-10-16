@@ -29,7 +29,8 @@ $script:DefaultMaxSpecBytes = 16384
 $script:MinMaxSpecBytes = 4096
 $script:MaxMaxSpecBytes = 262144
 $script:MaxLinkedIssues = 5
-$script:MaxIssueComments = 100
+$script:MaxIssueCommentPages = 10
+$script:MaxIssueComments = 100 * $script:MaxIssueCommentPages
 $script:ReviewSpecModes = @('off', 'on')
 $script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
 $script:ReviewVerdictPattern = '^`?REVIEW_VERDICT:\s*(?:(CLEAN)|FINDINGS\s+([1-9][0-9]{0,3}))\s*`?$'
@@ -1189,10 +1190,13 @@ function Get-ReviewSpecSources {
     # The PR description and each linked issue with its comments. Every value is untrusted text: it reaches the
     # reviewer only through Format-ReviewSpecContext, and only issue numbers parsed as integers reach a command line.
     if ($PrNumber -notmatch '^\d+$') { throw "invalid PR number '$PrNumber'" }
-    if ($Repository -notmatch $script:ReviewRepositoryPattern) { $Repository = '' }
-    # gh fills {owner}/{repo} from GH_REPO or the checkout when the job did not name the repository.
-    $apiRepository = if ($Repository) { $Repository } else { '{owner}/{repo}' }
-    $pr = ConvertFrom-ReviewGitHubJson -What "the description of PR #$PrNumber" -Attempt (
+    if ([string]::IsNullOrWhiteSpace($Repository)) {
+        # A local run names the repository through GH_REPO or the checkout; resolve it so closing references to
+        # other repositories can still be told apart.
+        $Repository = ([string](Invoke-ReviewGitHubCli -Arguments @('repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner') -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-repo').Stdout).Trim()
+    }
+    if ($Repository -notmatch $script:ReviewRepositoryPattern) { throw 'could not determine the repository for the spec review (set GITHUB_REPOSITORY)' }
+    $pr =ConvertFrom-ReviewGitHubJson -What "the description of PR #$PrNumber" -Attempt (
         Invoke-ReviewGitHubCli -Arguments @('pr', 'view', $PrNumber, '--json', 'title,body,closingIssuesReferences') -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-pr-spec')
     $references = @()
     if ($null -ne $pr -and $pr.PSObject.Properties.Name -contains 'closingIssuesReferences' -and $null -ne $pr.closingIssuesReferences) {
@@ -1205,22 +1209,28 @@ function Get-ReviewSpecSources {
                 }
                 $owner = "$ownerLogin/$(Get-ReviewJsonText -Object $reference.repository -Name 'name')"
             }
-            if ($Repository -and $owner -ieq $Repository) { $owner = $Repository }
-            elseif (-not $Repository) { $owner = '' }
+            if ($owner -ieq $Repository) { $owner = $Repository }
             [pscustomobject]@{ Number = (Get-ReviewJsonText -Object $reference -Name 'number'); Repository = $owner }
         })
     }
     $body = Get-ReviewJsonText -Object $pr -Name 'body'
     $issues = foreach ($number in @(Get-ReviewLinkedIssueNumbers -Body $body -Repository $Repository -PrNumber $PrNumber -ClosingReferences $references)) {
-        $attempt = Invoke-ReviewGitHubCli -Arguments @('api', "repos/$apiRepository/issues/$number") -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-issue'
+        $attempt = Invoke-ReviewGitHubCli -Arguments @('api', "repos/$Repository/issues/$number") -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-issue'
         if ($attempt.ExitCode -ne 0 -and ([string]$attempt.Stderr) -match 'HTTP 404|HTTP 410') {
             # A deleted or transferred issue is named so the reviewer does not judge it as empty.
             [pscustomobject]@{ Number = $number; Missing = $true; Title = ''; Body = ''; State = ''; Author = $null; Comments = @() }
             continue
         }
         $issue = ConvertFrom-ReviewGitHubJson -Attempt $attempt -What "issue #$number (the workflow needs issues: read)"
-        $comments = ConvertFrom-ReviewGitHubJson -What "the comments on issue #$number" -Attempt (
-            Invoke-ReviewGitHubCli -Arguments @('api', "repos/$apiRepository/issues/$number/comments?per_page=$($script:MaxIssueComments)") -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-issue-comments')
+        # GitHub lists comments oldest first, so read every page (up to a cap) to keep the latest refinements.
+        # (A plain array: Windows PowerShell's @() fails on a generic List of deserialized JSON objects.)
+        $comments = @()
+        for ($page = 1; $page -le $script:MaxIssueCommentPages; $page++) {
+            $batch = @(ConvertFrom-ReviewGitHubJson -What "the comments on issue #$number" -Attempt (
+                Invoke-ReviewGitHubCli -Arguments @('api', "repos/$Repository/issues/$number/comments?per_page=100&page=$page") -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'github-issue-comments'))
+            $comments += @($batch | Where-Object { $null -ne $_ })
+            if ($batch.Count -lt 100) { break }
+        }
         $state = Get-ReviewJsonText -Object $issue -Name 'state'
         if ($state -notmatch '^(open|closed)$') { $state = '' }
         [pscustomobject]@{
