@@ -20,12 +20,49 @@ env:
   CLI_IMAGE: ghcr.io/${{ github.repository_owner }}/agent-harness-cli
 
 jobs:
-  publish-images:
-    name: publish-images
+  # Deploy order (#726). CI main runs no longer cancel each other, so runs for two commits can finish in either
+  # order. `guard` lets a run publish and deploy only when its `test` job ran and passed (a docs-only push skips
+  # `test`, and CI still succeeds through `gate`) and its commit is still main's tip. So an older commit that
+  # finishes after a newer one publishes nothing and never moves the stable image tags back; the newer commit's run
+  # deploys it. The concurrency group above serializes the runs that pass, and deploy-ci.ps1 re-checks the tip
+  # after that wait and refuses a non-fast-forward, so the tower never goes from a newer commit to an older one.
+  guard:
+    name: guard
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          sparse-checkout: scripts/ci_gate.py
+          sparse-checkout-cone-mode: false
+      - name: Tested, and still main's tip
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          CI_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: >-
+          python3 scripts/ci_gate.py deploy
+          --repository "$GITHUB_REPOSITORY" --run-id "$CI_RUN_ID" --head-sha "$CI_HEAD_SHA"
+
+  publish-images:
+    name: publish-images
+    needs: guard
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+      && needs.guard.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -72,7 +109,8 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.event == 'push'
-    needs: publish-images
+      && needs.guard.outputs.deploy == 'true'
+    needs: [guard, publish-images]
     runs-on: [self-hosted, Windows, X64, agent-harness-tower]
     timeout-minutes: 15
     environment: tower-production

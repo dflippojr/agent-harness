@@ -9,7 +9,15 @@ after that workflow succeeds for the exact commit pushed to `main`:
    quality gate shows on the job but does not block deployment; only failing tests do. On pull requests the quality
    gate still fails the check. Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
    tower; that pool is retired so CI no longer competes with llama-server for the tower's RAM.
-2. **publish-images** is triggered by `workflow_run` only after `CI` completes successfully for a push to `main`.
+   **CI / gate** is the one check to require (#726). It always runs, needs every other CI job, and fails if any of
+   them failed or was cancelled (on a push to `main` it ignores `sonar`, as above). **CI / changes** lists the
+   changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `openapi` and `ui-tests` skip and
+   `gate` still passes, so a docs-only PR is not left pending. A push to `main` is never cancelled by a later push:
+   each main commit gets its own CI run, and only pull-request runs cancel their older run.
+2. **guard** checks the `CI` run first: it continues only when that run's `test` job ran and passed (a docs-only
+   push skips it) and the commit is still `main`'s tip. Main runs can finish out of order, so this stops an older
+   commit from publishing images or deploying after a newer one; the newer commit's own run deploys.
+   **publish-images** is triggered by `workflow_run` only after `CI` completes successfully for a push to `main`.
    It checks out `github.event.workflow_run.head_sha`, never a branch name, and GitHub-hosted Linux builders publish
    both runtime images to GHCR:
    - `ghcr.io/dflippojr/agent-harness-sandbox:sha-<commit>` and `:py312`
@@ -89,7 +97,7 @@ the tower.
 Serial `sonar` job baseline from nine successful hosted runs on 2026-09-23 (createdAt 02:47–19:42 UTC): job
 wall-clock median 818 s, worst 1026 s; `Run tests with coverage` median 684 s, worst 843 s (the 828 s figure in
 issue #191 is run 35911097047). Pushing a branch without a pull request does not trigger `ci.yml`, and the
-`paths-ignore` allow-list that skips `test` skips `sonar` with it (none of those files are Sonar sources).
+`changes` skip list that skips `test` skips `sonar` with it (none of those files are Sonar sources).
 
 SonarCloud **Automatic Analysis must stay OFF**. This workflow is the analysis; turning Automatic Analysis on would
 duplicate and fight it. To rotate the token, create a new SonarCloud user token, replace the repo Actions secret
@@ -685,6 +693,8 @@ to the slot), and dispatch again.
 ## Failure behavior
 
 - CI failure, cancellation, pull-request run, or non-`main` run: no images and no deployment.
+- A docs-only push (`test` skipped) or a commit that is no longer `main`'s tip: `guard` stops it, so no images and
+  no deployment.
 - Image build/push failure: no deployment. Actions cache export failure is ignored because the cache is optional.
 - Docker unavailable, live checkout dirty, wrong branch, non-fast-forward history, or dependency resolution failure:
   deployment fails visibly before the daemon is stopped or the live checkout and virtual environment are changed.
