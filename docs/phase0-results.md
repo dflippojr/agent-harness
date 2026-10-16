@@ -267,3 +267,5 @@ two dropped candidates from `HELDOUT_TASKS`, and hand the four to #673.
 | `reimport_overlap` | pending | |
 | `ordered_events` | pending | |
 | `bank_csv_shapes` | pending | |
+
+<!-- #739 gate proof: docs-only change, never merged -->
