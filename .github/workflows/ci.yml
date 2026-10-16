@@ -5,6 +5,7 @@ name: CI
 #   test      - the complete pytest suite with coverage (coverage.xml artifact)
 #   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
+#   lint      - ruff, and pyright against tools/lint/pyright-baseline.json; runs on every change
 #   changes   - lists the changed files; the three test jobs skip when every one is on the skip list
 #   gate      - the one check to require: always runs, fails if any job it needs failed or was cancelled
 # The suite runs once. Tests used to run a second time on a self-hosted
@@ -258,6 +259,27 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  lint:
+    # Static checks (#729): ruff's small rule set (F, E9, B, PLE) everywhere, and pyright in basic mode over the shipped
+    # packages. Pyright fails only on errors that tools/lint/pyright-baseline.json does not record, so a later change
+    # can burn the baseline down. It runs on every change, docs-only ones too: it is fast and needs no Windows.
+    # Pyright resolves imports from this interpreter, hence the runtime requirements; its "All" platform is set in
+    # pyrightconfig.json, so the Linux runner checks the Windows-only branches too.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install lint dependencies
+        run: python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt -r tools/lint/requirements.txt
+      - name: ruff
+        run: python -m ruff check --output-format=github .
+      - name: pyright against its baseline
+        run: python tools/lint/pyright_baseline.py
+
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -308,7 +330,7 @@ jobs:
     # (`test`, `openapi` and `ui-tests` skipped by `changes`). Any needed job failed or cancelled fails it; see
     # scripts/ci_gate.py for the rules. Add every new job here.
     if: always()
-    needs: [changes, test, sonar, openapi, ui-tests]
+    needs: [changes, lint, test, sonar, openapi, ui-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
