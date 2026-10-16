@@ -5,6 +5,9 @@ The diff is parsed into per-line records (side, line number, text) so a comment 
 line range. Each comment quotes its lines and remembers the base/head commit it was written against; at send time
 a comment whose quoted lines no longer match the current diff is marked stale and the current text is quoted.
 Idea credit: Orca's diff line comments (stablyai/orca); reimplemented, no code copied.
+
+The automated PR reviewer (ops/review/run-review.ps1, review-v3) ends its comment with a machine-readable summary line,
+`<!-- agent-review: sha=<head> criteria=<met>/<total> findings=<n> -->`; parse_review_summary reads it back.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 MAX_COMMENT_CHARS = 4000
 MAX_QUOTED_LINES = 200
 SIDES = ("old", "new")
+REVIEW_SUMMARY = re.compile(
+    r"^<!-- agent-review: sha=([0-9a-f]{40}) criteria=(\d{1,3})/(\d{1,3}) findings=(\d{1,4}) -->$", re.MULTILINE)
 
 
 def _path(marker: str, line: str) -> str | None:
@@ -153,3 +158,17 @@ def format_message(comments: list[dict], repos: list[dict]) -> str:
         out += [f"   > {t}" for t in (now if stale and now else c["quoted"])]
         out.append(f"   Comment: {c['comment']}")
     return "\n".join(out)
+
+
+def parse_review_summary(body: str) -> dict | None:
+    """The automated review's summary line -> {sha, criteria_met, criteria_total, findings}, or None.
+
+    Only a whole line counts, and the last one wins: the job appends its line after the review text, so a summary
+    line quoted in the text cannot stand in for it. A line claiming more criteria met than exist is malformed."""
+    found = REVIEW_SUMMARY.findall((body or "").replace("\r\n", "\n"))
+    if not found:
+        return None
+    sha, met, total, findings = found[-1]
+    if int(met) > int(total):
+        return None
+    return {"sha": sha, "criteria_met": int(met), "criteria_total": int(total), "findings": int(findings)}

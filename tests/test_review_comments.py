@@ -109,3 +109,37 @@ def test_draft_survives_restart_and_sends_one_followup(tmp_path):
         assert client.get(url).json() == []
         assert client.post(url + "/send").status_code == 400
         assert client.delete(f"{url}/rc-nope").status_code == 404
+
+
+# --- The automated review's summary line (review-v3), read back for readiness tools. ---
+
+HEAD = "b" * 40
+
+
+def _summary(sha=HEAD, criteria="2/3", findings=1):
+    return f"<!-- agent-review: sha={sha} criteria={criteria} findings={findings} -->"
+
+
+def test_review_summary_is_read_from_a_posted_comment():
+    body = "\r\n".join([
+        "Reviewed the full diff", "", "## Findings", "- **Spec** criterion two is not met", "",
+        f"<!-- agent-review: sha={HEAD} mode=full base=main -->", _summary(),
+    ])
+    assert rc.parse_review_summary(body) == {"sha": HEAD, "criteria_met": 2, "criteria_total": 3, "findings": 1}
+
+
+def test_review_summary_last_whole_line_wins():
+    quoted = f"The reviewer quoted {_summary(criteria='3/3', findings=0)} inline."
+    earlier = _summary(sha="a" * 40, criteria="3/3", findings=0)
+    parsed = rc.parse_review_summary(f"{quoted}\n{earlier}\n{_summary(criteria='0/2', findings=2)}\n")
+    assert parsed == {"sha": HEAD, "criteria_met": 0, "criteria_total": 2, "findings": 2}
+
+
+def test_review_summary_rejects_missing_and_malformed_lines():
+    assert rc.parse_review_summary("") is None
+    assert rc.parse_review_summary(None) is None
+    # The v2 coverage marker alone is not a summary.
+    assert rc.parse_review_summary(f"<!-- agent-review: sha={HEAD} mode=full -->") is None
+    for bad in (_summary(sha="B" * 40), _summary(sha="b" * 39), _summary(criteria="4/3"),
+                _summary(criteria="x/3"), _summary(findings=-1), "  " + _summary()):
+        assert rc.parse_review_summary(bad) is None, bad

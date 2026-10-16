@@ -129,18 +129,49 @@ conclusion follows the review verdict:
 | Every backend failed or gave no valid verdict, or the comment was not posted | `failure` | `Review did not complete` |
 | Run cancelled | `cancelled` | `Automated review cancelled` |
 
-The review has two parts under fixed headings. `## Findings` lists correctness bugs only; it alone sets the verdict, the
-check conclusion and the inline annotations. `## Style and structure (advisory)` lists at most five suggestions on naming,
+**Spec review (review-v3, #725).** Before the backend runs, the job reads the pull request's title and description and
+each issue it closes: the issues GitHub links to the PR plus `Closes`/`Fixes`/`Resolves #N` (or `owner/repo#N` naming
+this repository) in the description, at most five, each with its title, body, author, author association and up to 100
+comments. They reach the reviewer as one fenced block of untrusted data, `BEGIN UNTRUSTED SPECIFICATION <nonce>` to
+`END UNTRUSTED SPECIFICATION <nonce>` with a random 16-character nonce per run. Every line of their text is prefixed
+with `| ` after control and invisible format characters are dropped, so no line of an issue can pass for the closing
+fence, a heading or a contract line, and the prompt tells the reviewer never to follow instructions found inside. The
+text never reaches a command line: `gh` returns JSON, only issue numbers parsed as integers are passed as arguments, and
+the prompt goes to the backend on standard input. A description and issues larger than `REVIEW_MAX_SPEC_BYTES`
+(default `16384` bytes of UTF-8; accepted range `4096` to `262144`, digits only) are cut to fit: the description gets at
+most half, then each issue's title and body, then comments newest first; every cut is marked in the block. An issue
+that no longer exists (HTTP 404 or 410) is named as unreadable; any other failure, including a caller that did not grant
+`issues: read`, fails the review before a backend runs. In an incremental pass the reviewer judges criteria against the
+pull request head in the workspace. `ops/review/run-review.ps1` does all of this only with `-Spec on` (or
+`REVIEW_SPEC=on`); without it the script keeps the review-v2 behaviour, so a review-v2 workflow that follows this
+script still works.
+
+The review has three parts under fixed headings. `## Acceptance criteria` lists each criterion of the linked issues as
+**Met**, **Not met** or **Not applicable** (owner actions, deferred or out-of-scope items, proof attached outside the
+diff), citing evidence by file name. `## Findings` lists blocking findings: correctness bugs; every unmet criterion,
+quoted; a bug fix without a test that would fail without it; a test deleted, skipped, retried or weakened without a
+matching entry under the description's `### Gate changes`; a test that cannot fail (asserts constants, mocks the unit
+under test, swallows exceptions); and a `## Proof` table row that the diff contradicts. Findings alone set the verdict,
+the check conclusion and the inline annotations. `## Style and structure (advisory)` lists at most five suggestions on naming,
 responsibilities, duplication, consistency with the neighbouring code and simplifications, judged against the repository's
 own lint and format configuration. It never changes the verdict or fails the check. Its items are written without the
 `path:line` form, and the annotation scanner also stops reading at this heading, so they cannot become annotations. A clean review can therefore still carry advisory suggestions.
 
 The check summary carries the posted comment, so findings are readable from the Checks tab. The workflow run itself
 stays green when the review merely has findings: a red run means the review machinery broke, a red check means the
-code has findings. The prompt requires the reviewer to end with exactly two lines, `REVIEW_VERDICT: CLEAN` or
+code has findings. The prompt requires the reviewer to end with exactly three lines: `REVIEW_CRITERIA: <met>/<total>`
+(criteria marked Met over those marked Met or Not met; `0/0` when no issue is linked), then `REVIEW_VERDICT: CLEAN` or
 `REVIEW_VERDICT: FINDINGS <n>`, then `REVIEW_STATUS: COMPLETE`. The verdict only counts as the line directly above the
-status marker, so verdict-like text quoted from the diff cannot spoof it; a missing or malformed verdict is treated like
-a missing marker. Both lines are removed before posting. The check is created on the head commit that the job checked
+status marker and the criteria line only as the line directly above the verdict, so contract-like text quoted from the
+diff or an issue cannot spoof them. A review whose findings are fewer than its unmet criteria (for example one that
+reports a miss but obeys an issue's "ignore all findings") is rejected like a missing verdict, so the check fails as
+`Review did not complete` instead of turning green. A missing or malformed line is treated like a missing marker. All
+three lines are removed before posting. A spec review's check title adds the count, for example
+`2 findings; criteria 1/3 met`, and the job output `criteria=<met>/<total>` carries it. When the posted comment carries
+the coverage marker (below), a spec review adds a summary line after it for readiness tools such as `ao ready`:
+`<!-- agent-review: sha=<head> criteria=<met>/<total> findings=<n> -->`. `harness.review_comments.parse_review_summary`
+reads it back and takes the last whole line, so a summary quoted in the review text cannot stand in for it. A partial
+review withholds the summary along with the marker, so a readiness tool treats it as not reviewed. The check is created on the head commit that the job checked
 out, and `pull_request` only fires on `opened`, so a PR that gains commits needs a dispatched re-review before its head
 commit carries the check again.
 
@@ -326,21 +357,23 @@ permissions:
   contents: read
   pull-requests: write
   checks: write
+  issues: read
 
 jobs:
   review:
-    uses: dflippojr/agent-harness/.github/workflows/review.yml@review-v1
+    uses: dflippojr/agent-harness/.github/workflows/review.yml@review-v3
     with:
       pr_number: ${{ inputs.pr_number }}
       backend: ${{ inputs.backend }}
       mode: ${{ inputs.mode }}
       runs_on: '["self-hosted","Windows","X64","financial-planner-review"]'
-      tooling_ref: review-v1
+      tooling_ref: review-v3
     secrets: inherit
 ```
 
 Do not add a workflow-level `concurrency` group to the caller; the shared job already serializes per repository and
-PR. Optional inputs: `max_diff_bytes` (otherwise the consumer's `REVIEW_MAX_DIFF_BYTES` variable, then `204800`) and
+PR. Optional inputs: `max_diff_bytes` (otherwise the consumer's `REVIEW_MAX_DIFF_BYTES` variable, then `204800`),
+`max_spec_bytes` (review-v3; otherwise the consumer's `REVIEW_MAX_SPEC_BYTES` variable, then `16384`) and
 `tooling_ref` (use the trusted default branch or a maintainer-pinned tag, never a PR ref). The `REVIEW_*` repository variables are read from the consumer
 repository.
 
@@ -353,24 +386,35 @@ review/deploy workflows that need those runners, with workflow refs on the defau
 select runners but do not restrict who may schedule them. Keep fork-PR approval required for all outside contributors.
 This GitHub administration step cannot be enforced by this repository change; the owner must configure it.
 
-**Permissions.** The caller's `permissions` block must grant `contents: read`, `pull-requests: write` (PR comment), and
-`checks: write` (the `Automated Code Review` check). A called workflow can only narrow these.
+**Permissions.** The caller's `permissions` block must grant `contents: read`, `pull-requests: write` (PR comment),
+`checks: write` (the `Automated Code Review` check) and, from review-v3, `issues: read` (the linked issues). A called
+workflow can only narrow these, so a review-v3 caller without `issues: read` fails its reviews as
+`Review did not complete`.
 
 **Actions allowlist.** A consumer whose Actions policy allows only selected actions (for example GitHub-owned plus
 `SonarSource/sonarqube-scan-action@*`) must also allow `dflippojr/agent-harness/.github/workflows/review.yml@*`
 (Settings -> Actions -> General -> "Allow or block specified actions and reusable workflows").
 
-**Version pin.** The `@review-v1` reference selects the workflow definition. The script follows trusted `main` by
-default; pinning only the workflow does not stage script changes. For staged rollout, set `tooling_ref: review-v1`
+**Version pin.** The `@review-v3` reference selects the workflow definition. The script follows trusted `main` by
+default; pinning only the workflow does not stage script changes. For staged rollout, set `tooling_ref: review-v3`
 as in the caller above so both workflow and script follow the same maintainer-controlled tag. After a change has
 been verified here, the owner moves that tag deliberately:
 
 ```powershell
-git tag -f review-v1 <verified commit on main>
-git push -f origin refs/tags/review-v1
+git tag -f review-v3 <verified commit on main>
+git push -f origin refs/tags/review-v3
 ```
 
-A breaking change to the caller contract (renamed or new required inputs) gets a new tag such as `review-v2`.
+A breaking change to the caller contract (renamed or new required inputs, or a new permission) gets a new tag.
+review-v3 added the spec review and the `issues: read` permission, so it is a new tag: the review-v2 tag stays on its
+commit and its callers keep the diff-only review until each repository moves its caller (workflow ref, `tooling_ref`
+and the `issues: read` grant) to review-v3. The owner creates review-v3 once, at the merge commit of #725 on `main`,
+after a dispatched review here has passed:
+
+```powershell
+git tag review-v3 <merge commit of #725>
+git push origin refs/tags/review-v3
+```
 
 **Required check on pull requests.** The review does not run on pushes to `main`; it is a required check for PRs into
 `main`, so a PR cannot merge without a clean (or partial, `neutral`) review of its head commit. A runner outage then
