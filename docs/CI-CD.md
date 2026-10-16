@@ -19,6 +19,8 @@ after that workflow succeeds for the exact commit pushed to `main`:
    commit from publishing images or deploying after a newer one; the newer commit's own run deploys. `guard` runs
    outside any concurrency group, so an older run cannot replace a newer commit's queued deployment; only
    `publish-images` (`agent-harness-main-publish`) and `deploy-tower` (`agent-harness-main-deployment`) serialize.
+   `publish-images` repeats the tip check as its first step, inside its group, because the guard's answer can go
+   stale while the job waits there; a stale run publishes nothing, and its `deploy-tower` skips.
    **publish-images** is triggered by `workflow_run` only after `CI` completes successfully for a push to `main`.
    It checks out `github.event.workflow_run.head_sha`, never a branch name, and GitHub-hosted Linux builders publish
    both runtime images to GHCR:

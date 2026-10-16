@@ -265,3 +265,17 @@ def test_guard_runs_outside_any_concurrency_group():
     assert groups["publish-images"]["group"] != groups["deploy-tower"]["group"]
     assert all(group["cancel-in-progress"] is False for group in groups.values())
 
+
+def test_publish_rechecks_the_tip_inside_its_group_before_any_image_step():
+    publish = CI_CD["jobs"]["publish-images"]
+    steps = publish["steps"]
+    fresh_at = next(i for i, step in enumerate(steps) if step.get("id") == "fresh")
+    assert "scripts/ci_gate.py deploy" in steps[fresh_at]["run"]
+    assert all("docker/" not in step.get("uses", "") for step in steps[:fresh_at])
+    for step in steps[fresh_at + 1:]:
+        assert step["if"] == "steps.fresh.outputs.deploy == 'true'", step
+    assert publish["outputs"]["published"] == "${{ steps.fresh.outputs.deploy }}"
+    assert publish["permissions"]["actions"] == "read"
+    deploy_if = " ".join(CI_CD["jobs"]["deploy-tower"]["if"].split())
+    assert "&& needs.publish-images.outputs.published == 'true'" in deploy_if
+
