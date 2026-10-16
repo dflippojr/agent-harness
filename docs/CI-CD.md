@@ -136,8 +136,11 @@ page of comments, up to 1,000. The repository is `GITHUB_REPOSITORY`, or for a l
 resolves (from `GH_REPO` or the checkout); the review fails if neither names one, so a reference to another repository is
 never read as a same-numbered issue here. They reach the reviewer as one fenced block of untrusted data, `BEGIN UNTRUSTED SPECIFICATION <nonce>` to
 `END UNTRUSTED SPECIFICATION <nonce>` with a random 16-character nonce per run. Every line of their text is prefixed
-with `| ` after control and invisible format characters are dropped, so no line of an issue can pass for the closing
-fence, a heading or a contract line, and the prompt tells the reviewer never to follow instructions found inside. The
+with `| ` after U+2028 and U+2029 become line breaks and control and invisible format characters are dropped, judged
+by code point so the Unicode tag block, the variation selectors supplement and unpaired surrogates go too. No line of
+an issue can pass for the closing fence, a heading or a contract line, and the prompt tells the reviewer never to
+follow instructions found inside. Only comments from owners, members and collaborators may refine the criteria; other
+comments, the issue author's included when the author has none of those roles, are context only. The
 text never reaches a command line: `gh` returns JSON, only issue numbers parsed as integers are passed as arguments, and
 the prompt goes to the backend on standard input. A description and issues larger than `REVIEW_MAX_SPEC_BYTES`
 (default `16384` bytes of UTF-8 as rendered, `| ` prefixes included; accepted range `4096` to `262144`, digits only)

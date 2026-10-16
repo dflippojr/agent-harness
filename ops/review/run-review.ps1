@@ -1257,8 +1257,32 @@ function Get-ReviewSpecSources {
 function ConvertTo-ReviewCleanText {
     param([AllowEmptyString()][string]$Text)
 
-    # Control and invisible format characters are dropped and line endings become LF.
-    return (($Text -replace "`r`n?", "`n") -replace '[\p{Cc}-[\n\t]]|\p{Cf}', '')
+    # Line endings, including LINE SEPARATOR and PARAGRAPH SEPARATOR, become LF, so each line can be quoted. Then
+    # control and invisible format characters are dropped by code point rather than by UTF-16 unit, so characters
+    # outside the BMP are judged whole: the tag block (U+E0000-U+E007F) is Format and goes, as do the variation
+    # selectors supplement (U+E0100-U+E01EF) and unpaired surrogates. Both are read by models but invisible on GitHub.
+    $normalized = $Text -replace '\r\n?|\u2028|\u2029', "`n"
+    if ($normalized -notmatch '[\p{Cc}\p{Cf}\p{Cs}]') { return $normalized }
+    $builder = New-Object System.Text.StringBuilder($normalized.Length)
+    $index = 0
+    while ($index -lt $normalized.Length) {
+        $character = $normalized[$index]
+        if ([char]::IsSurrogatePair($normalized, $index)) {
+            $codePoint = [char]::ConvertToUtf32($normalized, $index)
+            $category = [System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($normalized, $index)
+            if ($category -ne [System.Globalization.UnicodeCategory]::Format -and -not ($codePoint -ge 0xE0100 -and $codePoint -le 0xE01EF)) {
+                [void]$builder.Append($normalized, $index, 2)
+            }
+            $index += 2
+            continue
+        }
+        $category = [char]::GetUnicodeCategory($character)
+        $drop = $category -eq [System.Globalization.UnicodeCategory]::Format -or $category -eq [System.Globalization.UnicodeCategory]::Surrogate -or
+            ($category -eq [System.Globalization.UnicodeCategory]::Control -and $character -ne "`n" -and $character -ne "`t")
+        if (-not $drop) { [void]$builder.Append($character) }
+        $index++
+    }
+    return $builder.ToString()
 }
 
 function ConvertTo-ReviewQuotedText {
