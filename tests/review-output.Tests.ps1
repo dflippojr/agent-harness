@@ -303,13 +303,22 @@ Describe 'Spec review (review-v3)' {
         )
         $script:sources.Body = 'P' * 9000
         $context = Format-ReviewSpecContext -Sources $script:sources -MaxSpecBytes 4096 -Nonce 'n'
-        $untrusted = (@($context -split "`r?`n") | Where-Object { $_.StartsWith('| ') } | ForEach-Object { $_.Substring(2) }) -join ''
+        # The quoted lines as rendered, "| " prefixes and line breaks included.
+        $untrusted = (@($context -split "`r?`n") | Where-Object { $_.StartsWith('| ') }) -join "`n"
         $bytes = (New-Object System.Text.UTF8Encoding($false)).GetByteCount($untrusted)
         if ($bytes -gt 4096) { throw "Spec budget exceeded: $bytes bytes" }
-        if ($context -notmatch '\(truncated: 2048 of 9000 bytes shown\)') { throw 'The description did not stop at half the budget' }
+        if ($context -notmatch '\(truncated: 2046 of 9000 bytes shown\)') { throw 'The description did not stop at half the budget' }
         if ($context -notmatch 'NEWEST') { throw 'The newest comment was dropped before the oldest' }
         if ($context -match 'OLDEST' -or $context -notmatch '\(1 of 2 comments not shown: empty, or past the specification budget of 4096 bytes\.\)') { throw 'The oldest comment was not the one dropped' }
         if ($context -notmatch 'NEWEST ' + [char]0x00E9) { throw 'Multibyte text was not kept' }
+
+        # Many short lines: the "| " prefix on each one counts, so they cannot double the rendered size.
+        $script:sources.Body = (@(1..5000 | ForEach-Object { 'x' }) -join "`n")
+        $script:sources.Issues[0].Body = $script:sources.Body
+        $context = Format-ReviewSpecContext -Sources $script:sources -MaxSpecBytes 4096 -Nonce 'n'
+        $untrusted = (@($context -split "`r?`n") | Where-Object { $_.StartsWith('| ') }) -join "`n"
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetByteCount($untrusted)
+        if ($bytes -gt 4096) { throw "Quoted short lines exceeded the spec budget: $bytes bytes" }
     }
 
     It 'bounds the whole block, labels included, however many comments the issues have' {

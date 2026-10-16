@@ -1254,27 +1254,43 @@ function Get-ReviewSpecSources {
     }
 }
 
+function ConvertTo-ReviewCleanText {
+    param([AllowEmptyString()][string]$Text)
+
+    # Control and invisible format characters are dropped and line endings become LF.
+    return (($Text -replace "`r`n?", "`n") -replace '[\p{Cc}-[\n\t]]|\p{Cf}', '')
+}
+
 function ConvertTo-ReviewQuotedText {
     param([AllowEmptyString()][string]$Text)
 
     # Every line of untrusted text starts with "| ", so none of it can pass for a fence, a heading this job
-    # writes, or a review contract line. Control and invisible format characters are dropped first.
-    $clean = ($Text -replace "`r`n?", "`n") -replace '[\p{Cc}-[\n\t]]|\p{Cf}', ''
+    # writes, or a review contract line.
+    $clean = ConvertTo-ReviewCleanText -Text $Text
     return ((@($clean.TrimEnd() -split "`n") | ForEach-Object { "| $_".TrimEnd() }) -join "`n")
 }
 
-function Get-ReviewUtf8Prefix {
-    param([AllowEmptyString()][string]$Text, [int]$MaxBytes)
+function Get-ReviewQuotedByteCount {
+    param([AllowEmptyString()][string]$Text)
 
-    # The longest prefix within MaxBytes of UTF-8 that does not split a surrogate pair.
+    # An upper bound on the UTF-8 size of ConvertTo-ReviewQuotedText for clean text: the text plus "| " per line.
+    return (New-Object System.Text.UTF8Encoding($false)).GetByteCount($Text) + 2 * $Text.Split("`n").Count
+}
+
+function Get-ReviewUtf8Prefix {
+    param([AllowEmptyString()][string]$Text, [int]$MaxBytes, [switch]$Quoted)
+
+    # The longest prefix within MaxBytes of UTF-8 that does not split a surrogate pair. With -Quoted the size is
+    # measured as ConvertTo-ReviewQuotedText will render it, so many short lines cannot outgrow the budget.
     $utf8 = New-Object System.Text.UTF8Encoding($false)
-    if ($utf8.GetByteCount($Text) -le $MaxBytes) { return $Text }
+    $size = if ($Quoted) { { param($value) Get-ReviewQuotedByteCount -Text $value } } else { { param($value) $utf8.GetByteCount($value) } }
+    if ((& $size $Text) -le $MaxBytes) { return $Text }
     if ($MaxBytes -le 0) { return '' }
     $low = 0
     $high = [Math]::Min($Text.Length, $MaxBytes)
     while ($low -lt $high) {
         $mid = [int][Math]::Ceiling(($low + $high) / 2)
-        if ($utf8.GetByteCount($Text.Substring(0, $mid)) -le $MaxBytes) { $low = $mid } else { $high = $mid - 1 }
+        if ((& $size $Text.Substring(0, $mid)) -le $MaxBytes) { $low = $mid } else { $high = $mid - 1 }
     }
     if ($low -gt 0 -and [char]::IsHighSurrogate($Text[$low - 1])) { $low-- }
     return $Text.Substring(0, $low)
@@ -1298,7 +1314,7 @@ function Format-ReviewSpecContext {
     $pieces = New-Object System.Collections.Generic.List[object]
     $newPiece = {
         param([string]$Text, [int]$Cap, [string]$Label, [bool]$Always)
-        $piece = [pscustomobject]@{ Text = $Text; Cap = $Cap; Label = $Label; Always = $Always; Overhead = ($utf8.GetByteCount($Label) + 64); Shown = '' }
+        $piece = [pscustomobject]@{ Text = (ConvertTo-ReviewCleanText -Text $Text); Cap = $Cap; Label = $Label; Always = $Always; Overhead = ($utf8.GetByteCount($Label) + 64); Shown = '' }
         $pieces.Add($piece)
         $piece
     }
@@ -1324,15 +1340,17 @@ function Format-ReviewSpecContext {
         $when = if ($who.Created) { " on $($who.Created)" } else { '' }
         $entry.Piece = & $newPiece ([string]$entry.Comment.Body) $MaxSpecBytes "Comment by @$($who.Login) ($($who.Association))$when" $false
     }
-    $prTitle = Get-ReviewUtf8Prefix -Text ([string]$Sources.Title) -MaxBytes 512
-    $remaining = $MaxSpecBytes - $utf8.GetByteCount($prTitle)
+    $prTitle = Get-ReviewUtf8Prefix -Text (ConvertTo-ReviewCleanText -Text ([string]$Sources.Title)) -MaxBytes 512 -Quoted
+    $remaining = $MaxSpecBytes - (Get-ReviewQuotedByteCount -Text $prTitle)
     foreach ($piece in $pieces) {
-        # Titles and bodies always render (if only as omitted), so their labels are always paid for.
+        # Text is measured as rendered, "| " line prefixes included. Titles and bodies always render (if only as
+        # omitted), so their labels are always paid for.
         $available = $remaining - $piece.Overhead
         if (-not [string]::IsNullOrWhiteSpace($piece.Text) -and $available -gt 0) {
-            $piece.Shown = Get-ReviewUtf8Prefix -Text $piece.Text -MaxBytes ([Math]::Min($piece.Cap, $available))
+            $piece.Shown = Get-ReviewUtf8Prefix -Text $piece.Text -MaxBytes ([Math]::Min($piece.Cap, $available)) -Quoted
         }
-        if ($piece.Always -or $piece.Shown.Length -gt 0) { $remaining -= $piece.Overhead + $utf8.GetByteCount($piece.Shown) }
+        if ($piece.Shown.Length -gt 0) { $remaining -= $piece.Overhead + (Get-ReviewQuotedByteCount -Text $piece.Shown) }
+        elseif ($piece.Always) { $remaining -= $piece.Overhead }
     }
     $render = {
         param($Piece)

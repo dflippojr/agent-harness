@@ -140,7 +140,8 @@ with `| ` after control and invisible format characters are dropped, so no line 
 fence, a heading or a contract line, and the prompt tells the reviewer never to follow instructions found inside. The
 text never reaches a command line: `gh` returns JSON, only issue numbers parsed as integers are passed as arguments, and
 the prompt goes to the backend on standard input. A description and issues larger than `REVIEW_MAX_SPEC_BYTES`
-(default `16384` bytes of UTF-8; accepted range `4096` to `262144`, digits only) are cut to fit: the description gets at
+(default `16384` bytes of UTF-8 as rendered, `| ` prefixes included; accepted range `4096` to `262144`, digits only)
+are cut to fit: the description gets at
 most half, then each issue's title and body, then comments: those from owners, members and collaborators first, so a
 flood of outside comments on a public issue cannot push them out, each group newest first. Each section's label counts
 against the budget too, and comments that are empty or do not fit are left out and counted in one notice per issue, so
