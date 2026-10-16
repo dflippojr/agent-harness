@@ -127,6 +127,21 @@ def test_private_write_refuses_a_target_linked_outside(tmp_path):
     assert sorted(p.name for p in directory.iterdir()) == ["escape.key"]
 
 
+def test_private_write_refuses_a_target_linked_to_another_key_in_the_directory(tmp_path):
+    directory = tmp_path / "keys"
+    directory.mkdir()
+    older = directory / "older.key"
+    older.write_bytes(b"older synthetic key")
+    try:
+        os.symlink(older, directory / "current.key")
+    except (OSError, NotImplementedError):
+        pytest.skip("can't create a file symlink here")
+    with pytest.raises(ValueError, match="refusing to write"):
+        member_key.write_private(directory, "current.key", b"synthetic")
+    assert older.read_bytes() == b"older synthetic key"
+    assert sorted(p.name for p in directory.iterdir()) == ["current.key", "older.key"]
+
+
 def test_private_write_through_a_linked_directory_stays_inside_it(tmp_path):
     real = tmp_path / "real"
     real.mkdir()

@@ -66,8 +66,12 @@ def write_private(directory: Path, name: str, content: bytes) -> Path:
     """Atomically write an owner-only file called `name` directly inside `directory`; any other target is refused
     before the filesystem is touched (#728)."""
     base = directory.resolve()
-    target = (base / name).resolve()
-    if Path(name).name != name or target.parent != base or not target.is_relative_to(base):
+    target = base / name
+    # A link at the target is refused too, even one to another key in this directory: replace() would destroy it.
+    if Path(name).name != name or name in ("", ".", "..") or target.is_symlink():
+        raise ValueError(f"refusing to write {name!r} outside {base}")
+    resolved = target.resolve()
+    if resolved.parent != base or not resolved.is_relative_to(base):
         raise ValueError(f"refusing to write {name!r} outside {base}")
     base.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".member-key-", dir=base)
