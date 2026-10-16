@@ -308,8 +308,23 @@ Describe 'Spec review (review-v3)' {
         if ($bytes -gt 4096) { throw "Spec budget exceeded: $bytes bytes" }
         if ($context -notmatch '\(truncated: 2048 of 9000 bytes shown\)') { throw 'The description did not stop at half the budget' }
         if ($context -notmatch 'NEWEST') { throw 'The newest comment was dropped before the oldest' }
-        if ($context -match 'OLDEST' -or $context -notmatch '\(omitted: specification budget of 4096 bytes used up\)') { throw 'The oldest comment was not the one dropped' }
+        if ($context -match 'OLDEST' -or $context -notmatch '\(1 of 2 comments not shown: empty, or past the specification budget of 4096 bytes\.\)') { throw 'The oldest comment was not the one dropped' }
         if ($context -notmatch 'NEWEST ' + [char]0x00E9) { throw 'Multibyte text was not kept' }
+    }
+
+    It 'bounds the whole block, labels included, however many comments the issues have' {
+        $outsider = [pscustomobject]@{ Login = 'outsider'; Association = 'NONE'; Created = '2026-10-15T00:00:00Z' }
+        $tiny = @(1..1000 | ForEach-Object { [pscustomobject]@{ Author = $outsider; Body = 'x' } })
+        $empty = @(1..1000 | ForEach-Object { [pscustomobject]@{ Author = $outsider; Body = '' } })
+        $script:sources.Issues = @(1..5 | ForEach-Object {
+            [pscustomobject]@{ Number = $_; Missing = $false; Title = "Issue $_"; State = 'open'; Author = $script:author; Body = 'B' * 2000; Comments = $(if ($_ % 2) { $tiny } else { $empty }) }
+        })
+        $context = Format-ReviewSpecContext -Sources $script:sources -MaxSpecBytes 4096 -Nonce 'n'
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetByteCount($context)
+        # The budget plus the fixed preamble and one header and notice per issue, not one label per comment.
+        if ($bytes -gt 4096 + 2048) { throw "Spec block grew to $bytes bytes" }
+        if ($context -notmatch '\(1000 of 1000 comments not shown') { throw 'Hidden comments were not collapsed into one notice' }
+        if ($context -match '\(empty\)\r?\nComment by') { throw 'Empty comments were rendered one by one' }
     }
 
     It 'budgets maintainer comments before a flood of outside comments' {

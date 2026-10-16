@@ -1293,11 +1293,18 @@ function Format-ReviewSpecContext {
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     # Budget the untrusted text: the PR description (at most half), then every issue body, then each issue's
     # comments newest first, since later comments usually refine the issue. Sections still render in reading order.
+    # Each piece's label and truncation note count against the budget too (Overhead), so a thread of many tiny
+    # comments cannot grow the block past it; a comment that does not fit is left out and counted in one notice.
     $pieces = New-Object System.Collections.Generic.List[object]
-    $newPiece = { param([string]$Text, [int]$Cap) $piece = [pscustomobject]@{ Text = $Text; Cap = $Cap; Shown = '' }; $pieces.Add($piece); $piece }
-    $prPiece = & $newPiece ([string]$Sources.Body) ([int][Math]::Floor($MaxSpecBytes / 2))
+    $newPiece = {
+        param([string]$Text, [int]$Cap, [string]$Label, [bool]$Always)
+        $piece = [pscustomobject]@{ Text = $Text; Cap = $Cap; Label = $Label; Always = $Always; Overhead = ($utf8.GetByteCount($Label) + 64); Shown = '' }
+        $pieces.Add($piece)
+        $piece
+    }
+    $prPiece = & $newPiece ([string]$Sources.Body) ([int][Math]::Floor($MaxSpecBytes / 2)) 'Description' $true
     $issueViews = @(foreach ($issue in @($Sources.Issues)) {
-        [pscustomobject]@{ Issue = $issue; Title = (& $newPiece ([string]$issue.Title) 512); Body = (& $newPiece ([string]$issue.Body) $MaxSpecBytes); Comments = @() }
+        [pscustomobject]@{ Issue = $issue; Title = (& $newPiece ([string]$issue.Title) 512 'Title' $true); Body = (& $newPiece ([string]$issue.Body) $MaxSpecBytes 'Body' $true); Comments = @() }
     })
     # Anyone can comment on a public issue, so comments from people with write access, on every linked issue, are
     # budgeted before any other comment: a flood of outside comments cannot push the maintainers' refinements out.
@@ -1312,15 +1319,24 @@ function Format-ReviewSpecContext {
     })
     $order = @($allEntries | Sort-Object -Property @{ Expression = { if ($trusted -contains [string]$_.Comment.Author.Association) { 0 } else { 1 } } },
         @{ Expression = { $_.Issue } }, @{ Expression = { $_.Index }; Descending = $true })
-    foreach ($entry in $order) { $entry.Piece = & $newPiece ([string]$entry.Comment.Body) $MaxSpecBytes }
+    foreach ($entry in $order) {
+        $who = $entry.Comment.Author
+        $when = if ($who.Created) { " on $($who.Created)" } else { '' }
+        $entry.Piece = & $newPiece ([string]$entry.Comment.Body) $MaxSpecBytes "Comment by @$($who.Login) ($($who.Association))$when" $false
+    }
     $prTitle = Get-ReviewUtf8Prefix -Text ([string]$Sources.Title) -MaxBytes 512
     $remaining = $MaxSpecBytes - $utf8.GetByteCount($prTitle)
     foreach ($piece in $pieces) {
-        $piece.Shown = Get-ReviewUtf8Prefix -Text $piece.Text -MaxBytes ([Math]::Min($piece.Cap, [Math]::Max(0, $remaining)))
-        $remaining -= $utf8.GetByteCount($piece.Shown)
+        # Titles and bodies always render (if only as omitted), so their labels are always paid for.
+        $available = $remaining - $piece.Overhead
+        if (-not [string]::IsNullOrWhiteSpace($piece.Text) -and $available -gt 0) {
+            $piece.Shown = Get-ReviewUtf8Prefix -Text $piece.Text -MaxBytes ([Math]::Min($piece.Cap, $available))
+        }
+        if ($piece.Always -or $piece.Shown.Length -gt 0) { $remaining -= $piece.Overhead + $utf8.GetByteCount($piece.Shown) }
     }
     $render = {
-        param($Piece, [string]$Label)
+        param($Piece)
+        $Label = $Piece.Label
         if ([string]::IsNullOrWhiteSpace($Piece.Text)) { return "${Label}: (empty)" }
         if ($Piece.Shown.Length -eq 0) { return "${Label}: (omitted: specification budget of $MaxSpecBytes bytes used up)" }
         $text = "${Label}:`n$(ConvertTo-ReviewQuotedText -Text $Piece.Shown)"
@@ -1341,7 +1357,7 @@ function Format-ReviewSpecContext {
     $lines.Add('')
     $lines.Add("PULL REQUEST #$($Sources.PrNumber)")
     $lines.Add("Title:`n$(ConvertTo-ReviewQuotedText -Text $prTitle)")
-    $lines.Add((& $render $prPiece 'Description'))
+    $lines.Add((& $render $prPiece))
     if ($issueViews.Count -eq 0) {
         $lines.Add('')
         $lines.Add('No issue in this repository is linked with a closing keyword such as "Closes #N". There are no acceptance criteria: report REVIEW_CRITERIA: 0/0.')
@@ -1355,12 +1371,14 @@ function Format-ReviewSpecContext {
         }
         $author = $issue.Author
         $lines.Add("ISSUE #$($issue.Number) ($($issue.State); opened by @$($author.Login), $($author.Association))")
-        $lines.Add((& $render $view.Title 'Title'))
-        $lines.Add((& $render $view.Body 'Body'))
+        $lines.Add((& $render $view.Title))
+        $lines.Add((& $render $view.Body))
+        $hidden = 0
         foreach ($entry in $view.Comments) {
-            $who = $entry.Comment.Author
-            $when = if ($who.Created) { " on $($who.Created)" } else { '' }
-            $lines.Add((& $render $entry.Piece "Comment by @$($who.Login) ($($who.Association))$when"))
+            if ($entry.Piece.Shown.Length -gt 0) { $lines.Add((& $render $entry.Piece)) } else { $hidden++ }
+        }
+        if ($hidden -gt 0) {
+            $lines.Add("($hidden of $(@($view.Comments).Count) comments not shown: empty, or past the specification budget of $MaxSpecBytes bytes.)")
         }
         if (@($issue.Comments).Count -ge $script:MaxIssueComments) {
             $lines.Add("(Only the first $($script:MaxIssueComments) comments were fetched.)")

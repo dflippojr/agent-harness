@@ -142,8 +142,9 @@ text never reaches a command line: `gh` returns JSON, only issue numbers parsed 
 the prompt goes to the backend on standard input. A description and issues larger than `REVIEW_MAX_SPEC_BYTES`
 (default `16384` bytes of UTF-8; accepted range `4096` to `262144`, digits only) are cut to fit: the description gets at
 most half, then each issue's title and body, then comments: those from owners, members and collaborators first, so a
-flood of outside comments on a public issue cannot push them out, each group newest first. Every cut is marked in
-the block. An issue
+flood of outside comments on a public issue cannot push them out, each group newest first. Each section's label counts
+against the budget too, and comments that are empty or do not fit are left out and counted in one notice per issue, so
+a thread of many tiny comments cannot grow the block past the cap. Every cut is marked in the block. An issue
 that no longer exists (HTTP 404 or 410) is named as unreadable; any other failure, including a caller that did not grant
 `issues: read`, fails the review before a backend runs. In an incremental pass the reviewer judges criteria against the
 pull request head in the workspace. `ops/review/run-review.ps1` does all of this only with `REVIEW_SPEC=on` (or
