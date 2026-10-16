@@ -16,7 +16,9 @@ after that workflow succeeds for the exact commit pushed to `main`:
    each main commit gets its own CI run, and only pull-request runs cancel their older run.
 2. **guard** checks the `CI` run first: it continues only when that run's `test` job ran and passed (a docs-only
    push skips it) and the commit is still `main`'s tip. Main runs can finish out of order, so this stops an older
-   commit from publishing images or deploying after a newer one; the newer commit's own run deploys.
+   commit from publishing images or deploying after a newer one; the newer commit's own run deploys. `guard` runs
+   outside any concurrency group, so an older run cannot replace a newer commit's queued deployment; only
+   `publish-images` (`agent-harness-main-publish`) and `deploy-tower` (`agent-harness-main-deployment`) serialize.
    **publish-images** is triggered by `workflow_run` only after `CI` completes successfully for a push to `main`.
    It checks out `github.event.workflow_run.head_sha`, never a branch name, and GitHub-hosted Linux builders publish
    both runtime images to GHCR:

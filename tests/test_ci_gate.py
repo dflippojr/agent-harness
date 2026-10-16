@@ -253,3 +253,15 @@ def test_publish_and_deploy_wait_for_the_guard():
     assert jobs["deploy-tower"]["needs"] == ["guard", "publish-images"]
     for name in ("publish-images", "deploy-tower"):
         assert "&& needs.guard.outputs.deploy == 'true'" in " ".join(jobs[name]["if"].split()), name
+
+
+def test_guard_runs_outside_any_concurrency_group():
+    # A workflow-level group would let an older CI completion replace the newest commit's pending run before its
+    # guard ran (GitHub replaces a group's pending run when another queues). Only jobs after `guard` serialize.
+    assert "concurrency" not in CI_CD
+    jobs = CI_CD["jobs"]
+    assert "concurrency" not in jobs["guard"]
+    groups = {name: jobs[name]["concurrency"] for name in ("publish-images", "deploy-tower")}
+    assert groups["publish-images"]["group"] != groups["deploy-tower"]["group"]
+    assert all(group["cancel-in-progress"] is False for group in groups.values())
+

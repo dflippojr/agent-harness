@@ -6,10 +6,9 @@ on:
     types: [completed]
     branches: [main]
 
-concurrency:
-  group: agent-harness-main-deployment
-  # Never interrupt a main deployment between updating code, retagging images, and restarting the daemon.
-  cancel-in-progress: false
+# No workflow-level concurrency: `guard` must run at once, outside any group. GitHub replaces a group's pending run
+# when a newer one queues, so a group around the whole workflow would let an older CI completion replace the newest
+# commit's pending deployment before either guard ran. The two jobs after `guard` serialize in groups of their own.
 
 permissions:
   contents: read
@@ -24,8 +23,9 @@ jobs:
   # order. `guard` lets a run publish and deploy only when its `test` job ran and passed (a docs-only push skips
   # `test`, and CI still succeeds through `gate`) and its commit is still main's tip. So an older commit that
   # finishes after a newer one publishes nothing and never moves the stable image tags back; the newer commit's run
-  # deploys it. The concurrency group above serializes the runs that pass, and deploy-ci.ps1 re-checks the tip
-  # after that wait and refuses a non-fast-forward, so the tower never goes from a newer commit to an older one.
+  # deploys it. Only runs that pass reach the job-level groups below, so a run queued there can be replaced only by
+  # a newer commit's. deploy-ci.ps1 re-checks the tip after that wait and refuses a non-fast-forward, so the tower
+  # never goes from a newer commit to an older one.
   guard:
     name: guard
     if: >-
@@ -63,6 +63,10 @@ jobs:
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.event == 'push'
       && needs.guard.outputs.deploy == 'true'
+    concurrency:
+      # Its own group, not deploy-tower's: one shared group would let this job replace the pending deploy-tower.
+      group: agent-harness-main-publish
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -111,6 +115,10 @@ jobs:
       github.event.workflow_run.event == 'push'
       && needs.guard.outputs.deploy == 'true'
     needs: [guard, publish-images]
+    concurrency:
+      group: agent-harness-main-deployment
+      # Never interrupt a main deployment between updating code, retagging images, and restarting the daemon.
+      cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, agent-harness-tower]
     timeout-minutes: 15
     environment: tower-production
