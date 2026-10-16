@@ -659,6 +659,26 @@ function Split-ReviewLastLine {
     return [pscustomobject]@{ Rest = $trimmed.Substring(0, $split).Trim(); Last = $trimmed.Substring($split + 1).Trim() }
 }
 
+function Get-ReviewCriteriaRowCount {
+    param([AllowEmptyString()][string]$Text)
+
+    # The Met and Not met rows under "## Acceptance criteria", up to the next "##" heading. Each row starts with its
+    # status in bold, optionally as a list item; Not applicable rows count toward neither.
+    $met = 0
+    $notMet = 0
+    $inCriteria = $false
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^\s*##\s') {
+            $inCriteria = $line -match '^\s*##\s+Acceptance criteria\s*$'
+            continue
+        }
+        if ($inCriteria -and $line -cmatch '^\s*(?:[-*+]\s+|[0-9]{1,3}[.)]\s+)?\*\*(Met|Not met):?\*\*') {
+            if ($Matches[1] -ceq 'Met') { $met++ } else { $notMet++ }
+        }
+    }
+    return [pscustomobject]@{ Met = $met; NotMet = $notMet }
+}
+
 function Get-ReviewVerdict {
     [CmdletBinding()]
     param(
@@ -687,6 +707,9 @@ function Get-ReviewVerdict {
         # Every unmet criterion must also be a finding, so a review cannot report a miss and stay clean.
         if ($met -gt $total -or $count -lt ($total - $met)) { return $null }
         $review = $parts.Rest
+        # The counts must match the rows the review lists, so it cannot mark a criterion Not met and count it as Met.
+        $listed = Get-ReviewCriteriaRowCount -Text $review
+        if ($listed.Met -ne $met -or ($listed.Met + $listed.NotMet) -ne $total) { return $null }
     }
     if ([string]::IsNullOrWhiteSpace($review)) { return $null }
     return [pscustomobject]@{

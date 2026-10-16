@@ -388,19 +388,28 @@ Describe 'Spec review (review-v3)' {
         if ($plain -match 'SPECIFICATION') { throw 'A diff-only review embedded a spec' }
     }
 
-    It 'requires a criteria line that agrees with the findings' -TestCases @(
-        @{ Tail = "REVIEW_CRITERIA: 2/2`nREVIEW_VERDICT: CLEAN"; Met = 2; Total = 2; Count = 0 }
-        @{ Tail = "REVIEW_CRITERIA: 0/0`nREVIEW_VERDICT: CLEAN"; Met = 0; Total = 0; Count = 0 }
-        @{ Tail = "``REVIEW_CRITERIA: 1/3```nREVIEW_VERDICT: FINDINGS 2"; Met = 1; Total = 3; Count = 2 }
-        @{ Tail = "REVIEW_CRITERIA: 2/3`nREVIEW_VERDICT: CLEAN"; Met = $null }
-        @{ Tail = "REVIEW_CRITERIA: 1/3`nREVIEW_VERDICT: FINDINGS 1"; Met = $null }
-        @{ Tail = "REVIEW_CRITERIA: 4/3`nREVIEW_VERDICT: FINDINGS 1"; Met = $null }
-        @{ Tail = "REVIEW_VERDICT: CLEAN"; Met = $null }
-        @{ Tail = "REVIEW_VERDICT: CLEAN`nREVIEW_CRITERIA: 2/2"; Met = $null }
-        @{ Tail = "REVIEW_CRITERIA: 2/2`nmore text`nREVIEW_VERDICT: CLEAN"; Met = $null }
+    It 'requires a criteria line that agrees with the findings and the listed rows' -TestCases @(
+        @{ Tail = "REVIEW_CRITERIA: 2/2`nREVIEW_VERDICT: CLEAN"; Rows = 'Met', 'Met'; Met = 2; Total = 2; Count = 0 }
+        @{ Tail = "REVIEW_CRITERIA: 0/0`nREVIEW_VERDICT: CLEAN"; Rows = @(); Met = 0; Total = 0; Count = 0 }
+        @{ Tail = "``REVIEW_CRITERIA: 1/3```nREVIEW_VERDICT: FINDINGS 2"; Rows = 'Met', 'Not met', 'Not met'; Met = 1; Total = 3; Count = 2 }
+        # Not applicable rows count toward neither number; list markers and a colon in the bold status are allowed.
+        @{ Tail = "REVIEW_CRITERIA: 1/2`nREVIEW_VERDICT: FINDINGS 1"; Rows = '- **Met:**', '1. **Not met**', 'Not applicable'; Met = 1; Total = 2; Count = 1 }
+        @{ Tail = "REVIEW_CRITERIA: 2/3`nREVIEW_VERDICT: CLEAN"; Rows = 'Met', 'Met', 'Not met'; Met = $null }
+        @{ Tail = "REVIEW_CRITERIA: 1/3`nREVIEW_VERDICT: FINDINGS 1"; Rows = 'Met', 'Not met', 'Not met'; Met = $null }
+        @{ Tail = "REVIEW_CRITERIA: 4/3`nREVIEW_VERDICT: FINDINGS 1"; Rows = 'Met', 'Met', 'Met'; Met = $null }
+        # The footer disagrees with the rows: a listed miss counted as met, or a row missing from the total.
+        @{ Tail = "REVIEW_CRITERIA: 2/2`nREVIEW_VERDICT: CLEAN"; Rows = 'Met', 'Not met'; Met = $null }
+        @{ Tail = "REVIEW_CRITERIA: 2/2`nREVIEW_VERDICT: CLEAN"; Rows = 'Met', 'Met', 'Not met'; Met = $null }
+        @{ Tail = "REVIEW_CRITERIA: 2/2`nREVIEW_VERDICT: CLEAN"; Rows = 'Met'; Met = $null }
+        @{ Tail = "REVIEW_VERDICT: CLEAN"; Rows = @(); Met = $null }
+        @{ Tail = "REVIEW_VERDICT: CLEAN`nREVIEW_CRITERIA: 2/2"; Rows = 'Met', 'Met'; Met = $null }
+        @{ Tail = "REVIEW_CRITERIA: 2/2`nmore text`nREVIEW_VERDICT: CLEAN"; Rows = 'Met', 'Met'; Met = $null }
     ) {
-        param($Tail, $Met, $Total, $Count)
-        $verdict = Get-ReviewVerdict -Text "## Findings`n- a finding`n$Tail" -RequireCriteria
+        param($Tail, $Rows, $Met, $Total, $Count)
+        $criteria = @($Rows | ForEach-Object { if ($_ -like '*`*`**') { "$_ A criterion." } else { "**$_** A criterion." } }) -join "`n"
+        # A Met row outside the criteria part does not count.
+        $text = "## Acceptance criteria`n$criteria`n`n## Findings`n- a finding`n**Met** quoted in a finding.`n$Tail"
+        $verdict = Get-ReviewVerdict -Text $text -RequireCriteria
         if ($null -eq $Met) {
             if ($null -ne $verdict) { throw "Accepted an invalid ending: $Tail" }
             return
@@ -408,7 +417,7 @@ Describe 'Spec review (review-v3)' {
         if ($null -eq $verdict -or $verdict.CriteriaMet -ne $Met -or $verdict.CriteriaTotal -ne $Total -or $verdict.FindingCount -ne $Count) { throw "Wrong verdict for: $Tail" }
         if ($verdict.Review -match 'REVIEW_') { throw 'Contract lines were left in the review' }
         # A diff-only review keeps the two-line contract and ignores criteria.
-        $plain = Get-ReviewVerdict -Text "## Findings`n- a finding`n$Tail"
+        $plain = Get-ReviewVerdict -Text $text
         if ($null -eq $plain -or $null -ne $plain.CriteriaTotal) { throw 'A diff-only review required criteria' }
     }
 

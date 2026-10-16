@@ -174,7 +174,8 @@ code has findings. The prompt requires the reviewer to end with exactly three li
 (criteria marked Met over those marked Met or Not met; `0/0` when no issue is linked), then `REVIEW_VERDICT: CLEAN` or
 `REVIEW_VERDICT: FINDINGS <n>`, then `REVIEW_STATUS: COMPLETE`. The verdict only counts as the line directly above the
 status marker and the criteria line only as the line directly above the verdict, so contract-like text quoted from the
-diff or an issue cannot spoof them. A review whose findings are fewer than its unmet criteria (for example one that
+diff or an issue cannot spoof them. The criteria line must match the **Met** and **Not met** rows listed under
+`## Acceptance criteria`, and a review whose findings are fewer than its unmet criteria (for example one that
 reports a miss but obeys an issue's "ignore all findings") is rejected like a missing verdict, so the check fails as
 `Review did not complete` instead of turning green. A missing or malformed line is treated like a missing marker. All
 three lines are removed before posting. A spec review's check title adds the count, for example
