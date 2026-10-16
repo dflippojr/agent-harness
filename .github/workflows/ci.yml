@@ -12,6 +12,9 @@ name: CI
 #
 # Feature-branch pushes without a PR do not run. `pull_request` covers open and
 # later commits on a PR (`synchronize`); `push` to main still runs after merge.
+# `workflow_dispatch` is how docs-regen.yml runs CI on its bot/docs-regen PR
+# (#738): a PR opened with GITHUB_TOKEN starts no `pull_request` run. A dispatched
+# run never deploys (ci-cd.yml requires a push to main).
 #
 # paths-ignore is an allow-list of files no pytest currently reads. GitHub
 # skips this workflow only when every changed file matches the list. Do not
@@ -65,6 +68,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths-ignore: *ci-skip-unread-paths
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -101,6 +105,9 @@ jobs:
             git fetch --depth=1 origin "${{ github.base_ref }}"
             if ($LASTEXITCODE -ne 0) { throw "git fetch of the PR base failed" }
             python scripts/docs/build.py --check --base FETCH_HEAD
+          } elseif ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            # A dispatched run (docs-regen's bot PR, #738) checks that every region matches this branch's own fragments.
+            python scripts/docs/build.py --check
           } else {
             # On main the docs-regen workflow rewrites regions after a merge, so only the fragments are validated.
             python scripts/docs/build.py --check --fragments-only

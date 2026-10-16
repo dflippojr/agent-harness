@@ -38,20 +38,37 @@ anonymously and does not sign in. The first production deployment showed why: `d
 ## Docs regeneration on main
 
 `.github/workflows/docs-regen.yml` runs on a push to `main` that touches `docs/fragments/**`, `scripts/docs/**`, `harness/**` or `harness_modules/**` (the code-derived tables read routes and settings from there)
-(and on `workflow_dispatch`). It runs `python scripts/docs/build.py` and, only if a generated region changed, commits
-`Docs: regenerate fragment regions [skip ci]` to `main` as `github-actions[bot]`. It is the single writer of generated
-regions; PRs add fragments only. It uses the default `GITHUB_TOKEN` with `contents: write` on that one job.
+(and on `workflow_dispatch`). It runs `python scripts/docs/build.py` and, only if a generated region changed, lands the
+result on `main` through a pull request (#738). It is the single writer of generated regions; PRs add fragments only.
+It never pushes to `main`:
 
-- **No deploy, no loop.** A push made with `GITHUB_TOKEN` starts no workflow runs, so the bot commit starts neither
-  `docs-regen`, `CI`, nor (through `CI`) `deploy-tower`. The `[skip ci]` marker repeats that explicitly, and the job
-  skips any head commit carrying it. `tests/test_ci_cd_workflow.py` pins both.
-- **Bursts.** The `docs-regen` concurrency group cancels an older run, so close-together merges produce one commit.
-  If `main` moves during a run, the push is retried from the new tip, up to three times.
-- **Main CI.** After a fragment PR merges, the region lags until the bot commit lands, so the `Check docs fragments`
+1. It commits `Docs: regenerate fragment regions [skip ci]` as `github-actions[bot]` and force-pushes it to
+   `bot/docs-regen`, then opens a PR from that branch (or reuses the open one).
+2. A PR opened with the default `GITHUB_TOKEN` starts no `pull_request` runs, so the job starts `CI` on the branch with
+   `workflow_dispatch` and waits for that run. Its checks land on the PR head commit, so a required `gate` check sees
+   them. The dispatched run checks every region against the branch's own fragments (`build.py --check`).
+3. When CI passes, the job squash-merges the PR with `--match-head-commit`, so only the commit CI passed can merge. The
+   repository deletes the merged branch. If CI fails, the PR stays open and the run fails; the next merge to `main`
+   regenerates and reuses it.
+
+It uses the default `GITHUB_TOKEN`, with `contents`, `pull-requests` and `actions` write on that one job.
+`tests/test_ci_cd_workflow.py` pins that its only push targets `bot/docs-regen` and that the merge follows a passing CI
+run on the same commit.
+
+- **Owner setting.** Opening the PR needs Settings > Actions > General > "Allow GitHub Actions to create and approve
+  pull requests". Without it the job fails with an error naming that setting, and `main`'s regions lag.
+- **Rulesets.** Because the docs commit arrives as a PR with a passing `gate`, a phase-1 ruleset (PR required, `gate`
+  required, no approvals, no bypass actors; `ao rulesets` in dflippojr/agent-ops) needs no exemption for it. A rule
+  that requires an approving review would hold the docs PR until the owner approves it.
+- **No deploy, no loop.** The merge, made with `GITHUB_TOKEN`, starts no workflow runs, so the merged commit starts
+  neither `docs-regen`, `CI`, nor (through `CI`) `deploy-tower`. The `[skip ci]` marker repeats that explicitly, and
+  the job skips any head commit carrying it. The dispatched CI run never deploys: `ci-cd.yml` deploys only after CI for
+  a push to `main`.
+- **Bursts.** The `docs-regen` concurrency group cancels an older run, so close-together merges produce one PR.
+- **Main CI.** After a fragment PR merges, the region lags until the docs PR merges, so the `Check docs fragments`
   step on main runs `--check --fragments-only` (schema only). PRs still compare regions against the base.
-- **Nothing changed** means no commit (`tests/test_docs_build.py::test_build_twice_changes_nothing_the_second_time`).
-- `main` has no branch protection today. If a ruleset ever blocks the bot push, the owner must allow
-  `github-actions[bot]` to bypass it for this workflow.
+- **Nothing changed** means no PR, and an open docs PR left over from an earlier run is closed
+  (`tests/test_docs_build.py::test_build_twice_changes_nothing_the_second_time`).
 
 ## Deployment boundary
 
