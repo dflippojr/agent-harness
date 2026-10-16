@@ -18,8 +18,7 @@ HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 MAX_COMMENT_CHARS = 4000
 MAX_QUOTED_LINES = 200
 SIDES = ("old", "new")
-REVIEW_SUMMARY = re.compile(
-    r"^<!-- agent-review: sha=([0-9a-f]{40}) criteria=(\d{1,3})/(\d{1,3}) findings=(\d{1,4}) -->$", re.MULTILINE)
+REVIEW_SUMMARY = re.compile(r"<!-- agent-review: sha=([0-9a-f]{40}) criteria=(\d{1,3})/(\d{1,3}) findings=(\d{1,4}) -->")
 
 
 def _path(marker: str, line: str) -> str | None:
@@ -160,15 +159,17 @@ def format_message(comments: list[dict], repos: list[dict]) -> str:
     return "\n".join(out)
 
 
-def parse_review_summary(body: str) -> dict | None:
+def parse_review_summary(body: str | None) -> dict | None:
     """The automated review's summary line -> {sha, criteria_met, criteria_total, findings}, or None.
 
-    Only a whole line counts, and the last one wins: the job appends its line after the review text, so a summary
-    line quoted in the text cannot stand in for it. A line claiming more criteria met than exist is malformed."""
-    found = REVIEW_SUMMARY.findall((body or "").replace("\r\n", "\n"))
-    if not found:
+    Only the comment's final nonblank line counts: the job appends the summary there, after the review text, so a
+    summary quoted in the text (or a comment whose footer is missing or malformed) cannot stand in for it. A line
+    claiming more criteria met than exist is malformed."""
+    lines = (body or "").strip().splitlines()
+    match = REVIEW_SUMMARY.fullmatch(lines[-1]) if lines else None
+    if match is None:
         return None
-    sha, met, total, findings = found[-1]
+    sha, met, total, findings = match.groups()
     if int(met) > int(total):
         return None
     return {"sha": sha, "criteria_met": int(met), "criteria_total": int(total), "findings": int(findings)}

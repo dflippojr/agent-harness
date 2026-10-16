@@ -322,6 +322,15 @@ Describe 'Spec review (review-v3)' {
         # ahead of older ones.
         if ($context.IndexOf('DECISION') -gt $context.IndexOf('FLOOD')) { throw 'Comments were not rendered in reading order' }
         if ($context -notmatch '\| FLOOD5 ' -or $context -match '\| FLOOD1 ') { throw 'Outside comments were not budgeted newest first' }
+
+        # The priority spans issues: an outside flood on the first issue cannot starve a maintainer on the second.
+        $script:sources.Issues[0].Comments = $flood
+        $script:sources.Issues += [pscustomobject]@{
+            Number = 14; Missing = $false; Title = 'Second'; State = 'open'; Author = $script:author; Body = 'Second issue.'
+            Comments = @([pscustomobject]@{ Author = $script:author; Body = 'SECOND DECISION: keep the old column order.' })
+        }
+        $context = Format-ReviewSpecContext -Sources $script:sources -MaxSpecBytes 4096 -Nonce 'n'
+        if ($context -notmatch '\| SECOND DECISION') { throw 'An outside flood on one issue starved a maintainer on another' }
     }
 
     It 'names missing issues and an unlinked pull request' {

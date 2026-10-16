@@ -1289,16 +1289,20 @@ function Format-ReviewSpecContext {
     $issueViews = @(foreach ($issue in @($Sources.Issues)) {
         [pscustomobject]@{ Issue = $issue; Title = (& $newPiece ([string]$issue.Title) 512); Body = (& $newPiece ([string]$issue.Body) $MaxSpecBytes); Comments = @() }
     })
-    # Anyone can comment on a public issue, so comments from people with write access are budgeted before the rest:
-    # a flood of outside comments cannot push the maintainers' refinements out.
+    # Anyone can comment on a public issue, so comments from people with write access, on every linked issue, are
+    # budgeted before any other comment: a flood of outside comments cannot push the maintainers' refinements out.
     $trusted = @('OWNER', 'MEMBER', 'COLLABORATOR')
-    foreach ($view in $issueViews) {
+    $allEntries = @(for ($issueIndex = 0; $issueIndex -lt $issueViews.Count; $issueIndex++) {
+        $view = $issueViews[$issueIndex]
         $comments = @($view.Issue.Comments)
-        $entries = @(for ($index = 0; $index -lt $comments.Count; $index++) { [pscustomobject]@{ Index = $index; Comment = $comments[$index]; Piece = $null } })
-        $order = @($entries | Sort-Object -Property @{ Expression = { if ($trusted -contains [string]$_.Comment.Author.Association) { 0 } else { 1 } } }, @{ Expression = { $_.Index }; Descending = $true })
-        foreach ($entry in $order) { $entry.Piece = & $newPiece ([string]$entry.Comment.Body) $MaxSpecBytes }
-        $view.Comments = $entries
-    }
+        $view.Comments = @(for ($index = 0; $index -lt $comments.Count; $index++) {
+            [pscustomobject]@{ Issue = $issueIndex; Index = $index; Comment = $comments[$index]; Piece = $null }
+        })
+        $view.Comments
+    })
+    $order = @($allEntries | Sort-Object -Property @{ Expression = { if ($trusted -contains [string]$_.Comment.Author.Association) { 0 } else { 1 } } },
+        @{ Expression = { $_.Issue } }, @{ Expression = { $_.Index }; Descending = $true })
+    foreach ($entry in $order) { $entry.Piece = & $newPiece ([string]$entry.Comment.Body) $MaxSpecBytes }
     $prTitle = Get-ReviewUtf8Prefix -Text ([string]$Sources.Title) -MaxBytes 512
     $remaining = $MaxSpecBytes - $utf8.GetByteCount($prTitle)
     foreach ($piece in $pieces) {

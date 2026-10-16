@@ -174,7 +174,7 @@ three lines are removed before posting. A spec review's check title adds the cou
 `2 findings; criteria 1/3 met`, and the job output `criteria=<met>/<total>` carries it. When the posted comment carries
 the coverage marker (below), a spec review adds a summary line after it for readiness tools such as `ao ready`:
 `<!-- agent-review: sha=<head> criteria=<met>/<total> findings=<n> -->`. `harness.review_comments.parse_review_summary`
-reads it back and takes the last whole line, so a summary quoted in the review text cannot stand in for it. A partial
+reads it back from the comment's final nonblank line only, so a summary quoted in the review text cannot stand in for it. A partial
 review withholds the summary along with the marker, so a readiness tool treats it as not reviewed. The check is created on the head commit that the job checked
 out, and `pull_request` only fires on `opened`, so a PR that gains commits needs a dispatched re-review before its head
 commit carries the check again.
