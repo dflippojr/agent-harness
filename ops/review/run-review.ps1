@@ -1289,11 +1289,15 @@ function Format-ReviewSpecContext {
     $issueViews = @(foreach ($issue in @($Sources.Issues)) {
         [pscustomobject]@{ Issue = $issue; Title = (& $newPiece ([string]$issue.Title) 512); Body = (& $newPiece ([string]$issue.Body) $MaxSpecBytes); Comments = @() }
     })
+    # Anyone can comment on a public issue, so comments from people with write access are budgeted before the rest:
+    # a flood of outside comments cannot push the maintainers' refinements out.
+    $trusted = @('OWNER', 'MEMBER', 'COLLABORATOR')
     foreach ($view in $issueViews) {
         $comments = @($view.Issue.Comments)
-        [array]::Reverse($comments)
-        $view.Comments = @(foreach ($comment in $comments) { [pscustomobject]@{ Comment = $comment; Piece = (& $newPiece ([string]$comment.Body) $MaxSpecBytes) } })
-        [array]::Reverse($view.Comments)
+        $entries = @(for ($index = 0; $index -lt $comments.Count; $index++) { [pscustomobject]@{ Index = $index; Comment = $comments[$index]; Piece = $null } })
+        $order = @($entries | Sort-Object -Property @{ Expression = { if ($trusted -contains [string]$_.Comment.Author.Association) { 0 } else { 1 } } }, @{ Expression = { $_.Index }; Descending = $true })
+        foreach ($entry in $order) { $entry.Piece = & $newPiece ([string]$entry.Comment.Body) $MaxSpecBytes }
+        $view.Comments = $entries
     }
     $prTitle = Get-ReviewUtf8Prefix -Text ([string]$Sources.Title) -MaxBytes 512
     $remaining = $MaxSpecBytes - $utf8.GetByteCount($prTitle)

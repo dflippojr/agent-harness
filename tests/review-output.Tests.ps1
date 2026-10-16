@@ -312,6 +312,18 @@ Describe 'Spec review (review-v3)' {
         if ($context -notmatch 'NEWEST ' + [char]0x00E9) { throw 'Multibyte text was not kept' }
     }
 
+    It 'budgets maintainer comments before a flood of outside comments' {
+        $outsider = [pscustomobject]@{ Login = 'outsider'; Association = 'NONE'; Created = '' }
+        $flood = @(1..5 | ForEach-Object { [pscustomobject]@{ Author = $outsider; Body = "FLOOD$_ " + ('f' * 3000) } })
+        $script:sources.Issues[0].Comments = @([pscustomobject]@{ Author = $script:author; Body = 'DECISION: CSV only.' }) + $flood
+        $context = Format-ReviewSpecContext -Sources $script:sources -MaxSpecBytes 4096 -Nonce 'n'
+        if ($context -notmatch '\| DECISION: CSV only\.') { throw 'The flood pushed out the maintainer comment' }
+        # Reading order is kept: the maintainer comment still comes first, and the newest outside comment is kept
+        # ahead of older ones.
+        if ($context.IndexOf('DECISION') -gt $context.IndexOf('FLOOD')) { throw 'Comments were not rendered in reading order' }
+        if ($context -notmatch '\| FLOOD5 ' -or $context -match '\| FLOOD1 ') { throw 'Outside comments were not budgeted newest first' }
+    }
+
     It 'names missing issues and an unlinked pull request' {
         $script:sources.Issues = @([pscustomobject]@{ Number = 13; Missing = $true; Title = ''; Body = ''; State = ''; Author = $null; Comments = @() })
         if ((Format-ReviewSpecContext -Sources $script:sources) -notmatch 'ISSUE #13: could not be read') { throw 'Missing issue was not named' }
