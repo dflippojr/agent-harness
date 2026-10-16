@@ -120,6 +120,8 @@ jobs:
           HEAD_SHA: ${{ steps.regen.outputs.sha }}
         # --match-head-commit merges exactly the commit CI just passed; if the branch moved, the merge is refused.
         # The repository deletes the merged branch (delete_branch_on_merge), so the next run starts it fresh.
+        # Under a ruleset, the merge also needs the required `gate` check. #726 adds that job to ci.yml, so the
+        # dispatched CI run above produces it; agent-ops applies the ruleset only once `gate` is green on main.
         run: >
           gh pr merge "$PR_NUMBER" --squash --match-head-commit "$HEAD_SHA"
           --subject "$COMMIT_SUBJECT (#$PR_NUMBER)"

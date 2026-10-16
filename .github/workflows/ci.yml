@@ -154,6 +154,9 @@ jobs:
     runs-on: windows-latest
     # Forks have no secrets. Same-repository Dependabot PRs use the separate
     # Dependabot secret store; they run the same scan when its token is set.
+    # A dispatched run (docs-regen's bot/docs-regen PR, #738) skips the scan on purpose: that commit changes only
+    # generated Markdown regions, which are not Sonar sources, and gating it on main's unrelated quality gate would
+    # leave main's docs lagging. The docs PR still has to pass `test`, `openapi` and `ui-tests`.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     continue-on-error: ${{ github.event_name == 'push' }}
     steps:
