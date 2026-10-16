@@ -11,18 +11,26 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from harness.modules import check_member_key_dir
+
 KEY_FILE = "member-keys.key"
 WARNING = ("The member key and a database backup together decrypt every member's stored API key; "
            "keep the key copy somewhere other than where the backups are kept off-site.")
 
 
 def key_dir(cfg, root: Path) -> Path:
-    path = Path(cfg.backup.member_key_dir).expanduser() if cfg.backup.member_key_dir else root / "member-keys"
-    resolved = path.resolve()
-    relative = resolved.relative_to(root.resolve()) if resolved.is_relative_to(root.resolve()) else None
+    """The member-key directory, resolved once: root/member-keys, or backup.member_key_dir checked as at config load."""
+    base = root.resolve()
+    if cfg.backup.member_key_dir:
+        resolved = check_member_key_dir(cfg.backup.member_key_dir)
+    else:
+        resolved = (base / "member-keys").resolve()
+        if resolved.parent != base:  # a member-keys symlink or junction pointing elsewhere
+            raise ValueError("the default member-key directory must stay inside backup.dir")
+    relative = resolved.relative_to(base) if resolved.is_relative_to(base) else None
     if relative is not None and (not relative.parts or re.match(r"^\d{4}-\d{2}-\d{2}", relative.parts[0])):
         raise ValueError("backup.member_key_dir must be separate from dated database backup folders")
-    return path
+    return resolved
 
 
 def fingerprint(content: bytes) -> str:
@@ -54,17 +62,24 @@ def _windows_command(args: list[str]) -> str:
     return result.stdout
 
 
-def write_private(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix=".member-key-", dir=path.parent)
-    tmp = Path(name)
+def write_private(directory: Path, name: str, content: bytes) -> Path:
+    """Atomically write an owner-only file called `name` directly inside `directory`; any other target is refused
+    before the filesystem is touched (#728)."""
+    base = directory.resolve()
+    target = (base / name).resolve()
+    if Path(name).name != name or target.parent != base or not target.is_relative_to(base):
+        raise ValueError(f"refusing to write {name!r} outside {base}")
+    base.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".member-key-", dir=base)
+    tmp = Path(tmp_name)
     try:
-        os.close(fd)
-        restrict(tmp)  # protect the file before any secret bytes are written
-        tmp.write_bytes(content)
-        tmp.replace(path)
+        with os.fdopen(fd, "wb") as f:
+            restrict(tmp)  # protect the file before any secret bytes are written
+            f.write(content)
+        tmp.replace(target)
     finally:
         tmp.unlink(missing_ok=True)
+    return target
 
 
 def snapshot_key(cfg, root: Path, database: Path, warnings: list[str]) -> Path | None:
@@ -82,8 +97,7 @@ def snapshot_key(cfg, root: Path, database: Path, warnings: list[str]) -> Path |
         warnings.append("Member key backup skipped: the source key is unreadable or invalid; "
                         "members may need to re-add their API keys after restore.")
         return None
-    dest = directory / f"{digest}.key"
-    write_private(dest, content)
+    dest = write_private(directory, f"{digest}.key", content)
     with closing(sqlite3.connect(database)) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS backup_member_key (fingerprint TEXT NOT NULL)")
         conn.execute("DELETE FROM backup_member_key")

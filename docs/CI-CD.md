@@ -5,9 +5,9 @@ after that workflow succeeds for the exact commit pushed to `main`:
 
 1. **CI / test** runs the complete test suite once, with coverage, on GitHub-hosted `windows-latest` for pull
    requests and pushes to `main`, and uploads `coverage.xml` as an artifact. **CI / sonar** (same workflow,
-   `needs: test`) feeds that coverage to SonarCloud. On a push to `main`, `sonar` is `continue-on-error`, so a failing
-   quality gate shows on the job but does not block deployment; only failing tests do. On pull requests the quality
-   gate still fails the check. Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
+   `needs: test`) feeds that coverage to SonarCloud and waits for the quality gate. A failing gate fails the check on
+   pull requests and fails the CI run on a push to `main`, so it blocks deployment just as failing tests do (#728).
+   Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
    tower; that pool is retired so CI no longer competes with llama-server for the tower's RAM.
 2. **publish-images** is triggered by `workflow_run` only after `CI` completes successfully for a push to `main`.
    It checks out `github.event.workflow_run.head_sha`, never a branch name, and GitHub-hosted Linux builders publish

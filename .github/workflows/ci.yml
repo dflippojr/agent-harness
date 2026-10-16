@@ -30,10 +30,10 @@ name: CI
 # always-running success job (do not add that job here).
 # .github/workflows/ci-cd.yml already deploys only when
 # workflow_run.conclusion == 'success' for a push to main, so a skipped or
-# absent CI run does not publish or deploy (desired). On a push to main the
-# `sonar` job is continue-on-error: a failing quality gate shows on the job
-# but does not block the deploy; only failing tests do. On pull requests the
-# quality gate still fails the check.
+# absent CI run does not publish or deploy (desired). The `sonar` job blocks
+# everywhere (#728): a failing SonarCloud quality gate fails the check on a
+# pull request and fails the CI run on a push to main, which stops the deploy
+# just as failing tests do.
 on:
   push:
     branches: [main]
@@ -148,7 +148,6 @@ jobs:
     # Forks have no secrets. Same-repository Dependabot PRs use the separate
     # Dependabot secret store; they run the same scan when its token is set.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    continue-on-error: ${{ github.event_name == 'push' }}
     steps:
       - name: Check SonarCloud token availability
         id: sonar-token
