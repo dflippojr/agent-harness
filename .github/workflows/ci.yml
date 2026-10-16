@@ -274,10 +274,13 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install lint dependencies
+        id: install
         run: python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt -r tools/lint/requirements.txt
       - name: ruff
         run: python -m ruff check --output-format=github .
       - name: pyright against its baseline
+        # Also after a ruff failure, so one run reports both.
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: python tools/lint/pyright_baseline.py
 
   changes:
