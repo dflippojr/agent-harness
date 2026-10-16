@@ -92,11 +92,14 @@ def _json(reply: httpx.Response):
         return {}
 
 
-def check_loopback(handle: dict, listeners: Iterable[tuple[str, int]]) -> Check:
+def check_loopback(handle: dict, listeners: Iterable[tuple[str, int]] | str) -> Check:
     """Both URLs are 127.0.0.1 on non-live ports, and every socket the instance listens on is bound to 127.0.0.1.
-    `listeners` is (ip, port) for each listening socket of the recorded process and its children."""
+    `listeners` is (ip, port) for each listening socket of the recorded process and its children, or why a live one
+    could not be inspected: an uninspected process might listen anywhere."""
     if problem := url_problem(handle):
         return Check("loopback", False, problem)
+    if isinstance(listeners, str):
+        return Check("loopback", False, listeners)
     ports = [_host_port(handle[label])[1] for label in ("server", "web")]
     bound = list(listeners)
     exposed = sorted({f"{ip}:{port}" for ip, port in bound if ip != LOOPBACK})
@@ -180,15 +183,20 @@ def instance_processes(handle: dict) -> list:
         return []
 
 
-def live_listeners(procs) -> list[tuple[str, int]]:
+def live_listeners(procs) -> list[tuple[str, int]] | str:
+    """The listening sockets of `procs`, or why one of them could not be inspected. A process that has exited
+    listens on nothing."""
     import psutil
     bound = []
     for proc in procs:
+        # psutil 6 renamed Process.connections to net_connections; requirements.txt allows 5.9.
+        sockets = getattr(proc, "net_connections", None) or proc.connections
         try:
-            bound += [(c.laddr.ip, c.laddr.port) for c in proc.net_connections(kind="inet")
-                      if c.status == psutil.CONN_LISTEN]
-        except psutil.Error:
+            bound += [(c.laddr.ip, c.laddr.port) for c in sockets(kind="inet") if c.status == psutil.CONN_LISTEN]
+        except psutil.NoSuchProcess:
             continue
+        except psutil.Error as e:
+            return f"process {proc.pid}'s sockets could not be inspected ({type(e).__name__})"
     return bound
 
 

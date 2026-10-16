@@ -58,7 +58,7 @@ failure:
 | Check | Passes when |
 | --- | --- |
 | `ready` | `instance.json` says `ready`, the Server's `/health` answers 200 with `ok`, and Web's `/ready` answers 200 |
-| `loopback` | both URLs are `http://127.0.0.1:<port>` and not `:8100`, and every socket the recorded process listens on is bound to `127.0.0.1`, including both ports |
+| `loopback` | both URLs are `http://127.0.0.1:<port>` and not `:8100`, and every socket the recorded process and its children listen on is bound to `127.0.0.1`, including both ports. A live process whose sockets cannot be inspected fails the check |
 | `isolation` | the `data/fake-model-instance` marker is present, the generated config's `data_dir` and `repos_dir` are inside the instance directory (which is not this checkout or its `config/`), and the instance process carries no credential variables |
 | `seed` | the six seeded sessions (each with its settled status), the chat and both jobs from docs/ui-testing.md "Seed and sign-in" are listed, read with the owner token |
 

@@ -214,6 +214,28 @@ def test_loopback_fails_beyond_loopback_or_without_the_listeners(handle, listene
     assert why in check.detail
 
 
+def test_loopback_fails_when_a_live_process_cannot_be_inspected():
+    import psutil
+    conn = Mock(laddr=Mock(ip="127.0.0.1", port=SERVER), status=psutil.CONN_LISTEN)
+    parent = Mock(pid=1, **{"net_connections.return_value": [conn, Mock(laddr=Mock(ip="127.0.0.1", port=WEB),
+                                                                       status=psutil.CONN_LISTEN)]})
+    child = Mock(pid=2, **{"net_connections.side_effect": psutil.AccessDenied(2)})
+    gone = Mock(pid=3, **{"net_connections.side_effect": psutil.NoSuchProcess(3)})
+    assert doctor.live_listeners([parent, gone]) == LISTENING
+    listeners = doctor.live_listeners([parent, child])
+    check = doctor.check_loopback(HANDLE, listeners)
+    assert not check.ok and "process 2's sockets could not be inspected (AccessDenied)" in check.detail
+
+
+def test_listeners_work_with_psutil_5():
+    import psutil
+    old = Mock(spec=["pid", "connections"], pid=1, **{"connections.return_value": [
+        Mock(laddr=Mock(ip="127.0.0.1", port=SERVER), status=psutil.CONN_LISTEN),
+        Mock(laddr=Mock(ip="127.0.0.1", port=60000), status="ESTABLISHED")]})
+    assert doctor.live_listeners([old]) == [("127.0.0.1", SERVER)]
+    old.connections.assert_called_once_with(kind="inet")
+
+
 # Doctor: isolation --------------------------------------------------------------------------------------------------
 def test_isolation_fails_on_data_outside_the_instance_or_credentials(instance, tmp_path):
     leaked = doctor.check_isolation(instance, dict(CLEAN_ENV, GITHUB_TOKEN="x", OPENAI_API_KEY="y"))
