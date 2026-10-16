@@ -7,6 +7,8 @@ may reuse the same display slug. Member projects force owner-only capabilities o
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .config import PROJECT_NAME, Project
 from .principal import OWNER_USER_ID
 from .storage import repos_dir
@@ -78,6 +80,5 @@ def validate_slug(name: str) -> str:
     return slug
 
 
-def member_managed_repo(cfg, user_id: str, slug: str) -> "Path":
-    from pathlib import Path
+def member_managed_repo(cfg, user_id: str, slug: str) -> Path:
     return repos_dir(cfg, user_id) / slug

@@ -302,7 +302,6 @@ def test_repeated_inspect_and_status_do_not_rehash_unchanged_files(tmp_path, mon
 
 def test_install_hash_failure_space_shared_and_idempotent_remove(tmp_path):
     payloads = {"checkpoint": b"CKPT-DATA", "vae": b"VAE-DATA", "encoder": b"ENC-DATA"}
-    bad = dict(payloads)
     server, url = start_fixture({**{k: v for k, v in payloads.items()}, "checkpoint": b"WRONG"})
     try:
         cfg = cfg_for(tmp_path)
@@ -801,9 +800,6 @@ def test_staged_comfyui_validation_and_rollback(tmp_path):
     assert checked["graphs"]["ok"]
     missing = validate_comfyui(cfg, object_info={"UNETLoader": {}}, root=staged)
     assert not missing["ok"]
-
-    archive = tmp_path / "ComfyUI_windows_portable_nvidia.7z"
-    pin = load_manifest()["comfyui"]["pinned_portable"]
 
     def fake_extract(src, dest):
         plant_comfy(Path(dest))

@@ -51,7 +51,7 @@ class Histogram:
         """Cumulative (le, count) pairs, sum, and count."""
         with self._lock:
             running, cumulative = 0, []
-            for bound, n in zip(self.buckets, self._counts):
+            for bound, n in zip(self.buckets, self._counts, strict=True):
                 running += n
                 cumulative.append((bound, running))
             return cumulative, self._sum, self._count

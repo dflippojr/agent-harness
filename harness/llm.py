@@ -152,7 +152,7 @@ async def chat(
                     await _apply_chunk(chunk, out, calls, on_delta, on_progress)
     except httpx.HTTPError as e:
         raise LLMError(f"{type(e).__name__}: {e}", retryable=isinstance(e, (httpx.ReadError, httpx.RemoteProtocolError,
-                                                                              httpx.ConnectError)))
+                                                                              httpx.ConnectError))) from e
     for index in sorted(calls):
         call = calls[index]
         if not call["id"]:

@@ -8,8 +8,6 @@ import logging
 import math
 import mimetypes
 import os
-import sqlite3
-import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -619,7 +617,7 @@ async def create_project(body: CreateProject, request: Request):
     try:
         config_mod.add_project(cfg, project)
     except (OSError, ValueError, TypeError) as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     return {"name": project.name, "description": project.description, "repo": bool(project.repo),
             "homelab": False, "target": project.target, "managed": True}
 
@@ -668,10 +666,10 @@ async def update_backend(name: str, body: BackendUpdate, request: Request):
         raise HarnessError(400, "set model or effort")
     try:
         save_prefs(m, name, model=body.model, effort=body.effort)
-    except KeyError:
-        raise HarnessError(404, f"unknown backend {name!r}")
+    except KeyError as exc:
+        raise HarnessError(404, f"unknown backend {name!r}") from exc
     except ValueError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     if name == "local":
         return {"name": "local", "model": m.cfg.default_model, "effort": ""}
     from .backend_state import view as backend_view
@@ -1234,14 +1232,14 @@ def _key_origins(body: dict, kind: str) -> list:
     try:
         return list(dict.fromkeys(normalize_origin(value) for value in raw_origins))
     except ValueError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 def _key_catalog_app_id(body: dict) -> str:
     try:
         return catalog_ids.normalize(body.get("catalog_app_id"))
     except ValueError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 @api_router.get("/keys")

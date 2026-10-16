@@ -843,15 +843,12 @@ def test_reviewer_payload_is_minimized():
 
 
 # integration: fake hosted reviewer on local, Claude, and Codex bridges
-import asyncio
-
 from fastapi.testclient import TestClient
 
 from harness.api import create_app
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.metrics import render as render_metrics
-from harness.smart_approvals import SmartConfig
 from harness.transcript import render as render_transcript
 from test_daemon import Script, call, events, make_cfg, wait_status
 from test_phase8 import _claude_manager, _codex_manager

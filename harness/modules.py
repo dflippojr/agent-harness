@@ -138,7 +138,8 @@ _PUBLIC = {
 }
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
+    # `Any`, not the inferred `ModuleType | Any`: pyright would otherwise flag every call through this facade.
     target = _PUBLIC.get(name)
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -336,7 +337,7 @@ def discover(packages=None) -> tuple[Module, ...]:
     found: list[Module] = []
     for name in (key if key is not None else namespace_packages()):
         try:
-            module = getattr(importlib.import_module(name), "MODULE")
+            module = importlib.import_module(name).MODULE
         except Exception:
             log.exception("module package %s did not load; running without it", name)
             continue

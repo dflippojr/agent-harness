@@ -19,10 +19,8 @@ and docs/app-api.md.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
-import secrets
 import time
 from urllib.parse import urlsplit
 
@@ -30,7 +28,7 @@ from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .api import RouteTable, mgr, sse
+from .api import RouteTable, mgr
 from .api_models import ApprovalResponse, SessionResponse
 from .fileops import ToolError
 from .manager import HarnessError, public_approval
@@ -448,7 +446,7 @@ def _check_token_origin(request: Request, m, key: dict) -> None:
         try:
             origin = normalize_origin(raw_origin)
         except ValueError as e:
-            raise HarnessError(403, str(e))
+            raise HarnessError(403, str(e)) from e
         if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
             raise HarnessError(403, "this app token is not approved for this origin")
 
@@ -561,13 +559,13 @@ async def create_pairing_code(body: PairingCodeRequest, request: Request):
     except ValueError as e:
         await m.db.main.awrite(credential_audit.record, m.db, ctx, "pairing.create", "", "denied", "pairing",
                                {"reason": "invalid_request"})
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     try:
         catalog_app_id = catalog_ids.normalize(body.catalog_app_id)
     except ValueError as e:
         await m.db.main.awrite(credential_audit.record, m.db, ctx, "pairing.create", "", "denied", "pairing",
                                {"reason": "invalid_request"})
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     scopes = " ".join(dict.fromkeys(body.scopes))
 
     def commit():
@@ -606,7 +604,7 @@ async def pair_browser(body: PairRequest, request: Request):
     try:
         origin = normalize_origin(raw_origin)
     except ValueError as e:
-        raise HarnessError(403, str(e))
+        raise HarnessError(403, str(e)) from e
     m = mgr(request)
 
     def commit():
@@ -745,7 +743,7 @@ async def api_create_project(body: dict, request: Request):
     try:
         config_mod.add_project(m.cfg, project)
     except (OSError, ValueError, TypeError) as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     return {"name": project.name, "description": project.description, "repo": bool(project.repo),
             "homelab": False, "target": project.target, "managed": True}
 
@@ -1340,8 +1338,8 @@ async def event_ticket(ref: str, request: Request):
     s = visible_session(request, key, ref)
     try:
         origin = normalize_origin(request.headers.get("origin", ""))
-    except ValueError:
-        raise HarnessError(400, "stream tickets require the paired browser Origin header")
+    except ValueError as exc:
+        raise HarnessError(400, "stream tickets require the paired browser Origin header") from exc
     if origin not in (key.get("origins") or []):
         raise HarnessError(403, "stream tickets are only available to a paired browser origin")
     ticket, expires_at = m.db.create_stream_ticket(key["id"], s["id"], origin, STREAM_TICKET_TTL_SECONDS)

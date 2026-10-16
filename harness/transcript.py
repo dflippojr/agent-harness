@@ -21,7 +21,7 @@ def _block(text: str, limit: int = 4000) -> str:
     text = text.rstrip()
     if len(text) > limit:
         text = text[: limit // 2] + f"\n... [{len(text) - limit} characters omitted] ...\n" + text[-limit // 2:]
-    return "```\n" + text.replace("```", "``​`") + "\n```"
+    return "```\n" + text.replace("```", "``\u200b`") + "\n```"
 
 
 def _r_user_message(at: str, d: dict, last_content: str) -> list[str]:
