@@ -3,17 +3,27 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { test as base, expect, type Page, type TestInfo } from '@playwright/test';
-import { createTask, expectDone } from '../tests/fixtures';
+import { createTask, expectDone, signIn } from '../tests/fixtures';
 
 const shots = path.join(process.env.VERIFY_EVIDENCE_DIR ?? 'test-results/verify', 'screenshots');
 
-// Page errors and console errors fail a journey. Fake mode drops optional modules (images), whose probes log 404s.
+// Fake mode drops the local-model modules (docs/ui-testing.md, "How isolation is enforced"); Stables probes these and
+// gets 404. Every other failed response fails the journey.
+const EXPECTED_404 = ['/api/admin/v1/gpu', '/api/admin/v1/models/status'];
+const LOAD_FAILED = 'Failed to load resource: the server responded with a status of ';
+
+// Page errors, console errors and failed responses fail a journey. The browser logs each failed response as a console
+// error too; those are judged by the response, so only the expected 404 probes pass.
 const test = base.extend<{ errors: string[] }>({
   errors: async ({ page }, use) => {
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
+    page.on('response', response => {
+      const expected = response.status() === 404 && EXPECTED_404.includes(new URL(response.url()).pathname);
+      if (response.status() >= 400 && !expected) errors.push(`HTTP ${response.status()} ${response.request().method()} ${response.url()}`);
+    });
     page.on('console', message => {
-      if (message.type() === 'error' && !message.text().includes('Failed to load resource: the server responded with a status of 404')) errors.push(message.text());
+      if (message.type() === 'error' && !message.text().startsWith(LOAD_FAILED)) errors.push(message.text());
     });
     await use(errors);
   },
@@ -21,13 +31,6 @@ const test = base.extend<{ errors: string[] }>({
 
 async function capture(page: Page, info: TestInfo, name: string) {
   await page.screenshot({ path: path.join(shots, `${info.project.name}-${name}.png`) });
-}
-
-// docs/ui-testing.md, "Seed and sign-in": /connect signs this copy in as the owner.
-async function signIn(page: Page) {
-  await page.goto('/connect');
-  await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
-  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
 }
 
 test('smoke: sign in, tab bar, Agents shows the seed @smoke', async ({ page, errors }, info) => {
@@ -57,4 +60,21 @@ test('task: a new task streams its answer and persists @task', async ({ page, er
   await expect(page.locator('#title')).toHaveText(title);
   await capture(page, info, 'task');
   expect(errors).toEqual([]);
+});
+
+// The filter itself (#744 review): a missing stylesheet fails a journey even though the page still renders; the
+// expected module probes do not.
+test('a failed response other than the expected probes is an error @smoke', async ({ page, errors }, info) => {
+  base.skip(info.project.name !== 'desktop', 'one run is enough');
+  await page.goto('/connect');
+  await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
+  await page.evaluate(async probes => { for (const probe of probes) await fetch(probe).catch(() => {}); }, EXPECTED_404);
+  expect(errors).toEqual([]);
+  await page.evaluate(() => new Promise(resolve => {
+    const link = Object.assign(document.createElement('link'), { rel: 'stylesheet', href: '/verify-missing.css' });
+    link.onerror = link.onload = resolve;
+    document.head.append(link);
+  }));
+  await expect.poll(() => errors.some(error => error.startsWith('HTTP 404 GET') && error.endsWith('/verify-missing.css'))).toBe(true);
+  expect(errors.filter(error => !error.endsWith('/verify-missing.css'))).toEqual([]);
 });

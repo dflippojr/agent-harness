@@ -6,6 +6,7 @@ A full run needs a Stables checkout, Node.js and a browser; these use synthetic 
 
 import importlib.util
 import json
+import os
 import socket
 import sys
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import httpx
+import psutil
 import pytest
 import yaml
 
@@ -34,6 +36,15 @@ def load(name):
 
 doctor = load("doctor")
 verify = load("verify")
+REAL_PROCESS_ITER = psutil.process_iter  # before conftest's isolated_local_supervision replaces it
+
+
+@pytest.fixture(autouse=True)
+def real_process_table(isolated_local_supervision, monkeypatch):
+    """The POSIX containment finds a run's orphans by scanning the process table; conftest's autouse supervision
+    isolation empties it, which would make cleanup find nothing (#744 review). Requesting that fixture orders this
+    one after it."""
+    monkeypatch.setattr(psutil, "process_iter", REAL_PROCESS_ITER)
 SERVER, WEB = 50101, 50102
 HANDLE = {"status": "ready", "server": f"http://127.0.0.1:{SERVER}", "web": f"http://127.0.0.1:{WEB}"}
 LISTENING = [("127.0.0.1", SERVER), ("127.0.0.1", WEB)]
@@ -104,6 +115,23 @@ def test_every_run_gets_its_own_evidence_folder(tmp_path, capsys):
     with pytest.raises(SystemExit):
         verify.main(["run", "--evidence", str(used)])
     assert "not empty" in capsys.readouterr().err
+
+
+def test_recovery_cleanup_redacts_the_evidence(tmp_path):
+    evidence = tmp_path / "evidence"
+    (evidence / "playwright").mkdir(parents=True)
+    (evidence / "launch.json").write_text(json.dumps({"evidence": str(evidence), "processes": []}), encoding="utf-8")
+    with zipfile.ZipFile(evidence / "playwright" / "trace.zip", "w") as z:
+        z.writestr("0-trace.network", '{"html": "harness.ownerToken: ho-killedrunowner1234", "h": "Bearer abc"}')
+    (evidence / "drive.txt").write_text("token ho-killedrunowner1234\n", encoding="utf-8")
+    assert verify.main(["cleanup", "--evidence", str(evidence)]) == 0
+    with zipfile.ZipFile(evidence / "playwright" / "trace.zip") as z:
+        assert z.read("0-trace.network").decode() == '{"html": "harness.ownerToken: [REDACTED]", "h": "Bearer [REDACTED]"}'
+    assert (evidence / "drive.txt").read_text(encoding="utf-8") == "token [REDACTED]\n"
+
+
+def test_the_process_table_is_real_here():
+    assert os.getpid() in {p.pid for p in psutil.process_iter()}
 
 
 def test_cleanup_needs_a_launch_record(tmp_path, capsys):

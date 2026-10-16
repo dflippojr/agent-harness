@@ -569,7 +569,9 @@ def main(argv: list[str] | None = None) -> int:
         c.error(f"no readable launch.json in {run.evidence} ({type(e).__name__})")
     run.contained.token = run.record.get("token") or run.contained.token
     with uninterruptible():
-        return 0 if run.cleanup() else 1
+        cleaned = run.cleanup()
+        run.redact()  # the killed run never got to it: its traces may still hold the instance's tokens
+        return 0 if cleaned else 1
 
 
 if __name__ == "__main__":

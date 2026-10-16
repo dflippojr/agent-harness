@@ -70,13 +70,16 @@ checks pass. Run on its own, it takes the owner token from `HARNESS_UI_OWNER_TOK
 Playwright, Chromium only, one worker, a desktop (1440×900) and a phone (Pixel 7) project, with
 [`tools/ui-tests/verify/drive.spec.ts`](../../../tools/ui-tests/verify/drive.spec.ts) and
 [`tools/ui-tests/verify.config.ts`](../../../tools/ui-tests/verify.config.ts). It reuses that package's pinned
-Playwright and the suite's `createTask` and `expectDone` helpers. The main suite's config does not pick it up. The
+Playwright and the suite's `signIn`, `createTask` and `expectDone` helpers. The main suite's config does not pick it up. The
 config refuses any `VERIFY_WEB_URL` that is not a loopback port. Output: `drive.txt`.
 
 ### Feature map
 
-Every journey signs in through `<web>/connect` (docs/ui-testing.md, "Seed and sign-in") and fails on page errors and
-console errors. Fake mode's expected 404 probes for dropped modules are the one exception.
+Every journey signs in through `<web>/connect` (docs/ui-testing.md, "Seed and sign-in"), with the suite's `signIn`
+helper. It fails on page errors, console errors and any failed (4xx/5xx) response. The one exception is the 404s from
+Stables' probes of the local-model endpoints that fake mode drops: `/api/admin/v1/gpu` and
+`/api/admin/v1/models/status`. A third `@smoke` test, on desktop only, checks that filter: a missing stylesheet must
+count as an error.
 
 | Feature | Runs | What it does | What proves it |
 | --- | --- | --- | --- |
@@ -122,7 +125,8 @@ timeout.
 until Ctrl+C, then cleans up as usual. Don't use it in an unattended run.
 
 If a run was killed before its own cleanup, repeat the cleanup from the evidence folder. On Windows its processes
-die with it, but the instance directory stays.
+die with it, but the instance directory stays. The recovery cleanup also redacts the folder, because the killed run
+never did.
 
 ```
 python .claude/skills/verify/scripts/verify.py cleanup --evidence .verify/<run>
@@ -135,7 +139,7 @@ python .claude/skills/verify/scripts/verify.py cleanup --evidence .verify/<run>
 - argument parsing
 - the doctor's verdicts: healthy; not ready; unsafe URLs never contacted; non-loopback listeners; data outside the
   instance; credentials; missing or unsettled seed; no token
-- token redaction in `launcher.txt`, logs and trace zips
+- token redaction in `launcher.txt`, logs and trace zips, including by `verify.py cleanup`
 - full `run`s with a stand-in instance whose drive or doctor step fails, or whose launch fails, checking that cleanup
   still leaves no process, port or directory behind
 - interrupted runs, `--keep`, and unique instance and evidence folders
