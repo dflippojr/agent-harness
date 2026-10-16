@@ -1488,7 +1488,8 @@ def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     assert r".\.review-tooling\ops\review\run-review.ps1" in run
     assert "-Workspace $env:REVIEW_WORKSPACE" in run
     assert "-Mode $env:REVIEW_MODE" in run
-    assert "-Spec on" in run
+    # An environment switch, not a parameter: older tooling must not fail on an unknown -Spec.
+    assert env["REVIEW_SPEC"] == "on" and "-Spec" not in run
     assert "-OutputPath (Join-Path $env:GITHUB_WORKSPACE 'review-output.md')" in run
     complete_env = _workflow_step("Complete PR check")["env"]
     assert complete_env["REVIEW_BACKEND"] == "${{ steps.agent.outputs.backend }}"

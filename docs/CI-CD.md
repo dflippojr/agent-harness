@@ -142,9 +142,11 @@ the prompt goes to the backend on standard input. A description and issues large
 most half, then each issue's title and body, then comments newest first; every cut is marked in the block. An issue
 that no longer exists (HTTP 404 or 410) is named as unreadable; any other failure, including a caller that did not grant
 `issues: read`, fails the review before a backend runs. In an incremental pass the reviewer judges criteria against the
-pull request head in the workspace. `ops/review/run-review.ps1` does all of this only with `-Spec on` (or
-`REVIEW_SPEC=on`); without it the script keeps the review-v2 behaviour, so a review-v2 workflow that follows this
-script still works.
+pull request head in the workspace. `ops/review/run-review.ps1` does all of this only with `REVIEW_SPEC=on` (or
+`-Spec on`); without it the script keeps the review-v2 behaviour, so a review-v2 workflow that follows this script
+still works. The workflow sets the environment variable rather than the parameter, so the v3 workflow with older
+tooling (a pull request that changes `review.yml` runs it against `main`'s script) degrades to a diff-only review
+instead of failing.
 
 The review has three parts under fixed headings. `## Acceptance criteria` lists each criterion of the linked issues as
 **Met**, **Not met** or **Not applicable** (owner actions, deferred or out-of-scope items, proof attached outside the
