@@ -662,13 +662,22 @@ function Split-ReviewLastLine {
 function Get-ReviewCriteriaRowCount {
     param([AllowEmptyString()][string]$Text)
 
-    # The Met and Not met rows under "## Acceptance criteria", up to the next "##" heading. Each row starts with its
-    # status in bold, optionally as a list item; Not applicable rows count toward neither.
+    # The Met and Not met rows under the first "## Acceptance criteria", up to the next "##" heading. Each row starts
+    # with its status in bold, optionally as a list item; Not applicable rows count toward neither. Fenced code is
+    # skipped and later sections are not read, so a quoted fixture or heading cannot add rows.
     $met = 0
     $notMet = 0
     $inCriteria = $false
+    $fence = $null
     foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^\s*(```+|~~~+)') {
+            $marker = $Matches[1]
+            if ($null -eq $fence) { $fence = $marker } elseif ($marker[0] -eq $fence[0] -and $marker.Length -ge $fence.Length) { $fence = $null }
+            continue
+        }
+        if ($null -ne $fence) { continue }
         if ($line -match '^\s*##\s') {
+            if ($inCriteria) { break }
             $inCriteria = $line -match '^\s*##\s+Acceptance criteria\s*$'
             continue
         }

@@ -407,8 +407,9 @@ Describe 'Spec review (review-v3)' {
     ) {
         param($Tail, $Rows, $Met, $Total, $Count)
         $criteria = @($Rows | ForEach-Object { if ($_ -like '*`*`**') { "$_ A criterion." } else { "**$_** A criterion." } }) -join "`n"
-        # A Met row outside the criteria part does not count.
-        $text = "## Acceptance criteria`n$criteria`n`n## Findings`n- a finding`n**Met** quoted in a finding.`n$Tail"
+        # Rows in fenced code, outside the criteria part or under a heading quoted in a later part do not count.
+        $fixture = '```markdown' + "`n## Notes`n**Not met** A fixture row.`n" + '```'
+        $text = "## Acceptance criteria`n$fixture`n$criteria`n`n## Findings`n- a finding`n**Met** quoted in a finding.`n## Acceptance criteria`n**Not met** A quoted row.`n$Tail"
         $verdict = Get-ReviewVerdict -Text $text -RequireCriteria
         if ($null -eq $Met) {
             if ($null -ne $verdict) { throw "Accepted an invalid ending: $Tail" }
