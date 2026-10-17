@@ -301,9 +301,10 @@ readiness signal.
     fresh instance. Every mutating test uses a unique name; approval tests create their own pending approval, so the default protected seed stays available for layout tests.
   - Nothing is shared or persistent between runs.
 - **Projects.** Desktop light and dark at 1440×900, and phone light and dark with `devices['iPhone SE']` (WebKit) and
-  `devices['Pixel 7']` (Chromium). `phone-landscape` is `devices['Pixel 7 landscape']` at its full 915×412 screen, light
-  only; it runs only the layout invariants (#734).
-- **Which journeys run where.** All seven projects stay defined in `playwright.config.ts`. The `signedIn` fixture in `tests/fixtures.ts`
+  `devices['Pixel 7']` (Chromium). Two landscape projects, light only, run only the layout invariants (#734):
+  `phone-landscape` is `devices['Pixel 7 landscape']` at its full 915×412 screen, which gets Stables' wide layout (768 px
+  and up), and `iphone-se-landscape` is `devices['iPhone SE landscape']` at 667×375, which keeps the phone layout.
+- **Which journeys run where.** All eight projects stay defined in `playwright.config.ts`. The `signedIn` fixture in `tests/fixtures.ts`
   calls `onlyProjects(info, names)` before it opens `/connect`, so a project a test does not need costs no server requests. The
   `test` that specs import allows the light projects; `selfSizingTest` and `reflowTest` allow the narrower sets below. Behaviour journeys and
   defect regressions assert routes, persistence, audit rows, 44px targets and reflow overflow, none of which depends on
@@ -316,7 +317,8 @@ readiness signal.
     Actions tabs reflow…" and "Chat thread and an existing job reflow…".
   - **Light and dark, on `desktop` and `iphone-se` only** (`reflowTest`): `layout.spec.ts` "primary pages reflow…", which asserts the
     scheme's `--bg` on every primary page. This is the one dark run.
-  - **Phones, portrait and landscape** (`phoneTest`: `iphone-se-light`, `pixel7-light`, `phone-landscape`):
+  - **Phones, portrait and landscape** (`phoneTest`: `iphone-se-light`, `pixel7-light`, `phone-landscape`,
+    `iphone-se-landscape`):
     `layout-invariants.spec.ts`, one case per entry of `tests/inventory.ts`. See "Layout invariants" below.
   - The theme itself is checked by that `--bg` assertion, by AH-13 (the theme switch) and by the token contrast lint in
     `tests/test_web_tokens.py`.
@@ -408,10 +410,11 @@ where they are.
 The nine defects of the second pass (#626–#634) were one class: layout on small and rotated screens. No journey would
 have caught them. `tests/inventory.ts` lists every phone surface of Stables on the fake instance: each page, Settings
 subpage, Actions tab, session tab, sheet, menu and dialog, with how to reach it. `tests/layout-invariants.spec.ts` runs
-every entry on the phones in portrait and on `phone-landscape`, and checks:
+every entry on both phones in portrait and in landscape, and checks:
 
-- **Targets.** Each visible control you can tap at the top, middle and bottom of the page is at least 44×44 CSS px, or
-  at least 24×24 (WCAG 2.5.8). Any two are at least 8 px apart. Pinned chrome (fixed or sticky) is compared only with
+- **Targets.** Each visible control you can tap at the top, middle and bottom of the page is at least 44×44 CSS px,
+  Stables' `--tap`. An allow-listed control may be as small as 24×24 (WCAG 2.5.8). Any two controls are at least 8 px
+  apart. Pinned chrome (fixed or sticky) is compared only with
   pinned chrome, and an open menu only with itself. Inside an open modal dialog, only its own controls count.
 - **Wrapping.** No word, meaning a run of letters and digits, breaks across lines.
 - **Sheets.** An open sheet's primary actions are inside the visual viewport and not covered. A modal sheet locks the
@@ -423,7 +426,8 @@ Each check is soft, so a failing case names every violation on its surface. Entr
 test title, for example `Actions › Disk (#626, #627)`. The spec keeps two lists, and every entry on either one needs a
 reason:
 
-- **`allowList`**: reviewed exceptions to a rule, such as full-width list rows that share a hairline.
+- **`allowList`**: reviewed exceptions to a rule, such as full-width list rows that share a hairline, or a secondary
+  text link held to 24×24.
 - **`knownDefects`**: open defects of the pinned Stables release, each with its dflippojr/stables issue. Their
   findings are subtracted on the surfaces and projects they name. A case fails once its entry stops reproducing, so
   the entry leaves with the re-pin that fixes it.

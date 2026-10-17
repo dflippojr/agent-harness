@@ -1,7 +1,7 @@
 // Layout invariants on every phone surface, portrait and landscape (#734). The second UI pass found nine phone layout
 // defects (#626-#634) after this suite was green; they are one class, and these checks judge every inventory entry for it:
-// - targets: each visible, hittable control is at least 44x44 CSS px, or at least 24x24 (WCAG 2.5.8), and any two are
-//   at least 8 px apart;
+// - targets: each visible, hittable control is at least 44x44 CSS px (allow-listed ones at least 24x24, WCAG 2.5.8), and
+//   any two are at least 8 px apart;
 // - wrapping: no word breaks across lines;
 // - sheets: an open sheet's primary actions are inside the visual viewport, and a modal one locks the page behind it;
 // - composers: the composer never covers the last message, with or without the virtual keyboard.
@@ -13,9 +13,12 @@ import type { Page } from '@playwright/test';
 const check = expect.configure({ soft: true, timeout: 3_000 });
 
 type Rule = 'size' | 'spacing' | 'wrap';
-// Reviewed exceptions, each with its reason. `size` and `wrap` entries exempt the elements their selector matches;
-// a `spacing` entry exempts a pair only when both match it (rows of one list), so the group stays 8 px from the rest.
+// Reviewed exceptions, each with its reason. A `size` entry lowers the floor for the elements it matches from 44x44 to
+// WCAG 2.5.8's 24x24, and the 8 px spacing still holds them. A `wrap` entry exempts the elements it matches. A `spacing`
+// entry exempts a pair only when both match it (rows of one list), so the group stays 8 px from the rest.
 const allowList: { rule: Rule; selector: string; reason: string }[] = [
+  { rule: 'size', selector: 'a.approval-show',
+    reason: "Show in transcript is a secondary text link in the wide approval card's header (phone landscape), 28 px tall." },
   { rule: 'spacing', selector: '#tab-bar a.tab',
     reason: 'The tab bar is one full-width strip of 44 px tabs that share edges, the platform tab bar pattern.' },
   { rule: 'spacing', selector: 'a.set-row',
@@ -94,9 +97,8 @@ function targetViolations(page: Page) {
     const EPS = 0.05;
     targets.forEach((el, i) => {
       const { width, height } = boxes[i];
-      if (allowSize.some(selector => el.matches(selector))) return;
-      if (width + EPS >= 44 && height + EPS >= 44) return;
-      if (width + EPS >= 24 && height + EPS >= 24) return; // undersized but spaced: the spacing check below holds it to 8 px
+      const floor = allowSize.some(selector => el.matches(selector)) ? 24 : 44;
+      if (width + EPS >= floor && height + EPS >= floor) return;
       problems.push(`size ${describe(el)} is ${Math.round(width)}x${Math.round(height)}`);
     });
     targets.forEach((a, i) => targets.slice(i + 1).forEach((b, k) => {
@@ -169,10 +171,12 @@ async function pageScrollsBehind(page: Page, wheel: boolean) {
   return after === before ? '' : `a wheel scrolled the page from ${before} to ${after}`;
 }
 
-const scrollTo = (page: Page, where: 'top' | 'middle' | 'bottom') => page.evaluate(where => {
+type Position = 'top' | 'middle' | 'bottom' | 'focus';
+const scrollTo = (page: Page, where: Position, focus = '') => page.evaluate(({ where, focus }) => {
+  if (where === 'focus') return document.querySelector(focus)!.scrollIntoView({ block: 'center' });
   const max = document.documentElement.scrollHeight - innerHeight;
   window.scrollTo(0, where === 'top' ? 0 : where === 'middle' ? max / 2 : max);
-}, where);
+}, { where, focus });
 
 // The composer over the last message at the end of the thread, if it covers it.
 const coverage = (page: Page, composer: NonNullable<Surface['composer']>, keyboard: string) => page.evaluate(({ field, messages, keyboard }) => {
@@ -196,12 +200,14 @@ for (const surface of inventory) {
     });
     await surface.open(page);
     await frames(page);
-    // A modal pins the page behind it, so its own controls are measured once; a page is measured top, middle and bottom.
-    const positions = surface.sheet?.modal ? ['top'] as const : ['top', 'middle', 'bottom'] as const;
+    // A modal pins the page behind it, so its own controls are measured once. A page is measured at the top, middle and
+    // bottom, and with its focus in view.
+    const positions: Position[] = surface.sheet?.modal ? ['top'] : ['top', 'middle', 'bottom', ...surface.focus ? ['focus' as const] : []];
+    const at = (where: Position) => where === 'focus' ? `with ${surface.focus} in view` : `at the ${where}`;
     for (const where of positions) {
-      await test.step(`targets at the ${where}`, async () => {
-        if (!surface.sheet?.modal) await scrollTo(page, where);
-        await check.poll(() => unknown(frames(page).then(() => targetViolations(page))), { message: `targets at the ${where}` }).toEqual([]);
+      await test.step(`targets ${at(where)}`, async () => {
+        if (!surface.sheet?.modal) await scrollTo(page, where, surface.focus);
+        await check.poll(() => unknown(frames(page).then(() => targetViolations(page))), { message: `targets ${at(where)}` }).toEqual([]);
       });
     }
     await test.step('no word breaks across lines', async () => {
@@ -211,8 +217,8 @@ for (const surface of inventory) {
       const sheet = surface.sheet;
       await test.step('primary actions are on screen', async () => {
         for (const where of positions) {
-          if (!sheet.modal) await scrollTo(page, where);
-          await check.poll(() => unknown(hiddenActions(page, sheet)), { message: `primary actions at the ${where}` }).toEqual([]);
+          if (!sheet.modal) await scrollTo(page, where, surface.focus);
+          await check.poll(() => unknown(hiddenActions(page, sheet)), { message: `primary actions ${at(where)}` }).toEqual([]);
         }
       });
       if (sheet.modal) await test.step('the page behind does not scroll', async () => {

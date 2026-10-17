@@ -15,7 +15,9 @@ export default defineConfig({
       { name: 'iphone-se-' + colorScheme, use: { ...devices['iPhone SE'], viewport: { width: 375, height: 667 }, colorScheme } },
       { name: 'pixel7-' + colorScheme, use: { ...devices['Pixel 7'], colorScheme } },
     ]),
-    // Pixel 7 held sideways at its full 915x412 screen (#734). Only the layout invariants run here.
+    // Phones held sideways (#734); only the layout invariants run here. Pixel 7 at its full 915x412 screen gets Stables'
+    // wide layout (768 px and up); iPhone SE at 667x375 keeps the phone layout, where #631 and #632 were found.
     { name: 'phone-landscape', use: { ...devices['Pixel 7 landscape'], viewport: { width: 915, height: 412 }, colorScheme: 'light' } },
+    { name: 'iphone-se-landscape', use: { ...devices['iPhone SE landscape'], viewport: { width: 667, height: 375 }, colorScheme: 'light' } },
   ],
 });

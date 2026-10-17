@@ -10,6 +10,8 @@ export type Surface = {
   open: (page: Page) => Promise<void>;
   // An open sheet or dialog: the accessible names of its primary actions. A modal one also locks the page behind it.
   sheet?: { selector: string; actions: string[]; modal: boolean };
+  // The part of the page the entry exists to show. It is measured scrolled into view too, besides top, middle and bottom.
+  focus?: string;
   // A composer that must not cover the last message, also with the virtual keyboard up. `messages` selects the thread's
   // messages; the lowest one is the last.
   composer?: { field: string; messages: string };
@@ -72,7 +74,7 @@ export const inventory: Surface[] = [
   { name: 'Actions › Claude Remote Control', guards: ['#626'], open: page => goto(page, '/#/actions/remote-control', '.resources-tabs') },
   { name: 'Actions › Disk', guards: ['#626', '#627'], open: page => goto(page, '/#/actions/disk', '.disk-facts') },
   { name: 'Session › Transcript', guards: ['#629', '#634'], composer: SESSION_COMPOSER, open: page => openDone(page, 'Tool rows') },
-  { name: 'Session › Transcript with tool output', guards: ['#629'], open: async page => {
+  { name: 'Session › Transcript with tool output', guards: ['#629'], focus: 'details.tool[open]', open: async page => {
     await openDone(page, 'Tool rows');
     await page.locator('details.tool summary').filter({ hasText: /read_file.*notes\/log.txt/s }).first().click();
   } },
@@ -88,7 +90,7 @@ export const inventory: Surface[] = [
     await page.locator('.note.checkpoint').first().getByRole('button', { name: 'Rewind here', exact: true }).click();
     await expect(page.locator(SHEET)).toBeVisible();
   } },
-  { name: 'Session › Session menu', guards: ['#634'], open: async page => {
+  { name: 'Session › Session menu', open: async page => {
     await openDone(page, 'Tool rows');
     await page.getByRole('button', { name: 'Session menu', exact: true }).click();
     await expect(page.getByRole('menu', { name: 'Session', exact: true })).toBeVisible();

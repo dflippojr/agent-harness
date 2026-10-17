@@ -4,7 +4,7 @@ const LIGHT = ['desktop-light', 'iphone-se-light', 'pixel7-light'];
 // Tests that set their own viewport sizes need one mouse and one touch (WebKit) run; pixel7 adds nothing for them.
 const SELF_SIZING = ['desktop-light', 'iphone-se-light'];
 // The layout invariants (#734) judge every phone surface in portrait and in landscape.
-const PHONES = ['iphone-se-light', 'pixel7-light', 'phone-landscape'];
+const PHONES = ['iphone-se-light', 'pixel7-light', 'phone-landscape', 'iphone-se-landscape'];
 export function onlyProjects(info: TestInfo, names: readonly string[]) {
   base.skip(!names.includes(info.project.name), 'theme-independent');
 }
