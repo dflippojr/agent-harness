@@ -433,6 +433,49 @@ def test_cleanup_after_a_failed_drive_leaves_nothing_running(tmp_path, monkeypat
     assert verify.main(["cleanup", "--evidence", str(evidence)]) == 0  # safe to repeat
 
 
+TEMP_WRITING_STEP = """
+import pathlib, sys, tempfile
+# A browser profile in the system temp dir, as Playwright makes one; the step dies before it can remove it.
+profile = pathlib.Path(tempfile.mkdtemp(prefix="playwright_chromiumdev_profile-"))
+(profile / "Cookies").write_text("stand-in", encoding="utf-8")
+pathlib.Path(sys.argv[1]).write_text(str(profile), encoding="utf-8")
+sys.exit(3)
+"""
+
+
+def test_the_drive_keeps_its_temp_files_in_the_run_and_cleanup_removes_them(tmp_path, monkeypatch):
+    run = stand_in_run(tmp_path, monkeypatch)
+    run.doctor = lambda: run.step("doctor", True, "stand-in")
+    profile_file = tmp_path / "profile.path"
+    run.drive_argv = lambda features: [sys.executable, "-c", TEMP_WRITING_STEP, str(profile_file)]
+
+    assert run.run([]) == 1
+
+    record = json.loads((tmp_path / "evidence" / "launch.json").read_text(encoding="utf-8"))
+    scratch = Path(record["scratch_dir"])
+    profile = Path(profile_file.read_text(encoding="utf-8"))
+    assert scratch in profile.parents  # not the system temp dir, which nothing records
+    assert not scratch.exists() and not profile.exists()
+    assert run.steps[-1][:2] == ("cleanup", True)
+
+
+def test_recovery_fails_when_the_runs_temp_files_remain(tmp_path, monkeypatch):
+    evidence = tmp_path / "evidence"
+    scratch = tmp_path / "harness-verify-tmp-x"
+    (scratch / "playwright-artifacts-x").mkdir(parents=True)
+    evidence.mkdir()
+    (evidence / "launch.json").write_text(json.dumps({"evidence": str(evidence), "processes": [],
+                                                      "scratch_dir": str(scratch)}), encoding="utf-8")
+    with monkeypatch.context() as held:
+        held.setattr(verify.shutil, "rmtree", lambda *a, **kw: None)  # a handle the killed browser still holds
+        held.setattr(verify.time, "sleep", lambda seconds: None)
+        assert verify.main(["cleanup", "--evidence", str(evidence)]) == 1
+    assert f"{scratch} still exists" in (evidence / "cleanup.txt").read_text(encoding="utf-8")
+
+    assert verify.main(["cleanup", "--evidence", str(evidence)]) == 0
+    assert not scratch.exists()
+
+
 def test_cleanup_after_a_failed_doctor_skips_the_drive(tmp_path, monkeypatch):
     run = stand_in_run(tmp_path, monkeypatch)
     # The real doctor: the stand-in's listener speaks no HTTP, so `ready` fails.

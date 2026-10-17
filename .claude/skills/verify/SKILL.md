@@ -114,8 +114,11 @@ Cleanup runs in a `finally`, so it also runs after a failed launch, doctor or dr
 2. It kills each process still in the run's containment, then each process in `launch.json` that still runs with
    its recorded start time. Nothing is found or killed by name or port. If the instance directory is still there,
    Teardown runs once more.
-3. The leftover checks: no recorded or contained process alive, both ports refuse connections, and the instance
-   directory is gone. Any leftover fails the step and is listed in `cleanup.txt`.
+3. It deletes the run's private temp directory (`scratch_dir` in `launch.json`). Every step runs with `TMP`, `TEMP`
+   and `TMPDIR` set to it, so browser profiles and Playwright's artifacts land there, not in the system temp
+   directory, even when a killed browser never got to remove them.
+4. The leftover checks: no recorded or contained process alive, both ports refuse connections, and the instance and
+   temp directories are gone. Any leftover fails the step and is listed in `cleanup.txt`.
 
 A run passes only if launch, doctor, drive and cleanup all ran and passed. Ctrl+C or an error is recorded as a failed
 `interrupted` step, and cleanup and the summary still run. Ctrl+C is ignored while they run; every wait in them has a
@@ -125,7 +128,7 @@ timeout.
 until Ctrl+C, then cleans up as usual. Don't use it in an unattended run.
 
 If a run was killed before its own cleanup, repeat the cleanup from the evidence folder. On Windows its processes
-die with it, but the instance directory stays. The recovery cleanup also redacts the folder, because the killed run
+die with it, but the instance and temp directories stay. The recovery cleanup also redacts the folder, because the killed run
 never did.
 
 ```
@@ -141,5 +144,6 @@ python .claude/skills/verify/scripts/verify.py cleanup --evidence .verify/<run>
   instance; credentials; missing or unsettled seed; no token
 - token redaction in `launcher.txt`, logs and trace zips, including by `verify.py cleanup`
 - full `run`s with a stand-in instance whose drive or doctor step fails, or whose launch fails, checking that cleanup
-  still leaves no process, port or directory behind
+  still leaves no process, port or directory behind, and that a step's temp files land in the run's temp directory
+- a recovery cleanup that fails while the run's temp directory remains
 - interrupted runs, `--keep`, and unique instance and evidence folders

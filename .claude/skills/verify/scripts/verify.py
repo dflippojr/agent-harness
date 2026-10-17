@@ -6,7 +6,8 @@
 `run` starts a disposable fake-model instance (docs/ui-testing.md, "Start") in a new temp directory as its own
 background process, records it in DIR/launch.json before waiting for anything, runs the doctor, drives the smoke
 journey (plus the named features) on desktop and Pixel 7 with the tools/ui-tests Playwright package, writes
-DIR/summary.md, and always cleans up: the contract's Teardown, then every process this run started. `cleanup` repeats
+DIR/summary.md, and always cleans up: the contract's Teardown, then every process this run started, then the run's
+private temp directory (every step's TMP, so browser profiles and Playwright artifacts never land in the system one). `cleanup` repeats
 that cleanup from a launch.json when a run was killed before its own cleanup ran. DIR defaults to
 .verify/<UTC timestamp>-<suffix>/ (git-ignored).
 """
@@ -99,6 +100,22 @@ def instance_env() -> dict:
     without a token) and without HARNESS_FAKE_MODEL, which the start command sets itself."""
     env = {k: v for k, v in os.environ.items() if not doctor.SECRET_NAME.search(k) and k != "HARNESS_FAKE_MODEL"}
     return dict(env, PYTHONUTF8="1")
+
+
+def scratch_env(env: dict, scratch: str) -> dict:
+    """A step's environment with its temp files in the run's private temp directory: Python reads TMPDIR, TEMP and
+    TMP, Node's os.tmpdir() (Playwright's browser profiles and artifactsDir) reads TMPDIR or TEMP and TMP."""
+    return dict(env, TMPDIR=scratch, TEMP=scratch, TMP=scratch)
+
+
+def remove_tree(path: Path, seconds: float = 10) -> bool:
+    """Delete a directory, retrying while a just-killed process's open handles keep Windows from deleting it."""
+    deadline = time.monotonic() + seconds
+    while True:
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists() or time.monotonic() > deadline:
+            return not path.exists()
+        time.sleep(0.25)
 
 
 def redact_text(text: str, tokens: list[str]) -> str:
@@ -319,14 +336,17 @@ class Run:
             return self.step("launch", False, problem)
         # A new empty directory per run (the start command accepts an empty --dir), so no two runs share one.
         instance = Path(tempfile.mkdtemp(prefix="harness-verify-", dir=tempfile.gettempdir()))
+        # Recorded before any step starts, so `cleanup` after a killed run removes what the steps' killed processes
+        # had no chance to.
+        scratch = Path(tempfile.mkdtemp(prefix="harness-verify-tmp-", dir=tempfile.gettempdir()))
         logs = self.evidence / "logs"
         logs.mkdir(parents=True, exist_ok=True)
-        self.record.update(instance_dir=str(instance), server_log=str(logs / "server.log"))
+        self.record.update(instance_dir=str(instance), scratch_dir=str(scratch), server_log=str(logs / "server.log"))
         self.save()
         with (logs / "server.log").open("w", encoding="utf-8") as err:
             proc = self.contained.popen([self.python, *self.launcher, "--dir", str(instance)], cwd=REPO,
                                         stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL,
-                                        env=instance_env())
+                                        env=scratch_env(instance_env(), str(scratch)))
         self.track("instance", proc.pid)
         reader = threading.Thread(target=self.read_launcher, args=(proc,), daemon=True)
         reader.start()
@@ -384,7 +404,8 @@ class Run:
         return [node, str(PLAYWRIGHT_CLI), "test", "--config", str(DRIVE_CONFIG), "--workers=1", "--grep", tags]
 
     def drive(self, features: list[str]) -> bool:
-        env = dict(os.environ, VERIFY_WEB_URL=self.record["web"], VERIFY_EVIDENCE_DIR=str(self.evidence))
+        env = scratch_env(dict(os.environ, VERIFY_WEB_URL=self.record["web"], VERIFY_EVIDENCE_DIR=str(self.evidence)),
+                          self.record["scratch_dir"])
         out = self.evidence / "drive.txt"
         code = self.wait_tracking("drive", self.spawn("drive", self.drive_argv(features), out, env), STEP_SECONDS)
         what = ", ".join(["smoke", *features]) + " on desktop and Pixel 7"
@@ -402,7 +423,8 @@ class Run:
             pass
 
     def cleanup(self) -> bool:
-        """docs/ui-testing.md, "Teardown", then every recorded process, then the contract's leftover checks."""
+        """docs/ui-testing.md, "Teardown", then every recorded process, then the run's temp directory, then the
+        contract's leftover checks."""
         lines = []
         instance = self.record.get("instance_dir")
         if instance:
@@ -417,6 +439,9 @@ class Run:
         lines.append(f"killed {contained} contained and {len(procs)} recorded processes still running")
         if instance and Path(instance).exists():  # Teardown failed, or a process it could not stop held the dir
             lines.append("teardown again: " + self.teardown(instance))
+        scratch = self.record.get("scratch_dir")
+        if scratch:  # only now: a killed browser may have held its profile open
+            lines.append(f"temp files: {'removed' if remove_tree(Path(scratch)) else 'could not remove'} {scratch}")
         problems = []
         left = [f"{p['name']} {p['pid']}" for p in self.record["processes"] if alive(p) is not None]
         if left:
@@ -426,9 +451,10 @@ class Run:
         for key in ("server_port", "web_port"):
             if self.record.get(key) and port_open(self.record[key]):
                 problems.append(f"port {self.record[key]} still accepts connections")
-        if instance and Path(instance).exists():
-            problems.append(f"{instance} still exists")
-        lines += problems or ["no recorded process, port or instance directory is left"]
+        for path in (instance, scratch):
+            if path and Path(path).exists():
+                problems.append(f"{path} still exists")
+        lines += problems or ["no recorded process, port, instance directory or temp file is left"]
         (self.evidence / "cleanup.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         return self.step("cleanup", not problems, "; ".join(problems) or "nothing left behind")
 
