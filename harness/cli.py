@@ -487,6 +487,8 @@ ADMIN_COMMANDS = (
     ("config restart", "POST", "/config/restart", "restart the daemon to apply settings", _REVISION),
     ("maintenance status", "GET", "/maintenance", "show disk usage and maintenance state", ()),
     ("maintenance cleanup", "POST", "/maintenance/cleanup", "remove expired workspaces and data", ()),
+    ("canary alert-test", "POST", "/canary/alert-test", "send a sample canary alert (--kind silence|regression)",
+     ("--kind",)),
     ("sessions rename", "PATCH", "/sessions/{ref}", "rename a session", ("title",)),
     ("sessions rerun", "POST", "/sessions/{ref}/rerun", "start a new session with the same prompt",
      ("--backend", "--model")),
@@ -536,7 +538,7 @@ _GROUP_HELP = {
     "pairing-requests": "zero-touch App pairing requests", "hub": "Hub inventory and claim",
     "models": "local models", "backends": "model backends",
     "smart-approvals": "smart approvals",
-    "config": "daemon settings", "maintenance": "disk cleanup and backups",
+    "config": "daemon settings", "maintenance": "disk cleanup and backups", "canary": "nightly agent canary",
     "sessions": "session review, checkpoints and comments", "github": "GitHub issues and PRs", "chats": "chats",
 }
 
