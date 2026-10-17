@@ -41,6 +41,7 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 CONFIG_PATH = DEFAULT_CONFIG
 ADMIN_PREFIX = "/api/admin/v1"
 TERMINAL = ("done", "cancelled", "failed")
+WATCH_RECONNECTS = 30  # connections in a row that bring no event before `watch` gives up (about a minute)
 DIM, BOLD, YELLOW, GREEN, RED, CYAN, RESET = "\033[2m", "\033[1m", "\033[33m", "\033[32m", "\033[31m", "\033[36m", "\033[0m"
 
 
@@ -366,6 +367,7 @@ def _watch_event(e: dict, sid: str, args, state: dict) -> int | None:
 def _consume_stream(sid: str, args, state: dict) -> tuple[int | None, bool]:
     """Read one connection. Returns (exit code, True if the stream was left to ask about an approval)."""
     for e in iter_sse(sid, state["after"]):
+        state["empty"] = 0
         if e["seq"] is not None:
             state["after"] = e["seq"]
         code = _watch_event(e, sid, args, state)
@@ -380,14 +382,17 @@ def _consume_stream(sid: str, args, state: dict) -> tuple[int | None, bool]:
 
 def watch(sid: str, args, after: int = 0) -> int:
     state = {"streamed": {"content": False, "reasoning": False}, "position": None, "last_content": "",
-             "prompt_for": None, "after": after}
+             "prompt_for": None, "after": after, "empty": 0}
     while True:
         state["prompt_for"] = None
+        state["empty"] += 1  # reset by the first event the connection brings
         code, ask = _consume_stream(sid, args, state)
         if code is not None:
             return code
         if ask:
             _decide_approval(sid, state["prompt_for"])
+        elif state["empty"] >= WATCH_RECONNECTS:
+            sys.exit(f"daemon not reachable at {BASE}")  # #733: a daemon that is down is not waited for forever
         else:
             time.sleep(2)  # stream ended or dropped; reconnect
 

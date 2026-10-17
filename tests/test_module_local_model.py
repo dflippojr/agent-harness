@@ -192,8 +192,8 @@ def test_doctor_gpu_uses_fake_output(tmp_path, monkeypatch, output, failed, warn
 def test_doctor_model_and_disabled_branches(tmp_path, monkeypatch):
     from harness.doctor import Report
     cfg, report = make_cfg(tmp_path), Report()
-    monkeypatch.setattr(doctor.httpx, 'get', lambda *_args, **_kwargs: httpx.Response(200, json={
-        'is_sleeping': True, 'default_generation_settings': {'n_ctx': 1}}))
+    monkeypatch.setattr(doctor.httpx, 'get', lambda url, **_kwargs: httpx.Response(200, json={
+        'is_sleeping': True, 'default_generation_settings': {'n_ctx': 1}}, request=httpx.Request('GET', url)))
     doctor.check_model_server(report, cfg)
     assert report.warned == 1
     def fail(*_args, **_kwargs):
