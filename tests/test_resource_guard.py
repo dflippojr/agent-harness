@@ -702,7 +702,7 @@ def test_doctor_reports_the_resource_guard(tmp_path, monkeypatch, capsys):
     def get(url, timeout=None):
         payload = {"/health": {"profile": cfg.profile}, "/models/status": [{"state": "ready"}], "/gpu": gpu,
                    "/maintenance": {"backup": {}}}["/" + url.split("/", 3)[3]]
-        return httpx.Response(200, json=payload)
+        return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
     monkeypatch.setattr(doctor.httpx, "get", get)
     (tmp_path / "llama.paused").write_text("x")
     r = doctor.Report()

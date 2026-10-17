@@ -55,30 +55,31 @@ EXPECTED_SKIP_PATHS = (
 )
 
 
-def _event_filters(workflow: dict) -> dict[str, list[str]]:
-    # PyYAML 1.1 treats the GitHub `on:` key as boolean True.
-    events = workflow.get("on", workflow[True])
-    return {
-        event: list(events[event]["paths-ignore"])
-        for event in ("push", "pull_request")
-    }
+def _skip_list(workflow: dict) -> list[str]:
+    step = next(s for s in workflow["jobs"]["changes"]["steps"] if s.get("id") == "filter")
+    return [line for line in step["env"]["CI_SKIP_UNREAD_PATHS"].splitlines() if line]
 
 
 def test_ci_skips_only_unread_paths_on_push_and_pull_request():
     text = WORKFLOW.read_text(encoding="utf-8")
-    filters = _event_filters(yaml.safe_load(text))
-    expected = list(EXPECTED_SKIP_PATHS)
-
-    for event, ignored in filters.items():
-        assert ignored == expected, event
-        assert "LICENSE" in ignored
-        for path in MUST_RUN_PATHS:
-            assert path not in ignored, path
-        assert "**.md" not in ignored
-        assert "docs/**" not in ignored
+    workflow = yaml.safe_load(text)
+    # PyYAML 1.1 treats the GitHub `on:` key as boolean True.
+    events = workflow.get("on", workflow[True])
+    # The workflow always runs so `gate` always reports (#726); the skip moved into the `changes` job.
+    for event in ("push", "pull_request"):
+        assert "paths-ignore" not in events[event], event
+        assert "paths" not in events[event], event
+    ignored = _skip_list(workflow)
+    assert ignored == list(EXPECTED_SKIP_PATHS)
+    assert "LICENSE" in ignored
+    for path in MUST_RUN_PATHS:
+        assert path not in ignored, path
+    assert "**.md" not in ignored
+    assert "docs/**" not in ignored
+    # Entries are matched exactly by scripts/ci_gate.py; a glob would silently never match.
+    assert not any(ch in path for path in ignored for ch in "*?[!")
 
     assert "test_product_naming.py" in text
     assert "test_marketplace_manifest.py" in text
     assert "test_ci_docs_explain_backend_configuration_and_manual_verification" in text
     assert "ci-cd.yml" in text
-

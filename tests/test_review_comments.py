@@ -109,3 +109,42 @@ def test_draft_survives_restart_and_sends_one_followup(tmp_path):
         assert client.get(url).json() == []
         assert client.post(url + "/send").status_code == 400
         assert client.delete(f"{url}/rc-nope").status_code == 404
+
+
+# --- The automated review's summary line (review-v3), read back for readiness tools. ---
+
+HEAD = "b" * 40
+
+
+def _summary(sha=HEAD, criteria="2/3", findings=1):
+    return f"<!-- agent-review: sha={sha} criteria={criteria} findings={findings} -->"
+
+
+def test_review_summary_is_read_from_a_posted_comment():
+    body = "\r\n".join([
+        "Reviewed the full diff", "", "## Findings", "- **Spec** criterion two is not met", "",
+        f"<!-- agent-review: sha={HEAD} mode=full base=main -->", _summary(),
+    ])
+    assert rc.parse_review_summary(body) == {"sha": HEAD, "criteria_met": 2, "criteria_total": 3, "findings": 1}
+
+
+def test_review_summary_is_only_the_final_line():
+    quoted = f"The reviewer quoted {_summary(criteria='3/3', findings=0)} inline."
+    earlier = _summary(sha="a" * 40, criteria="3/3", findings=0)
+    parsed = rc.parse_review_summary("\n".join([quoted, earlier, _summary(criteria="0/2", findings=2), "", ""]))
+    assert parsed == {"sha": HEAD, "criteria_met": 0, "criteria_total": 2, "findings": 2}
+    # A summary line anywhere but last, such as a quoted example in a comment without the job's footer, is not one.
+    fenced = "\n".join(["```", _summary(criteria="3/3", findings=0), "```"])
+    assert rc.parse_review_summary(fenced) is None
+    assert rc.parse_review_summary("\n".join([earlier, "A later line of text."])) is None
+    assert rc.parse_review_summary("\n".join([earlier, _summary(criteria="4/3")])) is None
+
+
+def test_review_summary_rejects_missing_and_malformed_lines():
+    assert rc.parse_review_summary("") is None
+    assert rc.parse_review_summary(None) is None
+    # The v2 coverage marker alone is not a summary.
+    assert rc.parse_review_summary(f"<!-- agent-review: sha={HEAD} mode=full -->") is None
+    for bad in (_summary(sha="B" * 40), _summary(sha="b" * 39), _summary(criteria="4/3"),
+                _summary(criteria="x/3"), _summary(findings=-1), "x " + _summary(), _summary() + " x"):
+        assert rc.parse_review_summary(bad) is None, bad
