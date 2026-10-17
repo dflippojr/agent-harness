@@ -83,7 +83,7 @@ def decide_tests(changed: list[str] | None, skipped: set[str]) -> tuple[bool, st
     return False, f"all {len(changed)} changed files are on the skip list; test jobs skip and gate still reports"
 
 
-def gate_failures(needs: Mapping[str, Mapping[str, object]], event_name: str) -> list[str]:
+def gate_failures(needs: Mapping[str, Mapping[str, object]]) -> list[str]:
     """Reasons the gate fails; empty when every needed job passed or was skipped on purpose."""
     failures = []
     changes = needs.get("changes", {})
@@ -95,9 +95,6 @@ def gate_failures(needs: Mapping[str, Mapping[str, object]], event_name: str) ->
         if job == "changes":
             continue
         result = details.get("result")
-        if job == "sonar" and event_name == "push":
-            # sonar is continue-on-error on main pushes (#728 makes it blocking); it never fails the gate there.
-            continue
         if result in ("failure", "cancelled"):
             failures.append(f"{job}: {result}")
         elif result == "skipped" and job in TEST_JOBS and tests_wanted:
@@ -132,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("changes", help="reads EVENT_NAME, PUSH_BEFORE and CI_SKIP_UNREAD_PATHS")
-    commands.add_parser("gate", help="reads NEEDS (toJSON(needs)) and EVENT_NAME")
+    commands.add_parser("gate", help="reads NEEDS (toJSON(needs))")
     deploy = commands.add_parser("deploy")
     deploy.add_argument("--repository", required=True)
     deploy.add_argument("--run-id", required=True)
@@ -149,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         needs = json.loads(os.environ.get("NEEDS") or "{}")
         for job, details in needs.items():
             print(f"{job}: {details.get('result')}")
-        failures = gate_failures(needs, os.environ.get("EVENT_NAME", ""))
+        failures = gate_failures(needs)
         for failure in failures:
             print(f"::error::gate: {failure}")
         return 1 if failures else 0
