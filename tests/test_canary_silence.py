@@ -180,6 +180,66 @@ def test_a_slot_with_no_deployed_commit_is_unrun(tmp_path):
     assert len(notes) == 1 and "no deployed commit" in notes[0]["message"]
 
 
+
+class ShutdownSuite:
+    """The daemon stops while the slot waits for the GPU."""
+
+    async def __call__(self, sha: str, only):
+        raise asyncio.CancelledError
+
+
+def test_slots_a_shutdown_interrupts_are_recorded_and_the_next_start_alerts(tmp_path):
+    notes: list[dict] = []
+    clock = Nights()
+    c = _canary(tmp_path, ShutdownSuite(), notes, clock)
+    for night in range(3):
+        try:
+            run(c.nightly(f"{night:040x}"))
+            raise AssertionError("the shutdown was swallowed")
+        except asyncio.CancelledError:
+            pass
+        clock.t += DAY
+    streak = c.store.unrun_streak()
+    assert [s["outcome"] for s in streak] == ["blocked"] * 3
+    assert all(s["reason"] == "the daemon stopped during the slot" for s in streak)
+    assert notes == []                                         # the notifier was stopping too
+    run(c.silence_alarm())                                     # the next start
+    assert len(notes) == 1 and "the daemon stopped during the slot" in notes[0]["message"]
+    run(c.silence_alarm())                                     # a second restart the same day
+    assert len(notes) == 1
+
+
+def test_a_slot_a_crash_interrupted_is_recorded_at_the_next_start(tmp_path):
+    store = CanaryStore(Database(tmp_path / "h.sqlite3"))
+    store.begin("a" * 40, NIGHT)                               # the daemon died mid-run
+    store.interrupted(NIGHT + 60)
+    assert [(s["sha"], s["outcome"], s["reason"]) for s in store.unrun_streak()] == [
+        ("a" * 40, "blocked", "daemon restarted mid-run")]
+    store.begin("b" * 40, NIGHT + DAY)
+    store.first_run("b" * 40, _outcomes(18))                   # ... or during the confirmation rerun
+    store.interrupted(NIGHT + DAY + 60)
+    assert store.unrun_streak() == []
+
+
+def test_the_nightly_loop_checks_for_silence_when_it_starts(tmp_path):
+    notes: list[dict] = []
+    clock = Nights()
+    c = _canary(tmp_path, ShutdownSuite(), notes, clock)
+    for night in range(3):
+        c.store.record_slot(clock.t, f"{night:040x}", "blocked", "the GPU queue was busy")
+        clock.t += DAY
+
+    async def body():
+        n = canary.Nightly(c, CanaryConfig(enabled=True), sha=lambda: "", now=lambda: datetime(2026, 10, 13, 4, 0))
+        n.start()
+        for _ in range(100):
+            if notes:
+                break
+            await asyncio.sleep(0.01)
+        await n.stop()
+    run(body())
+    assert len(notes) == 1 and notes[0]["title"] == "Agent canary has not run for 3 nights"
+
 # gauges
 def test_gauges_without_any_run_or_hold(tmp_path):
     store = CanaryStore(Database(tmp_path / "h.sqlite3"))

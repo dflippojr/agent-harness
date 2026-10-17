@@ -141,10 +141,12 @@ class CanaryStore:
         rows = [_row(r) for r in self.db.read(read)]
         for row in rows:
             if row["outcomes"]:
-                self.finish(row["sha"], "complete", row["outcomes"], now,
-                            note="daemon restarted during the confirmation rerun: first-run results, no alert")
+                status, note = "complete", "daemon restarted during the confirmation rerun: first-run results, no alert"
+                self.finish(row["sha"], status, row["outcomes"], now, note=note)
             else:
-                self.finish(row["sha"], "blocked", [], now, note="daemon restarted mid-run")
+                status, note = "blocked", "daemon restarted mid-run"
+                self.finish(row["sha"], status, [], now, note=note)
+            self.record_slot(now, row["sha"], status, note)  # the crashed slot counts towards the silence alarm (#732)
         return rows
 
     def completed_before(self, sha: str, limit: int) -> list[dict]:
@@ -177,9 +179,9 @@ class CanaryStore:
                                         (at, sha, outcome, reason)).lastrowid
         return self.db.write(record)
 
-    def mark_slot_alerted(self, slot_id: int) -> None:
+    def mark_slot_alerted(self, slot_id: int, now: float) -> None:
         def mark():
-            self.db.conn.execute("UPDATE canary_slots SET alerted = 1 WHERE id = ?", (slot_id,))
+            self.db.conn.execute("UPDATE canary_slots SET alerted_at = ? WHERE id = ?", (now, slot_id))
         self.db.write(mark)
 
     def unrun_streak(self) -> list[dict]:
@@ -291,6 +293,10 @@ class Canary:
         try:
             row = await self.run_for(sha)
         except asyncio.CancelledError:
+            # a shutdown mid-slot: run_for has finished the row. Record the slot before stopping, so restarts at slot
+            # time can't hide a silence; the notifier is stopping too, so the alarm waits for the next start.
+            row = await asyncio.to_thread(self.store.get, sha) if sha else None
+            await self._end_slot(sha, before, row, "the daemon stopped during the slot", alarm=False)
             raise
         except Exception as e:
             row = await asyncio.to_thread(self.store.get, sha) if sha else None
@@ -299,7 +305,8 @@ class Canary:
         await self._end_slot(sha, before, row)
         return row
 
-    async def _end_slot(self, sha: str, before: dict | None, row: dict | None, error: str = "") -> None:
+    async def _end_slot(self, sha: str, before: dict | None, row: dict | None, error: str = "",
+                        alarm: bool = True) -> None:
         if row is None or row["status"] == "running":
             outcome, reason = "skipped", error or ("no deployed commit" if not sha else "no result recorded")
         elif before and before["status"] in FINAL:
@@ -309,17 +316,22 @@ class Canary:
                       "the next deployed commit runs" if outcome == "skipped" else f"{sha[:SHORT_SHA]} already ran")
         else:
             outcome, reason = row["status"], error or row["note"]
+        await asyncio.to_thread(self.store.record_slot, self.clock(), sha, outcome, reason)
+        if alarm:
+            await self.silence_alarm()
+
+    async def silence_alarm(self) -> None:
+        """Send the silence alarm if the last SILENT_SLOTS slots went unrun, at most once a calendar day (tower-local)
+        while the silence lasts. Checked after each slot and when the daemon starts."""
         now = self.clock()
-        slot = await asyncio.to_thread(self.store.record_slot, now, sha, outcome, reason)
         streak = await asyncio.to_thread(self.store.unrun_streak)
         if len(streak) < SILENT_SLOTS:
             return
-        # at most once a calendar day (tower-local) while the silence lasts
         today = datetime.fromtimestamp(now).date()
-        if any(s["alerted"] and datetime.fromtimestamp(s["at"]).date() == today for s in streak):
+        if any(s["alerted_at"] and datetime.fromtimestamp(s["alerted_at"]).date() == today for s in streak):
             return
         self.notify(silence_alert(streak, self.topic))
-        await asyncio.to_thread(self.store.mark_slot_alerted, slot)
+        await asyncio.to_thread(self.store.mark_slot_alerted, streak[0]["id"], now)
 
     async def _judge(self, sha: str, report: Report) -> tuple[list[dict], Verdict]:
         prior = await asyncio.to_thread(self.store.completed_before, sha, self.cfg.baseline_runs)
@@ -372,7 +384,7 @@ def sample_alert(kind: str, topic: str, now: float) -> dict:
     """A sample of an alert for the manual alert test (POST /canary/alert-test): the real payload builder on made-up
     input, titled as a test so it is never mistaken for a real alert."""
     if kind == "silence":
-        streak = [{"at": now - i * 86400, "outcome": outcome, "reason": reason, "alerted": 0}
+        streak = [{"at": now - i * 86400, "outcome": outcome, "reason": reason}
                   for i, (outcome, reason) in enumerate((
                       ("skipped", "the GPU is held by hand with no end (test sample)"),
                       ("blocked", "the resource guard is paused: game running (test sample)"),
@@ -421,6 +433,12 @@ class Nightly:
             self._task = None
 
     async def _loop(self) -> None:
+        try:
+            await self.canary.silence_alarm()  # slots a shutdown or crash interrupted were recorded without one (#732)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("canary silence check failed")
         while True:
             try:
                 wait = (next_slot(self.now(), self.cfg.at) - self.now()).total_seconds()

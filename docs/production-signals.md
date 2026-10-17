@@ -49,10 +49,20 @@ The daemon also pushes two of these as ntfy notifications, so the owner hears ab
 
 ## Canary tables
 
-Read-only, with the harness virtual environment's Python (the daemon keeps writing while this reads):
+Read-only, with the harness virtual environment's Python (the daemon keeps writing while this reads). The
+script goes in a single-quoted here-string, which PowerShell passes on unchanged, so the SQL quotes survive:
 
 ```powershell
-& D:\Projects\agent-harness\.venv\Scripts\python.exe -c "import sqlite3; c = sqlite3.connect('file:D:/Agents/harness/harness.sqlite3?mode=ro', uri=True); [print(r) for r in c.execute('SELECT datetime(at, ''unixepoch'', ''localtime''), substr(sha, 1, 8), outcome, reason FROM canary_slots ORDER BY id DESC LIMIT 7')]; [print(r) for r in c.execute('SELECT substr(sha, 1, 8), status, pass_rate, datetime(finished_at, ''unixepoch'', ''localtime''), note FROM canary_results ORDER BY started_at DESC LIMIT 7')]"
+@'
+import sqlite3
+db = sqlite3.connect("file:D:/Agents/harness/harness.sqlite3?mode=ro", uri=True)
+for row in db.execute("SELECT datetime(at, 'unixepoch', 'localtime'), substr(sha, 1, 8), outcome, reason "
+                      "FROM canary_slots ORDER BY id DESC LIMIT 7"):
+    print(row)
+for row in db.execute("SELECT substr(sha, 1, 8), status, pass_rate, datetime(finished_at, 'unixepoch', 'localtime'), "
+                      "note FROM canary_results ORDER BY started_at DESC LIMIT 7"):
+    print(row)
+'@ | & D:\Projects\agent-harness\.venv\Scripts\python.exe -
 ```
 
 If the checkout's virtual environment lives elsewhere, `.venv-path` in the checkout names it. `canary_slots` has one

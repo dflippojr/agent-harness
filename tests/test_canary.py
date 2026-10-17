@@ -283,6 +283,9 @@ def test_nightly_fires_at_the_slot_for_the_deployed_sha(tmp_path):
     seen: list[str] = []
 
     class Fake:
+        async def silence_alarm(self):
+            pass
+
         async def nightly(self, sha):
             seen.append(sha)
             raise asyncio.CancelledError  # end the loop after one night
@@ -324,6 +327,9 @@ def test_a_bad_slot_time_disables_the_nightly_with_a_log_instead_of_killing_the_
     seen: list[str] = []
 
     class Fake:
+        async def silence_alarm(self):
+            pass
+
         async def nightly(self, sha):
             seen.append(sha)
 

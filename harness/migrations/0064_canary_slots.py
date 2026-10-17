@@ -10,5 +10,5 @@ def up(conn: sqlite3.Connection) -> None:
             sha TEXT NOT NULL DEFAULT '',
             outcome TEXT NOT NULL,
             reason TEXT NOT NULL DEFAULT '',
-            alerted INTEGER NOT NULL DEFAULT 0
+            alerted_at REAL  -- when the silence alarm was sent on this slot; NULL if it wasn't
         )""")

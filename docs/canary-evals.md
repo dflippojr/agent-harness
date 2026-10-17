@@ -95,7 +95,7 @@ The canary session is registered as low priority (`GpuScheduler.low_priority`).
 passes, attempts, pass_rate, turns, prompt_tokens, wall_seconds, baseline_sha, baseline_rate, alerted, note`
 (`note`: why a run was skipped or finished at a restart, migration 0048).
 
-`canary_slots` (#732), one row per nightly slot: `at, sha, outcome, reason, alerted`. `outcome` is the commit's
+`canary_slots` (#732), one row per nightly slot: `at, sha, outcome, reason, alerted_at`. `outcome` is the commit's
 row status after the slot (`complete`, `timeout`, `blocked`, `skipped`); `reason` is why it didn't run, including
 "already skipped" for a commit whose one row was final before the slot, and "no deployed commit".
 
@@ -140,7 +140,9 @@ The canary only runs while the GPU is free, so a hold or a busy week can starve 
 After every nightly slot the daemon records the slot in `canary_slots`. When the canary is enabled and the last 3
 slots in a row ended `blocked` or `skipped`, it sends one ntfy notification, "Agent canary has not run for N nights",
 listing the reasons recorded on those slots. While the silence lasts it repeats at most once a calendar day
-(tower-local), on the next slot. A slot that runs (`complete` or `timeout`), or one on a commit that already has a
+(tower-local), on the next slot or daemon start. A slot a shutdown interrupts is recorded as the daemon stops ("the
+daemon stopped during the slot"), and one a crash interrupted when the daemon next starts; the daemon checks for
+silence each time it starts, so restarts at slot time can't hide one. A slot that runs (`complete` or `timeout`), or one on a commit that already has a
 result, ends the streak; the next silence starts counting from zero. The alert goes through `Notifier.send`, like
 the regression alert: a delivery ntfy refuses is logged, not retried.
 
