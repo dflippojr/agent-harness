@@ -14,6 +14,10 @@ after that workflow succeeds for the exact commit pushed to `main`:
    changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `openapi` and `ui-tests` skip and
    `gate` still passes, so a docs-only PR is not left pending. A push to `main` is never cancelled by a later push:
    each main commit gets its own CI run, and only pull-request runs cancel their older run.
+   **CI / lint** (#729) runs on every change, on `ubuntu-latest`: `ruff check` with the small rule set in
+   `pyproject.toml` (`F`, `E9`, `B`, `PLE`; no formatter or import sorting), then pyright in basic mode
+   (`pyrightconfig.json`) over `harness`, `harness_modules`, `sdk` and `macrunner`. Pyright fails only on errors that
+   `tools/lint/pyright-baseline.json` does not record; fixing a recorded one and rewriting the baseline shrinks it.
 2. **guard** checks the `CI` run first: it continues only when that run's `test` job ran and passed (a docs-only
    push skips it) and the commit is still `main`'s tip. Main runs can finish out of order, so this stops an older
    commit from publishing images or deploying after a newer one; the newer commit's own run deploys. `guard` runs

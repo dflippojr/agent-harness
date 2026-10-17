@@ -85,11 +85,12 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     assert "continue-on-error: ${{ github.event_name == 'push' }}" in sonar_job
     assert "runs-on: [self-hosted" not in workflow
     assert "runs-on: windows-latest" in workflow
-    # Only the bookkeeping jobs (`changes`, `gate`, #726) may use Ubuntu; the suite and its analysis cannot.
+    # Only the bookkeeping jobs (`changes`, `gate`, #726) and the static checks (`lint`, #729) may use Ubuntu; the
+    # suite and its analysis cannot.
     jobs = yaml.safe_load(workflow)["jobs"]
     for job in ("test", "sonar", "openapi", "ui-tests"):
         assert jobs[job]["runs-on"] == "windows-latest", job
-    assert {name for name, job in jobs.items() if job["runs-on"] == "ubuntu-latest"} == {"changes", "gate"}
+    assert {name for name, job in jobs.items() if job["runs-on"] == "ubuntu-latest"} == {"changes", "gate", "lint"}
     assert "sonar.qualitygate.wait=true" in workflow
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert "pytest-xdist" not in requirements

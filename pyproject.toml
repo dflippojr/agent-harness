@@ -2,3 +2,21 @@
 name = "agent-harness"
 version = "0.0.0"
 requires-python = ">=3.12"
+
+# Lint (#729): a small, high-signal rule set, and no formatter or import sorting. The CI `lint` job runs
+# `ruff check .`; AGENTS.md has the local commands. Fix a finding, or silence one line with `# noqa: <rule>` and a
+# reason; do not add per-file ignores.
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "F",    # pyflakes: undefined names, unused imports, redefinitions
+    "E9",   # syntax errors
+    "B",    # flake8-bugbear
+    "PLE",  # pylint errors
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI parameter declarations are evaluated once at definition time on purpose.
+extend-immutable-calls = ["fastapi.File"]

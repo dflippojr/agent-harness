@@ -280,7 +280,7 @@ def test_the_login_container_mounts_only_the_end_users_volume_and_has_no_secret(
 def test_the_daemon_never_reads_end_user_volumes_host_side():
     source = (Path(end_users.__file__)).read_text(encoding="utf-8")
     import re
-    assert not re.search(r"(Path|open|read_text|read_bytes|listdir|glob)\(", source)
+    assert not re.search(r"\b(Path|open|read_text|read_bytes|listdir|glob)\(", source)
     assert "volume_mountpoint" not in source and "Mountpoint" not in source
 
 

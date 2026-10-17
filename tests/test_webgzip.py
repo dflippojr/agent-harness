@@ -56,7 +56,7 @@ def test_sse_and_binary_not_compressed():
     app.add_middleware(WebGzipMiddleware, web=WEB)
 
     async def events():
-        for i in range(3):
+        for _ in range(3):
             yield f"data: {'x' * 2000}\n\n"
 
     @app.get("/static/sse")

@@ -8,7 +8,7 @@ from pathlib import Path
 from .config import CORE_MODULE_NAMES, Config
 from .settings import (
     APP_CAPABILITIES, APPLY_MODES, Bounds, EFFORTS, NOTIFY_COMPLETION, Registry, SettingSpec,
-    module_installed, parse_value,
+    module_installed,
 )
 
 SMART_APPROVALS = "Smart approvals"

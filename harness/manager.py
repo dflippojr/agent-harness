@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import secrets
 import shutil
 import threading
@@ -18,7 +17,6 @@ from pathlib import Path
 
 from .bus import EventBus
 from . import cli_domains, local_owner, review_comments, tailscale_peer, tool_profiles
-from . import review_comments
 from .changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, changes_from_diffs, published, repo_diffs, workspace_changes
 from .maintenance import Maintenance, remove_tree
 from .local_inference import NoWarmer
@@ -931,7 +929,7 @@ class Manager:
         try:
             return validate_tools(app_tools, reserved)
         except ValueError as e:
-            raise HarnessError(400, str(e))
+            raise HarnessError(400, str(e)) from e
 
     def _add_skills(self, system: str, project: str, skills: list[str] | None, session_meta: dict,
                     missing: str) -> tuple[str, list]:
@@ -1733,7 +1731,7 @@ class Manager:
             state, detail = await self._review_local(sid, s, project, ws, action)
         except projects.GitError as e:
             await self.bus.aemit(sid, "error", {"message": f"{action} failed: {e}"})
-            raise HarnessError(e.status, str(e))
+            raise HarnessError(e.status, str(e)) from e
         head = "" if action == "discard" else await asyncio.to_thread(projects.head, ws)
 
         def record_review() -> None:

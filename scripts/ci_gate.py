@@ -21,6 +21,8 @@ ZERO_SHA = "0" * 40
 
 # Jobs whose `if:` reads the `changes` output. They may be skipped only when no changed file needs the tests.
 TEST_JOBS = ("test", "openapi", "ui-tests")
+# Jobs that run on every change (#729); skipped is never expected of them.
+ALWAYS_JOBS = ("lint",)
 
 Runner = Callable[[list[str]], str]
 
@@ -102,9 +104,11 @@ def gate_failures(needs: Mapping[str, Mapping[str, object]], event_name: str) ->
             failures.append(f"{job}: {result}")
         elif result == "skipped" and job in TEST_JOBS and tests_wanted:
             failures.append(f"{job}: skipped although changed files need the tests")
+        elif result == "skipped" and job in ALWAYS_JOBS:
+            failures.append(f"{job}: skipped although it runs on every change")
         elif result not in ("success", "skipped"):
             failures.append(f"{job}: {result}")
-    for job in TEST_JOBS:
+    for job in TEST_JOBS + ALWAYS_JOBS:
         if job not in needs:
             failures.append(f"{job}: not in gate's needs")
     return failures

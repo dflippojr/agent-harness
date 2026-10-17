@@ -259,7 +259,7 @@ def test_cleanup_removes_old_workspaces_keeps_unsaved(tmp_path, monkeypatch):
     async def body():
         m = Manager(cfg, chat=Script([Completion(content="ok")]))
         await m.start(maintenance=False)
-        scratch = await finished(m, m.create("hello")["id"])
+        await finished(m, m.create("hello")["id"])
         m.runner.chat = edit_steps()
         local = await finished(m, m.create("bump", project="proj")["id"])
         m.runner.chat = edit_steps()

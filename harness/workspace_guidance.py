@@ -61,5 +61,5 @@ def apply_to_prompt(prompt: str, workspace: Path) -> str:
         return base
     name, text = found
     for marker in (SECTION_OPEN, SECTION_CLOSE, repomap.SECTION_OPEN, repomap.SECTION_CLOSE):
-        text = text.replace(marker, marker[:-1] + "​>")  # the file can't open or close a prompt section
+        text = text.replace(marker, marker[:-1] + "\u200b>")  # the file can't open or close a prompt section
     return f"{base}\n\n{SECTION_OPEN}\nContents of {name} at the workspace root (the repository's guidance):\n\n{text}\n{SECTION_CLOSE}"

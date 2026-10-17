@@ -115,8 +115,8 @@ class Homelab:
         try:
             for item in json.loads(out or "[]"):
                 found[item["Name"].lstrip("/")] = item
-        except ValueError:
-            raise HomelabError(f"docker inspect failed: {(err or out).strip()[:300]}")
+        except ValueError as exc:
+            raise HomelabError(f"docker inspect failed: {(err or out).strip()[:300]}") from exc
         lines = []
         for svc in self.cfg.services.values():
             item = found.get(svc.container or svc.name)
@@ -188,8 +188,8 @@ class Homelab:
                 resp = await client.get(f"{base}/api/v1/query", params={"query": query})
         try:
             body = resp.json()
-        except ValueError:
-            raise HomelabError(f"Prometheus answered HTTP {resp.status_code}: {resp.text[:300]}")
+        except ValueError as exc:
+            raise HomelabError(f"Prometheus answered HTTP {resp.status_code}: {resp.text[:300]}") from exc
         if body.get("status") != "success":
             raise HomelabError(f"Prometheus error: {body.get('error', resp.text[:300])}")
         return format_prometheus(body["data"])

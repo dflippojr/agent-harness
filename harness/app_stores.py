@@ -953,7 +953,7 @@ class SessionStores:
                 moved += 1
             if repoint:
                 with self._using(app_id, write=True) as db:
-                    db.write(lambda db=db: db.conn.executemany("UPDATE sessions SET workspace = ? WHERE id = ?",
+                    db.write(lambda db=db, repoint=repoint: db.conn.executemany("UPDATE sessions SET workspace = ? WHERE id = ?",
                                                                [(w, sid) for sid, w in repoint.items()]))
             log.info("moved %d file(s) of App %s's sessions into %s and repointed %d workspace(s); backup %s",
                      moved, app_id, root, len(repoint), backup)

@@ -109,7 +109,7 @@ def missing_weights(cfg, *, verify_hash: bool = False) -> list[str]:
     """Human-readable problems for each scale. Empty means both general-image models are present."""
     problems = []
     dest = models_dir(cfg)
-    for scale, spec in MODELS.items():
+    for spec in MODELS.values():
         path = dest / spec.filename
         if not path.is_file():
             problems.append(f"{spec.filename} not in {dest}")

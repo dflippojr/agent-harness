@@ -115,7 +115,7 @@ async def create_job(body: Job, request: Request):
     try:
         job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
     except ValueError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     job["id"] = new_job_id()
     job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
     context = operation_audit.request_context(request, m)
@@ -151,7 +151,7 @@ async def update_job(jid: str, body: Job, request: Request):
     try:
         job = validate(body.model_dump(), m.cfg.projects, m.cfg.models, m.cfg.backends)
     except ValueError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
     context = operation_audit.request_context(request, m)
     def save():

@@ -204,9 +204,9 @@ def comfy_start() -> subprocess.Popen:
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{COMFY_PORT}/system_stats", timeout=2)
             return p
-        except Exception:
+        except Exception as exc:
             if p.poll() is not None:
-                raise SystemExit("ComfyUI exited; see comfy.log")
+                raise SystemExit("ComfyUI exited; see comfy.log") from exc
             time.sleep(1)
     raise SystemExit("ComfyUI did not start")
 
