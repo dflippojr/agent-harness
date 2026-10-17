@@ -301,8 +301,9 @@ readiness signal.
     fresh instance. Every mutating test uses a unique name; approval tests create their own pending approval, so the default protected seed stays available for layout tests.
   - Nothing is shared or persistent between runs.
 - **Projects.** Desktop light and dark at 1440×900, and phone light and dark with `devices['iPhone SE']` (WebKit) and
-  `devices['Pixel 7']` (Chromium).
-- **Which journeys run where.** All six projects stay defined in `playwright.config.ts`. The `signedIn` fixture in `tests/fixtures.ts`
+  `devices['Pixel 7']` (Chromium). `phone-landscape` is `devices['Pixel 7 landscape']` at its full 915×412 screen, light
+  only; it runs only the layout invariants (#734).
+- **Which journeys run where.** All seven projects stay defined in `playwright.config.ts`. The `signedIn` fixture in `tests/fixtures.ts`
   calls `onlyProjects(info, names)` before it opens `/connect`, so a project a test does not need costs no server requests. The
   `test` that specs import allows the light projects; `selfSizingTest` and `reflowTest` allow the narrower sets below. Behaviour journeys and
   defect regressions assert routes, persistence, audit rows, 44px targets and reflow overflow, none of which depends on
@@ -315,6 +316,8 @@ readiness signal.
     Actions tabs reflow…" and "Chat thread and an existing job reflow…".
   - **Light and dark, on `desktop` and `iphone-se` only** (`reflowTest`): `layout.spec.ts` "primary pages reflow…", which asserts the
     scheme's `--bg` on every primary page. This is the one dark run.
+  - **Phones, portrait and landscape** (`phoneTest`: `iphone-se-light`, `pixel7-light`, `phone-landscape`):
+    `layout-invariants.spec.ts`, one case per entry of `tests/inventory.ts`. See "Layout invariants" below.
   - The theme itself is checked by that `--bg` assertion, by AH-13 (the theme switch) and by the token contrast lint in
     `tests/test_web_tokens.py`.
 - **Teardown.** Playwright stops the start process when the run ends. On Windows that is a hard kill, so the instance
@@ -395,6 +398,35 @@ where they are.
   - the Rename chat sheet keeps its draft and focus through portrait → landscape → portrait and closes with Escape, browser Back and a backdrop tap
   - the session composer and Send stay in view under the header at 60 % height in both orientations
   - live resize from 1440 to 375 px and back keeps the Delete job sheet open, focus inside it and a partly edited name; Cancel returns focus to Delete, and a reload shows the unsaved name was never stored
-- The pass filed these defects: #626–#634. Their regression tests come with their fixes.
+- The pass filed these defects: #626–#634, fixed in #647. `layout-invariants.spec.ts` holds their regression cases; see
+  "Layout invariants" below.
 - WebKit does not focus a button on click, so a sheet opened by a click returns focus to `body` there. Tests open the sheet from the keyboard when they check where focus returns.
 - A Web origin opened without `/connect` (no stored Server URL or token) shows "Demo access — look around only" and an HTTP 404 note. That is the expected state for an unconfigured, separately hosted copy, not a sign-in path.
+
+## Layout invariants (#734)
+
+The nine defects of the second pass (#626–#634) were one class: layout on small and rotated screens. No journey would
+have caught them. `tests/inventory.ts` lists every phone surface of Stables on the fake instance: each page, Settings
+subpage, Actions tab, session tab, sheet, menu and dialog, with how to reach it. `tests/layout-invariants.spec.ts` runs
+every entry on the phones in portrait and on `phone-landscape`, and checks:
+
+- **Targets.** Each visible control you can tap at the top, middle and bottom of the page is at least 44×44 CSS px, or
+  at least 24×24 (WCAG 2.5.8). Any two are at least 8 px apart. Pinned chrome (fixed or sticky) is compared only with
+  pinned chrome, and an open menu only with itself. Inside an open modal dialog, only its own controls count.
+- **Wrapping.** No word, meaning a run of letters and digits, breaks across lines.
+- **Sheets.** An open sheet's primary actions are inside the visual viewport and not covered. A modal sheet locks the
+  root against scrolling, and in Chromium a wheel over the backdrop leaves the page where it was.
+- **Composers.** At the end of a thread, the composer does not cover the last message: as laid out, with the layout
+  viewport shrunk to 55 % (the Android keyboard), and with only the visual viewport shrunk to 55 % (the iOS keyboard).
+
+Each check is soft, so a failing case names every violation on its surface. Entries that guard a defect name it in the
+test title, for example `Actions › Disk (#626, #627)`. The spec keeps two lists, and every entry on either one needs a
+reason:
+
+- **`allowList`**: reviewed exceptions to a rule, such as full-width list rows that share a hairline.
+- **`knownDefects`**: open defects of the pinned Stables release, each with its dflippojr/stables issue. Their
+  findings are subtracted on the surfaces and projects they name. A case fails once its entry stops reproducing, so
+  the entry leaves with the re-pin that fixes it.
+
+A new page, sub-tab, sheet or dialog in Stables needs an inventory entry when Stables is re-pinned.
+

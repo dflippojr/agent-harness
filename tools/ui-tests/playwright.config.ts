@@ -9,9 +9,13 @@ export default defineConfig({
     command: 'node start.mjs', url: 'http://127.0.0.1:18801/ready',
     reuseExistingServer: false, timeout: 180_000, stdout: 'ignore', stderr: 'pipe',
   },
-  projects: (['light', 'dark'] as const).flatMap(colorScheme => [
-    { name: 'desktop-' + colorScheme, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, colorScheme } },
-    { name: 'iphone-se-' + colorScheme, use: { ...devices['iPhone SE'], viewport: { width: 375, height: 667 }, colorScheme } },
-    { name: 'pixel7-' + colorScheme, use: { ...devices['Pixel 7'], colorScheme } },
-  ]),
+  projects: [
+    ...(['light', 'dark'] as const).flatMap(colorScheme => [
+      { name: 'desktop-' + colorScheme, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, colorScheme } },
+      { name: 'iphone-se-' + colorScheme, use: { ...devices['iPhone SE'], viewport: { width: 375, height: 667 }, colorScheme } },
+      { name: 'pixel7-' + colorScheme, use: { ...devices['Pixel 7'], colorScheme } },
+    ]),
+    // Pixel 7 held sideways at its full 915x412 screen (#734). Only the layout invariants run here.
+    { name: 'phone-landscape', use: { ...devices['Pixel 7 landscape'], viewport: { width: 915, height: 412 }, colorScheme: 'light' } },
+  ],
 });
