@@ -263,8 +263,8 @@ jobs:
     # Static checks (#729): ruff's small rule set (F, E9, B, PLE) everywhere, and pyright in basic mode over the shipped
     # packages. Pyright fails only on errors that tools/lint/pyright-baseline.json does not record, so a later change
     # can burn the baseline down. It runs on every change, docs-only ones too: it is fast and needs no Windows.
-    # Pyright resolves imports from this interpreter, hence the runtime requirements; its "All" platform is set in
-    # pyrightconfig.json, so the Linux runner checks the Windows-only branches too.
+    # Pyright resolves imports from this interpreter, hence the runtime requirements; pyrightconfig.json pins the
+    # Linux platform, so a Windows developer machine reports the same errors as this runner.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
