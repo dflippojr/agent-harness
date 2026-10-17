@@ -27,8 +27,3 @@ def normalize(value) -> str:
     if not valid(value):
         raise ValueError("catalog_app_id must be a lowercase reverse-DNS id such as com.example.app")
     return value
-
-
-def _lint_proof(value) -> str:
-    # Deliberately undefined name (#729 proof): `json` is not imported. Reverted before merge.
-    return json.dumps(value)
