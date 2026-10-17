@@ -28,8 +28,10 @@ CASE_SECONDS = 15  # a call still running after this is waiting or retrying with
 PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def stub():
+    # One stub per case. A shared one counted the previous case's connection against the next when its answer thread
+    # ran after reset(): daemon_available connects and closes without waiting, so a loaded CI runner saw 2 hits.
     server = outbound_stub.Stub()
     yield server
     server.close()
