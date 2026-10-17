@@ -5,6 +5,8 @@ name: CI
 #   test      - the complete pytest suite with coverage (coverage.xml artifact)
 #   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
+#   changes   - lists the changed files; the three test jobs skip when every one is on the skip list
+#   gate      - the one check to require: always runs, fails if any job it needs failed or was cancelled
 # The suite runs once. Tests used to run a second time on a self-hosted
 # `agent-harness-ci` pool on the tower; that pool is retired so CI no longer
 # competes with llama-server and the desktop for RAM. The job ids `test` and
@@ -13,69 +15,49 @@ name: CI
 # Feature-branch pushes without a PR do not run. `pull_request` covers open and
 # later commits on a PR (`synchronize`); `push` to main still runs after merge.
 #
-# paths-ignore is an allow-list of files no pytest currently reads. GitHub
-# skips this workflow only when every changed file matches the list. Do not
-# use `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
+# The workflow always runs, so `gate` always reports and a ruleset can require it
+# (#726, dflippojr/agent-ops#48). The docs-only skip lives in the `changes` job:
+# CI_SKIP_UNREAD_PATHS is an allow-list of files no pytest currently reads, and
+# `test`, `openapi` and `ui-tests` skip only when every changed file is on it.
+# Entries are exact paths, not globs. Do not add `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
 # INSTALL.md, admin-api.md, app-api.md, mac-client.md, and service-profile.md
 # are asserted by tests/test_product_naming.py; marketplace design, threat
 # model, schema, and example manifests by tests/test_marketplace_manifest.py;
 # docs/CI-CD.md by
 # tests/test_review_runner.py::test_ci_docs_explain_backend_configuration_and_manual_verification.
 # Adding a test that reads a skipped file requires removing that path from
-# paths-ignore in the same change. None of the skipped files are Sonar
+# the list in the same change. None of the skipped files are Sonar
 # sources, so skipping the analysis with them loses nothing.
 #
-# main currently has no branch protection or rulesets, so a skipped `test`
-# check is acceptable. If `test` ever becomes required, add a tiny
-# always-running success job (do not add that job here).
-# .github/workflows/ci-cd.yml already deploys only when
-# workflow_run.conclusion == 'success' for a push to main, so a skipped or
-# absent CI run does not publish or deploy (desired). On a push to main the
-# `sonar` job is continue-on-error: a failing quality gate shows on the job
-# but does not block the deploy; only failing tests do. On pull requests the
-# quality gate still fails the check.
+# `gate` passes when the test jobs were skipped by `changes`, so a docs-only PR
+# is not left pending. .github/workflows/ci-cd.yml publishes and deploys only
+# when `test` itself ran and passed for the commit that is still main's tip, so
+# a docs-only push or a superseded commit never publishes or deploys (desired).
+# On a push to main the `sonar` job is continue-on-error and `gate` ignores it:
+# a failing quality gate shows on the job but blocks neither the gate nor the
+# deploy (#728 changes that); only failing tests do. On pull requests the
+# quality gate still fails `sonar`, and with it `gate`.
 on:
   push:
     branches: [main]
-    paths-ignore: &ci-skip-unread-paths
-      - LICENSE
-      - third_party/Real-ESRGAN.LICENSE
-      - docs/compatibility.md
-      - docs/flux-fast.md
-      - docs/issue-13-lightning-results.md
-      - docs/smart-approvals.md
-      - docs/phase0-results.md
-      - docs/phase1-results.md
-      - docs/phase2-results.md
-      - docs/phase3-results.md
-      - docs/phase4-results.md
-      - docs/phase5-results.md
-      - docs/phase6a-hermes-study.md
-      - docs/phase6b-results.md
-      - docs/phase6c-results.md
-      - docs/phase6d-results.md
-      - docs/phase6e-results.md
-      - docs/phase7a-results.md
-      - docs/phase7b-results.md
-      - docs/phase7d-results.md
-      - docs/phase7e-results.md
-      - docs/phase8a-design.md
-      - docs/phase8b-results.md
-      - docs/phase8c-results.md
   pull_request:
     types: [opened, synchronize, reopened]
-    paths-ignore: *ci-skip-unread-paths
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A PR push cancels that PR's older run. Each main push gets a group of its own commit, so no main run is
+  # cancelled, nor replaced while pending (GitHub drops a pending run when a newer one queues in the same group,
+  # even with cancel-in-progress false). Every merge commit is tested on its own; batch merges used to cancel most.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
     # The suite is Windows-native (CreateProcess flags, msvcrt, PowerShell), so
     # it runs on windows-latest; Ubuntu fails on msvcrt, console-creation flags,
     # and Windows paths. Docker-image and GPU tests skip on the hosted runner.
@@ -130,7 +112,7 @@ jobs:
         run: >
           python -m pytest tests -q -n 4 --dist loadfile -o faulthandler_timeout=300
           --cov=harness --cov=harness_modules --cov=sdk --cov=scripts --cov=macrunner
-          --cov-report=xml:coverage.xml --cov-report=term
+          --cov-report=xml:coverage.xml --cov-report=term --cov-fail-under=88
 
       - name: Upload coverage
         uses: actions/upload-artifact@v7
@@ -192,6 +174,8 @@ jobs:
   openapi:
     # Clients pin this document: Stables (dflippojr/stables) copies it into types/openapi.json and type-checks
     # against the copy, so a route or model change shows up here as a diff to the committed document.
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -205,6 +189,8 @@ jobs:
         run: python tools/openapi/export_schema.py --check
 
   ui-tests:
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -271,3 +257,67 @@ jobs:
             tools/ui-tests/test-results/
           if-no-files-found: ignore
           retention-days: 7
+
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tests: ${{ steps.filter.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The PR merge commit and its base parent (or the pushed commit); trees only, plus the one script.
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: scripts/ci_gate.py
+          sparse-checkout-cone-mode: false
+      - name: Decide whether any changed file is read by the tests
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          CI_SKIP_UNREAD_PATHS: |
+            LICENSE
+            third_party/Real-ESRGAN.LICENSE
+            docs/compatibility.md
+            docs/flux-fast.md
+            docs/issue-13-lightning-results.md
+            docs/smart-approvals.md
+            docs/phase0-results.md
+            docs/phase1-results.md
+            docs/phase2-results.md
+            docs/phase3-results.md
+            docs/phase4-results.md
+            docs/phase5-results.md
+            docs/phase6a-hermes-study.md
+            docs/phase6b-results.md
+            docs/phase6c-results.md
+            docs/phase6d-results.md
+            docs/phase6e-results.md
+            docs/phase7a-results.md
+            docs/phase7b-results.md
+            docs/phase7d-results.md
+            docs/phase7e-results.md
+            docs/phase8a-design.md
+            docs/phase8b-results.md
+            docs/phase8c-results.md
+        run: python3 scripts/ci_gate.py changes
+
+  gate:
+    # The required check. It always runs and needs every job above, so it reports on docs-only changes too
+    # (`test`, `openapi` and `ui-tests` skipped by `changes`). Any needed job failed or cancelled fails it; see
+    # scripts/ci_gate.py for the rules. Add every new job here.
+    if: always()
+    needs: [changes, test, sonar, openapi, ui-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts/ci_gate.py
+          sparse-checkout-cone-mode: false
+      - name: Every needed job passed, or was skipped on purpose
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_gate.py gate

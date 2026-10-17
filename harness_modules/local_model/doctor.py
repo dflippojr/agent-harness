@@ -29,7 +29,7 @@ def check_model_server(r, cfg) -> None:
         return
     model = cfg.models[cfg.default_model]
     try:
-        props = httpx.get(f"{model.base_url}/props", timeout=5).json()
+        props = httpx.get(f"{model.base_url}/props", timeout=5).raise_for_status().json()  # #733: a 4xx isn't up
         n_ctx = (props.get("default_generation_settings") or {}).get("n_ctx")
         detail = f"{model.base_url}: {props.get('model_alias') or props.get('model_path', '?')}, n_ctx {n_ctx}"
         if props.get("is_sleeping"):
@@ -48,7 +48,7 @@ def check_model_server(r, cfg) -> None:
 def check_guard(r, cfg):
     base = f"http://127.0.0.1:{cfg.port}"
     try:
-        gpu = httpx.get(f"{base}/gpu", timeout=5).json()
+        gpu = httpx.get(f"{base}/gpu", timeout=5).raise_for_status().json()
         if gpu.get("enabled"):
             flag = Path(cfg.gpu_guard.pause_flag).exists()
             if flag and gpu["state"] == "clear" and not gpu.get("lazy_load"):
