@@ -512,6 +512,24 @@ def notify_test_route(ctx: Ctx):
         return client.post("/notify/test")
 
 
+def canary_alert_test_route(ctx: Ctx):
+    """POST /canary/alert-test sends its sample through Notifier.deliver (#732)."""
+    from fastapi.testclient import TestClient
+    from test_daemon import Completion, Script, make_cfg
+
+    from harness.api import create_app
+    from harness.manager import Manager
+    from harness_modules.notifications import service
+    ctx.quick_sleeps(service)
+    cfg = make_cfg(ctx.tmp)
+    m = Manager(cfg, chat=Script([Completion(content="unused")]))
+    ntfy = ntfy_cfg(ctx).notify
+    cfg.notify.enabled, cfg.notify.server, cfg.notify.topic, cfg.notify.token_file = (
+        True, ntfy.server, ntfy.topic, ntfy.token_file)
+    ctx.stores.append(lambda: _dump(m.db.conn))
+    with TestClient(create_app(m)) as client:
+        return client.post("/canary/alert-test", json={"kind": "silence"})
+
 async def skills_review(ctx: Ctx):
     from harness_modules.skills.runtime import SkillsRuntime
     key = ctx.file("reviewer-key", ctx.secret)
@@ -627,6 +645,8 @@ REGISTRY: list[Outbound] = [
              notify_test_route, status(502), ok={"malformed": BODY_UNREAD}, attempts=3, secret=True),
     Outbound("harness_modules/notifications/service.py::Notifier._run", "push notifications: delivery loop",
              notifier_loop, undelivered, ok={"malformed": BODY_UNREAD}, attempts=3, secret=True),
+    Outbound("harness_modules/notifications/service.py::Notifier.deliver", "canary: POST /canary/alert-test",
+             canary_alert_test_route, status(502), ok={"malformed": BODY_UNREAD}, attempts=3, secret=True),
     Outbound("harness_modules/skills/runtime.py::SkillsRuntime.hosted_review", "skills: hosted reviewer",
              skills_review, secret=True),
     Outbound("sdk/harness_client.py::Harness.__init__", "SDK: API request", sdk_client, secret=True),

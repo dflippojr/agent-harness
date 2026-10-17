@@ -109,6 +109,7 @@ ADMIN_PATHS = frozenset({
     "/chats/{ref}/snippets/{run_id}/cancel",
     "/maintenance",
     "/maintenance/cleanup",
+    "/canary/alert-test",
     "/events",
     "/keys",
     "/keys/{kid}",

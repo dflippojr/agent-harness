@@ -9,6 +9,7 @@ import math
 import mimetypes
 import os
 import sqlite3
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -941,6 +942,27 @@ async def maintenance_cleanup(request: Request):
     """Runs a cleanup pass now, after any pass in progress, and returns what it removed."""
     m = require_owner(request)
     return await m.maintenance.cleanup(context=operation_audit.request_context(request, m))
+
+
+class CanaryAlertTest(BaseModel):
+    kind: str = "silence"  # silence | regression
+
+
+@api_router.post("/canary/alert-test")
+async def canary_alert_test(request: Request, body: CanaryAlertTest | None = None):
+    """Send a sample canary alert (silence or regression) through ntfy, titled as a test; with notifications off, only return it."""
+    from . import canary
+    m = require_owner(request)
+    try:
+        payload = canary.sample_alert((body or CanaryAlertTest()).kind, m.cfg.notify.topic, time.time())
+    except ValueError as e:
+        raise HarnessError(400, str(e)) from e
+    if not m.notifier.enabled:
+        return {"sent": False, "reason": "notifications are disabled", "notification": payload}
+    failure = await m.notifier.deliver(payload)
+    if failure:  # never report a notification ntfy refused as sent (#682)
+        raise HarnessError(502, failure)
+    return {"sent": True, "reason": "", "notification": payload}
 
 
 @api_router.get("/sessions/{ref}/approvals")

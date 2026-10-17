@@ -82,12 +82,23 @@ class CanaryRunner:
 
     # may a run start now
     def can_start(self) -> bool:
+        return not self.blocker()
+
+    def blocker(self) -> str:
+        """What keeps a run from starting now, in words for the row's note and the silence alarm (#732); "" if free."""
         m, g = self.m, self.m.guard
+        if g is not None and g.manual:
+            until = getattr(g, "manual_until", None)
+            end = f"until {time.strftime('%Y-%m-%d %H:%M', time.localtime(until))}" if until else "with no end"
+            return f"the GPU is held by hand {end} (resume: harness resources resume)"
+        if g is not None and g.state != "clear":
+            details = ", ".join(r.get("detail", "") for r in getattr(g, "reasons", []) if r.get("detail"))
+            return f"the resource guard is {g.state}" + (f": {details}" if details else "")
         if not m.scheduler.idle() or m.runner.generating or m.runner.gate.busy or m.runner.gate.exclusive:
-            return False
+            return "the GPU queue was busy"
         if m.images is not None and (m.images.gpu_taken or m.images.phase != "idle"):
-            return False
-        return g is None or (g.state == "clear" and not g.manual)
+            return "an image job had the GPU"
+        return ""
 
     async def _wait_until_free(self, deadline: float) -> bool:
         while not self.can_start():
@@ -115,7 +126,7 @@ class CanaryRunner:
         outcomes: list[dict] = []
         try:
             if not await self._wait_until_free(self.clock() + self.cfg.start_wait_seconds):
-                return Report("blocked")
+                return Report("blocked", reason=self.blocker() or "the GPU was busy")
             for task, kind in plan:
                 for repeat in range(self.suite["repeats"]):
                     if self.clock() >= cap or not await self._wait_until_free(cap):

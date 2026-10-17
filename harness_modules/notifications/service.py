@@ -95,6 +95,15 @@ class Notifier:
             except asyncio.QueueFull:
                 log.warning("notification queue full; dropping %s", payload.get("title"))
 
+    async def deliver(self, payload: dict) -> str:
+        """Post one notification now instead of queueing it: "" once ntfy accepted it, else why it didn't (#682)."""
+        async with httpx.AsyncClient(timeout=15) as client:
+            try:
+                await self.publish(client, payload)
+            except DeliveryError as e:
+                return str(e)
+        return ""
+
     def start(self) -> None:
         if self.enabled and self._task is None:
             self._task = asyncio.create_task(self._run(), name="notifier")

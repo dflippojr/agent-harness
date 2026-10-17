@@ -1021,6 +1021,17 @@
         "title": "Body_upload_image_images_uploads_post",
         "type": "object"
       },
+      "CanaryAlertTest": {
+        "properties": {
+          "kind": {
+            "default": "silence",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "title": "CanaryAlertTest",
+        "type": "object"
+      },
       "CapabilitiesResponse": {
         "additionalProperties": true,
         "properties": {
@@ -4355,6 +4366,50 @@
           }
         },
         "summary": "Update Backend"
+      }
+    },
+    "/api/admin/v1/canary/alert-test": {
+      "post": {
+        "description": "Send a sample canary alert (silence or regression) through ntfy, titled as a test; with notifications off, only return it.",
+        "operationId": "admin_canary_alert_test_canary_alert_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CanaryAlertTest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Canary Alert Test"
       }
     },
     "/api/admin/v1/chats": {
@@ -12144,6 +12199,50 @@
           }
         },
         "summary": "Update Backend"
+      }
+    },
+    "/canary/alert-test": {
+      "post": {
+        "description": "Send a sample canary alert (silence or regression) through ntfy, titled as a test; with notifications off, only return it.",
+        "operationId": "canary_alert_test_canary_alert_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CanaryAlertTest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Canary Alert Test"
       }
     },
     "/chats": {

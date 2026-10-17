@@ -89,6 +89,7 @@ Generated from the route registrations and the owner routes listed in `ADMIN_PAT
 | GET | `/api/admin/v1/audit` | owner | Owner-only review of every retained audit row, newest first, with a cursor (#467). | `harness/admin.py` `audit_review` |
 | GET | `/api/admin/v1/backends` | owner (`admin` scope) | Local and hosted backends with their model and sign-in state; `auth=skip` skips the sign-in checks. | `harness/api.py` `backends` |
 | PUT | `/api/admin/v1/backends/{name}` | owner (`admin` scope) | Settings → Backends: persist the default model (and effort, for hosted CLIs). | `harness/api.py` `update_backend` |
+| POST | `/api/admin/v1/canary/alert-test` | owner (`admin` scope) | Send a sample canary alert (silence or regression) through ntfy, titled as a test; with notifications off, only return it. | `harness/api.py` `canary_alert_test` |
 | GET | `/api/admin/v1/chats` | owner (`admin` scope) | The caller's chats, newest first, up to `limit` (1 to 200, default 50). | `harness/api.py` `list_chats` |
 | POST | `/api/admin/v1/chats` | owner (`admin` scope) | Starts a chat and returns before its first reply finishes; backend, model and effort are optional. | `harness/api.py` `create_chat` |
 | GET | `/api/admin/v1/chats/options` | owner (`admin` scope) | Backends, models and efforts a new chat can start with, and the default backend. | `harness/api.py` `chat_options` |

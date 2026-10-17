@@ -4,8 +4,9 @@ A small pinned task set (bakeoff/canary.yaml) runs through the production Manage
 deployed commit. Results are one row per commit in `canary_results`; a drop in pass rate against the median of the
 previous runs sends one ntfy notification. Advisory only: nothing here blocks a deploy.
 
-This module holds the parts that don't need the model: storage, the regression rule, the nightly trigger and the
-"one run per commit" bookkeeping. `bakeoff/canary.py` runs the tasks and is handed in as `run_suite`.
+This module holds the parts that don't need the model: storage, the regression rule, the nightly trigger, the
+"one run per commit" bookkeeping and the silence alarm (#732). `bakeoff/canary.py` runs the tasks and is handed in as
+`run_suite`.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ log = logging.getLogger("harness.canary")
 
 REPO = "dflippojr/agent-harness"
 FINAL = ("complete", "timeout", "skipped")  # blocked is the only status the next nightly slot retries
+UNRUN = ("blocked", "skipped")  # a nightly slot that produced no result (#732)
+SILENT_SLOTS = 3  # this many unrun slots in a row sends the silence alarm
 SHORT_SHA = 8
 # The canary's sessions live in these projects (bakeoff/canary.py). They are never resumed after a restart (#316).
 HARD_PROJECT, WEB_PROJECT = "canary-hard", "canary-web"
@@ -54,6 +57,7 @@ class Report:
     """What one canary pass over the suite produced."""
     status: str                                         # complete | timeout | blocked
     outcomes: list[dict] = field(default_factory=list)  # {task, repeat, ok, status, turns, prompt_tokens, seconds, restarts}
+    reason: str = ""                                    # blocked: what kept the GPU (a hold, the guard, a busy queue)
 
 
 WALL_LIMIT = "wall_limit"  # the canary stopped the attempt at the task's wall-clock limit: a graded fail
@@ -137,10 +141,12 @@ class CanaryStore:
         rows = [_row(r) for r in self.db.read(read)]
         for row in rows:
             if row["outcomes"]:
-                self.finish(row["sha"], "complete", row["outcomes"], now,
-                            note="daemon restarted during the confirmation rerun: first-run results, no alert")
+                status, note = "complete", "daemon restarted during the confirmation rerun: first-run results, no alert"
+                self.finish(row["sha"], status, row["outcomes"], now, note=note)
             else:
-                self.finish(row["sha"], "blocked", [], now, note="daemon restarted mid-run")
+                status, note = "blocked", "daemon restarted mid-run"
+                self.finish(row["sha"], status, [], now, note=note)
+            self.record_slot(now, row["sha"], status, note)  # the crashed slot counts towards the silence alarm (#732)
         return rows
 
     def completed_before(self, sha: str, limit: int) -> list[dict]:
@@ -157,6 +163,37 @@ class CanaryStore:
                 "SELECT * FROM canary_results WHERE finished_at IS NOT NULL AND pass_rate IS NOT NULL "
                 "ORDER BY started_at DESC LIMIT ?", (limit,)).fetchall()
         return [_row(r) for r in self.db.read(read)]
+
+    def last_complete_at(self) -> float | None:
+        """When the newest real result finished: a `complete` row with a pass rate (some attempt was graded)."""
+        def read():
+            return self.db.conn.execute(
+                "SELECT MAX(finished_at) FROM canary_results WHERE status = 'complete' AND pass_rate IS NOT NULL"
+            ).fetchone()[0]
+        return self.db.read(read)
+
+    # the nightly slots (#732)
+    def record_slot(self, at: float, sha: str, outcome: str, reason: str) -> int:
+        def record():
+            return self.db.conn.execute("INSERT INTO canary_slots (at, sha, outcome, reason) VALUES (?, ?, ?, ?)",
+                                        (at, sha, outcome, reason)).lastrowid
+        return self.db.write(record)
+
+    def mark_slot_alerted(self, slot_id: int, now: float) -> None:
+        def mark():
+            self.db.conn.execute("UPDATE canary_slots SET alerted_at = ? WHERE id = ?", (now, slot_id))
+        self.db.write(mark)
+
+    def unrun_streak(self) -> list[dict]:
+        """The newest slots that ended blocked or skipped, newest first, up to the last slot that did run."""
+        def read():
+            return self.db.conn.execute("SELECT * FROM canary_slots ORDER BY id DESC LIMIT 400").fetchall()
+        streak = []
+        for row in self.db.read(read):
+            if row["outcome"] not in UNRUN:
+                break
+            streak.append(dict(row))
+        return streak
 
 
 @dataclass
@@ -233,7 +270,7 @@ class Canary:
         try:
             report = await self.run_suite(sha, None)
             if report.status == "blocked":
-                status = "blocked" if tries < 2 else "skipped"
+                status, note = "blocked" if tries < 2 else "skipped", report.reason or "the GPU was busy"
             else:
                 status, outcomes = report.status, report.outcomes
                 if report.status == "complete":
@@ -249,6 +286,52 @@ class Canary:
         if verdict.alert:
             self._alert(sha, pass_rate(outcomes), verdict)
         return await asyncio.to_thread(self.store.get, sha)
+
+    async def nightly(self, sha: str) -> dict | None:
+        """One nightly slot: `run_for`, then the slot's outcome in `canary_slots` and the silence alarm (#732)."""
+        before = await asyncio.to_thread(self.store.get, sha) if sha else None
+        try:
+            row = await self.run_for(sha)
+        except asyncio.CancelledError:
+            # a shutdown mid-slot: run_for has finished the row. Record the slot before stopping, so restarts at slot
+            # time can't hide a silence; the notifier is stopping too, so the alarm waits for the next start.
+            row = await asyncio.to_thread(self.store.get, sha) if sha else None
+            await self._end_slot(sha, before, row, "the daemon stopped during the slot", alarm=False)
+            raise
+        except Exception as e:
+            row = await asyncio.to_thread(self.store.get, sha) if sha else None
+            await self._end_slot(sha, before, row, f"the canary failed: {e!r}")
+            raise
+        await self._end_slot(sha, before, row)
+        return row
+
+    async def _end_slot(self, sha: str, before: dict | None, row: dict | None, error: str = "",
+                        alarm: bool = True) -> None:
+        if row is None or row["status"] == "running":
+            outcome, reason = "skipped", error or ("no deployed commit" if not sha else "no result recorded")
+        elif before and before["status"] in FINAL:
+            # nothing ran: the commit already has its one row. Only a skipped one leaves the canary silent.
+            outcome = before["status"]
+            reason = (f"{sha[:SHORT_SHA]} was already skipped ({before['note'] or 'could not start'}); "
+                      "the next deployed commit runs" if outcome == "skipped" else f"{sha[:SHORT_SHA]} already ran")
+        else:
+            outcome, reason = row["status"], error or row["note"]
+        await asyncio.to_thread(self.store.record_slot, self.clock(), sha, outcome, reason)
+        if alarm:
+            await self.silence_alarm()
+
+    async def silence_alarm(self) -> None:
+        """Send the silence alarm if the last SILENT_SLOTS slots went unrun, at most once a calendar day (tower-local)
+        while the silence lasts. Checked after each slot and when the daemon starts."""
+        now = self.clock()
+        streak = await asyncio.to_thread(self.store.unrun_streak)
+        if len(streak) < SILENT_SLOTS:
+            return
+        today = datetime.fromtimestamp(now).date()
+        if any(s["alerted_at"] and datetime.fromtimestamp(s["alerted_at"]).date() == today for s in streak):
+            return
+        self.notify(silence_alert(streak, self.topic))
+        await asyncio.to_thread(self.store.mark_slot_alerted, streak[0]["id"], now)
 
     async def _judge(self, sha: str, report: Report) -> tuple[list[dict], Verdict]:
         prior = await asyncio.to_thread(self.store.completed_before, sha, self.cfg.baseline_runs)
@@ -276,11 +359,42 @@ class Canary:
         return outcomes, judge(pass_rate(outcomes), prior, **rule)
 
     def _alert(self, sha: str, rate: float, verdict: Verdict) -> None:
-        url = compare_url(verdict.baseline_sha, sha)
-        self.notify({"topic": self.topic, "title": f"Agent canary regressed on {sha[:SHORT_SHA]}",
-                     "message": (f"Pass rate {rate:.0%} vs baseline {verdict.baseline_rate:.0%} "
-                                 f"(drop of {(verdict.baseline_rate - rate) * 100:.0f} points).\n{url}"),
-                     "priority": 4, "tags": ["warning"], "click": url})
+        self.notify(regression_alert(sha, rate, verdict.baseline_sha, verdict.baseline_rate, self.topic))
+
+
+def silence_alert(streak: list[dict], topic: str) -> dict:
+    """The silence alarm's ntfy payload: `streak` is the unrun slots, newest first (CanaryStore.unrun_streak)."""
+    since = datetime.fromtimestamp(streak[-1]["at"]).strftime("%Y-%m-%d")
+    reasons = list(dict.fromkeys(s["reason"] or s["outcome"] for s in streak[:SILENT_SLOTS]))
+    return {"topic": topic, "title": f"Agent canary has not run for {len(streak)} nights",
+            "message": (f"The last {len(streak)} nightly slots (since {since}) ended blocked or skipped, so no "
+                        "agent regression would be noticed.\n" + "\n".join(f"- {r}" for r in reasons)),
+            "priority": 4, "tags": ["warning"]}
+
+
+def regression_alert(sha: str, rate: float, baseline_sha: str, baseline_rate: float, topic: str) -> dict:
+    url = compare_url(baseline_sha, sha)
+    return {"topic": topic, "title": f"Agent canary regressed on {sha[:SHORT_SHA]}",
+            "message": (f"Pass rate {rate:.0%} vs baseline {baseline_rate:.0%} "
+                        f"(drop of {(baseline_rate - rate) * 100:.0f} points).\n{url}"),
+            "priority": 4, "tags": ["warning"], "click": url}
+
+
+def sample_alert(kind: str, topic: str, now: float) -> dict:
+    """A sample of an alert for the manual alert test (POST /canary/alert-test): the real payload builder on made-up
+    input, titled as a test so it is never mistaken for a real alert."""
+    if kind == "silence":
+        streak = [{"at": now - i * 86400, "outcome": outcome, "reason": reason}
+                  for i, (outcome, reason) in enumerate((
+                      ("skipped", "the GPU is held by hand with no end (test sample)"),
+                      ("blocked", "the resource guard is paused: game running (test sample)"),
+                      ("blocked", "the GPU queue was busy (test sample)")))]
+        payload = silence_alert(streak, topic)
+    elif kind == "regression":
+        payload = regression_alert("0" * 40, 0.5, "f" * 40, 0.8, topic)
+    else:
+        raise ValueError(f"unknown alert kind {kind!r}; use silence or regression")
+    return {**payload, "title": f"Test: {payload['title']}", "tags": ["test_tube"]}
 
 
 def parse_at(at) -> tuple[int, int]:
@@ -301,7 +415,7 @@ def next_slot(now: datetime, at: str) -> datetime:
 
 
 class Nightly:
-    """Calls `canary.run_for(deployed sha)` once a night at `cfg.at`, tower-local time."""
+    """Calls `canary.nightly(deployed sha)` once a night at `cfg.at`, tower-local time."""
 
     def __init__(self, canary: Canary, cfg, sha: Callable[[], str] = deployed_sha,
                  now: Callable[[], datetime] = datetime.now):
@@ -319,6 +433,12 @@ class Nightly:
             self._task = None
 
     async def _loop(self) -> None:
+        try:
+            await self.canary.silence_alarm()  # slots a shutdown or crash interrupted were recorded without one (#732)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("canary silence check failed")
         while True:
             try:
                 wait = (next_slot(self.now(), self.cfg.at) - self.now()).total_seconds()
@@ -327,7 +447,7 @@ class Nightly:
                 return
             await asyncio.sleep(max(1.0, wait))
             try:
-                await self.canary.run_for(self.sha())
+                await self.canary.nightly(self.sha())
             except asyncio.CancelledError:
                 raise
             except Exception:
