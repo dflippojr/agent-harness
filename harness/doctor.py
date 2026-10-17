@@ -254,8 +254,8 @@ def check_secret_scanner(r: Report, cfg) -> None:
 def check_optional(r: Report, cfg) -> None:
     if cfg.web.enabled and not getattr(r, "not_started", False):
         try:
-            n = len(httpx.get(f"{cfg.web.searxng_url}/search", params={"q": "test", "format": "json"},
-                              timeout=15).json().get("results", []))
+            response = httpx.get(f"{cfg.web.searxng_url}/search", params={"q": "test", "format": "json"}, timeout=15)
+            n = len(response.raise_for_status().json().get("results", []))  # a refusal is not "0 results" (#733)
             r.ok("Web search", f"SearXNG answered with {n} results")
         except (httpx.HTTPError, ValueError) as e:
             r.fail("Web search", f"SearXNG at {cfg.web.searxng_url} not answering ({type(e).__name__})")

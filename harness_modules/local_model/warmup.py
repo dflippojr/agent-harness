@@ -206,7 +206,10 @@ class ModelWarmer:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10)) as client:
                 resp = await client.post(f"{model.base_url}/v1/chat/completions", json=payload)
-            log.info("%s %s in %.0f s (HTTP %s)", verb, model.name, time.monotonic() - started, resp.status_code)
+            if resp.status_code == 200:
+                log.info("%s %s in %.0f s (HTTP %s)", verb, model.name, time.monotonic() - started, resp.status_code)
+            else:  # #733: a refused ping did not warm the model
+                log.warning("%s %s failed: HTTP %s", verb, model.name, resp.status_code)
         except httpx.HTTPError as e:
             log.warning("%s %s failed: %s", verb, model.name, e)
 

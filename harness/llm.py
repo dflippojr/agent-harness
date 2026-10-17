@@ -131,6 +131,7 @@ async def chat(
     payload = _payload(model, messages, tools, max_tokens, extra, on_progress)
     out = Completion()
     calls: dict[int, dict] = {}
+    streamed = False
     # Cold model loads take up to a minute and long prompts ~70 s, so only the connect timeout is short.
     limits = httpx.Timeout(timeout, connect=10)
     try:
@@ -144,6 +145,7 @@ async def chat(
                     if not line.startswith("data:"):
                         continue
                     data = line[5:].strip()
+                    streamed = True
                     if data == "[DONE]":
                         break
                     chunk = json.loads(data)
@@ -153,6 +155,8 @@ async def chat(
     except httpx.HTTPError as e:
         raise LLMError(f"{type(e).__name__}: {e}", retryable=isinstance(e, (httpx.ReadError, httpx.RemoteProtocolError,
                                                                               httpx.ConnectError))) from e
+    if not streamed:  # #733: a 200 that carried no event stream is not an empty answer
+        raise LLMError("the model server answered 200 without an event stream", retryable=True)
     for index in sorted(calls):
         call = calls[index]
         if not call["id"]:
