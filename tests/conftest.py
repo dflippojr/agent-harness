@@ -136,6 +136,26 @@ def pinned_scanner(monkeypatch, gitleaks_tools):
     pin_scanner(monkeypatch, gitleaks_tools)
 
 
+def guard_process_signals(monkeypatch):
+    """No test may signal pid 0, 1 or -1 for real: killpg(1) and kill(-1) reach every process the user owns, and pid 0
+    is pytest's own group (#745). A fake Popen with a small pid must stub the signal call it leads to."""
+    def guarded(real, name):
+        def call(pid, sig):
+            if -1 <= pid <= 1:
+                pytest.fail(f"a test called the real os.{name}({pid}, {sig})")
+            return real(pid, sig)
+        return call
+
+    monkeypatch.setattr(os, "kill", guarded(os.kill, "kill"))
+    if hasattr(os, "killpg"):
+        monkeypatch.setattr(os, "killpg", guarded(os.killpg, "killpg"))
+
+
+@pytest.fixture(autouse=True)
+def guarded_process_signals(monkeypatch):
+    guard_process_signals(monkeypatch)
+
+
 @pytest.fixture(scope="module")
 def module_isolation(tmp_path_factory, gitleaks_tools):
     """The isolation every test gets from the autouse fixtures above, for a fixture that outlives one test (a
@@ -147,6 +167,7 @@ def module_isolation(tmp_path_factory, gitleaks_tools):
     fixed_ram(patcher)
     awake_model(patcher)
     pin_scanner(patcher, gitleaks_tools)
+    guard_process_signals(patcher)
     yield
     patcher.undo()
 
