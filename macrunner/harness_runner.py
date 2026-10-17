@@ -373,13 +373,13 @@ class Executor:
             return
         try:
             if os.name == "posix":
-                os.killpg(proc.pid, signal.SIGTERM)
+                signal_group(proc.pid, signal.SIGTERM)
             else:
                 proc.terminate()
             proc.wait(timeout=5)
         except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
             try:
-                os.killpg(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
+                signal_group(proc.pid, signal.SIGKILL) if os.name == "posix" else proc.kill()
             except (ProcessLookupError, PermissionError):
                 pass
 
@@ -414,7 +414,7 @@ class Executor:
         if not hasattr(os, "killpg") or proc.poll() is None:
             return
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            signal_group(proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
 
@@ -547,6 +547,16 @@ def clone_tree(src: Path, dst: Path) -> None:
         subprocess.run(["/bin/cp", "-cR", str(src), str(dst)], check=True, capture_output=True, timeout=300)
     else:
         shutil.copytree(src, dst, symlinks=True)
+
+
+def signal_group(pid: int, sig: int) -> None:
+    """os.killpg for a command's process group. No Popen child has pid 0 or 1, and signalling either would reach far
+    beyond the command: group 0 is the runner's own, and killpg(1) is kill(-1), every process the user may signal.
+    Those are logged and refused."""
+    if pid <= 1:
+        log.error("refusing to signal process group %s", pid)
+        return
+    os.killpg(pid, sig)
 
 
 def git_temp_root(home: Path) -> Path:

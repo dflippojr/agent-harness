@@ -6,10 +6,9 @@ on:
     types: [completed]
     branches: [main]
 
-concurrency:
-  group: agent-harness-main-deployment
-  # Never interrupt a main deployment between updating code, retagging images, and restarting the daemon.
-  cancel-in-progress: false
+# No workflow-level concurrency: `guard` must run at once, outside any group. GitHub replaces a group's pending run
+# when a newer one queues, so a group around the whole workflow would let an older CI completion replace the newest
+# commit's pending deployment before either guard ran. The two jobs after `guard` serialize in groups of their own.
 
 permissions:
   contents: read
@@ -20,28 +19,87 @@ env:
   CLI_IMAGE: ghcr.io/${{ github.repository_owner }}/agent-harness-cli
 
 jobs:
-  publish-images:
-    name: publish-images
+  # Deploy order (#726). CI main runs no longer cancel each other, so runs for two commits can finish in either
+  # order. `guard` lets a run publish and deploy only when its `test` job ran and passed (a docs-only push skips
+  # `test`, and CI still succeeds through `gate`) and its commit is still main's tip. So an older commit that
+  # finishes after a newer one publishes nothing and never moves the stable image tags back; the newer commit's run
+  # deploys it. Only runs that pass reach the job-level groups below, so a run queued there can be replaced only by
+  # a newer commit's. deploy-ci.ps1 re-checks the tip after that wait and refuses a non-fast-forward, so the tower
+  # never goes from a newer commit to an older one.
+  guard:
+    name: guard
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
-      packages: write
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+          sparse-checkout: scripts/ci_gate.py
+          sparse-checkout-cone-mode: false
+      - name: Tested, and still main's tip
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          CI_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: >-
+          python3 scripts/ci_gate.py deploy
+          --repository "$GITHUB_REPOSITORY" --run-id "$CI_RUN_ID" --head-sha "$CI_HEAD_SHA"
+
+  publish-images:
+    name: publish-images
+    needs: guard
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+      && needs.guard.outputs.deploy == 'true'
+    concurrency:
+      # Its own group, not deploy-tower's: one shared group would let this job replace the pending deploy-tower.
+      group: agent-harness-main-publish
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    outputs:
+      published: ${{ steps.fresh.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      # The guard's tip check can go stale while this job waits for its group. Rechecked here, inside the group: a
+      # newer commit that already published was pushed before this job started, so the stable tags never go back.
+      - name: Still main's tip, inside the publish group
+        id: fresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          CI_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: >-
+          python3 scripts/ci_gate.py deploy
+          --repository "$GITHUB_REPOSITORY" --run-id "$CI_RUN_ID" --head-sha "$CI_HEAD_SHA"
+      - if: steps.fresh.outputs.deploy == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - if: steps.fresh.outputs.deploy == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and publish session sandbox
+        if: steps.fresh.outputs.deploy == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: sandbox
@@ -53,6 +111,7 @@ jobs:
           cache-from: type=gha,scope=sandbox
           cache-to: type=gha,mode=max,scope=sandbox,ignore-error=true
       - name: Build and publish subscription CLI sandbox
+        if: steps.fresh.outputs.deploy == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: sandbox
@@ -72,7 +131,13 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.event == 'push'
-    needs: publish-images
+      && needs.guard.outputs.deploy == 'true'
+      && needs.publish-images.outputs.published == 'true'
+    needs: [guard, publish-images]
+    concurrency:
+      group: agent-harness-main-deployment
+      # Never interrupt a main deployment between updating code, retagging images, and restarting the daemon.
+      cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, agent-harness-tower]
     timeout-minutes: 15
     environment: tower-production
