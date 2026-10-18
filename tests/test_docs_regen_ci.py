@@ -49,7 +49,7 @@ def test_ci_wait_requires_run_and_successful_gate(tmp_path, run_id, watch_status
     sleep() { :; }
     '''
     script = tmp_path / "wait.sh"
-    script.write_text(mock + step["run"], encoding="utf-8")
+    script.write_text(mock + step["run"], encoding="utf-8", newline='\n')
     result = subprocess.run(
         [_bash(), str(script)], capture_output=True, text=True,
         env={**os.environ, "MOCK_RUN": run_id, "MOCK_WATCH": watch_status, "MOCK_GATE": gate,
