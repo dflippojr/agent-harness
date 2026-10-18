@@ -114,7 +114,7 @@ def test_trusted_gate_guard_runs_from_main_pinned_by_sha_and_checks_out_nothing(
     # pull_request_target runs the file as it is on main, so a pull request cannot supply its own judge.
     assert set(events) == {"pull_request_target"}
     assert events["pull_request_target"]["types"] == [
-        "opened", "synchronize", "reopened", "edited", "labeled", "unlabeled"]
+        "opened", "synchronize", "reopened", "edited", "labeled", "unlabeled", "closed"]
     assert workflow["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "write"}
     assert workflow["concurrency"]["group"] == "gate-guard-target-${{ github.event.pull_request.head.sha }}"
     assert list(workflow["jobs"]) == ["judge"]
