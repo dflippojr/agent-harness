@@ -7,12 +7,13 @@ name: CI
 #   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
 #   lint      - ruff, and pyright against tools/lint/pyright-baseline.json; runs on every change
-#   changes   - lists the changed files; the three test jobs skip when every one is on the skip list
+#   changes   - lists the changed files; the test jobs skip when every one is on the skip list
 #   gate      - the one check to require: always runs, fails if any job it needs failed or was cancelled
-# The suite runs once. Tests used to run a second time on a self-hosted
-# `agent-harness-ci` pool on the tower; that pool is retired so CI no longer
-# competes with llama-server and the desktop for RAM. The job ids `test` and
-# `sonar` keep the check names they had before the merge.
+# The suite runs twice: `test` on Python 3.12 with coverage, and `test-py313` on Python 3.13 without it (#730).
+# Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
+# tower; that pool is retired so CI no longer competes with llama-server and the
+# desktop for RAM. The job ids `test` and `sonar` keep the check names they had
+# before the merge.
 #
 # Feature-branch pushes without a PR do not run. `pull_request` covers open and
 # later commits on a PR (`synchronize`); `push` to main still runs after merge.
@@ -20,7 +21,7 @@ name: CI
 # The workflow always runs, so `gate` always reports and a ruleset can require it
 # (#726, dflippojr/agent-ops#48). The docs-only skip lives in the `changes` job:
 # CI_SKIP_UNREAD_PATHS is an allow-list of files no pytest currently reads, and
-# `test`, `openapi` and `ui-tests` skip only when every changed file is on it.
+# `test`, `test-py313`, `openapi` and `ui-tests` skip only when every changed file is on it.
 # Entries are exact paths, not globs. Do not add `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
 # INSTALL.md, admin-api.md, app-api.md, mac-client.md, and service-profile.md
 # are asserted by tests/test_product_naming.py; marketplace design, threat

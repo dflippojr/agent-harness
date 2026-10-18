@@ -27,8 +27,10 @@ def initialize(venv, bootstrap=None, dry_run=False):
     return subprocess.run([POWERSHELL, "-NoProfile", "-Command", command], capture_output=True, text=True)
 
 
-@pytest.mark.skipif(sys.version_info[:2] != (3, 12), reason="bootstraps from sys.executable, which must be Python 3.12;"
-                    " the 3.12 `test` job runs it (#730)")
+# On Python 3.13 the test still runs and must fail, so a fix that makes it pass is noticed (strict). It bootstraps from
+# sys.executable, which must be 3.12; #730 tracks the 3.13 gap.
+@pytest.mark.xfail(sys.version_info[:2] != (3, 12), strict=True,
+                   reason="bootstraps from sys.executable, which must be Python 3.12 (#730)")
 def test_staging_builds_312_and_preserves_a_compatible_venv(tmp_path):
     """Starts from a stale environment, so one run covers both creating the venv and preserving it afterwards. It
     bootstraps from the running interpreter (sys.executable), so it needs a Python 3.12 one."""
