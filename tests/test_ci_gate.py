@@ -123,7 +123,7 @@ def test_changes_command_writes_the_output(repo, monkeypatch, tmp_path_factory):
 
 def _needs(tests: str = "true", changes: str = "success", **results: str) -> dict:
     needs = {"changes": {"result": changes, "outputs": {"tests": tests}}}
-    for job in ("lint", "test", "sonar", "openapi", "ui-tests"):
+    for job in ("lint", "test", "test-py313", "sonar", "openapi", "ui-tests"):
         needs[job] = {"result": results.get(job.replace("-", "_"), "success"), "outputs": {}}
     return needs
 
@@ -133,11 +133,12 @@ def test_gate_passes_when_every_job_passed():
 
 
 def test_gate_passes_a_docs_only_change_with_tests_skipped():
-    needs = _needs("false", test="skipped", sonar="skipped", openapi="skipped", ui_tests="skipped")
+    needs = _needs("false", test="skipped", test_py313="skipped", sonar="skipped", openapi="skipped",
+                   ui_tests="skipped")
     assert ci_gate.gate_failures(needs) == []
 
 
-@pytest.mark.parametrize("job", ["lint", "test", "openapi", "ui_tests", "sonar"])
+@pytest.mark.parametrize("job", ["lint", "test", "test_py313", "openapi", "ui_tests", "sonar"])
 @pytest.mark.parametrize("result", ["failure", "cancelled"])
 def test_gate_fails_when_a_pull_request_job_failed_or_was_cancelled(job, result):
     failures = ci_gate.gate_failures(_needs(**{job: result}))
@@ -155,10 +156,11 @@ def test_gate_fails_when_lint_was_skipped_even_on_a_docs_only_change():
 
 
 def test_gate_fails_when_changes_failed():
-    needs = _needs("", changes="failure", test="skipped", sonar="skipped", openapi="skipped", ui_tests="skipped")
+    needs = _needs("", changes="failure", test="skipped", test_py313="skipped", sonar="skipped", openapi="skipped",
+                   ui_tests="skipped")
     failures = ci_gate.gate_failures(needs)
     assert failures[0] == "changes: failure"
-    assert len(failures) == 4  # and each test job skipped without a decision
+    assert len(failures) == 5  # and each test job skipped without a decision
 
 
 def test_gate_fails_on_a_failed_sonar():
@@ -167,7 +169,7 @@ def test_gate_fails_on_a_failed_sonar():
     assert ci_gate.gate_failures(_needs(sonar="skipped")) == []  # forks have no token
 
 
-@pytest.mark.parametrize("job", ["ui-tests", "lint"])
+@pytest.mark.parametrize("job", ["ui-tests", "lint", "test-py313"])
 def test_gate_fails_when_a_required_job_is_missing_from_needs(job):
     needs = _needs()
     del needs[job]

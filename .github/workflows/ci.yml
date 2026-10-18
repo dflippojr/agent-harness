@@ -3,6 +3,7 @@ name: CI
 # One workflow, all GitHub-hosted (free for this public repo):
 #   openapi   - the committed OpenAPI document (tools/openapi/openapi.json) matches the Server
 #   test      - the complete pytest suite with coverage (coverage.xml artifact)
+#   test-py313 - the same suite on Python 3.13, after an import smoke test (#730); no coverage
 #   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
 #   lint      - ruff, and pyright against tools/lint/pyright-baseline.json; runs on every change
@@ -120,6 +121,41 @@ jobs:
           name: coverage
           path: coverage.xml
           retention-days: 3
+
+  test-py313:
+    # The same suite on Python 3.13, the newest version the project claims to support (#730). Python 3.13 rejects
+    # some source that 3.12 accepts (#689), so the import smoke test runs first and fails fast. No coverage: `test`
+    # measures and uploads it.
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt pytest-xdist
+
+      # --noconftest: tests/conftest.py imports most of harness, so a module that fails to import would stop the run
+      # before this test names it.
+      - name: Import smoke test
+        run: python -m pytest tests/test_import_smoke.py -q -p no:xdist --noconftest
+
+      - name: Run tests
+        timeout-minutes: 40
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
+        run: >
+          python -m pytest tests -q -n 4 --dist loadfile -o faulthandler_timeout=300
 
   sonar:
     # SonarCloud analysis of the `test` job's coverage. Automatic analysis is
@@ -328,10 +364,10 @@ jobs:
 
   gate:
     # The required check. It always runs and needs every job above, so it reports on docs-only changes too
-    # (`test`, `openapi` and `ui-tests` skipped by `changes`). Any needed job failed or cancelled fails it; see
-    # scripts/ci_gate.py for the rules. Add every new job here.
+    # (`test`, `test-py313`, `openapi` and `ui-tests` skipped by `changes`). Any needed job failed or cancelled fails
+    # it; see scripts/ci_gate.py for the rules. Add every new job here.
     if: always()
-    needs: [changes, lint, test, sonar, openapi, ui-tests]
+    needs: [changes, lint, test, test-py313, sonar, openapi, ui-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
