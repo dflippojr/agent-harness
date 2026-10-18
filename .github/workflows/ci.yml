@@ -43,7 +43,9 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened]
+    # labeled/unlabeled rerun CI when the owner applies or removes gate-change-approved: the early gate-guard job reads
+    # labels when it runs, and gate needs that job, so without these a failed gate stays failed after approval (#727).
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read

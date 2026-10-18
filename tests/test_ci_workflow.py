@@ -11,7 +11,8 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 PULL_REQUEST_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
 TRUSTED_GATE_GUARD = ROOT / ".github" / "workflows" / "gate-guard-target.yml"
 REVIEW_WORKFLOW = ROOT / ".github" / "workflows" / "review.yml"
-GATE_GUARD_USES = re.compile(r"dflippojr/\.github/\.github/workflows/gate-guard(?:-target)?\.yml@([0-9a-f]{40})")
+EARLY_GATE_GUARD_USES = re.compile(r"dflippojr/\.github/\.github/workflows/gate-guard\.yml@([0-9a-f]{40})")
+TRUSTED_GATE_GUARD_USES = re.compile(r"dflippojr/\.github/\.github/workflows/gate-guard-target\.yml@([0-9a-f]{40})")
 
 # Files pytest currently reads; skipping them would hide real failures.
 MUST_RUN_PATHS = (
@@ -95,7 +96,7 @@ def test_ci_gate_guard_job_is_an_early_signal_pinned_by_sha_and_gate_needs_it():
     # ruleset requires it (dflippojr/agent-harness#727). This job still fails a pull request early, as the spec asks.
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
     guard = jobs["gate-guard"]
-    match = GATE_GUARD_USES.fullmatch(guard["uses"])
+    match = EARLY_GATE_GUARD_USES.fullmatch(guard["uses"])
     assert match, guard["uses"]
     assert guard["with"]["guard-ref"] == match.group(1)
     # Only the owner's gate-change-approved label counts (dflippojr/.github CONTRIBUTING.md).
@@ -104,6 +105,15 @@ def test_ci_gate_guard_job_is_an_early_signal_pinned_by_sha_and_gate_needs_it():
     # The called workflow reads issues too, and a called workflow cannot widen the caller's permissions.
     assert guard["permissions"]["issues"] == "read"
     assert "gate-guard" in jobs["gate"]["needs"]
+
+
+def test_ci_reruns_when_an_owner_label_changes_so_gate_reevaluates_the_early_guard():
+    # The early gate-guard job reads labels when it runs, and `gate` needs it. Without labeled/unlabeled here, applying
+    # gate-change-approved leaves the failed gate in place until someone reruns CI by hand (#727).
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    # PyYAML 1.1 treats the GitHub `on:` key as boolean True.
+    types = workflow.get("on", workflow[True])["pull_request"]["types"]
+    assert {"opened", "synchronize", "reopened", "labeled", "unlabeled"} <= set(types)
 
 
 def test_trusted_gate_guard_runs_from_main_pinned_by_sha_and_checks_out_nothing():
@@ -119,7 +129,7 @@ def test_trusted_gate_guard_runs_from_main_pinned_by_sha_and_checks_out_nothing(
     assert workflow["concurrency"]["group"] == "gate-guard-target-${{ github.event.pull_request.head.sha }}"
     assert list(workflow["jobs"]) == ["judge"]
     judge = workflow["jobs"]["judge"]
-    match = GATE_GUARD_USES.fullmatch(judge["uses"])
+    match = TRUSTED_GATE_GUARD_USES.fullmatch(judge["uses"])
     assert match, judge["uses"]
     # Pinned by commit, not branch, and guard-ref names the same commit.
     assert judge["with"]["guard-ref"] == match.group(1)
