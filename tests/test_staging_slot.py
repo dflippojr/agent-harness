@@ -203,7 +203,10 @@ def test_resolve_job_can_read_pull_requests_without_write_scopes():
 
 def test_production_never_queues_behind_staging():
     production = yaml.safe_load((ROOT / ".github" / "workflows" / "ci-cd.yml").read_text(encoding="utf-8"))
-    assert WORKFLOW["concurrency"]["group"] != production["concurrency"]["group"]
+    # Production serializes per job (#726); neither of its groups may be staging's.
+    production_groups = {job["concurrency"]["group"] for job in production["jobs"].values() if "concurrency" in job}
+    assert production_groups == {"agent-harness-main-publish", "agent-harness-main-deployment"}
+    assert WORKFLOW["concurrency"]["group"] not in production_groups
     assert WORKFLOW["concurrency"]["cancel-in-progress"] is False
 
 

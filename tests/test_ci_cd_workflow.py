@@ -38,14 +38,12 @@ def _docs_regen_job():
 
 def test_docs_regen_workflow_cannot_loop_or_deploy():
     workflow = DOCS_REGEN.read_text(encoding="utf-8")
-    # Write permissions are scoped to the one job, never workflow-wide.
-    assert yaml.safe_load(workflow)["permissions"] == {"contents": "read"}
-    assert workflow.count("contents: write") == 1
-    # Default GITHUB_TOKEN only: its pushes and merges start no workflow runs, and an explicit skip marker is a
-    # second guard on the commit that lands on main.
-    assert "secrets." not in workflow
-    assert _docs_regen_job()["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert "[skip ci]" in _docs_regen_job()["env"]["COMMIT_SUBJECT"]
+    # The default token only reads; writes use the dedicated narrow App.
+    assert yaml.safe_load(workflow)["permissions"] == {"contents": "read", "actions": "read"}
+    job = _docs_regen_job()
+    assert "permissions" not in job
+    assert "[skip ci]" not in job["env"]["COMMIT_SUBJECT"]
+    assert "[skip ci]" in job["env"]["MERGE_SUBJECT"]
     assert "contains(github.event.head_commit.message, '[skip ci]')" in workflow
     assert "cancel-in-progress: true" in workflow
     assert "workflow_run" not in workflow
@@ -70,22 +68,38 @@ def test_docs_regen_never_pushes_to_main():
     order = [step.get("id") or step.get("name") for step in job["steps"]]
     assert order.index("regen") < order.index("ci") < order.index("Merge the docs PR")
     ci = steps["ci"]["run"]
-    assert "gh workflow run ci.yml --ref \"$DOCS_BRANCH\"" in ci
+    assert "--event pull_request" in ci
+    assert "gh workflow run" not in ci
     assert '--commit "$HEAD_SHA"' in ci and "--exit-status" in ci
     merge = " ".join(steps["Merge the docs PR"]["run"].split())
     assert merge.startswith('gh pr merge "$PR_NUMBER" --squash --match-head-commit "$HEAD_SHA"')
     assert steps["ci"]["env"]["HEAD_SHA"] == steps["Merge the docs PR"]["env"]["HEAD_SHA"]
-    assert set(job["permissions"]) == {"contents", "pull-requests", "actions"}
+    assert '--subject "$MERGE_SUBJECT (#$PR_NUMBER)"' in merge
 
 
-def test_ci_can_be_dispatched_for_the_docs_pr():
-    # A PR opened with GITHUB_TOKEN starts no pull_request run, so docs-regen dispatches CI on its branch;
-    # that run compares every region against the branch's own fragments.
-    ci_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    triggers = yaml.safe_load(ci_text)[True]
-    assert "workflow_dispatch" in triggers
-    docs_check = ci_text.split('-eq "workflow_dispatch"', 1)[1].split("} else {", 1)[0]
-    assert "python scripts/docs/build.py --check\n" in docs_check
+def test_docs_pr_uses_repo_scoped_app_for_writes_and_default_token_for_ci_reads():
+    job = _docs_regen_job()
+    steps = {step.get("id") or step.get("name"): step for step in job["steps"]}
+    for token_id in ("app-token", "merge-token"):
+        token = steps[token_id]
+        assert token["uses"] == "actions/create-github-app-token@v3"
+        assert token["with"] == {
+            "app-id": "${{ secrets.DOCS_REGEN_APP_ID }}",
+            "private-key": "${{ secrets.DOCS_REGEN_APP_PRIVATE_KEY }}",
+            "owner": "${{ github.repository_owner }}",
+            "repositories": "${{ github.event.repository.name }}",
+            "permission-contents": "write",
+            "permission-pull-requests": "write",
+        }
+    checkout = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["token"] == "${{ steps.app-token.outputs.token }}"
+    assert steps["regen"]["env"]["GH_TOKEN"] == "${{ steps.app-token.outputs.token }}"
+    assert job["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert steps["Merge the docs PR"]["env"]["GH_TOKEN"] == "${{ steps.merge-token.outputs.token }}"
+    order = [step.get("id") or step.get("name") for step in job["steps"]]
+    assert order.index("ci") < order.index("merge-token") < order.index("Merge the docs PR")
+    ci_text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "workflow_dispatch" not in yaml.safe_load(ci_text)[True]
 
 
 def test_main_ci_only_validates_fragments():

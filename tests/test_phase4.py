@@ -110,6 +110,18 @@ def mac_cfg(tmp: Path, repo: str = ""):
     return cfg
 
 
+# Above Linux's PID_MAX_LIMIT (2**22) and macOS's 99999, so no real process or process group has it (#745).
+FAKE_PID = 2**22 + 1
+
+
+def record_group_kills(monkeypatch) -> list[tuple[int, int]]:
+    """Stub the runner's os.killpg for a fake Popen, whose process group must never be signalled for real (#745)."""
+    killed = []
+    monkeypatch.setattr(harness_runner.os, "killpg", lambda pid, sig: killed.append((pid, sig)), raising=False)
+    monkeypatch.setattr(harness_runner.signal, "SIGKILL", 9, raising=False)
+    return killed
+
+
 def executor(tmp: Path, roots: list[Path]) -> harness_runner.Executor:
     return harness_runner.Executor(workspaces=tmp / "mac-workspaces", repo_roots=[str(r) for r in roots],
                                    profile=None, home=tmp, shell=bash() or "bash", min_free_gb=0)
@@ -351,7 +363,7 @@ def test_executor_gives_each_session_a_private_tmpdir(tmp_path, monkeypatch):
     envs = []
 
     class FakeProc:
-        pid, returncode = 1, 0
+        pid, returncode = FAKE_PID, 0
 
         def __init__(self, argv, env, **_kw):
             envs.append(env)
@@ -367,6 +379,7 @@ def test_executor_gives_each_session_a_private_tmpdir(tmp_path, monkeypatch):
     shared.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(shared))
     monkeypatch.setattr(harness_runner.subprocess, "Popen", FakeProc)
+    record_group_kills(monkeypatch)
     ex = executor(tmp_path, [tmp_path])
     a, b = "0123456789", "abcdef0123"
     for sid in (a, a, b):

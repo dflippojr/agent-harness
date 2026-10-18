@@ -187,12 +187,15 @@ def _request_log(m, record: dict, started: float):
     return finish
 
 
-async def _relay_upstream(upstream, client, slot, stream: bool, finish, wait_ms: int) -> Response:
+async def _relay_upstream(upstream, client, slot, stream: bool, finish, wait_ms: int, flavor: str) -> Response:
     """Buffer the upstream response, or stream it through while scraping usage from head and tail."""
     ctype = upstream.headers.get("content-type", JSON_MEDIA_TYPE)
     if not stream or SSE_MEDIA_TYPE not in ctype:
         try:
             data = await upstream.aread()
+        except httpx.HTTPError as e:  # #733: the model server hung up mid-answer; its status line was not the answer
+            finish(502, wait_ms=wait_ms)
+            return error(flavor, 502, "api_error", f"model server failed mid-response: {type(e).__name__}")
         finally:
             await _close(upstream, client, slot)
         prompt, completion = usage_from(data[:16384], data[-16384:])
@@ -265,7 +268,7 @@ async def proxy(m, request: Request, path: str) -> Response:
         finish(502, wait_ms=wait_ms)
         return error(flavor, 502, "api_error", f"model server unreachable: {type(e).__name__}")
 
-    return await _relay_upstream(upstream, client, slot, stream, finish, wait_ms)
+    return await _relay_upstream(upstream, client, slot, stream, finish, wait_ms, flavor)
 
 
 def _models_payload(m) -> dict:

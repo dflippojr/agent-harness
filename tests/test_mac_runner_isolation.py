@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,7 @@ from harness import projects
 from harness.config import Project
 
 from test_git_isolation import make_repo, sh
-from test_phase4 import bash, executor, needs_bash
+from test_phase4 import FAKE_PID, bash, executor, needs_bash, record_group_kills
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "macrunner"))
 import harness_runner  # noqa: E402
@@ -223,12 +224,28 @@ def test_finished_command_group_is_signalled_once(tmp_path, monkeypatch, gone):
     assert killed == [(4242, 9)]
 
 
+@pytest.mark.parametrize("pid", [0, 1])
+def test_process_groups_0_and_1_are_never_signalled(monkeypatch, caplog, pid):
+    # killpg(1) is kill(-1), which reaches every process the user owns, and group 0 is the runner's own (#745).
+    killed = []
+    monkeypatch.setattr(harness_runner, "os", types.SimpleNamespace(name="posix", killpg=lambda *a: killed.append(a)))
+    monkeypatch.setattr(harness_runner.signal, "SIGKILL", 9, raising=False)
+
+    def stuck(timeout=None):
+        raise subprocess.TimeoutExpired("cmd", timeout)
+
+    harness_runner.Executor.kill(types.SimpleNamespace(pid=pid, poll=lambda: None, wait=stuck))
+    harness_runner.Executor.end_group(types.SimpleNamespace(pid=pid, poll=lambda: 0))
+    assert killed == []
+    assert caplog.text.count(f"refusing to signal process group {pid}") == 3
+
+
 # sandbox profile
 def test_runner_passes_the_workspace_directories_to_the_profile(tmp_path, monkeypatch):
     argvs = []
 
     class FakeProc:
-        pid, returncode = 1, 0
+        pid, returncode = FAKE_PID, 0
 
         def __init__(self, argv, **_kw):
             argvs.append(argv)
@@ -241,6 +258,7 @@ def test_runner_passes_the_workspace_directories_to_the_profile(tmp_path, monkey
             return 0
 
     monkeypatch.setattr(harness_runner.subprocess, "Popen", FakeProc)
+    record_group_kills(monkeypatch)
     session_tmp = tmp_path / "tmp-base" / SID
     monkeypatch.setattr(harness_runner.Executor, "tmpdir", lambda self, sid: session_tmp)
     monkeypatch.setattr(harness_runner.Executor, "tools_dir", lambda self, sid: session_tmp.with_name(sid + ".tools"))
@@ -327,7 +345,7 @@ def test_sandboxed_builds_use_session_directories(tmp_path, monkeypatch):
     envs = []
 
     class FakeProc:
-        pid, returncode = 1, 0
+        pid, returncode = FAKE_PID, 0
 
         def __init__(self, argv, env, **_kw):
             envs.append(env)
@@ -342,6 +360,7 @@ def test_sandboxed_builds_use_session_directories(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "shared"))
     (tmp_path / "shared").mkdir()
     monkeypatch.setattr(harness_runner.subprocess, "Popen", FakeProc)
+    record_group_kills(monkeypatch)
     ex = executor(tmp_path, [tmp_path])
     ex.handle("r", "shell", {"session": SID, "command": "true"})
     env = envs[0]
