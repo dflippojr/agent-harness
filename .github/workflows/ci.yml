@@ -8,6 +8,7 @@ name: CI
 #   lint      - ruff, and pyright against tools/lint/pyright-baseline.json; runs on every change
 #   changes   - lists the changed files; the three test jobs skip when every one is on the skip list
 #   gate      - the one check to require: always runs, fails if any job it needs failed or was cancelled
+#               The gate-guard check is posted by .github/workflows/gate-guard-target.yml, from main (#727).
 # The suite runs once. Tests used to run a second time on a self-hosted
 # `agent-harness-ci` pool on the tower; that pool is retired so CI no longer
 # competes with llama-server and the desktop for RAM. The job ids `test` and

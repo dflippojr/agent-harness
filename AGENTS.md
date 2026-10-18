@@ -6,9 +6,10 @@ Stables, the browser client, lives in its own repository, dflippojr/stables (#33
 
 # How to prove a change works
 
-CI (`.github/workflows/ci.yml`) is the gate. Its `gate` job is the one check to require: it always runs, needs every
-other job, and fails if any of them failed or was cancelled. Run the same jobs locally before you push. Keep test
-parallelism at 4 workers or fewer.
+CI (`.github/workflows/ci.yml`) is the gate. Its `gate` job always runs, needs every other job, and fails if any of them
+failed or was cancelled. The gate-guard check comes from `.github/workflows/gate-guard-target.yml`, which runs from
+`main` under `pull_request_target`, so a pull request can't replace its own judge. Require both checks, `gate` and
+`gate-guard`. Run the same jobs locally before you push. Keep test parallelism at 4 workers or fewer.
 
 | CI job | Local command (repository root) |
 | --- | --- |

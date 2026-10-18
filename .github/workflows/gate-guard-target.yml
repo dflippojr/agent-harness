@@ -1,0 +1,36 @@
+# The trusted gate guard (dflippojr/agent-harness#727), from dflippojr/.github templates/gate-guard-target-caller.yml.
+# pull_request_target runs this file as it is on main, so a pull request that edits it, or ci.yml, cannot change its
+# own verdict. ci.yml has no gate-guard job: a pull request supplies that job and could replace it with a no-op. This
+# caller checks out nothing from the pull request; the called workflow fetches its merge base and head as git objects
+# and reads their diff. It uses no secrets, only the GITHUB_TOKEN. The owner's gate-change-approved label counts only
+# when it was applied after the head was pushed. The verdict lands as the gate-guard check on the head commit; the
+# ruleset for main must require it next to gate (docs/CI-CD.md, "Required check on pull requests").
+name: Gate guard (default branch)
+
+on:
+  pull_request_target:
+    # edited re-judges a pull request moved to another base, where the same
+    # head can bring new hits; labeled/unlabeled re-judge it when an owner
+    # label changes.
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  checks: write
+
+# The check run lands on the head commit, which several pull requests can
+# share, so each run judges every open pull request with that head and runs
+# alone for it: the newest decision for a commit is the one that lands.
+concurrency:
+  group: gate-guard-target-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
+
+jobs:
+  judge:
+    uses: dflippojr/.github/.github/workflows/gate-guard-target.yml@e2c7fae8508be0359f3abaf136caade46ee7479c
+    with:
+      guard-ref: e2c7fae8508be0359f3abaf136caade46ee7479c
+      # Private repositories run on the tower:
+      # runs-on: '["self-hosted", "Linux", "X64", "tower-linux"]'
