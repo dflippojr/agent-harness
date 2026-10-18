@@ -1,5 +1,6 @@
 """Contracts for the pytest CI workflow path filter."""
 
+import re
 from pathlib import Path
 
 import yaml
@@ -7,6 +8,8 @@ import yaml
 
 ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+PULL_REQUEST_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
+GATE_GUARD_USES = re.compile(r"dflippojr/\.github/\.github/workflows/gate-guard\.yml@([0-9a-f]{40})")
 
 # Files pytest currently reads; skipping them would hide real failures.
 MUST_RUN_PATHS = (
@@ -83,3 +86,26 @@ def test_ci_skips_only_unread_paths_on_push_and_pull_request():
     assert "test_marketplace_manifest.py" in text
     assert "test_ci_docs_explain_backend_configuration_and_manual_verification" in text
     assert "ci-cd.yml" in text
+
+
+def test_ci_runs_the_shared_gate_guard_on_pull_requests_pinned_by_sha():
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    guard = jobs["gate-guard"]
+    match = GATE_GUARD_USES.fullmatch(guard["uses"])
+    assert match, guard["uses"]
+    # Pinned by commit, not branch (dflippojr/agent-harness#727), and guard-ref names the same commit.
+    assert guard["with"]["guard-ref"] == match.group(1)
+    # Only the owner's gate-change-approved label counts (dflippojr/.github CONTRIBUTING.md).
+    assert guard["with"]["require-owner-label-actor"] is True
+    assert guard["if"] == "github.event_name == 'pull_request'"
+    # The called workflow reads issues too, and a called workflow cannot widen the caller's permissions.
+    assert guard["permissions"]["issues"] == "read"
+    assert "gate-guard" in jobs["gate"]["needs"]
+
+
+def test_pull_request_template_carries_the_shared_proof_table():
+    template = PULL_REQUEST_TEMPLATE.read_text(encoding="utf-8")
+    assert "## Proof" in template
+    assert "| Acceptance criterion | How verified" in template
+    assert "### Not verified" in template
+    assert "### Gate changes" in template
