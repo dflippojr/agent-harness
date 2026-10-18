@@ -9,7 +9,9 @@ import yaml
 ROOT = Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 PULL_REQUEST_TEMPLATE = ROOT / ".github" / "pull_request_template.md"
-GATE_GUARD_USES = re.compile(r"dflippojr/\.github/\.github/workflows/gate-guard\.yml@([0-9a-f]{40})")
+TRUSTED_GATE_GUARD = ROOT / ".github" / "workflows" / "gate-guard-target.yml"
+REVIEW_WORKFLOW = ROOT / ".github" / "workflows" / "review.yml"
+GATE_GUARD_USES = re.compile(r"dflippojr/\.github/\.github/workflows/gate-guard(?:-target)?\.yml@([0-9a-f]{40})")
 
 # Files pytest currently reads; skipping them would hide real failures.
 MUST_RUN_PATHS = (
@@ -88,19 +90,41 @@ def test_ci_skips_only_unread_paths_on_push_and_pull_request():
     assert "ci-cd.yml" in text
 
 
-def test_ci_runs_the_shared_gate_guard_on_pull_requests_pinned_by_sha():
+def test_ci_has_no_pull_request_gate_guard_that_the_pull_request_could_replace():
+    # ci.yml runs on pull_request, so a pull request supplies that job and can swap in a green no-op. The trusted
+    # verdict comes from gate-guard-target.yml, which runs from main (dflippojr/agent-harness#727).
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-    guard = jobs["gate-guard"]
-    match = GATE_GUARD_USES.fullmatch(guard["uses"])
-    assert match, guard["uses"]
-    # Pinned by commit, not branch (dflippojr/agent-harness#727), and guard-ref names the same commit.
-    assert guard["with"]["guard-ref"] == match.group(1)
-    # Only the owner's gate-change-approved label counts (dflippojr/.github CONTRIBUTING.md).
-    assert guard["with"]["require-owner-label-actor"] is True
-    assert guard["if"] == "github.event_name == 'pull_request'"
-    # The called workflow reads issues too, and a called workflow cannot widen the caller's permissions.
-    assert guard["permissions"]["issues"] == "read"
-    assert "gate-guard" in jobs["gate"]["needs"]
+    assert "gate-guard" not in jobs
+    assert "gate-guard" not in jobs["gate"]["needs"]
+
+
+def test_trusted_gate_guard_runs_from_main_pinned_by_sha_and_checks_out_nothing():
+    text = TRUSTED_GATE_GUARD.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(text)
+    # PyYAML 1.1 treats the GitHub `on:` key as boolean True.
+    events = workflow.get("on", workflow[True])
+    # pull_request_target runs the file as it is on main, so a pull request cannot supply its own judge.
+    assert set(events) == {"pull_request_target"}
+    assert events["pull_request_target"]["types"] == [
+        "opened", "synchronize", "reopened", "edited", "labeled", "unlabeled"]
+    assert workflow["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "write"}
+    assert workflow["concurrency"]["group"] == "gate-guard-target-${{ github.event.pull_request.head.sha }}"
+    assert list(workflow["jobs"]) == ["judge"]
+    judge = workflow["jobs"]["judge"]
+    match = GATE_GUARD_USES.fullmatch(judge["uses"])
+    assert match, judge["uses"]
+    # Pinned by commit, not branch, and guard-ref names the same commit.
+    assert judge["with"]["guard-ref"] == match.group(1)
+    # The caller runs no pull request code and reads no secrets: no steps, no checkout, no secrets.
+    assert "steps" not in judge and "secrets" not in judge
+    assert "actions/checkout" not in text
+    assert "pull_request:" not in text and "workflow_dispatch" not in text
+
+
+def test_review_workflow_grants_the_issues_read_that_review_v3_needs():
+    # A called workflow cannot hold more than its caller grants; review-v3 reads the linked issues (the spec).
+    permissions = yaml.safe_load(REVIEW_WORKFLOW.read_text(encoding="utf-8"))["permissions"]
+    assert permissions["issues"] == "read"
 
 
 def test_pull_request_template_carries_the_shared_proof_table():
