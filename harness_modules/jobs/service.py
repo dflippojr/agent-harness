@@ -22,7 +22,8 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
-from harness.modules import parse_job_status as parse_status, job_summary as summary, operation_audit, audit_context
+from harness.modules import operation_audit, audit_context
+from harness.modules import parse_job_status as parse_status, job_summary as summary  # noqa: F401 -- tests import them from here
 
 log = logging.getLogger("harness.jobs")
 

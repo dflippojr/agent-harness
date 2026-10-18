@@ -1,0 +1,4 @@
+# Pinned so the lint job and developer machines agree (#729). Bumping pyright can change its messages: rewrite the
+# baseline in the same change (python tools/lint/pyright_baseline.py --write).
+ruff==0.17.1
+pyright==1.1.414

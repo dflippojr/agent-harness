@@ -234,11 +234,11 @@ class Executor:
         try:
             return fn(rid, params) if op in RID_OPS else fn(params)
         except ToolError as e:
-            raise OpError(str(e), "tool")
+            raise OpError(str(e), "tool") from e
         except projects.GitError as e:
-            raise OpError(str(e), "git")
+            raise OpError(str(e), "git") from e
         except (OSError, UnicodeError) as e:
-            raise OpError(f"{type(e).__name__}: {e}", "tool")
+            raise OpError(f"{type(e).__name__}: {e}", "tool") from e
 
     # tools
     def op_file(self, p: dict):
@@ -266,8 +266,8 @@ class Executor:
             raise OpError("content_b64 is required", "tool")
         try:
             data = base64.b64decode(raw, validate=True)
-        except ValueError:  # binascii.Error is a ValueError
-            raise OpError("content_b64 is not valid base64", "tool")
+        except ValueError as exc:  # binascii.Error is a ValueError
+            raise OpError("content_b64 is not valid base64", "tool") from exc
         ws = self.workspace(p["session"], create=True)
         files = FileOps(ws, 65536, prefixes=(str(ws), WORKSPACE))
         return files.write_bytes(p.get("path") or "", data)

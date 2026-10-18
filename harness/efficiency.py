@@ -129,7 +129,7 @@ def _scale(estimates: dict[str, int], target: int) -> dict[str, int]:
         return {keys[0]: target, keys[1]: 0, keys[2]: 0, keys[3]: 0}
     scaled = [int(value * target / total) for value in values]
     scaled[0] += target - sum(scaled)
-    return dict(zip(keys, scaled))
+    return dict(zip(keys, scaled, strict=True))
 
 
 def recomputed_tokens(prompt_tokens: int | None, cache_tokens: int | None) -> int | None:

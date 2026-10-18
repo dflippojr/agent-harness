@@ -7,7 +7,7 @@ from datetime import date
 
 import pytest
 
-from harness import claude_token, cli_domains
+from harness import claude_token
 from harness.cli_backends import ClaudeSession, CliBackendError, ready_domain
 from harness.config import BackendConfig, SandboxConfig
 

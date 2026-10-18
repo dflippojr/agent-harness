@@ -5,9 +5,7 @@ from __future__ import annotations
 from harness_modules.images.store import ImageStore
 
 import json
-import os
 import threading
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,7 +16,7 @@ from harness.llm import Completion
 from harness.managed_config import Envelope, ManagedStore, OverlayCrash
 from harness.manager import Manager
 from harness.settings import frozen_app_defaults, looks_hidden, parse_value, schema_entry, use_live_app_settings
-from harness.settings_keys import APP_SPECS, STATIC_ADMIN, assert_explicit_registry, build_registry
+from harness.settings_keys import assert_explicit_registry, build_registry
 from harness.settings_service import SettingsError, SettingsService
 
 from test_daemon import Script, make_cfg

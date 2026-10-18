@@ -239,7 +239,7 @@ def _request_origin(request: Request) -> str:
     try:
         return normalize_origin(raw)
     except ValueError as e:
-        raise HarnessError(403, str(e))
+        raise HarnessError(403, str(e)) from e
 
 
 def _caller(request: Request) -> str:
@@ -291,7 +291,7 @@ def register_app(app: FastAPI) -> None:
         except ValueError as e:
             await m.db.main.awrite(credential_audit.record, m.db, unknown, action, "", "denied",
                                    "pairing_request", {"reason": "invalid_request"})
-            raise HarnessError(400, str(e))
+            raise HarnessError(400, str(e)) from e
 
         def commit():
             db, now = m.db.main, clock()
@@ -328,7 +328,7 @@ def register_app(app: FastAPI) -> None:
         try:
             challenge = _challenge(body.code_challenge, body.code_challenge_method)
         except ValueError as e:
-            raise HarnessError(400, str(e))
+            raise HarnessError(400, str(e)) from e
 
         def commit():
             db, now = m.db.main, clock()
@@ -511,7 +511,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         try:
             scopes = _scopes(body.scopes, m.cfg)
         except ValueError as e:
-            raise HarnessError(400, str(e))
+            raise HarnessError(400, str(e)) from e
         values = disclosures(scopes.split(), m.cfg)
         return JSONResponse(values, headers={**NO_STORE, "X-Disclosures-Digest": disclosures_digest(values),
                                              "Access-Control-Expose-Headers": "X-Disclosures-Digest"})
@@ -535,7 +535,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
             reason = "acknowledgement_required" if "acknowledge" in str(e) else "invalid_request"
             await m.db.main.awrite(credential_audit.record, m.db, ctx, "pairing_request.create", "", "denied",
                                    "pairing_request", {"reason": reason})
-            raise HarnessError(400, str(e))
+            raise HarnessError(400, str(e)) from e
 
         def commit():
             db, now = m.db.main, clock()

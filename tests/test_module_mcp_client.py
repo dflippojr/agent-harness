@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import config, modules, taint
+from harness import config, taint
 from harness.fileops import ToolError
 from harness.manager import Manager
 from harness.policy import Policy

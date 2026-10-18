@@ -52,7 +52,7 @@ def test_session_event_replay_order_and_last_event_id(tmp_path):
     with client:
         sid = client.post("/api/v1/sessions", json={"prompt": "stream"}).json()["id"]
         first = manager.db.insert_event(sid, "characterization_first", {"n": 1})
-        second = manager.db.insert_event(sid, "characterization_second", {"n": 2})
+        manager.db.insert_event(sid, "characterization_second", {"n": 2})
 
         replay = client.get(f"/api/v1/sessions/{sid}/events?after={first['seq'] - 1}&follow=false")
         resumed = client.get(f"/api/v1/sessions/{sid}/events?after=0&follow=false",

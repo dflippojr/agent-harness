@@ -280,7 +280,7 @@ class MemoryLibrary:
         try:
             rx = re.compile(pattern, re.IGNORECASE)
         except re.error as e:
-            raise ToolError(f"bad regular expression: {e}")
+            raise ToolError(f"bad regular expression: {e}") from e
         hits = []
         for f in self.allowed_files():
             for n, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):

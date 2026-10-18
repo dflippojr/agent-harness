@@ -134,7 +134,7 @@ async def inventory(manager):
     caps = manager.cfg.capabilities()["modules"]
     runtimes = [rt for rt in manager.modules if rt.effective()]
     results = await asyncio.gather(*(_detail(rt) for rt in runtimes))
-    details = {rt.module.name: detail for rt, detail in zip(runtimes, results)}
+    details = {rt.module.name: detail for rt, detail in zip(runtimes, results, strict=True)}
     module_rows = []
     names = dict.fromkeys([field.name for field in fields(manager.cfg.installed)] + list(caps))
     for name in names:
