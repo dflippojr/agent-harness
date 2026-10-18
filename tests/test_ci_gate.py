@@ -129,52 +129,52 @@ def _needs(tests: str = "true", changes: str = "success", **results: str) -> dic
 
 
 def test_gate_passes_when_every_job_passed():
-    assert ci_gate.gate_failures(_needs(), "pull_request") == []
+    assert ci_gate.gate_failures(_needs()) == []
 
 
 def test_gate_passes_a_docs_only_change_with_tests_skipped():
     needs = _needs("false", test="skipped", sonar="skipped", openapi="skipped", ui_tests="skipped")
-    assert ci_gate.gate_failures(needs, "pull_request") == []
+    assert ci_gate.gate_failures(needs) == []
 
 
 @pytest.mark.parametrize("job", ["lint", "test", "openapi", "ui_tests", "sonar"])
 @pytest.mark.parametrize("result", ["failure", "cancelled"])
 def test_gate_fails_when_a_pull_request_job_failed_or_was_cancelled(job, result):
-    failures = ci_gate.gate_failures(_needs(**{job: result}), "pull_request")
+    failures = ci_gate.gate_failures(_needs(**{job: result}))
     assert failures == [f"{job.replace('_', '-')}: {result}"]
 
 
 def test_gate_fails_when_tests_were_wanted_but_skipped():
-    assert ci_gate.gate_failures(_needs(test="skipped"), "push") == [
+    assert ci_gate.gate_failures(_needs(test="skipped")) == [
         "test: skipped although changed files need the tests"]
 
 
 def test_gate_fails_when_lint_was_skipped_even_on_a_docs_only_change():
     needs = _needs("false", lint="skipped", test="skipped", sonar="skipped", openapi="skipped", ui_tests="skipped")
-    assert ci_gate.gate_failures(needs, "push") == ["lint: skipped although it runs on every change"]
+    assert ci_gate.gate_failures(needs) == ["lint: skipped although it runs on every change"]
 
 
 def test_gate_fails_when_changes_failed():
     needs = _needs("", changes="failure", test="skipped", sonar="skipped", openapi="skipped", ui_tests="skipped")
-    failures = ci_gate.gate_failures(needs, "pull_request")
+    failures = ci_gate.gate_failures(needs)
     assert failures[0] == "changes: failure"
     assert len(failures) == 4  # and each test job skipped without a decision
 
 
-def test_gate_ignores_sonar_on_main_pushes_only():
-    assert ci_gate.gate_failures(_needs(sonar="failure"), "push") == []
-    assert ci_gate.gate_failures(_needs(sonar="skipped"), "pull_request") == []  # forks have no token
+def test_gate_fails_on_a_failed_sonar():
+    # A failing quality gate blocks main pushes as it does pull requests (#728); the gate no longer reads the event.
+    assert ci_gate.gate_failures(_needs(sonar="failure")) == ["sonar: failure"]
+    assert ci_gate.gate_failures(_needs(sonar="skipped")) == []  # forks have no token
 
 
 @pytest.mark.parametrize("job", ["ui-tests", "lint"])
 def test_gate_fails_when_a_required_job_is_missing_from_needs(job):
     needs = _needs()
     del needs[job]
-    assert ci_gate.gate_failures(needs, "push") == [f"{job}: not in gate's needs"]
+    assert ci_gate.gate_failures(needs) == [f"{job}: not in gate's needs"]
 
 
 def test_gate_command_exit_code(monkeypatch, capsys):
-    monkeypatch.setenv("EVENT_NAME", "pull_request")
     monkeypatch.setenv("NEEDS", json.dumps(_needs()))
     assert ci_gate.main(["gate"]) == 0
     monkeypatch.setenv("NEEDS", json.dumps(_needs(test="failure")))

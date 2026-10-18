@@ -34,10 +34,9 @@ name: CI
 # is not left pending. .github/workflows/ci-cd.yml publishes and deploys only
 # when `test` itself ran and passed for the commit that is still main's tip, so
 # a docs-only push or a superseded commit never publishes or deploys (desired).
-# On a push to main the `sonar` job is continue-on-error and `gate` ignores it:
-# a failing quality gate shows on the job but blocks neither the gate nor the
-# deploy (#728 changes that); only failing tests do. On pull requests the
-# quality gate still fails `sonar`, and with it `gate`.
+# The `sonar` job blocks everywhere (#728): a failing SonarCloud quality gate
+# fails `sonar`, and with it `gate`, on a pull request and on a push to main,
+# where the failed CI run stops the deploy just as failing tests do.
 on:
   push:
     branches: [main]
@@ -131,7 +130,6 @@ jobs:
     # Forks have no secrets. Same-repository Dependabot PRs use the separate
     # Dependabot secret store; they run the same scan when its token is set.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    continue-on-error: ${{ github.event_name == 'push' }}
     steps:
       - name: Check SonarCloud token availability
         id: sonar-token
@@ -344,5 +342,4 @@ jobs:
       - name: Every needed job passed, or was skipped on purpose
         env:
           NEEDS: ${{ toJSON(needs) }}
-          EVENT_NAME: ${{ github.event_name }}
         run: python3 scripts/ci_gate.py gate

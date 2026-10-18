@@ -388,7 +388,7 @@ def apply(cfg, p: Plan, now: float | None = None) -> Path:
                 content = item.source.read_bytes()
                 if fingerprint(content) != expected_fingerprint(p.folder / "harness.sqlite3"):
                     raise RestoreRefused("member-key fingerprint changed after planning")
-                write_private(item.dest, content)
+                write_private(item.dest.parent, item.dest.name, content)
             else:
                 shutil.copy2(item.source, item.dest)
     except BaseException:

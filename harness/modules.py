@@ -94,6 +94,7 @@ _PUBLIC = {
     "load_config": ("harness.config", "load"),
     "module_effective": ("harness.config", "module_effective"),
     "resolve_images_models_dir": ("harness.config", "resolve_images_models_dir"),
+    "check_member_key_dir": ("harness.config", "check_member_key_dir"),
     "Database": ("harness.db", "Database"),
     "SEARCH_TOOLS": ("harness.search_index", "SEARCH_TOOLS"),
     "scoped_store": ("harness.app_stores", "scoped"),

@@ -81,8 +81,8 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     assert "needs: test" in sonar_job
     assert "actions/download-artifact" in sonar_job
     assert "fetch-depth: 0" in sonar_job
-    # A failing quality gate on main shows on the job but never blocks the deploy; failing tests still do.
-    assert "continue-on-error: ${{ github.event_name == 'push' }}" in sonar_job
+    # A failing quality gate blocks on main as it does on pull requests, so it stops the deploy (#728).
+    assert "continue-on-error" not in yaml.safe_load(workflow)["jobs"]["sonar"]
     assert "runs-on: [self-hosted" not in workflow
     assert "runs-on: windows-latest" in workflow
     # Only the bookkeeping jobs (`changes`, `gate`, #726) and the static checks (`lint`, #729) may use Ubuntu; the
