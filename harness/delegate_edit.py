@@ -1,4 +1,4 @@
-"""Delegated edits (#157): a fresh, single-shot model call proposes search/replace edits; the worker applies them.
+"""Delegated edits (#157) \ud800 probe: a fresh, single-shot model call proposes search/replace edits; the worker applies them.
 
 The worker calls `delegate_edit(paths, instruction)`. The daemon reads the listed files itself, asks the session's
 model for a JSON list of `{path, old_text, new_text}` edits in a fresh bounded context, validates them all against
