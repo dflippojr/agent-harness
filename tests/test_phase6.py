@@ -562,8 +562,8 @@ def test_agent_generate_image_tool_saves_into_workspace(tmp_path):
         job = ImageStore(m.db).list_images()[0]
         assert job["source"] == "agent"
         assert job["session_id"] == s["id"]
-        bad = await m.images.call("generate_image", {"prompt": "x", "filename": "../../escape.png"},
-                                         workspace_root=tmp_path / "data" / "workspaces" / s["id"])
+        await m.images.call("generate_image", {"prompt": "x", "filename": "../../escape.png"},
+                            workspace_root=tmp_path / "data" / "workspaces" / s["id"])
         await m.stop()
     coro = body()
     with pytest.raises(ToolError, match="escapes the workspace"):

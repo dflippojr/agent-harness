@@ -137,7 +137,7 @@ def pdf_to_text(body: bytes) -> tuple[str, str]:
     except ToolError:
         raise
     except Exception as e:  # noqa: BLE001 - pypdf raises many kinds of errors for broken files
-        raise ToolError(f"couldn't open the PDF: {type(e).__name__}: {e}"[:300])
+        raise ToolError(f"couldn't open the PDF: {type(e).__name__}: {e}"[:300]) from e
     title = ""
     try:
         title = str((reader.metadata or {}).get("/Title") or "").strip()
@@ -197,7 +197,7 @@ def docx_to_text(body: bytes) -> tuple[str, str]:
             doc = ElementTree.fromstring(z.read("word/document.xml"))
             core = z.read("docProps/core.xml") if "docProps/core.xml" in z.namelist() else b""
     except (zipfile.BadZipFile, KeyError, ElementTree.ParseError) as e:
-        raise ToolError(f"couldn't open the Word document: {e}")
+        raise ToolError(f"couldn't open the Word document: {e}") from e
 
     lines = []
     body_el = doc.find(_DOCX_NS + "body")
@@ -378,7 +378,7 @@ class WebTools:
             resp.raise_for_status()
             data = resp.json()
         except (httpx.HTTPError, ValueError) as e:
-            raise ToolError(f"search backend unavailable: {type(e).__name__}: {e}"[:300])
+            raise ToolError(f"search backend unavailable: {type(e).__name__}: {e}"[:300]) from e
         lines = _search_lines(data, limit)
         if not lines:
             out = f"No results for {query!r}."
@@ -405,7 +405,7 @@ class WebTools:
         try:
             ips = await self.resolve(host, port)
         except OSError as e:  # includes socket.gaierror
-            raise ToolError(f"can't resolve {host}: {e}")
+            raise ToolError(f"can't resolve {host}: {e}") from e
         if not ips:
             raise ToolError(f"can't resolve {host}")
         _reject_blocked_ips(host, ips)
@@ -459,7 +459,7 @@ class WebTools:
         try:
             final, ctype, body = await self._download(url)
         except httpx.HTTPError as e:
-            raise ToolError(f"fetch failed: {type(e).__name__}: {e}"[:300])
+            raise ToolError(f"fetch failed: {type(e).__name__}: {e}"[:300]) from e
         convert, args = _extract_text(ctype, body, final)
         title, text = await asyncio.to_thread(convert, *args)
         text = strip_base64_images(re.sub(r"\n{3,}", "\n\n", text)).strip()
@@ -512,7 +512,7 @@ class WebTools:
         try:
             rx = re.compile(pattern, re.IGNORECASE)
         except re.error as e:
-            raise ToolError(f"bad find pattern: {e}")
+            raise ToolError(f"bad find pattern: {e}") from e
         spans: list[list[int]] = []
         total = 0
         for m in rx.finditer(text):

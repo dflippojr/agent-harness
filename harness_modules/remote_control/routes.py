@@ -43,7 +43,7 @@ async def rc_launch(project: str, request: Request):
         return await rc.launch(project, started_by=getattr(request.state.access, 'user_id', '') or 'owner',
                                include_owner_only=rc_owner_surface(request))
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 @owner_routes.post("/remote-control/{project}/trust")
@@ -54,7 +54,7 @@ async def rc_trust(project: str, request: Request):
         return remote_control(manager(request)).open_trust_prompt(project, include_owner_only=rc_owner_surface(request),
                                                             actor=getattr(request.state.access, 'user_id', '') or 'owner')
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 @owner_routes.post("/remote-control/{project}/stop")
@@ -64,7 +64,7 @@ async def rc_stop(project: str, request: Request):
     try:
         return await remote_control(manager(request)).stop(project, include_owner_only=rc_owner_surface(request))
     except ToolError as e:
-        raise HarnessError(404, str(e))
+        raise HarnessError(404, str(e)) from e
 @app_routes.get("/api/v1/remote-control")
 async def app_rc_status(request: Request):
     """Report whether Remote Control is enabled and each project's state."""
@@ -86,7 +86,7 @@ async def app_rc_launch(project: str, request: Request):
     try:
         return await m.remote_control.launch(project, started_by=f"app:{key['name']}")
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 @app_routes.post("/api/v1/remote-control/{project}/stop")
@@ -99,5 +99,5 @@ async def app_rc_stop(project: str, request: Request):
     try:
         return await m.remote_control.stop(project)
     except ToolError as e:
-        raise HarnessError(404, str(e))
+        raise HarnessError(404, str(e)) from e
 

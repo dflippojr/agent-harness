@@ -364,7 +364,7 @@ def test_global_concurrency_cap(tmp_path):
         body = {"language": "python", "source": "x"}
         ids = [client.post(f"/chats/{sid}/snippets", json=body, headers=OWNER) for sid in sids]
         assert [r.status_code for r in ids] == [202, 202, 429]
-        for sid, r in zip(sids, ids[:2]):
+        for sid, r in zip(sids, ids[:2], strict=False):
             client.post(f"/chats/{sid}/snippets/{r.json()['id']}/cancel", headers=OWNER)
 
 

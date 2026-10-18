@@ -1249,8 +1249,6 @@ def _complete_check(
         "REVIEW_OMITTED_FILES": "0",
         "PR_NUMBER": "7",
         "FAKE_DIFF_FILES": diff_files,
-        "PR_NUMBER": "7",
-        "FAKE_DIFF_FILES": diff_files,
         **env,
     }
     result = subprocess.run(

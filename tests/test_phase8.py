@@ -176,9 +176,7 @@ def test_github_falls_back_to_html_when_api_fails():
 
 # Claude Code Remote Control launches (8b)
 import json as _json  # noqa: E402
-import subprocess as _subprocess  # noqa: E402
 import sys as _sys  # noqa: E402
-from pathlib import Path as _Path  # noqa: E402
 
 from harness.config import Project, RemoteControlConfig  # noqa: E402
 from harness.fileops import ToolError  # noqa: E402
@@ -935,7 +933,7 @@ def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
     async def body():
         m, _, _ = _claude_manager(tmp_path, "allow")
         await m.start()
-        s = await wait_status(m, m.create("read it", backend="claude")["id"], "done")
+        await wait_status(m, m.create("read it", backend="claude")["id"], "done")
         await asyncio.gather(*m.tasks.values())
         assert m.db.get_backend_usage("claude")["data"]["utilization"] == 0.8
         tally = m.db.usage_tally("claude", 0)
@@ -1032,7 +1030,7 @@ def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):
         m.cfg.backends["claude"].billing = "credits"
         await m.start()
         sid = m.create("hit the limit", backend="claude")["id"]
-        s = await wait_status(m, sid, "waiting_limit")
+        await wait_status(m, sid, "waiting_limit")
         assert events(m, sid, "billing_warning")
         assert events(m, sid, "limit_waiting")[0]["resets_at"] > time.time()
         await m.cancel(sid)
@@ -1056,7 +1054,7 @@ def test_backend_billing_warning_waiting_limit_and_api_key_fallback(tmp_path):
         m.runner.cli_factory = factory
         await m.start()
         sid = m.create("fall back", backend="claude")["id"]
-        s = await wait_status(m, sid, "done")
+        await wait_status(m, sid, "done")
         assert len(made) == 2
         assert made[1]["api_key"] == "api-secret"
         assert events(m, sid, "backend_fallback")

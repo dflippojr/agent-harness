@@ -19,7 +19,7 @@ def score(task, call):
             "logprobs": True, "top_logprobs": 10, "chat_template_kwargs": {"enable_thinking": False}}
     t0 = time.time()
     req = urllib.request.Request(QWEN, json.dumps(body).encode(), {"Content-Type": "application/json"})
-    for attempt in range(3):
+    for _attempt in range(3):
         try:
             r = json.load(urllib.request.urlopen(req, timeout=120))
             break
@@ -84,7 +84,7 @@ def policies(s, t, msgs, cache):
 
 def dropped(orig, new):
     """tool call ids whose result content was replaced or shortened."""
-    return {o["tool_call_id"] for o, n in zip(orig, new) if o["role"] == "tool" and n["content"] != o["content"]}
+    return {o["tool_call_id"] for o, n in zip(orig, new, strict=False) if o["role"] == "tool" and n["content"] != o["content"]}
 
 
 def run(sid, s, stats):
@@ -117,7 +117,7 @@ def run(sid, s, stats):
             if p in prev:
                 old = prev[p]
                 n = 0
-                for a, b in zip(old, new):
+                for a, b in zip(old, new, strict=False):
                     if a != b: break
                     n += C.message_chars(a)
                 st["reuse_num"] += n

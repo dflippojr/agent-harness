@@ -135,7 +135,7 @@ def _cli_route(command: str) -> tuple[str, str]:
     return HAND_WRITTEN[args.cmd]
 
 
-def _routes_without_cli(routes: set[tuple[str, str]], allowed=NOT_ON_CLI.keys()) -> list[str]:
+def _routes_without_cli(routes: set[tuple[str, str]], allowed=tuple(NOT_ON_CLI)) -> list[str]:
     """Owner API routes with no inventory row, or whose rows have no CLI command calling them."""
     rows = _doc_rows()
     missing = []

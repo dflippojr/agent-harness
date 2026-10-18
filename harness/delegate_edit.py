@@ -189,7 +189,7 @@ def apply_to_texts(texts: dict[str, str], edits: list[dict]) -> dict[str, str]:
     result = {}
     for path, items in spans.items():
         items.sort()
-        for (_, end, _), (start, _, _) in zip(items, items[1:]):
+        for (_, end, _), (start, _, _) in zip(items, items[1:], strict=False):
             if start < end:
                 raise ToolError(f"two edits to {path} overlap")
         original, out, pos = texts[path], [], 0

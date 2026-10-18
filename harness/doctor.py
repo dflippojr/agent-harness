@@ -7,7 +7,6 @@ ops/check-stack.ps1 (a `doctor` command as in Hermes Agent, docs/phase6a-hermes-
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import subprocess

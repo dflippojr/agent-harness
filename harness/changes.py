@@ -129,7 +129,7 @@ def changes_from_diffs(diffs: list[dict], scan=None) -> dict:
     secret = None
     if scan is not None:
         secret, masked = scan(diffs)
-        for d, text in zip(diffs, masked):
+        for d, text in zip(diffs, masked, strict=False):
             d["diff"] = text
     repos = []
     budget = MAX_DIFF_CHARS

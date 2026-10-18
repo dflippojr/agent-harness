@@ -298,7 +298,7 @@ def test_stop_matchers_of_production_and_staging_are_disjoint():
     # Staging stop is the staging task and the staging port only, never "any python on 8100".
     assert "$StagingTaskName" in RESTART
     assert "AgentHarness-Daemon'" not in RESTART
-    assert f"127.0.0.1:$StagingPort/health" in RESTART
+    assert "127.0.0.1:$StagingPort/health" in RESTART
 
 
 def test_supervisor_keeps_the_virtual_environment_pointer_inside_the_staging_data_root():

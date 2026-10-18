@@ -152,10 +152,10 @@ class Maintenance:
             return []
         if code != 0:
             return []
-        return [dict(zip(("name", "state", "size"), line.split("\t"))) for line in text.splitlines()]
+        return [dict(zip(("name", "state", "size"), line.split("\t"), strict=False)) for line in text.splitlines()]
 
     def _workspace_roots(self) -> list:
-        from .storage import is_reparse_point, workspaces_dir
+        from .storage import is_reparse_point
         roots = [self.cfg.workspaces_dir]
         for parent in (self.cfg.data_dir / "users", self.cfg.data_dir / "apps"):  # members' and Apps' (#330)
             if parent.is_dir() and not is_reparse_point(parent):

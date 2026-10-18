@@ -79,14 +79,14 @@ def _assert_tiled(parent, children, *, resume_boundary=None) -> None:
     for c in ordered:
         assert c.start_time <= c.end_time, f"{c.name} ends before it starts"
         assert parent.start_time - EDGE_NS <= c.start_time and c.end_time <= parent.end_time + EDGE_NS,             f"{c.name} outside {parent.name}"
-    for a, b in zip(ordered, ordered[1:]):
+    for a, b in zip(ordered, ordered[1:], strict=False):
         assert a.end_time <= b.start_time + EDGE_NS, f"{a.name} overlaps {b.name} under {parent.name}"
     allowed = None
     if resume_boundary is not None:
         idle, setup = resume_boundary
         assert parent.name == "session" and idle.name == "idle" and setup.name == "run_setup"
         # Require both spans and their adjacency: removing setup must not exempt idle -> turn instead.
-        assert any(a is idle and b is setup for a, b in zip(ordered, ordered[1:]))
+        assert any(a is idle and b is setup for a, b in zip(ordered, ordered[1:], strict=False))
         allowed = (idle.end_time, setup.start_time)
     gaps = _gaps(parent, ordered)
     cursor = parent.start_time

@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from .principal import PUBLIC_CLONE_HOSTS
-from .projects import GitError, GitResult, git, isolated_git_dir
+from .projects import GitError, GitResult, isolated_git_dir
 from .storage import ContainmentError, require_contained
 
 _LOCAL_SCHEME = re.compile(r"^(file|git|ssh|git\+ssh|rsync)$", re.I)
@@ -136,10 +136,10 @@ def clone_public(url: str, dest: Path, root: Path, max_bytes: int | None = None)
     result = _run_clone(cmd, dest, max_bytes=max_bytes)
     try:
         require_contained(dest, root)
-    except ContainmentError:
+    except ContainmentError as exc:
         import shutil
         shutil.rmtree(dest, ignore_errors=True)
-        raise CloneRefused("clone resolved outside the account root")
+        raise CloneRefused("clone resolved outside the account root") from exc
     return result
 
 
