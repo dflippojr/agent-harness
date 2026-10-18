@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -277,11 +278,26 @@ def test_the_login_container_mounts_only_the_end_users_volume_and_has_no_secret(
     assert codex[-3:] == ["codex", "login", "--device-auth"]
 
 
-def test_the_daemon_never_reads_end_user_volumes_host_side():
-    source = (Path(end_users.__file__)).read_text(encoding="utf-8")
-    import re
+def _assert_no_host_volume_reads(source: str):
     assert not re.search(r"\b(Path|open|read_text|read_bytes|listdir|glob)\(", source)
     assert "volume_mountpoint" not in source and "Mountpoint" not in source
+
+
+def test_the_daemon_never_reads_end_user_volumes_host_side():
+    _assert_no_host_volume_reads(Path(end_users.__file__).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("source", [
+    "Path('volume')", "open('volume')", "read_text('volume')", "read_bytes('volume')",
+    "listdir('volume')", "glob('volume')", "volume_mountpoint", "Mountpoint",
+])
+def test_host_volume_read_guard_rejects_forbidden_source(source):
+    with pytest.raises(AssertionError):
+        _assert_no_host_volume_reads(source)
+
+
+def test_host_volume_read_guard_allows_unrelated_identifiers():
+    _assert_no_host_volume_reads("reopen('safe'); pending = 'container-managed volume'")
 
 
 # --- the Claude popup flow (stub) --------------------------------------------------------------------------------

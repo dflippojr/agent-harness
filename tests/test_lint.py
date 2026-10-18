@@ -10,9 +10,12 @@ import json
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 import yaml
+
+from harness import catalog
 
 ROOT = Path(__file__).resolve().parents[1]
 CI = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
@@ -44,6 +47,10 @@ OLD = _diagnostic("harness/a.py", 10, '"get" is not a known attribute of "None"'
 
 
 # --- configuration ---------------------------------------------------------------------------------------------
+
+def test_member_managed_repo_return_annotation_resolves_to_path():
+    assert get_type_hints(catalog.member_managed_repo)["return"] is Path
+
 
 def test_ruff_selects_the_small_rule_set_without_formatting_or_per_file_ignores():
     ruff = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["ruff"]
