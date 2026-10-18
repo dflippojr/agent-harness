@@ -90,12 +90,20 @@ def test_ci_skips_only_unread_paths_on_push_and_pull_request():
     assert "ci-cd.yml" in text
 
 
-def test_ci_has_no_pull_request_gate_guard_that_the_pull_request_could_replace():
-    # ci.yml runs on pull_request, so a pull request supplies that job and can swap in a green no-op. The trusted
-    # verdict comes from gate-guard-target.yml, which runs from main (dflippojr/agent-harness#727).
+def test_ci_gate_guard_job_is_an_early_signal_pinned_by_sha_and_gate_needs_it():
+    # A pull request supplies this job and can replace it, so it is not the judge: gate-guard-target.yml is, and the
+    # ruleset requires it (dflippojr/agent-harness#727). This job still fails a pull request early, as the spec asks.
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-    assert "gate-guard" not in jobs
-    assert "gate-guard" not in jobs["gate"]["needs"]
+    guard = jobs["gate-guard"]
+    match = GATE_GUARD_USES.fullmatch(guard["uses"])
+    assert match, guard["uses"]
+    assert guard["with"]["guard-ref"] == match.group(1)
+    # Only the owner's gate-change-approved label counts (dflippojr/.github CONTRIBUTING.md).
+    assert guard["with"]["require-owner-label-actor"] is True
+    assert guard["if"] == "github.event_name == 'pull_request'"
+    # The called workflow reads issues too, and a called workflow cannot widen the caller's permissions.
+    assert guard["permissions"]["issues"] == "read"
+    assert "gate-guard" in jobs["gate"]["needs"]
 
 
 def test_trusted_gate_guard_runs_from_main_pinned_by_sha_and_checks_out_nothing():

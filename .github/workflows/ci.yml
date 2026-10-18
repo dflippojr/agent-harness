@@ -7,8 +7,9 @@ name: CI
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
 #   lint      - ruff, and pyright against tools/lint/pyright-baseline.json; runs on every change
 #   changes   - lists the changed files; the three test jobs skip when every one is on the skip list
-#   gate      - the one check to require: always runs, fails if any job it needs failed or was cancelled
-#               The gate-guard check is posted by .github/workflows/gate-guard-target.yml, from main (#727).
+#   gate-guard - the shared gate guard (dflippojr/.github) on pull requests: an early signal, not the judge (#727)
+#   gate      - the check to require, with the gate-guard check that .github/workflows/gate-guard-target.yml posts
+#               from main: always runs, fails if any job it needs failed or was cancelled
 # The suite runs once. Tests used to run a second time on a self-hosted
 # `agent-harness-ci` pool on the tower; that pool is retired so CI no longer
 # competes with llama-server and the desktop for RAM. The job ids `test` and
@@ -327,12 +328,30 @@ jobs:
             docs/phase8c-results.md
         run: python3 scripts/ci_gate.py changes
 
+  gate-guard:
+    # The shared guard fails a pull request that deletes or skips tests, adds retries, or edits workflow, Sonar,
+    # coverage or lint config, unless the owner applied gate-change-approved. This job is an early signal inside
+    # `gate`, not the judge: a pull request supplies this file and can replace the job, and this copy accepts a label
+    # applied before the newest push. The judge is .github/workflows/gate-guard-target.yml, which runs from main under
+    # pull_request_target, and the ruleset for main requires its gate-guard check next to `gate`. Pinned by commit
+    # SHA, with guard-ref naming the same commit (owner decision on #727). A push skips it, and `gate` passes a
+    # skipped job.
+    if: github.event_name == 'pull_request'
+    uses: dflippojr/.github/.github/workflows/gate-guard.yml@e2c7fae8508be0359f3abaf136caade46ee7479c
+    with:
+      guard-ref: e2c7fae8508be0359f3abaf136caade46ee7479c
+      require-owner-label-actor: true
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+
   gate:
     # The required check. It always runs and needs every job above, so it reports on docs-only changes too
     # (`test`, `openapi` and `ui-tests` skipped by `changes`). Any needed job failed or cancelled fails it; see
     # scripts/ci_gate.py for the rules. Add every new job here.
     if: always()
-    needs: [changes, lint, test, sonar, openapi, ui-tests]
+    needs: [changes, lint, test, sonar, openapi, ui-tests, gate-guard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

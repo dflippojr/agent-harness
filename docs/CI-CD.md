@@ -10,10 +10,11 @@ after that workflow succeeds for the exact commit pushed to `main`:
    Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
    tower; that pool is retired so CI no longer competes with llama-server for the tower's RAM.
    **CI / gate** is the one check to require (#726). It always runs, needs every other CI job, and fails if any of
-   them failed or was cancelled, `sonar` included on a push to `main`. `ci.yml` has no gate-guard job, because a pull
-   request supplies that file and could replace such a job with a no-op. The gate guard is `.github/workflows/gate-guard-target.yml`
-   (#727): it runs from `main` under `pull_request_target`, calls the shared guard from dflippojr/.github pinned by
-   commit SHA (`guard-ref` names the same commit), and posts the `gate-guard` check on each pull request's head. It
+   them failed or was cancelled, `sonar` included on a push to `main`. **CI / gate-guard** (#727) calls the shared gate
+   guard from dflippojr/.github on each pull request, pinned by commit SHA (`guard-ref` names the same commit). It is an
+   early signal inside `gate`, not the judge, because a pull request supplies this file and could replace the job. The
+   judge is `.github/workflows/gate-guard-target.yml` (#727): it runs from `main` under `pull_request_target`, calls
+   the same shared guard pinned to the same commit, and posts the `gate-guard` check on each pull request's head. It
    fails a pull request that deletes or skips a test, adds a retry, or edits workflow, Sonar, coverage or lint config,
    unless the owner applied `gate-change-approved` after the newest push. **CI / changes** lists the
    changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `openapi` and `ui-tests` skip and
