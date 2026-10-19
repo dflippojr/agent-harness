@@ -154,7 +154,7 @@ async def chat(
                     await _apply_chunk(chunk, out, calls, on_delta, on_progress)
     except httpx.HTTPError as e:
         raise LLMError(f"{type(e).__name__}: {e}", retryable=isinstance(e, (httpx.ReadError, httpx.RemoteProtocolError,
-                                                                              httpx.ConnectError)))
+                                                                              httpx.ConnectError))) from e
     if not streamed:  # #733: a 200 that carried no event stream is not an empty answer
         raise LLMError("the model server answered 200 without an event stream", retryable=True)
     for index in sorted(calls):

@@ -119,7 +119,7 @@ async def create_image(body: ImageRequest, request: Request):
         return svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
                           resolution=body.resolution, seed=body.seed, upscale=body.upscale)
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 @owner_routes.post("/images/uploads", status_code=201)
@@ -130,7 +130,7 @@ async def upload_image(request: Request, file: UploadFile = File(...)):
     try:
         return svc.ingest_upload(await read_upload(file, svc.cfg.max_upload_bytes))
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 @owner_routes.post("/images/warmup")
@@ -139,7 +139,7 @@ async def warmup_images(request: Request):
     try:
         return await images_service(request).warmup()
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 @owner_routes.post("/images/cooldown")
@@ -159,7 +159,7 @@ async def edit_image(iid: str, request: Request, prompt: str = Form(...), mask: 
         return svc.submit_edit(parent["id"], prompt, await read_upload(mask, svc.cfg.max_upload_bytes),
                                feather=feather, seed=seed)
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 @owner_routes.post("/images/{iid}/upscale", status_code=201)
@@ -170,7 +170,7 @@ async def upscale_image(iid: str, body: ImageUpscaleRequest, request: Request):
     try:
         return svc.submit_upscale(parent["id"], body.upscale)
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
 
 
 @owner_routes.post("/images/{iid}/cancel")
@@ -182,7 +182,7 @@ async def cancel_image(iid: str, request: Request):
     try:
         return await svc.cancel(job["id"])
     except ToolError as e:
-        raise HarnessError(409, str(e))
+        raise HarnessError(409, str(e)) from e
 
 
 @owner_routes.delete("/images/{iid}")
@@ -195,7 +195,7 @@ async def delete_image(iid: str, request: Request):
     try:
         return await svc.delete(job["id"], backup_dir=backup)
     except ToolError as e:
-        raise HarnessError(404, str(e))
+        raise HarnessError(404, str(e)) from e
 
 
 @owner_routes.get("/images/{iid}")
@@ -242,7 +242,7 @@ async def image_archive_retention_apply(body: ImageArchiveRetentionApply, reques
     try:
         return await asyncio.to_thread(images_runtime(request).archive.apply_retention, body.confirmation)
     except ImageArchiveError as e:
-        raise HarnessError(409, str(e))
+        raise HarnessError(409, str(e)) from e
 
 
 # App API (/api/v1): app_auth checks the token and its images scope
@@ -259,7 +259,7 @@ async def app_image(body: AppImageRequest, request: Request):
         job = svc.submit(body.prompt, model=body.model, aspect_ratio=body.aspect_ratio,
                          source=f"app:{key['name']}"[:40], upscale=body.upscale)
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     return {**job, "url": f"/api/v1/images/{job['id']}.png"}
 
 
@@ -276,7 +276,7 @@ async def app_image_upscale(iid: str, body: AppImageUpscaleRequest, request: Req
     try:
         job = svc.submit_upscale(parent["id"], body.upscale, source=f"app:{key['name']}"[:40])
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     return {**job, "url": f"/api/v1/images/{job['id']}.png"}
 
 

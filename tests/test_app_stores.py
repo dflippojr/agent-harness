@@ -115,7 +115,7 @@ def test_two_apps_sessions_are_written_only_to_their_own_stores(tmp_path):
     assert session_ids(web) == {owner_sid}
     assert not any(rows_of(web, all_app_sids).values())
     assert rows_of(web, {owner_sid})["events"] > 0                        # the owner's session is in Web's store
-    for name, app in apps.items():
+    for app in apps.values():
         store = Path(cfg.data_dir) / "apps" / app["id"] / APP_STORE_FILE
         assert session_ids(store) == app["sids"]
         held = rows_of(store, app["sids"])

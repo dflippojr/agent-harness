@@ -366,7 +366,7 @@ def test_owner_write_that_fails_leaves_the_profile_whole(tmp_path):
 from datetime import datetime  # noqa: E402
 
 from harness.config import JobsConfig  # noqa: E402
-from harness_modules.jobs.service import Cron, CronError, JobScheduler, parse_status  # noqa: E402
+from harness_modules.jobs.service import Cron, CronError, parse_status  # noqa: E402
 from harness_modules.notifications.service import Notifier  # noqa: E402
 
 

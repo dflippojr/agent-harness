@@ -1,6 +1,5 @@
 """GitHub task source keeps token, trust framing and PR branch rules server-side."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx

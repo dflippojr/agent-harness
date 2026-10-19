@@ -69,8 +69,9 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     assert "pytest-cov" in workflow
     assert "pytest-xdist" in workflow
     assert "python -m pytest tests" in workflow
-    # Tests run once in the workflow, so the coverage run is the only pytest invocation.
-    assert workflow.count("python -m pytest tests -q -n") == 1
+    # Two suite runs: `test` (3.12) is the coverage run; `test-py313` runs the suite again without coverage (#730).
+    assert workflow.count("python -m pytest tests -q -n") == 2
+    assert workflow.count("--cov-report=xml:coverage.xml") == 1
     assert "-n 4 --dist loadfile" in workflow  # the verbosity flag is free to change; the worker split is not
     coverage_step = workflow[workflow.index("Run tests with coverage") : workflow.index("Scan with SonarCloud")]
     assert "-n auto" not in coverage_step
@@ -81,15 +82,16 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     assert "needs: test" in sonar_job
     assert "actions/download-artifact" in sonar_job
     assert "fetch-depth: 0" in sonar_job
-    # A failing quality gate on main shows on the job but never blocks the deploy; failing tests still do.
-    assert "continue-on-error: ${{ github.event_name == 'push' }}" in sonar_job
+    # A failing quality gate blocks on main as it does on pull requests, so it stops the deploy (#728).
+    assert "continue-on-error" not in yaml.safe_load(workflow)["jobs"]["sonar"]
     assert "runs-on: [self-hosted" not in workflow
     assert "runs-on: windows-latest" in workflow
-    # Only the bookkeeping jobs (`changes`, `gate`, #726) may use Ubuntu; the suite and its analysis cannot.
+    # Only the bookkeeping jobs (`changes`, `gate`, #726) and the static checks (`lint`, #729) may use Ubuntu; the
+    # suite and its analysis cannot.
     jobs = yaml.safe_load(workflow)["jobs"]
     for job in ("test", "sonar", "openapi", "ui-tests"):
         assert jobs[job]["runs-on"] == "windows-latest", job
-    assert {name for name, job in jobs.items() if job["runs-on"] == "ubuntu-latest"} == {"changes", "gate"}
+    assert {name for name, job in jobs.items() if job["runs-on"] == "ubuntu-latest"} == {"changes", "gate", "lint"}
     assert "sonar.qualitygate.wait=true" in workflow
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert "pytest-xdist" not in requirements

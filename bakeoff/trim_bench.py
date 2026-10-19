@@ -188,7 +188,7 @@ def _compact(context: list[dict], arm: Arm, outcomes: dict, mask: bool, turn: in
     if arm.trim:
         trimmed, saved = compaction.trim(context, TrimRules(), int(KEEP_RECENT * n * CHARS_PER_TOKEN), outcomes)
         result.trim_chars += saved
-        for old, new in zip(context, trimmed):
+        for old, new in zip(context, trimmed, strict=False):
             if (old.get("content") != new.get("content") and old["role"] == "tool"
                     and compaction.LINES_OMITTED.split("{")[0] in (new.get("content") or "")):
                 result.head_tail.append((turn, sigs[old["tool_call_id"]]))

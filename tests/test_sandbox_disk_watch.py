@@ -147,7 +147,7 @@ def test_concurrent_member_commands_share_the_account_quota(monkeypatch, tmp_pat
     # command would let each write 100 MB; measuring the account while they run stops them near the quota.
     roots = [tmp_path / "a", tmp_path / "b"]
     fakes = {}
-    for name, root in zip("ab", roots):
+    for name, root in zip("ab", roots, strict=True):
         root.mkdir()
         fakes[f"harness-{name}"] = FakeDocker(root, chunks=150, pace=0.02)
 
@@ -164,7 +164,7 @@ def test_concurrent_member_commands_share_the_account_quota(monkeypatch, tmp_pat
         return limits
 
     async def both():
-        boxes = [sandbox.Sandbox(n, r, SandboxConfig(), disk_limits=disk_limits) for n, r in zip("ab", roots)]
+        boxes = [sandbox.Sandbox(n, r, SandboxConfig(), disk_limits=disk_limits) for n, r in zip("ab", roots, strict=True)]
         return await asyncio.gather(*(b.exec("make") for b in boxes), return_exceptions=True)
     results = asyncio.run(both())
     assert any(isinstance(r, disk_watch.DiskLimitExceeded) for r in results)

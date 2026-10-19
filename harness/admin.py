@@ -157,7 +157,7 @@ def _normalized_origin(raw_origin: str) -> str:
     try:
         return normalize_origin(raw_origin)
     except ValueError as e:
-        raise HarnessError(403, str(e))
+        raise HarnessError(403, str(e)) from e
 
 
 def _check_token_origin(request: Request, m, key: dict) -> None:

@@ -242,7 +242,7 @@ def find_passages(text: str, pattern: str, context: int = 400, limit: int = 12) 
     try:
         rx = re.compile(pattern, re.IGNORECASE)
     except re.error as e:
-        raise ToolError(f"bad find pattern: {e}")
+        raise ToolError(f"bad find pattern: {e}") from e
     spans: list[list[int]] = []
     total = 0
     for m in rx.finditer(text):

@@ -5,15 +5,23 @@ after that workflow succeeds for the exact commit pushed to `main`:
 
 1. **CI / test** runs the complete test suite once, with coverage, on GitHub-hosted `windows-latest` for pull
    requests and pushes to `main`, and uploads `coverage.xml` as an artifact. **CI / sonar** (same workflow,
-   `needs: test`) feeds that coverage to SonarCloud. On a push to `main`, `sonar` is `continue-on-error`, so a failing
-   quality gate shows on the job but does not block deployment; only failing tests do. On pull requests the quality
-   gate still fails the check. Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
+   `needs: test`) feeds that coverage to SonarCloud and waits for the quality gate. A failing gate fails the check on
+   pull requests and fails the CI run on a push to `main`, so it blocks deployment just as failing tests do (#728).
+   Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
    tower; that pool is retired so CI no longer competes with llama-server for the tower's RAM.
    **CI / gate** is the one check to require (#726). It always runs, needs every other CI job, and fails if any of
-   them failed or was cancelled (on a push to `main` it ignores `sonar`, as above). **CI / changes** lists the
+   them failed or was cancelled, `sonar` included on a push to `main`. **CI / changes** lists the
    changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `openapi` and `ui-tests` skip and
    `gate` still passes, so a docs-only PR is not left pending. A push to `main` is never cancelled by a later push:
    each main commit gets its own CI run, and only pull-request runs cancel their older run.
+   **CI / lint** (#729) runs on every change, on `ubuntu-latest`: `ruff check` with the small rule set in
+   `pyproject.toml` (`F`, `E9`, `B`, `PLE`; no formatter or import sorting), then pyright in basic mode
+   (`pyrightconfig.json`) over `harness`, `harness_modules`, `sdk` and `macrunner`. Pyright fails only on errors that
+   `tools/lint/pyright-baseline.json` does not record; fixing a recorded one and rewriting the baseline shrinks it.
+   **CI / test-py313** (#730) runs the same suite on Python 3.13, on `windows-latest`, after an import smoke test
+   (`tests/test_import_smoke.py`) that compiles every shipped source file and imports every shipped module with
+   `SyntaxWarning` as an error. It has no coverage. `gate` needs it, so a failure fails the CI run, and `guard` deploys
+   only from a successful run.
 2. **guard** checks the `CI` run first: it continues only when that run's `test` job ran and passed (a docs-only
    push skips it) and the commit is still `main`'s tip. Main runs can finish out of order, so this stops an older
    commit from publishing images or deploying after a newer one; the newer commit's own run deploys. `guard` runs

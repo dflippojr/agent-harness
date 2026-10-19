@@ -3,6 +3,8 @@ import { test as base, expect, type Page, type TestInfo } from '@playwright/test
 const LIGHT = ['desktop-light', 'iphone-se-light', 'pixel7-light'];
 // Tests that set their own viewport sizes need one mouse and one touch (WebKit) run; pixel7 adds nothing for them.
 const SELF_SIZING = ['desktop-light', 'iphone-se-light'];
+// The layout invariants (#734) judge every phone surface in portrait and in landscape.
+const PHONES = ['iphone-se-light', 'pixel7-light', 'phone-landscape', 'iphone-se-landscape'];
 export function onlyProjects(info: TestInfo, names: readonly string[]) {
   base.skip(!names.includes(info.project.name), 'theme-independent');
 }
@@ -10,13 +12,17 @@ export function onlyProjects(info: TestInfo, names: readonly string[]) {
 const signedInOn = (names: readonly string[]) => base.extend<{ signedIn: Page }>({
   signedIn: async ({ page }, use, info) => {
     onlyProjects(info, names);
-    await page.goto('/connect');
-    await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
-    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
+    await signIn(page);
     try { await use(page); }
     finally { await page.context().setOffline(false); }
   },
 });
+// docs/ui-testing.md, "Seed and sign-in": /connect signs the separately hosted copy in as the owner.
+export async function signIn(page: Page) {
+  await page.goto('/connect');
+  await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
+}
 export const test = signedInOn(LIGHT);
 export const selfSizingTest = signedInOn(SELF_SIZING);
 // The one dark run: the primary-page sweep also asserts each scheme's --bg.
@@ -24,6 +30,7 @@ export const reflowTest = signedInOn([...SELF_SIZING, 'desktop-dark', 'iphone-se
 // Journeys that assert layout and chrome with their own viewport sizes run on one mouse and one touch project.
 export const desktopTest = signedInOn(['desktop-light']);
 export const desktopAndPhoneTest = signedInOn(SELF_SIZING);
+export const phoneTest = signedInOn(PHONES);
 export { expect };
 export async function openSession(page: Page, title: string) {
   await page.goto('/#/agents');

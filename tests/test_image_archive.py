@@ -9,7 +9,6 @@ import hashlib
 import json
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -86,7 +85,7 @@ def test_reconcile_repairs_corruption_and_reports_hash_mismatch_and_missing_sour
     m = archive_manager(tmp_path)
     first = completed_image(m, "first")
     second = completed_image(m, "second")
-    third = completed_image(m, "third", write_source=False)
+    completed_image(m, "third", write_source=False)
     m.modules.get("images").archive.archive(first)
     m.modules.get("images").archive.archive(second)
     png, _ = m.modules.get("images").archive.paths(first)

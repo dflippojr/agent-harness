@@ -1,0 +1,6 @@
+{
+  "include": ["harness", "harness_modules", "sdk", "macrunner"],
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Linux"
+}

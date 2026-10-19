@@ -249,6 +249,23 @@ class BackupConfig:
     image_archive_min_free_gb: float = 1   # warn without invalidating a database snapshot
 
 
+def check_member_key_dir(value: str) -> Path:
+    """backup.member_key_dir resolved once: an absolute local path with no `..`, UNC or device prefix, and no symlink
+    or junction that sends it somewhere else (#728). Raises ValueError otherwise."""
+    path = Path(value).expanduser()
+    if re.match(r"^[\\/]{2}", value.strip()) or str(path).startswith("\\\\"):
+        raise ValueError("backup.member_key_dir must be a local path, not a UNC or device path")
+    if not path.is_absolute():
+        raise ValueError("backup.member_key_dir must be an absolute path")
+    if ".." in path.parts:
+        raise ValueError("backup.member_key_dir must not contain '..' segments")
+    resolved = path.resolve()
+    if os.path.normcase(resolved) != os.path.normcase(path):
+        raise ValueError(f"backup.member_key_dir must not pass through a symlink, junction or mapped drive "
+                         f"(it resolves to {resolved})")
+    return resolved
+
+
 @dataclass
 class TelemetryConfig:
     """OpenTelemetry traces (#259, docs/observability.md). Off unless `otlp_endpoint` is set."""
@@ -1030,6 +1047,8 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
     web, endpoint, images, search = (sections[k] for k in ("web", "endpoint", "images", "search"))
     jobs, skills, remote_control = (sections[k] for k in ("jobs", "skills", "remote_control"))
     modules = sections["modules"]
+    if backup.member_key_dir:
+        check_member_key_dir(backup.member_key_dir)
     if not selected.local_model:
         models = {}
     cfg = Config(

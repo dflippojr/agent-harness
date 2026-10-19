@@ -2,7 +2,6 @@
 import asyncio
 import json
 import os
-import ntpath
 import socket
 import subprocess
 import ctypes
@@ -14,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from harness_modules.remote_control.discovery_paths import DiscoveryError, Identity, WindowsDirectories, beneath, lexical
-from harness_modules.remote_control.folder_discovery import FolderDiscovery, FolderStore, LIMITS, MARKERS, SUFFIXES
+from harness_modules.remote_control.folder_discovery import FolderDiscovery, LIMITS, MARKERS, SUFFIXES
 from harness_modules.remote_control.service import RemoteControl, RemoteControlError
 from harness.fileops import ToolError
 from harness.settings_keys import build_registry

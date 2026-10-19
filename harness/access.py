@@ -14,12 +14,9 @@ from __future__ import annotations
 
 import re
 
-from .principal import (  # re-exported for existing imports
-    OWNER_USER_ID,
+from .principal import (
     Principal,
-    guest_for,
-    parse_guest_until,
-    require_owner_allowlist,
+    parse_guest_until as parse_guest_until,  # re-exported for existing imports
     resolve_human,
 )
 

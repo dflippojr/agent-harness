@@ -26,3 +26,6 @@ tools/ui-tests/test-results/
 /stables/
 # The tower deploy's pointer to the pinned Stables copy (ops/harness/deploy-ci.ps1)
 .stables-path
+
+# The verify skill's evidence folders (.claude/skills/verify)
+.verify/

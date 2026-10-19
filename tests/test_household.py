@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from harness.access import resolve_access
 from harness.accounts import AccountService, DEFAULT_DISK_QUOTA_BYTES
-from harness.admin import API_VERSION as ADMIN_API_VERSION, PREFIX
+from harness.admin import PREFIX
 from harness.api import create_app
 from harness.apps import API_VERSION as APP_API_VERSION
 from harness.clone import CloneRefused, QuotaExceeded, isolated_clone_env, isolated_prepare, isolated_refresh_origin, public_https_url
@@ -179,7 +179,7 @@ def test_two_member_adversarial_matrix(tmp_path):
                                            Completion(content="secret-bob")])
     with client:
         alice = create_member(client, ALICE, "Alice")
-        bob = create_member(client, BOB, "Bob")
+        create_member(client, BOB, "Bob")
         ah, bh = H(ALICE), H(BOB)
         owner_s = client.post("/sessions", json={"prompt": "owner unique zebra prompt"},
                               headers=H(OWNER)).json()

@@ -38,7 +38,7 @@ async def update_memory_profile(body: MemoryProfileUpdate, request: Request):
     try:
         saved = await lib.owner_write(cfg.profile_path, body.content, body.summary)
     except ToolError as e:
-        raise HarnessError(400, str(e))
+        raise HarnessError(400, str(e)) from e
     profile = await asyncio.to_thread(lib.profile_text)
     return {"profile": profile, "profile_chars": len(profile), "profile_max_chars": cfg.profile_max_chars,
             "last_commit": saved}

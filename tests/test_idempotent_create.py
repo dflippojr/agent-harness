@@ -33,12 +33,12 @@ def _manager(cfg) -> Manager:
         spawned.append(sid)
         spawn(sid, recovered)
     m._spawn = counting
-    setattr(m, "spawned", spawned)
+    m.spawned = spawned
     return m
 
 
 def _spawned(m: Manager) -> list[str]:
-    return getattr(m, "spawned")
+    return m.spawned
 
 
 def _created_events(m: Manager, sid: str) -> int:

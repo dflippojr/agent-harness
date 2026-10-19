@@ -94,6 +94,7 @@ _PUBLIC = {
     "load_config": ("harness.config", "load"),
     "module_effective": ("harness.config", "module_effective"),
     "resolve_images_models_dir": ("harness.config", "resolve_images_models_dir"),
+    "check_member_key_dir": ("harness.config", "check_member_key_dir"),
     "Database": ("harness.db", "Database"),
     "SEARCH_TOOLS": ("harness.search_index", "SEARCH_TOOLS"),
     "scoped_store": ("harness.app_stores", "scoped"),
@@ -138,7 +139,8 @@ _PUBLIC = {
 }
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
+    # `Any`, not the inferred `ModuleType | Any`: pyright would otherwise flag every call through this facade.
     target = _PUBLIC.get(name)
     if target is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -336,7 +338,7 @@ def discover(packages=None) -> tuple[Module, ...]:
     found: list[Module] = []
     for name in (key if key is not None else namespace_packages()):
         try:
-            module = getattr(importlib.import_module(name), "MODULE")
+            module = importlib.import_module(name).MODULE
         except Exception:
             log.exception("module package %s did not load; running without it", name)
             continue

@@ -3,14 +3,17 @@ name: CI
 # One workflow, all GitHub-hosted (free for this public repo):
 #   openapi   - the committed OpenAPI document (tools/openapi/openapi.json) matches the Server
 #   test      - the complete pytest suite with coverage (coverage.xml artifact)
+#   test-py313 - the same suite on Python 3.13, after an import smoke test (#730); no coverage
 #   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
-#   changes   - lists the changed files; the three test jobs skip when every one is on the skip list
+#   lint      - ruff, and pyright against tools/lint/pyright-baseline.json; runs on every change
+#   changes   - lists the changed files; the test jobs skip when every one is on the skip list
 #   gate      - the one check to require: always runs, fails if any job it needs failed or was cancelled
-# The suite runs once. Tests used to run a second time on a self-hosted
-# `agent-harness-ci` pool on the tower; that pool is retired so CI no longer
-# competes with llama-server and the desktop for RAM. The job ids `test` and
-# `sonar` keep the check names they had before the merge.
+# The suite runs twice: `test` on Python 3.12 with coverage, and `test-py313` on Python 3.13 without it (#730).
+# Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
+# tower; that pool is retired so CI no longer competes with llama-server and the
+# desktop for RAM. The job ids `test` and `sonar` keep the check names they had
+# before the merge.
 #
 # Feature-branch pushes without a PR do not run. `pull_request` covers open and
 # later commits on a PR (`synchronize`); `push` to main still runs after merge.
@@ -18,7 +21,7 @@ name: CI
 # The workflow always runs, so `gate` always reports and a ruleset can require it
 # (#726, dflippojr/agent-ops#48). The docs-only skip lives in the `changes` job:
 # CI_SKIP_UNREAD_PATHS is an allow-list of files no pytest currently reads, and
-# `test`, `openapi` and `ui-tests` skip only when every changed file is on it.
+# `test`, `test-py313`, `openapi` and `ui-tests` skip only when every changed file is on it.
 # Entries are exact paths, not globs. Do not add `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
 # INSTALL.md, admin-api.md, app-api.md, mac-client.md, and service-profile.md
 # are asserted by tests/test_product_naming.py; marketplace design, threat
@@ -33,10 +36,9 @@ name: CI
 # is not left pending. .github/workflows/ci-cd.yml publishes and deploys only
 # when `test` itself ran and passed for the commit that is still main's tip, so
 # a docs-only push or a superseded commit never publishes or deploys (desired).
-# On a push to main the `sonar` job is continue-on-error and `gate` ignores it:
-# a failing quality gate shows on the job but blocks neither the gate nor the
-# deploy (#728 changes that); only failing tests do. On pull requests the
-# quality gate still fails `sonar`, and with it `gate`.
+# The `sonar` job blocks everywhere (#728): a failing SonarCloud quality gate
+# fails `sonar`, and with it `gate`, on a pull request and on a push to main,
+# where the failed CI run stops the deploy just as failing tests do.
 on:
   push:
     branches: [main]
@@ -121,6 +123,41 @@ jobs:
           path: coverage.xml
           retention-days: 3
 
+  test-py313:
+    # The same suite on Python 3.13, the newest version the project claims to support (#730). Python 3.13 rejects
+    # some source that 3.12 accepts (#689), so the import smoke test runs first and fails fast. No coverage: `test`
+    # measures and uploads it.
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt pytest-xdist
+
+      # --noconftest: tests/conftest.py imports most of harness, so a module that fails to import would stop the run
+      # before this test names it.
+      - name: Import smoke test
+        run: python -m pytest tests/test_import_smoke.py -q -p no:xdist --noconftest
+
+      - name: Run tests
+        timeout-minutes: 40
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
+        run: >
+          python -m pytest tests -q -n 4 --dist loadfile -o faulthandler_timeout=300
+
   sonar:
     # SonarCloud analysis of the `test` job's coverage. Automatic analysis is
     # turned off in SonarCloud; this job is the analysis. Same windows-latest
@@ -130,7 +167,6 @@ jobs:
     # Forks have no secrets. Same-repository Dependabot PRs use the separate
     # Dependabot secret store; they run the same scan when its token is set.
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    continue-on-error: ${{ github.event_name == 'push' }}
     steps:
       - name: Check SonarCloud token availability
         id: sonar-token
@@ -258,6 +294,30 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  lint:
+    # Static checks (#729): ruff's small rule set (F, E9, B, PLE) everywhere, and pyright in basic mode over the shipped
+    # packages. Pyright fails only on errors that tools/lint/pyright-baseline.json does not record, so a later change
+    # can burn the baseline down. It runs on every change, docs-only ones too: it is fast and needs no Windows.
+    # Pyright resolves imports from this interpreter, hence the runtime requirements; pyrightconfig.json pins the
+    # Linux platform, so a Windows developer machine reports the same errors as this runner.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install lint dependencies
+        id: install
+        run: python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt -r tools/lint/requirements.txt
+      - name: ruff
+        run: python -m ruff check --output-format=github .
+      - name: pyright against its baseline
+        # Also after a ruff failure, so one run reports both.
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python tools/lint/pyright_baseline.py
+
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -305,10 +365,10 @@ jobs:
 
   gate:
     # The required check. It always runs and needs every job above, so it reports on docs-only changes too
-    # (`test`, `openapi` and `ui-tests` skipped by `changes`). Any needed job failed or cancelled fails it; see
-    # scripts/ci_gate.py for the rules. Add every new job here.
+    # (`test`, `test-py313`, `openapi` and `ui-tests` skipped by `changes`). Any needed job failed or cancelled fails
+    # it; see scripts/ci_gate.py for the rules. Add every new job here.
     if: always()
-    needs: [changes, test, sonar, openapi, ui-tests]
+    needs: [changes, lint, test, test-py313, sonar, openapi, ui-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -319,5 +379,4 @@ jobs:
       - name: Every needed job passed, or was skipped on purpose
         env:
           NEEDS: ${{ toJSON(needs) }}
-          EVENT_NAME: ${{ github.event_name }}
         run: python3 scripts/ci_gate.py gate

@@ -174,7 +174,7 @@ def render(summary: list[dict]) -> str:
                       "-" if g["cost_per_success"] is None else f"{g['cost_per_success']:.4f}",
                       f"{g['localisation_failures']}/{g['localisation_checked']}" if g["localisation_checked"] else "-"))
     widths = [max(len(line[i]) for line in lines) for i in range(len(head))]
-    text = ["  ".join(cell.ljust(w) if i < 2 else cell.rjust(w) for i, (cell, w) in enumerate(zip(line, widths)))
+    text = ["  ".join(cell.ljust(w) if i < 2 else cell.rjust(w) for i, (cell, w) in enumerate(zip(line, widths, strict=True)))
             for line in lines]
     return "\n".join([text[0], "  ".join("-" * w for w in widths), *text[1:]])
 

@@ -57,7 +57,6 @@ def test_a_clone_that_never_yields_output_times_out_in_bounded_time(never_closin
 
 
 def test_a_quota_kill_that_never_yields_output_still_reports_quota_not_a_timeout(never_closing, tmp_path):
-    dest = tmp_path / "dest"
     over = clone.threading.Event()
     over.set()  # as _watch_size would, the instant dest exceeds max_bytes
     started = time.monotonic()

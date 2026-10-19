@@ -54,7 +54,7 @@ def test_two_apps_two_members_owner_guesses_and_cursor(setup):
     actors = headers + [{"Tailscale-User-Login": f"{name}@example.com"} for name in ("alice", "bob")]
     scopes = [key["id"] for key, _ in apps] + [member["user_id"] for member in members]
     sids = [create(client, {**auth, "X-Actor": PRIVATE, "X-Source": PRIVATE}) for auth in actors]
-    for auth, scope, sid in zip(actors, scopes, sids):
+    for auth, scope, sid in zip(actors, scopes, sids, strict=False):
         client.put(f"/api/v1/sessions/{sid}", headers=auth, json={"title": PRIVATE})
         first = page(client, auth, limit=1)
         second = page(client, auth, limit=1, before_id=first["next_before_id"])

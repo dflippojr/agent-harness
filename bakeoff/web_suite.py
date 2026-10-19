@@ -131,7 +131,7 @@ async def run_one(task: WebTask, fixture: Path, repeat: int, repo_map: bool = Fa
                 "context_tokens": final["run"].get("context_tokens", 0), "tool_calls": calls,
                 "fixture_misses": list(m.runner.web.fixture.misses), "answer": final["answer"],
                 # for auditing citations: what each call asked for and the start of what it got back
-                "tool_log": [{"call": q, "ok": r["ok"], "output": r["output"][:2000]} for q, r in zip(requests, results)]}
+                "tool_log": [{"call": q, "ok": r["ok"], "output": r["output"][:2000]} for q, r in zip(requests, results, strict=False)]}
     finally:
         await m.stop()
         m.db.close()

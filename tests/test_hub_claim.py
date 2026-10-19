@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import secrets
+import sqlite3
 import subprocess
 import sys
 
@@ -219,7 +220,7 @@ def test_approve_deny_and_release_need_the_host_secret(hh):
             r = client.post(CLAIM + path, headers=headers, json=body)
             assert r.status_code == 403, (label, path, r.text)
     # The ordinary owner routes refuse a Hub claim too, whoever calls them.
-    for path, body in ((f"/approve", {"match": match}), ("/confirm", {"match": match}), ("/deny", None)):
+    for path, body in (("/approve", {"match": match}), ("/confirm", {"match": match}), ("/deny", None)):
         r = client.post(f"{PREFIX}/pairing-requests/{rid}{path}", json=body)
         assert r.status_code == 403 and "harness hub approve" in r.json()["detail"], r.text
     assert _redeem(client, rid, verifier).status_code == 409   # still waiting: nothing changed
@@ -496,7 +497,7 @@ def test_migration_adds_the_role_and_the_record(tmp_path):
     assert columns == {"slot", "key_id", "name", "kind", "origin", "request_id", "claimed_at"}
     assert db.hub_claim() is None
     db.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, claimed_at) VALUES (1, 'k', 'n', 'native', 1)")
-    with pytest.raises(Exception):   # never a second row
+    with pytest.raises(sqlite3.IntegrityError):   # never a second row
         db.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, claimed_at) VALUES (2, 'k', 'n', 'native', 1)")
     assert list((tmp_path / "pre-migration").glob("harness-v56-*.sqlite3"))
     db.close()
