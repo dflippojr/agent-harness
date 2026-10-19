@@ -18,6 +18,10 @@ after that workflow succeeds for the exact commit pushed to `main`:
    `pyproject.toml` (`F`, `E9`, `B`, `PLE`; no formatter or import sorting), then pyright in basic mode
    (`pyrightconfig.json`) over `harness`, `harness_modules`, `sdk` and `macrunner`. Pyright fails only on errors that
    `tools/lint/pyright-baseline.json` does not record; fixing a recorded one and rewriting the baseline shrinks it.
+   **CI / test-py313** (#730) runs the same suite on Python 3.13, on `windows-latest`, after an import smoke test
+   (`tests/test_import_smoke.py`) that compiles every shipped source file and imports every shipped module with
+   `SyntaxWarning` as an error. It has no coverage. `gate` needs it, so a failure fails the CI run, and `guard` deploys
+   only from a successful run.
 2. **guard** checks the `CI` run first: it continues only when that run's `test` job ran and passed (a docs-only
    push skips it) and the commit is still `main`'s tip. Main runs can finish out of order, so this stops an older
    commit from publishing images or deploying after a newer one; the newer commit's own run deploys. `guard` runs
