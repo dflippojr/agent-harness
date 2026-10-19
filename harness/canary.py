@@ -146,8 +146,17 @@ class CanaryStore:
             else:
                 status, note = "blocked", "daemon restarted mid-run"
                 self.finish(row["sha"], status, [], now, note=note)
-            self.record_slot(now, row["sha"], status, note)  # the crashed slot counts towards the silence alarm (#732)
+            if not self._slot_since(row["sha"], row["started_at"]):
+                # the crashed slot counts towards the silence alarm (#732); a shutdown that cancelled the claim in
+                # flight already recorded its slot, and its row only committed afterwards
+                self.record_slot(now, row["sha"], status, note)
         return rows
+
+    def _slot_since(self, sha: str, at: float) -> bool:
+        def read():
+            return self.db.conn.execute("SELECT 1 FROM canary_slots WHERE sha = ? AND at >= ? LIMIT 1",
+                                        (sha, at)).fetchone()
+        return self.db.read(read) is not None
 
     def completed_before(self, sha: str, limit: int) -> list[dict]:
         """The newest `limit` completed runs other than `sha`, newest first."""

@@ -230,6 +230,16 @@ def test_a_shutdown_that_leaves_the_row_running_is_not_counted_again_at_the_next
     assert len(c.store.unrun_streak()) == 1
 
 
+def test_a_claim_that_commits_after_the_shutdown_recorded_its_slot_is_not_counted_again(tmp_path):
+    store = CanaryStore(Database(tmp_path / "h.sqlite3"))
+    sha = "d" * 40
+    store.record_slot(NIGHT + 5, sha, "skipped", "no result recorded")   # the shutdown found no row yet
+    store.begin(sha, NIGHT)                                              # ... then the queued claim committed
+    assert len(store.interrupted(NIGHT + DAY)) == 1
+    assert len(store.unrun_streak()) == 1
+    assert store.get(sha)["status"] == "blocked"
+
+
 def test_a_slot_a_crash_interrupted_is_recorded_at_the_next_start(tmp_path):
     store = CanaryStore(Database(tmp_path / "h.sqlite3"))
     store.begin("a" * 40, NIGHT)                               # the daemon died mid-run
