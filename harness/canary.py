@@ -296,6 +296,12 @@ class Canary:
             # a shutdown mid-slot: run_for has finished the row. Record the slot before stopping, so restarts at slot
             # time can't hide a silence; the notifier is stopping too, so the alarm waits for the next start.
             row = await asyncio.to_thread(self.store.get, sha) if sha else None
+            if row and row["status"] == "running":
+                # cancelled before run_for could finish its row: finish it here, so the next start's interrupted()
+                # doesn't record this slot a second time
+                await asyncio.to_thread(self.store.finish, sha, "blocked", [], self.clock(),
+                                        note="the daemon stopped during the slot")
+                row = await asyncio.to_thread(self.store.get, sha)
             await self._end_slot(sha, before, row, "the daemon stopped during the slot", alarm=False)
             raise
         except Exception as e:

@@ -209,6 +209,27 @@ def test_slots_a_shutdown_interrupts_are_recorded_and_the_next_start_alerts(tmp_
     assert len(notes) == 1
 
 
+def test_a_shutdown_that_leaves_the_row_running_is_not_counted_again_at_the_next_start(tmp_path):
+    notes: list[dict] = []
+    clock = Nights()
+    c = _canary(tmp_path, ShutdownSuite(), notes, clock)
+    sha = "c" * 40
+
+    async def claimed_then_cancelled(_sha: str):
+        c.store.begin(_sha, clock.t)                           # the claim committed, the cleanup never ran
+        raise asyncio.CancelledError
+
+    c.run_for = claimed_then_cancelled
+    try:
+        run(c.nightly(sha))
+        raise AssertionError("the shutdown was swallowed")
+    except asyncio.CancelledError:
+        pass
+    assert len(c.store.unrun_streak()) == 1
+    assert c.store.interrupted(clock.t + 60) == []             # nothing is left running for the next start
+    assert len(c.store.unrun_streak()) == 1
+
+
 def test_a_slot_a_crash_interrupted_is_recorded_at_the_next_start(tmp_path):
     store = CanaryStore(Database(tmp_path / "h.sqlite3"))
     store.begin("a" * 40, NIGHT)                               # the daemon died mid-run
