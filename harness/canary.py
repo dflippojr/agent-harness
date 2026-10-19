@@ -138,7 +138,7 @@ class CanaryStore:
         completed (no alert: an alert is never sent unconfirmed), else `blocked`, so the next slot may retry."""
         def read():
             return self.db.conn.execute("SELECT * FROM canary_results WHERE status = 'running'").fetchall()
-        rows = [_row(r) for r in self.db.read(read)]
+        rows = [row for r in self.db.read(read) if (row := _row(r)) is not None]
         for row in rows:
             if row["outcomes"]:
                 status, note = "complete", "daemon restarted during the confirmation rerun: first-run results, no alert"
@@ -359,6 +359,7 @@ class Canary:
         return outcomes, judge(pass_rate(outcomes), prior, **rule)
 
     def _alert(self, sha: str, rate: float, verdict: Verdict) -> None:
+        assert verdict.baseline_rate is not None  # judge() sets the baseline on every alerting verdict
         self.notify(regression_alert(sha, rate, verdict.baseline_sha, verdict.baseline_rate, self.topic))
 
 
