@@ -19,7 +19,13 @@ parallelism at 4 workers or fewer.
 | `sonar` | CI only (SonarCloud). On a PR, list its new issues at `https://sonarcloud.io/api/issues/search?componentKeys=dflippojr_agent-harness&pullRequest=<PR>&resolved=false`. |
 | `changes`, `gate` | CI only (`scripts/ci_gate.py`). A change touching only the files in `CI_SKIP_UNREAD_PATHS` skips the three test jobs, and `gate` still passes. |
 
-To see a change working in the running app, start a disposable fake-model instance (no real model, no GPU, loopback
+To prove a change works in the running app, run the verify skill and paste its summary into the PR's Proof table:
+`python .claude/skills/verify/scripts/verify.py run [--feature task]`. It starts a disposable fake-model instance on
+loopback with synthetic data, checks it, drives the smoke journey on desktop and Pixel 7, writes
+`.verify/<run>/summary.md` with screenshots and logs, and stops everything it started. Setup and the feature map are
+in `.claude/skills/verify/SKILL.md`.
+
+To poke at the app by hand instead, start the same disposable fake-model instance (no real model, no GPU, loopback
 only), as `docs/ui-testing.md` describes:
 
 ```

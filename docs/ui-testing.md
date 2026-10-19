@@ -8,6 +8,9 @@ real server: the runner, policy and approvals, the file tools, compaction, jobs,
 `ui-testing-pass` skill reads this file. The commands and the safety boundary are here; the fixture format is in the
 docstring of [`harness/fake_model.py`](../harness/fake_model.py).
 
+To prove one change end to end, the verify skill ([`.claude/skills/verify/SKILL.md`](../.claude/skills/verify/SKILL.md))
+runs Start, a doctor, a smoke journey and Teardown in one command and saves the evidence.
+
 ## Scope and isolation
 
 - **Target.** Stables (dflippojr/stables, native JavaScript, no build step) at the release pinned in
