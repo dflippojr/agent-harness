@@ -298,8 +298,9 @@ class Canary:
 
     async def nightly(self, sha: str) -> dict | None:
         """One nightly slot: `run_for`, then the slot's outcome in `canary_slots` and the silence alarm (#732)."""
-        before = await asyncio.to_thread(self.store.get, sha) if sha else None
+        before = None
         try:
+            before = await asyncio.to_thread(self.store.get, sha) if sha else None
             row = await self.run_for(sha)
         except asyncio.CancelledError:
             # a shutdown mid-slot: run_for has finished the row. Record the slot before stopping, so restarts at slot

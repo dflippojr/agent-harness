@@ -230,6 +230,29 @@ def test_a_shutdown_that_leaves_the_row_running_is_not_counted_again_at_the_next
     assert len(c.store.unrun_streak()) == 1
 
 
+def test_a_shutdown_during_the_first_read_of_the_slot_is_still_recorded(tmp_path):
+    notes: list[dict] = []
+    clock = Nights()
+    c = _canary(tmp_path, ShutdownSuite(), notes, clock)
+    real_get = c.store.get
+    calls = []
+
+    def get(sha):
+        calls.append(sha)
+        if len(calls) == 1:
+            raise asyncio.CancelledError                       # the shutdown lands on the slot's first read
+        return real_get(sha)
+
+    c.store.get = get
+    try:
+        run(c.nightly("e" * 40))
+        raise AssertionError("the shutdown was swallowed")
+    except asyncio.CancelledError:
+        pass
+    assert [(s["outcome"], s["reason"]) for s in c.store.unrun_streak()] == [
+        ("skipped", "the daemon stopped during the slot")]
+
+
 def test_a_claim_that_commits_after_the_shutdown_recorded_its_slot_is_not_counted_again(tmp_path):
     store = CanaryStore(Database(tmp_path / "h.sqlite3"))
     sha = "d" * 40
