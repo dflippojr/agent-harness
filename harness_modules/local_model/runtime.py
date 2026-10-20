@@ -2,7 +2,7 @@
 import asyncio
 
 from harness.modules import ModuleRuntime, ACTIVE
-from .service import GpuGuard, ServerControl
+from .service import GpuGuard, ServerControl, hold_reminder
 from .warmup import ModelWarmer
 
 
@@ -17,6 +17,7 @@ class LocalModelRuntime(ModuleRuntime):
                                or m.runner.gate.exclusive,
                                on_pause=self._gpu_paused, on_resume=self._gpu_resumed,
                                data_dir=cfg.data_dir)
+            m.guard.on_hold_reminder = self._hold_reminder
             m.runner.guard = m.guard
             self.service.blocked = lambda: m.guard.active or m.guard.manual or m.modules.gpu_taken
         else:
@@ -73,6 +74,11 @@ class LocalModelRuntime(ModuleRuntime):
         for session in m.db.sessions_with_status(*ACTIVE):
             if session.get("backend", "local") == "local" and session["status"] != "waiting_approval":
                 m.runner.note_gpu_pause(session["id"])
+
+    def _hold_reminder(self, age_seconds):
+        """An indefinite manual hold has lasted over a day (#732): one ntfy reminder a day while it does."""
+        m = self.manager
+        m.notifier.send(hold_reminder(age_seconds, m.guard.manual_since, m.cfg.notify.topic))
 
     def _gpu_resumed(self, seconds):
         m = self.manager

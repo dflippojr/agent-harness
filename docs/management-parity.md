@@ -244,6 +244,7 @@ on New task; that call goes over the App API (`/api/v1`).
 | Action | Method | Endpoint | CLI |
 | --- | --- | --- | --- |
 | Clean up | POST | `/maintenance/cleanup` | `harness maintenance cleanup` |
+| Canary alert test (a sample silence or regression alert) | POST | `/canary/alert-test` | `harness canary alert-test` |
 | Image-archive retention preview | POST | `/maintenance/image-archive/retention/preview` | `harness maintenance image-retention-preview` |
 | Apply image-archive retention | POST | `/maintenance/image-archive/retention/apply` | `harness maintenance image-retention-apply <confirmation>` |
 | Update a runner | POST | `/runners/{name}/update` | `harness runner update <name>` |

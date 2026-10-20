@@ -12,13 +12,17 @@ export function onlyProjects(info: TestInfo, names: readonly string[]) {
 const signedInOn = (names: readonly string[]) => base.extend<{ signedIn: Page }>({
   signedIn: async ({ page }, use, info) => {
     onlyProjects(info, names);
-    await page.goto('/connect');
-    await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
-    await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
+    await signIn(page);
     try { await use(page); }
     finally { await page.context().setOffline(false); }
   },
 });
+// docs/ui-testing.md, "Seed and sign-in": /connect signs the separately hosted copy in as the owner.
+export async function signIn(page: Page) {
+  await page.goto('/connect');
+  await expect(page.locator('#conn')).toHaveAttribute('data-state', 'live');
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible();
+}
 export const test = signedInOn(LIGHT);
 export const selfSizingTest = signedInOn(SELF_SIZING);
 // The one dark run: the primary-page sweep also asserts each scheme's --bg.

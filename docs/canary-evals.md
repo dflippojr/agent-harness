@@ -5,7 +5,8 @@ prompt, tool schemas, compaction, masking or policy wording that makes the agent
 It is advisory: it never blocks a deploy.
 
 Code: `bakeoff/canary.py` (task runner), `bakeoff/canary.yaml` (the set), `harness/canary.py` (storage, regression
-rule, nightly trigger), `harness/migrations/0047_canary_results.py` (table). Switched on with `canary.enabled: true`
+rule, nightly trigger, silence alarm), `harness/migrations/0047_canary_results.py` and `0064_canary_slots.py`
+(tables). Switched on with `canary.enabled: true`
 in `harness.yaml`; off by default.
 
 ## The set
@@ -45,7 +46,8 @@ takes the daemon down.
 - A commit that already has a finished row (`complete`, `timeout`, `skipped`) is not run again: one row per SHA.
 - A run that could not start (GPU slot busy, queue not empty or guard not `clear` for `canary.start_wait_seconds`)
   leaves the row `blocked` and is retried at the next nightly slot. If that also cannot start the row becomes
-  `skipped`.
+  `skipped`. Either way the row's `note` says what held the GPU at the end of the wait: a manual hold (and whether
+  it has an end), the resource guard's state and trigger, a busy queue or an image job.
 - A run past `canary.total_cap_seconds` (45 min) stops; the remaining tasks are recorded as `timeout`. Timed-out
   runs do not count towards baselines or alerts.
 - A task attempt's time limit (the hard task's `wall_limit`, 1500 s for web tasks) counts only time the canary had
@@ -93,8 +95,18 @@ The canary session is registered as low priority (`GpuScheduler.low_priority`).
 passes, attempts, pass_rate, turns, prompt_tokens, wall_seconds, baseline_sha, baseline_rate, alerted, note`
 (`note`: why a run was skipped or finished at a restart, migration 0048).
 
+`canary_slots` (#732), one row per nightly slot: `at, sha, outcome, reason, alerted_at`. `outcome` is the commit's
+row status after the slot (`complete`, `timeout`, `blocked`, `skipped`); `reason` is why it didn't run, including
+"already skipped" for a commit whose one row was final before the slot, and "no deployed commit". The row is written
+`pending` when the slot starts, before the slot's other writes, and gets its outcome when the slot ends. A slot a crash
+left `pending` gets its outcome from the commit's row at the next start, so a crash between the result and the slot
+record can't lose a slot.
+
 `/metrics` exports `harness_canary_pass_rate`, `harness_canary_turns`, `harness_canary_prompt_tokens` and
-`harness_canary_wall_seconds`, each labelled `sha` (first 8 characters), for the latest 30 results only.
+`harness_canary_wall_seconds`, each labelled `sha` (first 8 characters), for the latest 30 results only. It also
+exports three unlabelled silence gauges, whether or not the canary is on: `harness_canary_last_complete_age_seconds`
+(`+Inf` with no result yet), `harness_canary_consecutive_unrun_slots` and `harness_gpu_manual_hold_age_seconds`. See
+[production-signals.md](production-signals.md#the-silence-gauges).
 
 No Grafana dashboard JSON is checked in under `ops/`, so there is no panel to edit. PromQL for one:
 
@@ -125,21 +137,41 @@ confirmation rerun.
   `https://github.com/dflippojr/agent-harness/compare/<baseline_sha>...<new_sha>`. `baseline_sha` is the earlier run
   closest to the median.
 
-## Manual check on staging: a degraded prompt must alert
+## Silence alarm
 
-The unit tests (`tests/test_canary.py`) cover the rule with a scripted model that gets worse. To see the whole chain
-once on real hardware:
+The canary only runs while the GPU is free, so a hold or a busy week can starve it without anything failing (#732).
+After every nightly slot the daemon records the slot in `canary_slots`. When the canary is enabled and the last 3
+slots in a row ended `blocked` or `skipped`, it sends one ntfy notification, "Agent canary has not run for N nights",
+listing the reasons recorded on those slots. While the silence lasts it repeats at most once a calendar day
+(tower-local), on the next slot or daemon start. A slot a shutdown interrupts is recorded as the daemon stops ("the
+daemon stopped during the slot"), and one a crash interrupted when the daemon next starts (it was written `pending`
+when it began); the daemon checks for
+silence each time it starts, so restarts at slot time can't hide one. A slot that runs (`complete` or `timeout`), or one on a commit that already has a
+result, ends the streak; the next silence starts counting from zero. The alert goes through `Notifier.send`, like
+the regression alert: a delivery ntfy refuses is logged, not retried.
 
-1. Seed history: let the nightly run on at least 3 earlier commits, or run `python -m bakeoff.canary` on staging
-   after deploying 3 harmless commits.
-2. On a branch, degrade `SYSTEM_PROMPT` in `harness/manager.py` (for example drop the tool-use guidance or tell the
-   agent to answer without using tools). Do not merge it.
-3. Dispatch `staging.yml` from `main` with that branch ref, which deploys it with `HARNESS_BUILD_COMMIT` set.
-4. On staging set `canary.enabled: true` and `canary.at` to a minute a few minutes ahead (tower-local), restart the
-   staging daemon, and keep the GPU free of games and other sessions.
-5. After the run, expect a `canary_results` row for that SHA with a lower `pass_rate`, `/metrics` showing it, and one
-   phone notification with the compare link. Reset staging afterwards (the `staging.yml` reset input) and set
-   `canary.at` back.
+The usual cause is a manual GPU hold with no end (`POST /gpu/pause` without `duration_seconds`). Holds behave as
+before; while one has lasted over 24 h, the resource guard sends one ntfy reminder a day, "GPU held by hand for N
+days", with when it began and `harness resources resume`. The hold's start and the last reminder are kept in
+`gpu-guard-hold.json`, so a restart neither resets the age nor repeats the reminder (a hold saved before #732 takes
+its start from that file's modification time).
+
+## Alert test
+
+The unit tests (`tests/test_canary.py`, `tests/test_canary_silence.py`) cover the regression rule with a scripted
+model that gets worse, the 3-slot rule and the hold reminder. To check the delivery end of the chain on any
+instance, the fake one included, ask the daemon for a sample alert:
+
+```sh
+harness canary alert-test --kind silence      # or --kind regression
+# the same: POST /api/admin/v1/canary/alert-test {"kind": "silence"}
+```
+
+It builds the alert with the same code as the real one, from made-up input, titles it `Test: ...` and sends it
+through the daemon's ntfy settings. The answer says what happened: `{"sent": true, ...}` once ntfy accepted it, 502
+with ntfy's reason when it refused (#682), and `{"sent": false, "reason": "notifications are disabled",
+"notification": {...}}` on an instance with notifications off, such as `python -m harness.fake_instance`, where it
+returns the payload it would have sent. Nothing is written to the canary tables.
 
 `python -m bakeoff.canary --tasks sqlite_report --repeats 1` runs part of the set by hand with the daemon stopped;
 it prints results but does not write a row or notify.
