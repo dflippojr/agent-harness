@@ -57,21 +57,30 @@ anonymously and does not sign in. The first production deployment showed why: `d
 
 ## Docs regeneration on main
 
-`.github/workflows/docs-regen.yml` runs on a push to `main` that touches `docs/fragments/**`, `scripts/docs/**`, `harness/**` or `harness_modules/**` (the code-derived tables read routes and settings from there)
-(and on `workflow_dispatch`). It runs `python scripts/docs/build.py` and, only if a generated region changed, commits
-`Docs: regenerate fragment regions [skip ci]` to `main` as `github-actions[bot]`. It is the single writer of generated
-regions; PRs add fragments only. It uses the default `GITHUB_TOKEN` with `contents: write` on that one job.
+`.github/workflows/docs-regen.yml` regenerates regions after changes to fragments, generator code or Server code
+on `main` (and on manual dispatch). It is the single writer; feature PRs add fragments only. Changed regions land
+through a PR from `bot/docs-regen`, never a direct push to `main` (#738).
 
-- **No deploy, no loop.** A push made with `GITHUB_TOKEN` starts no workflow runs, so the bot commit starts neither
-  `docs-regen`, `CI`, nor (through `CI`) `deploy-tower`. The `[skip ci]` marker repeats that explicitly, and the job
-  skips any head commit carrying it. `tests/test_ci_cd_workflow.py` pins both.
-- **Bursts.** The `docs-regen` concurrency group cancels an older run, so close-together merges produce one commit.
-  If `main` moves during a run, the push is retried from the new tip, up to three times.
-- **Main CI.** After a fragment PR merges, the region lags until the bot commit lands, so the `Check docs fragments`
-  step on main runs `--check --fragments-only` (schema only). PRs still compare regions against the base.
-- **Nothing changed** means no commit (`tests/test_docs_build.py::test_build_twice_changes_nothing_the_second_time`).
-- `main` has no branch protection today. If a ruleset ever blocks the bot push, the owner must allow
-  `github-actions[bot]` to bypass it for this workflow.
+1. The dedicated `dflippojr-docs-regen` App mints a repository-scoped installation token using
+   `actions/create-github-app-token` and the repository Actions secrets `DOCS_REGEN_APP_ID` and
+   `DOCS_REGEN_APP_PRIVATE_KEY`. Its installation is limited to agent-harness, with Contents and Pull requests write.
+2. The workflow force-pushes generated regions to `bot/docs-regen` and opens or reuses its PR using that token.
+   The branch commit has no skip marker, so the App's PR events start normal `pull_request` CI. Manually dispatched
+   CI cannot satisfy required PR checks and is not used. The default `GITHUB_TOKEN` only reads workflow runs.
+3. It waits for the CI run on that exact head SHA and requires a successful `gate` job. Failures leave the PR open.
+   After the wait it refreshes the App token (installation tokens expire after one hour), then squash-merges with
+   `--match-head-commit` and subject `Docs: regenerate fragment regions [skip ci] (#<PR>)`.
+
+The squash commit's `[skip ci]` prevents push CI and therefore deployment; the regeneration job also guards against
+that marker. PR CI never deploys because deployment requires a successful CI run for a push to `main`.
+No ruleset bypass or Actions PR-creation setting is needed: the normal PR CI makes the required `gate` eligible.
+A ruleset requiring approval still waits for an owner review; the workflow never approves PRs.
+
+The `docs-regen` concurrency group cancels older runs, so bursts reuse one PR. Unchanged regions create no PR and
+close a stale docs PR. Main CI validates only fragment schemas while generated regions catch up; PR CI compares
+regions with the base or the PR's own fragments. `tests/test_ci_cd_workflow.py` checks the credential scope,
+normal PR CI, commit markers and merge ordering; `tests/test_docs_regen_ci.py` exercises failure handling in the
+CI wait script. End-to-end App operation must be checked after this workflow reaches main.
 
 ## Deployment boundary
 
