@@ -17,7 +17,7 @@ posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissio
 REMOVERS = [
     pytest.param(clone._remove_tree, id="clone"),
     pytest.param(maintenance.remove_tree, id="maintenance"),
-    pytest.param(app_stores._remove_tree, id="app_stores"),
+    pytest.param(app_stores.remove_tree, id="app_stores"),
     pytest.param(harness_runner.remove_tree, id="macrunner"),
 ]
 

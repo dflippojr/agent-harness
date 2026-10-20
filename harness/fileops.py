@@ -11,6 +11,7 @@ import errno
 import functools
 import os
 import re
+import shutil
 import stat
 import sys
 from pathlib import Path
@@ -312,6 +313,48 @@ def dir_size(path: Path) -> int:
         except OSError:
             pass
     return total
+
+
+def make_owner_writable(path: str) -> None:
+    """Give the owner write access to `path` (read and search too, for a directory), keeping its other bits.
+
+    A link is skipped: chmod would change whatever it points to.
+    """
+    if os.path.islink(path):
+        return
+    try:
+        mode = os.lstat(path).st_mode
+        os.chmod(path, stat.S_IMODE(mode) | (stat.S_IRWXU if stat.S_ISDIR(mode) else stat.S_IWUSR))
+    except OSError:
+        pass
+
+
+def grant_tree_owner_access(path: Path) -> None:
+    """make_owner_writable for `path` and everything under it."""
+    make_owner_writable(str(path))
+    for root, dirs, files in os.walk(path):
+        for name in [*dirs, *files]:
+            make_owner_writable(os.path.join(root, name))
+
+
+def _grant_and_retry(func, path: str, exc_info) -> None:
+    """shutil.rmtree onerror: grant the owner access to what failed, then retry the step if it takes a plain path."""
+    make_owner_writable(path)
+    if func not in (os.unlink, os.rmdir):
+        raise exc_info[1]
+    func(path)
+
+
+def remove_tree(path: Path) -> None:
+    """shutil.rmtree that also removes read-only files and directories with no owner access.
+
+    Git objects are read-only, and a failed step can leave a directory that its owner can't list. Access is granted
+    to the whole tree first, so the removal itself doesn't fail on permissions.
+    """
+    if not path.exists():
+        return
+    grant_tree_owner_access(path)
+    shutil.rmtree(path, onerror=_grant_and_retry)
 
 
 class FileOps:
