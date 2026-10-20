@@ -316,12 +316,18 @@ def dir_size(path: Path) -> int:
 
 
 _O_PATH = getattr(os, "O_PATH", 0)  # Linux: a descriptor for an entry, which needs no permission on the entry itself
+# Without O_PATH (macOS), a directory the owner can't read can't be pinned, so it is changed by name instead. That is
+# safe only where chmod can leave a link alone (follow_symlinks=False with dir_fd); elsewhere the directory is left.
+_CHMOD_NOFOLLOW = os.chmod in os.supports_dir_fd and os.chmod in os.supports_follow_symlinks
 
 
 def _pin(name: str, dir_fd: int | None) -> int | None:
-    """A descriptor for `name` (in `dir_fd`) that does not follow a link, or None where it can't be opened."""
+    """A descriptor for `name` (in `dir_fd`) that does not follow a link, or None where it can't be opened.
+
+    O_NONBLOCK keeps a FIFO with no writer from stalling the walk: opening it returns at once.
+    """
     try:
-        return os.open(name, (_O_PATH or os.O_RDONLY) | _O_NOFOLLOW, dir_fd=dir_fd)
+        return os.open(name, (_O_PATH or os.O_RDONLY) | _O_NOFOLLOW | _O_NONBLOCK, dir_fd=dir_fd)
     except OSError:
         return None
 
@@ -339,17 +345,36 @@ def _grant_pinned(fd: int, is_dir: bool) -> None:
         os.fchmod(fd, mode)
 
 
+def _grant_unpinned_dir(name: str, dir_fd: int) -> bool:
+    """For a directory that can't be opened: owner access by name, relative to its parent, without following a link.
+
+    Returns whether `name` is a directory, which is the only case that needs its entries reached. Where chmod can't
+    avoid links, nothing is changed and the directory stays as it was.
+    """
+    try:
+        st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    if _CHMOD_NOFOLLOW:
+        with contextlib.suppress(OSError):
+            os.chmod(name, stat.S_IMODE(st.st_mode) | stat.S_IRWXU, dir_fd=dir_fd, follow_symlinks=False)
+    return _CHMOD_NOFOLLOW
+
+
 def _grant_entry(name: str, dir_fd: int) -> None:
     """Owner access for the entry `name` in `dir_fd`, then for everything under it if it is a directory."""
     fd = _pin(name, dir_fd)
     if fd is None:
-        return
-    try:
-        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
-        with contextlib.suppress(OSError):
-            _grant_pinned(fd, is_dir)
-    finally:
-        os.close(fd)
+        is_dir = _grant_unpinned_dir(name, dir_fd)
+    else:
+        try:
+            is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+            with contextlib.suppress(OSError):
+                _grant_pinned(fd, is_dir)
+        finally:
+            os.close(fd)
     if not is_dir:
         return
     try:

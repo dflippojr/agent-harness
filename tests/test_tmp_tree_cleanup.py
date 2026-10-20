@@ -4,8 +4,10 @@ The cleanup used to chmod every entry to 0o200 (`stat.S_IWRITE` on POSIX replace
 that directory failed, and the tree stayed under pytest's basetemp for pytest's own cleanup to trip over.
 """
 
+import os
 import stat
 import sys
+import threading
 
 import pytest
 
@@ -102,3 +104,31 @@ def test_a_name_swapped_for_a_link_after_the_walk_listed_it_is_not_followed(tmp_
     grant_tree_owner_access(tree)
 
     assert stat.S_IMODE(outside.stat().st_mode) == 0o500
+
+
+@posix_only
+def test_without_o_path_read_only_directories_are_still_granted(tmp_path, monkeypatch):
+    monkeypatch.setattr(fileops, "_O_PATH", 0)   # the descriptor route macOS takes: no O_PATH
+    tree = tmp_path / "tree"
+    (tree / "read_only").mkdir(parents=True)
+    (tree / "read_only" / "object").write_text("x", encoding="utf-8")
+    (tree / "read_only" / "object").chmod(0o444)
+    (tree / "read_only").chmod(0o500)
+
+    fileops.remove_tree(tree)
+
+    assert not tree.exists()
+
+
+@posix_only
+def test_a_fifo_without_a_writer_does_not_stall_the_walk(tmp_path, monkeypatch):
+    monkeypatch.setattr(fileops, "_O_PATH", 0)   # without O_PATH a FIFO is opened for real, so it must not block
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    os.mkfifo(tree / "pipe")
+    worker = threading.Thread(target=grant_tree_owner_access, args=(tree,), daemon=True)
+
+    worker.start()
+    worker.join(10)
+
+    assert not worker.is_alive()
