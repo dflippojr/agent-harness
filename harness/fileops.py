@@ -315,12 +315,21 @@ def dir_size(path: Path) -> int:
     return total
 
 
+def _is_link(path: str) -> bool:
+    """A symlink, or on Windows a junction or other reparse point: chmod and a walk would reach past it."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def make_owner_writable(path: str) -> None:
     """Give the owner write access to `path` (read and search too, for a directory), keeping its other bits.
 
     A link is skipped: chmod would change whatever it points to.
     """
-    if os.path.islink(path):
+    if _is_link(path):
         return
     try:
         mode = os.lstat(path).st_mode
@@ -330,11 +339,14 @@ def make_owner_writable(path: str) -> None:
 
 
 def grant_tree_owner_access(path: Path) -> None:
-    """make_owner_writable for `path` and everything under it."""
+    """make_owner_writable for `path` and everything under it, without following a link or a junction."""
+    if _is_link(str(path)):
+        return
     make_owner_writable(str(path))
     for root, dirs, files in os.walk(path):
         for name in [*dirs, *files]:
             make_owner_writable(os.path.join(root, name))
+        dirs[:] = [name for name in dirs if not _is_link(os.path.join(root, name))]
 
 
 def _grant_and_retry(func, path: str, exc_info) -> None:
