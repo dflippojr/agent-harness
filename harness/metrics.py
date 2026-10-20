@@ -8,6 +8,7 @@ closer together than that reuse one computation.
 
 from __future__ import annotations
 
+import math
 import shutil
 import threading
 import time
@@ -29,6 +30,13 @@ def _esc(value) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
 
 
+def _num(value) -> str:
+    value = float(value)
+    if math.isinf(value):
+        return "+Inf" if value > 0 else "-Inf"
+    return f"{value:g}"
+
+
 class _Out:
     def __init__(self):
         self.lines: list[str] = []
@@ -37,7 +45,7 @@ class _Out:
         self.lines += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}"]
         for labels, value in samples:
             label = ",".join(f'{k}="{_esc(v)}"' for k, v in labels.items())
-            self.lines.append(f"{name}{{{label}}} {float(value):g}" if label else f"{name} {float(value):g}")
+            self.lines.append(f"{name}{{{label}}} {_num(value)}" if label else f"{name} {_num(value)}")
 
 
 def _histogram_lines(out: _Out, name: str, help_: str, series: list[tuple[dict, telemetry.Histogram]]) -> None:
@@ -246,6 +254,23 @@ def _canary_metrics(m: Manager, out: _Out) -> None:
                              ("harness_canary_prompt_tokens", "prompt_tokens", "Prompt tokens used by the canary run."),
                              ("harness_canary_wall_seconds", "wall_seconds", "Seconds the canary run's attempts had the GPU.")):
         out.metric(name, "gauge", help_, [({"sha": r["sha"][:SHORT_SHA]}, r[key]) for r in rows])
+    _silence_metrics(m, out)
+
+
+def _silence_metrics(m: Manager, out: _Out) -> None:
+    """Whether the canary has gone quiet and whether a manual GPU hold is why (#732). Exported whether or not the
+    canary is enabled: with no result ever the age is +Inf."""
+    from .canary import CanaryStore
+    store, now = CanaryStore(m.db), time.time()
+    last = store.last_complete_at()
+    out.metric("harness_canary_last_complete_age_seconds", "gauge",
+               "Seconds since the newest complete canary result (+Inf when there is none).",
+               [({}, now - last if last is not None else math.inf)])
+    out.metric("harness_canary_consecutive_unrun_slots", "gauge",
+               "Nightly canary slots in a row that ended blocked or skipped.", [({}, len(store.unrun_streak()))])
+    guard = getattr(m, "guard", None)
+    out.metric("harness_gpu_manual_hold_age_seconds", "gauge", "Seconds the manual GPU hold has lasted (0 when none).",
+               [({}, guard.hold_age(now) if guard is not None else 0)])
 
 
 def _maintenance_metrics(m: Manager, out: _Out) -> None:

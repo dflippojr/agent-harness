@@ -53,6 +53,19 @@ GIB = 1024 ** 3
 MEMORY_POLL_SECONDS = 5  # how often work waiting for memory looks again
 HEALTH_TIMEOUT_SECONDS = 300  # reopen the queue anyway after this; model calls then report their own errors
 MANUAL_HOLD_FILE = "gpu-guard-hold.json"  # survives a daemon restart; the pause_flag file alone does not
+HOLD_REMINDER_SECONDS = 24 * 60 * 60  # an indefinite hold older than this gets a reminder this often (#732)
+
+
+def hold_reminder(age_seconds: float, since: float | None, topic: str) -> dict:
+    """The ntfy payload reminding the owner of an indefinite manual hold (#732): its age and how to end it."""
+    days, rest = divmod(int(age_seconds), 86400)
+    age = f"{days} day{'s' if days != 1 else ''} {rest // 3600} h"
+    began = f" (since {time.strftime('%Y-%m-%d %H:%M', time.localtime(since))})" if since else ""
+    return {"topic": topic, "title": f"GPU held by hand for {age}",
+            "message": (f"The manual GPU hold has no end and has lasted {age}{began}. Local model sessions and the "
+                        "nightly canary wait while it lasts.\nResume: harness resources resume "
+                        "(or POST /api/admin/v1/resources/resume)"),
+            "priority": 3, "tags": ["hourglass"]}
 
 
 # ---------- detection ----------
@@ -391,6 +404,7 @@ class GpuGuard:
         self.on_resume = on_resume
         self.memory = memory or MemoryWatch(cfg.min_available_ram_gb, model_gb=cfg.model_ram_gb)
         self.want_model: Callable[[], bool] = lambda: False  # lazy_load: reload at the end of a hold anyway (queued work)
+        self.on_hold_reminder: Callable[[float], None] | None = None  # an indefinite hold is over a day old
         self.on_change: Callable[[], None] = lambda: None  # the state or the pause flag changed (ModelWarmer.notify)
         # Stops the server once a load in flight has ended (ModelWarmer.park), so the pause flag stays in place.
         self.park: Callable[[Callable[[], Awaitable[None]]], Awaitable[None]] = lambda stop: stop()
@@ -401,6 +415,8 @@ class GpuGuard:
         self.manual = False             # paused by hand
         self.manual_until: float | None = None  # epoch seconds; None means until explicitly resumed
         self.manual_duration_seconds: int | None = None
+        self.manual_since: float | None = None  # epoch seconds the current manual hold began
+        self.reminded_at: float | None = None   # the last indefinite-hold reminder (#732)
         self.override: frozenset | None = None  # triggers the user chose to ignore
         self.changed_at = time.time()
         self.last_check = 0.0
@@ -426,7 +442,7 @@ class GpuGuard:
         return {"enabled": self.cfg.enabled, "state": self.state, "signals": self.signals, "reasons": self.reasons,
                 "manual": self.manual, "override": bool(self.override), "since": self.changed_at,
                 "manual_until": self.manual_until, "manual_remaining_seconds": remaining,
-                "manual_duration_seconds": self.manual_duration_seconds,
+                "manual_duration_seconds": self.manual_duration_seconds, "manual_since": self.manual_since,
                 "last_check": self.last_check, "resume_after_seconds": self.cfg.resume_after_seconds,
                 "clear_for_seconds": (round(time.monotonic() - self._clear_since)
                                       if self._clear_since is not None else None),
@@ -466,6 +482,9 @@ class GpuGuard:
                 if not math.isfinite(manual_until):
                     raise ValueError(f"non-finite manual_until: {manual_until!r}")
             manual_duration_seconds = data.get("manual_duration_seconds")
+            since, reminded_at = data.get("since"), data.get("reminded_at")
+            since = float(since) if since is not None else None
+            reminded_at = float(reminded_at) if reminded_at is not None else None
         except (ValueError, KeyError, TypeError):
             log.warning("GPU guard: ignoring malformed hold state file %s", self._state_path)
             return
@@ -478,12 +497,21 @@ class GpuGuard:
         self.manual_until = manual_until
         self.manual_duration_seconds = manual_duration_seconds
         self.reasons = [_manual_reason()]
+        self.reminded_at = reminded_at
+        self.manual_since = since
+        if since is None:  # a hold saved before #732 recorded its start: the file was written when it began
+            try:
+                self.manual_since = self._state_path.stat().st_mtime
+            except OSError:
+                self.manual_since = time.time()
+            self._persist_hold()
 
     def _persist_hold(self) -> None:
         if self._state_path is None:
             return
         payload = {"manual": True, "manual_until": self.manual_until,
-                   "manual_duration_seconds": self.manual_duration_seconds}
+                   "manual_duration_seconds": self.manual_duration_seconds, "since": self.manual_since,
+                   "reminded_at": self.reminded_at}
         try:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             write_atomic(self._state_path, json.dumps(payload), private=True)
@@ -504,7 +532,27 @@ class GpuGuard:
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
 
+    def hold_age(self, now: float | None = None) -> float:
+        """Seconds the current manual hold has lasted; 0 without one."""
+        if not self.manual or self.manual_since is None:
+            return 0.0
+        return max(0.0, (time.time() if now is None else now) - self.manual_since)
+
+    def hold_reminder_due(self, now: float | None = None) -> bool:
+        """True, once a day, while an indefinite manual hold has lasted over a day (#732). Holds stay allowed; this
+        only records that the reminder went out, so a restart doesn't send another the same day."""
+        now = time.time() if now is None else now
+        if self.manual_until is not None or self.hold_age(now) < HOLD_REMINDER_SECONDS:
+            return False
+        if self.reminded_at is not None and now - self.reminded_at < HOLD_REMINDER_SECONDS:
+            return False
+        self.reminded_at = now
+        self._persist_hold()
+        return True
+
     def pause(self, duration_seconds: int | None = None) -> None:
+        if not self.manual:
+            self.manual_since, self.reminded_at = time.time(), None
         self.manual = True
         self.manual_until = time.time() + duration_seconds if duration_seconds else None
         self.manual_duration_seconds = duration_seconds
@@ -527,6 +575,7 @@ class GpuGuard:
         self.manual = False
         self.manual_until = None
         self.manual_duration_seconds = None
+        self.manual_since = self.reminded_at = None
         self._clear_persisted_hold()
         keys = frozenset(s["key"] for s in self.signals)
         self.override = (keys or None) if override_signals else None
@@ -539,6 +588,8 @@ class GpuGuard:
             try:
                 await self.check(startup=startup)
                 startup = False
+                if self.on_hold_reminder is not None and self.hold_reminder_due():
+                    self.on_hold_reminder(self.hold_age())
             except Exception:  # noqa: BLE001 - keep guarding
                 log.exception("GPU guard check failed")
             fast = self.state in (PAUSING, RESUMING)

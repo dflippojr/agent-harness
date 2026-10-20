@@ -153,6 +153,9 @@ class NoNotifier:
     def build(self, event: dict) -> None:
         return None
 
+    async def deliver(self, payload: dict) -> str:
+        return "notifications are disabled"
+
     def link(self, path: str) -> str:
         return ""
 
