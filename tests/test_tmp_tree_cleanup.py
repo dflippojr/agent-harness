@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from harness import app_stores, clone, maintenance
+from harness import app_stores, clone, fileops, maintenance
 from harness.fileops import grant_tree_owner_access
 from macrunner import harness_runner
 
@@ -79,3 +79,26 @@ def test_granting_access_to_a_link_root_leaves_its_target_alone(tmp_path):
 
     assert stat.S_IMODE(outside.stat().st_mode) == 0o500
     assert stat.S_IMODE((outside / "keep").stat().st_mode) == 0o444
+
+
+@posix_only
+def test_a_name_swapped_for_a_link_after_the_walk_listed_it_is_not_followed(tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o500)
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    real_pin = fileops._pin
+    swapped = []
+
+    def swap_then_pin(name, dir_fd):
+        if name == "sub" and not swapped:   # another process replaces the directory the walk has just listed
+            swapped.append(name)
+            (tree / "sub").rmdir()
+            (tree / "sub").symlink_to(outside, target_is_directory=True)
+        return real_pin(name, dir_fd)
+    monkeypatch.setattr(fileops, "_pin", swap_then_pin)
+
+    grant_tree_owner_access(tree)
+
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o500

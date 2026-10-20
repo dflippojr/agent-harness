@@ -315,8 +315,56 @@ def dir_size(path: Path) -> int:
     return total
 
 
-def _is_link(path: str) -> bool:
-    """A symlink, or on Windows a junction or other reparse point: chmod and a walk would reach past it."""
+_O_PATH = getattr(os, "O_PATH", 0)  # Linux: a descriptor for an entry, which needs no permission on the entry itself
+
+
+def _pin(name: str, dir_fd: int | None) -> int | None:
+    """A descriptor for `name` (in `dir_fd`) that does not follow a link, or None where it can't be opened."""
+    try:
+        return os.open(name, (_O_PATH or os.O_RDONLY) | _O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError:
+        return None
+
+
+def _grant_pinned(fd: int, is_dir: bool) -> None:
+    """Owner access for what `fd` holds. The mode is read and changed through the descriptor, so a name swapped
+    for a link after it was opened can't redirect the change."""
+    st = os.fstat(fd)
+    if stat.S_ISLNK(st.st_mode):
+        return
+    mode = stat.S_IMODE(st.st_mode) | (stat.S_IRWXU if is_dir else stat.S_IWUSR)
+    if _O_PATH:
+        os.chmod(f"/proc/self/fd/{fd}", mode)  # the descriptor's inode; the name it was opened by may have moved
+    else:
+        os.fchmod(fd, mode)
+
+
+def _grant_entry(name: str, dir_fd: int) -> None:
+    """Owner access for the entry `name` in `dir_fd`, then for everything under it if it is a directory."""
+    fd = _pin(name, dir_fd)
+    if fd is None:
+        return
+    try:
+        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        with contextlib.suppress(OSError):
+            _grant_pinned(fd, is_dir)
+    finally:
+        os.close(fd)
+    if not is_dir:
+        return
+    try:
+        child = os.open(name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=dir_fd)
+    except OSError:
+        return
+    try:
+        for entry in os.listdir(child):
+            _grant_entry(entry, child)
+    finally:
+        os.close(child)
+
+
+def _is_reparse_point(path: str) -> bool:
+    """A symlink, or on Windows a junction or other reparse point."""
     try:
         st = os.lstat(path)
     except OSError:
@@ -324,13 +372,7 @@ def _is_link(path: str) -> bool:
     return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
-def make_owner_writable(path: str) -> None:
-    """Give the owner write access to `path` (read and search too, for a directory), keeping its other bits.
-
-    A link is skipped: chmod would change whatever it points to.
-    """
-    if _is_link(path):
-        return
+def _add_owner_bits(path: str) -> None:
     try:
         mode = os.lstat(path).st_mode
         os.chmod(path, stat.S_IMODE(mode) | (stat.S_IRWXU if stat.S_ISDIR(mode) else stat.S_IWUSR))
@@ -338,23 +380,37 @@ def make_owner_writable(path: str) -> None:
         pass
 
 
-def grant_tree_owner_access(path: Path) -> None:
-    """make_owner_writable for `path` and everything under it, without following a link or a junction."""
-    if _is_link(str(path)):
+def _grant_by_path(path: Path) -> None:
+    """Windows has no descriptor-relative calls, so each name is checked for a link or junction before it's changed.
+    The check and the change are still two steps; the residual race is limited to the file attributes."""
+    if _is_reparse_point(str(path)):
         return
-    make_owner_writable(str(path))
+    _add_owner_bits(str(path))
     for root, dirs, files in os.walk(path):
         for name in [*dirs, *files]:
-            make_owner_writable(os.path.join(root, name))
-        dirs[:] = [name for name in dirs if not _is_link(os.path.join(root, name))]
+            full = os.path.join(root, name)
+            if not _is_reparse_point(full):
+                _add_owner_bits(full)
+        dirs[:] = [name for name in dirs if not _is_reparse_point(os.path.join(root, name))]
 
 
-def _grant_and_retry(func, path: str, exc_info) -> None:
-    """shutil.rmtree onerror: grant the owner access to what failed, then retry the step if it takes a plain path."""
-    make_owner_writable(path)
-    if func not in (os.unlink, os.rmdir):
-        raise exc_info[1]
-    func(path)
+def grant_tree_owner_access(path: Path) -> None:
+    """Owner access for `path` and everything under it, without following a link or a junction.
+
+    On POSIX the walk goes through descriptors: each entry is pinned with O_NOFOLLOW before it is changed, so a link
+    swapped in during the walk is refused rather than followed.
+    """
+    if not _DIR_FD:
+        _grant_by_path(path)
+        return
+    try:
+        parent = os.open(path.parent, os.O_RDONLY | _O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        _grant_entry(path.name, parent)
+    finally:
+        os.close(parent)
 
 
 def remove_tree(path: Path) -> None:
@@ -366,7 +422,7 @@ def remove_tree(path: Path) -> None:
     if not path.exists():
         return
     grant_tree_owner_access(path)
-    shutil.rmtree(path, onerror=_grant_and_retry)
+    shutil.rmtree(path)
 
 
 class FileOps:
