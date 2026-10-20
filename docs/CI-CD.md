@@ -14,7 +14,7 @@ after that workflow succeeds for the exact commit pushed to `main`:
    guard from dflippojr/.github on each pull request, pinned by commit SHA (`guard-ref` names the same commit). It is an
    early signal inside `gate`, not the judge, because a pull request supplies this file and could replace the job. The
    judge is `.github/workflows/gate-guard-target.yml` (#727): it runs from `main` under `pull_request_target`, calls
-   the same shared guard pinned to the same commit, and posts the `gate-guard` check on each pull request's head. It
+   the same shared guard pinned to the same commit, and its own job, `gate-guard-target / gate-guard`, is the verdict on each pull request's head. It
    fails a pull request that deletes or skips a test, adds a retry, or edits workflow, Sonar, coverage or lint config,
    unless the owner applied `gate-change-approved` after the newest push. **CI / changes** lists the
    changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `openapi` and `ui-tests` skip and
@@ -458,9 +458,10 @@ commit and its callers keep the diff-only review until each repository moves its
 and the `issues: read` grant) to review-v3. review-v3 exists: the owner created it at the merge commit of #725 on `main`,
 after a dispatched review here had passed. Callers pin it as shown above and need no tag of their own.
 
-**Gate guard required check (owner step).** The `main` ruleset must require `gate-guard` next to `gate`. `gate-guard` is
-the check run that `.github/workflows/gate-guard-target.yml` posts from `main`, so it appears on pull requests only after
-that file is merged, and it stays advisory until the ruleset names it. Without this step a pull request can still pass
+**Gate guard required check (owner step).** The `main` ruleset must require `gate-guard-target / gate-guard` next to `gate`.
+That check is the job `gate-guard-target` in `.github/workflows/gate-guard-target.yml`, which runs from `main`, so it appears
+on pull requests only after that file is merged, and it stays advisory until the ruleset names it. A ruleset that still
+names the old `gate-guard` check must be changed, because that check is no longer posted. Without this step a pull request can still pass
 `gate` after deleting tests, because `gate` alone judges nothing.
 
 **Required check on pull requests.** The review does not run on pushes to `main`; it is a required check for PRs into

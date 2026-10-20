@@ -125,16 +125,17 @@ def test_trusted_gate_guard_runs_from_main_pinned_by_sha_and_checks_out_nothing(
     assert set(events) == {"pull_request_target"}
     assert events["pull_request_target"]["types"] == [
         "opened", "synchronize", "reopened", "edited", "labeled", "unlabeled", "closed"]
-    assert workflow["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read", "checks": "write"}
+    assert workflow["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read"}
     assert workflow["concurrency"]["group"] == "gate-guard-target-${{ github.event.pull_request.head.sha }}"
-    assert list(workflow["jobs"]) == ["judge"]
-    judge = workflow["jobs"]["judge"]
-    match = TRUSTED_GATE_GUARD_USES.fullmatch(judge["uses"])
-    assert match, judge["uses"]
+    # The job id is the required check's name: gate-guard-target / gate-guard.
+    assert list(workflow["jobs"]) == ["gate-guard-target"]
+    target = workflow["jobs"]["gate-guard-target"]
+    match = TRUSTED_GATE_GUARD_USES.fullmatch(target["uses"])
+    assert match, target["uses"]
     # Pinned by commit, not branch, and guard-ref names the same commit.
-    assert judge["with"]["guard-ref"] == match.group(1)
+    assert target["with"]["guard-ref"] == match.group(1)
     # The caller runs no pull request code and reads no secrets: no steps, no checkout, no secrets.
-    assert "steps" not in judge and "secrets" not in judge
+    assert "steps" not in target and "secrets" not in target
     assert "actions/checkout" not in text
     assert "pull_request:" not in text and "workflow_dispatch" not in text
 

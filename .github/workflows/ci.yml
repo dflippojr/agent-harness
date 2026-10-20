@@ -376,9 +376,9 @@ jobs:
     # SHA, with guard-ref naming the same commit (owner decision on #727). A push skips it, and `gate` passes a
     # skipped job.
     if: github.event_name == 'pull_request'
-    uses: dflippojr/.github/.github/workflows/gate-guard.yml@e2c7fae8508be0359f3abaf136caade46ee7479c
+    uses: dflippojr/.github/.github/workflows/gate-guard.yml@fffb84b7fff0a8d68cad4a7da34ed4200e10dc0b
     with:
-      guard-ref: e2c7fae8508be0359f3abaf136caade46ee7479c
+      guard-ref: fffb84b7fff0a8d68cad4a7da34ed4200e10dc0b
       require-owner-label-actor: true
     permissions:
       contents: read

@@ -4,8 +4,9 @@
 # with a no-op, so the ruleset requires this file's check. This
 # caller checks out nothing from the pull request; the called workflow fetches its merge base and head as git objects
 # and reads their diff. It uses no secrets, only the GITHUB_TOKEN. The owner's gate-change-approved label counts only
-# when it was applied after the head was pushed. The verdict lands as the gate-guard check on the head commit; the
-# ruleset for main must require it next to gate (docs/CI-CD.md, "Required check on pull requests").
+# when it was applied after the head was pushed. The verdict is this job's own check on the head commit, named
+# gate-guard-target / gate-guard; the ruleset for main must require it next to gate (docs/CI-CD.md, "Required check on
+# pull requests").
 name: Gate guard (default branch)
 
 on:
@@ -20,7 +21,6 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
-  checks: write
 
 # The check run lands on the head commit, which several pull requests can
 # share, so each run judges every open pull request with that head and runs
@@ -29,10 +29,11 @@ concurrency:
   group: gate-guard-target-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
 
+# The job id names the required check: gate-guard-target / gate-guard.
 jobs:
-  judge:
-    uses: dflippojr/.github/.github/workflows/gate-guard-target.yml@e2c7fae8508be0359f3abaf136caade46ee7479c
+  gate-guard-target:
+    uses: dflippojr/.github/.github/workflows/gate-guard-target.yml@fffb84b7fff0a8d68cad4a7da34ed4200e10dc0b
     with:
-      guard-ref: e2c7fae8508be0359f3abaf136caade46ee7479c
+      guard-ref: fffb84b7fff0a8d68cad4a7da34ed4200e10dc0b
       # Private repositories run on the tower:
       # runs-on: '["self-hosted", "Linux", "X64", "tower-linux"]'
