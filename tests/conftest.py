@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from harness import backend_state, cli_domains, metrics, secret_scan, stables_shell
+from harness.fileops import grant_tree_owner_access
 from harness_modules.local_model import service as gpu_guard
 from harness_modules.local_model.warmup import READY, ModelWarmer
 
@@ -48,6 +49,21 @@ def isolate_local_supervision(monkeypatch, flag_dir):
 @pytest.fixture(autouse=True)
 def isolated_local_supervision(monkeypatch, tmp_path):
     isolate_local_supervision(monkeypatch, tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def writable_tmp_path(tmp_path):
+    """Git makes the objects of a repo it creates read-only. Restore owner write under tmp_path at teardown, so pytest
+    can clear the basetemp: an entry it can't delete piles up across runs (#754)."""
+    yield
+    grant_tree_owner_access(tmp_path)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def writable_basetemp(tmp_path_factory):
+    """Module- and session-scoped fixtures build their repos under the basetemp, outside any test's tmp_path (#754)."""
+    yield
+    grant_tree_owner_access(tmp_path_factory.getbasetemp())
 
 
 # One pinned gitleaks per machine, fetched once and checked against harness/gitleaks/pin.json (issue #263).
