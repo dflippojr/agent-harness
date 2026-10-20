@@ -4,13 +4,16 @@ and the alert-test trigger."""
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import math
 import os
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from harness import canary
@@ -274,6 +277,82 @@ def test_a_claim_that_commits_after_the_shutdown_recorded_its_slot_is_not_counte
     assert len(store.interrupted(NIGHT + DAY)) == 1
     assert len(store.unrun_streak()) == 1
     assert store.get(sha)["status"] == "blocked"
+
+
+class QueuedWrites(ThreadPoolExecutor):
+    """The loop's executor while every worker is busy: a job for `target` waits in the queue until `release()`, so a
+    cancel can still withdraw it. Other jobs run as usual."""
+
+    def __init__(self, target):
+        super().__init__(max_workers=2)
+        self.target, self.jobs = target, []
+        self.queued = asyncio.Event()
+
+    def submit(self, fn, /, *args, **kwargs):
+        if isinstance(fn, functools.partial) and fn.args[:1] == (self.target,):  # asyncio.to_thread(target, ...)
+            job: Future = Future()
+            self.jobs.append((job, functools.partial(fn, *args, **kwargs)))
+            self.queued.set()
+            return job
+        return super().submit(fn, *args, **kwargs)
+
+    def release(self) -> None:
+        for job, call in self.jobs:
+            if job.set_running_or_notify_cancel():                 # False: the cancel withdrew it
+                job.set_result(call())
+
+
+def _shutdown_while_queued(target, slot) -> None:
+    """Start `slot()`, stop the daemon while `target`'s write waits for a worker, then let the queue drain."""
+    async def body():
+        writes = QueuedWrites(target)
+        asyncio.get_running_loop().set_default_executor(writes)
+        task = asyncio.create_task(slot())
+        await writes.queued.wait()
+        task.cancel()                                              # Nightly.stop()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        writes.release()
+        try:
+            await task
+            raise AssertionError("the shutdown was swallowed")
+        except asyncio.CancelledError:
+            pass
+    run(body())
+
+
+def test_a_shutdown_while_the_slot_record_is_queued_still_records_the_slot(tmp_path):
+    notes: list[dict] = []
+    c = _canary(tmp_path, BlockedSuite("the GPU queue was busy"), notes, Nights())
+    _shutdown_while_queued(c.store.record_slot, lambda: c.nightly("a" * 40))
+    assert c.store.get("a" * 40)["status"] == "blocked"
+    assert [(s["outcome"], s["reason"]) for s in c.store.unrun_streak()] == [("blocked", "the GPU queue was busy")]
+    assert c.store.interrupted(NIGHT + 60) == []               # and nothing is left for the next start to recover
+
+
+@pytest.mark.parametrize("start_check", [False, True], ids=["slot", "start-check"])
+def test_a_shutdown_while_the_alert_mark_is_queued_does_not_repeat_the_alert(tmp_path, start_check):
+    notes: list[dict] = []
+    clock = Nights()
+    c = _canary(tmp_path, BlockedSuite("the GPU queue was busy"), notes, clock)
+    for night in range(3 if start_check else 2):              # the slot itself is the third
+        c.store.record_slot(clock.t, f"{night:040x}", "blocked", "the GPU queue was busy")
+        clock.t += DAY
+    slot = c.silence_alarm if start_check else functools.partial(c.nightly, "e" * 40)
+    _shutdown_while_queued(c.store.mark_slot_alerted, slot)
+    assert len(notes) == 1
+    assert c.store.unrun_streak()[0]["alerted_at"] == clock.t
+    run(c.silence_alarm())                                     # the next start, the same day
+    assert len(notes) == 1
+
+
+def test_a_shutdown_while_the_result_is_queued_keeps_the_finished_run(tmp_path):
+    notes: list[dict] = []
+    c = _canary(tmp_path, ScriptedSuite([18]), notes, Nights())
+    _shutdown_while_queued(c.store.finish, lambda: c.nightly("a" * 40))
+    row = c.store.get("a" * 40)
+    assert row["status"] == "complete" and row["passes"] == 18
+    assert c.store.unrun_streak() == []                        # a run, not a silent night
 
 
 def test_a_slot_a_crash_interrupted_is_recorded_at_the_next_start(tmp_path):

@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from .db import finish_then_cancel
+
 log = logging.getLogger("harness.canary")
 
 REPO = "dflippojr/agent-harness"
@@ -91,9 +93,17 @@ def _row(row) -> dict | None:
     return out
 
 
+async def _write(fn, *args):
+    """A CanaryStore write from the event loop. It commits even if a shutdown cancels the caller meanwhile, and the
+    cancel is raised after it: through a bare `asyncio.to_thread`, a cancel while the job still waits for a worker
+    drops the write (a slot never recorded, an alert sent again)."""
+    return await finish_then_cancel(asyncio.to_thread(fn, *args))
+
+
 class CanaryStore:
     """Writes run on the database's writer thread, one transaction each; reads use a pooled read connection.
-    Every method blocks the calling thread: event-loop code calls them through `asyncio.to_thread`."""
+    Every method blocks the calling thread: event-loop code calls reads through `asyncio.to_thread` and writes
+    through `_write`."""
 
     def __init__(self, db):
         self.db = db
@@ -280,7 +290,7 @@ class Canary:
         row = await asyncio.to_thread(self.store.get, sha)
         if row and row["status"] in FINAL:
             return row
-        tries = await asyncio.to_thread(self.store.begin, sha, self.clock())
+        tries = await _write(self.store.begin, sha, self.clock())
         # Every way out after the claim finishes the row, with the best state reached so far: a crash or shutdown
         # in the first run leaves it blocked (the next slot may retry); after that, the first run's results stand.
         status, outcomes, verdict, note = "blocked", [], Verdict(False), ""
@@ -291,15 +301,15 @@ class Canary:
             else:
                 status, outcomes = report.status, report.outcomes
                 if report.status == "complete":
-                    await asyncio.to_thread(self.store.first_run, sha, outcomes)
+                    await _write(self.store.first_run, sha, outcomes)
                     outcomes, verdict = await self._judge(sha, report)
         except CanaryConfigError as e:
             # the same config fails the same way every night: final for this commit, logged once (the row is final)
             status, note = "skipped", str(e)
             log.error("canary %s skipped: %s", sha[:SHORT_SHA], e)
         finally:
-            await asyncio.to_thread(self.store.finish, sha, status, outcomes, self.clock(), verdict.baseline_sha,
-                                    verdict.baseline_rate, verdict.alert, note)
+            await _write(self.store.finish, sha, status, outcomes, self.clock(), verdict.baseline_sha,
+                         verdict.baseline_rate, verdict.alert, note)
         if verdict.alert:
             self._alert(sha, pass_rate(outcomes), verdict)
         return await asyncio.to_thread(self.store.get, sha)
@@ -317,7 +327,7 @@ class Canary:
             if row and row["status"] == "running":
                 # cancelled before run_for could finish its row: finish it here, so the next start's interrupted()
                 # doesn't record this slot a second time
-                await asyncio.to_thread(self.store.abandon, sha, self.clock(), "the daemon stopped during the slot")
+                await _write(self.store.abandon, sha, self.clock(), "the daemon stopped during the slot")
                 row = await asyncio.to_thread(self.store.get, sha)
             await self._end_slot(sha, before, row, "the daemon stopped during the slot", alarm=False)
             raise
@@ -339,7 +349,7 @@ class Canary:
                       "the next deployed commit runs" if outcome == "skipped" else f"{sha[:SHORT_SHA]} already ran")
         else:
             outcome, reason = row["status"], error or row["note"]
-        await asyncio.to_thread(self.store.record_slot, self.clock(), sha, outcome, reason)
+        await _write(self.store.record_slot, self.clock(), sha, outcome, reason)
         if alarm:
             await self.silence_alarm()
 
@@ -354,7 +364,7 @@ class Canary:
         if any(s["alerted_at"] and datetime.fromtimestamp(s["alerted_at"]).date() == today for s in streak):
             return
         self.notify(silence_alert(streak, self.topic))
-        await asyncio.to_thread(self.store.mark_slot_alerted, streak[0]["id"], now)
+        await _write(self.store.mark_slot_alerted, streak[0]["id"], now)
 
     async def _judge(self, sha: str, report: Report) -> tuple[list[dict], Verdict]:
         prior = await asyncio.to_thread(self.store.completed_before, sha, self.cfg.baseline_runs)
