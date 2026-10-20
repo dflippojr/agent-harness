@@ -10,6 +10,7 @@ import sys
 import pytest
 
 from harness import app_stores, clone, maintenance
+from harness.fileops import grant_tree_owner_access
 from macrunner import harness_runner
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
@@ -62,3 +63,19 @@ def test_removing_a_link_leaves_what_it_points_to_alone(tmp_path, remove):
     assert not tree.exists()
     assert (outside / "keep").read_text(encoding="utf-8") == "x"
     assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+
+
+@posix_only
+def test_granting_access_to_a_link_root_leaves_its_target_alone(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("x", encoding="utf-8")
+    (outside / "keep").chmod(0o444)
+    outside.chmod(0o500)
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+
+    grant_tree_owner_access(link)
+
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o500
+    assert stat.S_IMODE((outside / "keep").stat().st_mode) == 0o444
