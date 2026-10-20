@@ -187,11 +187,11 @@ def test_a_directory_whose_owner_access_cannot_be_granted_is_left_and_not_raised
     sealed.chmod(0o000)
     real_chmod = os.chmod
 
-    def refuse_descriptor_chmod(path, mode, **kwargs):
-        if str(path).startswith("/proc/"):
+    def refuse_chmod_of_sealed(path, mode, **kwargs):   # by descriptor (/proc) or by name: whichever route is taken
+        if str(path).startswith("/proc/") or str(path).endswith("sealed"):
             raise PermissionError(path)
         return real_chmod(path, mode, **kwargs)
-    monkeypatch.setattr(os, "chmod", refuse_descriptor_chmod)
+    monkeypatch.setattr(os, "chmod", refuse_chmod_of_sealed)
     try:
         grant_tree_owner_access(tmp_path / "tree")
         assert stat.S_IMODE(sealed.stat().st_mode) == 0o000
