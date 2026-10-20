@@ -113,6 +113,14 @@ class CanaryStore:
             return self.db.conn.execute("SELECT tries FROM canary_results WHERE sha = ?", (sha,)).fetchone()[0]
         return self.db.write(claim)
 
+    def abandon(self, sha: str, now: float, note: str) -> None:
+        """Mark a row blocked only if it is still `running`: the write is queued behind a completion that is in
+        flight, so it can't overwrite a result."""
+        def mark():
+            self.db.conn.execute("UPDATE canary_results SET status = 'blocked', finished_at = ?, note = ? "
+                                 "WHERE sha = ? AND status = 'running'", (now, note, sha))
+        self.db.write(mark)
+
     def first_run(self, sha: str, outcomes: list[dict]) -> None:
         """Keep a completed first run while the confirmation reruns, so a restart can still finish the row with it."""
         def keep():
@@ -309,8 +317,7 @@ class Canary:
             if row and row["status"] == "running":
                 # cancelled before run_for could finish its row: finish it here, so the next start's interrupted()
                 # doesn't record this slot a second time
-                await asyncio.to_thread(self.store.finish, sha, "blocked", [], self.clock(),
-                                        note="the daemon stopped during the slot")
+                await asyncio.to_thread(self.store.abandon, sha, self.clock(), "the daemon stopped during the slot")
                 row = await asyncio.to_thread(self.store.get, sha)
             await self._end_slot(sha, before, row, "the daemon stopped during the slot", alarm=False)
             raise

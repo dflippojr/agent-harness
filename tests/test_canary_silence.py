@@ -253,6 +253,19 @@ def test_a_shutdown_during_the_first_read_of_the_slot_is_still_recorded(tmp_path
         ("skipped", "the daemon stopped during the slot")]
 
 
+def test_a_shutdown_never_overwrites_a_result_that_finished(tmp_path):
+    store = CanaryStore(Database(tmp_path / "h.sqlite3"))
+    sha = "f" * 40
+    store.begin(sha, NIGHT)
+    store.finish(sha, "complete", _outcomes(18), NIGHT + 60)
+    store.abandon(sha, NIGHT + 120, "the daemon stopped during the slot")
+    row = store.get(sha)
+    assert row["status"] == "complete" and row["outcomes"]
+    store.begin("9" * 40, NIGHT)
+    store.abandon("9" * 40, NIGHT + 120, "the daemon stopped during the slot")
+    assert store.get("9" * 40)["status"] == "blocked"
+
+
 def test_a_claim_that_commits_after_the_shutdown_recorded_its_slot_is_not_counted_again(tmp_path):
     store = CanaryStore(Database(tmp_path / "h.sqlite3"))
     sha = "d" * 40
