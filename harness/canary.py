@@ -30,6 +30,8 @@ log = logging.getLogger("harness.canary")
 REPO = "dflippojr/agent-harness"
 FINAL = ("complete", "timeout", "skipped")  # blocked is the only status the next nightly slot retries
 UNRUN = ("blocked", "skipped")  # a nightly slot that produced no result (#732)
+OPEN = "pending"  # a slot's outcome from its start until it is recorded; a crash leaves it for the next start
+RESTARTED = "the daemon restarted during the slot"
 SILENT_SLOTS = 3  # this many unrun slots in a row sends the silence alarm
 SHORT_SHA = 8
 # The canary's sessions live in these projects (bakeoff/canary.py). They are never resumed after a restart (#316).
@@ -153,28 +155,31 @@ class CanaryStore:
 
     def interrupted(self, now: float) -> list[dict]:
         """At daemon start, finish every row a crash left `running` (#316): with the first run's results if it had
-        completed (no alert: an alert is never sent unconfirmed), else `blocked`, so the next slot may retry."""
+        completed (no alert: an alert is never sent unconfirmed), else `blocked`, so the next slot may retry. Then
+        record each slot a crash left open (#732) from how its commit's row ended. Both steps only touch what is
+        still unfinished, so a crash during this recovery is finished by the next start."""
         def read():
             return self.db.conn.execute("SELECT * FROM canary_results WHERE status = 'running'").fetchall()
         rows = [row for r in self.db.read(read) if (row := _row(r)) is not None]
         for row in rows:
             if row["outcomes"]:
-                status, note = "complete", "daemon restarted during the confirmation rerun: first-run results, no alert"
-                self.finish(row["sha"], status, row["outcomes"], now, note=note)
+                note = "daemon restarted during the confirmation rerun: first-run results, no alert"
+                self.finish(row["sha"], "complete", row["outcomes"], now, note=note)
             else:
-                status, note = "blocked", "daemon restarted mid-run"
-                self.finish(row["sha"], status, [], now, note=note)
-            if not self._slot_since(row["sha"], row["started_at"]):
-                # the crashed slot counts towards the silence alarm (#732); a shutdown that cancelled the claim in
-                # flight already recorded its slot, and its row only committed afterwards
-                self.record_slot(now, row["sha"], status, note)
+                self.finish(row["sha"], "blocked", [], now, note="daemon restarted mid-run")
+        self._close_open_slots(now)
         return rows
 
-    def _slot_since(self, sha: str, at: float) -> bool:
+    def _close_open_slots(self, now: float) -> None:
         def read():
-            return self.db.conn.execute("SELECT 1 FROM canary_slots WHERE sha = ? AND at >= ? LIMIT 1",
-                                        (sha, at)).fetchone()
-        return self.db.read(read) is not None
+            return self.db.conn.execute("SELECT * FROM canary_slots WHERE outcome = ? ORDER BY id", (OPEN,)).fetchall()
+        for slot in self.db.read(read):
+            sha = slot["sha"]
+            row = self.get(sha) if sha else None
+            # a row that didn't finish during the slot is as it was before it: the crash came before the claim
+            untouched = row is None or (row["finished_at"] or 0) < slot["at"]
+            outcome, reason = slot_outcome(sha, row if untouched else None, row, RESTARTED if sha and untouched else "")
+            self.record_slot(now, sha, outcome, reason)
 
     def completed_before(self, sha: str, limit: int) -> list[dict]:
         """The newest `limit` completed runs other than `sha`, newest first."""
@@ -200,10 +205,25 @@ class CanaryStore:
         return self.db.read(read)
 
     # the nightly slots (#732)
-    def record_slot(self, at: float, sha: str, outcome: str, reason: str) -> int:
+    def open_slot(self, at: float, sha: str) -> int:
+        """Record a slot as it starts, before anything else it writes. It stays `pending` until `record_slot`, so a
+        crash between the slot's writes leaves it for the next start's `interrupted` instead of losing it."""
         def record():
-            return self.db.conn.execute("INSERT INTO canary_slots (at, sha, outcome, reason) VALUES (?, ?, ?, ?)",
-                                        (at, sha, outcome, reason)).lastrowid
+            return self.db.conn.execute("INSERT INTO canary_slots (at, sha, outcome) VALUES (?, ?, ?)",
+                                        (at, sha, OPEN)).lastrowid
+        return self.db.write(record)
+
+    def record_slot(self, at: float, sha: str, outcome: str, reason: str) -> int:
+        """Record how a slot ended: on the open slot for `sha` if there is one, else as a new row."""
+        def record():
+            slot = self.db.conn.execute("SELECT id FROM canary_slots WHERE outcome = ? AND sha = ? ORDER BY id DESC "
+                                        "LIMIT 1", (OPEN, sha)).fetchone()
+            if slot is None:
+                return self.db.conn.execute("INSERT INTO canary_slots (at, sha, outcome, reason) VALUES (?, ?, ?, ?)",
+                                            (at, sha, outcome, reason)).lastrowid
+            self.db.conn.execute("UPDATE canary_slots SET at = ?, outcome = ?, reason = ? WHERE id = ?",
+                                 (at, outcome, reason, slot[0]))
+            return slot[0]
         return self.db.write(record)
 
     def mark_slot_alerted(self, slot_id: int, now: float) -> None:
@@ -212,9 +232,11 @@ class CanaryStore:
         self.db.write(mark)
 
     def unrun_streak(self) -> list[dict]:
-        """The newest slots that ended blocked or skipped, newest first, up to the last slot that did run."""
+        """The newest slots that ended blocked or skipped, newest first, up to the last slot that did run. A slot
+        still open neither counts nor ends the streak."""
         def read():
-            return self.db.conn.execute("SELECT * FROM canary_slots ORDER BY id DESC LIMIT 400").fetchall()
+            return self.db.conn.execute("SELECT * FROM canary_slots WHERE outcome != ? ORDER BY id DESC LIMIT 400",
+                                        (OPEN,)).fetchall()
         streak = []
         for row in self.db.read(read):
             if row["outcome"] not in UNRUN:
@@ -318,6 +340,7 @@ class Canary:
         """One nightly slot: `run_for`, then the slot's outcome in `canary_slots` and the silence alarm (#732)."""
         before = None
         try:
+            await _write(self.store.open_slot, self.clock(), sha)
             before = await asyncio.to_thread(self.store.get, sha) if sha else None
             row = await self.run_for(sha)
         except asyncio.CancelledError:
@@ -340,15 +363,7 @@ class Canary:
 
     async def _end_slot(self, sha: str, before: dict | None, row: dict | None, error: str = "",
                         alarm: bool = True) -> None:
-        if row is None or row["status"] == "running":
-            outcome, reason = "skipped", error or ("no deployed commit" if not sha else "no result recorded")
-        elif before and before["status"] in FINAL:
-            # nothing ran: the commit already has its one row. Only a skipped one leaves the canary silent.
-            outcome = before["status"]
-            reason = (f"{sha[:SHORT_SHA]} was already skipped ({before['note'] or 'could not start'}); "
-                      "the next deployed commit runs" if outcome == "skipped" else f"{sha[:SHORT_SHA]} already ran")
-        else:
-            outcome, reason = row["status"], error or row["note"]
+        outcome, reason = slot_outcome(sha, before, row, error)
         await _write(self.store.record_slot, self.clock(), sha, outcome, reason)
         if alarm:
             await self.silence_alarm()
@@ -394,6 +409,18 @@ class Canary:
     def _alert(self, sha: str, rate: float, verdict: Verdict) -> None:
         assert verdict.baseline_rate is not None  # judge() sets the baseline on every alerting verdict
         self.notify(regression_alert(sha, rate, verdict.baseline_sha, verdict.baseline_rate, self.topic))
+
+
+def slot_outcome(sha: str, before: dict | None, row: dict | None, error: str = "") -> tuple[str, str]:
+    """How a nightly slot ended, from the commit's row before the slot (`before`) and after it (`row`)."""
+    if row is None or row["status"] == "running":
+        return "skipped", error or ("no deployed commit" if not sha else "no result recorded")
+    if before and before["status"] in FINAL:
+        # nothing ran: the commit already has its one row. Only a skipped one leaves the canary silent.
+        outcome = before["status"]
+        return outcome, (f"{sha[:SHORT_SHA]} was already skipped ({before['note'] or 'could not start'}); "
+                         "the next deployed commit runs" if outcome == "skipped" else f"{sha[:SHORT_SHA]} already ran")
+    return row["status"], error or row["note"]
 
 
 def silence_alert(streak: list[dict], topic: str) -> dict:

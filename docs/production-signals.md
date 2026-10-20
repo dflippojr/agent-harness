@@ -66,8 +66,9 @@ for row in db.execute("SELECT substr(sha, 1, 8), status, pass_rate, datetime(fin
 ```
 
 If the checkout's virtual environment lives elsewhere, `.venv-path` in the checkout names it. `canary_slots` has one
-row per nightly slot: `outcome` is `complete`, `timeout`, `blocked` or `skipped`, and `reason` says why it didn't
-run (a manual hold, the resource guard and its trigger, a busy queue, a missing fixture, a commit already skipped).
+row per nightly slot: `outcome` is `complete`, `timeout`, `blocked` or `skipped` (`pending` while the slot runs, or
+until the next start after a crash), and `reason` says why it didn't run (a manual hold, the resource guard and its
+trigger, a busy queue, a missing fixture, a commit already skipped).
 `canary_results` has one row per commit ([canary-evals.md](canary-evals.md#storage-and-metrics)).
 
 ## Real-environment lane

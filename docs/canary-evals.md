@@ -97,7 +97,10 @@ passes, attempts, pass_rate, turns, prompt_tokens, wall_seconds, baseline_sha, b
 
 `canary_slots` (#732), one row per nightly slot: `at, sha, outcome, reason, alerted_at`. `outcome` is the commit's
 row status after the slot (`complete`, `timeout`, `blocked`, `skipped`); `reason` is why it didn't run, including
-"already skipped" for a commit whose one row was final before the slot, and "no deployed commit".
+"already skipped" for a commit whose one row was final before the slot, and "no deployed commit". The row is written
+`pending` when the slot starts, before the slot's other writes, and gets its outcome when the slot ends. A slot a crash
+left `pending` gets its outcome from the commit's row at the next start, so a crash between the result and the slot
+record can't lose a slot.
 
 `/metrics` exports `harness_canary_pass_rate`, `harness_canary_turns`, `harness_canary_prompt_tokens` and
 `harness_canary_wall_seconds`, each labelled `sha` (first 8 characters), for the latest 30 results only. It also
@@ -141,7 +144,8 @@ After every nightly slot the daemon records the slot in `canary_slots`. When the
 slots in a row ended `blocked` or `skipped`, it sends one ntfy notification, "Agent canary has not run for N nights",
 listing the reasons recorded on those slots. While the silence lasts it repeats at most once a calendar day
 (tower-local), on the next slot or daemon start. A slot a shutdown interrupts is recorded as the daemon stops ("the
-daemon stopped during the slot"), and one a crash interrupted when the daemon next starts; the daemon checks for
+daemon stopped during the slot"), and one a crash interrupted when the daemon next starts (it was written `pending`
+when it began); the daemon checks for
 silence each time it starts, so restarts at slot time can't hide one. A slot that runs (`complete` or `timeout`), or one on a commit that already has a
 result, ends the streak; the next silence starts counting from zero. The alert goes through `Notifier.send`, like
 the regression alert: a delivery ntfy refuses is logged, not retried.

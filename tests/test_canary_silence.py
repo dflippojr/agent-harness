@@ -355,12 +355,65 @@ def test_a_shutdown_while_the_result_is_queued_keeps_the_finished_run(tmp_path):
     assert c.store.unrun_streak() == []                        # a run, not a silent night
 
 
+class Crash(BaseException):
+    """The process dies here: nothing after it runs, not even `except Exception` or the shutdown handler."""
+
+
+def _crash_after(fn):
+    def write(*args, **kwargs):
+        fn(*args, **kwargs)                                    # this write committed ...
+        raise Crash                                            # ... and the daemon died before the next one
+    return write
+
+
+def _crash_before(*_args, **_kwargs):
+    raise Crash
+
+
+@pytest.mark.parametrize("where", ["after-the-result", "before-the-claim", "mid-run", "in-the-recovery"])
+def test_a_crash_between_the_canary_writes_never_loses_the_slot(tmp_path, where):
+    notes: list[dict] = []
+    clock = Nights()
+    suite = BlockedSuite("the GPU queue was busy")
+    c = _canary(tmp_path, suite, notes, clock)
+    for night in range(2):                                     # two recorded blocked slots ...
+        c.store.record_slot(clock.t, f"{night:040x}", "blocked", "the GPU queue was busy")
+        clock.t += DAY
+    if where == "after-the-result":                            # ... and a third whose blocked result committed
+        c.store.finish = _crash_after(c.store.finish)
+    elif where == "before-the-claim":
+        c.store.begin = _crash_before
+    else:                                                      # the run's own `finally` never gets to write
+        c.run_suite = c.store.finish = _crash_before
+    with pytest.raises(Crash):
+        run(c.nightly("a" * 40))
+    if where == "in-the-recovery":                             # the next start dies too, once it finished the row
+        first_start = CanaryStore(c.store.db)
+        first_start.finish = _crash_after(first_start.finish)
+        with pytest.raises(Crash):
+            first_start.interrupted(clock.t + 60)
+    assert len(c.store.unrun_streak()) == 2                    # the open slot neither counts nor ends the streak yet
+    restarted = Canary(CanaryStore(c.store.db), suite, CanaryConfig(enabled=True), notes.append, topic="t",
+                       clock=lambda: clock.t + 120)
+    restarted.store.interrupted(clock.t + 120)
+    run(restarted.silence_alarm())
+    reason = {"after-the-result": "the GPU queue was busy", "before-the-claim": "the daemon restarted during the slot",
+              "mid-run": "daemon restarted mid-run", "in-the-recovery": "daemon restarted mid-run"}[where]
+    streak = restarted.store.unrun_streak()
+    assert [(s["sha"], s["reason"]) for s in streak] == [("a" * 40, reason)] + [
+        (f"{night:040x}", "the GPU queue was busy") for night in (1, 0)]
+    assert len(notes) == 1 and "3 nights" in notes[0]["title"]
+    assert restarted.store.interrupted(clock.t + 180) == [] and len(restarted.store.unrun_streak()) == 3
+
+
 def test_a_slot_a_crash_interrupted_is_recorded_at_the_next_start(tmp_path):
     store = CanaryStore(Database(tmp_path / "h.sqlite3"))
+    store.open_slot(NIGHT, "a" * 40)
     store.begin("a" * 40, NIGHT)                               # the daemon died mid-run
     store.interrupted(NIGHT + 60)
     assert [(s["sha"], s["outcome"], s["reason"]) for s in store.unrun_streak()] == [
         ("a" * 40, "blocked", "daemon restarted mid-run")]
+    store.open_slot(NIGHT + DAY, "b" * 40)
     store.begin("b" * 40, NIGHT + DAY)
     store.first_run("b" * 40, _outcomes(18))                   # ... or during the confirmation rerun
     store.interrupted(NIGHT + DAY + 60)
