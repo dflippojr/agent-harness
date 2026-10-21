@@ -43,7 +43,7 @@ sys.path.insert(0, str(APP_DIR))
 from harness import projects  # noqa: E402
 from harness.changes import MAX_DIFF_CHARS, MAX_SCAN_COMMITS, published, repo_diffs, workspace_changes  # noqa: E402
 from harness.compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION  # noqa: E402
-from harness.fileops import FILE_TOOLS, FileOps, ToolError, cap_command_output, dir_size, resolve_path  # noqa: E402
+from harness.fileops import FILE_TOOLS, FileOps, ToolError, cap_command_output, dir_size, remove_tree, resolve_path  # noqa: E402
 from harness.updater import apply_update, schedule_launchd_handoff  # noqa: E402
 
 VERSION = MAC_CLIENT_VERSION
@@ -563,14 +563,6 @@ def git_temp_root(home: Path) -> Path:
     """Where host-side git keeps its isolation directories: under runner/, which the sandbox profile denies, so a
     sandboxed command can't plant hooks or config in them."""
     return home / ".agent-harness" / "runner" / "tmp"
-
-
-def remove_tree(path: Path) -> None:
-    def on_error(func, p, _exc):
-        os.chmod(p, 0o700)
-        func(p)
-    if path.exists():
-        shutil.rmtree(path, onerror=on_error)
 
 
 def _quote(arg: str) -> str:

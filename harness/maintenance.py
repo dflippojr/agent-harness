@@ -18,9 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import shutil
-import stat
 import time
 import uuid
 from pathlib import Path
@@ -28,6 +26,7 @@ from pathlib import Path
 from . import projects, audit_context, operation_audit
 from .config import Config
 from .db import Database
+from .fileops import remove_tree
 from .principal import OWNER_USER_ID
 from .storage import checkpoints_dir
 from .runner_contract import RunnerError
@@ -35,15 +34,6 @@ from .runner import ACTIVE, Runner, dir_size
 from .sandbox import run_cmd
 
 log = logging.getLogger("harness.maintenance")
-
-
-def remove_tree(path: Path) -> None:
-    """shutil.rmtree that also removes read-only files (git objects are read-only on Windows)."""
-    def on_error(func, p, _exc):
-        os.chmod(p, stat.S_IWRITE)
-        func(p)
-    if path.exists():
-        shutil.rmtree(path, onerror=on_error)
 
 
 class Maintenance:

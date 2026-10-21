@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
-import stat
 import subprocess
 import tempfile
 import threading
@@ -19,6 +17,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from .fileops import remove_tree
 from .principal import PUBLIC_CLONE_HOSTS
 from .projects import GitError, GitResult, isolated_git_dir
 from .storage import ContainmentError, require_contained
@@ -254,38 +253,14 @@ def _discard(dest: Path, remove: bool) -> None:
         _remove_tree(dest)
 
 
-def _make_writable(p: str) -> None:
-    try:
-        os.chmod(p, stat.S_IWRITE)
-    except OSError:
-        pass
-
-
-def _retry_writable(func, p, _exc) -> None:
-    """shutil.rmtree onerror: clear the read-only bit and retry once."""
-    _make_writable(p)
-    try:
-        func(p)
-    except OSError:
-        pass
-
-
-def _make_tree_writable(path: Path) -> None:
-    try:
-        for root, dirs, files in os.walk(path):
-            for name in files + dirs:
-                _make_writable(os.path.join(root, name))
-            _make_writable(root)
-    except OSError:
-        pass
-
-
 def _remove_tree(path: Path) -> None:
     for _ in range(15):
         if not path.exists():
             return
-        _make_tree_writable(path)
-        shutil.rmtree(path, onerror=_retry_writable)
+        try:
+            remove_tree(path)
+        except OSError:
+            pass
         if not path.exists():
             return
         time.sleep(0.1)

@@ -34,7 +34,6 @@ import os
 import re
 import shutil
 import sqlite3
-import stat
 import threading
 import time
 import weakref
@@ -43,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import Database, merge_newest_first
+from .fileops import remove_tree
 from .sqlite_backup import backup_sqlite
 
 log = logging.getLogger(__name__)
@@ -101,15 +101,6 @@ def app_dir(data_dir: Path, app_id: str) -> Path:
     if not _APP_ID.fullmatch(app_id or ""):
         raise ValueError(f"not an App id: {app_id!r}")
     return Path(data_dir) / "apps" / app_id
-
-
-def _remove_tree(path: Path) -> None:
-    """shutil.rmtree that also removes read-only files (git objects are read-only on Windows)."""
-    def on_error(func, p, _exc):
-        os.chmod(p, stat.S_IWRITE)
-        func(p)
-    if path.exists():
-        shutil.rmtree(path, onerror=on_error)
 
 
 def _same_path(a: str | Path, b: Path) -> bool:
@@ -596,7 +587,7 @@ class SessionStores:
                 del self._tokens[token]
         if entry is not None:
             entry.db.close()
-        _remove_tree(folder)
+        remove_tree(folder)
         log.info("erased the store and folder of App %s", app_id)
 
     def _stage(self, db: Database, sid: str) -> None:

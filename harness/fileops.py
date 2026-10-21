@@ -11,9 +11,11 @@ import errno
 import functools
 import os
 import re
+import shutil
 import stat
 import sys
 from pathlib import Path
+from typing import Any, NamedTuple
 
 try:
     import fcntl
@@ -312,6 +314,217 @@ def dir_size(path: Path) -> int:
         except OSError:
             pass
     return total
+
+
+_O_PATH = getattr(os, "O_PATH", 0)  # Linux: a descriptor for an entry, which needs no permission on the entry itself
+# Without O_PATH (macOS), a directory the owner can't read can't be pinned, so it is changed by name instead. That is
+# safe only where chmod can leave a link alone (follow_symlinks=False with dir_fd); elsewhere the directory is left.
+_CHMOD_NOFOLLOW = os.chmod in os.supports_dir_fd and os.chmod in os.supports_follow_symlinks
+
+
+def _is_reparse_point(path: str) -> bool:
+    """A symlink, or on Windows a junction or other reparse point."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+class _FdTreeOps:
+    """The operations of the owner-access walk, through descriptors. A handle is an open file descriptor.
+
+    Each entry is pinned with O_NOFOLLOW before it is read or changed, and both happen through the descriptor, so a
+    name swapped for a link after the walk listed it can't redirect the change. Used wherever POSIX descriptors work.
+    """
+
+    stat = staticmethod(os.fstat)
+    listdir = staticmethod(os.listdir)
+    close = staticmethod(os.close)
+
+    @property
+    def chmod_by_name(self) -> bool:
+        return _CHMOD_NOFOLLOW
+
+    def open_parent(self, path: Path) -> int:
+        return os.open(path.parent, os.O_RDONLY | _O_DIRECTORY)
+
+    def pin(self, name: str, parent: int) -> int | None:
+        """A descriptor for `name` that does not follow a link, or None where it can't be opened.
+
+        O_NONBLOCK keeps a FIFO with no writer from stalling the walk: opening it returns at once.
+        """
+        with contextlib.suppress(OSError):
+            return os.open(name, (_O_PATH or os.O_RDONLY) | _O_NOFOLLOW | _O_NONBLOCK, dir_fd=parent)
+        return None
+
+    def chmod(self, pinned: int, mode: int) -> None:
+        # An O_PATH descriptor can't be passed to fchmod: its inode is changed through /proc, whatever the name it was
+        # opened by has become.
+        os.chmod(f"/proc/self/fd/{pinned}" if _O_PATH else pinned, mode)
+
+    def stat_name(self, name: str, parent: int) -> os.stat_result:
+        return os.stat(name, dir_fd=parent, follow_symlinks=False)
+
+    def chmod_name(self, name: str, parent: int, mode: int) -> None:
+        os.chmod(name, mode, dir_fd=parent, follow_symlinks=False)
+
+    def open_dir(self, name: str, parent: int) -> int:
+        return os.open(name, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=parent)
+
+
+class _PinnedPath(NamedTuple):
+    path: str
+    st: os.stat_result
+
+
+class _PathTreeOps:
+    """The same operations by path, for where descriptors can't do them (Windows). A directory handle is its path.
+
+    An entry is pinned by what lstat saw: a link or junction is refused, and the entry is looked at again, and must be
+    the same file and not a link, just before it is changed. Check and change are still two steps, so a swap in
+    between is a residual race that descriptors don't have; on Windows chmod only toggles the read-only flag.
+    """
+
+    chmod_by_name = True   # what stat_name returned is not a link, so a name is as good as a handle
+    listdir = staticmethod(os.listdir)
+
+    def open_parent(self, path: Path) -> str:
+        parent = str(path.parent)
+        if not os.path.isdir(parent):
+            raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), parent)
+        return parent
+
+    def pin(self, name: str, parent: str) -> _PinnedPath | None:
+        full = os.path.join(parent, name)
+        try:
+            st = os.lstat(full)
+        except OSError:
+            return None
+        return None if _is_reparse_point(full) else _PinnedPath(full, st)
+
+    def stat(self, pinned: _PinnedPath) -> os.stat_result:
+        return pinned.st
+
+    def chmod(self, pinned: _PinnedPath, mode: int) -> None:
+        if _is_reparse_point(pinned.path) or not os.path.samestat(pinned.st, os.lstat(pinned.path)):
+            raise OSError(errno.EBUSY, "entry changed since it was looked at", pinned.path)
+        os.chmod(pinned.path, mode)
+
+    def stat_name(self, name: str, parent: str) -> os.stat_result:
+        full = os.path.join(parent, name)
+        st = os.lstat(full)
+        if _is_reparse_point(full):
+            raise OSError(errno.ELOOP, "a link or junction", full)
+        return st
+
+    def chmod_name(self, name: str, parent: str, mode: int) -> None:
+        os.chmod(os.path.join(parent, name), mode)
+
+    def open_dir(self, name: str, parent: str) -> str:
+        full = os.path.join(parent, name)
+        if _is_reparse_point(full) or not os.path.isdir(full):
+            raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), full)
+        return full
+
+    def close(self, handle: str) -> None:
+        pass
+
+
+# What the owner-access walk needs of a tree, which `_FdTreeOps` and `_PathTreeOps` each provide. A handle is a
+# descriptor or a path, whichever the implementation works in, so the walk takes the operations as `Any`:
+#   open_parent(path) -> handle of the directory `path` is in; raises OSError where there is none
+#   pin(name, parent) -> handle for the entry `name` that does not follow a link; None where it can't be had
+#   stat(pinned) -> the pinned entry's stat;  chmod(pinned, mode) -> set its mode, raising OSError where it can't
+#   stat_name(name, parent) -> the stat of `name` itself, not of what a link points to; raises OSError for a link or a
+#       missing name;  chmod_name(name, parent, mode) -> set its mode without following a link
+#   chmod_by_name -> whether chmod_name may be used;  open_dir(name, parent) -> handle for the directory `name`,
+#       raising OSError for a link or a non-directory;  listdir(directory) -> its names;  close(handle)
+_TreeOps = Any
+
+
+def _tree_ops() -> _FdTreeOps | _PathTreeOps:
+    """Descriptors where this platform has what the walk needs of them, else paths. POSIX never takes the path route."""
+    if _DIR_FD and os.listdir in os.supports_fd and (_O_PATH or os.chmod in os.supports_fd):
+        return _FdTreeOps()
+    return _PathTreeOps()
+
+
+def _grant_unpinned_dir(ops: _TreeOps, name: str, parent: Any) -> bool:
+    """For an entry that can't be pinned: owner access by name, relative to its parent, without following a link.
+
+    Returns whether `name` is a directory whose entries should be reached. Where chmod can't avoid links, nothing is
+    changed and the directory stays as it was.
+    """
+    try:
+        st = ops.stat_name(name, parent)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    if ops.chmod_by_name:
+        with contextlib.suppress(OSError):
+            ops.chmod_name(name, parent, stat.S_IMODE(st.st_mode) | stat.S_IRWXU)
+    return ops.chmod_by_name
+
+
+def _grant_entry(ops: _TreeOps, name: str, parent: Any) -> None:
+    """Owner access for the entry `name` in `parent`, then for everything under it if it is a directory."""
+    pinned = ops.pin(name, parent)
+    if pinned is None:
+        is_dir = _grant_unpinned_dir(ops, name, parent)
+    else:
+        try:
+            st = ops.stat(pinned)
+            is_dir = stat.S_ISDIR(st.st_mode)
+            if not stat.S_ISLNK(st.st_mode):
+                with contextlib.suppress(OSError):
+                    ops.chmod(pinned, stat.S_IMODE(st.st_mode) | (stat.S_IRWXU if is_dir else stat.S_IWUSR))
+        except OSError:
+            return
+        finally:
+            ops.close(pinned)
+    if not is_dir:
+        return
+    try:
+        child = ops.open_dir(name, parent)
+    except OSError:
+        return
+    try:
+        for entry in ops.listdir(child):
+            _grant_entry(ops, entry, child)
+    finally:
+        ops.close(child)
+
+
+def grant_tree_owner_access(path: Path) -> None:
+    """Owner access for `path` and everything under it, without following a link or a junction.
+
+    Where POSIX descriptors work, the walk goes through them: each entry is pinned with O_NOFOLLOW before it is changed,
+    so a link swapped in during the walk is refused rather than followed. Elsewhere it goes by path, checking each name
+    for a link or junction (see `_PathTreeOps`). One walk drives both.
+    """
+    ops: _TreeOps = _tree_ops()
+    try:
+        parent = ops.open_parent(path)
+    except OSError:
+        return
+    try:
+        _grant_entry(ops, path.name, parent)
+    finally:
+        ops.close(parent)
+
+
+def remove_tree(path: Path) -> None:
+    """shutil.rmtree that also removes read-only files and directories with no owner access.
+
+    Git objects are read-only, and a failed step can leave a directory that its owner can't list. Access is granted
+    to the whole tree first, so the removal itself doesn't fail on permissions.
+    """
+    if not path.exists():
+        return
+    grant_tree_owner_access(path)
+    shutil.rmtree(path)
 
 
 class FileOps:
