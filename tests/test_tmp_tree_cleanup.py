@@ -43,6 +43,33 @@ def fd_ops(monkeypatch):
     return ops
 
 
+def open_descriptors():
+    """The descriptors this process has open, where the platform lists them (none on Windows).
+
+    Listing them opens descriptors of its own; those are closed again before each name is checked, so they are not counted.
+    """
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(directory):
+            open_now = set()
+            for name in os.listdir(directory):
+                try:
+                    os.fstat(int(name))
+                except OSError:
+                    continue
+                open_now.add(int(name))
+            return open_now
+    return set()
+
+
+@pytest.fixture(autouse=True)
+def no_descriptor_left_open():
+    """A test closes every descriptor it opens, its own parent handles included, whether it passes or fails."""
+    before = open_descriptors()
+    yield
+    leaked = open_descriptors() - before
+    assert not leaked, f"descriptors left open: {sorted(leaked)}"
+
+
 def link_to_dir(link, target):
     try:
         link.symlink_to(target, target_is_directory=True)
