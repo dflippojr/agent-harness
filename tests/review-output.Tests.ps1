@@ -25,6 +25,17 @@ Describe 'Review publication safety' {
         @{ Payload = '[gh](https://example.invalid)p_synthetic12345678' }
         @{ Payload = '[/ho][ref]me/reviewer/auth.json' }
         @{ Payload = "[gh]p_synthetic12345678`n`n[gh]: https://example.invalid" }
+        # A link reference defined inside a block quote or list item still turns [label] into a shortcut link.
+        @{ Payload = "[gh]p_synthetic12345678`n`n> [gh]: https://example.invalid" }
+        @{ Payload = "[gh]p_synthetic12345678`n`n- [gh]: https://example.invalid" }
+        @{ Payload = "[gh]p_synthetic12345678`n`n1. > [gh]: https://example.invalid" }
+        @{ Payload = "see [C]:/temp/../Users/reviewer/auth.json`n`n> [C]: https://example.invalid" }
+        @{ Payload = "see [C]:/temp/config.py`n`n* [C]: https://example.invalid" }
+        @{ Payload = "in [/ho]me/reviewer/auth.json`n`n> - [/ho]: https://example.invalid" }
+        @{ Payload = "[gh]p_synthetic12345678`n`n> %5Bgh%5D: https://example.invalid" }
+        @{ Payload = "[gh]p_synthetic12345678`n`n- &#91;gh&#93;: https://example.invalid" }
+        @{ Payload = "&#91;gh&#93;p_synthetic12345678`n`n> &lsqb;gh&rsqb;: https://example.invalid" }
+        @{ Payload = "in %5B/ho%5Dme/reviewer/auth.json`n`n- \[/ho\]: https://example.invalid" }
         @{ Payload = 'Bearer synthetic-value-1' }
         @{ Payload = ('Bearer ' + ('a' * 24)) }
         @{ Payload = ('`Bearer` ' + ('a' * 24)) }
