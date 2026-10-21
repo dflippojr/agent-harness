@@ -107,6 +107,25 @@ Describe 'Review publication safety' {
         @{ Payload = 'gh%26ZeroWidthSpace%3Bp_synthetic12345678' }
         @{ Payload = 'gh&amp;ZeroWidthSpace;p_synthetic12345678' }
         @{ Payload = 'see ghp_&frac12;synthetic12345678 and &blk14;' }
+        # HTML5 decodes numeric references and legacy names without a semicolon, as in a raw HTML block (#756).
+        @{ Payload = "<div>`ngh&#112_synthetic12345678`n</div>" }
+        @{ Payload = "<div>`n&#47home/reviewer/auth.json`n</div>" }
+        @{ Payload = 'gh&#x70_synthetic12345678' }
+        @{ Payload = 'gh&#X70_synthetic12345678' }
+        @{ Payload = 'gh&#0000112_synthetic12345678' }
+        @{ Payload = 'see C&#58/temp/config.py' }
+        @{ Payload = 'see C&#x3A\temp\config.py' }
+        @{ Payload = 'gh&shyp_synthetic12345678' }
+        @{ Payload = 'see C&shy:/temp/config.py' }
+        @{ Payload = 'in /ho&shyme/reviewer/auth.json' }
+        @{ Payload = (('a1' * 12) + '&shy' + ('b2' * 12)) }
+        # Character references 0x80-0x9F decode as Windows-1252 (&#153 is a trademark sign, TM under NFKC).
+        @{ Payload = (('a1' * 12) + '&#153' + ('b2' * 12)) }
+        @{ Payload = 'gh%26%23112_synthetic12345678' }
+        # Invisible characters that are not format characters still join the text around them.
+        @{ Payload = 'gh&#x34F;p_synthetic12345678' }
+        @{ Payload = 'in /ho&#x3164;me/reviewer/auth.json' }
+        @{ Payload = ('see C' + [char]0xFE0F + ':/temp/config.py') }
     ) {
         param($Payload)
         $fakeRunner = {
@@ -147,6 +166,7 @@ Describe 'Review publication safety' {
         @{ Payload = 'Defaults are `token=""` and `secret: "<placeholder>"`.' }
         # Entities the decoder knows, and ampersands that are not entity references, publish (#756).
         @{ Payload = 'R&amp;D, AT&T, a &lt;tag&gt;, &copy; 2026 and &nbsp;&frac12; &lsqb;x&rsqb;' }
+        @{ Payload = 'Q&A, R&D, fish&chips, &not a reference, &AMP, &#38 and &#x26 publish; &#1' }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
@@ -185,6 +205,7 @@ Describe 'Review publication safety' {
         @{ Text = ('x ' + ('a1' * 24)); Rule = 'long-token'; Form = 'raw'; Offset = 2 }
         @{ Text = 'x gh**p_**synthetic12345678'; Rule = 'known-token-prefix'; Form = 'rendered'; Offset = 2 }
         @{ Text = 'x gh&ZeroWidthSpace;p_synthetic12345678'; Rule = 'unknown-entity'; Form = 'decoded'; Offset = 4 }
+        @{ Text = 'x gh&#112_synthetic12345678'; Rule = 'known-token-prefix'; Form = 'decoded'; Offset = 2 }
     ) {
         param($Text, $Rule, $Form, $Offset)
         $failure = ''
