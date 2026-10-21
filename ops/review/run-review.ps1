@@ -406,6 +406,25 @@ $script:ReviewHtml5Entities = @{
     Tab = "`t"; NewLine = "`n"
 }
 
+# A named entity reference the decoders leave in place. GitHub may render it as a character the scan
+# never sees (&fjlig; is two letters, &ZeroWidthSpace; an invisible split), so it fails closed.
+$script:ReviewUnknownEntityPattern = '&[A-Za-z][A-Za-z0-9]*;'
+
+function ConvertFrom-ReviewEntities {
+    param([AllowEmptyString()][string]$Text)
+
+    # Percent escapes, then the HTML5 punctuation entities, then what WebUtility.HtmlDecode knows.
+    $decoded = [regex]::Replace([Uri]::UnescapeDataString($Text), '&([A-Za-z]+);', {
+            param($match)
+            $name = $match.Groups[1].Value
+            # Hashtable keys ignore case, but entity names do not (&hat; is not &Hat;).
+            $known = @($script:ReviewHtml5Entities.Keys | Where-Object { $_ -ceq $name })
+            if ($known.Count) { return $script:ReviewHtml5Entities[$name] }
+            return $match.Value
+        })
+    return [System.Net.WebUtility]::HtmlDecode($decoded)
+}
+
 function Get-ReviewScanForms {
     param([AllowEmptyString()][string]$Text, [switch]$PlainText)
 
@@ -419,16 +438,7 @@ function Get-ReviewNamedScanForms {
     # invisible format characters, compatibility characters, Markdown backslash escapes, and
     # (except for plain-text job logs) an approximate Markdown rendering without markup.
     # A form identical to an earlier one keeps the earlier name.
-    $decoded = [regex]::Replace([Uri]::UnescapeDataString($Text), '&([A-Za-z]+);', {
-            param($match)
-            $name = $match.Groups[1].Value
-            # Hashtable keys ignore case, but entity names do not (&hat; is not &Hat;).
-            $known = @($script:ReviewHtml5Entities.Keys | Where-Object { $_ -ceq $name })
-            if ($known.Count) { return $script:ReviewHtml5Entities[$name] }
-            return $match.Value
-        })
-    $decoded = [System.Net.WebUtility]::HtmlDecode($decoded)
-    $decoded = ($decoded -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
+    $decoded = ((ConvertFrom-ReviewEntities -Text $Text) -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
     $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
     $forms = [ordered]@{ raw = $Text; decoded = $decoded; unescaped = $unescaped }
     if (-not $PlainText) { $forms.rendered = ConvertTo-ReviewRenderedText -Text $unescaped }
@@ -559,6 +569,8 @@ function Assert-ReviewOutputSafe {
         $match = [regex]::Match($FormText, $Pattern)
         if ($match.Success) { $hits.Add("rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length))") }
     }
+    # Offsets for this rule count in the entity-decoded text, before format characters are removed.
+    & $check 'unknown-entity' 'decoded' (ConvertFrom-ReviewEntities -Text $Text) $script:ReviewUnknownEntityPattern
     # Absolute roots and credential patterns always scan the unmasked text.
     foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
         if (-not $CredentialsOnly) { & $check 'absolute-root' $form.Name $form.Text $script:ReviewAbsoluteRootPattern }
