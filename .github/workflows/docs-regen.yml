@@ -2,6 +2,9 @@ name: Docs regeneration
 
 # Regenerated regions reach main through a PR from the dedicated, repository-scoped
 # dflippojr-docs-regen App (#738). Its PR events run normal CI, including the required gate.
+# The main ruleset also requires gate-guard-target / gate-guard, a separate pull_request_target
+# workflow that can still be running when CI ends, so the merge waits for that check run too (#765).
+# Auto-merge is not enabled on this repository, so the wait polls instead of using gh pr merge --auto.
 # Only the squash commit carries [skip ci], preventing another CI/deploy or regeneration run.
 on:
   push:
@@ -21,6 +24,7 @@ concurrency:
 permissions:
   contents: read
   actions: read
+  checks: read
 
 jobs:
   regenerate:
@@ -105,6 +109,38 @@ jobs:
           gate="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" --jq '[.jobs[] | select(.name == "gate") | .conclusion] | join(",")')"
           if [ "$gate" != success ]; then
             echo "Required gate did not pass (conclusion: $gate)." >&2
+            exit 1
+          fi
+      # The ruleset requires this check from a workflow CI does not wait on; it can still be queued.
+      - name: Wait for the trusted gate guard
+        if: steps.regen.outputs.changed == 'true'
+        id: guard
+        env:
+          HEAD_SHA: ${{ steps.regen.outputs.sha }}
+          GUARD_CHECK: gate-guard-target / gate-guard
+        run: |
+          set -euo pipefail
+          state=""
+          for attempt in $(seq 1 60); do
+            # The newest run of the check wins: a superseded run of the same head is cancelled.
+            state="$(gh api -X GET "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs" \
+              -f check_name="$GUARD_CHECK" -f per_page=100 \
+              --jq '.check_runs | sort_by(.id) | last | select(. != null) | "\(.status) \(.conclusion // "")"')"
+            case "$state" in
+              "completed "*) break ;;
+            esac
+            sleep 30
+          done
+          if [ -z "$state" ]; then
+            echo "Check '$GUARD_CHECK' never appeared on $HEAD_SHA." >&2
+            exit 1
+          fi
+          if [ "${state%% *}" != completed ]; then
+            echo "Check '$GUARD_CHECK' was still ${state%% *} on $HEAD_SHA after 30 minutes." >&2
+            exit 1
+          fi
+          if [ "${state#* }" != success ]; then
+            echo "Check '$GUARD_CHECK' did not pass on $HEAD_SHA (conclusion: ${state#* })." >&2
             exit 1
           fi
       # Installation tokens expire after one hour; mint a fresh one after the CI wait.
