@@ -316,8 +316,8 @@ The rules run on the raw body and on what a reader would see: percent escapes, H
 parser reads them (numeric references and legacy names such as `&shy` need no semicolon, as in a raw HTML block;
 HTML5 names for ASCII punctuation such as `&sol;` and `&lsqb;`, which .NET does not decode, are decoded too; any other
 named entity with a semicolon left undecoded, such as `&fjlig;` or `&ZeroWidthSpace;`, fails closed as rule
-`unknown-entity`), invisible characters (Unicode's default-ignorable code points, such as format characters, the soft
-hyphen and Hangul fillers), Unicode compatibility forms and Markdown backslash escapes are decoded first, and an approximate rendered
+`unknown-entity`), characters a reader may not see (controls other than whitespace, noncharacters and Unicode's
+default-ignorable code points, such as format characters, the soft hyphen and Hangul fillers), Unicode compatibility forms and Markdown backslash escapes are decoded first, and an approximate rendered
 form also drops link targets, inline HTML tags and emphasis or code markers that could split a value, and every bracket
 when the text may define a link reference, which is any `]:` so definitions in block quotes and lists count (otherwise brackets render literally, so `test_x[case-1]` stays two words). Known
 citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and

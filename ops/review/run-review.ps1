@@ -425,9 +425,10 @@ $script:ReviewC1References = @{
     0x92 = 0x2019; 0x93 = 0x201C; 0x94 = 0x201D; 0x95 = 0x2022; 0x96 = 0x2013; 0x97 = 0x2014; 0x98 = 0x02DC
     0x99 = 0x2122; 0x9A = 0x0161; 0x9B = 0x203A; 0x9C = 0x0153; 0x9E = 0x017E; 0x9F = 0x0178
 }
-# Invisible characters a reader never sees: Unicode's default-ignorable code points, listed because
-# .NET Framework's tables are older (they put the soft hyphen in Pd, not Cf).
-$script:ReviewInvisiblePattern = '\p{Cf}|[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFF8]|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|[\uDB40-\uDB43][\uDC00-\uDFFF]'
+# Characters a reader may never see: controls other than whitespace (a browser can draw &#1 as nothing),
+# Unicode's default-ignorable code points, listed because .NET Framework's tables are older (they put
+# the soft hyphen in Pd, not Cf), and noncharacters.
+$script:ReviewInvisiblePattern = '\p{Cf}|[\x00-\x08\x0B\x0E-\x1F\x7F-\x9F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFF8]|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|[\uDB40-\uDB43][\uDC00-\uDFFF]|[\uFDD0-\uFDEF\uFFFE\uFFFF]|[\uD83F\uD87F\uD8BF\uD8FF\uD93F\uD97F\uD9BF\uD9FF\uDA3F\uDA7F\uDABF\uDAFF\uDB3F\uDB7F\uDBBF\uDBFF][\uDFFE\uDFFF]'
 
 function Get-ReviewNamedEntityText {
     param([Parameter(Mandatory = $true)][string]$Name)
