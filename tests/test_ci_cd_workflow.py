@@ -39,7 +39,7 @@ def _docs_regen_job():
 def test_docs_regen_workflow_cannot_loop_or_deploy():
     workflow = DOCS_REGEN.read_text(encoding="utf-8")
     # The default token only reads; writes use the dedicated narrow App.
-    assert yaml.safe_load(workflow)["permissions"] == {"contents": "read", "actions": "read"}
+    assert yaml.safe_load(workflow)["permissions"] == {"contents": "read", "actions": "read", "checks": "read"}
     job = _docs_regen_job()
     assert "permissions" not in job
     assert "[skip ci]" not in job["env"]["COMMIT_SUBJECT"]
@@ -66,7 +66,7 @@ def test_docs_regen_never_pushes_to_main():
     assert "HEAD:main" not in every_line and "refs/heads/main" not in every_line
     # The only way onto main is merging the PR, after CI on its head commit passed, pinned to that same commit.
     order = [step.get("id") or step.get("name") for step in job["steps"]]
-    assert order.index("regen") < order.index("ci") < order.index("Merge the docs PR")
+    assert order.index("regen") < order.index("ci") < order.index("guard") < order.index("Merge the docs PR")
     ci = steps["ci"]["run"]
     assert "--event pull_request" in ci
     assert "gh workflow run" not in ci

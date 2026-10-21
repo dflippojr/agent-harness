@@ -73,8 +73,12 @@ through a PR from `bot/docs-regen`, never a direct push to `main` (#738).
 2. The workflow force-pushes generated regions to `bot/docs-regen` and opens or reuses its PR using that token.
    The branch commit has no skip marker, so the App's PR events start normal `pull_request` CI. Manually dispatched
    CI cannot satisfy required PR checks and is not used. The default `GITHUB_TOKEN` only reads workflow runs.
-3. It waits for the CI run on that exact head SHA and requires a successful `gate` job. Failures leave the PR open.
-   After the wait it refreshes the App token (installation tokens expire after one hour), then squash-merges with
+3. It waits for the CI run on that exact head SHA and requires a successful `gate` job. It then polls the check-runs
+   API for `gate-guard-target / gate-guard` on the same SHA (the newest run wins; 60 polls, 30 seconds apart) and
+   requires success, because that check comes from a separate `pull_request_target` workflow that can outlast CI and
+   the ruleset requires it next to `gate` (#765). Auto-merge is not enabled on the repository, so the workflow polls
+   instead of using `gh pr merge --auto`. Failures leave the PR open.
+   After the waits it refreshes the App token (installation tokens expire after one hour), then squash-merges with
    `--match-head-commit` and subject `Docs: regenerate fragment regions [skip ci] (#<PR>)`.
 
 The squash commit's `[skip ci]` prevents push CI and therefore deployment; the regeneration job also guards against
@@ -86,7 +90,7 @@ The `docs-regen` concurrency group cancels older runs, so bursts reuse one PR. U
 close a stale docs PR. Main CI validates only fragment schemas while generated regions catch up; PR CI compares
 regions with the base or the PR's own fragments. `tests/test_ci_cd_workflow.py` checks the credential scope,
 normal PR CI, commit markers and merge ordering; `tests/test_docs_regen_ci.py` exercises failure handling in the
-CI wait script. End-to-end App operation must be checked after this workflow reaches main.
+CI and gate-guard wait scripts. End-to-end App operation must be checked after this workflow reaches main.
 
 ## Deployment boundary
 
