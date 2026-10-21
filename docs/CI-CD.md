@@ -313,7 +313,8 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
   rejected even though it is relative.
 
 The rules run on the raw body and on what a reader would see: percent escapes, HTML entities (including HTML5 names
-for ASCII punctuation such as `&sol;` and `&lsqb;`, which .NET does not decode), invisible format
+for ASCII punctuation such as `&sol;` and `&lsqb;`, which .NET does not decode; any other named entity left
+undecoded, such as `&fjlig;` or `&ZeroWidthSpace;`, fails closed as rule `unknown-entity`), invisible format
 characters, Unicode compatibility forms and Markdown backslash escapes are decoded first, and an approximate rendered
 form also drops link targets, inline HTML tags and emphasis or code markers that could split a value, and every bracket
 when the text may define a link reference, which is any `]:` so definitions in block quotes and lists count (otherwise brackets render literally, so `test_x[case-1]` stays two words). Known
