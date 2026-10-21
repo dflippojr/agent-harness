@@ -236,7 +236,11 @@ def test_a_tree_that_is_already_gone_is_left_alone(tmp_path, tree_ops):
 
 
 def test_an_entry_that_vanished_before_it_was_reached_is_skipped(tmp_path, tree_ops):
-    fileops._grant_entry(tree_ops, "missing", tree_ops.open_parent(tmp_path / "x"))
+    parent = tree_ops.open_parent(tmp_path / "x")
+    try:
+        fileops._grant_entry(tree_ops, "missing", parent)
+    finally:
+        tree_ops.close(parent)
 
 
 def test_a_file_is_made_writable_and_a_directory_gets_owner_access(tmp_path, tree_ops):
