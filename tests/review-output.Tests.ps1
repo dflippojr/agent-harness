@@ -95,6 +95,18 @@ Describe 'Review publication safety' {
         @{ Payload = 'C\:\\Users\\reviewer' }
         @{ Payload = ([string][char]0xFF0F + 'home' + [char]0xFF0F + 'reviewer') }
         @{ Payload = ('/ho' + [char]0x200B + 'me/reviewer') }
+        # HTML5 named entities outside the decoder's table fail closed (#756): GitHub renders them, the scan cannot.
+        @{ Payload = 'ghp_ab&fjlig;12345678' }
+        @{ Payload = 'gh&ZeroWidthSpace;p_synthetic12345678' }
+        @{ Payload = 'gh&NegativeVeryThinSpace;p_synthetic12345678' }
+        @{ Payload = 'see C&NegativeThinSpace;:/temp/config.py' }
+        @{ Payload = 'see C&NegativeMediumSpace;:	emp\config.py' }
+        @{ Payload = 'in /ho&ZeroWidthSpace;me/reviewer/auth.json' }
+        @{ Payload = 'in /ho&NegativeThickSpace;me/reviewer/auth.json' }
+        @{ Payload = (('a1' * 12) + '&fjlig;' + ('b2' * 12)) }
+        @{ Payload = 'gh%26ZeroWidthSpace%3Bp_synthetic12345678' }
+        @{ Payload = 'gh&amp;ZeroWidthSpace;p_synthetic12345678' }
+        @{ Payload = 'see ghp_&frac12;synthetic12345678 and &blk14;' }
     ) {
         param($Payload)
         $fakeRunner = {
@@ -133,6 +145,8 @@ Describe 'Review publication safety' {
         @{ Payload = '`def __init__(self, base_url: str, token: str) -> None:` then `self.token = token`.' }
         @{ Payload = 'The workflow sets `password: ${{ secrets.DEPLOY_PASSWORD }}` and `token = os.environ`.' }
         @{ Payload = 'Defaults are `token=""` and `secret: "<placeholder>"`.' }
+        # Entities the decoder knows, and ampersands that are not entity references, publish (#756).
+        @{ Payload = 'R&amp;D, AT&T, a &lt;tag&gt;, &copy; 2026 and &nbsp;&frac12; &lsqb;x&rsqb;' }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
@@ -170,6 +184,7 @@ Describe 'Review publication safety' {
         @{ Text = 'in /home/reviewer/auth.json'; Rule = 'profile-segment'; Form = 'raw'; Offset = 3 }
         @{ Text = ('x ' + ('a1' * 24)); Rule = 'long-token'; Form = 'raw'; Offset = 2 }
         @{ Text = 'x gh**p_**synthetic12345678'; Rule = 'known-token-prefix'; Form = 'rendered'; Offset = 2 }
+        @{ Text = 'x gh&ZeroWidthSpace;p_synthetic12345678'; Rule = 'unknown-entity'; Form = 'decoded'; Offset = 4 }
     ) {
         param($Text, $Rule, $Form, $Offset)
         $failure = ''
