@@ -126,6 +126,52 @@ Describe 'Review publication safety' {
         if (-not $body.Contains($Payload)) { throw 'Safe review text was not published unchanged' }
     }
 
+    It 'publishes quoted pytest ids with escaped parameters (#756)' {
+        # A Gate changes section quoting the exact removed and added ids, as open-payer-sandbox#26 did.
+        $ids = @(
+            'tests/test_ids.py::test_sanitize_identifier_strips_c1_controls[member_id_with_c1_control-\x96]'
+            'tests/test_ids.py::test_round_trip_identifiers_across_formats[case_017-\xd7]'
+            'tests/test_names.py::test_display_name_preserves_symbols[pilcrow-\xb6-multiplication-\xd7]'
+        )
+        $list = (1..173 | ForEach-Object { "test_member_id_round_trip_preserves_value_$_[case_$_-\xb6]" }) -join ', '
+        $body = "### Gate changes`n`nRemoved ``$($ids[0])`` and $($ids[1]); added:`n`n- $($ids[2])`n- $list"
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $body }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath
+        if (-not (Get-Content -Raw -LiteralPath $script:reviewOutputPath).Contains($body)) { throw 'Quoted pytest ids were not published' }
+        # The same ids beside a real path, credential or token still fail.
+        $linked = '[' + ('A1' * 12) + ']' + ('B2' * 12) + "`n`n[" + ('A1' * 12) + ']: https://example.invalid'
+        foreach ($unsafe in @('C:\Users\reviewer\.codex\auth.json', '/home/reviewer/.codex/auth.json', 'ghp_synthetic12345678', ('a1' * 24), $linked)) {
+            $result.Output = "$body`n`n$unsafe"
+            $failure = ''
+            try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath }
+            catch { $failure = $_.Exception.Message }
+            if ($failure -notlike 'Review did not complete*') { throw "Pytest ids hid an unsafe value: $unsafe" }
+        }
+    }
+
+    It 'logs which rule and scan form rejected the output, never the matched text (#756)' -TestCases @(
+        @{ Text = 'see ghp_synthetic12345678 here'; Rule = 'known-token-prefix'; Form = 'raw'; Offset = 4 }
+        @{ Text = 'open C:\Users\reviewer\auth.json'; Rule = 'absolute-root'; Form = 'raw'; Offset = 5 }
+        @{ Text = 'in /home/reviewer/auth.json'; Rule = 'profile-segment'; Form = 'raw'; Offset = 3 }
+        @{ Text = ('x ' + ('a1' * 24)); Rule = 'long-token'; Form = 'raw'; Offset = 2 }
+        @{ Text = 'x gh**p_**synthetic12345678'; Rule = 'known-token-prefix'; Form = 'rendered'; Offset = 2 }
+    ) {
+        param($Text, $Rule, $Form, $Offset)
+        $failure = ''
+        try { Assert-ReviewOutputSafe -Text $Text -WarningVariable scanWarnings -WarningAction SilentlyContinue }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -notlike 'Review did not complete*') { throw 'Expected a closed publication failure' }
+        $log = @($scanWarnings | ForEach-Object { $_.Message }) -join "`n"
+        if ($log -notmatch "rule $Rule matched the $Form form at offset $Offset\b") { throw "Missing rule log: $log" }
+        if ($log -match 'synthetic|reviewer|a1a1') { throw "The log leaked the matched text: $log" }
+    }
+
+    It 'parses a verdict for a review that quotes escaped pytest ids (#756)' {
+        $review = "## Acceptance criteria`n`n- **Met:** removes ``test_sanitize_identifier_strips_c1_controls[member_id_with_c1_control-\x96]``.`n`nNo findings.`nREVIEW_CRITERIA: 1/1`nREVIEW_VERDICT: CLEAN"
+        $verdict = Get-ReviewVerdict -Text $review -RequireCriteria
+        if ($null -eq $verdict -or $verdict.Verdict -ne 'clean') { throw 'Escaped pytest ids broke verdict parsing' }
+    }
+
     It 'publishes a profile-named directory only as a known repository path' {
         $known = 'app/[locale]/home/components/Nav.tsx'
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "$known`:3: finding" }
