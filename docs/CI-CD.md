@@ -10,7 +10,13 @@ after that workflow succeeds for the exact commit pushed to `main`:
    Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
    tower; that pool is retired so CI no longer competes with llama-server for the tower's RAM.
    **CI / gate** is the one check to require (#726). It always runs, needs every other CI job, and fails if any of
-   them failed or was cancelled, `sonar` included on a push to `main`. **CI / changes** lists the
+   them failed or was cancelled, `sonar` included on a push to `main`. **CI / gate-guard** (#727) calls the shared gate
+   guard from dflippojr/.github on each pull request, pinned by commit SHA (`guard-ref` names the same commit). It is an
+   early signal inside `gate`, not the judge, because a pull request supplies this file and could replace the job. The
+   judge is `.github/workflows/gate-guard-target.yml` (#727): it runs from `main` under `pull_request_target`, calls
+   the same shared guard pinned to the same commit, and its own job, `gate-guard-target / gate-guard`, is the verdict on each pull request's head. It
+   fails a pull request that deletes or skips a test, adds a retry, or edits workflow, Sonar, coverage or lint config,
+   unless the owner applied `gate-change-approved` after the newest push. **CI / changes** lists the
    changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `openapi` and `ui-tests` skip and
    `gate` still passes, so a docs-only PR is not left pending. A push to `main` is never cancelled by a later push:
    each main commit gets its own CI run, and only pull-request runs cancel their older run.
@@ -449,13 +455,14 @@ git push -f origin refs/tags/review-v3
 A breaking change to the caller contract (renamed or new required inputs, or a new permission) gets a new tag.
 review-v3 added the spec review and the `issues: read` permission, so it is a new tag: the review-v2 tag stays on its
 commit and its callers keep the diff-only review until each repository moves its caller (workflow ref, `tooling_ref`
-and the `issues: read` grant) to review-v3. The owner creates review-v3 once, at the merge commit of #725 on `main`,
-after a dispatched review here has passed:
+and the `issues: read` grant) to review-v3. review-v3 exists: the owner created it at the merge commit of #725 on `main`,
+after a dispatched review here had passed. Callers pin it as shown above and need no tag of their own.
 
-```powershell
-git tag review-v3 <merge commit of #725>
-git push origin refs/tags/review-v3
-```
+**Gate guard required check (owner step).** The `main` ruleset must require `gate-guard-target / gate-guard` next to `gate`.
+That check is the job `gate-guard-target` in `.github/workflows/gate-guard-target.yml`, which runs from `main`, so it appears
+on pull requests only after that file is merged, and it stays advisory until the ruleset names it. A ruleset that still
+names the old `gate-guard` check must be changed, because that check is no longer posted. Without this step a pull request can still pass
+`gate` after deleting tests, because `gate` alone judges nothing.
 
 **Required check on pull requests.** The review does not run on pushes to `main`; it is a required check for PRs into
 `main`, so a PR cannot merge without a clean (or partial, `neutral`) review of its head commit. A runner outage then
