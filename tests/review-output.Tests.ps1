@@ -126,6 +126,14 @@ Describe 'Review publication safety' {
         @{ Payload = 'gh&#x34F;p_synthetic12345678' }
         @{ Payload = 'in /ho&#x3164;me/reviewer/auth.json' }
         @{ Payload = ('see C' + [char]0xFE0F + ':/temp/config.py') }
+        @{ Payload = ('ghp' + [char]0x00AD + '_synthetic12345678') }
+        # A browser may draw a control character as nothing, whether it is spelled raw or as a reference.
+        @{ Payload = 'gh&#1p_synthetic12345678' }
+        @{ Payload = ('ghp' + [char]0x0001 + '_synthetic12345678') }
+        @{ Payload = ('in /ho' + [char]0x0085 + 'me/reviewer/auth.json') }
+        # So may a noncharacter.
+        @{ Payload = 'gh&#xFFFF;p_synthetic12345678' }
+        @{ Payload = 'see C&#1114111:/temp/config.py' }
     ) {
         param($Payload)
         $fakeRunner = {
