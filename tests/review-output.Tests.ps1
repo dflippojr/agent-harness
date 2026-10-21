@@ -134,6 +134,48 @@ Describe 'Review publication safety' {
         # So may a noncharacter.
         @{ Payload = 'gh&#xFFFF;p_synthetic12345678' }
         @{ Payload = 'see C&#1114111:/temp/config.py' }
+        # Bidirectional controls reorder what a reader sees, so they fail closed, raw or as references (#756).
+        @{ Payload = '&#x202E;87654321citehtnys_phg&#x202C;' }
+        @{ Payload = ([string][char]0x202E + '87654321citehtnys_phg' + [char]0x202C) }
+        @{ Payload = 'in &#x202E;nosj.htua/reweiver/emoh/&#x202C;' }
+        @{ Payload = ('see ' + [char]0x202E + 'yp.gifnoc/cilbup/:C' + [char]0x202C) }
+        @{ Payload = ([string][char]0x2067 + 'p_synthetic12345678' + [char]0x2069 + 'gh') }
+        @{ Payload = ([string][char]0x200F + 'p_synthetic12345678' + [char]0x200F + 'gh') }
+        @{ Payload = 'see %E2%80%AEyp.gifnoc/cilbup/:C' }
+        # Raw HTML is read as GitHub reads it: a comment or a quoted attribute may hold an angle bracket.
+        @{ Payload = 'gh<!-- x > y -->p_synthetic12345678' }
+        @{ Payload = 'in /ho<!-- x > y -->me/reviewer/auth.json' }
+        @{ Payload = 'see C<!-- x > y -->:/public/config.py' }
+        @{ Payload = 'gh<!-- x < y -->p_synthetic12345678' }
+        @{ Payload = 'gh<span title=">">p_synthetic12345678' }
+        @{ Payload = 'in /ho<span title="<">me/reviewer/auth.json' }
+        @{ Payload = "see C<a title='>'>:/public/config.py" }
+        @{ Payload = "<div>`ngh<x y=a<b>p_synthetic12345678`n</div>" }
+        # Markup GitHub keeps but whose text a reader does not see in place fails closed.
+        @{ Payload = '<span dir="rtl"><span dir="ltr">p_synthetic12345678</span><span dir="ltr">gh</span></span>' }
+        @{ Payload = 'gh<rp>x</rp>p_synthetic12345678' }
+        @{ Payload = 'gh<ruby><rt>x</rt></ruby>p_synthetic12345678' }
+        @{ Payload = '<table>/ho<tr><td>x</td></tr>me/reviewer/auth.json</table>' }
+        @{ Payload = 'gh<video>x</video>p_synthetic12345678' }
+        # So does markup the scan reads one line at a time but GitHub reads across lines.
+        @{ Payload = "gh<x`ny=`"1`">p_synthetic12345678" }
+        @{ Payload = "<div>`ngh<x`ny>p_synthetic12345678`n</div>" }
+        # A tag wins over a code span, so a backtick inside one cannot be trusted to start code.
+        @{ Payload = '`<b c="` g*h*p_synthetic12345678 `">`' }
+        # Text that only looks like markup, or like a link target, stays in the rendered form.
+        @{ Payload = 'x < y g*h*p_synthetic12345678 z > w' }
+        @{ Payload = '&lt;x a="g*h*p_synthetic12345678"&gt;' }
+        @{ Payload = '[a](b c g*h*p_synthetic12345678)' }
+        @{ Payload = '[a`](b`c "g*h*p_synthetic12345678")' }
+        # Link targets and images GitHub hides, however they are spelled, leave the rendered form.
+        @{ Payload = 'gh[](b\)c)p_synthetic12345678' }
+        @{ Payload = 'gh[](b "x)y")p_synthetic12345678' }
+        @{ Payload = 'gh[](<b)c>)p_synthetic12345678' }
+        @{ Payload = 'gh[](a(b(c)))p_synthetic12345678' }
+        @{ Payload = 'gh![](x)p_synthetic12345678' }
+        @{ Payload = 'gh[![](y)](z)p_synthetic12345678' }
+        # GFM strikes through text between single tildes too.
+        @{ Payload = 'g~h~p_synthetic12345678' }
     ) {
         param($Payload)
         $fakeRunner = {
@@ -175,6 +217,12 @@ Describe 'Review publication safety' {
         # Entities the decoder knows, and ampersands that are not entity references, publish (#756).
         @{ Payload = 'R&amp;D, AT&T, a &lt;tag&gt;, &copy; 2026 and &nbsp;&frac12; &lsqb;x&rsqb;' }
         @{ Payload = 'Q&A, R&D, fish&chips, &not a reference, &AMP, &#38 and &#x26 publish; &#1' }
+        # Generic types, comparisons and the markup GitHub renders in place publish (#756).
+        @{ Payload = 'Return `List<Object>`, `Map<String, List<Integer>>` or `Vec<Box<dyn Fn(&str)>>`; Option<T> too.' }
+        @{ Payload = 'When a < b and c > d, wrap it in <details><summary>Why</summary>x<sub>2</sub></details><br><!-- note -->' }
+        @{ Payload = "Use ``handlers[0](arg)`` and [the docs](https://example.invalid/a_(b) `"Title`").`n`n![diagram](https://example.invalid/d.png)" }
+        @{ Payload = "Hidden-text markup is quoted in a fence:`n`n``````html`n<table dir=`"rtl`"><tr><td><rp>x</rp></td></tr></table>`n<video src=`"a.mp4`"></video>`n```````n`nDone." }
+        @{ Payload = 'Expand `~/.claude` and keep ~5 minutes of logs.' }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
@@ -214,6 +262,11 @@ Describe 'Review publication safety' {
         @{ Text = 'x gh**p_**synthetic12345678'; Rule = 'known-token-prefix'; Form = 'rendered'; Offset = 2 }
         @{ Text = 'x gh&ZeroWidthSpace;p_synthetic12345678'; Rule = 'unknown-entity'; Form = 'decoded'; Offset = 4 }
         @{ Text = 'x gh&#112_synthetic12345678'; Rule = 'known-token-prefix'; Form = 'decoded'; Offset = 2 }
+        @{ Text = 'x &#x202E;87654321citehtnys_phg'; Rule = 'bidi-control'; Form = 'decoded'; Offset = 2 }
+        @{ Text = 'x gh<rp>x</rp>p_synthetic12345678'; Rule = 'raw-html'; Form = 'raw'; Offset = 4 }
+        @{ Text = 'x gh<!-- x > y -->p_synthetic12345678'; Rule = 'known-token-prefix'; Form = 'rendered'; Offset = 2 }
+        @{ Text = "<div>`ngh<x y=a<b>p_synthetic12345678`n</div>"; Rule = 'known-token-prefix'; Form = 'html'; Offset = 1 }
+        @{ Text = 'x [a`](b`c "g*h*p_synthetic12345678")'; Rule = 'known-token-prefix'; Form = 'literal'; Offset = 10 }
     ) {
         param($Text, $Rule, $Form, $Offset)
         $failure = ''
