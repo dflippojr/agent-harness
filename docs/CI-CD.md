@@ -312,10 +312,11 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
   repository path. `docs/users.md` and `root-ca.md` are not profile directories; an unknown `examples/home/x.py` is
   rejected even though it is relative.
 
-The rules run on the raw body and on what a reader would see: percent escapes, HTML entities, invisible format
+The rules run on the raw body and on what a reader would see: percent escapes, HTML entities (including HTML5 names
+for ASCII punctuation such as `&sol;` and `&lsqb;`, which .NET does not decode), invisible format
 characters, Unicode compatibility forms and Markdown backslash escapes are decoded first, and an approximate rendered
 form also drops link targets, inline HTML tags and emphasis or code markers that could split a value, and every bracket
-when the text defines a link reference (otherwise brackets render literally, so `test_x[case-1]` stays two words). Known
+when the text may define a link reference, which is any `]:` so definitions in block quotes and lists count (otherwise brackets render literally, so `test_x[case-1]` stays two words). Known
 citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and
 rendered spellings; a name counts as known only if every one of those spellings is relative. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt

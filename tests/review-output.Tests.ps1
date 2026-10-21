@@ -88,6 +88,8 @@ Describe 'Review publication safety' {
         # Encodings a reader would see decoded.
         @{ Payload = '/h%6fme/reviewer/.codex/auth.json' }
         @{ Payload = '&#47;home&#47;reviewer&#47;auth.json' }
+        @{ Payload = '&sol;home&sol;reviewer&sol;auth.json' }
+        @{ Payload = 'C&colon;&bsol;Users&bsol;reviewer' }
         @{ Payload = 'C&#58;&#92;Users&#92;reviewer' }
         @{ Payload = '\/home\/reviewer\/auth.json' }
         @{ Payload = 'C\:\\Users\\reviewer' }

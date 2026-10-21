@@ -397,6 +397,14 @@ function Get-ReviewPublishPattern {
 $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
 # Trailing periods, spaces or short-name tildes still match (Windows aliases); users.md or rooted do not.
 $script:ReviewProfileSegmentPattern = '(?i)[\\/](?:users|home|root|documents and settings)(?![\p{L}\p{N}\p{M}_-])(?!\.[\p{L}\p{N}])'
+# GitHub decodes HTML5 named entities that WebUtility.HtmlDecode does not know; these spell ASCII punctuation.
+$script:ReviewHtml5Entities = @{
+    excl = '!'; num = '#'; dollar = '$'; percnt = '%'; apos = "'"; lpar = '('; rpar = ')'; ast = '*'; midast = '*'
+    plus = '+'; comma = ','; period = '.'; sol = '/'; colon = ':'; semi = ';'; equals = '='; quest = '?'; commat = '@'
+    lsqb = '['; lbrack = '['; bsol = '\'; rsqb = ']'; rbrack = ']'; Hat = '^'; lowbar = '_'; UnderBar = '_'; grave = '`'
+    DiacriticalGrave = '`'; lcub = '{'; lbrace = '{'; verbar = '|'; vert = '|'; VerticalLine = '|'; rcub = '}'; rbrace = '}'
+    Tab = "`t"; NewLine = "`n"
+}
 
 function Get-ReviewScanForms {
     param([AllowEmptyString()][string]$Text, [switch]$PlainText)
@@ -411,7 +419,15 @@ function Get-ReviewNamedScanForms {
     # invisible format characters, compatibility characters, Markdown backslash escapes, and
     # (except for plain-text job logs) an approximate Markdown rendering without markup.
     # A form identical to an earlier one keeps the earlier name.
-    $decoded = [System.Net.WebUtility]::HtmlDecode([Uri]::UnescapeDataString($Text))
+    $decoded = [regex]::Replace([Uri]::UnescapeDataString($Text), '&([A-Za-z]+);', {
+            param($match)
+            $name = $match.Groups[1].Value
+            # Hashtable keys ignore case, but entity names do not (&hat; is not &Hat;).
+            $known = @($script:ReviewHtml5Entities.Keys | Where-Object { $_ -ceq $name })
+            if ($known.Count) { return $script:ReviewHtml5Entities[$name] }
+            return $match.Value
+        })
+    $decoded = [System.Net.WebUtility]::HtmlDecode($decoded)
     $decoded = ($decoded -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
     $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
     $forms = [ordered]@{ raw = $Text; decoded = $decoded; unescaped = $unescaped }
@@ -428,10 +444,12 @@ function ConvertTo-ReviewRenderedText {
     # Keep link labels and drop their targets (inline, full and collapsed reference links). A bare
     # [label] is a shortcut link only when the text defines a reference, so then every bracket goes;
     # otherwise brackets render literally and stay, keeping a pytest id such as test_x[case-1] two
-    # tokens. Inline HTML tags and emphasis or code markers always go, so markup cannot split a value.
+    # tokens. A definition may sit in a block quote or list item, or have a label spanning lines, so
+    # any "]:" counts as one rather than parsing containers. Inline HTML tags and emphasis or code
+    # markers always go, so markup cannot split a value.
     # Underscores count as emphasis only at a word edge; intraword ones (ghp_, snake_case) stay.
     $rendered = $Text -replace '\[([^\[\]]*)\](?:\([^()]*\)|\[[^\[\]]*\])', '$1'
-    if ($DropAllBrackets -or $rendered -match '(?m)^ {0,3}\[[^\[\]]+\]:') { $rendered = $rendered -replace '[\[\]]', '' }
+    if ($DropAllBrackets -or $rendered.Contains(']:')) { $rendered = $rendered -replace '[\[\]]', '' }
     $rendered = $rendered -replace '<[^<>]*>|[*`]|~~', ''
     return $rendered -replace '(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])', ''
 }
