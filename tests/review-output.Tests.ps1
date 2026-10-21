@@ -16,6 +16,8 @@ Describe 'Review publication safety' {
         @{ Payload = (('A' * 38) + '==') }
         @{ Payload = ('a1' * 24) }
         @{ Payload = (('ab_' * 15) + '9') }
+        @{ Payload = (('k3j9x2' * 7) + '_z') }
+        @{ Payload = (('abcde12345_' * 4)) }
         @{ Payload = ('A' * 24 + '/' + 'B' * 24) }
         @{ Payload = 'gh**p_**synthetic12345678' }
         @{ Payload = 'gh<b>p</b>_synthetic12345678' }
@@ -133,7 +135,7 @@ Describe 'Review publication safety' {
             'tests/test_ids.py::test_round_trip_identifiers_across_formats[case_017-\xd7]'
             'tests/test_names.py::test_display_name_preserves_symbols[pilcrow-\xb6-multiplication-\xd7]'
         )
-        $list = (1..173 | ForEach-Object { "test_member_id_round_trip_preserves_value_$_[case_$_-\xb6]" }) -join ', '
+        $list = (1..173 | ForEach-Object { "test_member_id_round_trip_preserves_value[case_$_-\xb6]" }) -join ', '
         $body = "### Gate changes`n`nRemoved ``$($ids[0])`` and $($ids[1]); added:`n`n- $($ids[2])`n- $list"
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $body }
         Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath

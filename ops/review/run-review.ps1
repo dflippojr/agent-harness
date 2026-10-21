@@ -350,27 +350,32 @@ function Get-ReviewRedactionRules {
     $quotedValue = '"(?![$%{<])[^"\s][^"]*"|''(?![$%{<])[^''\s][^'']*'''
     return @(
         [pscustomobject]@{
+            Name = 'bearer'
             Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+'
             PublishPattern = '(?i)\bBearer\s+(?:' + $tokenValue + ')'
             Replacement = 'Bearer [REDACTED]'
             Maskable = $false
         }
         [pscustomobject]@{
+            Name = 'credential-assignment'
             Pattern = $credentialNames + '("[^"]*"|''[^'']*''|[^\s,;]+)'
             PublishPattern = $credentialNames + '(?:' + $quotedValue + '|' + $tokenValue + ')'
             Replacement = '$1$2[REDACTED]'
             Maskable = $false
         }
         [pscustomobject]@{
+            Name = 'known-token-prefix'
             Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'
             Replacement = '[REDACTED]'
             Maskable = $false
         }
         # A long run of token characters is rejected unless it reads as an identifier: only letters,
-        # slashes, underscores and hyphens, at least one underscore or hyphen, and no digits
-        # (test_names_like_this, Verb-NounLikeThis). Random tokens of this length almost always have digits.
+        # slashes, underscores and hyphens, at least one underscore or hyphen, and digits only as up to
+        # four that end a lowercase word (test_strips_c1_controls, sha256_digest, Verb-NounLikeThis).
+        # Random tokens of this length almost always have digits elsewhere.
         [pscustomobject]@{
-            Pattern = '(?<![A-Za-z0-9+/=_-])(?!(?=[A-Za-z/]*[_-])[A-Za-z/_-]+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'
+            Name = 'long-token'
+            Pattern = '(?<![A-Za-z0-9+/=_-])(?!(?=[A-Za-z0-9/]*[_-])(?:[A-Za-z/_-]|(?<=[a-z][0-9]{0,3})[0-9](?![A-Za-z]))+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'
             Replacement = '[REDACTED]'
             Maskable = $true
         }
@@ -396,25 +401,38 @@ $script:ReviewProfileSegmentPattern = '(?i)[\\/](?:users|home|root|documents and
 function Get-ReviewScanForms {
     param([AllowEmptyString()][string]$Text, [switch]$PlainText)
 
+    return @(Get-ReviewNamedScanForms -Text $Text -PlainText:$PlainText | ForEach-Object { $_.Text })
+}
+
+function Get-ReviewNamedScanForms {
+    param([AllowEmptyString()][string]$Text, [switch]$PlainText)
+
     # Scan what a reader would see as well as the raw text: percent escapes, HTML entities,
     # invisible format characters, compatibility characters, Markdown backslash escapes, and
     # (except for plain-text job logs) an approximate Markdown rendering without markup.
+    # A form identical to an earlier one keeps the earlier name.
     $decoded = [System.Net.WebUtility]::HtmlDecode([Uri]::UnescapeDataString($Text))
     $decoded = ($decoded -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
     $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
-    $forms = @($Text, $decoded, $unescaped)
-    if (-not $PlainText) { $forms += ConvertTo-ReviewRenderedText -Text $unescaped }
-    return @(Get-ReviewOrdinalUnique -Values $forms)
+    $forms = [ordered]@{ raw = $Text; decoded = $decoded; unescaped = $unescaped }
+    if (-not $PlainText) { $forms.rendered = ConvertTo-ReviewRenderedText -Text $unescaped }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($name in $forms.Keys) {
+        if ($seen.Add($forms[$name])) { [pscustomobject]@{ Name = $name; Text = $forms[$name] } }
+    }
 }
 
 function ConvertTo-ReviewRenderedText {
-    param([AllowEmptyString()][string]$Text)
+    param([AllowEmptyString()][string]$Text, [switch]$DropAllBrackets)
 
-    # Keep link labels and drop their targets, then drop every bracket (shortcut and reference
-    # links), inline HTML tags, and emphasis or code markers, so markup cannot split a value.
+    # Keep link labels and drop their targets (inline, full and collapsed reference links). A bare
+    # [label] is a shortcut link only when the text defines a reference, so then every bracket goes;
+    # otherwise brackets render literally and stay, keeping a pytest id such as test_x[case-1] two
+    # tokens. Inline HTML tags and emphasis or code markers always go, so markup cannot split a value.
     # Underscores count as emphasis only at a word edge; intraword ones (ghp_, snake_case) stay.
     $rendered = $Text -replace '\[([^\[\]]*)\](?:\([^()]*\)|\[[^\[\]]*\])', '$1'
-    $rendered = $rendered -replace '<[^<>]*>|[*`\[\]]|~~', ''
+    if ($DropAllBrackets -or $rendered -match '(?m)^ {0,3}\[[^\[\]]+\]:') { $rendered = $rendered -replace '[\[\]]', '' }
+    $rendered = $rendered -replace '<[^<>]*>|[*`]|~~', ''
     return $rendered -replace '(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])', ''
 }
 
@@ -479,7 +497,8 @@ function Get-ReviewRepositoryPaths {
     $relative = '(^[\s`"''()\[\]{}*<>=:]*[/\\]|:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
     $known = foreach ($path in @($paths + $DiffPaths | Where-Object { $_ })) {
         $normalized = $path.Normalize([Text.NormalizationForm]::FormKC)
-        $spellings = @($path, $normalized, (ConvertTo-ReviewRenderedText -Text $normalized))
+        # A review that defines a link reference renders with every bracket dropped, so match that spelling too.
+        $spellings = @($path, $normalized, (ConvertTo-ReviewRenderedText -Text $normalized), (ConvertTo-ReviewRenderedText -Text $normalized -DropAllBrackets))
         if (@($spellings | Where-Object { -not $_ -or $_ -match $relative }).Count -eq 0) { $spellings }
     }
     return @(Get-ReviewOrdinalUnique -Values @($known))
@@ -514,34 +533,41 @@ function Assert-ReviewOutputSafe {
     if ($Workspace -or $DiffPaths.Count -gt 0) {
         $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
     }
-    $unsafe = $false
+    # Each hit is logged by rule, scan form and offset so a rejection can be diagnosed. Never log the
+    # matched text or its surroundings: they are what the scan withholds.
+    $hits = New-Object System.Collections.Generic.List[string]
+    $check = {
+        param([string]$RuleName, [string]$FormName, [string]$FormText, [string]$Pattern)
+        $match = [regex]::Match($FormText, $Pattern)
+        if ($match.Success) { $hits.Add("rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length))") }
+    }
     # Absolute roots and credential patterns always scan the unmasked text.
-    foreach ($form in (Get-ReviewScanForms -Text $Text)) {
-        if (-not $CredentialsOnly -and $form -match $script:ReviewAbsoluteRootPattern) { $unsafe = $true }
-        foreach ($rule in $credentialRules) {
-            if ($form -match (Get-ReviewPublishPattern -Rule $rule)) { $unsafe = $true }
-        }
+    foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
+        if (-not $CredentialsOnly) { & $check 'absolute-root' $form.Name $form.Text $script:ReviewAbsoluteRootPattern }
+        foreach ($rule in $credentialRules) { & $check $rule.Name $form.Name $form.Text (Get-ReviewPublishPattern -Rule $rule) }
     }
     if (-not $CredentialsOnly) {
         # Known relative citations are masked only for the profile-segment and long-token checks, first in
-        # the raw text (so decoding cannot break a citation) and again in each decoded form.
+        # the raw text (so decoding cannot break a citation) and again in each decoded form. Offsets for
+        # these two rules count in that masked text.
         $maskedText = Remove-ReviewRepositoryCitations -Text $Text -Paths $knownPaths
-        foreach ($form in (Get-ReviewScanForms -Text $maskedText)) {
-            $masked = Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths
-            if ($masked -match $script:ReviewProfileSegmentPattern) { $unsafe = $true }
+        foreach ($form in (Get-ReviewNamedScanForms -Text $maskedText)) {
+            $masked = Remove-ReviewRepositoryCitations -Text $form.Text -Paths $knownPaths
+            & $check 'profile-segment' $form.Name $masked $script:ReviewProfileSegmentPattern
         }
         # A web link's path is checked segment by segment, so a long documentation URL is not one token.
         # Only slashes present before decoding split it, so an encoded slash cannot divide a token, and
         # the query and fragment stay whole: signatures there may contain Base64 slashes.
         $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
-        foreach ($form in (Get-ReviewScanForms -Text $segmented)) {
-            $masked = Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths
-            foreach ($rule in $maskableRules) {
-                if ($masked -match (Get-ReviewPublishPattern -Rule $rule)) { $unsafe = $true }
-            }
+        foreach ($form in (Get-ReviewNamedScanForms -Text $segmented)) {
+            $masked = Remove-ReviewRepositoryCitations -Text $form.Text -Paths $knownPaths
+            foreach ($rule in $maskableRules) { & $check $rule.Name $form.Name $masked (Get-ReviewPublishPattern -Rule $rule) }
         }
     }
-    if ($unsafe) { throw 'Review did not complete: output failed the publication safety scan.' }
+    if ($hits.Count -gt 0) {
+        foreach ($hit in (Get-ReviewOrdinalUnique -Values $hits.ToArray())) { Write-Warning "Publication safety scan: $hit." }
+        throw 'Review did not complete: output failed the publication safety scan.'
+    }
 }
 
 function Test-ReviewDiagnosticLineEncodesSecret {

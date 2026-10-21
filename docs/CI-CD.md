@@ -314,13 +314,16 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
 
 The rules run on the raw body and on what a reader would see: percent escapes, HTML entities, invisible format
 characters, Unicode compatibility forms and Markdown backslash escapes are decoded first, and an approximate rendered
-form also drops link targets, brackets, inline HTML tags and emphasis or code markers that could split a value. Known
+form also drops link targets, inline HTML tags and emphasis or code markers that could split a value, and every bracket
+when the text defines a link reference (otherwise brackets render literally, so `test_x[case-1]` stays two words). Known
 citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and
 rendered spellings; a name counts as known only if every one of those spellings is relative. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
 tells the backend to cite only repository-relative paths and describe credentials in words. A run of 40 or more token characters is not
 treated as a token when it reads as an identifier (only letters, slashes, underscores and hyphens, with at least one
-underscore or hyphen and no digits), so long test and function names stay publishable. The base ref in the coverage
+underscore or hyphen, and digits only as up to four ending a lowercase word, as in `c1` or `sha256`), so long test and
+function names stay publishable. A rejection logs a warning per hit naming the rule, the scan form (`raw`, `decoded`,
+`unescaped` or `rendered`) and the offset and length of the match, never the matched text. The base ref in the coverage
 marker is already validated as a branch name and is checked against the credential patterns only. For publication, the bearer
 and named-credential rules (`token`, `secret`, `password`, `api_key` and similar followed by `:` or `=`) match only a
 value that looks like a credential: a non-empty quoted literal that is not a reference (`$VAR`, `${{ ... }}`, `%VAR%`,
