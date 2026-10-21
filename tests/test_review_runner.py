@@ -20,7 +20,7 @@ CI_DOCS = ROOT / "docs" / "CI-CD.md"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
 
 
-def run_powershell(tmp_path: Path, body: str) -> subprocess.CompletedProcess[str]:
+def run_powershell(tmp_path: Path, body: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     if not POWERSHELL:
         pytest.skip("Windows PowerShell is not installed")
     wrapper = tmp_path / "review-test.ps1"
@@ -34,7 +34,7 @@ def run_powershell(tmp_path: Path, body: str) -> subprocess.CompletedProcess[str
         cwd=ROOT,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
         check=False,
     )
 
@@ -99,6 +99,8 @@ Import-Module Pester -ErrorAction Stop
 $r = Invoke-Pester '{pester_path}' -PassThru
 if ($r.FailedCount -ne 0 -or $r.PassedCount -eq 0 -or $r.PassedCount -ne $r.TotalCount) {{ exit 1 }}
 """,
+        # The whole suite (about 190 cases) takes about 8 s locally but over 30 s on a loaded hosted runner.
+        timeout=180,
     )
     assert result.returncode == 0, output(result)
 
