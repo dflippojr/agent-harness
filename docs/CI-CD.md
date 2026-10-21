@@ -317,9 +317,22 @@ parser reads them (numeric references and legacy names such as `&shy` need no se
 HTML5 names for ASCII punctuation such as `&sol;` and `&lsqb;`, which .NET does not decode, are decoded too; any other
 named entity with a semicolon left undecoded, such as `&fjlig;` or `&ZeroWidthSpace;`, fails closed as rule
 `unknown-entity`), characters a reader may not see (controls other than whitespace, noncharacters and Unicode's
-default-ignorable code points, such as format characters, the soft hyphen and Hangul fillers), Unicode compatibility forms and Markdown backslash escapes are decoded first, and an approximate rendered
-form also drops link targets, inline HTML tags and emphasis or code markers that could split a value, and every bracket
-when the text may define a link reference, which is any `]:` so definitions in block quotes and lists count (otherwise brackets render literally, so `test_x[case-1]` stays two words). Known
+default-ignorable code points, such as format characters, the soft hyphen and Hangul fillers), Unicode compatibility forms and Markdown backslash escapes are decoded first. Three
+approximate renderings then read markup from the raw text, so an escaped or entity-encoded bracket stays text:
+`rendered` drops the raw HTML that CommonMark passes through (tags, comments, processing instructions, declarations,
+CDATA) and the link and image targets GitHub hides, `literal` keeps every link target in case the text was not a link,
+and `html` reads each line as GitHub reads a raw HTML block (an HTML5 tokenizer, so a quoted attribute or a comment may
+hold `>`). Both Markdown renderings drop emphasis, code and strikethrough markers, and every bracket when the text may
+define a link reference, which is any `]:` so definitions in block quotes and lists count (otherwise brackets render
+literally, so `test_x[case-1]` stays two words). What the renderings cannot settle fails closed, outside fenced code
+blocks at column 0: rule `bidi-control` rejects any bidirectional formatting character, raw or decoded (it reorders what a
+reader sees, even in code); rule `raw-html` rejects markup that CommonMark reads across lines (or an unterminated tag or
+comment in a possible HTML block), markup that CommonMark and an HTML5 tokenizer end at different places (a comment
+holding `--!>`, an instruction or CDATA holding `>`), markup holding a backtick, a `dir` attribute, and the elements
+whose text GitHub keeps out of place (`rp`, `rt`, `rb`, `rtc`, `ruby`, `table`, `video`, `bdo`, `bdi`), even when only
+named in inline code; rule `link-target` rejects a link whose target holds a backtick or whose text holds an unpaired
+one. Renderers GitHub runs in the browser (math, Mermaid, GeoJSON, STL) are not modeled, and no scan stops a value spelled
+out in pieces in prose. Known
 citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and
 rendered spellings; a name counts as known only if every one of those spellings is relative. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
@@ -327,7 +340,7 @@ tells the backend to cite only repository-relative paths and describe credential
 treated as a token when it reads as an identifier (only letters, slashes, underscores and hyphens, with at least one
 underscore or hyphen, and digits only as up to four ending a lowercase word, as in `c1` or `sha256`), so long test and
 function names stay publishable. A rejection logs a warning per hit naming the rule, the scan form (`raw`, `decoded`,
-`unescaped` or `rendered`) and the offset and length of the match, never the matched text. The base ref in the coverage
+`unescaped`, `rendered`, `literal` or `html`) and the offset and length of the match, never the matched text. The base ref in the coverage
 marker is already validated as a branch name and is checked against the credential patterns only. For publication, the bearer
 and named-credential rules (`token`, `secret`, `password`, `api_key` and similar followed by `:` or `=`) match only a
 value that looks like a credential: a non-empty quoted literal that is not a reference (`$VAR`, `${{ ... }}`, `%VAR%`,
