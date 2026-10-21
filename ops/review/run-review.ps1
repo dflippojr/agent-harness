@@ -409,20 +409,73 @@ $script:ReviewHtml5Entities = @{
 # A named entity reference the decoders leave in place. GitHub may render it as a character the scan
 # never sees (&fjlig; is two letters, &ZeroWidthSpace; an invisible split), so it fails closed.
 $script:ReviewUnknownEntityPattern = '&[A-Za-z][A-Za-z0-9]*;'
+# HTML5 decodes these names even without a semicolon (gh&shyp_ is gh, a soft hyphen, p_), longest first.
+$script:ReviewLegacyEntities = @(
+    'AElig AMP Aacute Acirc Agrave Aring Atilde Auml COPY Ccedil ETH Eacute Ecirc Egrave Euml GT Iacute Icirc Igrave',
+    'Iuml LT Ntilde Oacute Ocirc Ograve Oslash Otilde Ouml QUOT REG THORN Uacute Ucirc Ugrave Uuml Yacute aacute acirc',
+    'acute aelig agrave amp aring atilde auml brvbar ccedil cedil cent copy curren deg divide eacute ecirc egrave eth',
+    'euml frac12 frac14 frac34 gt iacute icirc iexcl igrave iquest iuml laquo lt macr micro middot nbsp not ntilde',
+    'oacute ocirc ograve ordf ordm oslash otilde ouml para plusmn pound quot raquo reg sect shy sup1 sup2 sup3 szlig',
+    'thorn times uacute ucirc ugrave uml uuml yacute yen yuml'
+) -join ' ' -split ' ' | Sort-Object { $_.Length } -Descending
+# HTML5 reads numeric references 0x80-0x9F as Windows-1252 (&#153 is a trademark sign, not a control).
+$script:ReviewC1References = @{
+    0x80 = 0x20AC; 0x82 = 0x201A; 0x83 = 0x0192; 0x84 = 0x201E; 0x85 = 0x2026; 0x86 = 0x2020; 0x87 = 0x2021
+    0x88 = 0x02C6; 0x89 = 0x2030; 0x8A = 0x0160; 0x8B = 0x2039; 0x8C = 0x0152; 0x8E = 0x017D; 0x91 = 0x2018
+    0x92 = 0x2019; 0x93 = 0x201C; 0x94 = 0x201D; 0x95 = 0x2022; 0x96 = 0x2013; 0x97 = 0x2014; 0x98 = 0x02DC
+    0x99 = 0x2122; 0x9A = 0x0161; 0x9B = 0x203A; 0x9C = 0x0153; 0x9E = 0x017E; 0x9F = 0x0178
+}
+# Invisible characters a reader never sees: Unicode's default-ignorable code points, listed because
+# .NET Framework's tables are older (they put the soft hyphen in Pd, not Cf).
+$script:ReviewInvisiblePattern = '\p{Cf}|[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFF8]|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|[\uDB40-\uDB43][\uDC00-\uDFFF]'
+
+function Get-ReviewNamedEntityText {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    # The text of &Name;, or $null when the scan does not know the name. Hashtable keys ignore case,
+    # but entity names do not (&hat; is not &Hat;).
+    $known = @($script:ReviewHtml5Entities.Keys | Where-Object { $_ -ceq $Name })
+    if ($known.Count) { return $script:ReviewHtml5Entities[$Name] }
+    # HTML5 adds upper-case spellings of a few HTML4 names that WebUtility.HtmlDecode does not know.
+    if ($Name -cmatch '^(?:AMP|COPY|GT|LT|QUOT|REG)$') { $Name = $Name.ToLowerInvariant() }
+    $reference = "&$Name;"
+    $decoded = [System.Net.WebUtility]::HtmlDecode($reference)
+    if ($decoded -cne $reference) { return $decoded }
+    return $null
+}
 
 function ConvertFrom-ReviewEntities {
     param([AllowEmptyString()][string]$Text)
 
-    # Percent escapes, then the HTML5 punctuation entities, then what WebUtility.HtmlDecode knows.
-    $decoded = [regex]::Replace([Uri]::UnescapeDataString($Text), '&([A-Za-z]+);', {
+    # Percent escapes, then one pass over character references as an HTML5 parser reads text: numeric
+    # references and legacy names need no semicolon, so a raw HTML block can spell gh&#112_ or
+    # gh&shyp_. A named reference with a semicolon that the scan does not know stays for the
+    # unknown-entity rule. An ampersand that starts no reference (AT&T) stays as it is.
+    $pattern = '&(?:#(?:[xX](?<hex>[0-9A-Fa-f]+)|(?<dec>[0-9]+));?|(?<name>[A-Za-z][A-Za-z0-9]*)(?<semi>;)?)'
+    return [regex]::Replace([Uri]::UnescapeDataString($Text), $pattern, {
             param($match)
-            $name = $match.Groups[1].Value
-            # Hashtable keys ignore case, but entity names do not (&hat; is not &Hat;).
-            $known = @($script:ReviewHtml5Entities.Keys | Where-Object { $_ -ceq $name })
-            if ($known.Count) { return $script:ReviewHtml5Entities[$name] }
-            return $match.Value
+            $name = $match.Groups['name'].Value
+            if ($name) {
+                if ($match.Groups['semi'].Success) {
+                    $entity = Get-ReviewNamedEntityText -Name $name
+                    if ($null -ne $entity) { return $entity }
+                    return $match.Value
+                }
+                foreach ($legacy in $script:ReviewLegacyEntities) {
+                    if ($name.StartsWith($legacy, [StringComparison]::Ordinal)) {
+                        return (Get-ReviewNamedEntityText -Name $legacy) + $name.Substring($legacy.Length)
+                    }
+                }
+                return $match.Value
+            }
+            $digits, $base = if ($match.Groups['hex'].Success) { $match.Groups['hex'].Value, 16 } else { $match.Groups['dec'].Value, 10 }
+            $digits = $digits.TrimStart('0')
+            # Zero, surrogates and values past U+10FFFF decode to the replacement character.
+            $code = if (-not $digits) { 0 } elseif ($digits.Length -gt 7) { 0x110000 } else { [Convert]::ToInt32($digits, $base) }
+            if ($code -eq 0 -or $code -gt 0x10FFFF -or ($code -ge 0xD800 -and $code -le 0xDFFF)) { return [string][char]0xFFFD }
+            if ($script:ReviewC1References.ContainsKey($code)) { $code = $script:ReviewC1References[$code] }
+            return [char]::ConvertFromUtf32($code)
         })
-    return [System.Net.WebUtility]::HtmlDecode($decoded)
 }
 
 function Get-ReviewScanForms {
@@ -438,7 +491,7 @@ function Get-ReviewNamedScanForms {
     # invisible format characters, compatibility characters, Markdown backslash escapes, and
     # (except for plain-text job logs) an approximate Markdown rendering without markup.
     # A form identical to an earlier one keeps the earlier name.
-    $decoded = ((ConvertFrom-ReviewEntities -Text $Text) -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
+    $decoded = ((ConvertFrom-ReviewEntities -Text $Text) -replace $script:ReviewInvisiblePattern, '').Normalize([Text.NormalizationForm]::FormKC)
     $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
     $forms = [ordered]@{ raw = $Text; decoded = $decoded; unescaped = $unescaped }
     if (-not $PlainText) { $forms.rendered = ConvertTo-ReviewRenderedText -Text $unescaped }
