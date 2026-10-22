@@ -342,6 +342,7 @@ gives up the GPU.
 | Stables (web client) | [web](docs/web.md) |
 | UI testing with the fake model | [ui-testing](docs/ui-testing.md) |
 | Harness-design gap report (arXiv 2609.00006, 2609.20804) | [harness-design-gap-report](docs/harness-design-gap-report.md) |
+| Native mobile client study (Swift, Flutter or PWA only) | [native-mobile-client-study](docs/native-mobile-client-study.md) |
 | Mac client and version compatibility | [mac-client](docs/mac-client.md) · [compatibility](docs/compatibility.md) |
 | CI/CD and trust boundaries | [CI-CD](docs/CI-CD.md) |
 <!-- generated:end readme-docs-index -->
