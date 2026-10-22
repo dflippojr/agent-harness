@@ -17,13 +17,19 @@ after that workflow succeeds for the exact commit pushed to `main`:
    the same shared guard pinned to the same commit, and its own job, `gate-guard-target / gate-guard`, is the verdict on each pull request's head. It
    fails a pull request that deletes or skips a test, adds a retry, or edits workflow, Sonar, coverage or lint config,
    unless the owner applied `gate-change-approved` after the newest push. **CI / changes** lists the
-   changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `openapi` and `ui-tests` skip and
+   changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `test-py313`, `openapi`, `ui-tests`
+   and `hub-contract` skip and
    `gate` still passes, so a docs-only PR is not left pending. A push to `main` is never cancelled by a later push:
    each main commit gets its own CI run, and only pull-request runs cancel their older run.
    **CI / lint** (#729) runs on every change, on `ubuntu-latest`: `ruff check` with the small rule set in
    `pyproject.toml` (`F`, `E9`, `B`, `PLE`; no formatter or import sorting), then pyright in basic mode
    (`pyrightconfig.json`) over `harness`, `harness_modules`, `sdk` and `macrunner`. Pyright fails only on errors that
    `tools/lint/pyright-baseline.json` does not record; fixing a recorded one and rewriting the baseline shrinks it.
+   **CI / hub-contract** (#736) runs the Hub's contract suite (dflippojr/agent-harness-hub `tests/contract`, its
+   `e2e`-marked `[daemon]` cases), checked out at the full SHA pinned in the job, against this commit's daemon in
+   fake-model mode on loopback, on `ubuntu-latest`. A daemon change that renames a field, changes a status code or
+   drops an endpoint the Hub calls fails it; AGENTS.md describes the deliberate-break flow (Hub PR first, then bump
+   the pinned ref).
    **CI / test-py313** (#730) runs the same suite on Python 3.13, on `windows-latest`, after an import smoke test
    (`tests/test_import_smoke.py`) that compiles every shipped source file and imports every shipped module with
    `SyntaxWarning` as an error. It has no coverage. `gate` needs it, so a failure fails the CI run, and `guard` deploys
