@@ -59,23 +59,26 @@ What this means:
 
 Both columns assume an iOS-only app that talks to `/api/v1` with the pairing flow in `docs/app-api.md`.
 
-| Capability | Native Swift | Flutter | Native code Flutter still needs |
+| Capability | Native Swift | Flutter | Native code with Flutter: inside the plugin, or written by the app |
 | --- | --- | --- | --- |
-| Push without ntfy | APNs directly. The daemon holds an APNs auth key and signs requests to Apple. Needs a paid Apple Developer Program membership ($99 per year, Web: [Apple membership details](https://developer.apple.com/programs/whats-included/)) and a bundle identifier. | Same APNs path. A Flutter app registers for remote notifications through a plugin (commonly Firebase Messaging, which adds Google's FCM service between the daemon and Apple) or through its own platform channel. | Registration and token delivery are platform code in `AppDelegate`; with a plugin they are hidden but still run in Swift. Unverified in this study: exact plugin behaviour. |
+| Push without ntfy | APNs directly. The daemon holds an APNs auth key and signs requests to Apple. Needs a paid Apple Developer Program membership ($99 per year, Web: [Apple membership details](https://developer.apple.com/programs/whats-included/)) and a bundle identifier. | Same APNs path. A Flutter app registers for remote notifications through a plugin (commonly Firebase Messaging, which adds Google's FCM service between the daemon and Apple) or through its own platform channel. | Registration and token delivery are platform code. With a plugin that code lives inside the plugin; how much `AppDelegate` glue the app itself must write was not checked, and `flutter_local_notifications` is local-only, so it does not cover push. Unverified: the push plugin's iOS setup. |
 | Background refresh | `BGAppRefreshTask` and silent push (`content-available`). Both are best-effort and throttled. | Plugin wrapper around `BGTaskScheduler` (Workmanager). The Dart isolate starts only when iOS relaunches the app. | A permitted-identifier entry in `Info.plist` and a handler registered before launch finishes: native configuration. Web: [Flutter Workmanager troubleshooting](https://docs.page/fluttercommunity/flutter_workmanager/troubleshooting). |
-| Lock-screen approvals | `UNNotificationCategory` and `UNNotificationAction`, handled in `UNUserNotificationCenterDelegate`. The `authenticationRequired` option makes iOS ask for an unlock first (Web: [Apple docs](https://developer.apple.com/documentation/usernotifications/unnotificationaction)). The handler can call the daemon with a token read from the Keychain, instead of the per-approval secret ntfy uses. | A notification plugin can register categories and report action taps to Dart. | Handling an action while the app is not running is the weak point. Whether the plugin's Dart callback runs reliably with the app terminated, and for how long, was not established (searches returned nothing). Plan on a Swift delegate. Unverified. |
-| Biometric unlock | `LocalAuthentication` with a Keychain item whose access control requires biometry; Face ID needs `NSFaceIDUsageDescription`. | `local_auth` for the prompt and `flutter_secure_storage` for the Keychain. `local_auth` only reports pass or fail and stores nothing; gating the stored secret behind the prompt is a separate step. | `NSFaceIDUsageDescription` in `Info.plist` (Web: [`local_auth` source](https://flutter.googlesource.com/mirrors/packages/+/refs/tags/url_launcher_macos-v3.0.7/packages/local_auth/local_auth)). Binding a secret to biometry needs a native Keychain access-control flag, or a young third-party package (the search found `biometric_security`, pre-1.0). |
+| Lock-screen approvals | `UNNotificationCategory` and `UNNotificationAction`, handled in `UNUserNotificationCenterDelegate`. The `authenticationRequired` option makes iOS ask for an unlock first (Web: [Apple docs](https://developer.apple.com/documentation/usernotifications/unnotificationaction)). The handler can call the daemon with a token read from the Keychain, instead of the per-approval secret ntfy uses. | `flutter_local_notifications` documents notification actions: categories and actions are declared in Dart (`DarwinNotificationCategory`, `DarwinNotificationAction`), and `onDidReceiveBackgroundNotificationResponse` is a top-level Dart callback for an action tapped while the app is sleeping or terminated. Web: [package page, Notification actions](https://pub.dev/packages/flutter_local_notifications#notification-actions) (read as a summary; the page's wording on the terminated case was not confirmed verbatim). | Plugin-internal: the `UNNotificationCenter` delegate and the wake-up. App-written, per the package docs: a few lines of Swift in `AppDelegate` (setting the notification centre delegate and a plugin registrant callback). Unverified: that the Dart callback runs reliably with the app terminated, and whether it can reach the daemon with a Keychain token. Device reliability still to test; no evidence here that a custom Swift action delegate is needed. |
+| Biometric unlock | `LocalAuthentication` with a Keychain item whose access control requires biometry; Face ID needs `NSFaceIDUsageDescription`. | `local_auth` for the prompt and `flutter_secure_storage` for the Keychain. `local_auth` only reports pass or fail and stores nothing. `flutter_secure_storage` exposes Keychain access control in Dart: `IOSOptions(accessControlFlags: [AccessControlFlag.biometryCurrentSet])`. Web: [`IOSOptions`](https://pub.dev/documentation/flutter_secure_storage/latest/flutter_secure_storage/IOSOptions-class.html), [`AccessControlFlag`](https://pub.dev/documentation/flutter_secure_storage/latest/flutter_secure_storage/AccessControlFlag.html). | Plugin-internal: the Keychain calls. App-written: `NSFaceIDUsageDescription` in `Info.plist` (configuration, not Swift; Web: [`local_auth` source](https://flutter.googlesource.com/mirrors/packages/+/refs/tags/url_launcher_macos-v3.0.7/packages/local_auth/local_auth)). No Swift needed for the access-control flag. Unverified: behaviour on a device (for example when biometrics change). |
 | Offline shell | The UI is in the app bundle, so it opens offline by construction. Data views need a local cache: SwiftData or a plain file store, written by hand. | Same: UI in the bundle, cache by hand (Dart packages). | None. |
 
 **Consequence for the shared constraint in `docs/orca-study.md`**: the native client must never carry a pairing code or
 token in a custom URL scheme (another app can register the same scheme). Use a typed or QR code redeemed in the app,
 or verified associated-domain links. This applies to Swift and Flutter alike.
 
-**Where Flutter would still need Swift.** Three of the five capabilities (remote push registration, notification
-actions while terminated, Keychain access control) land in `AppDelegate` or a notification delegate whichever
-framework is chosen. In an app whose reasons to exist are those capabilities, Flutter would carry its own runtime and a
-second language (Dart) on top of the Swift it cannot avoid. Flutter would earn its place on an app whose value is a
-large screen UI it can share across two OSes, and the Android half is out of scope here.
+**Where Flutter would still need Swift.** Less than first thought. Biometric secret storage is covered by a plugin's
+Dart API, and notification actions have a documented Dart path (device reliability still to test). What the table
+leaves with application-owned Swift is small: a few lines of `AppDelegate` glue for notifications, plus whatever the
+push-registration plugin requires, which was not checked. So this study does not claim that Flutter forces custom
+Swift for most capabilities. The Swift fallback in section 4 rests on other grounds: the app is iOS-only, so Flutter's
+shared-UI payoff is not in play, and Flutter adds a runtime, a second language and plugin upkeep. Flutter would earn
+its place on an app whose value is a large screen UI shared across two OSes, and the Android half is out of scope
+here.
 
 ## 3. Build setup and cost
 
@@ -108,10 +111,12 @@ Reasons:
 3. **A native client does not remove the third parties; it moves them.** ntfy's iOS delivery depends on a poll request
    to ntfy.sh when self-hosted (Web: [ntfy known issues](https://docs.ntfy.sh/known-issues/)). Direct APNs depends on
    Apple and needs an APNs key held by the daemon, which is a new secret in the Server's trust boundary.
-4. **If native, Swift.** The features that justify a native app are the ones Flutter hands back to Swift. The app is
-   iOS-only with Android out of scope, so Flutter's main payoff (one UI for two platforms) is not in play. Swift adds one
-   toolchain, Xcode, which #31 already covers. Flutter adds the Dart SDK, CocoaPods and plugin upkeep on a limited 16 GB
-   machine.
+4. **If native, Swift.** This rests on the iOS-only and toolchain grounds, not on Flutter lacking the features: the
+   plugins in section 2 document Dart APIs for biometric Keychain access and notification actions, so Flutter cannot be
+   ruled out on capability. The app is iOS-only with Android out of scope, so Flutter's main payoff (one UI for two
+   platforms) is not in play. Swift adds one toolchain, Xcode, which #31 already covers. Flutter adds the Dart SDK,
+   CocoaPods and plugin upkeep on a limited 16 GB machine. This is a judgement call and a closer one than the
+   capability table first suggested.
 
 **What would change this:**
 
@@ -134,7 +139,9 @@ Swift, with no Flutter or Dart install.
 
 - Nothing was tested on a device, the MacBook, Xcode or a macOS runner.
 - Whether current iOS shows Web Push action buttons, and WebAuthn behaviour in an installed iOS web app.
-- Whether Flutter's notification plugins run Dart on an action tap with the app terminated.
+- Whether `flutter_local_notifications` runs its Dart callback on an action tap with the app terminated, and how
+  reliably. The package page was read as a summary, so its exact wording and the `AppDelegate` code are unconfirmed.
+- How `flutter_secure_storage` biometric access control behaves on a device, and the iOS setup of any push plugin.
 - The Dart SDK download terms, Flutter's `LICENSE` file, and plugin licences.
 - Memory and disk cost of Flutter next to Xcode on the 16 GB MacBook.
 - The tester-army/e2e Flutter support claim (the repository is not here).
