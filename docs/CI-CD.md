@@ -322,15 +322,46 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
   repository path. `docs/users.md` and `root-ca.md` are not profile directories; an unknown `examples/home/x.py` is
   rejected even though it is relative.
 
-The rules run on the raw body and on what a reader would see: percent escapes, HTML entities, invisible format
-characters, Unicode compatibility forms and Markdown backslash escapes are decoded first, and an approximate rendered
-form also drops link targets, brackets, inline HTML tags and emphasis or code markers that could split a value. Known
+The rules run on the raw body and on what a reader would see: percent escapes, HTML character references as an HTML5
+parser reads them (numeric references and legacy names such as `&shy` need no semicolon, as in a raw HTML block;
+HTML5 names for ASCII punctuation such as `&sol;` and `&lsqb;`, which .NET does not decode, are decoded too; any other
+named entity with a semicolon left undecoded, such as `&fjlig;` or `&ZeroWidthSpace;`, fails closed as rule
+`unknown-entity`), characters a reader may not see (controls other than whitespace, noncharacters and Unicode's
+default-ignorable code points, such as format characters, the soft hyphen and Hangul fillers), Unicode compatibility forms and Markdown backslash escapes are decoded first. Three
+approximate renderings then read markup from the raw text, so an escaped or entity-encoded bracket stays text:
+`rendered` drops the raw HTML that CommonMark passes through (tags, comments, processing instructions, declarations,
+CDATA) and the link and image targets GitHub hides, `literal` keeps every link target in case the text was not a link,
+and `html` reads each line as GitHub reads a raw HTML block (an HTML5 tokenizer, so a quoted attribute or a comment may
+hold `>`). Both Markdown renderings drop emphasis, code and strikethrough markers, and every bracket when the text may
+define a link reference, which is any `]:` so definitions in block quotes and lists count (otherwise brackets render
+literally, so `test_x[case-1]` stays two words). What the renderings cannot settle fails closed, outside fenced code
+blocks at column 0: rule `bidi-control` rejects any bidirectional formatting character, raw or decoded (it reorders what a
+reader sees, even in code); rule `raw-html` rejects markup that CommonMark reads across lines (or an unterminated tag or
+comment in a possible HTML block), markup that CommonMark and an HTML5 tokenizer end at different places (a comment
+holding `--!>`, an instruction or CDATA holding `>`), markup holding a backtick, a `dir` attribute, and the elements
+whose text GitHub keeps out of place (`rp`, `rt`, `rb`, `rtc`, `ruby`, `table`, `video`, `bdo`, `bdi`), even when only
+named in inline code; rule `link-target` rejects a link whose target holds a backtick or whose text holds an unpaired
+one; rule `link-depth` rejects links and images nested more than 8 deep, which the `rendered` form stops unwrapping
+(even in fenced code). Math and Mermaid are checked in the raw, `decoded` and `unescaped` forms, so a reference or escape
+cannot hide them: rule `fence-info` rejects a fence line (indented, in a list item or block quote, too) whose info string
+is not a single plain language token (letters, digits, `_+#.-`), since GitHub decodes references and escapes there; rule
+`math` rejects a `math` fence (any case), `$$`, and a `$...$` pair GitHub may draw as math (the opening `$` after no
+ASCII letter or digit and before a non-space, the closing `$` after a non-space and before no ASCII letter or digit,
+within a paragraph; `&#36;` and `&dollar;` count and `\$` does not protect). A code span hides a `$` only when every
+backtick run outside fenced code closes on its own line and no backtick sits inside `<...>` or beside an escaped
+backtick (otherwise no span hides anything), and never on a line where a span holds a `|`, since a table row is possible
+wherever a `|` is. Rule `line-break` rejects, raw or decoded and before any of this, every line break but LF and CRLF:
+a bare CR (GitHub ends a line there; the scans do not), vertical tab, form feed, NEL, U+2028 and U+2029. So
+`$5 and $10`, `$HOME/$USER` and `` `$a` `` still publish. Rule `mermaid` rejects a `mermaid` fence. GeoJSON, TopoJSON
+and STL are not modeled, and no scan stops a value spelled out in pieces in prose. Known
 citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and
 rendered spellings; a name counts as known only if every one of those spellings is relative. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
 tells the backend to cite only repository-relative paths and describe credentials in words. A run of 40 or more token characters is not
 treated as a token when it reads as an identifier (only letters, slashes, underscores and hyphens, with at least one
-underscore or hyphen and no digits), so long test and function names stay publishable. The base ref in the coverage
+underscore or hyphen, and digits only as up to four ending a lowercase word, as in `c1` or `sha256`), so long test and
+function names stay publishable. A rejection logs a warning per hit naming the rule, the scan form (`raw`, `decoded`,
+`unescaped`, `rendered`, `literal` or `html`) and the offset and length of the match, never the matched text. The base ref in the coverage
 marker is already validated as a branch name and is checked against the credential patterns only. For publication, the bearer
 and named-credential rules (`token`, `secret`, `password`, `api_key` and similar followed by `:` or `=`) match only a
 value that looks like a credential: a non-empty quoted literal that is not a reference (`$VAR`, `${{ ... }}`, `%VAR%`,

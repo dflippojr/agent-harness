@@ -16,6 +16,8 @@ Describe 'Review publication safety' {
         @{ Payload = (('A' * 38) + '==') }
         @{ Payload = ('a1' * 24) }
         @{ Payload = (('ab_' * 15) + '9') }
+        @{ Payload = (('k3j9x2' * 7) + '_z') }
+        @{ Payload = (('abcde12345_' * 4)) }
         @{ Payload = ('A' * 24 + '/' + 'B' * 24) }
         @{ Payload = 'gh**p_**synthetic12345678' }
         @{ Payload = 'gh<b>p</b>_synthetic12345678' }
@@ -23,6 +25,17 @@ Describe 'Review publication safety' {
         @{ Payload = '[gh](https://example.invalid)p_synthetic12345678' }
         @{ Payload = '[/ho][ref]me/reviewer/auth.json' }
         @{ Payload = "[gh]p_synthetic12345678`n`n[gh]: https://example.invalid" }
+        # A link reference defined inside a block quote or list item still turns [label] into a shortcut link.
+        @{ Payload = "[gh]p_synthetic12345678`n`n> [gh]: https://example.invalid" }
+        @{ Payload = "[gh]p_synthetic12345678`n`n- [gh]: https://example.invalid" }
+        @{ Payload = "[gh]p_synthetic12345678`n`n1. > [gh]: https://example.invalid" }
+        @{ Payload = "see [C]:/temp/../Users/reviewer/auth.json`n`n> [C]: https://example.invalid" }
+        @{ Payload = "see [C]:/temp/config.py`n`n* [C]: https://example.invalid" }
+        @{ Payload = "in [/ho]me/reviewer/auth.json`n`n> - [/ho]: https://example.invalid" }
+        @{ Payload = "[gh]p_synthetic12345678`n`n> %5Bgh%5D: https://example.invalid" }
+        @{ Payload = "[gh]p_synthetic12345678`n`n- &#91;gh&#93;: https://example.invalid" }
+        @{ Payload = "&#91;gh&#93;p_synthetic12345678`n`n> &lsqb;gh&rsqb;: https://example.invalid" }
+        @{ Payload = "in %5B/ho%5Dme/reviewer/auth.json`n`n- \[/ho\]: https://example.invalid" }
         @{ Payload = 'Bearer synthetic-value-1' }
         @{ Payload = ('Bearer ' + ('a' * 24)) }
         @{ Payload = ('`Bearer` ' + ('a' * 24)) }
@@ -75,11 +88,159 @@ Describe 'Review publication safety' {
         # Encodings a reader would see decoded.
         @{ Payload = '/h%6fme/reviewer/.codex/auth.json' }
         @{ Payload = '&#47;home&#47;reviewer&#47;auth.json' }
+        @{ Payload = '&sol;home&sol;reviewer&sol;auth.json' }
+        @{ Payload = 'C&colon;&bsol;Users&bsol;reviewer' }
         @{ Payload = 'C&#58;&#92;Users&#92;reviewer' }
         @{ Payload = '\/home\/reviewer\/auth.json' }
         @{ Payload = 'C\:\\Users\\reviewer' }
         @{ Payload = ([string][char]0xFF0F + 'home' + [char]0xFF0F + 'reviewer') }
         @{ Payload = ('/ho' + [char]0x200B + 'me/reviewer') }
+        # HTML5 named entities outside the decoder's table fail closed (#756): GitHub renders them, the scan cannot.
+        @{ Payload = 'ghp_ab&fjlig;12345678' }
+        @{ Payload = 'gh&ZeroWidthSpace;p_synthetic12345678' }
+        @{ Payload = 'gh&NegativeVeryThinSpace;p_synthetic12345678' }
+        @{ Payload = 'see C&NegativeThinSpace;:/temp/config.py' }
+        @{ Payload = 'see C&NegativeMediumSpace;:	emp\config.py' }
+        @{ Payload = 'in /ho&ZeroWidthSpace;me/reviewer/auth.json' }
+        @{ Payload = 'in /ho&NegativeThickSpace;me/reviewer/auth.json' }
+        @{ Payload = (('a1' * 12) + '&fjlig;' + ('b2' * 12)) }
+        @{ Payload = 'gh%26ZeroWidthSpace%3Bp_synthetic12345678' }
+        @{ Payload = 'gh&amp;ZeroWidthSpace;p_synthetic12345678' }
+        @{ Payload = 'see ghp_&frac12;synthetic12345678 and &blk14;' }
+        # HTML5 decodes numeric references and legacy names without a semicolon, as in a raw HTML block (#756).
+        @{ Payload = "<div>`ngh&#112_synthetic12345678`n</div>" }
+        @{ Payload = "<div>`n&#47home/reviewer/auth.json`n</div>" }
+        @{ Payload = 'gh&#x70_synthetic12345678' }
+        @{ Payload = 'gh&#X70_synthetic12345678' }
+        @{ Payload = 'gh&#0000112_synthetic12345678' }
+        @{ Payload = 'see C&#58/temp/config.py' }
+        @{ Payload = 'see C&#x3A\temp\config.py' }
+        @{ Payload = 'gh&shyp_synthetic12345678' }
+        @{ Payload = 'see C&shy:/temp/config.py' }
+        @{ Payload = 'in /ho&shyme/reviewer/auth.json' }
+        @{ Payload = (('a1' * 12) + '&shy' + ('b2' * 12)) }
+        # Character references 0x80-0x9F decode as Windows-1252 (&#153 is a trademark sign, TM under NFKC).
+        @{ Payload = (('a1' * 12) + '&#153' + ('b2' * 12)) }
+        @{ Payload = 'gh%26%23112_synthetic12345678' }
+        # Invisible characters that are not format characters still join the text around them.
+        @{ Payload = 'gh&#x34F;p_synthetic12345678' }
+        @{ Payload = 'in /ho&#x3164;me/reviewer/auth.json' }
+        @{ Payload = ('see C' + [char]0xFE0F + ':/temp/config.py') }
+        @{ Payload = ('ghp' + [char]0x00AD + '_synthetic12345678') }
+        # A browser may draw a control character as nothing, whether it is spelled raw or as a reference.
+        @{ Payload = 'gh&#1p_synthetic12345678' }
+        @{ Payload = ('ghp' + [char]0x0001 + '_synthetic12345678') }
+        @{ Payload = ('in /ho' + [char]0x0085 + 'me/reviewer/auth.json') }
+        # So may a noncharacter.
+        @{ Payload = 'gh&#xFFFF;p_synthetic12345678' }
+        @{ Payload = 'see C&#1114111:/temp/config.py' }
+        # Bidirectional controls reorder what a reader sees, so they fail closed, raw or as references (#756).
+        @{ Payload = '&#x202E;87654321citehtnys_phg&#x202C;' }
+        @{ Payload = ([string][char]0x202E + '87654321citehtnys_phg' + [char]0x202C) }
+        @{ Payload = 'in &#x202E;nosj.htua/reweiver/emoh/&#x202C;' }
+        @{ Payload = ('see ' + [char]0x202E + 'yp.gifnoc/cilbup/:C' + [char]0x202C) }
+        @{ Payload = ([string][char]0x2067 + 'p_synthetic12345678' + [char]0x2069 + 'gh') }
+        @{ Payload = ([string][char]0x200F + 'p_synthetic12345678' + [char]0x200F + 'gh') }
+        @{ Payload = 'see %E2%80%AEyp.gifnoc/cilbup/:C' }
+        # Raw HTML is read as GitHub reads it: a comment or a quoted attribute may hold an angle bracket.
+        @{ Payload = 'gh<!-- x > y -->p_synthetic12345678' }
+        @{ Payload = 'in /ho<!-- x > y -->me/reviewer/auth.json' }
+        @{ Payload = 'see C<!-- x > y -->:/public/config.py' }
+        @{ Payload = 'gh<!-- x < y -->p_synthetic12345678' }
+        @{ Payload = 'gh<span title=">">p_synthetic12345678' }
+        @{ Payload = 'in /ho<span title="<">me/reviewer/auth.json' }
+        @{ Payload = "see C<a title='>'>:/public/config.py" }
+        @{ Payload = "<div>`ngh<x y=a<b>p_synthetic12345678`n</div>" }
+        # Markup GitHub keeps but whose text a reader does not see in place fails closed.
+        @{ Payload = '<span dir="rtl"><span dir="ltr">p_synthetic12345678</span><span dir="ltr">gh</span></span>' }
+        @{ Payload = 'gh<rp>x</rp>p_synthetic12345678' }
+        @{ Payload = 'gh<ruby><rt>x</rt></ruby>p_synthetic12345678' }
+        @{ Payload = '<table>/ho<tr><td>x</td></tr>me/reviewer/auth.json</table>' }
+        @{ Payload = 'gh<video>x</video>p_synthetic12345678' }
+        # So does markup the scan reads one line at a time but GitHub reads across lines.
+        @{ Payload = "gh<x`ny=`"1`">p_synthetic12345678" }
+        @{ Payload = "<div>`ngh<x`ny>p_synthetic12345678`n</div>" }
+        # A tag wins over a code span, so a backtick inside one cannot be trusted to start code.
+        @{ Payload = '`<b c="` g*h*p_synthetic12345678 `">`' }
+        # Text that only looks like markup, or like a link target, stays in the rendered form.
+        @{ Payload = 'x < y g*h*p_synthetic12345678 z > w' }
+        @{ Payload = '&lt;x a="g*h*p_synthetic12345678"&gt;' }
+        @{ Payload = '[a](b c g*h*p_synthetic12345678)' }
+        @{ Payload = '[a`](b`c "g*h*p_synthetic12345678")' }
+        # Link targets and images GitHub hides, however they are spelled, leave the rendered form.
+        @{ Payload = 'gh[](b\)c)p_synthetic12345678' }
+        @{ Payload = 'gh[](b "x)y")p_synthetic12345678' }
+        @{ Payload = 'gh[](<b)c>)p_synthetic12345678' }
+        @{ Payload = 'gh[](a(b(c)))p_synthetic12345678' }
+        @{ Payload = 'gh![](x)p_synthetic12345678' }
+        @{ Payload = 'gh[![](y)](z)p_synthetic12345678' }
+        # GFM strikes through text between single tildes too.
+        @{ Payload = 'g~h~p_synthetic12345678' }
+        # Nested images flatten to one image however deep; past the unwrapping bound they fail closed.
+        @{ Payload = ('gh' + ('![' * 8) + ('](x)' * 8) + 'p_synthetic12345678') }
+        @{ Payload = ('gh' + ('![' * 9) + ('](x)' * 9) + 'p_synthetic12345678') }
+        @{ Payload = ('gh' + ('![' * 10) + ('](x)' * 10) + 'p_synthetic12345678') }
+        @{ Payload = ('in /ho' + ('![' * 8) + ('](x)' * 8) + 'me/reviewer/auth.json') }
+        @{ Payload = ('in /ho' + ('![' * 9) + ('](x)' * 9) + 'me/reviewer/auth.json') }
+        @{ Payload = ('in /ho' + ('![' * 10) + ('](x)' * 10) + 'me/reviewer/auth.json') }
+        @{ Payload = ('see C' + ('![' * 8) + ('](x)' * 8) + ':/public/config.py') }
+        @{ Payload = ('see C' + ('![' * 9) + ('](x)' * 9) + ':/public/config.py') }
+        @{ Payload = ('see C' + ('![' * 10) + ('](x)' * 10) + ':/public/config.py') }
+        # GitHub draws math and Mermaid in the browser, so they fail closed however they are written.
+        @{ Payload = 'x $\text{gh}\text{p\_synthetic12345678}$ y' }
+        @{ Payload = 'x $\text{/ho}\text{me/reviewer/auth.json}$ y' }
+        @{ Payload = 'x $\text{C}\text{:/public/config.py}$ y' }
+        @{ Payload = 'x $`\text{gh}\text{p\_synthetic12345678}`$ y' }
+        @{ Payload = 'x &#36;\text{gh}\text{p\_synthetic12345678}&dollar; y' }
+        @{ Payload = 'x \$\text{gh}\text{p\_synthetic12345678}$ y' }
+        @{ Payload = 'x $$\text{gh}\text{p\_synthetic12345678}$$ y' }
+        @{ Payload = "x`n`n`$`$`n\text{gh}\text{p\_synthetic12345678}`n`$`$" }
+        # A fence starts its own line, after the runner's "- app.py:1: exposed " prefix.
+        @{ Payload = "`n``````math`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        @{ Payload = "`n ~~~ Math extra`n\text{/ho}\text{me/reviewer/auth.json}`n~~~" }
+        @{ Payload = "`n> ``````math`n> \text{C}\text{:/public/config.py}`n> ``````" }
+        @{ Payload = "`n``````mermaid`ngraph LR`n  A[`"gh#112;_synthetic12345678`"]`n``````" }
+        @{ Payload = "`n- ``````Mermaid`n  graph LR`n  A[`"/ho#109;e/reviewer/auth.json`"]`n  ``````" }
+        # A code span cannot hide math when it starts inside an autolink, after an escaped backtick
+        # or across a blank line.
+        @{ Payload = '<http://a`> $\text{gh}\text{p\_synthetic12345678}$ `b' }
+        @{ Payload = '\``a $\text{gh}\text{p\_synthetic12345678}$ `b' }
+        @{ Payload = "``a`n`n`$\text{gh}\text{p\_synthetic12345678}`$ ``b" }
+        # GitHub decodes references and escapes in a fence's info string, so anything but a plain
+        # language token fails closed, and the decoded forms are checked for math and Mermaid too.
+        @{ Payload = "`n``````m&#97;th`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        @{ Payload = "`n``````m&#x61;th`n\text{/ho}\text{me/reviewer/auth.json}`n``````" }
+        @{ Payload = "`n``````math&#32;extra`n\text{C}\text{:/public/config.py}`n``````" }
+        @{ Payload = "`n``````m&#101;rmaid`ngraph LR`nA[`"gh#112;_synthetic12345678`"]`n``````" }
+        @{ Payload = "`n``````mermaid&#32;extra`ngraph LR`nA[`"/ho#109;e/reviewer/auth.json`"]`n``````" }
+        @{ Payload = "`n- ``````m&#97;th`n  \text{gh}\text{p\_synthetic12345678}`n  ``````" }
+        @{ Payload = "`n> ~~~m\ath`n> \text{gh}\text{p\_synthetic12345678}`n> ~~~" }
+        # Backticks that may pair across a block boundary, or whose pairing is otherwise uncertain,
+        # hide no math.
+        @{ Payload = "`n- ``one`n- `$\text{gh}\text{p\_synthetic12345678}`$ ``two" }
+        @{ Payload = "`n- ``one`n- &#36;\text{/ho}\text{me/reviewer/auth.json}&dollar; ``two" }
+        @{ Payload = "`n``one`n---`n`$\text{C}\text{:/public/config.py}`$ ``two" }
+        @{ Payload = "`n# ``one`n`$\text{gh}\text{p\_synthetic12345678}`$ ``two" }
+        @{ Payload = "`n``one`n***`n`$\text{gh}\text{p\_synthetic12345678}`$ ``two" }
+        @{ Payload = "`n| ``a | `$\text{gh}\text{p\_synthetic12345678}`$ | b`` |`n| --- | --- | --- |" }
+        @{ Payload = '`a\` $\text{gh}\text{p\_synthetic12345678}$ `' }
+        # GitHub ends a line at a bare CR too, and a browser may break at other separators, so any line
+        # break but LF or CRLF fails closed.
+        @{ Payload = "x`r``````math`r\text{gh}\text{p\_synthetic12345678}`r``````" }
+        @{ Payload = "x`r``````mermaid`rgraph LR`rA[`"gh#112;_synthetic12345678`"]`r``````" }
+        @{ Payload = "x`r`n``````math`r\text{/ho}\text{me/reviewer/auth.json}`n``````" }
+        @{ Payload = "`r- ``one`r- `$\text{C}\text{:/public/config.py}`$ ``two" }
+        @{ Payload = ('x' + [char]0x2028 + "``````math`n\text{gh}\text{p\_synthetic12345678}`n``````") }
+        @{ Payload = ('x' + [char]0x2029 + "``````mermaid`nA[`"gh#112;_synthetic12345678`"]`n``````") }
+        @{ Payload = "x`f``````math`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        @{ Payload = "x`v``````math`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        @{ Payload = ('x' + [char]0x85 + "``````math`n\text{gh}\text{p\_synthetic12345678}`n``````") }
+        @{ Payload = "x&#13;``````math`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        # A table row is possible wherever a | is, even with a pipe-free delimiter row, so a code span
+        # holding a | hides no math.
+        @{ Payload = "`n| heading |`n---`n| ``a `$\text{gh}\text{p\_synthetic12345678}`$ | b`` |" }
+        @{ Payload = "`n| heading |`n:---:`n| ``a &#36;\text{/ho}\text{me/reviewer/auth.json}&dollar; | b`` |" }
+        @{ Payload = "`nheading |`n---:`n``a `$\text{C}\text{:/public/config.py}`$ | b``" }
     ) {
         param($Payload)
         $fakeRunner = {
@@ -118,12 +279,89 @@ Describe 'Review publication safety' {
         @{ Payload = '`def __init__(self, base_url: str, token: str) -> None:` then `self.token = token`.' }
         @{ Payload = 'The workflow sets `password: ${{ secrets.DEPLOY_PASSWORD }}` and `token = os.environ`.' }
         @{ Payload = 'Defaults are `token=""` and `secret: "<placeholder>"`.' }
+        # Entities the decoder knows, and ampersands that are not entity references, publish (#756).
+        @{ Payload = 'R&amp;D, AT&T, a &lt;tag&gt;, &copy; 2026 and &nbsp;&frac12; &lsqb;x&rsqb;' }
+        @{ Payload = 'Q&A, R&D, fish&chips, &not a reference, &AMP, &#38 and &#x26 publish; &#1' }
+        # Generic types, comparisons and the markup GitHub renders in place publish (#756).
+        @{ Payload = 'Return `List<Object>`, `Map<String, List<Integer>>` or `Vec<Box<dyn Fn(&str)>>`; Option<T> too.' }
+        @{ Payload = 'When a < b and c > d, wrap it in <details><summary>Why</summary>x<sub>2</sub></details><br><!-- note -->' }
+        @{ Payload = "Use ``handlers[0](arg)`` and [the docs](https://example.invalid/a_(b) `"Title`").`n`n![diagram](https://example.invalid/d.png)" }
+        @{ Payload = "Hidden-text markup is quoted in a fence:`n`n``````html`n<table dir=`"rtl`"><tr><td><rp>x</rp></td></tr></table>`n<video src=`"a.mp4`"></video>`n```````n`nDone." }
+        @{ Payload = 'Expand `~/.claude` and keep ~5 minutes of logs.' }
+        # Dollar signs GitHub does not draw as math, or that sit in code, publish.
+        @{ Payload = 'It costs $5 and $10; $env:TEMP\x, $HOME/$USER, a$x$b, $x$1 and $env:A, $env:B are text.' }
+        @{ Payload = 'Set `$a` to `$b`, see `a $x$ b`, and `$$` is the last token.' }
+        @{ Payload = "Diagrams are quoted in a fence:`n`n````````markdown`n``````mermaid`ngraph A`n```````n`$`$x`$`$`n````````" }
+        @{ Payload = "Other languages render as code:`n`n``````mathematica`nx`n```````n`n``````math-x`nx`n``````" }
+        @{ Payload = "Plain language tokens:`n`n``````c++`nx`n```````n`n``````shell-session`n`$ x`n```````n`nA ``````python`` block." }
+        @{ Payload = "Run ``Get-ChildItem | Where-Object { `$_.Length }`` and ``a``.`n`n``````powershell`n`$a = `$b`n```````n`nThen ```$x`$`` in code." }
+        @{ Payload = "Windows line endings:`r`n`r`n``````powershell`r`n`$a = `$b`r`n```````r`n`r`nThen ```$x`$`` in code.`r`n" }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
         Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath
         $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
         if (-not $body.Contains($Payload)) { throw 'Safe review text was not published unchanged' }
+    }
+
+    It 'publishes quoted pytest ids with escaped parameters (#756)' {
+        # A Gate changes section quoting the exact removed and added ids, as open-payer-sandbox#26 did.
+        $ids = @(
+            'tests/test_ids.py::test_sanitize_identifier_strips_c1_controls[member_id_with_c1_control-\x96]'
+            'tests/test_ids.py::test_round_trip_identifiers_across_formats[case_017-\xd7]'
+            'tests/test_names.py::test_display_name_preserves_symbols[pilcrow-\xb6-multiplication-\xd7]'
+        )
+        $list = (1..173 | ForEach-Object { "test_member_id_round_trip_preserves_value[case_$_-\xb6]" }) -join ', '
+        $body = "### Gate changes`n`nRemoved ``$($ids[0])`` and $($ids[1]); added:`n`n- $($ids[2])`n- $list"
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $body }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath
+        if (-not (Get-Content -Raw -LiteralPath $script:reviewOutputPath).Contains($body)) { throw 'Quoted pytest ids were not published' }
+        # The same ids beside a real path, credential or token still fail.
+        $linked = '[' + ('A1' * 12) + ']' + ('B2' * 12) + "`n`n[" + ('A1' * 12) + ']: https://example.invalid'
+        foreach ($unsafe in @('C:\Users\reviewer\.codex\auth.json', '/home/reviewer/.codex/auth.json', 'ghp_synthetic12345678', ('a1' * 24), $linked)) {
+            $result.Output = "$body`n`n$unsafe"
+            $failure = ''
+            try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath }
+            catch { $failure = $_.Exception.Message }
+            if ($failure -notlike 'Review did not complete*') { throw "Pytest ids hid an unsafe value: $unsafe" }
+        }
+    }
+
+    It 'logs which rule and scan form rejected the output, never the matched text (#756)' -TestCases @(
+        @{ Text = 'see ghp_synthetic12345678 here'; Rule = 'known-token-prefix'; Form = 'raw'; Offset = 4 }
+        @{ Text = 'open C:\Users\reviewer\auth.json'; Rule = 'absolute-root'; Form = 'raw'; Offset = 5 }
+        @{ Text = 'in /home/reviewer/auth.json'; Rule = 'profile-segment'; Form = 'raw'; Offset = 3 }
+        @{ Text = ('x ' + ('a1' * 24)); Rule = 'long-token'; Form = 'raw'; Offset = 2 }
+        @{ Text = 'x gh**p_**synthetic12345678'; Rule = 'known-token-prefix'; Form = 'rendered'; Offset = 2 }
+        @{ Text = 'x gh&ZeroWidthSpace;p_synthetic12345678'; Rule = 'unknown-entity'; Form = 'decoded'; Offset = 4 }
+        @{ Text = 'x gh&#112_synthetic12345678'; Rule = 'known-token-prefix'; Form = 'decoded'; Offset = 2 }
+        @{ Text = 'x &#x202E;87654321citehtnys_phg'; Rule = 'bidi-control'; Form = 'decoded'; Offset = 2 }
+        @{ Text = 'x gh<rp>x</rp>p_synthetic12345678'; Rule = 'raw-html'; Form = 'raw'; Offset = 4 }
+        @{ Text = 'x gh<!-- x > y -->p_synthetic12345678'; Rule = 'known-token-prefix'; Form = 'rendered'; Offset = 2 }
+        @{ Text = "<div>`ngh<x y=a<b>p_synthetic12345678`n</div>"; Rule = 'known-token-prefix'; Form = 'html'; Offset = 1 }
+        @{ Text = 'x [a`](b`c "g*h*p_synthetic12345678")'; Rule = 'known-token-prefix'; Form = 'literal'; Offset = 10 }
+        @{ Text = ('x gh' + ('![' * 9) + ('](x)' * 9) + 'p_synthetic12345678'); Rule = 'link-depth'; Form = 'raw'; Offset = 4 }
+        @{ Text = 'x $\text{gh}\text{p\_synthetic12345678}$'; Rule = 'math'; Form = 'raw'; Offset = 2 }
+        @{ Text = "x`n``````mermaid`nA[`"gh#112;_synthetic12345678`"]`n``````"; Rule = 'mermaid'; Form = 'raw'; Offset = 2 }
+        @{ Text = "x`n``````m&#97;th`n\text{gh}\text{p\_synthetic12345678}`n``````"; Rule = 'fence-info'; Form = 'raw'; Offset = 2 }
+        @{ Text = "x`n``````m&#97;th`n\text{gh}\text{p\_synthetic12345678}`n``````"; Rule = 'math'; Form = 'decoded'; Offset = 2 }
+        @{ Text = "x`r``````math`r\text{gh}\text{p\_synthetic12345678}`r``````"; Rule = 'line-break'; Form = 'raw'; Offset = 1 }
+        @{ Text = "x&#13;``````math`n\text{gh}\text{p\_synthetic12345678}`n``````"; Rule = 'line-break'; Form = 'decoded'; Offset = 1 }
+    ) {
+        param($Text, $Rule, $Form, $Offset)
+        $failure = ''
+        try { Assert-ReviewOutputSafe -Text $Text -WarningVariable scanWarnings -WarningAction SilentlyContinue }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -notlike 'Review did not complete*') { throw 'Expected a closed publication failure' }
+        $log = @($scanWarnings | ForEach-Object { $_.Message }) -join "`n"
+        if ($log -notmatch "rule $Rule matched the $Form form at offset $Offset\b") { throw "Missing rule log: $log" }
+        if ($log -match 'synthetic|reviewer|a1a1') { throw "The log leaked the matched text: $log" }
+    }
+
+    It 'parses a verdict for a review that quotes escaped pytest ids (#756)' {
+        $review = "## Acceptance criteria`n`n- **Met:** removes ``test_sanitize_identifier_strips_c1_controls[member_id_with_c1_control-\x96]``.`n`nNo findings.`nREVIEW_CRITERIA: 1/1`nREVIEW_VERDICT: CLEAN"
+        $verdict = Get-ReviewVerdict -Text $review -RequireCriteria
+        if ($null -eq $verdict -or $verdict.Verdict -ne 'clean') { throw 'Escaped pytest ids broke verdict parsing' }
     }
 
     It 'publishes a profile-named directory only as a known repository path' {

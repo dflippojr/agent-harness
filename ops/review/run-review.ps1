@@ -350,27 +350,32 @@ function Get-ReviewRedactionRules {
     $quotedValue = '"(?![$%{<])[^"\s][^"]*"|''(?![$%{<])[^''\s][^'']*'''
     return @(
         [pscustomobject]@{
+            Name = 'bearer'
             Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+'
             PublishPattern = '(?i)\bBearer\s+(?:' + $tokenValue + ')'
             Replacement = 'Bearer [REDACTED]'
             Maskable = $false
         }
         [pscustomobject]@{
+            Name = 'credential-assignment'
             Pattern = $credentialNames + '("[^"]*"|''[^'']*''|[^\s,;]+)'
             PublishPattern = $credentialNames + '(?:' + $quotedValue + '|' + $tokenValue + ')'
             Replacement = '$1$2[REDACTED]'
             Maskable = $false
         }
         [pscustomobject]@{
+            Name = 'known-token-prefix'
             Pattern = '(?i)\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[baprs]-[A-Za-z0-9-]{8,})\b'
             Replacement = '[REDACTED]'
             Maskable = $false
         }
         # A long run of token characters is rejected unless it reads as an identifier: only letters,
-        # slashes, underscores and hyphens, at least one underscore or hyphen, and no digits
-        # (test_names_like_this, Verb-NounLikeThis). Random tokens of this length almost always have digits.
+        # slashes, underscores and hyphens, at least one underscore or hyphen, and digits only as up to
+        # four that end a lowercase word (test_strips_c1_controls, sha256_digest, Verb-NounLikeThis).
+        # Random tokens of this length almost always have digits elsewhere.
         [pscustomobject]@{
-            Pattern = '(?<![A-Za-z0-9+/=_-])(?!(?=[A-Za-z/]*[_-])[A-Za-z/_-]+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'
+            Name = 'long-token'
+            Pattern = '(?<![A-Za-z0-9+/=_-])(?!(?=[A-Za-z0-9/]*[_-])(?:[A-Za-z/_-]|(?<=[a-z][0-9]{0,3})[0-9](?![A-Za-z]))+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'
             Replacement = '[REDACTED]'
             Maskable = $true
         }
@@ -392,30 +397,498 @@ function Get-ReviewPublishPattern {
 $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
 # Trailing periods, spaces or short-name tildes still match (Windows aliases); users.md or rooted do not.
 $script:ReviewProfileSegmentPattern = '(?i)[\\/](?:users|home|root|documents and settings)(?![\p{L}\p{N}\p{M}_-])(?!\.[\p{L}\p{N}])'
+# GitHub decodes HTML5 named entities that WebUtility.HtmlDecode does not know; these spell ASCII punctuation.
+$script:ReviewHtml5Entities = @{
+    excl = '!'; num = '#'; dollar = '$'; percnt = '%'; apos = "'"; lpar = '('; rpar = ')'; ast = '*'; midast = '*'
+    plus = '+'; comma = ','; period = '.'; sol = '/'; colon = ':'; semi = ';'; equals = '='; quest = '?'; commat = '@'
+    lsqb = '['; lbrack = '['; bsol = '\'; rsqb = ']'; rbrack = ']'; Hat = '^'; lowbar = '_'; UnderBar = '_'; grave = '`'
+    DiacriticalGrave = '`'; lcub = '{'; lbrace = '{'; verbar = '|'; vert = '|'; VerticalLine = '|'; rcub = '}'; rbrace = '}'
+    Tab = "`t"; NewLine = "`n"
+}
+
+# A named entity reference the decoders leave in place. GitHub may render it as a character the scan
+# never sees (&fjlig; is two letters, &ZeroWidthSpace; an invisible split), so it fails closed.
+$script:ReviewUnknownEntityPattern = '&[A-Za-z][A-Za-z0-9]*;'
+# HTML5 decodes these names even without a semicolon (gh&shyp_ is gh, a soft hyphen, p_), longest first.
+$script:ReviewLegacyEntities = @(
+    'AElig AMP Aacute Acirc Agrave Aring Atilde Auml COPY Ccedil ETH Eacute Ecirc Egrave Euml GT Iacute Icirc Igrave',
+    'Iuml LT Ntilde Oacute Ocirc Ograve Oslash Otilde Ouml QUOT REG THORN Uacute Ucirc Ugrave Uuml Yacute aacute acirc',
+    'acute aelig agrave amp aring atilde auml brvbar ccedil cedil cent copy curren deg divide eacute ecirc egrave eth',
+    'euml frac12 frac14 frac34 gt iacute icirc iexcl igrave iquest iuml laquo lt macr micro middot nbsp not ntilde',
+    'oacute ocirc ograve ordf ordm oslash otilde ouml para plusmn pound quot raquo reg sect shy sup1 sup2 sup3 szlig',
+    'thorn times uacute ucirc ugrave uml uuml yacute yen yuml'
+) -join ' ' -split ' ' | Sort-Object { $_.Length } -Descending
+# HTML5 reads numeric references 0x80-0x9F as Windows-1252 (&#153 is a trademark sign, not a control).
+$script:ReviewC1References = @{
+    0x80 = 0x20AC; 0x82 = 0x201A; 0x83 = 0x0192; 0x84 = 0x201E; 0x85 = 0x2026; 0x86 = 0x2020; 0x87 = 0x2021
+    0x88 = 0x02C6; 0x89 = 0x2030; 0x8A = 0x0160; 0x8B = 0x2039; 0x8C = 0x0152; 0x8E = 0x017D; 0x91 = 0x2018
+    0x92 = 0x2019; 0x93 = 0x201C; 0x94 = 0x201D; 0x95 = 0x2022; 0x96 = 0x2013; 0x97 = 0x2014; 0x98 = 0x02DC
+    0x99 = 0x2122; 0x9A = 0x0161; 0x9B = 0x203A; 0x9C = 0x0153; 0x9E = 0x017E; 0x9F = 0x0178
+}
+# Characters a reader may never see: controls other than whitespace (a browser can draw &#1 as nothing),
+# Unicode's default-ignorable code points, listed because .NET Framework's tables are older (they put
+# the soft hyphen in Pd, not Cf), and noncharacters.
+$script:ReviewInvisiblePattern = '\p{Cf}|[\x00-\x08\x0B\x0E-\x1F\x7F-\x9F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFF8]|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|[\uDB40-\uDB43][\uDC00-\uDFFF]|[\uFDD0-\uFDEF\uFFFE\uFFFF]|[\uD83F\uD87F\uD8BF\uD8FF\uD93F\uD97F\uD9BF\uD9FF\uDA3F\uDA7F\uDABF\uDAFF\uDB3F\uDB7F\uDBBF\uDBFF][\uDFFE\uDFFF]'
+# Bidirectional formatting characters change the order a reader sees (an override displays
+# 87654321citehtnys_phg reversed), which no scan form reproduces, so publication rejects them.
+$script:ReviewBidiPattern = '[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]'
+# The structural scans split lines at LF only (a CR before it is dropped). GitHub also ends a line at
+# a bare CR, and a browser or editor may break at the other separators, so publication rejects them.
+$script:ReviewLineBreakPattern = '\r(?!\n)|[\x0B\x0C\x85\u2028\u2029]'
+# Start tags GitHub keeps although a reader does not see their text in place: rp is hidden, ruby text
+# sits above the line, a table moves stray text in front of itself and video drops its content. bdo and
+# bdi would reorder text if GitHub kept them; a dir attribute, which it keeps, does.
+$script:ReviewHiddenTextElements = @('bdi', 'bdo', 'rb', 'rp', 'rt', 'rtc', 'ruby', 'table', 'video')
+# Raw HTML that CommonMark (GitHub's cmark-gfm) passes through: open and closing tags, comments
+# (GitHub ends one at the first -->), processing instructions, declarations (upper-case only, as GitHub
+# reads them) and CDATA. {0} is whitespace that may be empty, {1} whitespace that may not, {2} any
+# character inside a comment, instruction or CDATA, {3} the line endings a quoted value or
+# declaration may not hold.
+$script:ReviewCommonMarkMarkupFormat = '<[A-Za-z][A-Za-z0-9-]*(?:{1}[A-Za-z_:][A-Za-z0-9_.:-]*(?:{0}={0}(?:[^ \t\r\n"''=<>`]+|''[^''{3}]*''|"[^"{3}]*"))?)*{0}/?>|</[A-Za-z][A-Za-z0-9-]*{0}>|<!---?>|<!--{2}*?-->|<\?{2}*?\?>|<![A-Z][^>{3}]*>|<!\[CDATA\[{2}*?\]\]>'
+# Within one line, which is how the rendered forms read it, and across lines, which they do not.
+$script:ReviewCommonMarkMarkup = $script:ReviewCommonMarkMarkupFormat -f '[ \t]*', '[ \t]+', '[^\r\n]', '\r\n'
+$script:ReviewCommonMarkMarkupAcrossLines = '\G(?:' + ($script:ReviewCommonMarkMarkupFormat -f '[ \t]*(?:\r?\n[ \t]*)?', '(?:[ \t]+(?:\r?\n[ \t]*)?|\r?\n[ \t]*)', '[\s\S]', '') + ')'
+# An inline link or image, or a full or collapsed reference link, as CommonMark reads it from the raw
+# text: a backslash escape is consumed first so an escaped bracket stays text, and a destination may be
+# <pointy>, hold escaped or balanced parentheses (a balancing group counts them), or carry a title.
+$script:ReviewLinkPattern = & {
+    $escape = '\\[\s\S]'
+    $label = '\[(?<label>(?:[^\[\]\\]|\\[\s\S])*)\]'
+    $destination = '(?:<(?:[^<>\r\n\\]|\\[^\r\n])*>|(?:[^\s()\\]|\\[^\r\n]|(?<open>\()|(?<-open>\)))+(?(open)(?!)))'
+    $title = '(?:"(?:[^"\\]|\\[\s\S])*"|''(?:[^''\\]|\\[\s\S])*''|\((?:[^()\\]|\\[\s\S])*\))'
+    "$escape|!?$label(?<target>\(\s*(?:$destination)?(?:\s+$title)?\s*\)|\[(?:[^\[\]\\]|\\[\s\S])*\])"
+}
+# Each pass drops one level of nested links and images; deeper nesting fails closed (link-depth).
+$script:ReviewLinkDepth = 8
+
+function Get-ReviewNamedEntityText {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    # The text of &Name;, or $null when the scan does not know the name. Hashtable keys ignore case,
+    # but entity names do not (&hat; is not &Hat;).
+    $known = @($script:ReviewHtml5Entities.Keys | Where-Object { $_ -ceq $Name })
+    if ($known.Count) { return $script:ReviewHtml5Entities[$Name] }
+    # HTML5 adds upper-case spellings of a few HTML4 names that WebUtility.HtmlDecode does not know.
+    if ($Name -cmatch '^(?:AMP|COPY|GT|LT|QUOT|REG)$') { $Name = $Name.ToLowerInvariant() }
+    $reference = "&$Name;"
+    $decoded = [System.Net.WebUtility]::HtmlDecode($reference)
+    if ($decoded -cne $reference) { return $decoded }
+    return $null
+}
+
+function ConvertFrom-ReviewEntities {
+    param([AllowEmptyString()][string]$Text)
+
+    # Percent escapes, then one pass over character references as an HTML5 parser reads text: numeric
+    # references and legacy names need no semicolon, so a raw HTML block can spell gh&#112_ or
+    # gh&shyp_. A named reference with a semicolon that the scan does not know stays for the
+    # unknown-entity rule. An ampersand that starts no reference (AT&T) stays as it is.
+    $pattern = '&(?:#(?:[xX](?<hex>[0-9A-Fa-f]+)|(?<dec>[0-9]+));?|(?<name>[A-Za-z][A-Za-z0-9]*)(?<semi>;)?)'
+    return [regex]::Replace([Uri]::UnescapeDataString($Text), $pattern, {
+            param($match)
+            $name = $match.Groups['name'].Value
+            if ($name) {
+                if ($match.Groups['semi'].Success) {
+                    $entity = Get-ReviewNamedEntityText -Name $name
+                    if ($null -ne $entity) { return $entity }
+                    return $match.Value
+                }
+                foreach ($legacy in $script:ReviewLegacyEntities) {
+                    if ($name.StartsWith($legacy, [StringComparison]::Ordinal)) {
+                        return (Get-ReviewNamedEntityText -Name $legacy) + $name.Substring($legacy.Length)
+                    }
+                }
+                return $match.Value
+            }
+            $digits, $base = if ($match.Groups['hex'].Success) { $match.Groups['hex'].Value, 16 } else { $match.Groups['dec'].Value, 10 }
+            $digits = $digits.TrimStart('0')
+            # Zero, surrogates and values past U+10FFFF decode to the replacement character.
+            $code = if (-not $digits) { 0 } elseif ($digits.Length -gt 7) { 0x110000 } else { [Convert]::ToInt32($digits, $base) }
+            if ($code -eq 0 -or $code -gt 0x10FFFF -or ($code -ge 0xD800 -and $code -le 0xDFFF)) { return [string][char]0xFFFD }
+            if ($script:ReviewC1References.ContainsKey($code)) { $code = $script:ReviewC1References[$code] }
+            return [char]::ConvertFromUtf32($code)
+        })
+}
 
 function Get-ReviewScanForms {
     param([AllowEmptyString()][string]$Text, [switch]$PlainText)
 
+    return @(Get-ReviewNamedScanForms -Text $Text -PlainText:$PlainText | ForEach-Object { $_.Text })
+}
+
+function Get-ReviewNamedScanForms {
+    param([AllowEmptyString()][string]$Text, [switch]$PlainText)
+
     # Scan what a reader would see as well as the raw text: percent escapes, HTML entities,
-    # invisible format characters, compatibility characters, Markdown backslash escapes, and
-    # (except for plain-text job logs) an approximate Markdown rendering without markup.
-    $decoded = [System.Net.WebUtility]::HtmlDecode([Uri]::UnescapeDataString($Text))
-    $decoded = ($decoded -replace '\p{Cf}', '').Normalize([Text.NormalizationForm]::FormKC)
-    $unescaped = $decoded -replace '\\(?=[!-/:-@\[-`{-~])', ''
-    $forms = @($Text, $decoded, $unescaped)
-    if (-not $PlainText) { $forms += ConvertTo-ReviewRenderedText -Text $unescaped }
-    return @(Get-ReviewOrdinalUnique -Values $forms)
+    # invisible format characters, compatibility characters and Markdown backslash escapes are
+    # decoded. Except for plain-text job logs, three approximate renderings first drop markup read
+    # from the raw text, so an escaped or entity-encoded bracket stays text: rendered drops the raw
+    # HTML CommonMark passes through and the link targets GitHub hides; literal keeps every link
+    # target, in case the text was not a link after all (a code span can start before one); html
+    # reads every line as a raw HTML block does, without Markdown. Raw HTML whose reading the forms
+    # cannot settle fails closed before this (Find-ReviewUnmodeledMarkup).
+    # A form identical to an earlier one keeps the earlier name.
+    $decode = { param([string]$Value) ((ConvertFrom-ReviewEntities -Text $Value) -replace $script:ReviewInvisiblePattern, '').Normalize([Text.NormalizationForm]::FormKC) }
+    $unescape = { param([string]$Value) $Value -replace '\\(?=[!-/:-@\[-`{-~])', '' }
+    $decoded = & $decode $Text
+    $forms = [ordered]@{ raw = $Text; decoded = $decoded; unescaped = (& $unescape $decoded) }
+    if (-not $PlainText) {
+        $markdown = Remove-ReviewMarkup -Text $Text
+        $forms.rendered = ConvertTo-ReviewRenderedText -Text (& $unescape (& $decode (Remove-ReviewLinkTargets -Text $markdown).Text))
+        $forms.literal = ConvertTo-ReviewRenderedText -Text (& $unescape (& $decode $markdown))
+        $forms.html = & $decode (Remove-ReviewMarkup -Text $Text -Html)
+    }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+    foreach ($name in $forms.Keys) {
+        if ($seen.Add($forms[$name])) { [pscustomobject]@{ Name = $name; Text = $forms[$name] } }
+    }
 }
 
 function ConvertTo-ReviewRenderedText {
+    param([AllowEmptyString()][string]$Text, [switch]$DropAllBrackets)
+
+    # Drop the Markdown markers left once markup and link targets are gone. A bare [label] is a
+    # shortcut link only when the text defines a reference, so then every bracket goes; otherwise
+    # brackets render literally and stay, keeping a pytest id such as test_x[case-1] two tokens. A
+    # definition may sit in a block quote or list item, or have a label spanning lines, so any "]:"
+    # counts as one rather than parsing containers. Emphasis, code and strikethrough markers (GFM
+    # strikes text between single tildes too) always go, so they cannot split a value.
+    # Underscores count as emphasis only at a word edge; intraword ones (ghp_, snake_case) stay.
+    $rendered = $Text
+    if ($DropAllBrackets -or $rendered.Contains(']:')) { $rendered = $rendered -replace '[\[\]]', '' }
+    $rendered = $rendered -replace '[*`~]', ''
+    return $rendered -replace '(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])', ''
+}
+
+function Invoke-ReviewMappedReplace {
+    param([AllowEmptyString()][string]$Text, [int[]]$Map, [Parameter(Mandatory = $true)][string]$Pattern, [Parameter(Mandatory = $true)][scriptblock]$Keep)
+
+    # Replace each match of $Pattern with the part of it $Keep returns (the match, one of its groups,
+    # or nothing), carrying along $Map, the raw-text offset of each character, so a rule hit found in
+    # the result can still name an offset in the raw form.
+    if ($null -eq $Map) { $Map = [Linq.Enumerable]::ToArray([Linq.Enumerable]::Range(0, $Text.Length)) }
+    $builder = New-Object System.Text.StringBuilder
+    $offsets = New-Object 'System.Collections.Generic.List[int]'
+    $copy = {
+        param([int]$Index, [int]$Length)
+        [void]$builder.Append($Text, $Index, $Length)
+        $offsets.AddRange([ArraySegment[int]]::new($Map, $Index, $Length))
+    }
+    $at = 0
+    foreach ($match in [regex]::Matches($Text, $Pattern)) {
+        & $copy $at ($match.Index - $at)
+        $kept = & $Keep $match
+        if ($kept) { & $copy $kept.Index $kept.Length }
+        $at = $match.Index + $match.Length
+    }
+    & $copy $at ($Text.Length - $at)
+    return [pscustomobject]@{ Text = $builder.ToString(); Map = $offsets.ToArray() }
+}
+
+function Remove-ReviewLinkTargets {
+    param([AllowEmptyString()][string]$Text, [int[]]$Map)
+
+    # Keep the text of inline links, images and full or collapsed reference links and drop the rest,
+    # innermost first: an image inside a link's text goes on one pass and the link on the next. The
+    # passes are bounded, so Remaining is the first link still left when they run out, or $null; the
+    # text is then not fully rendered and the caller must reject it (Find-ReviewUnmodeledMarkup).
+    $keep = { param($match) if ($match.Groups['label'].Success) { $match.Groups['label'] } else { $match } }
+    $result = [pscustomobject]@{ Text = $Text; Map = $Map }
+    for ($pass = 0; $pass -lt $script:ReviewLinkDepth; $pass++) {
+        $next = Invoke-ReviewMappedReplace -Text $result.Text -Map $result.Map -Pattern $script:ReviewLinkPattern -Keep $keep
+        if ($next.Text -ceq $result.Text) { break }
+        $result = $next
+    }
+    $remaining = @([regex]::Matches($result.Text, $script:ReviewLinkPattern) | Where-Object { $_.Groups['label'].Success } | Select-Object -First 1)
+    return [pscustomobject]@{ Text = $result.Text; Map = $result.Map; Remaining = $(if ($remaining.Count) { $remaining[0] }) }
+}
+
+function Remove-ReviewMarkup {
+    param([AllowEmptyString()][string]$Text, [switch]$Html, [switch]$Mapped)
+
+    # Drop the markup a reader does not see, one line at a time: by default the raw HTML CommonMark
+    # passes through in a paragraph (a backslash-escaped < stays text); with -Html, everything an
+    # HTML5 tokenizer reads as markup, as GitHub does in a raw HTML block, an unterminated tag or
+    # comment running to the end of its line. -Mapped (without -Html) also returns the raw-text offset
+    # of each character left.
+    if (-not $Html) {
+        $stripped = Invoke-ReviewMappedReplace -Text $Text -Pattern "\\[\s\S]|$script:ReviewCommonMarkMarkup" -Keep {
+            param($match)
+            if ($match.Value[0] -eq '\') { $match }
+        }
+        if ($Mapped) { return $stripped }
+        return $stripped.Text
+    }
+    $lines = foreach ($line in ($Text -split "`n")) {
+        $builder = New-Object System.Text.StringBuilder
+        $index = 0
+        while ($true) {
+            $next = $line.IndexOf('<', $index)
+            if ($next -lt 0) { [void]$builder.Append($line.Substring($index)); break }
+            [void]$builder.Append($line.Substring($index, $next - $index))
+            $token = Get-ReviewHtmlToken -Text $line -Start $next
+            if ($token) { $index = $next + $token.Length }
+            else { [void]$builder.Append('<'); $index = $next + 1 }
+        }
+        $builder.ToString()
+    }
+    return @($lines) -join "`n"
+}
+
+function Get-ReviewHtmlToken {
+    param([AllowEmptyString()][string]$Text, [int]$Start)
+
+    # The markup an HTML5 tokenizer reads from the < at $Start, as GitHub's sanitizer and a browser
+    # read a raw HTML block: its length, whether it ends before the end of $Text, and for a start tag
+    # its lower-case name and attribute names. $null when the < is text.
+    $length = $Text.Length
+    $space = " `t`n`r`f"
+    $token = { param([int]$End, [string]$Name = '', $Attributes = @())
+        [pscustomobject]@{ Length = [Math]::Min($End, $length) - $Start; Complete = $End -le $length; Name = $Name; Attributes = @($Attributes) } }
+    $toClose = { param([int]$From) $end = $Text.IndexOf('>', [Math]::Min($From, $length)); if ($end -lt 0) { $length + 1 } else { $end + 1 } }
+    $startsWith = { param([string]$Value) $Value.Length -le $length - $Start -and [string]::CompareOrdinal($Text, $Start, $Value, 0, $Value.Length) -eq 0 }
+    if ($Start + 1 -ge $length) { return $null }
+    $next = $Text[$Start + 1]
+    if ($next -eq '!') {
+        if (-not (& $startsWith '<!--')) { return & $token (& $toClose ($Start + 2)) }
+        # <!--> and <!---> are empty comments; any other ends at the first --> or --!>.
+        foreach ($abrupt in '<!-->', '<!--->') { if (& $startsWith $abrupt) { return & $token ($Start + $abrupt.Length) } }
+        $end = [regex]::Match($Text.Substring($Start + 4), '--!?>')
+        if ($end.Success) { return & $token ($Start + 4 + $end.Index + $end.Length) }
+        return & $token ($length + 1)
+    }
+    if ($next -eq '?') { return & $token (& $toClose ($Start + 2)) }
+    $nameStart = $Start + 1
+    if ($next -eq '/') {
+        if ($Start + 2 -ge $length) { return $null }
+        if ($Text[$Start + 2] -eq '>') { return & $token ($Start + 3) }
+        if ($Text[$Start + 2] -notmatch '[A-Za-z]') { return & $token (& $toClose ($Start + 2)) }
+        $nameStart = $Start + 2
+    } elseif ($next -notmatch '[A-Za-z]') {
+        return $null
+    }
+    $index = $nameStart
+    while ($index -lt $length -and $space.IndexOf($Text[$index]) -lt 0 -and '/>'.IndexOf($Text[$index]) -lt 0) { $index++ }
+    $name = if ($nameStart -eq $Start + 1) { $Text.Substring($nameStart, $index - $nameStart).ToLowerInvariant() } else { '' }
+    $attributes = New-Object System.Collections.Generic.List[string]
+    while ($index -lt $length) {
+        $character = $Text[$index]
+        if ($character -eq '>') { return & $token ($index + 1) $name $attributes }
+        if ($character -eq '/' -or $space.IndexOf($character) -ge 0) { $index++; continue }
+        # An attribute name runs to whitespace, /, > or = (a leading = belongs to it).
+        $attributeStart = $index
+        $index++
+        while ($index -lt $length -and $space.IndexOf($Text[$index]) -lt 0 -and '/>='.IndexOf($Text[$index]) -lt 0) { $index++ }
+        $attributes.Add($Text.Substring($attributeStart, $index - $attributeStart).ToLowerInvariant())
+        while ($index -lt $length -and $space.IndexOf($Text[$index]) -ge 0) { $index++ }
+        if ($index -ge $length -or $Text[$index] -ne '=') { continue }
+        $index++
+        while ($index -lt $length -and $space.IndexOf($Text[$index]) -ge 0) { $index++ }
+        if ($index -ge $length) { break }
+        $quote = $Text[$index]
+        if ($quote -eq '"' -or $quote -eq "'") {
+            # A quoted value may hold > or <.
+            $index = $Text.IndexOf($quote, $index + 1)
+            if ($index -lt 0) { break }
+            $index++
+        } else {
+            while ($index -lt $length -and $space.IndexOf($Text[$index]) -lt 0 -and $Text[$index] -ne '>') { $index++ }
+        }
+    }
+    return & $token ($length + 1) $name $attributes
+}
+
+function Get-ReviewMarkdownLines {
     param([AllowEmptyString()][string]$Text)
 
-    # Keep link labels and drop their targets, then drop every bracket (shortcut and reference
-    # links), inline HTML tags, and emphasis or code markers, so markup cannot split a value.
-    # Underscores count as emphasis only at a word edge; intraword ones (ghp_, snake_case) stay.
-    $rendered = $Text -replace '\[([^\[\]]*)\](?:\([^()]*\)|\[[^\[\]]*\])', '$1'
-    $rendered = $rendered -replace '<[^<>]*>|[*`\[\]]|~~', ''
-    return $rendered -replace '(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])', ''
+    # Each line with its offset, whether it is fenced code or opens or closes it (Fence), and whether
+    # it may belong to a raw HTML block. Only a fence at column 0 counts as code: it closes any list item or block quote, so
+    # nothing but an HTML block could hold it, and a line inside a possible HTML block is never
+    # read as a fence. Any line whose text after container markers starts with < may start an
+    # HTML block, which runs to its CommonMark end condition or, for the other kinds, to a blank
+    # line; counting too many lines only checks more of them.
+    $ends = [ordered]@{
+        '^<(?i:script|pre|style|textarea)(?:[\s>]|$)' = '(?i)</(?:script|pre|style|textarea)>'
+        '^<!--' = '-->'
+        '^<\?' = '\?>'
+        '^<!\[CDATA\[' = '\]\]>'
+        '^<![A-Za-z]' = '>'
+    }
+    $lines = @($Text -split "`n")
+    $offset = 0
+    $fence = $null
+    $htmlEnd = $null
+    for ($number = 0; $number -lt $lines.Count; $number++) {
+        $line = $lines[$number].TrimEnd("`r")
+        $fenced = $false
+        $delimiter = $false
+        $html = $false
+        if ($fence) {
+            $close = [regex]::Match($line, '^ {0,3}(`{3,}|~{3,})[ \t]*$')
+            if ($close.Success -and $close.Groups[1].Value[0] -eq $fence[0] -and $close.Groups[1].Length -ge $fence.Length) { $fence = $null; $delimiter = $true }
+            else { $fenced = $true }
+        } elseif ($htmlEnd) {
+            $html = $true
+            if ($htmlEnd -ne 'blank') { if ($line -match $htmlEnd) { $htmlEnd = $null } }
+            elseif ($line -match '^[ \t]*$') { $htmlEnd = $null; $html = $false }
+        } elseif ($line -match '^(?:`{3,}[^`]*|~{3,}.*)$') {
+            $fence = [regex]::Match($line, '^(`+|~+)').Value
+            $delimiter = $true
+        } else {
+            $inner = $line -replace '^[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*', ''
+            if ($inner.StartsWith('<')) {
+                $html = $true
+                $htmlEnd = 'blank'
+                foreach ($start in $ends.Keys) {
+                    if ($inner -match $start) {
+                        $htmlEnd = if ($inner.Substring(1) -match $ends[$start]) { $null } else { $ends[$start] }
+                        break
+                    }
+                }
+            }
+        }
+        [pscustomobject]@{ Start = $offset; Text = $line; Fenced = $fenced; Fence = $delimiter; Html = $html; Last = $number -eq $lines.Count - 1 }
+        $offset += $lines[$number].Length + 1
+    }
+}
+
+function Find-ReviewUnmodeledMarkup {
+    param([AllowEmptyString()][string]$Text)
+
+    # The first raw HTML or link whose reading the scan forms cannot settle, as its rule, offset and
+    # length, or $null. Fenced code is literal and skipped; everything else fails closed:
+    # - markup CommonMark reads across lines, or an unterminated tag or comment in a possible HTML
+    #   block, since the forms read one line at a time;
+    # - markup CommonMark and an HTML5 tokenizer end at different places (a comment holding --!>,
+    #   a processing instruction or CDATA holding >);
+    # - markup or a link target holding a backtick, or link text with an unpaired one: a code span
+    #   that starts before it may hide the markup, or the markup may hide the code span;
+    # - a start tag whose text a reader does not see in place ($script:ReviewHiddenTextElements) or
+    #   that carries a dir attribute;
+    # - links and images nested deeper than the rendered form unwraps (link-depth).
+    # Math and Mermaid fail closed separately, on every decoded form (Find-ReviewRendererMarkup).
+    $lines = @(Get-ReviewMarkdownLines -Text $Text)
+    $starts = [int[]]@($lines | ForEach-Object { $_.Start })
+    $fencedAt = {
+        param([int]$Offset)
+        $index = [Array]::BinarySearch($starts, $Offset)
+        if ($index -lt 0) { $index = (-bnot $index) - 1 }
+        $lines[$index].Fenced
+    }
+    $acrossLines = [regex]::new($script:ReviewCommonMarkMarkupAcrossLines)
+    $oneLine = [regex]::new("\G(?:$script:ReviewCommonMarkMarkup)")
+    foreach ($line in $lines) {
+        if ($line.Fenced) { continue }
+        $at = $line.Text.IndexOf('<')
+        while ($at -ge 0) {
+            $offset = $line.Start + $at
+            $hit = { param([int]$Length) [pscustomobject]@{ Rule = 'raw-html'; Offset = $offset; Length = $Length } }
+            $spanning = $acrossLines.Match($Text, $offset)
+            if ($spanning.Success -and $spanning.Value.Contains("`n")) { return & $hit $spanning.Length }
+            $token = Get-ReviewHtmlToken -Text $line.Text -Start $at
+            if ($token) {
+                if (-not $token.Complete -and $line.Html -and -not $line.Last) { return & $hit $token.Length }
+                $common = $oneLine.Match($line.Text, $at)
+                if ($common.Success -and ($common.Length -ne $token.Length -or $common.Value.Contains('`'))) { return & $hit $common.Length }
+                if ($token.Name -and ($script:ReviewHiddenTextElements -contains $token.Name -or $token.Attributes -contains 'dir')) { return & $hit $token.Length }
+            }
+            $at = $line.Text.IndexOf('<', $at + 1)
+        }
+    }
+    foreach ($link in [regex]::Matches($Text, $script:ReviewLinkPattern)) {
+        if (-not $link.Groups['label'].Success -or (& $fencedAt $link.Index)) { continue }
+        $runs = @([regex]::Matches($link.Groups['label'].Value, '`+') | ForEach-Object { $_.Length })
+        $unpaired = $false
+        for ($index = 0; $index -lt $runs.Count; $index++) {
+            if ($runs[$index] -lt 0) { continue }
+            $closer = @(($index + 1)..($runs.Count) | Where-Object { $_ -lt $runs.Count -and $runs[$_] -eq $runs[$index] } | Select-Object -First 1)
+            if ($closer.Count) { $runs[$closer[0]] = -1 } else { $unpaired = $true }
+        }
+        if ($unpaired -or $link.Groups['target'].Value.Contains('`')) {
+            return [pscustomobject]@{ Rule = 'link-target'; Offset = $link.Index; Length = $link.Length }
+        }
+    }
+    # Links and images nested deeper than the rendered form unwraps would leave link syntax between
+    # the halves of a value that GitHub draws whole, so they fail closed, fenced or not.
+    $markdown = Remove-ReviewMarkup -Text $Text -Mapped
+    $links = Remove-ReviewLinkTargets -Text $markdown.Text -Map $markdown.Map
+    if ($links.Remaining) {
+        $first = $links.Map[$links.Remaining.Index]
+        $last = $links.Map[$links.Remaining.Index + $links.Remaining.Length - 1]
+        return [pscustomobject]@{ Rule = 'link-depth'; Offset = $first; Length = $last - $first + 1 }
+    }
+    return $null
+}
+
+function Find-ReviewRendererMarkup {
+    param([AllowEmptyString()][string]$Text)
+
+    # The first math or Mermaid GitHub may draw in the browser, which the scan forms cannot read as
+    # shown, as its rule, offset and length, or $null. The caller runs it on every decoded form, so
+    # an entity- or escape-spelled fence name or dollar is caught in the form that decodes it.
+    $lines = @(Get-ReviewMarkdownLines -Text $Text)
+    # Any fence line outside fenced code (indented, in a list item or a block quote, too) must name a
+    # plain language token other than math or mermaid, in any case. GitHub decodes references and
+    # escapes in an info string, so anything else (&, \, a second word) fails closed (fence-info).
+    foreach ($line in $lines) {
+        if ($line.Fenced) { continue }
+        $fence = [regex]::Match($line.Text, '^[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*(?:`{3,}|~{3,})(?<info>.*)$')
+        if (-not $fence.Success) { continue }
+        $info = $fence.Groups['info'].Value.Trim()
+        $rule = if ($info -match '^(?i:math|mermaid)$') { $info.ToLowerInvariant() } elseif ($info -and $info -notmatch '^[A-Za-z0-9][A-Za-z0-9_+#.-]*$') { 'fence-info' }
+        if ($rule) { return [pscustomobject]@{ Rule = $rule; Offset = $line.Start + $fence.Index; Length = $fence.Length } }
+    }
+    # Inline and display math: GitHub draws $...$ when the opening $ follows no ASCII letter or digit
+    # and precedes a non-space, and the closing $ follows a non-space and precedes no ASCII letter or
+    # digit, and draws $$...$$ (also from &#36; or &dollar;, and despite \$). Check a same-length copy
+    # with fenced code and its fences blanked and a reference to $ ending in $. Math never crosses a
+    # paragraph break, but a $ pair across lines fails closed too.
+    $prose = $Text.ToCharArray()
+    foreach ($line in $lines) {
+        if ($line.Fenced -or $line.Fence) { for ($index = $line.Start; $index -lt $line.Start + $line.Text.Length; $index++) { $prose[$index] = ' ' } }
+    }
+    $prose = [regex]::Replace((-join $prose), '&(?:#[xX][0-9A-Fa-f]+|#[0-9]+|[A-Za-z][A-Za-z0-9]*);?', {
+            param($match)
+            if ((ConvertFrom-ReviewEntities -Text $match.Value) -ceq '$') { return ('#' * ($match.Length - 1)) + '$' }
+            return $match.Value
+        })
+    # Code spans hide a $ only when their reading is certain: every backtick run outside fenced code
+    # closes on its own line (a bare CR or other separator is rejected before this), so no span can
+    # cross a block boundary or shift the pairing of a later one; and no backtick sits inside <...>
+    # (an autolink or not) or beside an escaped backtick. Otherwise no span hides anything. A table
+    # row is possible wherever a | is (a one-column table's delimiter row needs none), and a | may end
+    # a cell, so no span hides anything on a line where one holds a |.
+    $spans = New-Object System.Collections.Generic.List[int[]]
+    $certain = $true
+    $tokens = [regex]::new('\\[\s\S]|<[^<>\s]*>|`+')
+    foreach ($line in $lines) {
+        if (-not $certain) { break }
+        if ($line.Fenced -or $line.Fence) { continue }
+        $lineSpans = New-Object System.Collections.Generic.List[int[]]
+        $piped = $false
+        $at = 0
+        while ($certain) {
+            $token = $tokens.Match($line.Text, $at)
+            if (-not $token.Success) { break }
+            $at = $token.Index + $token.Length
+            if ($token.Value[0] -eq '\') { if ($token.Value -eq '\`' -and $at -lt $line.Text.Length -and $line.Text[$at] -eq '`') { $certain = $false }; continue }
+            if ($token.Value[0] -eq '<') { if ($token.Value.Contains('`')) { $certain = $false }; continue }
+            $closer = [regex]::Match($line.Text.Substring($at), "(?<!``)``{$($token.Length)}(?!``)")
+            if (-not $closer.Success) { $certain = $false; break }
+            if ($line.Text.Substring($at, $closer.Index).Contains('|')) { $piped = $true }
+            $at += $closer.Index + $closer.Length
+            $lineSpans.Add([int[]]@(($line.Start + $token.Index), ($at - $token.Index)))
+        }
+        if (-not $piped) { $spans.AddRange($lineSpans) }
+    }
+    if ($certain) {
+        $chars = $prose.ToCharArray()
+        foreach ($span in $spans) { for ($index = $span[0]; $index -lt $span[0] + $span[1]; $index++) { $chars[$index] = '#' } }
+        $prose = -join $chars
+    }
+    $math = [regex]::Match($prose, '\$\$|(?<![A-Za-z0-9])\$(?=\S)(?:(?!\r?\n[ \t]*\r?\n)[\s\S])*?(?<=\S)\$(?![A-Za-z0-9])')
+    if ($math.Success) { return [pscustomobject]@{ Rule = 'math'; Offset = $math.Index; Length = $math.Length } }
+    return $null
 }
 
 function Get-ReviewOrdinalUnique {
@@ -479,7 +952,8 @@ function Get-ReviewRepositoryPaths {
     $relative = '(^[\s`"''()\[\]{}*<>=:]*[/\\]|:|[\r\n]|(^|[/\\])\.\.([/\\]|$))'
     $known = foreach ($path in @($paths + $DiffPaths | Where-Object { $_ })) {
         $normalized = $path.Normalize([Text.NormalizationForm]::FormKC)
-        $spellings = @($path, $normalized, (ConvertTo-ReviewRenderedText -Text $normalized))
+        # A review that defines a link reference renders with every bracket dropped, so match that spelling too.
+        $spellings = @($path, $normalized, (ConvertTo-ReviewRenderedText -Text $normalized), (ConvertTo-ReviewRenderedText -Text $normalized -DropAllBrackets))
         if (@($spellings | Where-Object { -not $_ -or $_ -match $relative }).Count -eq 0) { $spellings }
     }
     return @(Get-ReviewOrdinalUnique -Values @($known))
@@ -514,34 +988,59 @@ function Assert-ReviewOutputSafe {
     if ($Workspace -or $DiffPaths.Count -gt 0) {
         $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
     }
-    $unsafe = $false
-    # Absolute roots and credential patterns always scan the unmasked text.
-    foreach ($form in (Get-ReviewScanForms -Text $Text)) {
-        if (-not $CredentialsOnly -and $form -match $script:ReviewAbsoluteRootPattern) { $unsafe = $true }
-        foreach ($rule in $credentialRules) {
-            if ($form -match (Get-ReviewPublishPattern -Rule $rule)) { $unsafe = $true }
+    # Each hit is logged by rule, scan form and offset so a rejection can be diagnosed. Never log the
+    # matched text or its surroundings: they are what the scan withholds.
+    $hits = New-Object System.Collections.Generic.List[string]
+    $check = {
+        param([string]$RuleName, [string]$FormName, [string]$FormText, [string]$Pattern)
+        $match = [regex]::Match($FormText, $Pattern)
+        if ($match.Success) { $hits.Add("rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length))") }
+    }
+    # Offsets for these rules count in the raw text, or in the entity-decoded text before format
+    # characters are removed.
+    $entityDecoded = ConvertFrom-ReviewEntities -Text $Text
+    & $check 'bidi-control' 'raw' $Text $script:ReviewBidiPattern
+    & $check 'bidi-control' 'decoded' $entityDecoded $script:ReviewBidiPattern
+    & $check 'line-break' 'raw' $Text $script:ReviewLineBreakPattern
+    & $check 'line-break' 'decoded' $entityDecoded $script:ReviewLineBreakPattern
+    & $check 'unknown-entity' 'decoded' $entityDecoded $script:ReviewUnknownEntityPattern
+    if (-not $CredentialsOnly) {
+        $unmodeled = Find-ReviewUnmodeledMarkup -Text $Text
+        if ($unmodeled) { $hits.Add("rule $($unmodeled.Rule) matched the raw form at offset $($unmodeled.Offset) (length $($unmodeled.Length))") }
+        # Math and Mermaid in the raw text and in each decoded form, where references and escapes are
+        # spelled out. Offsets count in that form.
+        foreach ($form in (Get-ReviewNamedScanForms -Text $Text -PlainText)) {
+            $renderer = Find-ReviewRendererMarkup -Text $form.Text
+            if ($renderer) { $hits.Add("rule $($renderer.Rule) matched the $($form.Name) form at offset $($renderer.Offset) (length $($renderer.Length))") }
         }
+    }
+    # Absolute roots and credential patterns always scan the unmasked text.
+    foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
+        if (-not $CredentialsOnly) { & $check 'absolute-root' $form.Name $form.Text $script:ReviewAbsoluteRootPattern }
+        foreach ($rule in $credentialRules) { & $check $rule.Name $form.Name $form.Text (Get-ReviewPublishPattern -Rule $rule) }
     }
     if (-not $CredentialsOnly) {
         # Known relative citations are masked only for the profile-segment and long-token checks, first in
-        # the raw text (so decoding cannot break a citation) and again in each decoded form.
+        # the raw text (so decoding cannot break a citation) and again in each decoded form. Offsets for
+        # these two rules count in that masked text.
         $maskedText = Remove-ReviewRepositoryCitations -Text $Text -Paths $knownPaths
-        foreach ($form in (Get-ReviewScanForms -Text $maskedText)) {
-            $masked = Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths
-            if ($masked -match $script:ReviewProfileSegmentPattern) { $unsafe = $true }
+        foreach ($form in (Get-ReviewNamedScanForms -Text $maskedText)) {
+            $masked = Remove-ReviewRepositoryCitations -Text $form.Text -Paths $knownPaths
+            & $check 'profile-segment' $form.Name $masked $script:ReviewProfileSegmentPattern
         }
         # A web link's path is checked segment by segment, so a long documentation URL is not one token.
         # Only slashes present before decoding split it, so an encoded slash cannot divide a token, and
         # the query and fragment stay whole: signatures there may contain Base64 slashes.
         $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
-        foreach ($form in (Get-ReviewScanForms -Text $segmented)) {
-            $masked = Remove-ReviewRepositoryCitations -Text $form -Paths $knownPaths
-            foreach ($rule in $maskableRules) {
-                if ($masked -match (Get-ReviewPublishPattern -Rule $rule)) { $unsafe = $true }
-            }
+        foreach ($form in (Get-ReviewNamedScanForms -Text $segmented)) {
+            $masked = Remove-ReviewRepositoryCitations -Text $form.Text -Paths $knownPaths
+            foreach ($rule in $maskableRules) { & $check $rule.Name $form.Name $masked (Get-ReviewPublishPattern -Rule $rule) }
         }
     }
-    if ($unsafe) { throw 'Review did not complete: output failed the publication safety scan.' }
+    if ($hits.Count -gt 0) {
+        foreach ($hit in (Get-ReviewOrdinalUnique -Values $hits.ToArray())) { Write-Warning "Publication safety scan: $hit." }
+        throw 'Review did not complete: output failed the publication safety scan.'
+    }
 }
 
 function Test-ReviewDiagnosticLineEncodesSecret {
