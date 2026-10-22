@@ -1,0 +1,8 @@
+schema_version: 1
+kind: doc-index
+target: readme-docs-index
+title: Native mobile client study (Swift, Flutter or PWA only)
+order: 53
+links:
+  - text: 'native-mobile-client-study'
+    href: docs/native-mobile-client-study.md
