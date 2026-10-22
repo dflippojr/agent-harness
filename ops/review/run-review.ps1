@@ -455,6 +455,8 @@ $script:ReviewLinkPattern = & {
     $title = '(?:"(?:[^"\\]|\\[\s\S])*"|''(?:[^''\\]|\\[\s\S])*''|\((?:[^()\\]|\\[\s\S])*\))'
     "$escape|!?$label(?<target>\(\s*(?:$destination)?(?:\s+$title)?\s*\)|\[(?:[^\[\]\\]|\\[\s\S])*\])"
 }
+# Each pass drops one level of nested links and images; deeper nesting fails closed (link-depth).
+$script:ReviewLinkDepth = 8
 
 function Get-ReviewNamedEntityText {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -529,7 +531,7 @@ function Get-ReviewNamedScanForms {
     $forms = [ordered]@{ raw = $Text; decoded = $decoded; unescaped = (& $unescape $decoded) }
     if (-not $PlainText) {
         $markdown = Remove-ReviewMarkup -Text $Text
-        $forms.rendered = ConvertTo-ReviewRenderedText -Text (& $unescape (& $decode (Remove-ReviewLinkTargets -Text $markdown)))
+        $forms.rendered = ConvertTo-ReviewRenderedText -Text (& $unescape (& $decode (Remove-ReviewLinkTargets -Text $markdown).Text))
         $forms.literal = ConvertTo-ReviewRenderedText -Text (& $unescape (& $decode $markdown))
         $forms.html = & $decode (Remove-ReviewMarkup -Text $Text -Html)
     }
@@ -555,36 +557,64 @@ function ConvertTo-ReviewRenderedText {
     return $rendered -replace '(?<![\p{L}\p{N}])_+|_+(?![\p{L}\p{N}])', ''
 }
 
-function Remove-ReviewLinkTargets {
-    param([AllowEmptyString()][string]$Text)
+function Invoke-ReviewMappedReplace {
+    param([AllowEmptyString()][string]$Text, [int[]]$Map, [Parameter(Mandatory = $true)][string]$Pattern, [Parameter(Mandatory = $true)][scriptblock]$Keep)
 
-    # Keep the text of inline links, images and full or collapsed reference links and drop the rest.
-    # An image inside a link's text goes on one pass and the link on the next.
-    for ($pass = 0; $pass -lt 8; $pass++) {
-        $next = [regex]::Replace($Text, $script:ReviewLinkPattern, {
-                param($match)
-                if ($match.Groups['label'].Success) { return $match.Groups['label'].Value }
-                return $match.Value
-            })
-        if ($next -ceq $Text) { break }
-        $Text = $next
+    # Replace each match of $Pattern with the part of it $Keep returns (the match, one of its groups,
+    # or nothing), carrying along $Map, the raw-text offset of each character, so a rule hit found in
+    # the result can still name an offset in the raw form.
+    if ($null -eq $Map) { $Map = [Linq.Enumerable]::ToArray([Linq.Enumerable]::Range(0, $Text.Length)) }
+    $builder = New-Object System.Text.StringBuilder
+    $offsets = New-Object 'System.Collections.Generic.List[int]'
+    $copy = {
+        param([int]$Index, [int]$Length)
+        [void]$builder.Append($Text, $Index, $Length)
+        $offsets.AddRange([ArraySegment[int]]::new($Map, $Index, $Length))
     }
-    return $Text
+    $at = 0
+    foreach ($match in [regex]::Matches($Text, $Pattern)) {
+        & $copy $at ($match.Index - $at)
+        $kept = & $Keep $match
+        if ($kept) { & $copy $kept.Index $kept.Length }
+        $at = $match.Index + $match.Length
+    }
+    & $copy $at ($Text.Length - $at)
+    return [pscustomobject]@{ Text = $builder.ToString(); Map = $offsets.ToArray() }
+}
+
+function Remove-ReviewLinkTargets {
+    param([AllowEmptyString()][string]$Text, [int[]]$Map)
+
+    # Keep the text of inline links, images and full or collapsed reference links and drop the rest,
+    # innermost first: an image inside a link's text goes on one pass and the link on the next. The
+    # passes are bounded, so Remaining is the first link still left when they run out, or $null; the
+    # text is then not fully rendered and the caller must reject it (Find-ReviewUnmodeledMarkup).
+    $keep = { param($match) if ($match.Groups['label'].Success) { $match.Groups['label'] } else { $match } }
+    $result = [pscustomobject]@{ Text = $Text; Map = $Map }
+    for ($pass = 0; $pass -lt $script:ReviewLinkDepth; $pass++) {
+        $next = Invoke-ReviewMappedReplace -Text $result.Text -Map $result.Map -Pattern $script:ReviewLinkPattern -Keep $keep
+        if ($next.Text -ceq $result.Text) { break }
+        $result = $next
+    }
+    $remaining = @([regex]::Matches($result.Text, $script:ReviewLinkPattern) | Where-Object { $_.Groups['label'].Success } | Select-Object -First 1)
+    return [pscustomobject]@{ Text = $result.Text; Map = $result.Map; Remaining = $(if ($remaining.Count) { $remaining[0] }) }
 }
 
 function Remove-ReviewMarkup {
-    param([AllowEmptyString()][string]$Text, [switch]$Html)
+    param([AllowEmptyString()][string]$Text, [switch]$Html, [switch]$Mapped)
 
     # Drop the markup a reader does not see, one line at a time: by default the raw HTML CommonMark
     # passes through in a paragraph (a backslash-escaped < stays text); with -Html, everything an
     # HTML5 tokenizer reads as markup, as GitHub does in a raw HTML block, an unterminated tag or
-    # comment running to the end of its line.
+    # comment running to the end of its line. -Mapped (without -Html) also returns the raw-text offset
+    # of each character left.
     if (-not $Html) {
-        return [regex]::Replace($Text, "\\[\s\S]|$script:ReviewCommonMarkMarkup", {
-                param($match)
-                if ($match.Value[0] -eq '\') { return $match.Value }
-                return ''
-            })
+        $stripped = Invoke-ReviewMappedReplace -Text $Text -Pattern "\\[\s\S]|$script:ReviewCommonMarkMarkup" -Keep {
+            param($match)
+            if ($match.Value[0] -eq '\') { $match }
+        }
+        if ($Mapped) { return $stripped }
+        return $stripped.Text
     }
     $lines = foreach ($line in ($Text -split "`n")) {
         $builder = New-Object System.Text.StringBuilder
@@ -729,9 +759,17 @@ function Find-ReviewUnmodeledMarkup {
     # - markup or a link target holding a backtick, or link text with an unpaired one: a code span
     #   that starts before it may hide the markup, or the markup may hide the code span;
     # - a start tag whose text a reader does not see in place ($script:ReviewHiddenTextElements) or
-    #   that carries a dir attribute.
+    #   that carries a dir attribute;
+    # - links and images nested deeper than the rendered form unwraps (link-depth);
+    # - math and Mermaid, which GitHub draws in the browser from text the forms cannot read as shown.
     $lines = @(Get-ReviewMarkdownLines -Text $Text)
-    $fencedAt = { param([int]$Offset) @($lines | Where-Object { $_.Fenced -and $Offset -ge $_.Start -and $Offset -le $_.Start + $_.Text.Length }).Count -gt 0 }
+    $starts = [int[]]@($lines | ForEach-Object { $_.Start })
+    $fencedAt = {
+        param([int]$Offset)
+        $index = [Array]::BinarySearch($starts, $Offset)
+        if ($index -lt 0) { $index = (-bnot $index) - 1 }
+        $lines[$index].Fenced
+    }
     $acrossLines = [regex]::new($script:ReviewCommonMarkMarkupAcrossLines)
     $oneLine = [regex]::new("\G(?:$script:ReviewCommonMarkMarkup)")
     foreach ($line in $lines) {
@@ -765,6 +803,46 @@ function Find-ReviewUnmodeledMarkup {
             return [pscustomobject]@{ Rule = 'link-target'; Offset = $link.Index; Length = $link.Length }
         }
     }
+    # Links and images nested deeper than the rendered form unwraps would leave link syntax between
+    # the halves of a value that GitHub draws whole, so they fail closed, fenced or not.
+    $markdown = Remove-ReviewMarkup -Text $Text -Mapped
+    $links = Remove-ReviewLinkTargets -Text $markdown.Text -Map $markdown.Map
+    if ($links.Remaining) {
+        $first = $links.Map[$links.Remaining.Index]
+        $last = $links.Map[$links.Remaining.Index + $links.Remaining.Length - 1]
+        return [pscustomobject]@{ Rule = 'link-depth'; Offset = $first; Length = $last - $first + 1 }
+    }
+    # A math or mermaid fence, wherever GitHub may read one (indented, in a list item or a block
+    # quote; the language word in any case), unless it sits inside fenced code.
+    foreach ($line in $lines) {
+        if ($line.Fenced) { continue }
+        $fence = [regex]::Match($line.Text, '^[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*(?:`{3,}|~{3,})[ \t]*(?<lang>(?i:math|mermaid))(?![^\s])')
+        if ($fence.Success) {
+            return [pscustomobject]@{ Rule = $fence.Groups['lang'].Value.ToLowerInvariant(); Offset = $line.Start + $fence.Index; Length = $fence.Length }
+        }
+    }
+    # Inline and display math: GitHub draws $...$ when the opening $ follows no ASCII letter or digit
+    # and precedes a non-space, and the closing $ follows a non-space and precedes no ASCII letter or
+    # digit, and draws $$...$$ (also from &#36; or &dollar;, and despite \$). Check a same-length copy
+    # with fenced code blanked, a reference to $ ending in $, and code spans filled; a span cannot
+    # cross a blank line or start inside <...>, which may be an autolink. Math never crosses a
+    # paragraph break, but a $ pair across lines fails closed too.
+    $prose = $Text.ToCharArray()
+    foreach ($line in $lines) {
+        if ($line.Fenced) { for ($index = $line.Start; $index -lt $line.Start + $line.Text.Length; $index++) { $prose[$index] = ' ' } }
+    }
+    $prose = [regex]::Replace((-join $prose), '&(?:#[xX][0-9A-Fa-f]+|#[0-9]+|[A-Za-z][A-Za-z0-9]*);?', {
+            param($match)
+            if ((ConvertFrom-ReviewEntities -Text $match.Value) -ceq '$') { return ('#' * ($match.Length - 1)) + '$' }
+            return $match.Value
+        })
+    $prose = [regex]::Replace($prose, '\\[\s\S]|<[^<>\s]*>|(?<!`)(?<tick>`+)(?!`)(?:(?!\r?\n[ \t]*\r?\n)[\s\S])*?(?<!`)\k<tick>(?!`)', {
+            param($match)
+            if ($match.Groups['tick'].Success) { return '#' * $match.Length }
+            return $match.Value
+        })
+    $math = [regex]::Match($prose, '\$\$|(?<![A-Za-z0-9])\$(?=\S)(?:(?!\r?\n[ \t]*\r?\n)[\s\S])*?(?<=\S)\$(?![A-Za-z0-9])')
+    if ($math.Success) { return [pscustomobject]@{ Rule = 'math'; Offset = $math.Index; Length = $math.Length } }
     return $null
 }
 
