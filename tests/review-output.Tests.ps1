@@ -206,6 +206,24 @@ Describe 'Review publication safety' {
         @{ Payload = '<http://a`> $\text{gh}\text{p\_synthetic12345678}$ `b' }
         @{ Payload = '\``a $\text{gh}\text{p\_synthetic12345678}$ `b' }
         @{ Payload = "``a`n`n`$\text{gh}\text{p\_synthetic12345678}`$ ``b" }
+        # GitHub decodes references and escapes in a fence's info string, so anything but a plain
+        # language token fails closed, and the decoded forms are checked for math and Mermaid too.
+        @{ Payload = "`n``````m&#97;th`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        @{ Payload = "`n``````m&#x61;th`n\text{/ho}\text{me/reviewer/auth.json}`n``````" }
+        @{ Payload = "`n``````math&#32;extra`n\text{C}\text{:/public/config.py}`n``````" }
+        @{ Payload = "`n``````m&#101;rmaid`ngraph LR`nA[`"gh#112;_synthetic12345678`"]`n``````" }
+        @{ Payload = "`n``````mermaid&#32;extra`ngraph LR`nA[`"/ho#109;e/reviewer/auth.json`"]`n``````" }
+        @{ Payload = "`n- ``````m&#97;th`n  \text{gh}\text{p\_synthetic12345678}`n  ``````" }
+        @{ Payload = "`n> ~~~m\ath`n> \text{gh}\text{p\_synthetic12345678}`n> ~~~" }
+        # Backticks that may pair across a block boundary, or whose pairing is otherwise uncertain,
+        # hide no math.
+        @{ Payload = "`n- ``one`n- `$\text{gh}\text{p\_synthetic12345678}`$ ``two" }
+        @{ Payload = "`n- ``one`n- &#36;\text{/ho}\text{me/reviewer/auth.json}&dollar; ``two" }
+        @{ Payload = "`n``one`n---`n`$\text{C}\text{:/public/config.py}`$ ``two" }
+        @{ Payload = "`n# ``one`n`$\text{gh}\text{p\_synthetic12345678}`$ ``two" }
+        @{ Payload = "`n``one`n***`n`$\text{gh}\text{p\_synthetic12345678}`$ ``two" }
+        @{ Payload = "`n| ``a | `$\text{gh}\text{p\_synthetic12345678}`$ | b`` |`n| --- | --- | --- |" }
+        @{ Payload = '`a\` $\text{gh}\text{p\_synthetic12345678}$ `' }
     ) {
         param($Payload)
         $fakeRunner = {
@@ -258,6 +276,8 @@ Describe 'Review publication safety' {
         @{ Payload = 'Set `$a` to `$b`, see `a $x$ b`, and `$$` is the last token.' }
         @{ Payload = "Diagrams are quoted in a fence:`n`n````````markdown`n``````mermaid`ngraph A`n```````n`$`$x`$`$`n````````" }
         @{ Payload = "Other languages render as code:`n`n``````mathematica`nx`n```````n`n``````math-x`nx`n``````" }
+        @{ Payload = "Plain language tokens:`n`n``````c++`nx`n```````n`n``````shell-session`n`$ x`n```````n`nA ``````python`` block." }
+        @{ Payload = "Run ``Get-ChildItem | Where-Object { `$_.Length }`` and ``a``.`n`n``````powershell`n`$a = `$b`n```````n`nThen ```$x`$`` in code." }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
@@ -305,6 +325,8 @@ Describe 'Review publication safety' {
         @{ Text = ('x gh' + ('![' * 9) + ('](x)' * 9) + 'p_synthetic12345678'); Rule = 'link-depth'; Form = 'raw'; Offset = 4 }
         @{ Text = 'x $\text{gh}\text{p\_synthetic12345678}$'; Rule = 'math'; Form = 'raw'; Offset = 2 }
         @{ Text = "x`n``````mermaid`nA[`"gh#112;_synthetic12345678`"]`n``````"; Rule = 'mermaid'; Form = 'raw'; Offset = 2 }
+        @{ Text = "x`n``````m&#97;th`n\text{gh}\text{p\_synthetic12345678}`n``````"; Rule = 'fence-info'; Form = 'raw'; Offset = 2 }
+        @{ Text = "x`n``````m&#97;th`n\text{gh}\text{p\_synthetic12345678}`n``````"; Rule = 'math'; Form = 'decoded'; Offset = 2 }
     ) {
         param($Text, $Rule, $Form, $Offset)
         $failure = ''
