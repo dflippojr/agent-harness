@@ -698,8 +698,8 @@ function Get-ReviewHtmlToken {
 function Get-ReviewMarkdownLines {
     param([AllowEmptyString()][string]$Text)
 
-    # Each line with its offset, whether it is fenced code, and whether it may belong to a raw HTML
-    # block. Only a fence at column 0 counts as code: it closes any list item or block quote, so
+    # Each line with its offset, whether it is fenced code or opens or closes it (Fence), and whether
+    # it may belong to a raw HTML block. Only a fence at column 0 counts as code: it closes any list item or block quote, so
     # nothing but an HTML block could hold it, and a line inside a possible HTML block is never
     # read as a fence. Any line whose text after container markers starts with < may start an
     # HTML block, which runs to its CommonMark end condition or, for the other kinds, to a blank
@@ -718,10 +718,11 @@ function Get-ReviewMarkdownLines {
     for ($number = 0; $number -lt $lines.Count; $number++) {
         $line = $lines[$number].TrimEnd("`r")
         $fenced = $false
+        $delimiter = $false
         $html = $false
         if ($fence) {
             $close = [regex]::Match($line, '^ {0,3}(`{3,}|~{3,})[ \t]*$')
-            if ($close.Success -and $close.Groups[1].Value[0] -eq $fence[0] -and $close.Groups[1].Length -ge $fence.Length) { $fence = $null }
+            if ($close.Success -and $close.Groups[1].Value[0] -eq $fence[0] -and $close.Groups[1].Length -ge $fence.Length) { $fence = $null; $delimiter = $true }
             else { $fenced = $true }
         } elseif ($htmlEnd) {
             $html = $true
@@ -729,6 +730,7 @@ function Get-ReviewMarkdownLines {
             elseif ($line -match '^[ \t]*$') { $htmlEnd = $null; $html = $false }
         } elseif ($line -match '^(?:`{3,}[^`]*|~{3,}.*)$') {
             $fence = [regex]::Match($line, '^(`+|~+)').Value
+            $delimiter = $true
         } else {
             $inner = $line -replace '^[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*', ''
             if ($inner.StartsWith('<')) {
@@ -742,7 +744,7 @@ function Get-ReviewMarkdownLines {
                 }
             }
         }
-        [pscustomobject]@{ Start = $offset; Text = $line; Fenced = $fenced; Html = $html; Last = $number -eq $lines.Count - 1 }
+        [pscustomobject]@{ Start = $offset; Text = $line; Fenced = $fenced; Fence = $delimiter; Html = $html; Last = $number -eq $lines.Count - 1 }
         $offset += $lines[$number].Length + 1
     }
 }
@@ -760,8 +762,8 @@ function Find-ReviewUnmodeledMarkup {
     #   that starts before it may hide the markup, or the markup may hide the code span;
     # - a start tag whose text a reader does not see in place ($script:ReviewHiddenTextElements) or
     #   that carries a dir attribute;
-    # - links and images nested deeper than the rendered form unwraps (link-depth);
-    # - math and Mermaid, which GitHub draws in the browser from text the forms cannot read as shown.
+    # - links and images nested deeper than the rendered form unwraps (link-depth).
+    # Math and Mermaid fail closed separately, on every decoded form (Find-ReviewRendererMarkup).
     $lines = @(Get-ReviewMarkdownLines -Text $Text)
     $starts = [int[]]@($lines | ForEach-Object { $_.Start })
     $fencedAt = {
@@ -812,35 +814,74 @@ function Find-ReviewUnmodeledMarkup {
         $last = $links.Map[$links.Remaining.Index + $links.Remaining.Length - 1]
         return [pscustomobject]@{ Rule = 'link-depth'; Offset = $first; Length = $last - $first + 1 }
     }
-    # A math or mermaid fence, wherever GitHub may read one (indented, in a list item or a block
-    # quote; the language word in any case), unless it sits inside fenced code.
+    return $null
+}
+
+function Find-ReviewRendererMarkup {
+    param([AllowEmptyString()][string]$Text)
+
+    # The first math or Mermaid GitHub may draw in the browser, which the scan forms cannot read as
+    # shown, as its rule, offset and length, or $null. The caller runs it on every decoded form, so
+    # an entity- or escape-spelled fence name or dollar is caught in the form that decodes it.
+    $lines = @(Get-ReviewMarkdownLines -Text $Text)
+    # Any fence line outside fenced code (indented, in a list item or a block quote, too) must name a
+    # plain language token other than math or mermaid, in any case. GitHub decodes references and
+    # escapes in an info string, so anything else (&, \, a second word) fails closed (fence-info).
     foreach ($line in $lines) {
         if ($line.Fenced) { continue }
-        $fence = [regex]::Match($line.Text, '^[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*(?:`{3,}|~{3,})[ \t]*(?<lang>(?i:math|mermaid))(?![^\s])')
-        if ($fence.Success) {
-            return [pscustomobject]@{ Rule = $fence.Groups['lang'].Value.ToLowerInvariant(); Offset = $line.Start + $fence.Index; Length = $fence.Length }
-        }
+        $fence = [regex]::Match($line.Text, '^[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*(?:`{3,}|~{3,})(?<info>.*)$')
+        if (-not $fence.Success) { continue }
+        $info = $fence.Groups['info'].Value.Trim()
+        $rule = if ($info -match '^(?i:math|mermaid)$') { $info.ToLowerInvariant() } elseif ($info -and $info -notmatch '^[A-Za-z0-9][A-Za-z0-9_+#.-]*$') { 'fence-info' }
+        if ($rule) { return [pscustomobject]@{ Rule = $rule; Offset = $line.Start + $fence.Index; Length = $fence.Length } }
     }
     # Inline and display math: GitHub draws $...$ when the opening $ follows no ASCII letter or digit
     # and precedes a non-space, and the closing $ follows a non-space and precedes no ASCII letter or
     # digit, and draws $$...$$ (also from &#36; or &dollar;, and despite \$). Check a same-length copy
-    # with fenced code blanked, a reference to $ ending in $, and code spans filled; a span cannot
-    # cross a blank line or start inside <...>, which may be an autolink. Math never crosses a
+    # with fenced code and its fences blanked and a reference to $ ending in $. Math never crosses a
     # paragraph break, but a $ pair across lines fails closed too.
     $prose = $Text.ToCharArray()
     foreach ($line in $lines) {
-        if ($line.Fenced) { for ($index = $line.Start; $index -lt $line.Start + $line.Text.Length; $index++) { $prose[$index] = ' ' } }
+        if ($line.Fenced -or $line.Fence) { for ($index = $line.Start; $index -lt $line.Start + $line.Text.Length; $index++) { $prose[$index] = ' ' } }
     }
     $prose = [regex]::Replace((-join $prose), '&(?:#[xX][0-9A-Fa-f]+|#[0-9]+|[A-Za-z][A-Za-z0-9]*);?', {
             param($match)
             if ((ConvertFrom-ReviewEntities -Text $match.Value) -ceq '$') { return ('#' * ($match.Length - 1)) + '$' }
             return $match.Value
         })
-    $prose = [regex]::Replace($prose, '\\[\s\S]|<[^<>\s]*>|(?<!`)(?<tick>`+)(?!`)(?:(?!\r?\n[ \t]*\r?\n)[\s\S])*?(?<!`)\k<tick>(?!`)', {
-            param($match)
-            if ($match.Groups['tick'].Success) { return '#' * $match.Length }
-            return $match.Value
-        })
+    # Code spans hide a $ only when their reading is certain: every backtick run outside fenced code
+    # closes on its own line, so no span can cross a block boundary or shift the pairing of a later
+    # one; no span holds a | when any line may be a table delimiter row (a | may end a cell); and no
+    # backtick sits inside <...> (an autolink or not) or beside an escaped backtick. Otherwise no
+    # span hides anything.
+    $spans = New-Object System.Collections.Generic.List[int[]]
+    $certain = $true
+    $table = @($lines | Where-Object {
+            $row = $_.Text -replace '^[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*', ''
+            -not $_.Fenced -and $_.Text -match '\|' -and $_.Text -match '-' -and $row -match '^[ \t|:-]*$'
+        }).Count -gt 0
+    $tokens = [regex]::new('\\[\s\S]|<[^<>\s]*>|`+')
+    foreach ($line in $lines) {
+        if (-not $certain) { break }
+        if ($line.Fenced -or $line.Fence) { continue }
+        $at = 0
+        while ($certain) {
+            $token = $tokens.Match($line.Text, $at)
+            if (-not $token.Success) { break }
+            $at = $token.Index + $token.Length
+            if ($token.Value[0] -eq '\') { if ($token.Value -eq '\`' -and $at -lt $line.Text.Length -and $line.Text[$at] -eq '`') { $certain = $false }; continue }
+            if ($token.Value[0] -eq '<') { if ($token.Value.Contains('`')) { $certain = $false }; continue }
+            $closer = [regex]::Match($line.Text.Substring($at), "(?<!``)``{$($token.Length)}(?!``)")
+            if (-not $closer.Success -or ($table -and $line.Text.Substring($at, $closer.Index).Contains('|'))) { $certain = $false; break }
+            $at += $closer.Index + $closer.Length
+            $spans.Add([int[]]@(($line.Start + $token.Index), ($at - $token.Index)))
+        }
+    }
+    if ($certain) {
+        $chars = $prose.ToCharArray()
+        foreach ($span in $spans) { for ($index = $span[0]; $index -lt $span[0] + $span[1]; $index++) { $chars[$index] = '#' } }
+        $prose = -join $chars
+    }
     $math = [regex]::Match($prose, '\$\$|(?<![A-Za-z0-9])\$(?=\S)(?:(?!\r?\n[ \t]*\r?\n)[\s\S])*?(?<=\S)\$(?![A-Za-z0-9])')
     if ($math.Success) { return [pscustomobject]@{ Rule = 'math'; Offset = $math.Index; Length = $math.Length } }
     return $null
@@ -960,6 +1001,12 @@ function Assert-ReviewOutputSafe {
     if (-not $CredentialsOnly) {
         $unmodeled = Find-ReviewUnmodeledMarkup -Text $Text
         if ($unmodeled) { $hits.Add("rule $($unmodeled.Rule) matched the raw form at offset $($unmodeled.Offset) (length $($unmodeled.Length))") }
+        # Math and Mermaid in the raw text and in each decoded form, where references and escapes are
+        # spelled out. Offsets count in that form.
+        foreach ($form in (Get-ReviewNamedScanForms -Text $Text -PlainText)) {
+            $renderer = Find-ReviewRendererMarkup -Text $form.Text
+            if ($renderer) { $hits.Add("rule $($renderer.Rule) matched the $($form.Name) form at offset $($renderer.Offset) (length $($renderer.Length))") }
+        }
     }
     # Absolute roots and credential patterns always scan the unmasked text.
     foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {

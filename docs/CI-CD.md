@@ -332,12 +332,16 @@ holding `--!>`, an instruction or CDATA holding `>`), markup holding a backtick,
 whose text GitHub keeps out of place (`rp`, `rt`, `rb`, `rtc`, `ruby`, `table`, `video`, `bdo`, `bdi`), even when only
 named in inline code; rule `link-target` rejects a link whose target holds a backtick or whose text holds an unpaired
 one; rule `link-depth` rejects links and images nested more than 8 deep, which the `rendered` form stops unwrapping
-(even in fenced code); rule `math` rejects a `math` fence (indented, in a list item or block quote, any case), `$$`, and
-a `$...$` pair GitHub may draw as math (the opening `$` after no ASCII letter or digit and before a non-space, the closing
-`$` after a non-space and before no ASCII letter or digit, within a paragraph; `&#36;` and `&dollar;` count, `\$` does
-not protect, and code spans are skipped), so `$5 and $10`, `$HOME/$USER` and `` `$a` `` still publish; rule `mermaid`
-rejects a `mermaid` fence. GeoJSON, TopoJSON and STL are not modeled, and no scan stops a value spelled out in pieces in
-prose. Known
+(even in fenced code). Math and Mermaid are checked in the raw, `decoded` and `unescaped` forms, so a reference or escape
+cannot hide them: rule `fence-info` rejects a fence line (indented, in a list item or block quote, too) whose info string
+is not a single plain language token (letters, digits, `_+#.-`), since GitHub decodes references and escapes there; rule
+`math` rejects a `math` fence (any case), `$$`, and a `$...$` pair GitHub may draw as math (the opening `$` after no
+ASCII letter or digit and before a non-space, the closing `$` after a non-space and before no ASCII letter or digit,
+within a paragraph; `&#36;` and `&dollar;` count and `\$` does not protect). A code span hides a `$` only when every
+backtick run outside fenced code closes on its own line, no span holds a `|` while any line may be a table delimiter
+row, and no backtick sits inside `<...>` or beside an escaped backtick; otherwise no span hides anything. So
+`$5 and $10`, `$HOME/$USER` and `` `$a` `` still publish. Rule `mermaid` rejects a `mermaid` fence. GeoJSON, TopoJSON
+and STL are not modeled, and no scan stops a value spelled out in pieces in prose. Known
 citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and
 rendered spellings; a name counts as known only if every one of those spellings is relative. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
