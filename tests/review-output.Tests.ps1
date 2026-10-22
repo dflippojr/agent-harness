@@ -224,6 +224,23 @@ Describe 'Review publication safety' {
         @{ Payload = "`n``one`n***`n`$\text{gh}\text{p\_synthetic12345678}`$ ``two" }
         @{ Payload = "`n| ``a | `$\text{gh}\text{p\_synthetic12345678}`$ | b`` |`n| --- | --- | --- |" }
         @{ Payload = '`a\` $\text{gh}\text{p\_synthetic12345678}$ `' }
+        # GitHub ends a line at a bare CR too, and a browser may break at other separators, so any line
+        # break but LF or CRLF fails closed.
+        @{ Payload = "x`r``````math`r\text{gh}\text{p\_synthetic12345678}`r``````" }
+        @{ Payload = "x`r``````mermaid`rgraph LR`rA[`"gh#112;_synthetic12345678`"]`r``````" }
+        @{ Payload = "x`r`n``````math`r\text{/ho}\text{me/reviewer/auth.json}`n``````" }
+        @{ Payload = "`r- ``one`r- `$\text{C}\text{:/public/config.py}`$ ``two" }
+        @{ Payload = ('x' + [char]0x2028 + "``````math`n\text{gh}\text{p\_synthetic12345678}`n``````") }
+        @{ Payload = ('x' + [char]0x2029 + "``````mermaid`nA[`"gh#112;_synthetic12345678`"]`n``````") }
+        @{ Payload = "x`f``````math`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        @{ Payload = "x`v``````math`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        @{ Payload = ('x' + [char]0x85 + "``````math`n\text{gh}\text{p\_synthetic12345678}`n``````") }
+        @{ Payload = "x&#13;``````math`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        # A table row is possible wherever a | is, even with a pipe-free delimiter row, so a code span
+        # holding a | hides no math.
+        @{ Payload = "`n| heading |`n---`n| ``a `$\text{gh}\text{p\_synthetic12345678}`$ | b`` |" }
+        @{ Payload = "`n| heading |`n:---:`n| ``a &#36;\text{/ho}\text{me/reviewer/auth.json}&dollar; | b`` |" }
+        @{ Payload = "`nheading |`n---:`n``a `$\text{C}\text{:/public/config.py}`$ | b``" }
     ) {
         param($Payload)
         $fakeRunner = {
@@ -278,6 +295,7 @@ Describe 'Review publication safety' {
         @{ Payload = "Other languages render as code:`n`n``````mathematica`nx`n```````n`n``````math-x`nx`n``````" }
         @{ Payload = "Plain language tokens:`n`n``````c++`nx`n```````n`n``````shell-session`n`$ x`n```````n`nA ``````python`` block." }
         @{ Payload = "Run ``Get-ChildItem | Where-Object { `$_.Length }`` and ``a``.`n`n``````powershell`n`$a = `$b`n```````n`nThen ```$x`$`` in code." }
+        @{ Payload = "Windows line endings:`r`n`r`n``````powershell`r`n`$a = `$b`r`n```````r`n`r`nThen ```$x`$`` in code.`r`n" }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
@@ -327,6 +345,8 @@ Describe 'Review publication safety' {
         @{ Text = "x`n``````mermaid`nA[`"gh#112;_synthetic12345678`"]`n``````"; Rule = 'mermaid'; Form = 'raw'; Offset = 2 }
         @{ Text = "x`n``````m&#97;th`n\text{gh}\text{p\_synthetic12345678}`n``````"; Rule = 'fence-info'; Form = 'raw'; Offset = 2 }
         @{ Text = "x`n``````m&#97;th`n\text{gh}\text{p\_synthetic12345678}`n``````"; Rule = 'math'; Form = 'decoded'; Offset = 2 }
+        @{ Text = "x`r``````math`r\text{gh}\text{p\_synthetic12345678}`r``````"; Rule = 'line-break'; Form = 'raw'; Offset = 1 }
+        @{ Text = "x&#13;``````math`n\text{gh}\text{p\_synthetic12345678}`n``````"; Rule = 'line-break'; Form = 'decoded'; Offset = 1 }
     ) {
         param($Text, $Rule, $Form, $Offset)
         $failure = ''
