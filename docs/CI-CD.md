@@ -338,8 +338,10 @@ is not a single plain language token (letters, digits, `_+#.-`), since GitHub de
 `math` rejects a `math` fence (any case), `$$`, and a `$...$` pair GitHub may draw as math (the opening `$` after no
 ASCII letter or digit and before a non-space, the closing `$` after a non-space and before no ASCII letter or digit,
 within a paragraph; `&#36;` and `&dollar;` count and `\$` does not protect). A code span hides a `$` only when every
-backtick run outside fenced code closes on its own line, no span holds a `|` while any line may be a table delimiter
-row, and no backtick sits inside `<...>` or beside an escaped backtick; otherwise no span hides anything. So
+backtick run outside fenced code closes on its own line and no backtick sits inside `<...>` or beside an escaped
+backtick (otherwise no span hides anything), and never on a line where a span holds a `|`, since a table row is possible
+wherever a `|` is. Rule `line-break` rejects, raw or decoded and before any of this, every line break but LF and CRLF:
+a bare CR (GitHub ends a line there; the scans do not), vertical tab, form feed, NEL, U+2028 and U+2029. So
 `$5 and $10`, `$HOME/$USER` and `` `$a` `` still publish. Rule `mermaid` rejects a `mermaid` fence. GeoJSON, TopoJSON
 and STL are not modeled, and no scan stops a value spelled out in pieces in prose. Known
 citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and

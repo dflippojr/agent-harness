@@ -432,6 +432,9 @@ $script:ReviewInvisiblePattern = '\p{Cf}|[\x00-\x08\x0B\x0E-\x1F\x7F-\x9F\u00AD\
 # Bidirectional formatting characters change the order a reader sees (an override displays
 # 87654321citehtnys_phg reversed), which no scan form reproduces, so publication rejects them.
 $script:ReviewBidiPattern = '[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]'
+# The structural scans split lines at LF only (a CR before it is dropped). GitHub also ends a line at
+# a bare CR, and a browser or editor may break at the other separators, so publication rejects them.
+$script:ReviewLineBreakPattern = '\r(?!\n)|[\x0B\x0C\x85\u2028\u2029]'
 # Start tags GitHub keeps although a reader does not see their text in place: rp is hidden, ruby text
 # sits above the line, a table moves stray text in front of itself and video drops its content. bdo and
 # bdi would reorder text if GitHub kept them; a dir attribute, which it keeps, does.
@@ -850,20 +853,19 @@ function Find-ReviewRendererMarkup {
             return $match.Value
         })
     # Code spans hide a $ only when their reading is certain: every backtick run outside fenced code
-    # closes on its own line, so no span can cross a block boundary or shift the pairing of a later
-    # one; no span holds a | when any line may be a table delimiter row (a | may end a cell); and no
-    # backtick sits inside <...> (an autolink or not) or beside an escaped backtick. Otherwise no
-    # span hides anything.
+    # closes on its own line (a bare CR or other separator is rejected before this), so no span can
+    # cross a block boundary or shift the pairing of a later one; and no backtick sits inside <...>
+    # (an autolink or not) or beside an escaped backtick. Otherwise no span hides anything. A table
+    # row is possible wherever a | is (a one-column table's delimiter row needs none), and a | may end
+    # a cell, so no span hides anything on a line where one holds a |.
     $spans = New-Object System.Collections.Generic.List[int[]]
     $certain = $true
-    $table = @($lines | Where-Object {
-            $row = $_.Text -replace '^[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*', ''
-            -not $_.Fenced -and $_.Text -match '\|' -and $_.Text -match '-' -and $row -match '^[ \t|:-]*$'
-        }).Count -gt 0
     $tokens = [regex]::new('\\[\s\S]|<[^<>\s]*>|`+')
     foreach ($line in $lines) {
         if (-not $certain) { break }
         if ($line.Fenced -or $line.Fence) { continue }
+        $lineSpans = New-Object System.Collections.Generic.List[int[]]
+        $piped = $false
         $at = 0
         while ($certain) {
             $token = $tokens.Match($line.Text, $at)
@@ -872,10 +874,12 @@ function Find-ReviewRendererMarkup {
             if ($token.Value[0] -eq '\') { if ($token.Value -eq '\`' -and $at -lt $line.Text.Length -and $line.Text[$at] -eq '`') { $certain = $false }; continue }
             if ($token.Value[0] -eq '<') { if ($token.Value.Contains('`')) { $certain = $false }; continue }
             $closer = [regex]::Match($line.Text.Substring($at), "(?<!``)``{$($token.Length)}(?!``)")
-            if (-not $closer.Success -or ($table -and $line.Text.Substring($at, $closer.Index).Contains('|'))) { $certain = $false; break }
+            if (-not $closer.Success) { $certain = $false; break }
+            if ($line.Text.Substring($at, $closer.Index).Contains('|')) { $piped = $true }
             $at += $closer.Index + $closer.Length
-            $spans.Add([int[]]@(($line.Start + $token.Index), ($at - $token.Index)))
+            $lineSpans.Add([int[]]@(($line.Start + $token.Index), ($at - $token.Index)))
         }
+        if (-not $piped) { $spans.AddRange($lineSpans) }
     }
     if ($certain) {
         $chars = $prose.ToCharArray()
@@ -997,6 +1001,8 @@ function Assert-ReviewOutputSafe {
     $entityDecoded = ConvertFrom-ReviewEntities -Text $Text
     & $check 'bidi-control' 'raw' $Text $script:ReviewBidiPattern
     & $check 'bidi-control' 'decoded' $entityDecoded $script:ReviewBidiPattern
+    & $check 'line-break' 'raw' $Text $script:ReviewLineBreakPattern
+    & $check 'line-break' 'decoded' $entityDecoded $script:ReviewLineBreakPattern
     & $check 'unknown-entity' 'decoded' $entityDecoded $script:ReviewUnknownEntityPattern
     if (-not $CredentialsOnly) {
         $unmodeled = Find-ReviewUnmodeledMarkup -Text $Text
