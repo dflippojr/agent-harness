@@ -18,8 +18,28 @@ replace its own judge. Require both checks, `gate` and `gate-guard-target / gate
 | `lint` | `python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt -r tools/lint/requirements.txt`, then `python -m ruff check .` and `python tools/lint/pyright_baseline.py`. Fix a ruff finding, or silence that one line with `# noqa: <rule>` and a reason; no per-file ignores. Pyright fails only on errors its baseline (`tools/lint/pyright-baseline.json`) does not record: fix new ones rather than growing it. After fixing recorded ones, shrink it with `python tools/lint/pyright_baseline.py --write`. |
 | `openapi` | `python tools/openapi/export_schema.py --check` (see Local checks above). |
 | `ui-tests` | Check out the Stables tag pinned in `tools/stables/pin.json` and set `HARNESS_STABLES_DIR` to its `public/`. Then `python tools/stables/pin.py --check <stables checkout>`, `npm --prefix tools/ui-tests ci`, `npm --prefix tools/ui-tests exec -- playwright install chromium webkit` and `npm --prefix tools/ui-tests test -- --workers=1`. |
+| `hub-contract` | Clone dflippojr/agent-harness-hub at the `ref:` pinned in `ci.yml`'s `hub-contract` job. In a venv of its own, from the Hub checkout: `python -m pip install --require-hashes -r requirements-e2e.lock -r requirements-build.lock` and `python -m pip install --no-deps --no-build-isolation -e .`. Then, still in the Hub checkout, `HUB_E2E_DAEMON_SRC=<this checkout> HUB_E2E_DAEMON_PYTHON=<a Python with this repository's requirements.txt> python -m pytest tests/contract -m e2e -v -p no:cacheprovider`. The suite starts this daemon itself, in fake-model mode on loopback with throwaway data. |
 | `sonar` | CI only (SonarCloud). On a PR, list its new issues at `https://sonarcloud.io/api/issues/search?componentKeys=dflippojr_agent-harness&pullRequest=<PR>&resolved=false`. |
-| `changes`, `gate` | CI only (`scripts/ci_gate.py`). A change touching only the files in `CI_SKIP_UNREAD_PATHS` skips the three test jobs, and `gate` still passes. |
+| `changes`, `gate` | CI only (`scripts/ci_gate.py`). A change touching only the files in `CI_SKIP_UNREAD_PATHS` skips the test jobs, and `gate` still passes. |
+
+## Changing the API the Hub uses
+
+The Hub (dflippojr/agent-harness-hub) is this daemon's main admin client. Its contract suite (`tests/contract` there;
+`docs/daemon-contract.md` explains it) lists every endpoint the Hub calls, with the request it sends and the fields
+and status codes it reads, and `hub-contract` runs that suite's `[daemon]` cases against each change here. A red
+`hub-contract` means the change breaks the Hub: renamed or dropped fields, changed status codes or error codes, or a
+removed endpoint. If the break is a mistake, fix the daemon. If it is deliberate:
+
+1. Open a Hub PR first that updates the contract (`tests/contract/endpoints.py`), the Hub's fakes and the Hub for
+   the new answer. The Hub's own CI runs its contract against the daemon commit it pins, so during the change the
+   contract accepts both answers (the new field optional beside the old one, for example). Link the two PRs.
+2. Once the Hub PR merges, bump the `ref:` of the Hub checkout in `ci.yml`'s `hub-contract` job, in this PR, to that
+   Hub commit's full SHA. `hub-contract` turns green. The bump edits a workflow file, so the PR needs the owner's
+   `gate-change-approved` label; say so under `### Gate changes`.
+3. After this PR merges and the Hub bumps its daemon pin past it, a Hub follow-up drops the old answer.
+
+Bump the Hub ref on its own (no daemon change) the same way when the Hub's contract grows, so new Hub expectations
+judge this repository too.
 
 To prove a change works in the running app, run the verify skill and paste its summary into the PR's Proof table:
 `python .claude/skills/verify/scripts/verify.py run [--feature task]`. It starts a disposable fake-model instance on

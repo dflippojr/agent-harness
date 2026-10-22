@@ -107,6 +107,29 @@ def test_ci_gate_guard_job_is_an_early_signal_pinned_by_sha_and_gate_needs_it():
     assert "gate-guard" in jobs["gate"]["needs"]
 
 
+def test_hub_contract_runs_the_pinned_hubs_daemon_cases_against_this_checkout():
+    # The Hub's contract suite judges each daemon change (#736). A deliberate API break bumps the pin (AGENTS.md).
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    job = jobs["hub-contract"]
+    assert "hub-contract" in jobs["gate"]["needs"]
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] <= 10
+    checkouts = [step["with"] for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@")]
+    assert checkouts[0]["path"] == "daemon" and "repository" not in checkouts[0]
+    hub = checkouts[1]
+    assert hub["repository"] == "dflippojr/agent-harness-hub"
+    assert re.fullmatch(r"[0-9a-f]{40}", hub["ref"]), hub["ref"]
+    assert all(checkout["persist-credentials"] is False for checkout in checkouts)
+    install = next(step["run"] for step in job["steps"] if step.get("name") == "Install the daemon and the Hub")
+    assert "python -m pip install -r daemon/requirements.txt" in install
+    assert "--require-hashes -r hub/requirements-e2e.lock" in install
+    suite = job["steps"][-1]
+    assert suite["working-directory"] == "hub"
+    assert suite["env"]["HUB_E2E_DAEMON_SRC"] == "${{ github.workspace }}/daemon"
+    assert suite["env"]["HUB_E2E_DAEMON_PYTHON"] == "${{ steps.python.outputs.python-path }}"
+    assert "-m pytest tests/contract -m e2e" in suite["run"]
+
+
 def test_ci_reruns_when_an_owner_label_changes_so_gate_reevaluates_the_early_guard():
     # The early gate-guard job reads labels when it runs, and `gate` needs it. Without labeled/unlabeled here, applying
     # gate-change-approved leaves the failed gate in place until someone reruns CI by hand (#727).

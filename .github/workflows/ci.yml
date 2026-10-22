@@ -6,6 +6,7 @@ name: CI
 #   test-py313 - the same suite on Python 3.13, after an import smoke test (#730); no coverage
 #   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
+#   hub-contract - the pinned Hub's (dflippojr/agent-harness-hub) contract suite against this daemon in fake-model mode
 #   lint      - ruff, and pyright against tools/lint/pyright-baseline.json; runs on every change
 #   changes   - lists the changed files; the test jobs skip when every one is on the skip list
 #   gate-guard - the shared gate guard (dflippojr/.github) on pull requests: an early signal, not the judge (#727)
@@ -23,7 +24,8 @@ name: CI
 # The workflow always runs, so `gate` always reports and a ruleset can require it
 # (#726, dflippojr/agent-ops#48). The docs-only skip lives in the `changes` job:
 # CI_SKIP_UNREAD_PATHS is an allow-list of files no pytest currently reads, and
-# `test`, `test-py313`, `openapi` and `ui-tests` skip only when every changed file is on it.
+# `test`, `test-py313`, `openapi`, `ui-tests` and `hub-contract` skip only when every changed file
+# is on it.
 # Entries are exact paths, not globs. Do not add `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
 # INSTALL.md, admin-api.md, app-api.md, mac-client.md, and service-profile.md
 # are asserted by tests/test_product_naming.py; marketplace design, threat
@@ -298,6 +300,53 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  hub-contract:
+    # The Hub (dflippojr/agent-harness-hub) is this daemon's main admin client, so its expectations judge each daemon
+    # change (#736). Its contract suite's [daemon] cases (tests/contract, marked e2e) start this checkout's daemon in
+    # fake-model mode on loopback, with throwaway config, data and HOME, and check every endpoint the Hub calls
+    # against the shapes and status codes the Hub reads. The Hub is pinned by full SHA in `ref:` below; a deliberate
+    # API break updates the Hub's contract in a Hub PR first, then bumps that ref here (AGENTS.md). The daemon runs on
+    # this job's interpreter with this checkout's requirements.txt; the Hub runs from its own hash-locked venv.
+    # ubuntu-latest: about a minute, where windows-latest takes two or more; the Hub's nightly drift.yml runs the same
+    # suite against main on Windows too.
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: daemon
+          persist-credentials: false
+      - name: Check out the pinned Hub
+        uses: actions/checkout@v7
+        with:
+          repository: dflippojr/agent-harness-hub
+          ref: b3851f3d7b35ffb48562a7bee7bd4740bb27e3e2
+          path: hub
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        id: python
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            daemon/requirements.txt
+            hub/requirements-e2e.lock
+            hub/requirements-build.lock
+      - name: Install the daemon and the Hub
+        run: |
+          python -m pip install -r daemon/requirements.txt
+          python -m venv "$RUNNER_TEMP/hub-venv"
+          "$RUNNER_TEMP/hub-venv/bin/python" -m pip install --require-hashes -r hub/requirements-e2e.lock -r hub/requirements-build.lock
+          "$RUNNER_TEMP/hub-venv/bin/python" -m pip install --no-deps --no-build-isolation -e hub
+      - name: The Hub's contract suite against this daemon
+        working-directory: hub
+        env:
+          HUB_E2E_DAEMON_SRC: ${{ github.workspace }}/daemon
+          HUB_E2E_DAEMON_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: '"$RUNNER_TEMP/hub-venv/bin/python" -m pytest tests/contract -m e2e -v -p no:cacheprovider'
+
   lint:
     # Static checks (#729): ruff's small rule set (F, E9, B, PLE) everywhere, and pyright in basic mode over the shipped
     # packages. Pyright fails only on errors that tools/lint/pyright-baseline.json does not record, so a later change
@@ -387,10 +436,10 @@ jobs:
 
   gate:
     # The required check. It always runs and needs every job above, so it reports on docs-only changes too
-    # (`test`, `test-py313`, `openapi` and `ui-tests` skipped by `changes`). Any needed job failed or cancelled fails
-    # it; see scripts/ci_gate.py for the rules. Add every new job here.
+    # (`test`, `test-py313`, `openapi`, `ui-tests` and `hub-contract` skipped by `changes`). Any needed job failed or
+    # cancelled fails it; see scripts/ci_gate.py for the rules. Add every new job here.
     if: always()
-    needs: [changes, lint, test, test-py313, sonar, openapi, ui-tests, gate-guard]
+    needs: [changes, lint, test, test-py313, sonar, openapi, ui-tests, hub-contract, gate-guard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
