@@ -176,6 +176,36 @@ Describe 'Review publication safety' {
         @{ Payload = 'gh[![](y)](z)p_synthetic12345678' }
         # GFM strikes through text between single tildes too.
         @{ Payload = 'g~h~p_synthetic12345678' }
+        # Nested images flatten to one image however deep; past the unwrapping bound they fail closed.
+        @{ Payload = ('gh' + ('![' * 8) + ('](x)' * 8) + 'p_synthetic12345678') }
+        @{ Payload = ('gh' + ('![' * 9) + ('](x)' * 9) + 'p_synthetic12345678') }
+        @{ Payload = ('gh' + ('![' * 10) + ('](x)' * 10) + 'p_synthetic12345678') }
+        @{ Payload = ('in /ho' + ('![' * 8) + ('](x)' * 8) + 'me/reviewer/auth.json') }
+        @{ Payload = ('in /ho' + ('![' * 9) + ('](x)' * 9) + 'me/reviewer/auth.json') }
+        @{ Payload = ('in /ho' + ('![' * 10) + ('](x)' * 10) + 'me/reviewer/auth.json') }
+        @{ Payload = ('see C' + ('![' * 8) + ('](x)' * 8) + ':/public/config.py') }
+        @{ Payload = ('see C' + ('![' * 9) + ('](x)' * 9) + ':/public/config.py') }
+        @{ Payload = ('see C' + ('![' * 10) + ('](x)' * 10) + ':/public/config.py') }
+        # GitHub draws math and Mermaid in the browser, so they fail closed however they are written.
+        @{ Payload = 'x $\text{gh}\text{p\_synthetic12345678}$ y' }
+        @{ Payload = 'x $\text{/ho}\text{me/reviewer/auth.json}$ y' }
+        @{ Payload = 'x $\text{C}\text{:/public/config.py}$ y' }
+        @{ Payload = 'x $`\text{gh}\text{p\_synthetic12345678}`$ y' }
+        @{ Payload = 'x &#36;\text{gh}\text{p\_synthetic12345678}&dollar; y' }
+        @{ Payload = 'x \$\text{gh}\text{p\_synthetic12345678}$ y' }
+        @{ Payload = 'x $$\text{gh}\text{p\_synthetic12345678}$$ y' }
+        @{ Payload = "x`n`n`$`$`n\text{gh}\text{p\_synthetic12345678}`n`$`$" }
+        # A fence starts its own line, after the runner's "- app.py:1: exposed " prefix.
+        @{ Payload = "`n``````math`n\text{gh}\text{p\_synthetic12345678}`n``````" }
+        @{ Payload = "`n ~~~ Math extra`n\text{/ho}\text{me/reviewer/auth.json}`n~~~" }
+        @{ Payload = "`n> ``````math`n> \text{C}\text{:/public/config.py}`n> ``````" }
+        @{ Payload = "`n``````mermaid`ngraph LR`n  A[`"gh#112;_synthetic12345678`"]`n``````" }
+        @{ Payload = "`n- ``````Mermaid`n  graph LR`n  A[`"/ho#109;e/reviewer/auth.json`"]`n  ``````" }
+        # A code span cannot hide math when it starts inside an autolink, after an escaped backtick
+        # or across a blank line.
+        @{ Payload = '<http://a`> $\text{gh}\text{p\_synthetic12345678}$ `b' }
+        @{ Payload = '\``a $\text{gh}\text{p\_synthetic12345678}$ `b' }
+        @{ Payload = "``a`n`n`$\text{gh}\text{p\_synthetic12345678}`$ ``b" }
     ) {
         param($Payload)
         $fakeRunner = {
@@ -223,6 +253,11 @@ Describe 'Review publication safety' {
         @{ Payload = "Use ``handlers[0](arg)`` and [the docs](https://example.invalid/a_(b) `"Title`").`n`n![diagram](https://example.invalid/d.png)" }
         @{ Payload = "Hidden-text markup is quoted in a fence:`n`n``````html`n<table dir=`"rtl`"><tr><td><rp>x</rp></td></tr></table>`n<video src=`"a.mp4`"></video>`n```````n`nDone." }
         @{ Payload = 'Expand `~/.claude` and keep ~5 minutes of logs.' }
+        # Dollar signs GitHub does not draw as math, or that sit in code, publish.
+        @{ Payload = 'It costs $5 and $10; $env:TEMP\x, $HOME/$USER, a$x$b, $x$1 and $env:A, $env:B are text.' }
+        @{ Payload = 'Set `$a` to `$b`, see `a $x$ b`, and `$$` is the last token.' }
+        @{ Payload = "Diagrams are quoted in a fence:`n`n````````markdown`n``````mermaid`ngraph A`n```````n`$`$x`$`$`n````````" }
+        @{ Payload = "Other languages render as code:`n`n``````mathematica`nx`n```````n`n``````math-x`nx`n``````" }
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
@@ -267,6 +302,9 @@ Describe 'Review publication safety' {
         @{ Text = 'x gh<!-- x > y -->p_synthetic12345678'; Rule = 'known-token-prefix'; Form = 'rendered'; Offset = 2 }
         @{ Text = "<div>`ngh<x y=a<b>p_synthetic12345678`n</div>"; Rule = 'known-token-prefix'; Form = 'html'; Offset = 1 }
         @{ Text = 'x [a`](b`c "g*h*p_synthetic12345678")'; Rule = 'known-token-prefix'; Form = 'literal'; Offset = 10 }
+        @{ Text = ('x gh' + ('![' * 9) + ('](x)' * 9) + 'p_synthetic12345678'); Rule = 'link-depth'; Form = 'raw'; Offset = 4 }
+        @{ Text = 'x $\text{gh}\text{p\_synthetic12345678}$'; Rule = 'math'; Form = 'raw'; Offset = 2 }
+        @{ Text = "x`n``````mermaid`nA[`"gh#112;_synthetic12345678`"]`n``````"; Rule = 'mermaid'; Form = 'raw'; Offset = 2 }
     ) {
         param($Text, $Rule, $Form, $Offset)
         $failure = ''
