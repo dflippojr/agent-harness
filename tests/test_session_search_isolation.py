@@ -155,8 +155,8 @@ def test_call_ignores_spoofed_session_argument(tmp_path):
         with pytest.raises(ToolError, match="no session matches"):
             await tools.call("session_read", {"session_id": "aaaa000001", "_session": "aaaa000001"},
                              session={"id": "bbbb00000a"})
-        text = await tools.call("session_search", {"query": OWNER_MARKER, "_session": "aaaa000001"},
-                                session={"id": "bbbb00000a"})
+        text = (await tools.call("session_search", {"query": OWNER_MARKER, "_session": "aaaa000001"},
+                                 session={"id": "bbbb00000a"})).text
         assert "aaaa000001" not in text
     asyncio.run(body())
 

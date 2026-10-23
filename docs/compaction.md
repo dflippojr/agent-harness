@@ -42,7 +42,8 @@ artifact and the model gets its head and tail, then a footer naming the
 artifact: `... (output truncated; N characters total; recover with
 read_artifact(artifact_id=…, start=0, end=20000))`. MCP results and
 `session_read` transcripts still open with their untrusted-content banner; the
-artifact holds the plain text. Where `read_artifact` is unavailable (see
+artifact holds the plain text. `session_search` marks each hit from a tainted
+session with that banner in the result itself, so the artifact keeps it. Where `read_artifact` is unavailable (see
 below), the result is middle-truncated with no footer. `read_artifact` itself
 is never bounded or stored again.
 

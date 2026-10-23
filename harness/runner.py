@@ -2780,10 +2780,10 @@ class Runner:
         source = taint.source_for(name, args, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name))
         if source is None and s.get("kind") == TOOLS_ONLY and name in {t["name"] for t in s.get("app_tools") or []}:
             source = ("app_tool", f"app tool {name}")  # free text from the App's data, e.g. bank descriptions (#329)
-        if source is None and isinstance(output, ToolOutput):
-            source = output.taint  # e.g. session_read's: the session it read, not a second lookup of the ref (#794)
-        if source is not None:
-            self._add_taint(s["id"], *source)
+        # Else the result's own: the session session_read opened (#794), each tainted session session_search shows (#795)
+        sources = [source] if source is not None else output.taint if isinstance(output, ToolOutput) else []
+        for kind, origin in sources:
+            self._add_taint(s["id"], kind, origin)
 
     async def _member_tool_block(self, s: dict, call: dict, name: str, ws: Workspace) -> str | None:
         """An approved call still can't run for a household member without the tool; the recorded error, else None."""
