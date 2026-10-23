@@ -46,6 +46,13 @@ artifact holds the plain text. Where `read_artifact` is unavailable (see
 below), the result is middle-truncated with no footer. `read_artifact` itself
 is never bounded or stored again.
 
+Tool text is made valid UTF-8 where a native tool's result enters the runner,
+before it is hashed, stored or shown to the model (#777): each lone UTF-16
+surrogate (an MCP JSON string can carry `"\ud800"`, for example) becomes
+U+FFFD, and a surrogate pair becomes its character. The digest, the artifact,
+the `tool_result` event and the model's context all hold that sanitised text,
+so the session database and the artifact store stay valid UTF-8.
+
 ## What the transcript and UI show
 
 The `artifacts` table is the source of truth for the full text. Tool-result
