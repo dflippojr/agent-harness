@@ -484,6 +484,12 @@ class HubConfig:
 
 
 @dataclass
+class PlanningConfig:
+    """Experiment (#641, docs/compaction.md): append the saved plan to every native agent model call. Off by default."""
+    reinject: bool = False
+
+
+@dataclass
 class ToolOutputConfig:
     """Per-call tool result bounds. The agent may raise a limit up to the matching *_max."""
     read_file_lines: int = 400
@@ -608,6 +614,7 @@ class Config:
     trim: TrimRules = field(default_factory=TrimRules)
     repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
     canary: CanaryConfig = field(default_factory=CanaryConfig)
+    planning: PlanningConfig = field(default_factory=PlanningConfig)
     tool_output: ToolOutputConfig = field(default_factory=ToolOutputConfig)
     # Add-on module packages (harness/modules.py); None: every package under the harness_modules namespace.
     module_packages: tuple[str, ...] | None = None
@@ -1115,6 +1122,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         state_max_chars=_state_max_chars(compaction.get("state_max_chars", 8000)),
         trim=_trim_rules(compaction.get("trim")),
         tool_output=_tool_output(raw.get("tool_output")),
+        planning=_load_planning(raw.get("planning")),
     )
     from . import fake_model
     fake_model.apply(cfg)
@@ -1266,6 +1274,21 @@ def _trim_rules(raw) -> TrimRules:
     return TrimRules(strip_noise=switch("strip_noise"), head_tail=switch("head_tail"),
                      head_lines=lines("head_lines"), tail_lines=lines("tail_lines"),
                      superseded_reads=switch("superseded_reads"), dedupe=switch("dedupe"))
+
+
+def _load_planning(raw) -> PlanningConfig:
+    """`planning` (#641): a mapping whose only key, `reinject`, is a YAML boolean; anything else is a config error."""
+    if raw is None:
+        return PlanningConfig()
+    if not isinstance(raw, dict):
+        raise ValueError(f"planning must be a mapping, got {raw!r}")
+    unknown = sorted(set(raw) - {"reinject"})
+    if unknown:
+        raise ValueError(f"planning: unknown key {unknown[0]!r} (only reinject)")
+    reinject = raw.get("reinject", False)
+    if not isinstance(reinject, bool):
+        raise ValueError(f"planning.reinject must be true or false, got {reinject!r}")
+    return PlanningConfig(reinject=reinject)
 
 
 def _validate_loaded(cfg: Config) -> None:

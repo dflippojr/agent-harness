@@ -30,7 +30,7 @@ from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, ho
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
-from . import audit_context, operation_audit, namespace_audit, checkpointer, checkpoints, llm, member_keys, projects, secret_scan, telemetry, efficiency
+from . import audit_context, operation_audit, namespace_audit, checkpointer, checkpoints, llm, member_keys, planning, projects, secret_scan, telemetry, efficiency
 
 log = logging.getLogger("harness.manager")
 
@@ -499,6 +499,7 @@ class Manager:
         workspace = self._new_workspace(remote, target, owner_id, sid, app_id=app_id)
         system, branch = ((TOOLS_ONLY_PROMPT.format(app=app["name"]), "") if tools_only
                           else self._system_prompt(chat, remote, target, sid, spec, defaults, app))
+        system = planning.with_prompt(system, self._plan_prompt(backend, opts.kind))
         tools = self._validated_app_tools(app_tools)
         session_meta = {"app_id": app["id"] if app else "", "job_id": opts.job_id or "", "owner_id": owner_id,
                         "app_metadata": opts.app_metadata or {}}
@@ -907,6 +908,17 @@ class Manager:
             system += self._optional_prompts(spec, defaults, app)
         return system, branch
 
+    def _plan_prompt(self, backend: str, kind: str) -> bool:
+        """Whether a native agent session's system prompt asks it to keep its plan current (#641): fixed when the
+        session is made, so the prompt prefix stays cached."""
+        return backend == "local" and kind == "agent" and self.cfg.planning.reinject
+
+    def _with_plan_prompt(self, context: list, backend: str, kind: str) -> list:
+        if not context or context[0].get("role") != "system":
+            return context
+        content = planning.with_prompt(context[0]["content"], self._plan_prompt(backend, kind))
+        return context if content == context[0]["content"] else [{**context[0], "content": content}, *context[1:]]
+
     def _optional_prompts(self, spec, defaults: dict, app: dict | None) -> str:
         """Homelab, memory, web and search sections a non-chat session gets when its project and app allow them."""
         extra = ""
@@ -1204,6 +1216,11 @@ class Manager:
             else:
                 base_context = saved_context
                 context = base_context + [{"role": "user", "content": prompt}]
+            # The fork may run on another backend than its parent: its prompt follows the session it becomes (#641).
+            backend = choice["backend"] if choice is not None else parent.get("backend", "local")
+            kind = parent.get("kind", "agent")
+            context = self._with_plan_prompt(context, backend, kind)
+            base_context = self._with_plan_prompt(base_context, backend, kind)
         except (projects.GitError, OSError) as e:
             remove_tree(workspace)
             remove_tree(cp.store({**parent, "id": new_sid}).base)

@@ -7,6 +7,7 @@ The daemon calls `CanaryRunner.run` from its nightly trigger (harness/canary.py)
     python -m bakeoff.canary                       # the whole set, repeats from bakeoff/canary.yaml
     python -m bakeoff.canary --tasks sqlite_report --repeats 1
     python -m bakeoff.canary --heldout --repeats 3  # #674 calibration: the held-out tasks, never the nightly set
+    python -m bakeoff.canary --plan-reinject        # #641: the set with planning.reinject on (docs/compaction.md)
 
 Hard tasks are written into the session's workspace and graded by their existing hidden checkers (Docker sandbox, as
 in the bake-off). Web tasks replay the recorded web (web_suite.py) through a per-session WebTools.
@@ -257,7 +258,8 @@ def grade_hard_task(task, ws: Path, answer: str, baseline: dict[str, str]) -> tu
 
 
 # by hand, daemon stopped
-async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path, heldout: bool = False) -> Path:
+async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path, heldout: bool = False,
+                         plan_reinject: bool = False) -> Path:
     from harness import config as config_mod
     from harness.manager import Manager
 
@@ -273,7 +275,8 @@ async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path
                             default_model=base.default_model, models=base.models, sandbox=base.sandbox,
                             projects={"scratch": config_mod.Project(name="scratch")}, canary=canary_cfg,
                             web=config_mod.WebConfig(enabled=True, page_chars=base.web.page_chars,
-                                                     fixture_dir=str(fixture)))
+                                                     fixture_dir=str(fixture)),
+                            planning=config_mod.PlanningConfig(reinject=plan_reinject or base.planning.reinject))
     m = Manager(cfg)
     await m.start(maintenance=False)
     try:
@@ -282,7 +285,8 @@ async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path
         await m.stop()
         m.db.close()
         shutil.rmtree(tmp, ignore_errors=True)
-    out = ROOT / "runs" / f"{'heldout' if heldout else 'canary'}-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    name = ("heldout" if heldout else "canary") + ("-plan" if cfg.planning.reinject else "")
+    out = ROOT / "runs" / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps({"status": report.status, "outcomes": report.outcomes}, indent=1), encoding="utf-8")
     passed = sum(o["ok"] for o in report.outcomes)
@@ -296,9 +300,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeats", type=int, default=0)
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--heldout", action="store_true", help="the #673 held-out tasks (3 repeats unless --repeats)")
+    parser.add_argument("--plan-reinject", action="store_true",
+                        help="#641: re-inject the saved plan every turn (planning.reinject), whatever harness.yaml says")
     args = parser.parse_args(argv)
     asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture,
-                               heldout=args.heldout))
+                               heldout=args.heldout, plan_reinject=args.plan_reinject))
     return 0
 
 
