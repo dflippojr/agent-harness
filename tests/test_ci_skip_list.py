@@ -12,6 +12,7 @@ import tokenize
 import warnings
 from pathlib import Path, PurePosixPath
 
+import pytest
 import yaml
 
 from test_ci_workflow import ROOT, WORKFLOW, _skip_list
@@ -54,17 +55,54 @@ def _skips_all(source: str, listed: str) -> bool:
     return True
 
 
-# (file, directory) -> whether that file's listing of the directory skips a listed path, given the file's source.
+def _listings(source: str) -> list[tuple[str, str]]:
+    """Each listing word in `source`, with the stripped line it is on."""
+    found = []
+    for match in LISTS.finditer(source):
+        start = source.rfind("\n", 0, match.start()) + 1
+        end = source.find("\n", match.end())
+        found.append((match.group(), source[start : end if end >= 0 else len(source)].strip()))
+    return found
+
+
+# (file, directory) -> (every listing the file has today, as `_listings` returns them; whether that file's listing of
+# the directory skips a listed path, given the file's source). Any other listing in the file voids the exemption.
 EXEMPT_LISTINGS = {
     # Lists docs/ with git ls-files and skips history docs by its `history` regex; any other listed doc it reads counts.
-    ("tests/test_product_naming.py", "docs"): _history_skips,
+    ("tests/test_product_naming.py", "docs"): (
+        [("ls-files", 'tracked = subprocess.run(["git", "ls-files", "harness", "harness_modules", "sdk", "config", "ops", "install",')],
+        _history_skips,
+    ),
     # Globs only docs/fragments/*.yaml; names docs alone as that folder's parent and in tmp_path trees.
-    ("tests/test_docs_build.py", "docs"): _skips_all,
+    ("tests/test_docs_build.py", "docs"): (
+        [("glob", 'assert len(list((ROOT / "docs" / "fragments").glob("*.yaml"))) >= 7')],
+        _skips_all,
+    ),
     # Reads docs/CI-CD.md by name; `src/docs` is a citation fixture. Its rglob and iterdir walk tmp_path workspaces.
-    ("tests/test_review_runner.py", "docs"): _skips_all,
-    # `^/opt/docs/` is a policy rule matched against a made-up path; the file lists nothing, a comment says "glob".
-    ("tests/test_claude_reads.py", "docs"): _skips_all,
+    ("tests/test_review_runner.py", "docs"): (
+        [
+            ("rglob", 'assert sorted(path.relative_to(workspace).as_posix() for path in workspace.rglob("*")) == ['),
+            ("iterdir", '"entries": sorted(entry.name for entry in cwd.iterdir()), "env": dict(os.environ),'),
+        ],
+        _skips_all,
+    ),
+    # `^/opt/docs/` is a policy rule matched against a made-up path; the file lists nothing, a comment says "glob" and "walk".
+    ("tests/test_claude_reads.py", "docs"): (
+        [
+            ("glob", "# Read, Grep and LS paths are literal: glob characters in a folder name don't end the walk."),
+            ("walk", "# Read, Grep and LS paths are literal: glob characters in a folder name don't end the walk."),
+        ],
+        _skips_all,
+    ),
 }
+
+
+def _listing_skips(rel: str, directory: str | None, source: str, listed: str) -> bool:
+    exemption = EXEMPT_LISTINGS.get((rel, directory))
+    if not exemption:
+        return False
+    listings, skips = exemption
+    return _listings(source) == listings and skips(source, listed)
 
 
 def _token_types(*names: str) -> set[int]:
@@ -136,6 +174,14 @@ def _segments(node: ast.expr) -> list[str | None]:
     return [None]
 
 
+def _chain(node: ast.expr):
+    """The `+` nodes `_segments` recurses through from `node`; a `+` inside a call is a chain of its own."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        yield node
+        yield from _chain(node.left)
+        yield from _chain(node.right)
+
+
 def _joined_literals(tree: ast.AST, docs: list[ast.Constant]):
     """Yield (line, text) for adjacent literals the tokenizer sees apart: `"a" "b"` and each literal run of `"a" + "b"`."""
     docstrings = {id(doc) for doc in docs}
@@ -144,7 +190,7 @@ def _joined_literals(tree: ast.AST, docs: list[ast.Constant]):
         if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)) and id(node) not in docstrings:
             yield node.lineno, _segments(node)[0]
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and id(node) not in inner:
-            inner.update(id(child) for child in ast.walk(node))
+            inner.update(id(child) for child in _chain(node))
             run = []
             for segment in [*_segments(node), None]:
                 if segment is not None:
@@ -190,16 +236,22 @@ def _string_literals(source: str):
             yield tok.start[0], text
 
 
+# Where a path component starts: the literal's start, a path separator, a space in a shell command, or a git `rev:`.
+_START = r"(?:^|[\s/\\:])"
+
+
 def _names(literal: str, listed: str, basename: str) -> bool:
     if "." not in basename:
-        # `LICENSE` counts only as the last path component, so `LICENSE.txt` and prose don't trip it.
-        return bool(re.search(rf"(?:^|[/\\]){re.escape(basename)}$", literal)) or ("/" in listed and listed in literal)
+        # `LICENSE` counts only as the last path component, so `LICENSE.txt` and prose don't trip it. A space or `:`
+        # before it is a shell word or a git revision, as in `git show HEAD:LICENSE`.
+        return bool(re.search(rf"{_START}{re.escape(basename)}$", literal)) or ("/" in listed and listed in literal)
     return basename in literal
 
 
 def _lists(literal: str, directory: str) -> bool:
-    """Whether `literal` names `directory` as its last path component, or a glob directly inside it."""
-    return bool(re.search(rf"(?:^|[/\\]){re.escape(directory)}(?:[/\\][^/\\]*[*?[].*)?[/\\]?$", literal))
+    """Whether `literal` names `directory` as its last path component, or a glob directly inside it, as in
+    `git ls-files -- docs/*.md`."""
+    return bool(re.search(rf"{_START}{re.escape(directory)}(?:[/\\][^/\\]*[*?[].*)?[/\\]?$", literal))
 
 
 def find_reads(root: Path, listed_paths: list[str]) -> list[str]:
@@ -224,8 +276,7 @@ def find_reads(root: Path, listed_paths: list[str]) -> list[str]:
                     if _names(literal, listed, basename) and (rel, listed) not in EXEMPT_PAIRS:
                         reads.add((line, index, f"{rel}:{line} names {listed}"))
                     directory = directories.get(listed)
-                    skips = EXEMPT_LISTINGS.get((rel, directory))
-                    if lists and directory and _lists(literal, directory) and not (skips and skips(source, listed)):
+                    if lists and directory and _lists(literal, directory) and not _listing_skips(rel, directory, source, listed):
                         lines, held = listings.setdefault(directory, (set(), {}))
                         lines.add(line)
                         held[listed] = index
@@ -359,17 +410,15 @@ def test_scan_reports_a_listing_of_a_listed_paths_directory(tmp_path):
 
 def test_product_naming_lists_docs_but_skips_every_listed_doc(tmp_path):
     # Its exemption holds only for the listed docs its `history` regex skips; any other one it lists counts.
+    rel = "tests/test_product_naming.py"
     (tmp_path / "tests").mkdir()
-    (tmp_path / "tests" / "test_product_naming.py").write_text(
-        "import re\nimport subprocess\n\n\ndef test_x():\n"
-        '    history = re.compile(r"docs/(phase\\w*-results)\\.md$")\n'
-        '    return subprocess.run(["git", "ls-files", "docs"]), history\n',
-        encoding="utf-8",
-    )
+    (tmp_path / rel).write_text((ROOT / rel).read_text(encoding="utf-8"), encoding="utf-8")
 
     found = find_reads(tmp_path, ["docs/phase0-results.md", "docs/flux-fast.md"])
 
-    assert found == ["tests/test_product_naming.py:7 lists docs, which holds docs/flux-fast.md"]
+    assert len(found) == 1
+    assert found[0].startswith(f"{rel}:")
+    assert found[0].endswith(" lists docs, which holds docs/flux-fast.md")
 
 
 def test_scan_matches_an_extensionless_name_as_the_last_path_component(tmp_path):
@@ -413,3 +462,68 @@ def test_scan_joins_concatenated_literals(tmp_path):
 
     # One report per literal, however many ways it is matched.
     assert found == [f"harness/joined.py:{line} names docs/phase0-results.md" for line in (3, 5, 8, 9, 10)]
+
+
+def test_scan_joins_a_chain_nested_in_a_call_and_reads_shell_strings(tmp_path):
+    (tmp_path / "harness").mkdir()
+    (tmp_path / "harness" / "nested.py").write_text(
+        "from pathlib import Path\nROOT = Path(__file__).parents[1]\n"
+        'a = str(ROOT) + Path("docs/phase0-" + "results.md").read_text()\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "harness" / "shell.py").write_text(
+        "import subprocess\n"
+        'subprocess.run("git ls-files docs", shell=True)\n'
+        'subprocess.run("git ls-files -- docs/*.md".split())\n'
+        'subprocess.run(["git", "show", "HEAD:LICENSE"])\n',
+        encoding="utf-8",
+    )
+
+    found = find_reads(tmp_path, ["LICENSE", "docs/phase0-results.md"])
+
+    assert found == [
+        "harness/nested.py:3 names docs/phase0-results.md",
+        "harness/shell.py:2,3 lists docs, which holds docs/phase0-results.md",
+        "harness/shell.py:4 names LICENSE",
+    ]
+
+
+# A docs/ listing that each listing exemption's file does not have today; the first three are the review's probes.
+NEW_DOCS_LISTINGS = {
+    "tests/test_product_naming.py": '[p.read_text() for p in (ROOT / "docs").glob("*.md")]',
+    "tests/test_docs_build.py": '[p.read_text() for p in (ROOT / "docs").glob("*-results.md")]',
+    "tests/test_review_runner.py": 'for p in (ROOT / "docs").glob("*.md"): p.read_text()',
+    "tests/test_claude_reads.py": '[p.read_text() for p in Path("docs").iterdir()]',
+}
+
+
+@pytest.mark.parametrize("rel", sorted(NEW_DOCS_LISTINGS))
+def test_a_new_listing_voids_a_listing_exemption(tmp_path, rel):
+    # Each exemption holds for the file as it is today and for no listing added to it.
+    assert sorted(file for file, _ in EXEMPT_LISTINGS) == sorted(NEW_DOCS_LISTINGS)
+    source = (ROOT / rel).read_text(encoding="utf-8")
+    copy = tmp_path / rel
+    copy.parent.mkdir(parents=True)
+    copy.write_text(source, encoding="utf-8")
+    assert find_reads(tmp_path, ["docs/phase0-results.md"]) == []
+
+    copy.write_text(source + NEW_DOCS_LISTINGS[rel] + "\n", encoding="utf-8")
+    found = find_reads(tmp_path, ["docs/phase0-results.md"])
+
+    assert len(found) == 1
+    assert found[0].startswith(f"{rel}:")
+    assert found[0].endswith(f",{source.count(chr(10)) + 1} lists docs, which holds docs/phase0-results.md")
+
+
+def test_a_changed_listing_voids_a_listing_exemption(tmp_path):
+    rel = "tests/test_docs_build.py"
+    source = (ROOT / rel).read_text(encoding="utf-8")
+    assert '(ROOT / "docs" / "fragments").glob("*.yaml")' in source
+    (tmp_path / "tests").mkdir()
+    (tmp_path / rel).write_text(source.replace('(ROOT / "docs" / "fragments").glob', '(ROOT / "docs").glob'), encoding="utf-8")
+
+    found = find_reads(tmp_path, ["docs/phase0-results.md"])
+
+    assert len(found) == 1
+    assert found[0].startswith(f"{rel}:")
+    assert found[0].endswith(" lists docs, which holds docs/phase0-results.md")
