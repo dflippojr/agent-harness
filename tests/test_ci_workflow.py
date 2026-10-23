@@ -36,10 +36,6 @@ MUST_RUN_PATHS = (
 EXPECTED_SKIP_PATHS = (
     "LICENSE",
     "third_party/Real-ESRGAN.LICENSE",
-    "docs/compatibility.md",
-    "docs/flux-fast.md",
-    "docs/issue-13-lightning-results.md",
-    "docs/smart-approvals.md",
     "docs/phase0-results.md",
     "docs/phase1-results.md",
     "docs/phase2-results.md",
@@ -55,7 +51,6 @@ EXPECTED_SKIP_PATHS = (
     "docs/phase7b-results.md",
     "docs/phase7d-results.md",
     "docs/phase7e-results.md",
-    "docs/phase8a-design.md",
     "docs/phase8b-results.md",
     "docs/phase8c-results.md",
 )
