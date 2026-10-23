@@ -28,7 +28,8 @@ name: CI
 # is on it.
 # Entries are exact paths, not globs. Do not add `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
 # INSTALL.md, admin-api.md, app-api.md, mac-client.md, and service-profile.md
-# are asserted by tests/test_product_naming.py; marketplace design, threat
+# are asserted by tests/test_product_naming.py, which also reads every tracked docs/*.md its history regex doesn't
+# skip; marketplace design, threat
 # model, schema, and example manifests by tests/test_marketplace_manifest.py;
 # docs/CI-CD.md by
 # tests/test_review_runner.py::test_ci_docs_explain_backend_configuration_and_manual_verification.
@@ -392,10 +393,6 @@ jobs:
           CI_SKIP_UNREAD_PATHS: |
             LICENSE
             third_party/Real-ESRGAN.LICENSE
-            docs/compatibility.md
-            docs/flux-fast.md
-            docs/issue-13-lightning-results.md
-            docs/smart-approvals.md
             docs/phase0-results.md
             docs/phase1-results.md
             docs/phase2-results.md
@@ -411,7 +408,6 @@ jobs:
             docs/phase7b-results.md
             docs/phase7d-results.md
             docs/phase7e-results.md
-            docs/phase8a-design.md
             docs/phase8b-results.md
             docs/phase8c-results.md
         run: python3 scripts/ci_gate.py changes
