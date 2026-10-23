@@ -1,5 +1,7 @@
-# Egress allowlist proxies for subscription-backend sandboxes (docs/phase8a-design.md).
-#   docker compose -f ops/egress/compose.yaml up -d --build
+# Egress allowlist proxies for subscription-backend sandboxes (docs/phase8a-design.md), and the session sandbox's
+# egress proxy (#671).
+#   docker compose -f ops/egress/compose.yaml up -d --build            every proxy (service profile)
+#   docker compose -f ops/egress/compose.yaml up -d --build sandbox    only the session sandbox's proxy
 # Backend sandboxes join their provider's internal `harness-cli-<backend>` network and set
 # HTTPS_PROXY=http://harness-egress-<backend>:8888. Separate networks prevent one backend from selecting another
 # provider's proxy. Each proxy also joins `harness-egress`, the only network with a route out.
@@ -35,6 +37,20 @@ services:
     volumes: ["./filters/reviewer.txt:/etc/tinyproxy/filter:ro"]
     ports: ["127.0.0.1:8890:8888"]
     networks: [harness-egress]
+  # The only way out for `run_shell network: true` and the project setup command. It forwards to public addresses
+  # only (ops/egress/sandbox-proxy.conf). The daemon gives each network command its own internal network holding just
+  # that session's container and this proxy, so sessions never share one; harness-sandbox-egress is the proxy's own.
+  sandbox:
+    build:
+      context: ../../harness
+      dockerfile: ../ops/egress/sandbox.Dockerfile
+    image: agent-harness-egress-sandbox:1
+    container_name: harness-egress-sandbox
+    restart: unless-stopped
+    read_only: true
+    mem_limit: 128m
+    volumes: ["./sandbox-proxy.conf:/etc/egress/sandbox-proxy.conf:ro"]
+    networks: [harness-sandbox-egress, harness-egress]
 
 networks:
   harness-cli-claude:
@@ -46,6 +62,11 @@ networks:
   harness-cli-cursor:
     name: harness-cli-cursor
     internal: true
+  harness-sandbox-egress:
+    name: harness-sandbox-egress
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"
   harness-egress:
     name: harness-egress
     external: true

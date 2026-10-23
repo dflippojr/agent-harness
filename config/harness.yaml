@@ -75,7 +75,14 @@ sandbox:
   cpus: "2"
   pids: 512
   network: harness-sandbox        # internal: no route out, no container-to-container traffic
-  egress_network: harness-egress  # attached only while an approved network command runs
+  # An approved network command (and the project setup command) gets its own internal network,
+  # `<proxy_network>-<session id>`, holding only that container and the sandbox egress proxy, and runs with
+  # HTTP(S)_PROXY set to `proxy`. The proxy forwards to public addresses only (ops/egress/sandbox-proxy.conf;
+  # docs/INSTALL.md "Sandbox network commands"). Start it: docker compose -f ops/egress/compose.yaml up -d --build sandbox
+  # These three are install-level: a project's `sandbox:` override cannot change them.
+  proxy: http://harness-egress-sandbox:8888
+  proxy_network: harness-sandbox-egress
+  egress_network: harness-egress  # reaches the host, LAN and tailnet: never attached; detached if an older daemon left it
   idle_stop_seconds: 900          # >0: stop an idle container after this many seconds (and while a session waits on an approval or the GPU guard); the next command restarts it (#428)
 
 # Hosted CLI session backends (Phase 8a). Credentials remain in provider Docker volumes and are never read by the

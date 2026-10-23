@@ -26,7 +26,8 @@ from .checkpointer import Checkpointer
 from .checkpoints import MUTATING_TOOLS
 from .cli_backends import (CODEX_TOOLS_ONLY_ITEMS, ELICITATION, ClaudeSession, CliBackendError, CodexSession,
                            CursorSession, PrintModeSession, cli_route_ready, forwarder_url)
-from .config import BUILTIN_BACKENDS, Config, ModelConfig, resolve_tool_output, clamp_tool_limit, module_effective
+from .config import (BUILTIN_BACKENDS, Config, ModelConfig, resolve_tool_output, clamp_tool_limit, module_effective,
+                     sandbox_for_project)
 from .db import Database, finish_then_cancel
 from .mcp_server import MCP_BACKENDS, SPLIT_TOOLS, McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
@@ -316,9 +317,7 @@ class Runner:
             return self.hub.sandbox(s["target"], s["id"])
         if s["id"] not in self._sandboxes:
             project = self.project_for(s)
-            sb_cfg = self.cfg.sandbox
-            if project and project.sandbox:
-                sb_cfg = type(sb_cfg)(**{**sb_cfg.__dict__, **project.sandbox})
+            sb_cfg = sandbox_for_project(self.cfg.sandbox, project.sandbox if project else {})
             sid = s["id"]
             sandbox_class = NoDockerSandbox if self.cfg.fake_model is not None else Sandbox
             self._sandboxes[sid] = sandbox_class(

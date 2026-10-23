@@ -78,9 +78,21 @@ class SandboxConfig:
     cpus: str = "2"
     pids: int = 512
     network: str = "harness-sandbox"
-    egress_network: str = "harness-egress"
+    egress_network: str = "harness-egress"   # never attached since #671; detached in case an older daemon left it
+    proxy: str = "http://harness-egress-sandbox:8888"  # network commands go out only through this proxy (#671)
+    proxy_network: str = "harness-sandbox-egress"     # each network command's own network is `<this>-<session id>`
     idle_stop_seconds: float = 900  # stop the container after this long without a command (0 = never, #428, #524)
 
+
+# Install-level only (#671): a project's `sandbox:` override cannot move network commands off the egress proxy.
+SANDBOX_EGRESS_KEYS = frozenset({"egress_network", "proxy", "proxy_network"})
+
+
+def sandbox_for_project(base: SandboxConfig, overrides: dict) -> SandboxConfig:
+    """The install's sandbox settings with a project's `sandbox:` overrides, except the egress ones."""
+    if not overrides:
+        return base
+    return type(base)(**{**base.__dict__, **{k: v for k, v in overrides.items() if k not in SANDBOX_EGRESS_KEYS}})
 
 TOOL_MODES = ("builtin", "split")
 

@@ -230,6 +230,14 @@ Act 'docker build -t agent-harness-sandbox:py312 sandbox' {
     & docker build -q -t agent-harness-sandbox:py312 (Join-Path $AppDir 'sandbox')
     if ($LASTEXITCODE -ne 0) { Die 'building the sandbox image failed' }
 }
+# Every profile: approved network commands in the sandbox go out only through this proxy (#671).
+Step 'Sandbox egress proxy'
+Act 'create harness-egress network and start the sandbox egress proxy' {
+    & docker network inspect harness-egress *> $null
+    if ($LASTEXITCODE -ne 0) { & docker network create harness-egress | Out-Null }
+    & docker compose -f (Join-Path $AppDir 'ops\egress\compose.yaml') up -d --build sandbox
+    if ($LASTEXITCODE -ne 0) { Die 'starting the sandbox egress proxy failed' }
+}
 if ($EffectiveProfile -eq 'Service' -or $NeedsLocalModel) {
     # Service backends and the generated OpenCode entry (#168, written whenever the local model is) both run in it.
     Step 'CLI backend image'
