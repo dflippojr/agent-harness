@@ -219,6 +219,34 @@ def doctor_optional(ctx: Ctx):
     return report
 
 
+def egress_proxy_forward(ctx: Ctx):
+    """A plain HTTP request through the sandbox egress proxy (#671), which owns the failure: the client gets a 502,
+    the upstream's own answer, or a closed connection. The resolver names a public address so the policy passes,
+    and the connector sends that address to the stub."""
+    from harness import egress_proxy as ep
+
+    async def resolve(host, port):
+        return ["8.8.8.8"]
+
+    async def connect(address, port):
+        return await ep.system_connect("127.0.0.1", ctx.port)
+
+    async def go():
+        proxy = ep.EgressProxy(ep.Policy(connect_timeout=5, idle_timeout=2), resolver=resolve, connector=connect)
+        server = await proxy.serve("127.0.0.1", 0)
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
+            writer.write(f"GET http://pkg.example/simple/ HTTP/1.1\r\nHost: pkg.example\r\n"
+                         f"Authorization: Bearer {ctx.secret}\r\n\r\n".encode())
+            data = await asyncio.wait_for(reader.read(), 10)
+            writer.close()
+            return data.split(b"\r\n", 1)[0].decode("latin-1")
+        finally:
+            server.close()
+            await server.wait_closed()
+    return go()
+
+
 # One POST per seeded session, chat and job, none retried.
 SEED_REQUESTS = len(fake_instance.SEED_SESSIONS) + len(fake_instance.SEED_CHATS) + len(fake_instance.SEED_JOBS)
 
@@ -585,6 +613,10 @@ REGISTRY: list[Outbound] = [
     Outbound("harness/doctor.py::_get", "doctor: daemon status as the local owner", doctor_get, secret=True),
     Outbound("harness/doctor.py::check_optional", "doctor: SearXNG web search", doctor_optional,
              flagged("Web search")),
+    Outbound("harness/egress_proxy.py::system_connect", "sandbox egress proxy: forward to the upstream",
+             egress_proxy_forward, lambda o: o.error is None and not o.value.startswith("HTTP/1.1 2"),
+             ok={m: "a transparent relay: the upstream's 200 and its bytes reach the client as sent"
+                 for m in ("malformed", "truncated")}, secret=True),
     Outbound("harness/fake_instance.py::serve", "fake instance: seed the API", fake_instance_seed,
              lambda o: o.error is not None or bool(o.value), attempts=SEED_REQUESTS, secret=True),
     Outbound("harness/gcm_ui_helper.py::_serve", "GCM helper: relay a device code to the daemon", gcm_relay, quiet,
