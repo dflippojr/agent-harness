@@ -205,6 +205,12 @@ compaction:
 #   enabled: false
 #   budget_tokens: 1500   # estimated as chars / 4
 
+# Experiment (#641, docs/compaction.md): append the saved update_state plan and next_step (at most 1,200 characters)
+# to the end of every native agent model request, without storing it, and ask the model to keep its plan current.
+# Off by default; run the canary comparison in docs/compaction.md before turning it on.
+# planning:
+#   reinject: false
+
 # Bounds on managed-runner tool results (tower and macbook). Hosted Claude/Codex/Cursor sessions never see these.
 # Omitted or invalid values fall back to these defaults. The agent may raise a limit per call with max_lines,
 # max_matches, or max_chars, clamped to the matching *_max. These replace FileOps.read_lines, the hard-coded

@@ -85,12 +85,12 @@ def test_the_canary_cli_runs_the_held_out_suite_only_on_request(monkeypatch):
     from bakeoff import canary
     seen = {}
 
-    async def fake_run(task_ids, repeats, fixture, heldout=False):
-        seen.update(task_ids=task_ids, repeats=repeats, heldout=heldout)
+    async def fake_run(task_ids, repeats, fixture, heldout=False, plan_reinject=False):
+        seen.update(task_ids=task_ids, repeats=repeats, heldout=heldout, plan_reinject=plan_reinject)
 
     monkeypatch.setattr(canary, "run_standalone", fake_run)
     canary.main(["--heldout", "--repeats", "3", "--tasks", "cali_draw"])
-    assert seen == {"task_ids": ["cali_draw"], "repeats": 3, "heldout": True}
+    assert seen == {"task_ids": ["cali_draw"], "repeats": 3, "heldout": True, "plan_reinject": False}
     suite = canary.heldout_suite(3)
     assert [t.id for t in suite["hard"]] == [t.id for t in HELDOUT_TASKS]
     assert suite["repeats"] == 3 and suite["web"] == []
@@ -130,7 +130,7 @@ def test_run_standalone_passes_the_held_out_cap_to_the_runner(monkeypatch, tmp_p
         return Report("complete", [])
 
     base = SimpleNamespace(default_model="m", models={}, sandbox=None, canary=config_mod.CanaryConfig(),
-                           web=SimpleNamespace(page_chars=1000))
+                           web=SimpleNamespace(page_chars=1000), planning=config_mod.PlanningConfig())
     monkeypatch.setattr(config_mod, "load", lambda: base)
     monkeypatch.setattr(config_mod, "Config", lambda **kw: SimpleNamespace(**kw))
     monkeypatch.setattr("harness.manager.Manager", FakeManager)

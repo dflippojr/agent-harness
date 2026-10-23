@@ -49,7 +49,7 @@ from weakref import WeakKeyDictionary
 
 import yaml
 
-from . import compaction, grounding
+from . import compaction, grounding, planning
 from .llm import Completion, LLMError
 
 log = logging.getLogger("harness.fake_model")
@@ -290,7 +290,7 @@ class FakeModel:
                 return (script, found[1] + 1) if script else (None, 0)
             if role != "user":
                 continue
-            text = _text(message)
+            text = planning.strip(_text(message))  # a plan block on a copy the model got (#641)
             if (text.startswith((compaction.SUMMARY_TAG, compaction.STATE_TAG))
                     or text in (compaction.ROUND_CONTINUE, CONTINUE_NUDGE, CUT_OFF_NUDGE)
                     or grounding.NUDGE_MARK in text):

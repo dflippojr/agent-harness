@@ -19,7 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, projects, state as agent_state, stuck, taint, telemetry, tool_profiles
+from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, planning, projects, state as agent_state, stuck, taint, telemetry, tool_profiles
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -2215,8 +2215,8 @@ class Runner:
         run = s["run"]
         tools = self.tool_schemas(s, ws)
         try:
-            completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache,
-                                                       run)
+            sent = self._outgoing(s)
+            completion = await self._call_with_retries(sid, model, sent, tools, stream, reading_with_cache, run)
         except llm.LLMError as e:
             if not llm.is_context_overflow(e):
                 raise
@@ -2224,8 +2224,8 @@ class Runner:
             s = await self._compact_on_overflow(s)
             run = s["run"]
             tools = self.tool_schemas(s, ws)
-            completion = await self._call_with_retries(sid, model, s["context"], tools, stream, reading_with_cache,
-                                                       run)
+            sent = self._outgoing(s)
+            completion = await self._call_with_retries(sid, model, sent, tools, stream, reading_with_cache, run)
         with telemetry.span("completion_commit"):
             stream.flush()
             if completion.cache_tokens is None and cache_box["seen"]:
@@ -2236,13 +2236,20 @@ class Runner:
             run["completion_tokens"] += completion.completion_tokens
             if completion.prompt_tokens > 2000:
                 # prompt_tokens covers the whole prompt (cached or not), including the tool schemas.
-                chars = sum(compaction.message_chars(m) for m in s["context"]) + len(json.dumps(tools))
+                chars = sum(compaction.message_chars(m) for m in sent) + len(json.dumps(tools))
                 run["chars_per_token"] = min(6.0, max(1.5, chars / completion.prompt_tokens))
                 run["context_tokens"] = completion.prompt_tokens + completion.completion_tokens
             ended = await self._commit_completion(s, run, completion, model, tools)
             if ended or not completion.tool_calls:
                 self._emit_turn_metrics(sid)
             return ended
+
+    def _outgoing(self, s: dict) -> list[dict]:
+        """The messages for the model: the stored context itself, or with `planning.reinject` on (#641) a copy whose
+        last message ends with the saved plan. Only native agent sessions reach here with a saved state."""
+        if not self.cfg.planning.reinject or s.get("kind", "agent") != "agent":
+            return s["context"]
+        return planning.with_plan(s["context"], (s.get("run") or {}).get("state"))
 
     async def _call_with_retries(self, sid: str, model, context: list, tools: list, stream: "_DeltaStream",
                                  reading, run: dict):

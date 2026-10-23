@@ -308,6 +308,77 @@ it does not taint the session. A project whose repo is untrusted should be
 treated as untrusted as a whole. Because the harness's own repository has an
 `AGENTS.md`, native sessions on an agent-harness project now see it.
 
+## Plan re-injection (experiment)
+
+`planning.reinject` (#641, off by default) tests arXiv 2609.20804 Finding 4:
+the agent's saved plan, re-injected on every turn and never stored in the
+history, kept the weakest model from ending runs with no edit. With the flag
+on, a native agent session (backend `local`, kind `agent`) works like this:
+
+- Every model call gets the `plan` and `next_step` from the session's saved
+  `update_state` object, when that object passes `STATE_SCHEMA` and at least
+  one of the two fields is non-empty. The text (`Plan:` and `Next step:`) is
+  capped at 1,200 characters: a longer one keeps its start and its end, with
+  `…` between them. It goes after a blank line and the line
+  `[current plan, from update_state; not part of the conversation]` at the
+  end of the last message's content (a `tool` result, or the user's own
+  message), in a deep copy of the request (`harness/planning.py`,
+  `Runner._outgoing`). It adds no message and changes no role, so Qwen3-family
+  templates still render the reasoning of the assistant turns after the last
+  user message. `s["context"]`, the transcript, checkpoints, compaction,
+  masking and the events never contain it.
+- Nothing is inserted above the newest turn, so llama-server's reused prefix
+  ends only where the plan began: each call re-reads the plan plus the new
+  turn, not the whole newest turn again.
+- One sentence asking the model to keep its plan current with `update_state`
+  is added to the system prompt when the session is created. It is fixed for
+  the session and never breaks the prefix.
+
+With the flag off, the request is the stored context object itself, byte for
+byte the same as before the flag existed. Chat, App-tools-only and hosted
+sessions never get the plan or the sentence; hosted CLIs keep their own plan
+tools. The flag is file-only (`config/harness.yaml`) and validated at load:
+`planning` must be a mapping whose only key, `reinject`, is `true` or `false`.
+The fake model ignores the block when it picks a script, so fixtures behave
+the same either way.
+
+### Canary comparison (owner, on the tower)
+
+Run this before turning the flag on by default. It needs the local model and
+the GPU, so CI never runs it.
+
+1. **Baseline, flag off: the nightly history.** With `planning.reinject`
+   absent or `false`, take the latest 5 `complete` rows from the daemon's
+   database (`data_dir/harness.sqlite3`, [canary-evals.md](canary-evals.md)):
+   `SELECT sha, pass_rate, turns, prompt_tokens, attempts FROM canary_results
+   WHERE status = 'complete' ORDER BY finished_at DESC LIMIT 5`. Their median
+   pass rate is the regression rule's baseline. `turns` and `prompt_tokens`
+   are run totals, so compare them per valid attempt.
+2. **Same commit, both arms.** The nightly runs each commit once, so a
+   flag-on night would also differ in code. Stop the daemon and, on the
+   deployed commit, run `python -m bakeoff.canary` (flag off) and
+   `python -m bakeoff.canary --plan-reinject` (flag on, whatever
+   `harness.yaml` says), twice each, alternating. Each run takes up to
+   `canary.total_cap_seconds`. Results land in `runs/canary-*.json` and
+   `runs/canary-plan-*.json`: per attempt `ok`, `status`, `turns` and
+   `prompt_tokens`. Count only `done`, `failed` and `wall_limit` attempts
+   (`harness.canary.valid`).
+3. **Compare** per arm: pass rate (passes over valid attempts), median turns
+   per valid attempt and median prompt tokens per valid attempt. Check the
+   same-commit flag-off arm against the nightly baseline as a sanity check.
+   One task's two attempts are about 11 points of the 18-attempt set, so
+   treat a smaller difference as noise unless more runs repeat it.
+4. **Record** the numbers in the table below, then decide whether to turn the
+   flag on by default (a separate change).
+
+| Arm | Commit | Runs | Valid attempts | Pass rate | Median turns | Median prompt tokens | Source |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Nightly baseline (off) | | 5 | | | | | `canary_results` |
+| Same commit, off | | 2 | | | | | `runs/canary-*.json` |
+| Same commit, on | | 2 | | | | | `runs/canary-plan-*.json` |
+
+Results: not yet run.
+
 ## Delegated edits
 
 `delegate_edit(paths, instruction, task_id?)` keeps file contents out of the

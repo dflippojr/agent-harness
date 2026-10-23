@@ -30,7 +30,7 @@ from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, ho
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
-from . import audit_context, operation_audit, namespace_audit, checkpointer, checkpoints, llm, member_keys, projects, secret_scan, telemetry, efficiency
+from . import audit_context, operation_audit, namespace_audit, checkpointer, checkpoints, llm, member_keys, planning, projects, secret_scan, telemetry, efficiency
 
 log = logging.getLogger("harness.manager")
 
@@ -499,6 +499,8 @@ class Manager:
         workspace = self._new_workspace(remote, target, owner_id, sid, app_id=app_id)
         system, branch = ((TOOLS_ONLY_PROMPT.format(app=app["name"]), "") if tools_only
                           else self._system_prompt(chat, remote, target, sid, spec, defaults, app))
+        if backend == "local" and opts.kind == "agent" and self.cfg.planning.reinject:
+            system += "\n\n" + planning.PROMPT  # fixed for the session, so the prompt prefix stays cached (#641)
         tools = self._validated_app_tools(app_tools)
         session_meta = {"app_id": app["id"] if app else "", "job_id": opts.job_id or "", "owner_id": owner_id,
                         "app_metadata": opts.app_metadata or {}}
