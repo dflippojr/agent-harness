@@ -15,7 +15,7 @@ import pytest
 
 from harness import local_owner, secret_scan
 from harness.admin import ADMIN_SCOPE, OWNER_KIND, PREFIX
-from harness.config import GuestAccess
+from harness.config import BackendConfig, GuestAccess
 from harness_modules.local_model import resources, routes
 from harness_modules.local_model.warmup import READY, ModelWarmer
 
@@ -24,6 +24,7 @@ from test_hub_claim import HUB_ORIGIN, _bearer, _claim
 
 STRANGER = "stranger@example.com"
 ELSEWHERE = "https://other.example"
+HOSTED_REFUSED = "backend 'claude' is only for the owner and App tokens"
 ALL_APP_SCOPES = ["sessions", "sessions:all", "approvals", "images", "inference", "remote_control"]
 
 # The nine owner status routes of test_access_checks.py, and what a member (not the owner) gets from each.
@@ -105,6 +106,11 @@ def routes_table(alice_id: str, bob_id: str, alice_sid: str, app_sid: str) -> li
         Route("create_project", "POST", "/api/v1/projects", ok=201, body={"name": "from-matrix"}, mutates=True,
               override={"app+login": (403, "app tokens cannot create projects"),
                         "device+sessions+login": (403, "device tokens cannot create projects")}),
+        # A device key never reaches a hosted backend (#786), whatever login comes with it; an App key with no
+        # provider policy and the owner do, and a member needs their own API key.
+        Route("hosted_session", "POST", "/api/v1/sessions", ok=201, body={"prompt": "x", "backend": "claude"},
+              mutates=True, member=(403, "API key in your settings"),
+              override={"device+sessions+login": (403, HOSTED_REFUSED), "noadmin+login": (403, HOSTED_REFUSED)}),
     ]
     # Routes a member must be refused (the loop test_household's two-member test used to carry); only members
     # are checked, since the other callers' answers on a feature that is off in this app say nothing about authz.
@@ -159,6 +165,12 @@ def expect(route: Route, caller: str):
             return 403, "'sessions' scope"
         return {"owner": (route.ok, ""), "app": (403, "app tokens cannot create projects"),
                 "device+sessions": (403, "device tokens cannot create projects")}.get(caller)
+    if family == "hosted_session":
+        if caller in MEMBERS:
+            return route.member
+        if caller == "device":
+            return 403, "'sessions' scope"
+        return (route.ok, "") if caller in (*OWNERISH, "app") else (403, HOSTED_REFUSED)
     if family == "member_only":
         if caller in MEMBERS:
             return route.member
@@ -187,6 +199,7 @@ def matrix(tmp_path_factory, gitleaks_tools):
         client, m = household(tmp_path_factory.mktemp("authz"),
                               guests=[GuestAccess(login=GUEST, until="2099-01-01T00:00:00+00:00")])
         m._spawn = lambda sid: None  # sessions are created, not run, so no background run touches a snapshot
+        m.cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5")  # a built-in hosted backend
         with client:
             alice, bob = create_member(client, ALICE, "Alice"), create_member(client, BOB, "Bob")
             # The kinds and prefixes of each credential are part of the contract (#24).

@@ -16,8 +16,9 @@ from harness.accounts import AccountService, DEFAULT_DISK_QUOTA_BYTES
 from harness.admin import PREFIX
 from harness.api import create_app
 from harness.apps import API_VERSION as APP_API_VERSION
+from harness.cli_backends import CliBackendError
 from harness.clone import CloneRefused, QuotaExceeded, isolated_clone_env, isolated_prepare, isolated_refresh_origin, public_https_url
-from harness.config import GuestAccess, Project
+from harness.config import BackendConfig, GuestAccess, Project
 from harness.db import Database
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
@@ -311,6 +312,50 @@ def test_device_keys_cannot_create_projects_whatever_identity_comes_with_them(tm
             created = client.post("/api/v1/projects", headers=headers, json={"name": name, "repo": str(tmp_path)})
             assert created.status_code == 201, created.text
             assert m.cfg.projects[name].owner_id == OWNER_USER_ID
+
+
+def test_device_keys_cannot_start_hosted_sessions_whatever_identity_comes_with_them(tmp_path):
+    """#786: with the built-in backends enabled, a `sessions` device key gets 403 for each of them on loopback and
+    beside the owner's Tailscale login, and no session starts; it keeps the local model, and an App key and the
+    owner's key still start hosted sessions."""
+    client, m = household(tmp_path)
+    m.cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5")
+    m.cfg.backends["codex"] = BackendConfig(enabled=True, model="gpt-5.6-sol")
+    m.cfg.cleanup.min_free_gb = 0
+    m._spawn = lambda *_args, **_kwargs: None
+    with client:
+        device = client.post("/keys", json={"name": "zed", "scopes": ["sessions"]}).json()
+        app = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions"]}).json()
+        owner = client.post("/keys", json={"name": "cc", "kind": "owner", "scopes": ["admin"]}).json()
+        assert (device["kind"], app["kind"], owner["kind"]) == ("device", "app", "owner")
+        client.local_owner = False  # a pure bearer caller on loopback
+        bearer = {"Authorization": f"Bearer {device['key']}"}
+        device_sessions = m.db.for_app(device["id"])
+        for headers in (bearer, {**H(OWNER), **bearer}):
+            for backend in ("claude", "codex"):
+                r = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hello", "backend": backend})
+                assert r.status_code == 403, r.text
+                error = r.json()["error"]
+                assert (error["code"], error["message"]) == (
+                    "provider_not_allowed",
+                    f"backend {backend!r} is only for the owner and App tokens; device tokens run on the local model")
+        assert device_sessions.list_sessions(50, owner_id="owner") == []
+        local = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "hello", "backend": "local"})
+        assert local.status_code == 201, local.text
+        for key in (app, owner):
+            hosted = client.post("/api/v1/sessions", headers={"Authorization": f"Bearer {key['key']}"},
+                                 json={"prompt": "hello", "backend": "claude"})
+            assert hosted.status_code == 201, hosted.text
+            assert hosted.json()["backend"] == "claude"
+            assert m.runner._backend_credential(m.db.get_session(hosted.json()["id"]))["policy"] != "denied"
+        # A device's hosted session from before this check (a message or an approval resumes it) is refused when
+        # it runs, not only when it is created.
+        sid = local.json()["id"]
+        device_sessions.update_session(sid, backend="claude", model="claude-opus-5")
+        s = m.db.get_session(sid)
+        assert m.runner._backend_credential(s)["policy"] == "denied"
+        with pytest.raises(CliBackendError, match="device tokens cannot use claude"):
+            m.runner._cli_credentials(sid, s, "claude")
 
 
 def test_member_cannot_use_hosted_or_owner_modules(tmp_path):
