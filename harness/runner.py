@@ -19,7 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, planning, projects, search_index, state as agent_state, stuck, taint, telemetry, tool_profiles
+from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, planning, projects, state as agent_state, stuck, taint, telemetry, tool_profiles
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -531,7 +531,7 @@ class Runner:
                 output = await self._dispatch_mcp(s, grant["approval_call_id"], name, args)
         except (ToolError, OSError, UnicodeError) as e:
             return f"Error: {e}", False
-        self._taint_from_result(s, name, args)  # MCP results are untrusted content like the native tools' (#262)
+        self._taint_from_result(s, name, args, output)  # MCP results are untrusted content like the native tools' (#262)
         # The hosted model gets the native loop's context-only banner (#653); _record_cli_tool_result drops it again.
         return self._context_banner(s, name) + (output.text if isinstance(output, ToolOutput) else str(output)), True
 
@@ -2775,17 +2775,13 @@ class Runner:
                    if e["type"] == "tool_result" and e["data"].get("artifact_id") == digest}
         return next((b for b in sorted(self._context_banner(s, n) for n in sources) if b), "")
 
-    def _taint_from_result(self, s: dict, name: str, args: dict) -> None:
+    def _taint_from_result(self, s: dict, name: str, args: dict, output: object = None) -> None:
         policy = self.policy(s) if name.startswith("mcp__") else None
         source = taint.source_for(name, args, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name))
         if source is None and s.get("kind") == TOOLS_ONLY and name in {t["name"] for t in s.get("app_tools") or []}:
             source = ("app_tool", f"app tool {name}")  # free text from the App's data, e.g. bank descriptions (#329)
-        if source is None and name == "session_read":
-            ref = str(args.get("session_id", "")).strip()
-            ids = search_index.readable_session_ids(self.db, ref, s["id"]) if ref else []  # the one it read (#791)
-            other = self.db.get_session(ids[0]) if len(ids) == 1 else None
-            if other and other.get("taint"):
-                source = ("session", f"session {other['id']} ({other['taint'][0]['origin']})")
+        if source is None and isinstance(output, ToolOutput):
+            source = output.taint  # e.g. session_read's: the session it read, not a second lookup of the ref (#794)
         if source is not None:
             self._add_taint(s["id"], *source)
 
@@ -2883,7 +2879,7 @@ class Runner:
             ok = False
             output = f"Error: {e}"
         if ok:
-            self._taint_from_result(s, name, args)
+            self._taint_from_result(s, name, args, output)
         extra = {}
         artifact_content = None
         if isinstance(output, ToolOutput):

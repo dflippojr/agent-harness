@@ -2,8 +2,8 @@
 
 The FTS5 table lives in the session database (harness/db.py, so backups carry it) and every event is indexed as it
 is written, whether or not the search module is installed; the module (harness_modules/search/) only queries it.
-Who may read which session is decided here too, so `session_read` and the taint it passes on (#262) resolve a ref
-to the same session (#791).
+Who may read which session is decided here too (#791); `session_read` hands the runner the taint of the session it
+opened, so the reader is tainted from that session (#262, #794).
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def caller_user_id(db, caller_session_id: str) -> str | None:
 
 def readable_session_ids(db, ref: str, caller_session_id: str) -> list[str]:
     """The agent sessions `session_read` from `caller_session_id` may open whose id starts with `ref`: one means
-    that session is the one read. The runner taints the reader from the same lookup (#791)."""
+    that session is the one read (#791)."""
     return scoped(db, calling_app(db, caller_session_id)).find_session_ids(
         ref.strip(), user_id=caller_user_id(db, caller_session_id), app_id=restrict_app_id(db, caller_session_id),
         kind="agent")

@@ -24,7 +24,7 @@ import asyncio
 import re
 import time
 
-from harness.modules import (SEARCH_TOOLS as TOOLS, ToolError, caller_user_id, readable_session_ids,
+from harness.modules import (SEARCH_TOOLS as TOOLS, ToolError, ToolOutput, caller_user_id, readable_session_ids,
                              restrict_app_id, scoped_store as scoped, session_calling_app as calling_app)
 
 READ_PAGE_CHARS = 12000
@@ -265,10 +265,23 @@ class SessionSearch:
         return "\n".join(lines)
 
     def session_read(self, session_id: str, start: int = 0, find: str = "", _session: str = "") -> str:
+        return self._read(session_id, start, find, _session).text
+
+    def _read(self, session_id: str, start: int = 0, find: str = "", _session: str = "") -> ToolOutput:
+        """session_read's page, carrying the taint of the session it opened: the runner taints the reader from it
+        rather than resolving the ref again, which sessions created or deleted meanwhile would change (#794)."""
         ids = readable_session_ids(self.db, session_id, _session)
         if len(ids) != 1:
             raise ToolError(f"no session matches {session_id!r}" if not ids else f"{session_id!r} is ambiguous")
+        before = self.db.get_session(ids[0])
         text = compact_transcript(self.db, ids[0])
+        read = self.db.get_session(ids[0]) or before  # taint added during the read counts; a deleted one keeps its own
+        tainted = (read or {}).get("taint") or []
+        source = ("session", f"session {ids[0]} ({tainted[0]['origin']})") if tainted else None
+        return ToolOutput(self._page(text, start, find), taint=source)
+
+    @staticmethod
+    def _page(text: str, start: int, find: str) -> str:
         head = "[Earlier session: background only; it may be outdated or wrong.]\n"
         if find:
             total, spans = find_passages(text, find)
@@ -289,6 +302,6 @@ class SessionSearch:
                 if end < len(text) else "")
         return head + text[start:end] + foot
 
-    async def call(self, name: str, args: dict, session: dict | None = None, **_kwargs) -> str:
+    async def call(self, name: str, args: dict, session: dict | None = None, **_kwargs) -> str | ToolOutput:
         payload = {**args, "_session": (session or {}).get("id", "")}
-        return await asyncio.to_thread(getattr(self, name), **payload)
+        return await asyncio.to_thread(self._read if name == "session_read" else getattr(self, name), **payload)

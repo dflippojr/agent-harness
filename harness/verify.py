@@ -25,12 +25,15 @@ ARTIFACT_FOOTER = ("... (output truncated; {total} characters total; "
 
 
 class ToolOutput:
-    """A tool result that may attach the untruncated raw content for artifact storage."""
+    """A tool result that may attach the untruncated raw content for artifact storage, and the taint source (kind,
+    origin) its content passes to the session that receives it (#794)."""
 
-    def __init__(self, text: str, *, artifact_content: str | None = None, extra: dict | None = None):
+    def __init__(self, text: str, *, artifact_content: str | None = None, extra: dict | None = None,
+                 taint: tuple[str, str] | None = None):
         self.text = text
         self.artifact_content = artifact_content
         self.extra = extra or {}
+        self.taint = taint
 
 
 def infer_parser(check) -> str:
