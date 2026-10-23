@@ -19,7 +19,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, planning, projects, state as agent_state, stuck, taint, telemetry, tool_profiles
+from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, planning, projects, search_index, state as agent_state, stuck, taint, telemetry, tool_profiles
 from .backend_state import billing_warning
 from .bus import EventBus
 from .checkpointer import Checkpointer
@@ -2782,7 +2782,7 @@ class Runner:
             source = ("app_tool", f"app tool {name}")  # free text from the App's data, e.g. bank descriptions (#329)
         if source is None and name == "session_read":
             ref = str(args.get("session_id", "")).strip()
-            ids = self.db.find_session_ids(ref, kind="agent") if ref else []
+            ids = search_index.readable_session_ids(self.db, ref, s["id"]) if ref else []  # the one it read (#791)
             other = self.db.get_session(ids[0]) if len(ids) == 1 else None
             if other and other.get("taint"):
                 source = ("session", f"session {other['id']} ({other['taint'][0]['origin']})")

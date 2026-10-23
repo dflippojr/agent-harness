@@ -24,7 +24,8 @@ import asyncio
 import re
 import time
 
-from harness.modules import SEARCH_TOOLS as TOOLS, ToolError, scoped_store as scoped
+from harness.modules import (SEARCH_TOOLS as TOOLS, ToolError, caller_user_id, readable_session_ids,
+                             restrict_app_id, scoped_store as scoped, session_calling_app as calling_app)
 
 READ_PAGE_CHARS = 12000
 KIND_WEIGHT = {"title": 3.0, "answer": 2.0, "message": 1.5, "assistant": 1.2, "context": 1.0, "tool": 0.8}
@@ -82,37 +83,6 @@ def fts_query(query: str, any_term: bool = False) -> str:
 
 
 # ---------- search ----------
-def restrict_app_id(db, caller_session_id: str) -> str | None:
-    """App id to restrict search/read to, or None if the caller may see every session it can reach.
-
-    Matches `/api/v1`: owner sessions (no app_id) are unrestricted; an app session sees only its
-    own sessions unless that app holds `sessions:all` on an unrevoked key. What a caller can reach at all is the
-    store of the owner's and members' sessions (Web's, #330 decision 4) plus its own App's (`calling_app`).
-    """
-    if not caller_session_id:
-        return None
-    caller = db.get_session(caller_session_id)
-    if caller is None:
-        raise ToolError(f"no session matches {caller_session_id!r}")
-    app_id = caller.get("app_id") or ""
-    if not app_id:
-        return None
-    key = db.get_api_key(app_id)
-    if key is None or key.get("revoked_at") is not None:
-        return app_id
-    scopes = set((key.get("scopes") or "").split())
-    if "sessions:all" in scopes:
-        return None
-    return app_id
-
-
-def calling_app(db, caller_session_id: str) -> str:
-    """The App whose store a session's search and reads may reach besides the main store: its own App's, or none
-    for the owner's and members' sessions (#330 decision 3)."""
-    caller = db.get_session(caller_session_id) if caller_session_id else None
-    return (caller or {}).get("app_id") or ""
-
-
 def _term_coverage(db, query: str, exclude: str, user_id: str | None, app_id: str | None,
                    session_kind: str | None = "agent") -> dict[str, int]:
     coverage: dict[str, int] = {}
@@ -274,7 +244,7 @@ class SessionSearch:
     def session_search(self, query: str, project: str = "", limit: int = 5, _session: str = "") -> str:
         limit = max(1, min(int(limit), 10))
         app_id = restrict_app_id(self.db, _session)
-        user_id = self._user_id(_session)
+        user_id = caller_user_id(self.db, _session)
         found = search(self.db, query, project=project.strip(), limit=limit, exclude=_session,
                        user_id=user_id, app_id=app_id, with_app=calling_app(self.db, _session))
         if not found["results"]:
@@ -294,17 +264,8 @@ class SessionSearch:
         lines.append("\nRead one with session_read(session_id).")
         return "\n".join(lines)
 
-    def _user_id(self, sid: str) -> str | None:
-        if not sid:
-            return None
-        s = self.db.get_session(sid)
-        return (s.get("owner_id") or "owner") if s else None
-
     def session_read(self, session_id: str, start: int = 0, find: str = "", _session: str = "") -> str:
-        app_id = restrict_app_id(self.db, _session)
-        user_id = self._user_id(_session)
-        db = scoped(self.db, calling_app(self.db, _session))
-        ids = db.find_session_ids(session_id.strip(), user_id=user_id, app_id=app_id, kind="agent")
+        ids = readable_session_ids(self.db, session_id, _session)
         if len(ids) != 1:
             raise ToolError(f"no session matches {session_id!r}" if not ids else f"{session_id!r} is ambiguous")
         text = compact_transcript(self.db, ids[0])
