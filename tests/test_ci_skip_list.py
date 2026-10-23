@@ -1,11 +1,13 @@
 """No test, and no code a test runs, reads a file on the CI skip list (#750).
 
 A change touching only `CI_SKIP_UNREAD_PATHS` entries skips the test jobs, so a test reading one of them would never
-run against a change to it. The scan fails closed: any string literal naming a listed path counts as a read.
+run against a change to it. The scan fails closed: any string literal naming a listed path counts as a read, and so
+does a literal naming a listed path's directory in a file that lists directories.
 """
 
 import ast
 import io
+import re
 import tokenize
 import warnings
 from pathlib import Path, PurePosixPath
@@ -26,10 +28,44 @@ EXEMPT_FILES = {
     "tests/test_ci_skip_list.py",
 }
 
-EXEMPT_PAIRS = {
-    # Module metadata the settings API returns as a string (`"docs": spec.docs`); never opened.
-    ("harness_modules/images/__init__.py", "docs/flux-fast.md"),
+# (file, listed path) pairs whose literal names the path but nothing opens it, each with its reason.
+EXEMPT_PAIRS: set[tuple[str, str]] = set()
+
+# A file that lists directories (`git ls-files`, `glob`, `os.walk`, ...) is taken to read whatever lies in each one
+# it names.
+LISTS = re.compile(r"ls-files|\b(?:r?glob|iterdir|walk|listdir|scandir)\b")
+
+
+def _history_skips(source: str, listed: str) -> bool:
+    """Whether the `history = re.compile(...)` pattern in `source` matches `listed`."""
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Assign)
+            and [getattr(target, "id", None) for target in node.targets] == ["history"]
+            and isinstance(node.value, ast.Call)
+            and node.value.args
+            and isinstance(node.value.args[0], ast.Constant)
+        ):
+            return bool(re.search(node.value.args[0].value, listed))
+    return False
+
+
+def _skips_all(source: str, listed: str) -> bool:
+    return True
+
+
+# (file, directory) -> whether that file's listing of the directory skips a listed path, given the file's source.
+EXEMPT_LISTINGS = {
+    # Lists docs/ with git ls-files and skips history docs by its `history` regex; any other listed doc it reads counts.
+    ("tests/test_product_naming.py", "docs"): _history_skips,
+    # Globs only docs/fragments/*.yaml; names docs alone as that folder's parent and in tmp_path trees.
+    ("tests/test_docs_build.py", "docs"): _skips_all,
+    # Reads docs/CI-CD.md by name; `src/docs` is a citation fixture. Its rglob and iterdir walk tmp_path workspaces.
+    ("tests/test_review_runner.py", "docs"): _skips_all,
+    # `^/opt/docs/` is a policy rule matched against a made-up path; the file lists nothing, a comment says "glob".
+    ("tests/test_claude_reads.py", "docs"): _skips_all,
 }
+
 
 def _token_types(*names: str) -> set[int]:
     # f-strings tokenize in parts from Python 3.12, t-strings from 3.14.
@@ -41,23 +77,26 @@ _STRING_STARTS = _token_types("FSTRING_START", "TSTRING_START")
 _STRING_ENDS = _token_types("FSTRING_END", "TSTRING_END")
 
 
-def _docstring_spans(tree: ast.AST, lines: list[str]) -> dict[tuple[int, int], tuple[int, int]]:
+def _docstrings(tree: ast.AST) -> list[ast.Constant]:
+    docs = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        first = node.body[0] if node.body else None
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+            # The string's own node, not the statement's, which starts at a `(` around it.
+            docs.append(first.value)
+    return docs
+
+
+def _docstring_spans(docs: list[ast.Constant], lines: list[str]) -> dict[tuple[int, int], tuple[int, int]]:
     """Map each docstring's start position to its end, in tokenize's (line, character) coordinates."""
 
     def position(line: int, byte_col: int) -> tuple[int, int]:
         # ast columns count UTF-8 bytes; tokenize columns count characters.
         return line, len(lines[line - 1].encode("utf-8")[:byte_col].decode("utf-8"))
 
-    spans = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        first = node.body[0] if node.body else None
-        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
-            # The string's own span, not the statement's, which starts at a `(` around it.
-            doc = first.value
-            spans[position(doc.lineno, doc.col_offset)] = position(doc.end_lineno, doc.end_col_offset)
-    return spans
+    return {position(doc.lineno, doc.col_offset): position(doc.end_lineno, doc.end_col_offset) for doc in docs}
 
 
 def _unescape(text: str) -> str:
@@ -86,13 +125,45 @@ def _literal_text(tok: tokenize.TokenInfo) -> str:
     return value.decode("latin-1") if isinstance(value, bytes) else value
 
 
+def _segments(node: ast.expr) -> list[str | None]:
+    """The literal text of an operand of `+`, with None wherever a value is computed."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _segments(node.left) + _segments(node.right)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+        return [node.value.decode("latin-1") if isinstance(node.value, bytes) else node.value]
+    if isinstance(node, ast.JoinedStr):
+        return [part.value if isinstance(part, ast.Constant) else None for part in node.values]
+    return [None]
+
+
+def _joined_literals(tree: ast.AST, docs: list[ast.Constant]):
+    """Yield (line, text) for adjacent literals the tokenizer sees apart: `"a" "b"` and each literal run of `"a" + "b"`."""
+    docstrings = {id(doc) for doc in docs}
+    inner = set()  # `+` nodes inside a chain already joined.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)) and id(node) not in docstrings:
+            yield node.lineno, _segments(node)[0]
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and id(node) not in inner:
+            inner.update(id(child) for child in ast.walk(node))
+            run = []
+            for segment in [*_segments(node), None]:
+                if segment is not None:
+                    run.append(segment)
+                elif run:
+                    yield node.lineno, "".join(run)
+                    run = []
+
+
 def _string_literals(source: str):
     """Yield (line, text) for every string literal and f-string part, skipping docstrings; comments never tokenize as strings."""
     with warnings.catch_warnings():
         # Some scanned sources hold invalid escape sequences; that is for lint to report, not this scan.
         warnings.simplefilter("ignore", SyntaxWarning)
-        # Physical lines, as tokenize counts them; str.splitlines also splits at U+2028 and friends.
-        docstrings = _docstring_spans(ast.parse(source), io.StringIO(source).readlines())
+        tree = ast.parse(source)
+    docs = _docstrings(tree)
+    yield from _joined_literals(tree, docs)
+    # Physical lines, as tokenize counts them; str.splitlines also splits at U+2028 and friends.
+    docstrings = _docstring_spans(docs, io.StringIO(source).readlines())
     docstring_end = (0, 0)
     prefixes = []  # Of the f-strings the tokenizer is inside, innermost last.
     parts = []  # Consecutive f-string parts: the tokenizer splits one run of text at `{{` and `\N{...}`.
@@ -121,14 +192,23 @@ def _string_literals(source: str):
 
 def _names(literal: str, listed: str, basename: str) -> bool:
     if "." not in basename:
-        # `LICENSE` counts only as the whole literal, so `LICENSE.txt` and prose don't trip it.
-        return literal == basename or ("/" in listed and listed in literal)
+        # `LICENSE` counts only as the last path component, so `LICENSE.txt` and prose don't trip it.
+        return bool(re.search(rf"(?:^|[/\\]){re.escape(basename)}$", literal)) or ("/" in listed and listed in literal)
     return basename in literal
 
 
+def _lists(literal: str, directory: str) -> bool:
+    """Whether `literal` names `directory` as its last path component, or a glob directly inside it."""
+    return bool(re.search(rf"(?:^|[/\\]){re.escape(directory)}(?:[/\\][^/\\]*[*?[].*)?[/\\]?$", literal))
+
+
 def find_reads(root: Path, listed_paths: list[str]) -> list[str]:
-    """Return `file:line names listed/path` for each scanned literal naming a listed path, minus the exemptions."""
+    """Return `file:line names listed/path` for each scanned literal naming a listed path, and `file:line,line lists
+    dir, which holds listed/path, ...` for a file that lists directories and names a listed path's directory, minus the
+    exemptions."""
     basenames = {listed: PurePosixPath(listed).name for listed in listed_paths}
+    # The repository root holds LICENSE, but no literal names it; a listing of the whole tree is not caught.
+    directories = {listed: str(PurePosixPath(listed).parent) for listed in listed_paths if "/" in listed}
     found = []
     for top in SCANNED_DIRS:
         for path in sorted((root / top).rglob("*.py")):
@@ -136,10 +216,24 @@ def find_reads(root: Path, listed_paths: list[str]) -> list[str]:
             if rel in EXEMPT_FILES:
                 continue
             source = path.read_text(encoding="utf-8")
+            lists = bool(LISTS.search(source))
+            reads = set()
+            listings = {}  # Directory -> (lines naming it, listed paths it holds that no exemption skips).
             for line, literal in _string_literals(source):
-                for listed, basename in basenames.items():
+                for index, (listed, basename) in enumerate(basenames.items()):
                     if _names(literal, listed, basename) and (rel, listed) not in EXEMPT_PAIRS:
-                        found.append(f"{rel}:{line} names {listed}")
+                        reads.add((line, index, f"{rel}:{line} names {listed}"))
+                    directory = directories.get(listed)
+                    skips = EXEMPT_LISTINGS.get((rel, directory))
+                    if lists and directory and _lists(literal, directory) and not (skips and skips(source, listed)):
+                        lines, held = listings.setdefault(directory, (set(), {}))
+                        lines.add(line)
+                        held[listed] = index
+            for directory, (lines, held) in listings.items():
+                paths = ", ".join(sorted(held, key=held.get))
+                at = ",".join(str(line) for line in sorted(lines))
+                reads.add((min(lines), min(held.values()), f"{rel}:{at} lists {directory}, which holds {paths}"))
+            found.extend(read for _, _, read in sorted(reads))
     return found
 
 
@@ -234,3 +328,88 @@ def test_scan_joins_split_f_string_parts_and_counts_physical_lines(tmp_path):
     found = find_reads(tmp_path, ["docs/phase0-results.md"])
 
     assert found == ["tests/test_split.py:2 names docs/phase0-results.md"]
+
+
+def test_scan_reports_a_listing_of_a_listed_paths_directory(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_lists.py").write_text(
+        "import os\nimport subprocess\nfrom pathlib import Path\nROOT = Path(__file__).parents[1]\n"
+        'tracked = subprocess.run(["git", "ls-files", "docs"], capture_output=True).stdout\n'
+        'walked = os.walk(f"{ROOT}/docs")\n'
+        'globbed = ROOT.glob("./docs/*.md")\n'
+        'licenses = (ROOT / "third_party").iterdir()\n',
+        encoding="utf-8",
+    )
+    # Names the directory but lists nothing; lists, but names `docs` only in a comment or as part of a longer name.
+    (tmp_path / "tests" / "test_names_docs.py").write_text(
+        'from pathlib import Path\nguide = (Path("docs") / "web.md").read_text()\n', encoding="utf-8"
+    )
+    (tmp_path / "tests" / "test_lookalikes.py").write_text(
+        "import os\n# os.listdir(\"docs\")\nsites = os.listdir(\"docs-site\")\nmine = os.listdir(\"mydocs\")\n",
+        encoding="utf-8",
+    )
+
+    found = find_reads(tmp_path, ["LICENSE", "third_party/Real-ESRGAN.LICENSE", "docs/phase0-results.md"])
+
+    assert found == [
+        "tests/test_lists.py:5,6,7 lists docs, which holds docs/phase0-results.md",
+        "tests/test_lists.py:8 lists third_party, which holds third_party/Real-ESRGAN.LICENSE",
+    ]
+
+
+def test_product_naming_lists_docs_but_skips_every_listed_doc(tmp_path):
+    # Its exemption holds only for the listed docs its `history` regex skips; any other one it lists counts.
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_product_naming.py").write_text(
+        "import re\nimport subprocess\n\n\ndef test_x():\n"
+        '    history = re.compile(r"docs/(phase\\w*-results)\\.md$")\n'
+        '    return subprocess.run(["git", "ls-files", "docs"]), history\n',
+        encoding="utf-8",
+    )
+
+    found = find_reads(tmp_path, ["docs/phase0-results.md", "docs/flux-fast.md"])
+
+    assert found == ["tests/test_product_naming.py:7 lists docs, which holds docs/flux-fast.md"]
+
+
+def test_scan_matches_an_extensionless_name_as_the_last_path_component(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "license.py").write_text(
+        "import os\nfrom pathlib import Path\nROOT = Path(__file__).parents[1]\n"
+        'a = open(f"{ROOT}/LICENSE")\n'
+        'b = open("./LICENSE")\n'
+        'c = open("..\\\\LICENSE")\n'
+        'd = open(os.getcwd() + "/LICENSE")\n'
+        'e = "LICENSE.txt"\n'
+        'f = "Real-ESRGAN.LICENSE"\n'
+        'g = "see the LICENSE file"\n',
+        encoding="utf-8",
+    )
+
+    found = find_reads(tmp_path, ["LICENSE", "third_party/Real-ESRGAN.LICENSE"])
+
+    assert found == [
+        "scripts/license.py:4 names LICENSE",
+        "scripts/license.py:5 names LICENSE",
+        "scripts/license.py:6 names LICENSE",
+        "scripts/license.py:7 names LICENSE",
+        "scripts/license.py:9 names third_party/Real-ESRGAN.LICENSE",
+    ]
+
+
+def test_scan_joins_concatenated_literals(tmp_path):
+    (tmp_path / "harness").mkdir()
+    (tmp_path / "harness" / "joined.py").write_text(
+        "from pathlib import Path\nROOT = Path(__file__).parents[1]\n"
+        'a = open("docs/phase0-" "results.md")\n'
+        'b = open(\n    "docs/phase0-"\n    "results.md"\n)\n'
+        'c = open("docs/phase0-" + "results.md")\n'
+        'd = open(str(ROOT) + "/docs/phase0-" + f"results.md")\n'
+        'e = open("docs/phase0-results.md")\n',
+        encoding="utf-8",
+    )
+
+    found = find_reads(tmp_path, ["docs/phase0-results.md"])
+
+    # One report per literal, however many ways it is matched.
+    assert found == [f"harness/joined.py:{line} names docs/phase0-results.md" for line in (3, 5, 8, 9, 10)]
