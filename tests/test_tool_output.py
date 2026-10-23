@@ -1,15 +1,23 @@
-"""Issue #158: tool_output config, per-project overrides, and verify-check parsing."""
+"""Issue #158: tool_output config, per-project overrides, and verify-check parsing. #670: result_chars."""
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import re
 import shutil
+from pathlib import Path
 
 import pytest
 
-from harness import config
+from harness import compaction, config
 from harness.config import (Project, ToolOutputConfig, VerifyCheck, _tool_output, _verify_checks,
                             clamp_tool_limit, resolve_tool_output)
+from harness.llm import Completion
+from harness.manager import Manager
+from harness.tools import bound_shell_text, truncate_middle
+from harness.verify import ARTIFACT_FOOTER
+from test_daemon import Script, call, events, make_cfg, wait_status
 
 
 def test_tool_output_defaults_and_invalid_fallback():
@@ -96,11 +104,13 @@ def test_invalid_project_override_falls_back_to_global_not_package_default(tmp_p
     ("mask_min_chars", "many", lambda c: c.mask_min_chars, None),
     ("read_file_lines", "nope", lambda c: c.tool_output.read_file_lines, None),
     ("search_matches", 12, lambda c: c.tool_output.search_matches, 12),
+    ("result_chars", 3000, lambda c: c.tool_output.result_chars, 3000),
+    ("result_chars", "lots", lambda c: c.tool_output.result_chars, None),
     ("reset_at", "no", lambda c: c.reset_at, None),
     ("state_max_chars", 12, lambda c: c.state_max_chars, None),
     (None, None, lambda c: c.tool_output, config.ToolOutputConfig()),
-], ids=["mask-set", "mask-zero", "mask-text", "read-lines-text", "search-set", "reset-at-text", "state-chars-low",
-        "tool-output-defaults"])
+], ids=["mask-set", "mask-zero", "mask-text", "read-lines-text", "search-set", "result-chars-set", "result-chars-text",
+        "reset-at-text", "state-chars-low", "tool-output-defaults"])
 def test_harness_yaml_keys_reach_the_loaded_config(tmp_path, key, value, read, expected):
     """A valid value reaches the loaded config; an invalid one falls back to the shipped value (`expected` None)."""
     cfg_dir = tmp_path / "cfg"
@@ -154,3 +164,279 @@ def test_search_offset_reports_at_least_n_without_scanning_total(tmp_path):
     raised = files.search("hit", max_matches=500)
     assert "hit 249" in raised
     assert files.search("hit", offset=999) == "no matches"
+
+
+def test_result_chars_defaults_and_clamps_to_its_max():
+    """#670: result_chars bounds every other native tool result; above result_chars_max it is clamped down."""
+    assert (ToolOutputConfig().result_chars, ToolOutputConfig().result_chars_max) == (20000, 100000)
+    assert _tool_output({"result_chars": 500_000, "result_chars_max": 1000}).result_chars == 1000
+    assert _tool_output({"result_chars": 0, "result_chars_max": "x"}) == ToolOutputConfig()
+    parsed = _tool_output({"result_chars": 3000, "result_chars_max": 9000})
+    assert (parsed.result_chars, parsed.result_chars_max) == (3000, 9000)
+    cfg = config.Config(
+        host="127.0.0.1", port=0, data_dir=Path("data"), repos_dir=Path("repos"), default_model="fake", models={},
+        sandbox=config.SandboxConfig(), projects={}, tool_output=ToolOutputConfig(result_chars=50_000),
+    )
+    assert resolve_tool_output(cfg, Project(name="p", tool_output={"result_chars": 700})).result_chars == 700
+    assert resolve_tool_output(cfg, Project(name="p", tool_output={"result_chars": "x"})).result_chars == 50_000
+
+
+PAGE = "".join(f"line {i:05d} of a long fetched page\n" for i in range(1000))  # 34,000 characters
+
+
+class _FakeWeb:
+    tool_names = {"web_fetch"}
+
+    def schemas(self):
+        return [{"type": "function", "function": {
+            "name": "web_fetch", "description": "fetch",
+            "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}}}]
+
+    async def call(self, name, args):
+        return PAGE if args["url"] == "big" else PAGE[:5000]
+
+
+def test_a_large_web_fetch_is_stored_whole_and_returned_as_head_tail_with_a_footer(tmp_path):
+    digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call("web_fetch", 0, url="big")]),
+                     Completion(tool_calls=[call("read_artifact", 1, artifact_id=digest, start=0, end=20000)]),
+                     Completion(tool_calls=[call("web_fetch", 2, url="small")]),
+                     Completion(content="done")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        try:
+            sid = m.create("read the page")["id"]
+            s = await wait_status(m, sid, "done", "failed")
+            assert s["status"] == "done", s["stop_reason"]
+            fetched, recovered, small = events(m, sid, "tool_result")
+            seen = script.requests[1][-1]["content"]
+            footer = ARTIFACT_FOOTER.format(total=len(PAGE), artifact_id=digest)
+            assert seen == bound_shell_text(PAGE, 20000, digest) and seen.endswith(footer)
+            assert seen.startswith(PAGE[:5000]) and seen.removesuffix("\n" + footer).endswith(PAGE[-5000:])
+            assert fetched["artifact_id"] == digest and fetched["output_chars"] == len(seen)
+            assert m.db.full_artifact(sid, digest) == PAGE
+            # The footer's id recovers the full text; the recovered range is never stored again.
+            assert recovered["ok"] and recovered["output"] == PAGE[:20000] and recovered["artifact_id"] is None
+            assert script.requests[2][-1]["content"] == PAGE[:20000]
+            # Under the limit the result is untouched.
+            assert script.requests[3][-1]["content"] == PAGE[:5000] == small["output"]
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_a_project_lowers_result_chars_and_read_artifact_output_is_not_bounded_again(tmp_path):
+    digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call("web_fetch", 0, url="big")]),
+                     Completion(tool_calls=[call("read_artifact", 1, artifact_id=digest, start=0, end=9000)]),
+                     Completion(content="done")])
+    cfg = make_cfg(tmp_path)
+    cfg.projects["scratch"] = Project(name="scratch", tool_output={"result_chars": 3000})
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        try:
+            sid = m.create("read the page")["id"]
+            await wait_status(m, sid, "done")
+            fetched, recovered = events(m, sid, "tool_result")
+            assert script.requests[1][-1]["content"] == bound_shell_text(PAGE, 3000, digest)
+            assert fetched["artifact_id"] == digest
+            # read_artifact is the recovery path: 9000 characters come back whole, above the project's 3000.
+            assert script.requests[2][-1]["content"] == PAGE[:9000]
+            assert recovered["artifact_id"] is None and "output truncated" not in recovered["output"]
+            assert m.db.full_artifact(sid, hashlib.sha256(PAGE[:9000].encode("utf-8")).hexdigest()) is None
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_a_session_without_read_artifact_gets_plain_middle_truncation(tmp_path):
+    cfg = make_cfg(tmp_path, rules=[{"tool": "read_artifact", "action": "deny", "reason": "no recovery"}])
+    script = Script([Completion(tool_calls=[call("web_fetch", 0, url="big")]), Completion(content="done")])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        try:
+            sid = m.create("read the page", project="guarded")["id"]
+            s = await wait_status(m, sid, "done")
+            assert not m.runner.artifact_tool_available(s)
+            seen = script.requests[1][-1]["content"]
+            assert seen == truncate_middle(PAGE, 20000)
+            assert "read_artifact" not in seen
+            assert events(m, sid, "tool_result")[0]["artifact_id"] is None
+            assert m.db.full_artifact(sid, hashlib.sha256(PAGE.encode("utf-8")).hexdigest()) is None
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_truncate_middle_at_the_smallest_limits_drops_the_middle():
+    """#670 review: limit 1 made half 0, and text[-0:] kept the whole text."""
+    text = "x" * 35_000
+    for limit in (1, 2, 3):
+        cut = truncate_middle(text, limit)
+        assert len(cut) < 60 and "characters truncated" in cut, limit
+
+
+def test_result_chars_of_one_still_bounds_a_large_result(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.projects["scratch"] = Project(name="scratch", tool_output={"result_chars": 1})
+    script = Script([Completion(tool_calls=[call("web_fetch", 0, url="big")]), Completion(content="done")])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        try:
+            sid = m.create("read the page")["id"]
+            await wait_status(m, sid, "done")
+            digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+            seen = script.requests[1][-1]["content"]
+            assert seen.endswith(ARTIFACT_FOOTER.format(total=len(PAGE), artifact_id=digest))
+            assert len(seen) < 300 and m.db.full_artifact(sid, digest) == PAGE
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_bookkeeping_results_are_bounded_like_every_other_result(tmp_path):
+    """#670 review: update_state, update_notes and reset_round record their own results, outside _execute."""
+    cfg = make_cfg(tmp_path)
+    cfg.projects["scratch"] = Project(name="scratch", tool_output={"result_chars": 8})
+    script = Script([Completion(tool_calls=[call("update_state", 0, goal="keep going", plan="the plan")]),
+                     Completion(tool_calls=[call("update_notes", 1, notes="a note")]),
+                     Completion(content="done")])
+
+    def assert_bounded(result: dict, seen: str) -> None:
+        full = m.db.full_artifact(sid, result["artifact_id"]) if result["artifact_id"] else None
+        assert result["ok"] and full and len(full) > 8, result
+        assert seen == bound_shell_text(full, 8, result["artifact_id"])
+
+    async def body():
+        nonlocal m, sid
+        m = Manager(cfg, chat=script)
+        await m.start()
+        try:
+            sid = m.create("save state")["id"]
+            await wait_status(m, sid, "done")
+            state, notes = events(m, sid, "tool_result")
+            assert_bounded(state, script.requests[1][-1]["content"])
+            assert_bounded(notes, script.requests[2][-1]["content"])
+            # reset_round restarts the context, which a step-indexed Script would replay, so it is called directly.
+            await m.runner._reset_round_call(sid, call("reset_round", 9), {})
+            assert_bounded(events(m, sid, "tool_result")[-1], m.db.get_session(sid)["context"][-1]["content"])
+        finally:
+            await m.stop()
+    m = sid = None
+    asyncio.run(body())
+
+
+def _assert_recoverable(m: Manager, sid: str, seen: str, digest: str) -> None:
+    """A result cut to fit the turn keeps its read_artifact footer, and the footer's id recovers the whole page."""
+    assert ARTIFACT_FOOTER.format(total=len(PAGE), artifact_id=digest) in seen, seen[-400:]
+    assert seen.startswith(PAGE[:200]) and m.db.full_artifact(sid, digest) == PAGE
+
+
+def test_a_bounded_result_cut_to_fit_a_small_context_keeps_its_footer(tmp_path):
+    """#775 review: at 8192 tokens the turn's budget (about 8,600 characters) cut the bounded result's tail and
+    footer, so the model never learned the artifact id."""
+    digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call("web_fetch", 0, url="big")]), Completion(content="done")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path, context_tokens=8192), chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        try:
+            sid = m.create("read the page")["id"]
+            s = await wait_status(m, sid, "done", "failed")
+            assert s["status"] == "done", s["stop_reason"]
+            seen = script.requests[1][-1]["content"]
+            _assert_recoverable(m, sid, seen, digest)
+            assert compaction.OUTPUT_CUT in seen
+            budget = int(0.35 * 8192 * 3.0)
+            assert len(seen) <= budget, len(seen)
+            assert events(m, sid, "tool_result")[0]["artifact_id"] == digest
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_several_large_results_in_one_turn_all_keep_their_footers(tmp_path):
+    """#775 review: four large fetches in one turn at the shipped 65,536 tokens; the fourth lost its footer."""
+    digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call("web_fetch", i, url="big") for i in range(4)]),
+                     Completion(content="done")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        try:
+            sid = m.create("read the pages")["id"]
+            s = await wait_status(m, sid, "done", "failed")
+            assert s["status"] == "done", s["stop_reason"]
+            results = [msg["content"] for msg in script.requests[1] if msg["role"] == "tool"]
+            assert len(results) == 4
+            for seen in results:
+                _assert_recoverable(m, sid, seen, digest)
+            assert compaction.OUTPUT_CUT in results[-1]
+            assert sum(len(r) for r in results) <= int(0.35 * 65536 * 3.0)
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_a_fetched_page_quoting_the_capture_note_is_not_labelled_capped(tmp_path):
+    """#775 review advisory: the "(capture capped)" label is run_shell's, not sniffed from any result's text."""
+    page = PAGE + "[capture capped at 1000000 characters per stream]\n"
+
+    class Quoting(_FakeWeb):
+        async def call(self, name, args):
+            return page
+
+    digest = hashlib.sha256(page.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call("web_fetch", 0, url="big")]), Completion(content="done")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        m.runner.web = Quoting()
+        await m.start()
+        try:
+            sid = m.create("read the page")["id"]
+            await wait_status(m, sid, "done")
+            seen = script.requests[1][-1]["content"]
+            assert seen.endswith("\n" + ARTIFACT_FOOTER.format(total=len(page), artifact_id=digest))
+            assert "(capture capped)" not in seen
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_cut_to_fit_keeps_the_footer_of_every_stored_result():
+    from harness.runner import Runner
+    from harness.tools import artifact_footer
+    digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+    footer = artifact_footer(len(PAGE), digest)
+    # Nothing stored: the plain prefix cut.
+    assert Runner._cut_to_fit(PAGE, None, False, 100, 2000).startswith(PAGE[:100] + "\n... " + compaction.OUTPUT_CUT)
+    # Stored: re-bounded from the stored text within the room, footer kept.
+    cut = Runner._cut_to_fit(bound_shell_text(PAGE, 20000, digest), PAGE, False, 3000, 3000)
+    assert len(cut) <= 3000 and cut.startswith(PAGE[:500]) and footer in cut and cut.count("characters truncated") == 1
+    # run_shell's capped footer survives as it was.
+    capped = artifact_footer(len(PAGE), digest, capped=True)
+    assert capped in Runner._cut_to_fit(bound_shell_text(PAGE, 20000, digest, capped=True), PAGE, False, 3000, 3000)
+    # verify: the rendered summary is trimmed, not replaced by the stored log.
+    summary = "verify: FAILED\n" + "x" * 5000
+    cut = Runner._cut_to_fit(summary + "\n" + footer, PAGE, True, 2000, 2000)
+    assert cut.startswith("verify: FAILED") and footer in cut and len(cut) <= 2000
+    # No room for any body: the footer alone, still recoverable.
+    stub = Runner._cut_to_fit(bound_shell_text(PAGE, 20000, digest), PAGE, False, 50, 2000)
+    assert stub.startswith(footer) and compaction.OUTPUT_CUT in stub

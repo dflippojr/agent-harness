@@ -8,6 +8,7 @@ import hashlib
 from harness import compaction
 from harness.llm import Completion
 from harness.manager import Manager
+from harness.tools import bound_shell_text
 from test_daemon import Script, call, events, make_cfg, wait_status
 
 BIG = "0123456789" * 6000  # 60,000 characters: over the 20,000-character read cap
@@ -72,8 +73,9 @@ def test_masking_and_recovery_through_a_scripted_session(tmp_path):
         assert big.startswith(compaction.RECEIPT_PREFIX)
         assert f"characters={len(full)}" in big and digest() in big
         assert not small.startswith(compaction.RECEIPT_PREFIX) and "small file" in small
+        # One event, for the one masked result. The model saw run_shell's head/tail shape of it, not all of it (#670).
         assert [e["characters_saved"] for e in events(m, sid, "compaction") if e["tier"] == "mask"] == [
-            len(full) - len(big)]  # one event, for the one masked result
+            len(bound_shell_text(full, 20000, digest())) - len(big)]
 
         assert _ctx_text(m, sid, "c5-read_artifact") == full[40000:40010]
         recovered = _ctx_text(m, sid, "c6-read_artifact")

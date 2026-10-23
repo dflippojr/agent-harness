@@ -151,13 +151,17 @@ def shell_result(code: int, output: str, network: bool, output_chars: int | None
     return text
 
 
-def bound_shell_text(text: str, limit: int, artifact_id: str) -> str:
+def artifact_footer(total: int, artifact_id: str, capped: bool = False) -> str:
+    footer = ARTIFACT_FOOTER.format(total=total, artifact_id=artifact_id)
+    return footer.replace("characters total;", "characters total (capture capped);") if capped else footer
+
+
+def bound_shell_text(text: str, limit: int, artifact_id: str, capped: bool = False) -> str:
+    """Head and tail of `text` plus the read_artifact footer. `capped` marks run_shell output its capture cap cut;
+    the caller says so, since a fetched page or MCP result may quote the cap's note (#775 review)."""
     if len(text) <= limit:
         return text
-    footer = ARTIFACT_FOOTER.format(total=len(text), artifact_id=artifact_id)
-    if "capture capped at" in text:
-        footer = footer.replace("characters total;", "characters total (capture capped);")
-    return truncate_middle(text, limit) + "\n" + footer
+    return truncate_middle(text, limit) + "\n" + artifact_footer(len(text), artifact_id, capped)
 
 
 class Workspace:

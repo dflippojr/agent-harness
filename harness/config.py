@@ -493,6 +493,9 @@ class ToolOutputConfig:
     run_shell_chars: int = 20000
     run_shell_chars_max: int = 100000
     verify_summary_chars: int = 4000
+    # Every other native tool result (web_fetch, MCP, modules, long-line read_file); read_artifact is exempt (#670).
+    result_chars: int = 20000
+    result_chars_max: int = 100000
 
 
 @dataclass
@@ -1132,6 +1135,8 @@ _TOOL_OUTPUT_BOUNDS = {
     "run_shell_chars": (1, 1_000_000),
     "run_shell_chars_max": (1, 1_000_000),
     "verify_summary_chars": (1, 100_000),
+    "result_chars": (1, 1_000_000),
+    "result_chars_max": (1, 1_000_000),
 }
 
 
@@ -1158,6 +1163,8 @@ def _tool_output(raw, base: ToolOutputConfig = TOOL_OUTPUT_DEFAULTS) -> ToolOutp
         values["search_matches"] = values["search_matches_max"]
     if values["run_shell_chars"] > values["run_shell_chars_max"]:
         values["run_shell_chars"] = values["run_shell_chars_max"]
+    if values["result_chars"] > values["result_chars_max"]:
+        values["result_chars"] = values["result_chars_max"]
     return ToolOutputConfig(**values)
 
 

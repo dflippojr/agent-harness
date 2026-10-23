@@ -24,6 +24,28 @@ characters. Ask for a later range if the first slice is truncated.
 Identical full outputs share a digest, so one artifact row can back more than
 one rewritten tool message.
 
+## Large tool results
+
+Masking shortens a result after the model has used it; `tool_output` bounds
+keep a large result from entering the context whole in the first place.
+Local-model sessions only: hosted CLI backends get their results unchanged.
+
+| Key (`config/harness.yaml`, `tool_output:`) | Default | Applies to |
+| --- | --- | --- |
+| `run_shell_chars` (max `run_shell_chars_max`) | 20000 (100000) | `run_shell` |
+| `verify_summary_chars` | 4000 | `verify` |
+| `result_chars` (max `result_chars_max`) | 20000 (100000) | every other successful result except `read_artifact` |
+
+A project in `config/projects.yaml` can override any of them under its own
+`tool_output:` block. Over the bound, the daemon stores the whole result as an
+artifact and the model gets its head and tail, then a footer naming the
+artifact: `... (output truncated; N characters total; recover with
+read_artifact(artifact_id=…, start=0, end=20000))`. MCP results and
+`session_read` transcripts still open with their untrusted-content banner; the
+artifact holds the plain text. Where `read_artifact` is unavailable (see
+below), the result is middle-truncated with no footer. `read_artifact` itself
+is never bounded or stored again.
+
 ## What the transcript and UI show
 
 The `artifacts` table is the source of truth for the full text. Tool-result

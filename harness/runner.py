@@ -38,8 +38,8 @@ from .disk_watch import AccountLimit, DiskLimits
 from .sandbox import NoDockerSandbox, Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
-from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
-from .tools import ToolError, Workspace, bound_shell_text, truncate_middle, validate_args
+from .fileops import CAPTURE_CAPPED_NOTE, dir_size  # noqa: F401 - dir_size is re-exported for maintenance
+from .tools import ToolError, Workspace, artifact_footer, bound_shell_text, truncate_middle, validate_args
 from .verify import ToolOutput, bound_rendered, render_verify
 from .local_inference import EXPECTED_WAKE_SECONDS, SLEEPING, UNLOADED, WAKING, NoWarmer
 
@@ -2526,7 +2526,7 @@ class Runner:
             await self._record_result(sid, call, "finish", "Not finished yet. " + grounding.nudge(quotes), ok=False)
             await self._skip_rest(sid, rest, "Not run: fix the quotes first.")
             return False
-        await self._record_result(sid, call, "finish", "Task finished.", ok=True)
+        await self._record_bounded(sid, call, "finish", "Task finished.")
         await self._skip_rest(sid, rest, "Not run: the task was already finished.")
         await self.aset_status(sid, "done", stop_reason="finished", answer=answer)
         return True
@@ -2860,6 +2860,7 @@ class Runner:
                        max_chars: int = 10**9) -> str:
         await self._acquire(sid)  # e.g. resumed after a restart with the approval already granted
         s = self.db.get_session(sid)
+        assert s is not None  # the loop only resolves calls of a session it holds
         if name == "run_shell":
             args = self._shell_within_budget(s, args)
         run = s["run"]
@@ -2884,18 +2885,14 @@ class Runner:
             artifact_content = output.artifact_content
             output = output.text
         # Store the untruncated shell string, then middle-truncate the model-facing text.
-        # run_shell and verify share this artifact_tool_available gate: a recover-with-read_artifact
+        # run_shell, verify and the other results share this artifact_tool_available gate: a recover-with-read_artifact
         # footer is only valid when the session can actually call that tool. Keep the branches in sync.
         if ok and name == "run_shell":
             limits = resolve_tool_output(self.cfg, self.project_for(s))
             cap = clamp_tool_limit(args.get("max_chars"), limits.run_shell_chars, limits.run_shell_chars_max)
             if len(output) > cap:
                 artifact_content = output
-                if self.artifact_tool_available(s):
-                    digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
-                    output = bound_shell_text(output, cap, digest)
-                else:
-                    output = truncate_middle(output, cap)
+                output = self._bound_result(s, output, cap, capped=CAPTURE_CAPPED_NOTE in output)
         elif ok and name == "verify" and extra.get("verify") is not None:
             limits = resolve_tool_output(self.cfg, self.project_for(s))
             cap = limits.verify_summary_chars
@@ -2905,6 +2902,11 @@ class Runner:
                 output = bound_rendered(rendered, cap, raw)
             else:
                 output = bound_rendered(rendered, cap, raw, artifact_available=False)
+        elif ok and name not in ("run_shell", "verify", "read_artifact"):
+            # read_artifact is the recovery path: storing its range again would let masking loop on it.
+            output, stored = self._bound_native(s, output)
+            if stored is not None:
+                artifact_content = stored
         # MCP results and session_read transcripts open with a banner in the model's context only (#644). Size the
         # artifact on the bannered text, so masking recovers the plain text rather than storing the banner.
         banner = self._result_banner(s, name, args) if ok else ""
@@ -2925,12 +2927,52 @@ class Runner:
                     self.db.update_session(sid, run=run)
         output_chars = len(output)
         if len(banner) + len(output) > max_chars:
-            cut = max(0, max_chars - len(banner))
-            output = (output[:cut] + f"\n... {compaction.OUTPUT_CUT}{max_chars} characters: this turn's tool results "
-                      "would overflow the context window. Request less at once, e.g. a smaller line range.]")
+            output = self._cut_to_fit(output, artifact_content, name == "verify", max(0, max_chars - len(banner)),
+                                      max_chars)
         await self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
                             artifact_content=artifact_content, extra=extra, output_chars=output_chars, banner=banner)
         return banner + output
+
+    @staticmethod
+    def _cut_to_fit(output: str, stored: str | None, rendered: bool, room: int, max_chars: int) -> str:
+        """Cut a result to the `room` left in its turn's budget. A result backed by a stored artifact keeps its
+        read_artifact footer, the only place the model learns the artifact id (#775 review): the stored text is
+        re-bounded to fit instead, or for verify (`rendered`) the summary is trimmed; with no room, only the footer."""
+        note = (f"\n... {compaction.OUTPUT_CUT}{max_chars} characters: this turn's tool results "
+                "would overflow the context window. Request less at once, e.g. a smaller line range.]")
+        if stored is None:
+            return output[:room] + note
+        digest = hashlib.sha256(stored.encode("utf-8")).hexdigest()
+        capped = artifact_footer(len(stored), digest, capped=True)
+        footer = capped if output.endswith("\n" + capped) else artifact_footer(len(stored), digest)
+        body = output.removesuffix("\n" + footer) if rendered else stored
+        limit = room - len(footer) - len(note) - len(f"\n\n... [{len(body)} characters truncated] ...\n")
+        return (truncate_middle(body, limit) + "\n" if limit > 0 else "") + footer + note
+
+    def _bound_result(self, s: dict, output: str, cap: int, capped: bool = False) -> str:
+        """The model-facing head and tail of an output over `cap`, which the caller stores whole as the artifact. The
+        read_artifact footer only when the session can call that tool; otherwise plain middle truncation."""
+        if self.artifact_tool_available(s):
+            return bound_shell_text(output, cap, hashlib.sha256(output.encode("utf-8")).hexdigest(), capped)
+        return truncate_middle(output, cap)
+
+    def _bound_native(self, s: dict, output: str) -> tuple[str, str | None]:
+        """(model-facing text, text to store) for a successful native result other than run_shell, verify and
+        read_artifact: over `result_chars` it gets run_shell's shape (#670). Hosted sessions' results are unchanged."""
+        if s.get("backend", "local") != "local":
+            return output, None
+        cap = resolve_tool_output(self.cfg, self.project_for(s)).result_chars
+        if len(output) <= cap:
+            return output, None
+        return self._bound_result(s, output, cap), output
+
+    async def _record_bounded(self, sid: str, call: dict, name: str, output: str) -> None:
+        """Record a successful result the loop builds itself (update_state, reset_round, finish), bounded the same way."""
+        s = self.db.get_session(sid)
+        assert s is not None  # the loop only resolves calls of a session it holds
+        output, stored = self._bound_native(s, output)
+        await self._record_result(sid, call, name, output, ok=True,
+                                  artifact_content=stored if self.artifact_tool_available(s) else None)
 
     async def _dispatch(self, sid: str, s: dict, call: dict, name: str, args: dict, ws: Workspace, kit) -> str:
         """Run one authorized tool call wherever it lives (daemon, app, image service, sandbox, runner)."""
@@ -3152,7 +3194,7 @@ class Runner:
             self.db.update_session(sid, run=run)
             self.bus.emit(sid, "notes", {"notes": notes})
         await self.db.for_session(sid).awrite(update_notes)
-        await self._record_result(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).", ok=True)
+        await self._record_bounded(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).")
 
     async def _update_state_call(self, sid: str, call: dict, args: dict) -> None:
         try:
@@ -3169,8 +3211,8 @@ class Runner:
             if payload["notes"]:
                 self.bus.emit(sid, "notes", {"notes": payload["notes"]})
         await self.db.for_session(sid).awrite(update_state)
-        await self._record_result(sid, call, "update_state",
-                            f"State saved ({len(agent_state.dump_state(payload))} characters).", ok=True)
+        await self._record_bounded(sid, call, "update_state",
+                                   f"State saved ({len(agent_state.dump_state(payload))} characters).")
 
     async def _reset_round_call(self, sid: str, call: dict, args: dict) -> None:
         if args:
@@ -3187,7 +3229,7 @@ class Runner:
             return
         run = {**s["run"], "pending_round_reset": True}
         self.db.update_session(sid, run=run)
-        await self._record_result(sid, call, "reset_round", "Round reset scheduled.", ok=True)
+        await self._record_bounded(sid, call, "reset_round", "Round reset scheduled.")
 
     @staticmethod
     def has_valid_saved_state(s: dict) -> bool:
