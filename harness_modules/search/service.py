@@ -29,6 +29,11 @@ from harness.modules import (SEARCH_TOOLS as TOOLS, ToolError, ToolOutput, calle
                              untrusted_banner)
 
 READ_PAGE_CHARS = 12000
+# session_search's passages, answers and titles are cut to these, so ten hits stay well inside the 20,000-character
+# result bound and every hit, with its banner when tainted, reaches the model whole (#798).
+PASSAGE_CHARS = 300
+TITLE_CHARS = 200
+CUT_MARK = " … [cut]"
 KIND_WEIGHT = {"title": 3.0, "answer": 2.0, "message": 1.5, "assistant": 1.2, "context": 1.0, "tool": 0.8}
 STOPWORDS = {"a", "an", "and", "are", "as", "at", "be", "did", "do", "does", "for", "from", "how", "i", "in", "is",
              "it", "last", "of", "on", "or", "the", "this", "that", "to", "was", "we", "what", "when", "where",
@@ -227,6 +232,12 @@ def find_passages(text: str, pattern: str, context: int = 400, limit: int = 12) 
     return total, [(lo, hi) for lo, hi in spans]
 
 
+def _cut(text: str, limit: int) -> str:
+    """`text` on one line, cut to `limit` characters with a mark saying so (#798)."""
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit].rstrip() + CUT_MARK
+
+
 class SessionSearch:
     """Daemon-side toolkit. The calling session is left out of its own search results.
 
@@ -268,13 +279,13 @@ class SessionSearch:
             if r["taint"]:
                 sources.append(("session", f"session {r['id']} ({r['taint'][0]['origin']})"))
                 lines.append(untrusted_banner("session transcript"))
-            lines.append(f"{r['id']} · {r['title']} · project {r['project']} · {day} · {r['status']} "
-                         f"· {r['hits']} matching event{'s' if r['hits'] != 1 else ''}")
+            lines.append(f"{r['id']} · {_cut(r['title'], TITLE_CHARS)} · project {r['project']} · {day} · "
+                         f"{r['status']} · {r['hits']} matching event{'s' if r['hits'] != 1 else ''}")
             for p in r["passages"]:
-                text = " ".join(p["text"].replace(MARK_START, "[").replace(MARK_END, "]").split())
+                text = _cut(p["text"].replace(MARK_START, "[").replace(MARK_END, "]"), PASSAGE_CHARS)
                 lines.append(f"  {p['kind']}: {text}")
             if r.get("answer"):
-                lines.append(f"  answer: {' '.join(r['answer'].split())[:300]}")
+                lines.append(f"  answer: {_cut(r['answer'], PASSAGE_CHARS)}")
         lines.append("\nRead one with session_read(session_id).")
         return ToolOutput("\n".join(lines), taint=sources)
 

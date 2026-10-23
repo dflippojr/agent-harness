@@ -541,7 +541,9 @@ class Runner:
             return f"Error: {e}", False
         self._taint_from_result(s, name, args, output)  # MCP results are untrusted content like the native tools' (#262)
         # The hosted model gets the native loop's context-only banner (#653); _record_cli_tool_result drops it again.
-        return self._context_banner(s, name) + (output.text if isinstance(output, ToolOutput) else str(output)), True
+        tainted = isinstance(output, ToolOutput) and bool(output.taint)
+        return (self._context_banner(s, name, tainted=tainted)
+                + (output.text if isinstance(output, ToolOutput) else str(output))), True
 
     def _shell_within_budget(self, s: dict, args: dict) -> dict:
         """`run_shell` args whose timeout does not outlast a member's or an App's run budget (#524)."""
@@ -1677,7 +1679,8 @@ class Runner:
                                 seconds: float = 0) -> None:
         bare = mcp_harness_tool(name)
         if ok and bare:  # mcp_call's banner is for the model only: the event keeps the plain result (#653)
-            output = output.removeprefix(self._context_banner(self.db.get_session(sid), bare))
+            # `tainted`: a session_search result's banner, when it has one (#798); its text never opens with it
+            output = output.removeprefix(self._context_banner(self.db.get_session(sid), bare, tainted=True))
 
         def record_cli_tool_result() -> None:
             run = self.db.get_session(sid)["run"]
@@ -2775,20 +2778,21 @@ class Runner:
                       if not any(e["path"] == path for e in proposal["edits"])]
         return max(decisions, key=lambda d: rank.get(d.action, 1))
 
-    def _context_banner(self, s: dict, name: str) -> str:
+    def _context_banner(self, s: dict, name: str, tainted: bool = False) -> str:
         policy = self.policy(s) if name.startswith("mcp__") else None
-        return taint.context_banner(name, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name))
+        return taint.context_banner(name, mcp_client=isinstance(policy, Policy) and policy.is_mcp_client_tool(name),
+                                    tainted=tainted)
 
-    def _result_banner(self, s: dict, name: str, args: dict) -> str:
-        """The context-only banner for a result (taint.context_banner). A read_artifact range gets the banner of any
-        result its artifact was stored from (identical outputs share one), so a masked MCP result or transcript stays
-        marked when recovered."""
+    def _result_banner(self, s: dict, name: str, args: dict, tainted: bool = False) -> str:
+        """The context-only banner for a result (taint.context_banner); `tainted` when it carried taint sources. A
+        read_artifact range gets the banner of any result its artifact was stored from (identical outputs share one),
+        so a masked MCP result, transcript or tainted session_search stays marked when recovered."""
         if name != "read_artifact":
-            return self._context_banner(s, name)
+            return self._context_banner(s, name, tainted)
         digest = args.get("artifact_id")
-        sources = {e["data"].get("name", "") for e in self.db.events(s["id"])
+        sources = {(e["data"].get("name", ""), bool(e["data"].get("tainted"))) for e in self.db.events(s["id"])
                    if e["type"] == "tool_result" and e["data"].get("artifact_id") == digest}
-        return next((b for b in sorted(self._context_banner(s, n) for n in sources) if b), "")
+        return next((b for b in sorted(self._context_banner(s, n, t) for n, t in sources) if b), "")
 
     def _taint_from_result(self, s: dict, name: str, args: dict, output: object = None) -> None:
         policy = self.policy(s) if name.startswith("mcp__") else None
@@ -2897,9 +2901,12 @@ class Runner:
             self._taint_from_result(s, name, args, output)
         extra = {}
         artifact_content = None
+        tainted = False
         if isinstance(output, ToolOutput):
             extra = dict(output.extra)
             artifact_content = output.artifact_content
+            if output.taint:  # the event says so, for the banner of a read_artifact range of it (#798)
+                tainted = extra["tainted"] = True
             output = output.text
         # The tool-result boundary (#777): a lone surrogate (an MCP JSON "\ud800", say) becomes U+FFFD here, so the
         # digest, the artifact store, the session database and the model request below all get valid UTF-8.
@@ -2929,9 +2936,10 @@ class Runner:
             output, stored = self._bound_native(s, output)
             if stored is not None:
                 artifact_content = stored
-        # MCP results and session_read transcripts open with a banner in the model's context only (#644). Size the
-        # artifact on the bannered text, so masking recovers the plain text rather than storing the banner.
-        banner = self._result_banner(s, name, args) if ok else ""
+        # MCP results, session_read transcripts and tainted session_search results (#798) open with a banner in the
+        # model's context only (#644). Size the artifact on the bannered text, so masking recovers the plain text
+        # rather than storing the banner.
+        banner = self._result_banner(s, name, args, tainted) if ok else ""
         # A recovered range is already backed by its artifact; storing it again would let masking loop on it.
         if artifact_content is None:
             artifact_content = (output if ok and name != "read_artifact"
