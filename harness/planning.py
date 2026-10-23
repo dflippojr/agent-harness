@@ -20,6 +20,14 @@ PROMPT = ("Each request ends with your current plan and next step from `update_s
           "`update_state` whenever your plan changes.")
 
 
+def with_prompt(system: str, on: bool) -> str:
+    """`system` with the PROMPT sentence when `on` (once, where it already is) and without it otherwise. A fork onto
+    another backend inherits its parent's prompt, so it is set again for the session it becomes."""
+    if on:
+        return system if PROMPT in system else system + "\n\n" + PROMPT
+    return system.replace("\n\n" + PROMPT, "")
+
+
 def plan_text(saved) -> str:
     """The plan and next step of a schema-valid saved state, at most MAX_CHARS long; empty when there is none."""
     if not agent_state.is_valid_state(saved):

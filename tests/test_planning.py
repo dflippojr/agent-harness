@@ -308,3 +308,40 @@ def test_the_standalone_canary_can_turn_the_flag_on(monkeypatch, tmp_path):
     assert seen["reinject"] == [False, True, True]
     assert off.name.startswith("canary-2") and on.name.startswith("canary-plan-")
     assert from_yaml.name.startswith("canary-plan-")
+
+
+# forks
+def test_with_prompt_adds_the_sentence_once_and_removes_it():
+    on = planning.with_prompt("SYSTEM", True)
+    assert on == f"SYSTEM\n\n{planning.PROMPT}" and planning.with_prompt(on, True) == on
+    assert planning.with_prompt(on, False) == "SYSTEM" and planning.with_prompt("SYSTEM", False) == "SYSTEM"
+
+
+def test_a_fork_has_the_sentence_only_where_it_runs_natively(tmp_path):
+    """A fork inherits its parent's prompt; the sentence follows the backend the fork runs on, in its context and in
+    its saved checkpoint."""
+    from test_backend_override import started
+
+    def sentences(s: dict) -> tuple[int, int]:
+        saved, _ = m.runner.checkpointer.store(s).load_turn(1)
+        return s["context"][0]["content"].count(planning.PROMPT), saved[0]["content"].count(planning.PROMPT)
+
+    async def body():
+        nonlocal m
+        m, s = await started(tmp_path)  # made with the flag off
+        assert planning.PROMPT not in s["context"][0]["content"]
+        m.cfg.planning = PlanningConfig(reinject=True)
+        local = await finished(m, (await m.fork(s["id"], 1, "carry on"))["id"])
+        hosted = m.db.get_session((await m.fork(local["id"], 1, "on codex", backend="codex"))["id"])
+        await finished(m, hosted["id"])
+        m.db.update_session(s["id"], backend="claude", model="claude-opus-5", effort="high")
+        back = m.db.get_session((await m.fork(s["id"], 1, "back home", backend="local"))["id"])
+        await finished(m, back["id"])
+        await m.stop()
+        return local, hosted, back
+
+    m = None
+    local, hosted, back = asyncio.run(body())
+    assert sentences(local) == (1, 1)    # a local fork made with the flag on
+    assert sentences(hosted) == (0, 0)   # local to hosted: dropped
+    assert sentences(back) == (1, 1)     # hosted to local: added
