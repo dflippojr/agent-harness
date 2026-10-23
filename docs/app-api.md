@@ -268,7 +268,7 @@ member. Device and runner tokens gain no member authority.
 | Create projects | yes | empty or public HTTPS allowlist | no | no | no |
 | `/api/admin/v1`, `ho-` owner tokens | yes | 403 | 403 | 403 | 403 |
 | App-tools-only sessions (`tools_only`) | no | no | no | own only, never `sessions:all` | no |
-| Hosted backends, images, jobs, runners, Remote Control | yes | Claude and Codex on their own API key only; no images, jobs, runners or Remote Control | no | scopes for images/remote_control only | no |
+| Hosted backends, images, jobs, runners, Remote Control | yes | Claude and Codex on their own API key only; no images, jobs, runners or Remote Control | no | scopes for images/remote_control only | images and Remote Control only with an owner-granted scope (`images`, `remote_control`); no hosted backends, jobs or runners |
 | Homelab, memory library | yes | no | no | only with the `homelab` / `memory_library` scope | no |
 | Notifications, backups, keys | yes | no | no | no | no |
 | Member prompts, transcripts, diffs, repo contents | no (aggregate metadata only) | own only | no | no | no |

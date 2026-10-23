@@ -175,3 +175,16 @@ def test_uninstalled_runtime_does_not_construct_a_hub(tmp_path):
     rt.init()
     assert rt.service is None and rt.features() == {"runner_pairing": False}
     asyncio.run(rt.stop())
+
+
+def test_a_runner_token_creates_no_project(tmp_path):
+    """#786: a runner's token is no credential on /api/v1, so it is refused there, on loopback and beside a login."""
+    m = runner_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        client.local_owner = False
+        runner = {"Authorization": "Bearer already-paired"}
+        for headers in (runner, {"Tailscale-User-Login": "me@example.com", **runner}):
+            r = client.post("/api/v1/projects", headers=headers, json={"name": "from-runner", "repo": str(tmp_path)})
+            assert r.status_code == 401, r.text
+        assert "from-runner" not in m.cfg.projects
+        assert not m.cfg.projects_overlay_path.exists()

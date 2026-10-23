@@ -111,3 +111,25 @@ def test_tool_gate_honors_owner_defaults_and_excludes_apps_and_runners():
     assert not MODULE.tools.eligible(kit, {**session, 'target': 'macbook'})
     kit.discovery.settings = SimpleNamespace(app_defaults_for_session=lambda _: {'app.capabilities': ['web']})
     assert not MODULE.tools.eligible(kit, session)
+
+
+def test_a_device_key_needs_the_owner_granted_scope(tmp_path):
+    """#786: a device key launches and stops Remote Control only with the remote_control scope the owner gave it."""
+    m = rc_manager(tmp_path)
+
+    class Fake:
+        async def launch(self, project, **kwargs):
+            return dict(project=project, **kwargs)
+
+        async def stop(self, project, **kwargs):
+            return dict(project=project, **kwargs)
+
+    m.modules.get('remote_control').service = Fake()
+    scoped = {'Authorization': 'Bearer ' + m.db.create_api_key('rc-phone', 'remote_control', kind='device')[1]}
+    unscoped = {'Authorization': 'Bearer ' + m.db.create_api_key('phone', 'sessions', kind='device')[1]}
+    with TestClient(create_app(m)) as client:
+        for path in ('/api/v1/remote-control/fake', '/api/v1/remote-control/fake/stop'):
+            refused = client.post(path, headers=unscoped)
+            assert refused.status_code == 403 and "'remote_control' scope" in refused.json()['detail']
+        assert client.post('/api/v1/remote-control/fake', headers=scoped).json()['started_by'] == 'app:rc-phone'
+        assert client.post('/api/v1/remote-control/fake/stop', headers=scoped).status_code == 200

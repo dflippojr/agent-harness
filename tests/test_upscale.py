@@ -285,3 +285,28 @@ def test_restart_recovers_pending_upscale(tmp_path):
         assert recovered["status"] == "done"
         await m.stop()
     asyncio.run(body())
+
+
+def test_a_device_key_needs_the_owner_granted_images_scope(tmp_path):
+    """#786: a device key generates and upscales only with the images scope the owner gave it."""
+    m, _, _ = image_manager(tmp_path, weights=True)
+    with TestClient(create_app(m)) as client:
+        scoped = client.post("/keys", json={"name": "imager", "scopes": ["images"]}).json()
+        unscoped = client.post("/keys", json={"name": "phone", "scopes": ["sessions"]}).json()
+        assert (scoped["kind"], unscoped["kind"]) == ("device", "device")
+        scoped_h = {"Authorization": f"Bearer {scoped['key']}"}
+        unscoped_h = {"Authorization": f"Bearer {unscoped['key']}"}
+        refused = client.post("/api/v1/images", json={"prompt": "logo"}, headers=unscoped_h)
+        assert refused.status_code == 403 and "'images' scope" in refused.json()["detail"]
+        job = client.post("/api/v1/images", json={"prompt": "logo"}, headers=scoped_h)
+        assert job.status_code == 201, job.text
+        iid = job.json()["id"]
+        wait_for(lambda: client.get(f"/images/{iid}").json()["status"] == "done", timeout=scaled(5))
+        m.images.path(ImageStore(m.db).get_image(iid)).write_bytes(rgb_png(32, 32))
+        ImageStore(m.db).update_image(iid, width=32, height=32)
+        refused = client.post(f"/api/v1/images/{iid}/upscale", json={"upscale": "2x"}, headers=unscoped_h)
+        assert refused.status_code == 403 and "'images' scope" in refused.json()["detail"]
+        up = client.post(f"/api/v1/images/{iid}/upscale", json={"upscale": "2x"}, headers=scoped_h)
+        assert up.status_code == 201, up.text
+        wait_for(lambda: client.get(f"/images/{up.json()['id']}").json()["status"] in ("done", "failed"),
+                 timeout=scaled(5))
