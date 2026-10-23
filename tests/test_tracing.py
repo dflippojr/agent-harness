@@ -166,6 +166,15 @@ from harness import telemetry
 from harness.config import Config, ModelConfig, Project, SandboxConfig
 from harness.llm import Completion
 from harness.manager import Manager
+# This child is its own interpreter, so it takes the suite's session free-space pin (#789) the same way.
+import shutil
+from types import SimpleNamespace
+from harness import manager as manager_mod
+class _ManagerShutil:
+    disk_usage = staticmethod(lambda path: SimpleNamespace(total=2**40, used=0, free=2**40))
+    def __getattr__(self, name):
+        return getattr(shutil, name)
+manager_mod.shutil = _ManagerShutil()
 
 async def chat(model, messages, tools, *args, **kw):
     if not any(m["role"] == "assistant" for m in messages):
