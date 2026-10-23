@@ -143,6 +143,18 @@ def check_provider_containers(r: Report, cfg) -> None:
             "Provider egress", f"{name}: {status}" if code == 0 else f"{container} missing")
 
 
+def check_sandbox_proxy(r: Report, cfg) -> None:
+    """The session sandbox's egress proxy (#671): `run_shell network: true` fails closed without it."""
+    from .sandbox import PROXY_START, proxy_container
+    container = proxy_container(cfg.sandbox)
+    code, status = run(["docker", "inspect", "--format", "{{.State.Status}}", container])
+    if code == 0 and status == "running":
+        r.ok("Sandbox egress", f"{container}: running")
+    else:
+        r.fail("Sandbox egress", f"{container} {status if code == 0 else 'missing'}: network commands fail until "
+                                 f"you run: {PROXY_START}")
+
+
 def check_docker(r: Report, cfg) -> None:
     code, out = run(["docker", "version", "--format", "{{.Server.Version}}"])
     if code != 0:
@@ -161,6 +173,7 @@ def check_docker(r: Report, cfg) -> None:
                                       "languages until you run: python -m harness.snippets pull")
     else:
         r.ok("Chat snippet runner", ", ".join(lang.tag for lang in LANGUAGES.values()))
+    check_sandbox_proxy(r, cfg)
     if cfg.profile == "service":
         check_provider_containers(r, cfg)
 

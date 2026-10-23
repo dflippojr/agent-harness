@@ -176,6 +176,15 @@ Harness daemon ── Session(backend = local | claude | codex | cursor)
   build.
 - The CLI's own sandbox stays enabled where it has one (Codex `workspace-write`, Cursor `--sandbox enabled`), inside
   the container.
+- The native session sandbox follows the same pattern (#671). Its approved network commands, and the project setup
+  command, used to attach `harness-egress` directly, which also reaches the host's ports (loopback-bound ones
+  included), the LAN and the tailnet. Now each such command gets its own internal network,
+  `harness-sandbox-egress-<session id>`, shared only with the `harness-egress-sandbox` proxy from
+  `ops/egress/compose.yaml`, and runs with the proxy variables set. The proxy is not a hostname allowlist like the
+  provider proxies: it allows the public internet and refuses, by resolved IP and without a second lookup, every
+  address that is not public (`harness/egress_proxy.py`, `ops/egress/sandbox-proxy.conf`). Only `CONNECT` to 443 and
+  plain HTTP to 80 pass. A missing proxy makes the command fail; nothing falls back to `harness-egress`. Details and
+  the owner's connect-only probe: docs/INSTALL.md, "Sandbox network commands".
 
 ### Per-domain CLI state (#371)
 

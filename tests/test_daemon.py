@@ -686,8 +686,9 @@ def test_sandbox_shell_local_clone_and_network_gate(tmp_path):
         Completion(tool_calls=[call("git_clone", 0, url="local:demo")]),
         Completion(tool_calls=[call("run_shell", 1, command="cd demo && python a.py && git log --oneline | wc -l")]),
         Completion(tool_calls=[call("run_shell", 2, command="getent hosts github.com || echo no-dns")]),
-        Completion(tool_calls=[call("run_shell", 3, command="getent hosts github.com >/dev/null && echo online",
-                                    network=True)]),
+        # Through the sandbox egress proxy (#671): the session's own network has no DNS or route of its own.
+        Completion(tool_calls=[call("run_shell", 3, network=True, command=(
+            "python -c \"import urllib.request as u; u.urlopen('https://github.com', timeout=30)\" && echo online"))]),
         Completion(content="done"),
     ])
 
@@ -706,7 +707,12 @@ def test_sandbox_shell_local_clone_and_network_gate(tmp_path):
         assert "hi" in outputs[1]
         assert outputs[1].rstrip().endswith("1")
         assert "no-dns" in outputs[2]
-        assert "online" in outputs[3]
+        proxy = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", "harness-egress-sandbox"],
+                               capture_output=True, text=True).stdout.strip()
+        if proxy == "true":
+            assert "online" in outputs[3]
+        else:  # fails closed: no direct route instead
+            assert s["status"] == "failed" and "harness-egress-sandbox is not running" in s["stop_reason"]
         await asyncio.gather(*m.tasks.values())  # "done" is committed before the container is stopped
         state = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", f"harness-{s['id']}"],
                                capture_output=True, text=True).stdout.strip()

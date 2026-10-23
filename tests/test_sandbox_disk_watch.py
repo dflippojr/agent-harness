@@ -50,7 +50,7 @@ class FakeDocker:
         if verb in self.fail:
             return 1, "", f"{verb} failed"
         if verb == "inspect":
-            return 0, f"{self.state} owner", ""
+            return 0, "true" if args[-1] == "harness-egress-sandbox" else f"{self.state} owner", ""
         if verb in ("restart", "kill"):
             self.restarted.set()
         elif verb == "exec":
@@ -152,7 +152,8 @@ def test_concurrent_member_commands_share_the_account_quota(monkeypatch, tmp_pat
         fakes[f"harness-{name}"] = FakeDocker(root, chunks=150, pace=0.02)
 
     async def docker(args, **kw):
-        return await next(f for n, f in fakes.items() if n in args)(args, **kw)
+        # The egress proxy's calls name no session container.
+        return await next((f for n, f in fakes.items() if n in args), fakes["harness-a"])(args, **kw)
 
     def used() -> int:
         return sum(p.stat().st_size for r in roots for p in r.iterdir())

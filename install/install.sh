@@ -279,6 +279,14 @@ if [[ $dry_run -eq 1 ]]; then
 else
     docker build -q -t agent-harness-sandbox:py312 "$app_dir/sandbox"
 fi
+# Every profile: approved network commands in the sandbox go out only through this proxy (#671).
+step "Sandbox egress proxy"
+if [[ $dry_run -eq 1 ]]; then
+    info "[dry run] create harness-egress network and start the sandbox egress proxy"
+else
+    docker network inspect harness-egress >/dev/null 2>&1 || docker network create harness-egress >/dev/null
+    docker compose -f "$app_dir/ops/egress/compose.yaml" up -d --build sandbox
+fi
 if [[ $profile == service ]]; then
     step "Hosted-provider CLI image and egress proxies"
     if [[ $dry_run -eq 1 ]]; then

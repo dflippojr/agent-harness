@@ -20,7 +20,10 @@ class FakeDocker:
 
     async def __call__(self, args, timeout=60, input_=None, env=None):
         self.calls.append(list(args))
+        assert args[1:4] != ["network", "connect", SandboxConfig().egress_network]  # never a direct route out (#671)
         verb = args[1]
+        if verb == "inspect" and args[-1] == "harness-egress-sandbox":
+            return 0, "true", ""
         if verb == "inspect":
             return (0, f"{self.state} {self.cache_label}", "") if self.state else (1, "", "")
         if verb == "run":
@@ -155,10 +158,18 @@ def test_project_setup_field():
     assert _project_from_spec("p", {}).setup == ""
 
 
+EGRESS_DETACH = [
+    ["docker", "network", "disconnect", "-f", "harness-egress", "harness-s1"],   # left by a daemon before #671
+    ["docker", "network", "disconnect", "-f", "harness-sandbox-egress-s1", "harness-s1"],
+    ["docker", "network", "disconnect", "-f", "harness-sandbox-egress-s1", "harness-egress-sandbox"],
+    ["docker", "network", "rm", "harness-sandbox-egress-s1"],
+]
+
+
 def test_a_restarted_container_starts_without_egress(docker):
     docker.state = "exited"
     assert asyncio.run(make().ensure_running()) == "started"
-    assert ["docker", "network", "disconnect", "-f", SandboxConfig().egress_network, "harness-s1"] in docker.calls
+    assert all(call in docker.calls for call in EGRESS_DETACH)
 
 
 def test_restarting_after_an_interrupted_command_detaches_egress(docker):
@@ -166,4 +177,4 @@ def test_restarting_after_an_interrupted_command_detaches_egress(docker):
     asyncio.run(make().restart())
     verbs = docker.verbs()
     assert verbs.index("restart") < verbs.index("network")
-    assert ["docker", "network", "disconnect", "-f", SandboxConfig().egress_network, "harness-s1"] in docker.calls
+    assert all(call in docker.calls for call in EGRESS_DETACH)

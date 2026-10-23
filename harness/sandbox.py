@@ -1,8 +1,9 @@
 """Per-session Docker sandbox.
 
 Each session gets one long-lived container, named after the session, so a daemon restart can reattach to it.
-Only the session workspace is mounted. The container sits on an internal network with no route out; an
-approved network command temporarily attaches an egress network.
+Only the session workspace is mounted. The container sits on an internal network with no route out. An approved
+network command (and the project setup command) gets a fresh internal network holding only this container and the
+sandbox egress proxy, and runs with the proxy variables set; the proxy forwards to public addresses only (#671).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Awaitable, Callable
+from urllib.parse import urlsplit
 
 from .config import SandboxConfig
 from .disk_watch import DiskLimitExceeded, DiskLimits, DiskWatch
@@ -23,6 +25,8 @@ from .principal import OWNER_USER_ID
 
 
 SETUP_TIMEOUT = 600
+PROXY_START = "docker compose -f ops/egress/compose.yaml up -d --build sandbox"
+PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 
 
 class SandboxUnavailable(Exception):
@@ -192,6 +196,25 @@ async def ensure_networks(cfg: SandboxConfig) -> None:
         await run_cmd(["docker", "network", "create", *icc_off, cfg.egress_network], timeout=30)
 
 
+def proxy_container(cfg: SandboxConfig) -> str:
+    """The sandbox egress proxy's container: the host name in `sandbox.proxy`."""
+    return urlsplit(cfg.proxy).hostname or cfg.proxy
+
+
+def egress_network(cfg: SandboxConfig, session_id: str) -> str:
+    """The session's own network to the proxy. Only that session's container and the proxy ever join it, so two
+    sessions with network commands running at once share no network."""
+    return f"{cfg.proxy_network}-{session_id}"
+
+
+async def remove_egress_network(cfg: SandboxConfig, session_id: str) -> None:
+    """Drop the session's proxy network, if any: take the proxy off it, then remove it. The session container must
+    already be off it (or gone)."""
+    net = egress_network(cfg, session_id)
+    await run_cmd(["docker", "network", "disconnect", "-f", net, proxy_container(cfg)], timeout=30)
+    await run_cmd(["docker", "network", "rm", net], timeout=30)
+
+
 class Sandbox:
     def __init__(self, session_id: str, workspace: Path, cfg: SandboxConfig, *, project: str = "", setup: str = "",
                  known: bool = False, on_event=None, user_id: str = OWNER_USER_ID,
@@ -209,6 +232,7 @@ class Sandbox:
         self._lock = asyncio.Lock()
         self._idle_timer: asyncio.Task | None = None
         self._idle_stopped = False   # we stopped it (not a crash), so the next start owes the model a notice
+        self._egress_checked = False  # a running container found by this daemon may still hold a crashed run's network
 
     async def _inspect(self) -> tuple[str | None, str]:
         """(container status or None, its cache label)."""
@@ -231,7 +255,11 @@ class Sandbox:
             await run_cmd(["docker", "rm", "-f", self.name], timeout=30)
             state = None
         if state == "running":
+            if not self._egress_checked:
+                self._egress_checked = True
+                await self._network(False)
             return "running"
+        self._egress_checked = True
         if state is not None:
             code, out, err = await run_cmd(["docker", "start", self.name], timeout=60)
             if code == 0:
@@ -278,15 +306,48 @@ class Sandbox:
             out += ["--mount", f"type=volume,source=harness-cache-{prefix}{name}-{self.project},target={target}"]
         return out
 
+    def _proxy_env(self) -> list[str]:
+        """`docker exec` options that send one command through the egress proxy; set for that exec only."""
+        return [arg for var in PROXY_VARIABLES for arg in ("-e", f"{var}={self.cfg.proxy}")]
+
     async def _network(self, attach: bool) -> None:
+        """Attach or detach the session's way out. It is never `egress_network`: that one reaches the host, the LAN
+        and the tailnet. A failed attach detaches again and raises; nothing falls back to a direct route."""
         if attach:
-            code, out, err = await run_cmd(
-                ["docker", "network", "connect", self.cfg.egress_network, self.name], timeout=30)
-            if code != 0 and "already exists" not in err:
-                raise SandboxUnavailable(f"could not enable network: {err.strip()[:300]}")
+            try:
+                await self._attach_egress()
+            except BaseException:
+                await self._network(False)
+                raise
         else:
-            await asyncio.shield(run_cmd(
-                ["docker", "network", "disconnect", "-f", self.cfg.egress_network, self.name], timeout=30))
+            await asyncio.shield(self._detach_egress())
+
+    async def _attach_egress(self) -> None:
+        proxy = proxy_container(self.cfg)
+        code, out, _ = await run_cmd(["docker", "inspect", "-f", "{{.State.Running}}", proxy], timeout=30)
+        if code != 0 or out.strip() != "true":
+            raise SandboxUnavailable(
+                f"network commands go out only through the sandbox egress proxy, and its container {proxy} is not "
+                f"running. Start it from the agent-harness checkout with: {PROXY_START}")
+        net = egress_network(self.cfg, self.session_id)
+        create = ["docker", "network", "create", "--internal", "--label", f"agent-harness.egress={self.session_id}",
+                  net]
+        code, out, err = await run_cmd(create, timeout=30)
+        if code != 0 and "already exists" in err:  # left by a run that ended without its detach
+            await self._detach_egress()
+            code, out, err = await run_cmd(create, timeout=30)
+        if code != 0:
+            raise SandboxUnavailable(f"could not enable network: {(err or out).strip()[:300]}")
+        for member in (proxy, self.name):
+            code, out, err = await run_cmd(["docker", "network", "connect", net, member], timeout=30)
+            if code != 0 and "already exists" not in err:
+                raise SandboxUnavailable(f"could not enable network: {(err or out).strip()[:300]}")
+
+    async def _detach_egress(self) -> None:
+        net = egress_network(self.cfg, self.session_id)
+        await run_cmd(["docker", "network", "disconnect", "-f", self.cfg.egress_network, self.name], timeout=30)
+        await run_cmd(["docker", "network", "disconnect", "-f", net, self.name], timeout=30)
+        await remove_egress_network(self.cfg, self.session_id)
 
     async def _run_setup(self) -> str:
         """Run the project's setup command in a fresh container. Returns 'ok' or a failure description, and reports
@@ -295,7 +356,7 @@ class Sandbox:
             await self._network(True)
             try:
                 code, out, err = await self._watched(
-                    ["docker", "exec", "-w", "/workspace", self.name,
+                    ["docker", "exec", *self._proxy_env(), "-w", "/workspace", self.name,
                      "timeout", "-k", "5", str(SETUP_TIMEOUT), "sh", "-c", self.setup], timeout=SETUP_TIMEOUT + 30)
             finally:
                 await self._network(False)
@@ -363,7 +424,7 @@ class Sandbox:
             try:
                 # `timeout` inside the container stops the command; the host timeout is only a backstop.
                 code, out, err = await self._watched(
-                    ["docker", "exec", "-w", "/workspace", self.name,
+                    ["docker", "exec", *(self._proxy_env() if network else []), "-w", "/workspace", self.name,
                      "timeout", "-k", "5", str(timeout), "sh", "-c", command],
                     timeout=timeout + 30,
                 )
@@ -443,6 +504,7 @@ class Sandbox:
 
     async def remove(self) -> None:
         await run_cmd(["docker", "rm", "-f", self.name], timeout=60)
+        await remove_egress_network(self.cfg, self.session_id)
 
 
 NO_DOCKER = ("the shell sandbox is off in fake model mode: this test instance shares the Docker engine with the real "

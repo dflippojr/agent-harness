@@ -84,7 +84,7 @@ Both are Apache 2.0.
 ## Hosted-provider service profile
 
 The service profile installs Agent Harness Server, the provider CLI image, and provider-specific
-egress proxies.
+egress proxies (every profile also starts the session sandbox's egress proxy).
 It skips llama.cpp, model downloads, GPU checks, and every optional integration unless selected:
 
 ```powershell
@@ -432,9 +432,57 @@ install/uninstall.sh --remove-files  # also remove the install directory
   ([`member-github-auth.md`](member-github-auth.md)) keeps each member's credential in the OS secure store under
   their own Git Credential Manager namespace, inside the same host trust boundary.
 - Agents are untrusted: shell commands run in a Docker container with only the workspace mounted and no network
-  unless you approve it. Pushes, deletes outside scratch paths, and network commands ask first.
+  unless you approve it. Pushes, deletes outside scratch paths, and network commands ask first. An approved
+  network command reaches the public internet only, through the sandbox egress proxy (see
+  [Sandbox network commands](#sandbox-network-commands)).
 - Web fetches refuse private, tailnet and metadata addresses. Agent Harness App-provided context and web pages are marked as
   information, not instructions.
+
+### Sandbox network commands
+
+A session container sits on `harness-sandbox`, an internal network with no route out and no traffic between
+containers. An approved `run_shell` with `network: true`, and the project setup command, get a network of their own
+for that one command: `harness-sandbox-egress-<session id>`, internal, holding only that session's container and the
+sandbox egress proxy `harness-egress-sandbox`. The command runs with `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy` and
+`https_proxy` set to the proxy, and the network is removed when it ends. Two sessions never share one, so they cannot
+reach each other. Session containers never join `harness-egress`, the network with a route out, which also reaches
+the host, the LAN and the tailnet; only the proxies sit on it.
+
+The proxy (`harness/egress_proxy.py`, policy in `ops/egress/sandbox-proxy.conf`) allows `CONNECT` to port 443 and
+plain `http://` to port 80. It resolves the destination once and refuses it with 403, opening no connection, if any
+address it resolves to is not public: loopback, RFC 1918, the tailnet's 100.64.0.0/10 and `fc00::/7`, link-local,
+multicast, reserved, Docker's host gateway and `host.docker.internal`, and their IPv4-mapped and NAT64 forms. It then
+connects to the address it checked, so a second DNS answer cannot redirect it. It logs one line per request
+(destination, port, decision), never headers or bodies: `docker logs harness-egress-sandbox`. Port 22 is refused,
+so clone over HTTPS. Change the policy only with a pull request the owner reviews; nothing changes it at runtime.
+
+Every profile's installer starts the proxy; `harness doctor` reports it as `Sandbox egress`. If it is not running,
+network commands fail and name the command that starts it, from the checkout:
+
+```
+docker network inspect harness-egress || docker network create harness-egress
+docker compose -f ops/egress/compose.yaml up -d --build sandbox
+```
+
+**Connect-only probe (owner, after an install or a Docker update).** It checks the deployed path from a container
+placed the way the daemon places a session. It sends nothing but TCP handshakes and `CONNECT` lines, so it changes no
+state on the host services it names. Replace the placeholders with the router's LAN address and another tailnet
+device's address; 8100 is the daemon. From the checkout, in PowerShell:
+
+```powershell
+docker network create --internal harness-sandbox-egress-probe
+docker network connect harness-sandbox-egress-probe harness-egress-sandbox
+docker run --rm --network harness-sandbox-egress-probe -v "${PWD}\ops\egress\probe_sandbox_egress.py:/probe.py:ro" `
+  agent-harness-sandbox:py312 python /probe.py host.docker.internal:8100 host.docker.internal:443 `
+  <router-ip>:443 <router-ip>:80 <tailnet-ip>:443 --public pypi.org:443
+docker network disconnect harness-sandbox-egress-probe harness-egress-sandbox
+docker network rm harness-sandbox-egress-probe
+docker logs --tail 20 harness-egress-sandbox
+```
+
+Every line must start with `ok`: each blocked target fails directly and gets 403 from the proxy, and `pypi.org:443`
+fails directly but gets 200 through the proxy. The proxy log shows one `deny` line per blocked target and one
+`allow` line for the control.
 
 ### Local callers
 

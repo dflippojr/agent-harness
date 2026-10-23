@@ -31,7 +31,7 @@ from .principal import OWNER_USER_ID
 from .storage import checkpoints_dir
 from .runner_contract import RunnerError
 from .runner import ACTIVE, Runner, dir_size
-from .sandbox import run_cmd
+from .sandbox import egress_network, proxy_container, run_cmd
 
 log = logging.getLogger("harness.maintenance")
 
@@ -129,6 +129,11 @@ class Maintenance:
             if s is not None and (s["status"] in ACTIVE or now - s["updated_at"] < idle):
                 continue
             await run_cmd(["docker", "rm", "-f", item["Names"]], timeout=60)
+            if sid:  # a network command cut short by a crash can leave the session's proxy network behind (#671)
+                net = egress_network(self.cfg.sandbox, sid)
+                await run_cmd(["docker", "network", "disconnect", "-f", net, proxy_container(self.cfg.sandbox)],
+                              timeout=30)
+                await run_cmd(["docker", "network", "rm", net], timeout=30)
             self.runner._sandboxes.pop(sid, None)
             report["containers_removed"].append(item["Names"])
 
