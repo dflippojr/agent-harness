@@ -269,7 +269,7 @@ def test_capture_cap_is_reported_in_artifact_truncation_and_footer():
     assert CAPTURE_CAPPED_NOTE in captured
     text = shell_result(0, captured, False)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    bounded = bound_shell_text(text, 20000, digest)
+    bounded = bound_shell_text(text, 20000, digest, capped=True)
     assert CAPTURE_CAPPED_NOTE in text  # stored artifact content
     assert CAPTURE_CAPPED_NOTE in bounded  # visible in the middle-truncated tail
     assert f"characters total (capture capped); recover with read_artifact(artifact_id={digest}" in bounded

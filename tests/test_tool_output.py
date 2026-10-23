@@ -392,3 +392,51 @@ def test_several_large_results_in_one_turn_all_keep_their_footers(tmp_path):
         finally:
             await m.stop()
     asyncio.run(body())
+
+
+def test_a_fetched_page_quoting_the_capture_note_is_not_labelled_capped(tmp_path):
+    """#775 review advisory: the "(capture capped)" label is run_shell's, not sniffed from any result's text."""
+    page = PAGE + "[capture capped at 1000000 characters per stream]\n"
+
+    class Quoting(_FakeWeb):
+        async def call(self, name, args):
+            return page
+
+    digest = hashlib.sha256(page.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call("web_fetch", 0, url="big")]), Completion(content="done")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        m.runner.web = Quoting()
+        await m.start()
+        try:
+            sid = m.create("read the page")["id"]
+            await wait_status(m, sid, "done")
+            seen = script.requests[1][-1]["content"]
+            assert seen.endswith("\n" + ARTIFACT_FOOTER.format(total=len(page), artifact_id=digest))
+            assert "(capture capped)" not in seen
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_cut_to_fit_keeps_the_footer_of_every_stored_result():
+    from harness.runner import Runner
+    from harness.tools import artifact_footer
+    digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+    footer = artifact_footer(len(PAGE), digest)
+    # Nothing stored: the plain prefix cut.
+    assert Runner._cut_to_fit(PAGE, None, False, 100, 2000).startswith(PAGE[:100] + "\n... " + compaction.OUTPUT_CUT)
+    # Stored: re-bounded from the stored text within the room, footer kept.
+    cut = Runner._cut_to_fit(bound_shell_text(PAGE, 20000, digest), PAGE, False, 3000, 3000)
+    assert len(cut) <= 3000 and cut.startswith(PAGE[:500]) and footer in cut and cut.count("characters truncated") == 1
+    # run_shell's capped footer survives as it was.
+    capped = artifact_footer(len(PAGE), digest, capped=True)
+    assert capped in Runner._cut_to_fit(bound_shell_text(PAGE, 20000, digest, capped=True), PAGE, False, 3000, 3000)
+    # verify: the rendered summary is trimmed, not replaced by the stored log.
+    summary = "verify: FAILED\n" + "x" * 5000
+    cut = Runner._cut_to_fit(summary + "\n" + footer, PAGE, True, 2000, 2000)
+    assert cut.startswith("verify: FAILED") and footer in cut and len(cut) <= 2000
+    # No room for any body: the footer alone, still recoverable.
+    stub = Runner._cut_to_fit(bound_shell_text(PAGE, 20000, digest), PAGE, False, 50, 2000)
+    assert stub.startswith(footer) and compaction.OUTPUT_CUT in stub

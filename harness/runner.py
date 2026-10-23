@@ -38,8 +38,8 @@ from .disk_watch import AccountLimit, DiskLimits
 from .sandbox import NoDockerSandbox, Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
-from .fileops import dir_size  # noqa: F401 - re-exported for maintenance
-from .tools import ToolError, Workspace, bound_shell_text, truncate_middle, validate_args
+from .fileops import CAPTURE_CAPPED_NOTE, dir_size  # noqa: F401 - dir_size is re-exported for maintenance
+from .tools import ToolError, Workspace, artifact_footer, bound_shell_text, truncate_middle, validate_args
 from .verify import ToolOutput, bound_rendered, render_verify
 from .local_inference import EXPECTED_WAKE_SECONDS, SLEEPING, UNLOADED, WAKING, NoWarmer
 
@@ -2892,7 +2892,7 @@ class Runner:
             cap = clamp_tool_limit(args.get("max_chars"), limits.run_shell_chars, limits.run_shell_chars_max)
             if len(output) > cap:
                 artifact_content = output
-                output = self._bound_result(s, output, cap)
+                output = self._bound_result(s, output, cap, capped=CAPTURE_CAPPED_NOTE in output)
         elif ok and name == "verify" and extra.get("verify") is not None:
             limits = resolve_tool_output(self.cfg, self.project_for(s))
             cap = limits.verify_summary_chars
@@ -2927,18 +2927,33 @@ class Runner:
                     self.db.update_session(sid, run=run)
         output_chars = len(output)
         if len(banner) + len(output) > max_chars:
-            cut = max(0, max_chars - len(banner))
-            output = (output[:cut] + f"\n... {compaction.OUTPUT_CUT}{max_chars} characters: this turn's tool results "
-                      "would overflow the context window. Request less at once, e.g. a smaller line range.]")
+            output = self._cut_to_fit(output, artifact_content, name == "verify", max(0, max_chars - len(banner)),
+                                      max_chars)
         await self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
                             artifact_content=artifact_content, extra=extra, output_chars=output_chars, banner=banner)
         return banner + output
 
-    def _bound_result(self, s: dict, output: str, cap: int) -> str:
+    @staticmethod
+    def _cut_to_fit(output: str, stored: str | None, rendered: bool, room: int, max_chars: int) -> str:
+        """Cut a result to the `room` left in its turn's budget. A result backed by a stored artifact keeps its
+        read_artifact footer, the only place the model learns the artifact id (#775 review): the stored text is
+        re-bounded to fit instead, or for verify (`rendered`) the summary is trimmed; with no room, only the footer."""
+        note = (f"\n... {compaction.OUTPUT_CUT}{max_chars} characters: this turn's tool results "
+                "would overflow the context window. Request less at once, e.g. a smaller line range.]")
+        if stored is None:
+            return output[:room] + note
+        digest = hashlib.sha256(stored.encode("utf-8")).hexdigest()
+        capped = artifact_footer(len(stored), digest, capped=True)
+        footer = capped if output.endswith("\n" + capped) else artifact_footer(len(stored), digest)
+        body = output.removesuffix("\n" + footer) if rendered else stored
+        limit = room - len(footer) - len(note) - len(f"\n\n... [{len(body)} characters truncated] ...\n")
+        return (truncate_middle(body, limit) + "\n" if limit > 0 else "") + footer + note
+
+    def _bound_result(self, s: dict, output: str, cap: int, capped: bool = False) -> str:
         """The model-facing head and tail of an output over `cap`, which the caller stores whole as the artifact. The
         read_artifact footer only when the session can call that tool; otherwise plain middle truncation."""
         if self.artifact_tool_available(s):
-            return bound_shell_text(output, cap, hashlib.sha256(output.encode("utf-8")).hexdigest())
+            return bound_shell_text(output, cap, hashlib.sha256(output.encode("utf-8")).hexdigest(), capped)
         return truncate_middle(output, cap)
 
     def _bound_native(self, s: dict, output: str) -> tuple[str, str | None]:

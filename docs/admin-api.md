@@ -719,6 +719,9 @@ activity fields, so the totals still hold it. Older sessions report 0 in `totals
 
 `tool_result.output_chars` is Unicode code points of the result before the 20,000-character event truncation.
 Failed outputs count. `largest_tool_output_by_tool` is session-API only (never a Prometheus label).
+A result bounded by `tool_output` (`run_shell_chars`, `result_chars`) counts its bounded size, so these fields stop at
+about that limit. A result's whole size is the total in its `read_artifact` footer and the length of its stored
+artifact. For a survey of raw tool-result sizes, use those or sessions from before #670.
 
 ### Prometheus (`GET /metrics`)
 
