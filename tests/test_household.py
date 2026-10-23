@@ -302,7 +302,8 @@ def test_device_keys_cannot_create_projects_whatever_identity_comes_with_them(tm
         for headers in (bearer, {**H(OWNER), **bearer}):
             r = client.post("/api/v1/projects", headers=headers, json={"name": "from-device", "repo": str(tmp_path)})
             assert r.status_code == 403, r.text
-            assert r.json()["error"] == {"code": "forbidden", "message": "device tokens cannot create projects"}
+            error = r.json()["error"]
+            assert (error["code"], error["message"]) == ("forbidden", "device tokens cannot create projects")
         assert set(m.cfg.projects) == before
         overlay = m.cfg.projects_overlay_path
         assert not overlay.exists() or "from-device" not in overlay.read_text(encoding="utf-8")

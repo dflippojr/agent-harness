@@ -10722,7 +10722,7 @@
         "summary": "Api Projects"
       },
       "post": {
-        "description": "Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected.",
+        "description": "Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected. App and device tokens get 403.",
         "operationId": "api_create_project_api_v1_projects_post",
         "requestBody": {
           "content": {
