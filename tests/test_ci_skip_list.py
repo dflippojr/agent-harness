@@ -36,7 +36,7 @@ def _token_types(*names: str) -> set[int]:
     return {getattr(tokenize, name) for name in names if hasattr(tokenize, name)}
 
 
-_STRING_PART_TOKENS = {tokenize.STRING, *_token_types("FSTRING_MIDDLE", "TSTRING_MIDDLE")}
+_STRING_PARTS = _token_types("FSTRING_MIDDLE", "TSTRING_MIDDLE")
 _STRING_STARTS = _token_types("FSTRING_START", "TSTRING_START")
 _STRING_ENDS = _token_types("FSTRING_END", "TSTRING_END")
 
@@ -70,10 +70,7 @@ def _unescape(text: str) -> str:
         return text
 
 
-def _literal_text(tok: tokenize.TokenInfo, raw: bool) -> str:
-    if tok.type != tokenize.STRING:
-        # An f-string part keeps its escapes as written.
-        return tok.string if raw else _unescape(tok.string)
+def _literal_text(tok: tokenize.TokenInfo) -> str:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)
@@ -94,20 +91,30 @@ def _string_literals(source: str):
     with warnings.catch_warnings():
         # Some scanned sources hold invalid escape sequences; that is for lint to report, not this scan.
         warnings.simplefilter("ignore", SyntaxWarning)
-        docstrings = _docstring_spans(ast.parse(source), source.splitlines(keepends=True))
+        # Physical lines, as tokenize counts them; str.splitlines also splits at U+2028 and friends.
+        docstrings = _docstring_spans(ast.parse(source), io.StringIO(source).readlines())
     docstring_end = (0, 0)
     prefixes = []  # Of the f-strings the tokenizer is inside, innermost last.
+    parts = []  # Consecutive f-string parts: the tokenizer splits one run of text at `{{` and `\N{...}`.
     for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type in _STRING_PARTS:
+            parts.append(tok)
+            continue
+        if parts:
+            text = "".join(part.string for part in parts)
+            # An f-string part keeps its escapes as written.
+            yield parts[0].start[0], text if "r" in prefixes[-1].lower() else _unescape(text)
+            parts = []
         if tok.type in _STRING_STARTS:
             prefixes.append(tok.string)
         elif tok.type in _STRING_ENDS:
             prefixes.pop()
-        if tok.type not in _STRING_PART_TOKENS:
+        if tok.type != tokenize.STRING:
             continue
         docstring_end = docstrings.get(tok.start, docstring_end)
         if tok.end <= docstring_end:
             continue
-        text = _literal_text(tok, raw=bool(prefixes) and "r" in prefixes[-1].lower())
+        text = _literal_text(tok)
         if isinstance(text, str):
             yield tok.start[0], text
 
@@ -210,3 +217,20 @@ def test_scan_decodes_bytes_and_f_string_escapes(tmp_path):
         "tests/test_encoded.py:3 names docs/phase0-results.md",
         "tests/test_encoded.py:4 names docs/phase4-results.md",
     ]
+
+
+def test_scan_joins_split_f_string_parts_and_counts_physical_lines(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_split.py").write_text(
+        "from pathlib import Path\n"
+        'Path(f"docs/phase0-\\N{LATIN SMALL LETTER R}esults.md").read_text()\n',
+        encoding="utf-8",
+    )
+    # A real U+2028 inside a docstring: one physical line to tokenize, two to str.splitlines.
+    (tmp_path / "tests" / "test_separator.py").write_text(
+        '"""Before\u2028cites docs/phase0-results.md."""\n', encoding="utf-8"
+    )
+
+    found = find_reads(tmp_path, ["docs/phase0-results.md"])
+
+    assert found == ["tests/test_split.py:2 names docs/phase0-results.md"]
