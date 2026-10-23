@@ -3,6 +3,8 @@ Describe 'Review publication safety' {
     BeforeEach {
         . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
         $script:reviewOutputPath = Join-Path $TestDrive 'review-output.md'
+        # GitHub's renderer, stubbed so no test calls the network: plain text renders as itself, encoded.
+        Mock Invoke-ReviewMarkdownRender { '<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }
     }
 
     It 'rejects unsafe backend output without a posted body' -TestCases @(
@@ -259,6 +261,8 @@ Describe 'Review publication safety' {
         catch { $failure = $_.Exception.Message }
         if ($failure -notlike 'Review did not complete*') { throw 'Expected a closed publication failure' }
         if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'Unsafe or stale body was retained' }
+        # A body the local forms reject is never sent to GitHub's renderer (#767).
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 0 -Exactly
     }
 
     It 'publishes ordinary review text' -TestCases @(
@@ -299,9 +303,11 @@ Describe 'Review publication safety' {
     ) {
         param($Payload)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Payload }
-        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -Repository 'owner/repo'
         $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
         if (-not $body.Contains($Payload)) { throw 'Safe review text was not published unchanged' }
+        # The body that passed is the one GitHub rendered, with the repository as context (#767).
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly -ParameterFilter { $Text.Contains($Payload) -and $Repository -eq 'owner/repo' }
     }
 
     It 'publishes quoted pytest ids with escaped parameters (#756)' {
@@ -356,6 +362,104 @@ Describe 'Review publication safety' {
         $log = @($scanWarnings | ForEach-Object { $_.Message }) -join "`n"
         if ($log -notmatch "rule $Rule matched the $Form form at offset $Offset\b") { throw "Missing rule log: $log" }
         if ($log -match 'synthetic|reviewer|a1a1') { throw "The log leaked the matched text: $log" }
+    }
+
+    Context 'GitHub''s rendered form (#767)' {
+        BeforeAll {
+            # GitHub's real POST /markdown answers for the payloads above (Update-RenderedFixtures.ps1).
+            # PowerShell 5.1's ConvertFrom-Json emits the array whole, so it is not wrapped in @().
+            $script:rendered = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $PSScriptRoot 'fixtures/review_markdown/rendered.json') | ConvertFrom-Json
+            # Rejected payloads whose rendering holds no value for the github form to find. Either the
+            # browser changes the text after GitHub renders it (math and Mermaid drawn by scripts, hidden
+            # ruby text, bidi reordering), so only the body's fail-closed rules can stop them...
+            $script:browserOnly = '(?i)\\text\{|mermaid|graph LR|<r[pt]>|dir="rtl"'
+            # ...or GitHub shows something other than the value: emphasis markers, an undefined or encoded
+            # reference, a backslash escape, a dropped file: link, a tab, a literal ampersand, a fraction
+            # sign, a replacement or Latin-1 character, a dropped tag's attribute. The body's forms still
+            # reject these; each is a candidate for a separate, reviewed relaxation.
+            $script:shownOtherwise = @(
+                'gh\*\*p_\*\*', '\[/ho\]\[ref\]', '%5Bgh%5D', '&#91;gh&#93;', '\\\[/ho\\\]', 'exposed \\\\server', '\\\\\?\\Volume',
+                '\(file:', 'NegativeMediumSpace', '%26ZeroWidthSpace', '&amp;ZeroWidthSpace', '&frac12;', '&#xFFFF;',
+                '<x y=a<b>', 'ghp\x01_', '/ho\x85me'
+            ) -join '|'
+        }
+
+        It 'covers the payloads the scan rejects and publishes' {
+            $rejected = @($script:rendered | Where-Object { $_.set -eq 'rejected' })
+            $published = @($script:rendered | Where-Object { $_.set -eq 'published' })
+            if ($rejected.Count -lt 200 -or $published.Count -lt 30) { throw "The rendered fixtures are incomplete: $($rejected.Count) rejected, $($published.Count) published" }
+        }
+
+        It 'finds the #759 bypass examples in GitHub''s rendering of them' {
+            $unexpected = foreach ($row in @($script:rendered | Where-Object { $_.set -eq 'rejected' })) {
+                $hits = @(Get-ReviewGitHubFormHits -Html $row.html)
+                $miss = $row.text -match $script:browserOnly -or $row.text -match $script:shownOtherwise
+                if ($hits.Count -and $miss) { "now caught, so drop it from the expected misses: $($row.text)" }
+                if (-not $hits.Count -and -not $miss) { "missed by the github form: $($row.text)" }
+                if (@($hits | Where-Object { $_ -notmatch '^rule [a-z-]+ matched the github(?:-decoded|-unescaped)? form at offset \d+ \(length \d+\)$' }).Count) { "unexpected hit format: $($hits -join '; ')" }
+            }
+            if ($unexpected) { throw ($unexpected -join "`n") }
+        }
+
+        It 'publishes every ordinary payload as GitHub renders it' {
+            Mock Invoke-ReviewMarkdownRender { $script:renderedHtml }
+            foreach ($row in @($script:rendered | Where-Object { $_.set -eq 'published' })) {
+                $hits = @(Get-ReviewGitHubFormHits -Html $row.html)
+                if ($hits.Count) { throw "GitHub's rendering of safe text was rejected ($($hits -join '; ')): $($row.text)" }
+                $script:renderedHtml = $row.html
+                Assert-ReviewOutputSafe -Text $row.text
+            }
+        }
+
+        It 'rejects a body whose rendering alone shows a <Kind>' -TestCases @(
+            # Synthetic renderings of text the local forms pass, as an unmodelled construct would render.
+            @{ Kind = 'token'; Html = '<p>see gh<em>p_</em>synthetic12345678</p>'; Rule = 'known-token-prefix'; Form = 'github' }
+            @{ Kind = 'profile path'; Html = '<p>in /ho<code>me</code>/reviewer/auth.json</p>'; Rule = 'profile-segment'; Form = 'github' }
+            @{ Kind = 'absolute root'; Html = '<p>see C<a href="x">:</a>/public/config.py</p>'; Rule = 'absolute-root'; Form = 'github' }
+            @{ Kind = 'long token'; Html = ('<p>' + ('a1' * 12) + '<del>' + ('b2' * 12) + '</del></p>'); Rule = 'long-token'; Form = 'github' }
+            @{ Kind = 'decoded token'; Html = '<p>gh&amp;#112;_synthetic12345678</p>'; Rule = 'known-token-prefix'; Form = 'github-decoded' }
+            @{ Kind = 'bidi control'; Html = '<p>&#x202E;87654321citehtnys_phg</p>'; Rule = 'bidi-control'; Form = 'github' }
+        ) {
+            param($Kind, $Html, $Rule, $Form)
+            $script:renderedHtml = $Html
+            Mock Invoke-ReviewMarkdownRender { $script:renderedHtml }
+            $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = 'An ordinary finding.' }
+            'stale body' | Set-Content -LiteralPath $script:reviewOutputPath
+            $failure = ''
+            try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WarningVariable scanWarnings -WarningAction SilentlyContinue }
+            catch { $failure = $_.Exception.Message }
+            if ($failure -notlike 'Review did not complete*') { throw 'Expected a closed publication failure' }
+            if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'Unsafe or stale body was retained' }
+            $log = @($scanWarnings | ForEach-Object { $_.Message }) -join "`n"
+            if ($log -notmatch "rule $Rule matched the $Form form at offset \d+") { throw "Missing rule log: $log" }
+            if ($log -match 'synthetic|reviewer|a1a1|config') { throw "The log leaked the matched text: $log" }
+        }
+
+        It 'fails closed without echoing text when the renderer <Case>' -TestCases @(
+            @{ Case = 'times out'; Thrown = (New-Object System.TimeoutException 'GitHub''s renderer did not answer within 30 s'); Reason = 'did not answer within 30 s' }
+            @{ Case = 'fails'; Thrown = (New-Object System.InvalidOperationException 'GitHub''s renderer failed (gh exited with code 1)'); Reason = 'failed \(gh exited with code 1\)' }
+            # Any other error is logged without its message, which may quote what was sent.
+            @{ Case = 'throws an unexpected error'; Thrown = (New-Object System.Exception 'body: ghp_synthetic12345678'); Reason = 'failed, so' }
+        ) {
+            param($Case, $Thrown, $Reason)
+            $script:renderError = $Thrown
+            Mock Invoke-ReviewMarkdownRender { throw $script:renderError }
+            $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = 'An ordinary finding.' }
+            'stale body' | Set-Content -LiteralPath $script:reviewOutputPath
+            $failure = ''
+            try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WarningVariable scanWarnings -WarningAction SilentlyContinue }
+            catch { $failure = $_.Exception.Message }
+            if ($failure -notlike 'Review did not complete*') { throw 'Expected a closed publication failure' }
+            if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'The body was published without a rendered scan' }
+            $log = @($scanWarnings | ForEach-Object { $_.Message }) -join "`n"
+            if ($log -notmatch "rule markdown-render failed: GitHub's renderer $Reason") { throw "Missing rule log: $log" }
+            if ($log -match 'synthetic|ordinary') { throw "The log echoed text: $log" }
+        }
+
+        It 'never renders validated metadata' {
+            Assert-ReviewOutputSafe -Text 'feature/home/navigation' -CredentialsOnly
+            Should -Invoke Invoke-ReviewMarkdownRender -Times 0 -Exactly
+        }
     }
 
     It 'parses a verdict for a review that quotes escaped pytest ids (#756)' {
@@ -480,10 +584,65 @@ Describe 'Review publication safety' {
     }
 }
 
+# A stand-in gh only; no GitHub calls.
+Describe 'GitHub''s renderer call (#767)' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
+        # A stand-in for gh: records its arguments and stdin, then answers as the FAKE_GH_* variables say.
+        $script:fakeGh = Join-Path $TestDrive 'gh.cmd'
+        @(
+            '@echo off'
+            'echo %*> "%~dp0args.txt"'
+            'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
+            'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%"'
+            'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
+            'exit /b %FAKE_GH_EXIT%'
+        ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
+    }
+    BeforeEach {
+        $env:FAKE_GH_SLEEP = $null; $env:FAKE_GH_HTML = '^<p^>ok^</p^>'; $env:FAKE_GH_EXIT = '0'
+    }
+    AfterAll {
+        Remove-Item Env:FAKE_GH_SLEEP, Env:FAKE_GH_HTML, Env:FAKE_GH_EXIT -ErrorAction SilentlyContinue
+    }
+
+    It 'posts the body as gfm with the repository as context, on stdin' {
+        $text = 'caf' + [char]0xe9 + ' "quoted" <b>' + "`r`nnext"
+        $html = Invoke-ReviewMarkdownRender -Text $text -Repository 'owner/repo' -FilePath $script:fakeGh
+        if ($html.Trim() -ne '<p>ok</p>') { throw "Unexpected HTML: $html" }
+        if ((Get-Content -Raw -LiteralPath (Join-Path $TestDrive 'args.txt')).Trim() -ne 'api --method POST markdown --input -') { throw 'Unexpected gh arguments' }
+        $request = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $TestDrive 'stdin.txt') | ConvertFrom-Json
+        if ($request.text -cne $text -or $request.mode -ne 'gfm' -or $request.context -ne 'owner/repo') { throw "Unexpected request: $($request | ConvertTo-Json -Compress)" }
+        Invoke-ReviewMarkdownRender -Text 'x' -Repository 'not a repository' -FilePath $script:fakeGh | Out-Null
+        $request = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $TestDrive 'stdin.txt') | ConvertFrom-Json
+        if ($request.PSObject.Properties['context']) { throw 'An invalid repository was sent as context' }
+    }
+
+    It 'throws <Type> when gh <Case>' -TestCases @(
+        @{ Case = 'does not answer in time'; Sleep = '20'; Html = '^<p^>late^</p^>'; Exit = '0'; Type = 'TimeoutException'; Missing = $false }
+        @{ Case = 'fails'; Sleep = $null; Html = 'ghp_synthetic12345678'; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
+        @{ Case = 'answers nothing'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $false }
+        @{ Case = 'cannot start'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $true }
+    ) {
+        param($Case, $Sleep, $Html, $Exit, $Type, $Missing)
+        $env:FAKE_GH_SLEEP = $Sleep; $env:FAKE_GH_HTML = $Html; $env:FAKE_GH_EXIT = $Exit
+        $path = if ($Missing) { Join-Path $TestDrive 'missing-gh.exe' } else { $script:fakeGh }
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $caught = $null
+        try { Invoke-ReviewMarkdownRender -Text 'body ghp_synthetic12345678' -FilePath $path -TimeoutSeconds 3 | Out-Null }
+        catch { $caught = $_.Exception }
+        $name = if ($caught) { $caught.GetType().Name } else { 'no exception' }
+        if ($name -ne $Type) { throw "Expected $Type, got $name" }
+        if ($caught.Message -match 'synthetic') { throw "The error echoed text: $($caught.Message)" }
+        if ($watch.Elapsed.TotalSeconds -gt 15) { throw "The renderer outlived its timeout: $($watch.Elapsed.TotalSeconds) s" }
+    }
+}
+
 # Synthetic PR descriptions and issues only; no GitHub calls.
 Describe 'Spec review (review-v3)' {
     BeforeEach {
         . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
+        Mock Invoke-ReviewMarkdownRender { '<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }
         $script:reviewOutputPath = Join-Path $TestDrive 'review-output.md'
         $script:author = [pscustomobject]@{ Login = 'owner'; Association = 'OWNER'; Created = '2026-10-15T00:00:00Z' }
         # The prompt-injection fixture: an issue body that tells the reviewer to drop its findings.
