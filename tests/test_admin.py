@@ -83,3 +83,50 @@ def test_web_session_and_github_actions_are_on_the_owner_api(tmp_path):
         assert r.status_code == 400 and "GitHub" in r.json()["detail"]
         r = client.post(PREFIX + "/github/sessions", json={"prompt": "x", "project": "scratch", "number": 1})
         assert r.status_code == 400 and "GitHub" in r.json()["detail"]
+
+
+def test_taint_clear_never_reaches_a_members_or_an_apps_session(tmp_path):
+    """#785: the owner's taint/clear resolves like every other owner session route: never a member's or an App's
+    session, by id or by prefix, and their taint stays; the owner's own sessions still clear by id and by prefix."""
+    from test_household import ALICE, H, OWNER, create_member, household
+    client, m = household(tmp_path)
+    m._spawn = lambda sid: None  # created, not run: no run touches the taint under test
+    taint = [{"kind": "web_fetch", "origin": "evil.example"}]
+    with client:
+        create_member(client, ALICE, "Alice")
+        app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions"]},
+                          headers=H(OWNER)).json()
+        member_sid = client.post("/api/v1/sessions", json={"prompt": "alice secret mango"}, headers=H(ALICE)).json()["id"]
+        app_sid = client.post("/api/v1/sessions", json={"prompt": "app private papaya"},
+                              headers=bearer(app["key"])).json()["id"]
+        own_sid = client.post("/sessions", json={"prompt": "owner zebra"}, headers=H(OWNER)).json()["id"]
+        for sid in (member_sid, app_sid, own_sid):
+            m.db.update_session(sid, taint=taint)
+        for sid in (member_sid, app_sid):
+            hidden = client.get(f"/sessions/{sid}", headers=H(OWNER))
+            assert hidden.status_code == 404
+            for path in ("", PREFIX):
+                for ref in (sid, sid[:6]):
+                    r = client.post(f"{path}/sessions/{ref}/taint/clear", headers=H(OWNER))
+                    assert (r.status_code, r.json()) == (404, hidden.json()), (path, ref, r.text)
+                    assert "mango" not in r.text and "papaya" not in r.text
+            assert m.db.get_session(sid)["taint"] == taint
+        assert m.db.audit_page(action="session.taint_clear")["items"] == []
+
+        cleared = client.post(f"/sessions/{own_sid[:6]}/taint/clear", headers=H(OWNER))
+        assert cleared.status_code == 200 and cleared.json()["id"] == own_sid and cleared.json()["taint"] == []
+        m.db.update_session(own_sid, taint=taint)
+        cleared = client.post(f"{PREFIX}/sessions/{own_sid}/taint/clear", headers=H(OWNER))
+        assert cleared.status_code == 200 and cleared.json()["taint"] == []
+
+
+def test_a_like_wildcard_in_a_session_ref_is_matched_literally(tmp_path):
+    """#785: `%` and `_` in a session ref are characters, not LIKE wildcards."""
+    client, m = make_client(tmp_path)
+    with client:
+        for _ in range(2):
+            assert client.post("/sessions", json={"prompt": "x"}).status_code == 201
+        for ref in ("%25", "_"):
+            r = client.get(f"/sessions/{ref}")
+            assert r.status_code == 404, (ref, r.text)
+            assert client.post(f"/sessions/{ref}/taint/clear").status_code == 404

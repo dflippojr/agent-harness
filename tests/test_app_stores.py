@@ -568,3 +568,16 @@ def test_an_apps_approvals_never_reach_the_owners_phone_or_one_tap_links(tmp_pat
         assert notifier.queue.empty()
         assert client.post(f"/a/{approval['token']}/approve").status_code == 404
         assert m.db.get_approval(approval["id"])["status"] == "pending"
+
+
+def test_a_session_id_prefix_is_matched_literally_not_as_a_like_pattern(tmp_path):
+    """#785: `%` and `_` in a ref never act as wildcards, in Web's store or an App's."""
+    stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
+    for sid, app_id in (("abc1", ""), ("abd2", "k-aaaa"), ("x_y1", ""), ("x_y2", "k-aaaa")):
+        stores.insert_session(_session(sid, app_id))
+    for ref in ("%", "_", "a%", "ab_", "%1", "x%"):
+        assert stores.find_session_ids(ref) == [], ref
+        assert stores.web.find_session_ids(ref) == [], ref
+    assert sorted(stores.find_session_ids("x_")) == ["x_y1", "x_y2"]
+    assert stores.web.find_session_ids("x_y") == ["x_y1"]
+    assert sorted(stores.find_session_ids("ab")) == ["abc1", "abd2"]
