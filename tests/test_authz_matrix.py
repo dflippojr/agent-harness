@@ -54,7 +54,10 @@ class Route(SimpleNamespace):
         return f"{self.method} {self.path}"
 
 
-def routes_table(alice_id: str, bob_id: str) -> list[Route]:
+def routes_table(alice_id: str, bob_id: str, alice_sid: str, app_sid: str) -> list[Route]:
+    # A member's and an App's session are out of the owner's reach on every owner session route (#330 decision 3,
+    # #785): the owner gets the same 404 as for a session that does not exist, and nothing changes.
+    beyond_owner = (alice_sid, app_sid)
     owner_api = [
         Route("owner", "GET", PREFIX), Route("owner", "GET", f"{PREFIX}/accounts"),
         Route("owner", "GET", f"{PREFIX}/keys"), Route("owner", "GET", f"{PREFIX}/gpu"),
@@ -74,6 +77,8 @@ def routes_table(alice_id: str, bob_id: str) -> list[Route]:
         Route("owner", "PUT", f"{PREFIX}/github-member-auth", body={"enabled": False}, mutates=True),
         Route("owner", "POST", f"{PREFIX}/accounts/{bob_id}/google/invitation", ok=201, mutates=True),
         Route("owner", "POST", f"{PREFIX}/accounts/{bob_id}/google/revoke-sessions", mutates=True),
+        *(Route("owner", "POST", f"{PREFIX}/sessions/{sid}/taint/clear", ok=404, mutates=True)
+          for sid in beyond_owner),
     ]
     legacy = [
         Route("legacy_any", "GET", "/me", role=True), Route("legacy_any", "GET", "/sessions"),
@@ -82,6 +87,8 @@ def routes_table(alice_id: str, bob_id: str) -> list[Route]:
               override={"hub": (403, "")}, body={"name": "k", "kind": OWNER_KIND, "scopes": [ADMIN_SCOPE]}),
         Route("legacy_owner", "POST", "/sessions/s1/approvals/a1", ok=404, body={"decision": "approve"},
               mutates=True, member=(404, "no session matches")),
+        *(Route("legacy_owner", "POST", f"/sessions/{sid}/taint/clear", ok=404, mutates=True,
+                member=(403, "members cannot use the owner API")) for sid in beyond_owner),
     ]
     status = [Route("legacy_owner", "GET", path, member=member) for path, member in OWNER_STATUS_PATHS.items()]
     app_contract = [
@@ -184,6 +191,11 @@ def matrix(tmp_path_factory, gitleaks_tools):
             _, noadmin = m.db.main.create_api_key("owner-without-admin", "sessions", OWNER_KIND)
             hub, _, _ = _claim(client, m)
             client.local_owner = False  # each caller sends only the headers it is given
+            # A tainted member session and App session, so a taint clear that reached either would change them.
+            alice_sid = client.post("/api/v1/sessions", headers=H(ALICE), json={"prompt": "alice's own"}).json()["id"]
+            app_sid = client.post("/api/v1/sessions", headers=_bearer(app["key"]), json={"prompt": "app's own"}).json()["id"]
+            for sid in (alice_sid, app_sid):
+                m.db.update_session(sid, taint=[{"kind": "web_fetch", "origin": "evil.example"}])
             callers = {
                 "owner": H(OWNER), "local": {local_owner.HEADER: m.local_owner_token}, "none": {},
                 "wrongtok": {local_owner.HEADER: "not-the-token"}, "emptytok": {local_owner.HEADER: ""},
@@ -198,7 +210,7 @@ def matrix(tmp_path_factory, gitleaks_tools):
                 "hub@origin": _bearer(hub, HUB_ORIGIN), "hub@elsewhere": _bearer(hub, ELSEWHERE),
                 "owner@elsewhere": {**H(OWNER), "Origin": ELSEWHERE},
             }
-            yield SimpleNamespace(client=client, m=m, callers=callers, app=app, ids=(alice["user_id"], bob["user_id"]))
+            yield SimpleNamespace(client=client, m=m, callers=callers, app=app, ids=(alice["user_id"], bob["user_id"], alice_sid, app_sid))
     finally:
         patcher.undo()  # a failed setup must not leave patches on for the next module
 
@@ -213,7 +225,7 @@ def snapshot(m) -> dict:
     return state
 
 
-ROUTE_IDS = [repr(r) for r in routes_table("u-a", "u-b")]
+ROUTE_IDS = [repr(r) for r in routes_table("u-a", "u-b", "s-alice", "s-app")]
 
 
 @pytest.mark.parametrize("index", range(len(ROUTE_IDS)), ids=ROUTE_IDS)

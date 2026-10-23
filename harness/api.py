@@ -215,8 +215,9 @@ def owner_id(request: Request) -> str:
 
 
 
-def owned_session(request: Request, ref: str, *, kind: str = "agent") -> tuple[Manager, str, dict]:
-    """Resolve a human-facing conversation of one kind only inside the caller's durable user scope."""
+def owned_session(request: Request, ref: str, *, kind: str | None = "agent") -> tuple[Manager, str, dict]:
+    """Resolve a human-facing conversation of one kind (any kind for None) only inside the caller's durable user
+    scope."""
     m = mgr(request)
     ident = request.state.access
     if ident.role == "guest":
@@ -225,7 +226,7 @@ def owned_session(request: Request, ref: str, *, kind: str = "agent") -> tuple[M
     sid = m.resolve_id(ref, user_id=scope, kind=kind, app="")  # never an App's session (#330 decision 3)
     session = m.db.get_session(sid)
     if (session is None or session.get("owner_id", "owner") != scope
-            or (session.get("kind") or "agent") != kind or session.get("app_id")):
+            or (kind is not None and (session.get("kind") or "agent") != kind) or session.get("app_id")):
         m.db.insert_audit(scope, scope, "cross_user", "denied")
         raise HarnessError(404, "no chat matches that id" if kind == "chat" else "no session matches that id")
     return m, sid, session
@@ -1088,8 +1089,9 @@ async def cancel_chat(ref: str, request: Request):
 @api_router.post("/sessions/{ref}/taint/clear")
 async def clear_taint(ref: str, request: Request):
     """Clears the session's untrusted-source taint and records the clear."""
-    m = require_owner(request)
-    return m.summary(m.clear_taint(ref, context=operation_audit.request_context(request, m)))
+    require_owner(request)
+    m, sid, _ = owned_session(request, ref, kind=None)  # never a member's or an App's session (#785)
+    return m.summary(m.clear_taint(sid, context=operation_audit.request_context(request, m)))
 
 
 @api_router.post("/sessions/{ref}/cancel")

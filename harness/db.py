@@ -415,6 +415,12 @@ CREATE TABLE IF NOT EXISTS web_sessions (
 CREATE INDEX IF NOT EXISTS web_sessions_user ON web_sessions(user_id);
 """
 
+
+def _like_prefix(prefix: str) -> str:
+    """`LIKE ? ESCAPE '\\'` pattern for ids that start with `prefix`, its own `%`, `_` and `\\` taken literally."""
+    return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 AND_OWNER = " AND owner_id = ?"
 AND_APP = " AND app_id = ?"
 AND_KIND = " AND kind = ?"
@@ -839,8 +845,8 @@ class Database:
     @_reads
     def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None,
                          kind: str | None = None) -> list[str]:
-        sql = "SELECT id FROM sessions WHERE id LIKE ?"
-        params: list = [prefix + "%"]
+        sql = "SELECT id FROM sessions WHERE id LIKE ? ESCAPE '\\'"
+        params: list = [_like_prefix(prefix)]  # the prefix is literal: `%` and `_` in it never match others (#785)
         if user_id is not None:
             sql += AND_OWNER
             params.append(user_id)

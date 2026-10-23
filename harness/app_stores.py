@@ -149,9 +149,8 @@ def _kind(name: str) -> str | None:
 
 
 def _like(prefix: str) -> re.Pattern:
-    """SQLite's `id LIKE prefix || '%'` as a regex."""
-    body = "".join(".*" if c == "%" else "." if c == "_" else re.escape(c) for c in prefix)
-    return re.compile(body + ".*", re.IGNORECASE | re.DOTALL)
+    """`Database.find_session_ids`'s case-insensitive literal prefix match as a regex (#785)."""
+    return re.compile(re.escape(prefix) + ".*", re.IGNORECASE | re.DOTALL)
 
 
 class _OpenStore:
