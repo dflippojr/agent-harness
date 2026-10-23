@@ -304,3 +304,35 @@ def test_result_chars_of_one_still_bounds_a_large_result(tmp_path):
         finally:
             await m.stop()
     asyncio.run(body())
+
+
+def test_bookkeeping_results_are_bounded_like_every_other_result(tmp_path):
+    """#670 review: update_state, update_notes and reset_round record their own results, outside _execute."""
+    cfg = make_cfg(tmp_path)
+    cfg.projects["scratch"] = Project(name="scratch", tool_output={"result_chars": 8})
+    script = Script([Completion(tool_calls=[call("update_state", 0, goal="keep going", plan="the plan")]),
+                     Completion(tool_calls=[call("update_notes", 1, notes="a note")]),
+                     Completion(content="done")])
+
+    def assert_bounded(result: dict, seen: str) -> None:
+        full = m.db.full_artifact(sid, result["artifact_id"]) if result["artifact_id"] else None
+        assert result["ok"] and full and len(full) > 8, result
+        assert seen == bound_shell_text(full, 8, result["artifact_id"])
+
+    async def body():
+        nonlocal m, sid
+        m = Manager(cfg, chat=script)
+        await m.start()
+        try:
+            sid = m.create("save state")["id"]
+            await wait_status(m, sid, "done")
+            state, notes = events(m, sid, "tool_result")
+            assert_bounded(state, script.requests[1][-1]["content"])
+            assert_bounded(notes, script.requests[2][-1]["content"])
+            # reset_round restarts the context, which a step-indexed Script would replay, so it is called directly.
+            await m.runner._reset_round_call(sid, call("reset_round", 9), {})
+            assert_bounded(events(m, sid, "tool_result")[-1], m.db.get_session(sid)["context"][-1]["content"])
+        finally:
+            await m.stop()
+    m = sid = None
+    asyncio.run(body())

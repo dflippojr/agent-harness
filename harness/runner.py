@@ -2526,7 +2526,7 @@ class Runner:
             await self._record_result(sid, call, "finish", "Not finished yet. " + grounding.nudge(quotes), ok=False)
             await self._skip_rest(sid, rest, "Not run: fix the quotes first.")
             return False
-        await self._record_result(sid, call, "finish", "Task finished.", ok=True)
+        await self._record_bounded(sid, call, "finish", "Task finished.")
         await self._skip_rest(sid, rest, "Not run: the task was already finished.")
         await self.aset_status(sid, "done", stop_reason="finished", answer=answer)
         return True
@@ -2902,13 +2902,11 @@ class Runner:
                 output = bound_rendered(rendered, cap, raw)
             else:
                 output = bound_rendered(rendered, cap, raw, artifact_available=False)
-        elif ok and name not in ("run_shell", "verify", "read_artifact") and s.get("backend", "local") == "local":
-            # Any other native result (web_fetch, MCP, module tools, long-line read_file) gets run_shell's shape (#670).
+        elif ok and name not in ("run_shell", "verify", "read_artifact"):
             # read_artifact is the recovery path: storing its range again would let masking loop on it.
-            cap = resolve_tool_output(self.cfg, self.project_for(s)).result_chars
-            if len(output) > cap:
-                artifact_content = output
-                output = self._bound_result(s, output, cap)
+            output, stored = self._bound_native(s, output)
+            if stored is not None:
+                artifact_content = stored
         # MCP results and session_read transcripts open with a banner in the model's context only (#644). Size the
         # artifact on the bannered text, so masking recovers the plain text rather than storing the banner.
         banner = self._result_banner(s, name, args) if ok else ""
@@ -2942,6 +2940,24 @@ class Runner:
         if self.artifact_tool_available(s):
             return bound_shell_text(output, cap, hashlib.sha256(output.encode("utf-8")).hexdigest())
         return truncate_middle(output, cap)
+
+    def _bound_native(self, s: dict, output: str) -> tuple[str, str | None]:
+        """(model-facing text, text to store) for a successful native result other than run_shell, verify and
+        read_artifact: over `result_chars` it gets run_shell's shape (#670). Hosted sessions' results are unchanged."""
+        if s.get("backend", "local") != "local":
+            return output, None
+        cap = resolve_tool_output(self.cfg, self.project_for(s)).result_chars
+        if len(output) <= cap:
+            return output, None
+        return self._bound_result(s, output, cap), output
+
+    async def _record_bounded(self, sid: str, call: dict, name: str, output: str) -> None:
+        """Record a successful result the loop builds itself (update_state, reset_round, finish), bounded the same way."""
+        s = self.db.get_session(sid)
+        assert s is not None  # the loop only resolves calls of a session it holds
+        output, stored = self._bound_native(s, output)
+        await self._record_result(sid, call, name, output, ok=True,
+                                  artifact_content=stored if self.artifact_tool_available(s) else None)
 
     async def _dispatch(self, sid: str, s: dict, call: dict, name: str, args: dict, ws: Workspace, kit) -> str:
         """Run one authorized tool call wherever it lives (daemon, app, image service, sandbox, runner)."""
@@ -3163,7 +3179,7 @@ class Runner:
             self.db.update_session(sid, run=run)
             self.bus.emit(sid, "notes", {"notes": notes})
         await self.db.for_session(sid).awrite(update_notes)
-        await self._record_result(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).", ok=True)
+        await self._record_bounded(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).")
 
     async def _update_state_call(self, sid: str, call: dict, args: dict) -> None:
         try:
@@ -3180,8 +3196,8 @@ class Runner:
             if payload["notes"]:
                 self.bus.emit(sid, "notes", {"notes": payload["notes"]})
         await self.db.for_session(sid).awrite(update_state)
-        await self._record_result(sid, call, "update_state",
-                            f"State saved ({len(agent_state.dump_state(payload))} characters).", ok=True)
+        await self._record_bounded(sid, call, "update_state",
+                                   f"State saved ({len(agent_state.dump_state(payload))} characters).")
 
     async def _reset_round_call(self, sid: str, call: dict, args: dict) -> None:
         if args:
@@ -3198,7 +3214,7 @@ class Runner:
             return
         run = {**s["run"], "pending_round_reset": True}
         self.db.update_session(sid, run=run)
-        await self._record_result(sid, call, "reset_round", "Round reset scheduled.", ok=True)
+        await self._record_bounded(sid, call, "reset_round", "Round reset scheduled.")
 
     @staticmethod
     def has_valid_saved_state(s: dict) -> bool:
