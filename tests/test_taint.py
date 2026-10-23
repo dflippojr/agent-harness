@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from harness import taint
 from harness.llm import Completion
 from harness.manager import Manager
@@ -250,3 +252,93 @@ def test_session_read_taints_from_the_session_it_read_in_the_readers_scope(tmp_p
             assert [(t["kind"], t["origin"]) for t in m.db.get_session(s["id"])["taint"]] == [
                 ("session", "session 7mmember01 (evil.example)")]
         client.portal.call(body)
+
+
+def _race_during_read(m, monkeypatch, race: str, read_id: str):
+    """Change the sessions while session_read builds the transcript (#794): another session the reader may open
+    whose id also starts with the ref appears, or the session being read is deleted."""
+    from harness_modules.search import service
+
+    def compact_transcript(db, sid):
+        text = original(db, sid)
+        if race == "inserted":
+            now = 1_700_000_000.0
+            m.db.insert_session({"id": read_id[:2] + "late0001", "project": "scratch", "target": "tower",
+                                 "model": "fake", "title": "late", "status": "done", "workspace": "",
+                                 "created_at": now, "updated_at": now, "context": [], "answer": "",
+                                 "owner_id": "owner", "app_id": "", "taint": []})
+        else:
+            m.db.delete_session(read_id)
+        return text
+    original = service.compact_transcript
+    monkeypatch.setattr(service, "compact_transcript", compact_transcript)
+
+
+def _with_search(m):
+    from harness_modules.search.service import SessionSearch
+    search = m.modules.get("search")
+    search.service = search.service or SessionSearch(m.db)
+
+
+def _tainted_earlier(m, sid: str) -> None:
+    now = 1_700_000_000.0
+    m.db.insert_session({"id": sid, "project": "scratch", "target": "tower", "model": "fake", "title": sid,
+                         "status": "done", "workspace": "", "created_at": now, "updated_at": now, "context": [],
+                         "answer": "", "owner_id": "owner", "app_id": "", "taint": SRC})
+    m.db.insert_event(sid, "user_message", {"content": f"notes in {sid}"})
+
+
+@pytest.mark.parametrize("race", ["inserted", "deleted"])
+def test_session_read_taints_from_the_session_it_read_when_sessions_change_during_the_read(tmp_path, monkeypatch,
+                                                                                           race):
+    """Issue #794: the taint comes from the session the read opened, not from a second lookup after it, so a
+    matching session created during the read, or the read session's deletion, can't drop it."""
+    def router(messages):
+        if any(msg["role"] == "tool" for msg in messages):
+            return Completion(content="noted")
+        return Completion(tool_calls=[call("session_read", 0, session_id="7m")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([router]))
+        _with_search(m)
+        await m.start()
+        _tainted_earlier(m, "7mread0001")
+        _race_during_read(m, monkeypatch, race, "7mread0001")
+        s = m.create("read my earlier notes")
+        await wait_status(m, s["id"], "done")
+        read = events(m, s["id"], "tool_result")[0]
+        assert read["ok"] and "notes in 7mread0001" in read["output"]
+        assert [(t["kind"], t["origin"]) for t in m.db.get_session(s["id"])["taint"]] == [
+            ("session", "session 7mread0001 (evil.example)")]
+        await m.stop()
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("race", ["inserted", "deleted"])
+def test_a_hosted_session_read_taints_from_the_session_it_read_when_sessions_change_during_the_read(
+        tmp_path, monkeypatch, race):
+    """Issue #794 on the MCP path: mcp__harness__session_read taints the hosted reader the same way."""
+    from harness.cli_backends import CliBackendError
+    from harness.config import BackendConfig
+    from test_mcp_server import FakeCli
+
+    async def body():
+        cfg = make_cfg(tmp_path)
+        cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5")
+        m = Manager(cfg)
+        m.runner.cli_factory = lambda **kw: (_ for _ in ()).throw(CliBackendError("stop here"))
+        _with_search(m)
+        await m.start()
+        sid = m.create("what happened earlier?", backend="claude")["id"]
+        await wait_status(m, sid, "failed")
+        await asyncio.gather(*m.tasks.values())
+        _tainted_earlier(m, "7mread0001")
+        _race_during_read(m, monkeypatch, race, "7mread0001")
+        cli, args = FakeCli(), {"session_id": "7m"}
+        await m.runner._allow_cli(sid, cli, "req-1", "mcp__harness__session_read", args, "toolu-1")
+        output, ok = await m.runner.mcp_call(sid, "session_read", args, "toolu-1")
+        assert ok and "notes in 7mread0001" in output
+        assert [(t["kind"], t["origin"]) for t in m.db.get_session(sid)["taint"]] == [
+            ("session", "session 7mread0001 (evil.example)")]
+        await m.stop()
+    asyncio.run(body())
