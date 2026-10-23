@@ -288,6 +288,30 @@ def test_two_member_adversarial_matrix(tmp_path):
         assert owner_s["id"] not in own
 
 
+def test_device_keys_cannot_create_projects_whatever_identity_comes_with_them(tmp_path):
+    """#786: a device key gets the App token's refusal on loopback and beside the owner's Tailscale login, and no
+    project is stored; the owner's key and the owner's login still create one."""
+    client, m = household(tmp_path)
+    with client:
+        device = client.post("/keys", json={"name": "zed", "scopes": ["sessions"]}).json()
+        owner = client.post("/keys", json={"name": "cc", "kind": "owner", "scopes": ["admin"]}).json()
+        assert (device["kind"], owner["kind"]) == ("device", "owner")
+        client.local_owner = False  # a pure bearer caller on loopback
+        bearer = {"Authorization": f"Bearer {device['key']}"}
+        before = set(m.cfg.projects)
+        for headers in (bearer, {**H(OWNER), **bearer}):
+            r = client.post("/api/v1/projects", headers=headers, json={"name": "from-device", "repo": str(tmp_path)})
+            assert r.status_code == 403, r.text
+            assert r.json()["error"] == {"code": "forbidden", "message": "device tokens cannot create projects"}
+        assert set(m.cfg.projects) == before
+        overlay = m.cfg.projects_overlay_path
+        assert not overlay.exists() or "from-device" not in overlay.read_text(encoding="utf-8")
+        for name, headers in (("by-key", {"Authorization": f"Bearer {owner['key']}"}), ("by-login", H(OWNER))):
+            created = client.post("/api/v1/projects", headers=headers, json={"name": name, "repo": str(tmp_path)})
+            assert created.status_code == 201, created.text
+            assert m.cfg.projects[name].owner_id == OWNER_USER_ID
+
+
 def test_member_cannot_use_hosted_or_owner_modules(tmp_path):
     client, m = household(tmp_path)
     with client:
