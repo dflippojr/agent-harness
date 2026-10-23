@@ -364,11 +364,12 @@ def test_device_keys_cannot_start_hosted_sessions_whatever_identity_comes_with_t
             m.runner._cli_credentials(sid, s, "claude")
 
 
-def test_device_keys_reach_no_built_in_hosted_backend_by_any_route(tmp_path):
+def test_device_keys_reach_no_built_in_hosted_backend_by_any_route(tmp_path, monkeypatch):
     """#786: the backend list, the default backend, a rerun and a message agree with the create check. A device key
     sees each built-in backend as unavailable and gets 403 wherever a session would run on one, before anything is
     queued; an App key and the owner's key still see them available."""
     client, m = household(tmp_path)
+    monkeypatch.setattr("harness.cli_backends.cli_route_ready", lambda *_: True)  # opencode's route is up: no docker call
     for name, model in (("claude", "claude-opus-5"), ("codex", "gpt-5.6-sol"), ("cursor", "composer-2")):
         m.cfg.backends[name] = BackendConfig(enabled=True, model=model)
     m.cfg.backends["opencode"] = opencode_backend()

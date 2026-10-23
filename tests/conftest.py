@@ -105,6 +105,13 @@ def no_real_cli_volumes(monkeypatch):
     block_real_cli_volumes(monkeypatch)
 
 
+@pytest.fixture(autouse=True)
+def fresh_cli_route_cache(monkeypatch):
+    """backend_state keeps each `kind: cli` route probe for 45 s in a module global. A test that lists backends would
+    leave its answer for the next test in the worker process; each test starts and ends with an empty cache."""
+    monkeypatch.setattr(backend_state, "_route_cache", {})
+
+
 def fixed_ram(monkeypatch):
     """The resource guard's RAM check must not depend on how busy the test machine is."""
     gib = 1024 ** 3
