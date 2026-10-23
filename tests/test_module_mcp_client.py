@@ -12,6 +12,7 @@ import pytest
 from harness import config, taint
 from harness.fileops import ToolError
 from harness.manager import Manager
+from harness.tools import bound_shell_text
 from harness.policy import Policy
 from harness_modules.mcp_client import MODULE
 from harness_modules.mcp_client import service
@@ -285,6 +286,38 @@ def test_result_banner_is_context_only_and_survives_read_artifact(tmp_path, fake
             assert recovered["ok"] and recovered["output"] == plain[:60]
             assert script.requests[2][-1]["content"] == banner + plain[:60]
             assert "MCP tools:" in final["context"][0]["content"]
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_a_large_mcp_result_is_bounded_after_its_banner_and_recovered_whole(tmp_path, fake_transport):
+    """#670: over result_chars the model gets the banner, then head/tail and a read_artifact footer; the artifact keeps
+    the plain result, and recovering it still opens with the banner."""
+    banner = taint.banner("MCP tool result") + "\n"
+    text = "".join(f"row {i:04d} of a large MCP answer. " for i in range(200))
+    plain = json.dumps({"content": [{"type": "text", "text": text}], "isError": False}, ensure_ascii=False)
+    digest = hashlib.sha256(plain.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call(NAME, text=text)]),
+                     Completion(tool_calls=[call("read_artifact", 1, artifact_id=digest, start=0, end=len(plain))]),
+                     Completion(content="done")])
+
+    async def body():
+        m = manager(tmp_path, packages=["harness_modules.mcp_client"], steps=script)
+        m.cfg.tool_output = config.ToolOutputConfig(result_chars=1000)
+        m.cfg.projects["scratch"].mcp_servers[0]["rules"] = [{"tool": NAME, "action": "allow"}]
+        await m.start()
+        try:
+            sid = m.create("echo")["id"]
+            final = await wait_status(m, sid, "done", "failed")
+            assert final["status"] == "done", final["stop_reason"]
+            first, recovered = events(m, sid, "tool_result")
+            assert len(plain) > 1000 and first["artifact_id"] == digest
+            assert m.db.full_artifact(sid, digest) == plain
+            assert script.requests[1][-1]["content"] == banner + bound_shell_text(plain, 1000, digest)
+            assert first["output"] == bound_shell_text(plain, 1000, digest)
+            assert recovered["output"] == plain and recovered["artifact_id"] is None
+            assert script.requests[2][-1]["content"] == banner + plain
         finally:
             await m.stop()
     asyncio.run(body())
