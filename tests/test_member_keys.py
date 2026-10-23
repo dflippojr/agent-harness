@@ -19,6 +19,7 @@ from harness.config import BackendConfig
 from harness.admin import PREFIX
 from harness.manager import HarnessError
 from harness.member_keys import MemberKeys
+from conftest import PLENTY_FREE_GB, pin_session_free_space
 from test_household import ALICE, BOB, OWNER, H, create_member, household
 
 CANARY = "sk-ant-api03-CANARYcanary7f3a9c1e2b4d5d6e7f"
@@ -224,6 +225,7 @@ def test_a_members_hosted_session_runs_through_the_runner_on_their_key(tmp_path,
 
     with setup(tmp_path, monkeypatch) as (client, m, ids):
         monkeypatch.undo()                      # sessions run for real this time (the stubs above are not needed)
+        pin_session_free_space(monkeypatch, PLENTY_FREE_GB)   # undo also dropped the autouse disk pin (#789)
         m.member_keys._probe = lambda *_a: (True, "")
 
         def factory(**kwargs):
