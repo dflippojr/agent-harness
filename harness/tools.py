@@ -164,6 +164,18 @@ def bound_shell_text(text: str, limit: int, artifact_id: str, capped: bool = Fal
     return truncate_middle(text, limit) + "\n" + artifact_footer(len(text), artifact_id, capped)
 
 
+_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def utf8_text(text: str) -> str:
+    """`text` with each lone UTF-16 surrogate replaced by U+FFFD (a pair is joined into its character), so it encodes
+    as UTF-8. Tool text passes through this at the tool-result boundary (#777): an MCP JSON string can carry a lone
+    "\\ud800", and the result's hash, the artifact store, the session database and the model request all need UTF-8."""
+    if not _SURROGATE.search(text):
+        return text
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+
+
 class Workspace:
     """Tools for a tower session: file tools run host-side on the bind-mounted workspace, commands in Docker."""
 

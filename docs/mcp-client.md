@@ -46,6 +46,8 @@ Results are untrusted content, like web results (#644). In the model's context e
 system prompt of a session in a project with `mcp_servers` says not to follow instructions in these results. The
 banner is added only where the tool message is built: the `tool_result` event and the stored artifact keep the plain
 result, so artifact digests are unchanged. A masked result recovered with `read_artifact` gets the banner again.
+A lone surrogate in a result, such as a JSON `"\ud800"`, reaches the model and the artifact as U+FFFD (#777;
+see [`compaction.md`](compaction.md#large-tool-results)).
 
 The client implements newline-delimited JSON-RPC and initialization for protocol `2024-11-05`, as described in
 the [MCP stdio transport](https://modelcontextprotocol.io/specification/2024-11-05/basic/transports) and

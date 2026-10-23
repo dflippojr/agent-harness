@@ -39,7 +39,7 @@ from .sandbox import NoDockerSandbox, Sandbox, SandboxUnavailable
 from .scheduler import GpuScheduler, InferenceGate
 from .settings import app_allows
 from .fileops import CAPTURE_CAPPED_NOTE, dir_size  # noqa: F401 - dir_size is re-exported for maintenance
-from .tools import ToolError, Workspace, artifact_footer, bound_shell_text, truncate_middle, validate_args
+from .tools import ToolError, Workspace, artifact_footer, bound_shell_text, truncate_middle, utf8_text, validate_args
 from .verify import ToolOutput, bound_rendered, render_verify
 from .local_inference import EXPECTED_WAKE_SECONDS, SLEEPING, UNLOADED, WAKING, NoWarmer
 
@@ -2884,6 +2884,11 @@ class Runner:
             extra = dict(output.extra)
             artifact_content = output.artifact_content
             output = output.text
+        # The tool-result boundary (#777): a lone surrogate (an MCP JSON "\ud800", say) becomes U+FFFD here, so the
+        # digest, the artifact store, the session database and the model request below all get valid UTF-8.
+        output = utf8_text(output)
+        if artifact_content is not None:
+            artifact_content = utf8_text(artifact_content)
         # Store the untruncated shell string, then middle-truncate the model-facing text.
         # run_shell, verify and the other results share this artifact_tool_available gate: a recover-with-read_artifact
         # footer is only valid when the session can actually call that tool. Keep the branches in sync.
