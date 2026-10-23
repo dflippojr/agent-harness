@@ -275,3 +275,32 @@ def test_a_session_without_read_artifact_gets_plain_middle_truncation(tmp_path):
         finally:
             await m.stop()
     asyncio.run(body())
+
+
+def test_truncate_middle_at_the_smallest_limits_drops_the_middle():
+    """#670 review: limit 1 made half 0, and text[-0:] kept the whole text."""
+    text = "x" * 35_000
+    for limit in (1, 2, 3):
+        cut = truncate_middle(text, limit)
+        assert len(cut) < 60 and "characters truncated" in cut, limit
+
+
+def test_result_chars_of_one_still_bounds_a_large_result(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.projects["scratch"] = Project(name="scratch", tool_output={"result_chars": 1})
+    script = Script([Completion(tool_calls=[call("web_fetch", 0, url="big")]), Completion(content="done")])
+
+    async def body():
+        m = Manager(cfg, chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        try:
+            sid = m.create("read the page")["id"]
+            await wait_status(m, sid, "done")
+            digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+            seen = script.requests[1][-1]["content"]
+            assert seen.endswith(ARTIFACT_FOOTER.format(total=len(PAGE), artifact_id=digest))
+            assert len(seen) < 300 and m.db.full_artifact(sid, digest) == PAGE
+        finally:
+            await m.stop()
+    asyncio.run(body())

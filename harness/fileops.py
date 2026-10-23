@@ -45,7 +45,8 @@ def truncate_middle(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     half = limit // 2
-    return f"{text[:half]}\n... [{len(text) - limit} characters truncated] ...\n{text[-half:]}"
+    tail = text[len(text) - half:]  # not text[-half:]: at limit 1, text[-0:] keeps it all
+    return f"{text[:half]}\n... [{len(text) - limit} characters truncated] ...\n{tail}"
 
 
 def cap_command_output(text: str, limit: int = OUTPUT_CAP) -> str:
