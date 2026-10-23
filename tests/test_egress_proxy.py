@@ -130,14 +130,23 @@ def test_the_committed_config():
     ("Bogus 1\n", "unknown key"), ("Deny 10.0.0.1/8\n", "host bits"), ("ConnectPort 70000\n", "out of range"),
     ("Port\n", "missing value"), ("ConnectPort https\n", "invalid literal"),
 ])
-def test_a_bad_config_line_stops_the_proxy(tmp_path, text, error):
+def test_a_bad_config_line_stops_the_proxy(tmp_path, monkeypatch, text, error):
     path = tmp_path / "proxy.conf"
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match=error) as e:
         ep.load_policy(path)
     assert f"{path}:1:" in str(e.value)
-    assert ep.main(["--config", str(path)]) == 2
-    assert ep.main(["--config", str(tmp_path / "missing.conf")]) == 2
+    monkeypatch.setattr(ep, "CONFIG", path)
+    assert ep.main() == 2
+    monkeypatch.setattr(ep, "CONFIG", tmp_path / "missing.conf")
+    assert ep.main() == 2
+
+
+def test_the_image_reads_the_mounted_config():
+    """The proxy takes no path from its command line; compose mounts the committed file where it looks."""
+    assert ep.CONFIG == Path("/etc/egress/sandbox-proxy.conf")
+    dockerfile = (ROOT / "ops/egress/sandbox.Dockerfile").read_text(encoding="utf-8")
+    assert 'ENTRYPOINT ["python", "-I", "/opt/egress/egress_proxy.py"]' in dockerfile
 
 
 def test_an_empty_config_forwards_nothing(tmp_path):

@@ -6,14 +6,14 @@ connects to exactly an address that passed the check, so a second lookup can't r
 or the tailnet. One log line per request: destination, port and decision; never headers or bodies.
 
 Standard library only: ops/egress/sandbox.Dockerfile copies this one file onto a slim Python image, and the policy
-(ports, deny list, timeouts) comes from the owner-reviewed ops/egress/sandbox-proxy.conf.
+(ports, deny list, timeouts) comes from the owner-reviewed ops/egress/sandbox-proxy.conf, which compose mounts
+read-only at CONFIG. The path is fixed: nothing on the command line or in the environment chooses another file.
 
-    python egress_proxy.py --config /etc/egress/sandbox-proxy.conf
+    python egress_proxy.py
 """
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import ipaddress
 import re
@@ -30,6 +30,7 @@ Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 Resolver = Callable[[str, int], Awaitable[list[str]]]
 Connector = Callable[[str, int], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 
+CONFIG = Path("/etc/egress/sandbox-proxy.conf")
 HEADER_LIMIT = 65536
 HEADER_TIMEOUT = 30
 BUFFER = 65536
@@ -368,12 +369,9 @@ async def _main(policy: Policy) -> None:
         await server.serve_forever()
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sandbox egress proxy (#671)")
-    parser.add_argument("--config", type=Path, required=True)
-    args = parser.parse_args(argv)
+def main() -> int:
     try:
-        policy = load_policy(args.config)
+        policy = load_policy(CONFIG)
     except (OSError, ValueError) as e:
         print(f"egress proxy: {e}", file=sys.stderr)
         return 2

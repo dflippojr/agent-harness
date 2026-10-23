@@ -5,4 +5,4 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY egress_proxy.py /opt/egress/egress_proxy.py
 USER nobody
 EXPOSE 8888
-ENTRYPOINT ["python", "-I", "/opt/egress/egress_proxy.py", "--config", "/etc/egress/sandbox-proxy.conf"]
+ENTRYPOINT ["python", "-I", "/opt/egress/egress_proxy.py"]

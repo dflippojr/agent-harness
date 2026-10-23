@@ -14,6 +14,8 @@ import argparse
 import socket
 import sys
 
+PROXY = ("harness-egress-sandbox", 8888)   # the sandbox egress proxy; fixed, so the probe can't be pointed elsewhere
+
 
 def direct(host: str, port: int, timeout: float) -> str:
     try:
@@ -23,10 +25,9 @@ def direct(host: str, port: int, timeout: float) -> str:
         return f"failed ({type(e).__name__})"
 
 
-def via_proxy(proxy: str, target: str, timeout: float) -> str:
-    proxy_host, _, proxy_port = proxy.rpartition(":")
+def via_proxy(target: str, timeout: float) -> str:
     try:
-        with socket.create_connection((proxy_host, int(proxy_port)), timeout) as conn:
+        with socket.create_connection(PROXY, timeout) as conn:
             conn.sendall(f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n".encode("ascii"))
             status = conn.makefile("rb").readline(200).decode("latin-1").split()
     except OSError as e:
@@ -44,14 +45,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("blocked", nargs="*", metavar="HOST:PORT", help="must be unreachable both ways")
     parser.add_argument("--public", action="append", default=[], metavar="HOST:PORT",
                         help="a public control the proxy must allow (CONNECT, port 443)")
-    parser.add_argument("--proxy", default="harness-egress-sandbox:8888")
     parser.add_argument("--timeout", type=float, default=5)
     args = parser.parse_args(argv)
     ok = True
     for target, allowed in [(t, False) for t in args.blocked] + [(t, True) for t in args.public]:
         host, port = split_target(target)
         reach = direct(host, port, args.timeout)
-        answer = via_proxy(args.proxy, target, args.timeout)
+        answer = via_proxy(target, args.timeout)
         good = reach.startswith("failed") and answer == ("200" if allowed else "403")
         ok = ok and good
         print(f"{'ok ' if good else 'BAD'} {target:<40} direct: {reach:<28} proxy: {answer}"
