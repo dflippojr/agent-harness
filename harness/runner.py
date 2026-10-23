@@ -2860,6 +2860,7 @@ class Runner:
                        max_chars: int = 10**9) -> str:
         await self._acquire(sid)  # e.g. resumed after a restart with the approval already granted
         s = self.db.get_session(sid)
+        assert s is not None  # the loop only resolves calls of a session it holds
         if name == "run_shell":
             args = self._shell_within_budget(s, args)
         run = s["run"]
@@ -2884,18 +2885,14 @@ class Runner:
             artifact_content = output.artifact_content
             output = output.text
         # Store the untruncated shell string, then middle-truncate the model-facing text.
-        # run_shell and verify share this artifact_tool_available gate: a recover-with-read_artifact
+        # run_shell, verify and the other results share this artifact_tool_available gate: a recover-with-read_artifact
         # footer is only valid when the session can actually call that tool. Keep the branches in sync.
         if ok and name == "run_shell":
             limits = resolve_tool_output(self.cfg, self.project_for(s))
             cap = clamp_tool_limit(args.get("max_chars"), limits.run_shell_chars, limits.run_shell_chars_max)
             if len(output) > cap:
                 artifact_content = output
-                if self.artifact_tool_available(s):
-                    digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
-                    output = bound_shell_text(output, cap, digest)
-                else:
-                    output = truncate_middle(output, cap)
+                output = self._bound_result(s, output, cap)
         elif ok and name == "verify" and extra.get("verify") is not None:
             limits = resolve_tool_output(self.cfg, self.project_for(s))
             cap = limits.verify_summary_chars
@@ -2905,6 +2902,13 @@ class Runner:
                 output = bound_rendered(rendered, cap, raw)
             else:
                 output = bound_rendered(rendered, cap, raw, artifact_available=False)
+        elif ok and name not in ("run_shell", "verify", "read_artifact") and s.get("backend", "local") == "local":
+            # Any other native result (web_fetch, MCP, module tools, long-line read_file) gets run_shell's shape (#670).
+            # read_artifact is the recovery path: storing its range again would let masking loop on it.
+            cap = resolve_tool_output(self.cfg, self.project_for(s)).result_chars
+            if len(output) > cap:
+                artifact_content = output
+                output = self._bound_result(s, output, cap)
         # MCP results and session_read transcripts open with a banner in the model's context only (#644). Size the
         # artifact on the bannered text, so masking recovers the plain text rather than storing the banner.
         banner = self._result_banner(s, name, args) if ok else ""
@@ -2931,6 +2935,13 @@ class Runner:
         await self._record_result(sid, call, name, output, ok=ok, seconds=time.monotonic() - started,
                             artifact_content=artifact_content, extra=extra, output_chars=output_chars, banner=banner)
         return banner + output
+
+    def _bound_result(self, s: dict, output: str, cap: int) -> str:
+        """The model-facing head and tail of an output over `cap`, which the caller stores whole as the artifact. The
+        read_artifact footer only when the session can call that tool; otherwise plain middle truncation."""
+        if self.artifact_tool_available(s):
+            return bound_shell_text(output, cap, hashlib.sha256(output.encode("utf-8")).hexdigest())
+        return truncate_middle(output, cap)
 
     async def _dispatch(self, sid: str, s: dict, call: dict, name: str, args: dict, ws: Workspace, kit) -> str:
         """Run one authorized tool call wherever it lives (daemon, app, image service, sandbox, runner)."""

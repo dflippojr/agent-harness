@@ -209,7 +209,10 @@ compaction:
 # Omitted or invalid values fall back to these defaults. The agent may raise a limit per call with max_lines,
 # max_matches, or max_chars, clamped to the matching *_max. These replace FileOps.read_lines, the hard-coded
 # 200 search matches, and Workspace.output_chars. read_chars stays as a second cap on read_file; the runner's
-# per-turn max_chars budget stays as an additional ceiling.
+# per-turn max_chars budget stays as an additional ceiling. result_chars bounds every other successful local-model
+# tool result (web_fetch, web_search, MCP, module tools, long-line read_file; never read_artifact) the way
+# run_shell_chars bounds shell output: the whole result is stored as a session artifact and the model gets its head and
+# tail plus a read_artifact footer (#670). result_chars above result_chars_max is clamped to it.
 tool_output:
   read_file_lines: 400
   read_file_lines_max: 2000
@@ -218,6 +221,8 @@ tool_output:
   run_shell_chars: 20000
   run_shell_chars_max: 100000
   verify_summary_chars: 4000
+  result_chars: 20000
+  result_chars_max: 100000
 
 # Resource guard (harness/gpu_guard.py, Actions -> Resources; docs/resource-guard.md). While a game runs (Steam/Epic/
 # GOG/Xbox library folders, or Sunshine's Steam Big Picture app) or Plex hardware-transcodes, the queue pauses after the

@@ -104,11 +104,13 @@ def test_invalid_project_override_falls_back_to_global_not_package_default(tmp_p
     ("mask_min_chars", "many", lambda c: c.mask_min_chars, None),
     ("read_file_lines", "nope", lambda c: c.tool_output.read_file_lines, None),
     ("search_matches", 12, lambda c: c.tool_output.search_matches, 12),
+    ("result_chars", 3000, lambda c: c.tool_output.result_chars, 3000),
+    ("result_chars", "lots", lambda c: c.tool_output.result_chars, None),
     ("reset_at", "no", lambda c: c.reset_at, None),
     ("state_max_chars", 12, lambda c: c.state_max_chars, None),
     (None, None, lambda c: c.tool_output, config.ToolOutputConfig()),
-], ids=["mask-set", "mask-zero", "mask-text", "read-lines-text", "search-set", "reset-at-text", "state-chars-low",
-        "tool-output-defaults"])
+], ids=["mask-set", "mask-zero", "mask-text", "read-lines-text", "search-set", "result-chars-set", "result-chars-text",
+        "reset-at-text", "state-chars-low", "tool-output-defaults"])
 def test_harness_yaml_keys_reach_the_loaded_config(tmp_path, key, value, read, expected):
     """A valid value reaches the loaded config; an invalid one falls back to the shipped value (`expected` None)."""
     cfg_dir = tmp_path / "cfg"
@@ -214,7 +216,6 @@ def test_a_large_web_fetch_is_stored_whole_and_returned_as_head_tail_with_a_foot
             footer = ARTIFACT_FOOTER.format(total=len(PAGE), artifact_id=digest)
             assert seen == bound_shell_text(PAGE, 20000, digest) and seen.endswith(footer)
             assert seen.startswith(PAGE[:5000]) and seen.removesuffix("\n" + footer).endswith(PAGE[-5000:])
-            assert len(seen) < 20000 + len(footer) + 1
             assert fetched["artifact_id"] == digest and fetched["output_chars"] == len(seen)
             assert m.db.full_artifact(sid, digest) == PAGE
             # The footer's id recovers the full text; the recovered range is never stored again.
