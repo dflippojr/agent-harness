@@ -31,10 +31,14 @@ EXEMPT_PAIRS = {
     ("harness_modules/images/__init__.py", "docs/flux-fast.md"),
 }
 
-_STRING_PART_TOKENS = {
-    tokenize.STRING,
-    *(getattr(tokenize, name) for name in ("FSTRING_MIDDLE", "TSTRING_MIDDLE") if hasattr(tokenize, name)),
-}
+def _token_types(*names: str) -> set[int]:
+    # f-strings tokenize in parts from Python 3.12, t-strings from 3.14.
+    return {getattr(tokenize, name) for name in names if hasattr(tokenize, name)}
+
+
+_STRING_PART_TOKENS = {tokenize.STRING, *_token_types("FSTRING_MIDDLE", "TSTRING_MIDDLE")}
+_STRING_STARTS = _token_types("FSTRING_START", "TSTRING_START")
+_STRING_ENDS = _token_types("FSTRING_END", "TSTRING_END")
 
 
 def _docstring_spans(tree: ast.AST, lines: list[str]) -> dict[tuple[int, int], tuple[int, int]]:
@@ -56,18 +60,33 @@ def _docstring_spans(tree: ast.AST, lines: list[str]) -> dict[tuple[int, int], t
     return spans
 
 
-def _literal_text(tok: tokenize.TokenInfo) -> str:
+def _unescape(text: str) -> str:
+    """Decode backslash escapes the way a non-raw literal does, so `\\x72` matches `r`."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            return text.encode("latin-1", "backslashreplace").decode("unicode_escape")
+    except UnicodeDecodeError:
+        return text
+
+
+def _literal_text(tok: tokenize.TokenInfo, raw: bool) -> str:
     if tok.type != tokenize.STRING:
-        return tok.string
+        # An f-string part keeps its escapes as written.
+        return tok.string if raw else _unescape(tok.string)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)
-            return ast.literal_eval(tok.string)
+            value = ast.literal_eval(tok.string)
     except (ValueError, SyntaxError):
         # An f-string tokenized whole (Python < 3.12): drop the prefix and quotes, keep the text.
         body = tok.string.lstrip("rRbBuUfFtT")
+        prefix = tok.string[: len(tok.string) - len(body)]
         quote = body[:3] if body[:3] in ('"""', "'''") else body[:1]
-        return body[len(quote) : len(body) - len(quote)]
+        body = body[len(quote) : len(body) - len(quote)]
+        return body if "r" in prefix.lower() else _unescape(body)
+    # A bytes path opens the file just the same.
+    return value.decode("latin-1") if isinstance(value, bytes) else value
 
 
 def _string_literals(source: str):
@@ -77,13 +96,18 @@ def _string_literals(source: str):
         warnings.simplefilter("ignore", SyntaxWarning)
         docstrings = _docstring_spans(ast.parse(source), source.splitlines(keepends=True))
     docstring_end = (0, 0)
+    prefixes = []  # Of the f-strings the tokenizer is inside, innermost last.
     for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type in _STRING_STARTS:
+            prefixes.append(tok.string)
+        elif tok.type in _STRING_ENDS:
+            prefixes.pop()
         if tok.type not in _STRING_PART_TOKENS:
             continue
         docstring_end = docstrings.get(tok.start, docstring_end)
         if tok.end <= docstring_end:
             continue
-        text = _literal_text(tok)
+        text = _literal_text(tok, raw=bool(prefixes) and "r" in prefixes[-1].lower())
         if isinstance(text, str):
             yield tok.start[0], text
 
@@ -166,3 +190,23 @@ def test_scan_ignores_only_the_docstring_itself(tmp_path):
     found = find_reads(tmp_path, ["docs/phase0-results.md"])
 
     assert found == ["tools/.venv/reader.py:1 names docs/phase0-results.md", "tools/accented.py:1 names docs/phase0-results.md"]
+
+
+def test_scan_decodes_bytes_and_f_string_escapes(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_encoded.py").write_text(
+        "from pathlib import Path\n"
+        'open(b"docs/phase0-results.md").read()\n'
+        'Path(f"docs/phase0-\\x72esults.md").read_text()\n'
+        'Path(rf"docs\\x2fphase4-results.md")\n',
+        encoding="utf-8",
+    )
+
+    found = find_reads(tmp_path, ["docs/phase0-results.md", "docs/phase4-results.md"])
+
+    # The raw f-string keeps `\x2f` as written: it still names the basename, though not the full path.
+    assert found == [
+        "tests/test_encoded.py:2 names docs/phase0-results.md",
+        "tests/test_encoded.py:3 names docs/phase0-results.md",
+        "tests/test_encoded.py:4 names docs/phase4-results.md",
+    ]
