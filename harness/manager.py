@@ -825,9 +825,9 @@ class Manager:
                                TOOLS_ONLY_UNSUPPORTED)
 
     def _check_app_provider(self, app: dict, backend: str, model: str) -> None:
-        # A device key is no App: whatever its scopes or the identity it arrives with, it never reaches a hosted or
-        # kind: cli backend, so it has no provider policy to consult (#786).
-        if app.get("kind") != "app":
+        # A device key is no App: whatever its scopes or the identity it arrives with, it never reaches a built-in
+        # hosted backend (#786). A kind: cli backend keeps its own rule below.
+        if app.get("kind") != "app" and not self._needs_grant(backend):
             raise HarnessError(403, f"backend {backend!r} is only for the owner and App tokens; device tokens run "
                                     "on the local model", "provider_not_allowed")
         # A kind: cli backend is invisible to every App until the owner grants it, managed or not (#168).

@@ -28,6 +28,7 @@ from harness.storage import (ContainmentError, account_usage_bytes, contained, e
                              require_contained, user_root, workspaces_dir)
 from harness.tools import ToolError, Workspace
 
+from test_cli_print_mode import opencode_backend
 from test_daemon import Script, make_cfg
 from waits import scaled
 
@@ -316,11 +317,12 @@ def test_device_keys_cannot_create_projects_whatever_identity_comes_with_them(tm
 
 def test_device_keys_cannot_start_hosted_sessions_whatever_identity_comes_with_them(tmp_path):
     """#786: with the built-in backends enabled, a `sessions` device key gets 403 for each of them on loopback and
-    beside the owner's Tailscale login, and no session starts; it keeps the local model, and an App key and the
-    owner's key still start hosted sessions."""
+    beside the owner's Tailscale login, and no session starts; it keeps the local model, a kind: cli backend keeps
+    its own grant rule, and an App key and the owner's key still start hosted sessions."""
     client, m = household(tmp_path)
     m.cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5")
     m.cfg.backends["codex"] = BackendConfig(enabled=True, model="gpt-5.6-sol")
+    m.cfg.backends["opencode"] = opencode_backend()
     m.cfg.cleanup.min_free_gb = 0
     m._spawn = lambda *_args, **_kwargs: None
     with client:
@@ -339,6 +341,10 @@ def test_device_keys_cannot_start_hosted_sessions_whatever_identity_comes_with_t
                 assert (error["code"], error["message"]) == (
                     "provider_not_allowed",
                     f"backend {backend!r} is only for the owner and App tokens; device tokens run on the local model")
+            # Not a built-in backend: the answer any key the owner has not granted it gets (#168), as before.
+            r = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hello", "backend": "opencode"})
+            assert r.status_code == 403, r.text
+            assert r.json()["error"]["message"] == "this app is not allowed to use backend 'opencode'"
         assert device_sessions.list_sessions(50, owner_id="owner") == []
         local = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "hello", "backend": "local"})
         assert local.status_code == 201, local.text

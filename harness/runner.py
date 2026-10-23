@@ -81,7 +81,7 @@ ACTIVE = ("queued", "running", *WAITING)
 # Set on `run` when the run first goes `running`: it holds a place under its member's or App's running cap until the
 # run ends, parked or queued again meanwhile (and across a daemon restart). new_run() does not carry it (#524).
 HOLDS_PLACE = "holds_place"
-DEVICE_KEY = "device_key"  # a `_backend_credential` source: a device key's session, never run on a hosted backend (#786)
+DEVICE_KEY = "device_key"  # `_backend_credential` source: a device key's session on a built-in backend (#786)
 RUN_SECONDS = "run_seconds"  # on `run`: its time spent running so far, kept for a restart (#524)
 # Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
 # cleared after its branch save and transcript: a daemon stopped in between leaves it set, and the next start finishes
@@ -1543,9 +1543,9 @@ class Runner:
         app_id = s.get("app_id") or ""
         assignment = self.db.app_provider_credential(app_id, s["backend"]) if app_id else None
         member = member_keys.member_of(s.get("end_user") or "") if not app_id else ""
-        if app_id and (self.db.get_api_key(app_id) or {}).get("kind") == "device":
-            # A device key's session never runs on a hosted or kind: cli backend (#786), not even one it started
-            # before `create` refused that, when it is resumed.
+        if app_id and not backend.is_cli and (self.db.get_api_key(app_id) or {}).get("kind") == "device":
+            # A device key's session never runs on a built-in hosted backend (#786), not even one it started before
+            # `create` refused that, when it is resumed.
             return {"policy": "denied", "key": "", "source": DEVICE_KEY, "assignment_id": "", "path": "",
                     "marker": None}
         if member:
