@@ -43,6 +43,33 @@ def fd_ops(monkeypatch):
     return ops
 
 
+def open_descriptors():
+    """The descriptors this process has open, where the platform lists them (none on Windows).
+
+    Listing them opens descriptors of its own; those are closed again before each name is checked, so they are not counted.
+    """
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        if os.path.isdir(directory):
+            open_now = set()
+            for name in os.listdir(directory):
+                try:
+                    os.fstat(int(name))
+                except OSError:
+                    continue
+                open_now.add(int(name))
+            return open_now
+    return set()
+
+
+@pytest.fixture(autouse=True)
+def no_descriptor_left_open():
+    """A test closes every descriptor it opens, its own parent handles included, whether it passes or fails."""
+    before = open_descriptors()
+    yield
+    leaked = open_descriptors() - before
+    assert not leaked, f"descriptors left open: {sorted(leaked)}"
+
+
 def link_to_dir(link, target):
     try:
         link.symlink_to(target, target_is_directory=True)
@@ -209,7 +236,11 @@ def test_a_tree_that_is_already_gone_is_left_alone(tmp_path, tree_ops):
 
 
 def test_an_entry_that_vanished_before_it_was_reached_is_skipped(tmp_path, tree_ops):
-    fileops._grant_entry(tree_ops, "missing", tree_ops.open_parent(tmp_path / "x"))
+    parent = tree_ops.open_parent(tmp_path / "x")
+    try:
+        fileops._grant_entry(tree_ops, "missing", parent)
+    finally:
+        tree_ops.close(parent)
 
 
 def test_a_file_is_made_writable_and_a_directory_gets_owner_access(tmp_path, tree_ops):
