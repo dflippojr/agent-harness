@@ -460,6 +460,8 @@ $script:ReviewLinkPattern = & {
 }
 # Each pass drops one level of nested links and images; deeper nesting fails closed (link-depth).
 $script:ReviewLinkDepth = 8
+# How long GitHub's renderer may take before the body fails closed (markdown-render).
+$script:ReviewMarkdownRenderTimeoutSeconds = 30
 
 function Get-ReviewNamedEntityText {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -604,12 +606,13 @@ function Remove-ReviewLinkTargets {
 }
 
 function Remove-ReviewMarkup {
-    param([AllowEmptyString()][string]$Text, [switch]$Html, [switch]$Mapped)
+    param([AllowEmptyString()][string]$Text, [switch]$Html, [switch]$Mapped, [switch]$Document)
 
     # Drop the markup a reader does not see, one line at a time: by default the raw HTML CommonMark
     # passes through in a paragraph (a backslash-escaped < stays text); with -Html, everything an
     # HTML5 tokenizer reads as markup, as GitHub does in a raw HTML block, an unterminated tag or
-    # comment running to the end of its line. -Mapped (without -Html) also returns the raw-text offset
+    # comment running to the end of its line (to the end of the text with -Document, for an HTML
+    # document such as GitHub's rendering). -Mapped (without -Html) also returns the raw-text offset
     # of each character left.
     if (-not $Html) {
         $stripped = Invoke-ReviewMappedReplace -Text $Text -Pattern "\\[\s\S]|$script:ReviewCommonMarkMarkup" -Keep {
@@ -619,7 +622,7 @@ function Remove-ReviewMarkup {
         if ($Mapped) { return $stripped }
         return $stripped.Text
     }
-    $lines = foreach ($line in ($Text -split "`n")) {
+    $lines = foreach ($line in $(if ($Document) { , $Text } else { $Text -split "`n" })) {
         $builder = New-Object System.Text.StringBuilder
         $index = 0
         while ($true) {
@@ -971,19 +974,144 @@ function Remove-ReviewRepositoryCitations {
     return $Text
 }
 
+function Invoke-ReviewMarkdownRender {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$Text,
+        [AllowEmptyString()][string]$Repository = '',
+        [AllowEmptyString()][string]$WorkingDirectory = '',
+        [string]$FilePath = 'gh',
+        [int]$TimeoutSeconds = $script:ReviewMarkdownRenderTimeoutSeconds
+    )
+
+    # GitHub's HTML for $Text as a comment shows it: POST /markdown in gfm mode, with the repository as
+    # context, through gh so its authentication applies. The body goes on stdin, never to a file. Throws
+    # a TimeoutException when gh does not finish in time and an InvalidOperationException when it fails;
+    # neither message holds the text, the response or gh's stderr.
+    $request = [ordered]@{ text = $Text; mode = 'gfm' }
+    if ($Repository -match $script:ReviewRepositoryPattern) { $request.context = $Repository }
+    $json = $request | ConvertTo-Json -Compress
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $FilePath
+    $start.Arguments = 'api --method POST markdown --input -'
+    if ($WorkingDirectory) { $start.WorkingDirectory = $WorkingDirectory }
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = $utf8NoBom
+    # .NET Framework encodes a child's stdin with the console input encoding, and a BOM would break the JSON.
+    $previousInputEncoding = [Console]::InputEncoding
+    try {
+        [Console]::InputEncoding = $utf8NoBom
+        $process = [System.Diagnostics.Process]::Start($start)
+    } catch {
+        throw (New-Object System.InvalidOperationException 'GitHub''s renderer could not be started')
+    } finally {
+        [Console]::InputEncoding = $previousInputEncoding
+    }
+    try {
+        $deadline = [Diagnostics.Stopwatch]::StartNew()
+        $remaining = { [int][Math]::Max(0, $TimeoutSeconds * 1000 - $deadline.ElapsedMilliseconds) }
+        # Read both streams and write stdin asynchronously, so a full pipe cannot outlast the timeout.
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        [void]$process.StandardError.ReadToEndAsync()
+        $written = $process.StandardInput.WriteAsync($json)
+        try { if ($written.Wait((& $remaining))) { $process.StandardInput.Close() } }
+        catch { Write-Verbose 'The renderer stopped reading its input; its exit code decides.' }
+        if (-not $process.WaitForExit((& $remaining))) {
+            try { $process.Kill() } catch { Write-Verbose 'The renderer exited while it was being stopped.' }
+            throw (New-Object System.TimeoutException "GitHub's renderer did not answer within $TimeoutSeconds s")
+        }
+        if ($process.ExitCode -ne 0) { throw (New-Object System.InvalidOperationException "GitHub's renderer failed (gh exited with code $($process.ExitCode))") }
+        if (-not $stdout.Wait((& $remaining))) { throw (New-Object System.TimeoutException "GitHub's renderer did not answer within $TimeoutSeconds s") }
+        $html = $stdout.Result
+        # A body always renders to something, so an empty answer is a failure, not a clean form.
+        if ([string]::IsNullOrWhiteSpace($html) -and -not [string]::IsNullOrWhiteSpace($Text)) { throw (New-Object System.InvalidOperationException 'GitHub''s renderer returned no HTML') }
+        return $html
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Get-ReviewRuleHits {
+    param(
+        [AllowEmptyString()][string]$Text,
+        [string[]]$KnownPaths = @(),
+        # Scan plain text (GitHub's rendered HTML with its tags dropped) without the Markdown renderings.
+        [switch]$PlainText,
+        # Prefixes each form's name, so a hit says which source it was found in.
+        [string]$FormPrefix = '',
+        [switch]$CredentialsOnly
+    )
+
+    # The credential, absolute-root, profile-segment and long-token rules over each scan form of $Text,
+    # as one log line per hit: rule, form and offset, never the matched text or its surroundings.
+    $rules = @(Get-ReviewRedactionRules)
+    $credentialRules = @($rules | Where-Object { -not $_.Maskable })
+    $maskableRules = @($rules | Where-Object { $_.Maskable })
+    $forms = { param([string]$Value) Get-ReviewNamedScanForms -Text $Value -PlainText:$PlainText }
+    $check = {
+        param([string]$RuleName, [string]$FormName, [string]$FormText, [string]$Pattern)
+        $match = [regex]::Match($FormText, $Pattern)
+        if ($FormPrefix) { $FormName = if ($FormName -eq 'raw') { $FormPrefix } else { "$FormPrefix-$FormName" } }
+        if ($match.Success) { "rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length))" }
+    }
+    # Absolute roots and credential patterns always scan the unmasked text.
+    foreach ($form in (& $forms $Text)) {
+        if (-not $CredentialsOnly) { & $check 'absolute-root' $form.Name $form.Text $script:ReviewAbsoluteRootPattern }
+        foreach ($rule in $credentialRules) { & $check $rule.Name $form.Name $form.Text (Get-ReviewPublishPattern -Rule $rule) }
+    }
+    if ($CredentialsOnly) { return }
+    # Known relative citations are masked only for the profile-segment and long-token checks, first in
+    # the source text (so decoding cannot break a citation) and again in each decoded form. Offsets for
+    # these two rules count in that masked text.
+    $maskedText = Remove-ReviewRepositoryCitations -Text $Text -Paths $KnownPaths
+    foreach ($form in (& $forms $maskedText)) {
+        $masked = Remove-ReviewRepositoryCitations -Text $form.Text -Paths $KnownPaths
+        & $check 'profile-segment' $form.Name $masked $script:ReviewProfileSegmentPattern
+    }
+    # A web link's path is checked segment by segment, so a long documentation URL is not one token.
+    # Only slashes present before decoding split it, so an encoded slash cannot divide a token, and
+    # the query and fragment stay whole: signatures there may contain Base64 slashes.
+    $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
+    foreach ($form in (& $forms $segmented)) {
+        $masked = Remove-ReviewRepositoryCitations -Text $form.Text -Paths $KnownPaths
+        foreach ($rule in $maskableRules) { & $check $rule.Name $form.Name $masked (Get-ReviewPublishPattern -Rule $rule) }
+    }
+}
+
+function Get-ReviewGitHubFormHits {
+    param([AllowEmptyString()][string]$Html, [string[]]$KnownPaths = @())
+
+    # The github form is the text a reader sees in GitHub's rendered HTML: every tag dropped as an HTML5
+    # tokenizer reads them, so attributes (link targets, Mermaid's data-plain copy) go and text joins
+    # across inline tags, then GitHub's character references decoded. It is plain text, so it is scanned
+    # as it is and decoded and unescaped once more (github, github-decoded, github-unescaped). It is an
+    # extra form: GitHub's HTML does not show what the browser later does to it (hidden rp text, bidi
+    # reordering, math and Mermaid drawn by scripts), so the fail-closed rules on the body stay.
+    $text = [System.Net.WebUtility]::HtmlDecode((Remove-ReviewMarkup -Text $Html -Html -Document))
+    foreach ($form in @(@('github', $text), @('github-decoded', (ConvertFrom-ReviewEntities -Text $text)))) {
+        $match = [regex]::Match($form[1], $script:ReviewBidiPattern)
+        if ($match.Success) { "rule bidi-control matched the $($form[0]) form at offset $($match.Index) (length $($match.Length))" }
+    }
+    Get-ReviewRuleHits -Text $text -KnownPaths $KnownPaths -PlainText -FormPrefix 'github'
+}
+
 function Assert-ReviewOutputSafe {
     [CmdletBinding()]
     param(
         [AllowEmptyString()][string]$Text,
         [AllowEmptyString()][string]$Workspace = '',
         [string[]]$DiffPaths = @(),
+        # The context GitHub's renderer resolves references against.
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
         # For validated metadata such as a branch name: credential patterns only, no path or long-token rules.
         [switch]$CredentialsOnly
     )
 
-    $rules = @(Get-ReviewRedactionRules)
-    $credentialRules = @($rules | Where-Object { -not $_.Maskable })
-    $maskableRules = @($rules | Where-Object { $_.Maskable })
     $knownPaths = @()
     if ($Workspace -or $DiffPaths.Count -gt 0) {
         $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
@@ -1014,27 +1142,20 @@ function Assert-ReviewOutputSafe {
             if ($renderer) { $hits.Add("rule $($renderer.Rule) matched the $($form.Name) form at offset $($renderer.Offset) (length $($renderer.Length))") }
         }
     }
-    # Absolute roots and credential patterns always scan the unmasked text.
-    foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
-        if (-not $CredentialsOnly) { & $check 'absolute-root' $form.Name $form.Text $script:ReviewAbsoluteRootPattern }
-        foreach ($rule in $credentialRules) { & $check $rule.Name $form.Name $form.Text (Get-ReviewPublishPattern -Rule $rule) }
-    }
-    if (-not $CredentialsOnly) {
-        # Known relative citations are masked only for the profile-segment and long-token checks, first in
-        # the raw text (so decoding cannot break a citation) and again in each decoded form. Offsets for
-        # these two rules count in that masked text.
-        $maskedText = Remove-ReviewRepositoryCitations -Text $Text -Paths $knownPaths
-        foreach ($form in (Get-ReviewNamedScanForms -Text $maskedText)) {
-            $masked = Remove-ReviewRepositoryCitations -Text $form.Text -Paths $knownPaths
-            & $check 'profile-segment' $form.Name $masked $script:ReviewProfileSegmentPattern
+    foreach ($hit in @(Get-ReviewRuleHits -Text $Text -KnownPaths $knownPaths -CredentialsOnly:$CredentialsOnly)) { $hits.Add($hit) }
+    # GitHub's own rendering is scanned too, never instead: only once every form above passes, so a body
+    # they reject is never sent anywhere. A failed or timed-out call fails closed (markdown-render).
+    if (-not $CredentialsOnly -and $hits.Count -eq 0) {
+        $html = $null
+        try {
+            $html = Invoke-ReviewMarkdownRender -Text $Text -Repository $Repository -WorkingDirectory $Workspace
+        } catch {
+            # Only the renderer's own messages are logged; any other error may quote what it was sent.
+            $reason = if ($_.Exception -is [System.TimeoutException] -or $_.Exception -is [System.InvalidOperationException]) { $_.Exception.Message } else { 'GitHub''s renderer failed' }
+            $hits.Add("rule markdown-render failed: $reason, so the github form was not scanned")
         }
-        # A web link's path is checked segment by segment, so a long documentation URL is not one token.
-        # Only slashes present before decoding split it, so an encoded slash cannot divide a token, and
-        # the query and fragment stay whole: signatures there may contain Base64 slashes.
-        $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
-        foreach ($form in (Get-ReviewNamedScanForms -Text $segmented)) {
-            $masked = Remove-ReviewRepositoryCitations -Text $form.Text -Paths $knownPaths
-            foreach ($rule in $maskableRules) { & $check $rule.Name $form.Name $masked (Get-ReviewPublishPattern -Rule $rule) }
+        if ($null -ne $html) {
+            foreach ($hit in @(Get-ReviewGitHubFormHits -Html $html -KnownPaths $knownPaths)) { $hits.Add($hit) }
         }
     }
     if ($hits.Count -gt 0) {
@@ -2311,6 +2432,7 @@ function Write-ReviewResult {
         [AllowEmptyString()][string]$BaseRef = '',
         [AllowEmptyString()][string]$Workspace = '',
         [string[]]$DiffPaths = @(),
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
         [bool]$PublishMarker = $true
     )
 
@@ -2343,7 +2465,7 @@ function Write-ReviewResult {
         }
     }
     $body = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**." -f $CoverageLine.Trim(), $Result.Output.Trim(), $label
-    Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths
+    Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
     # The marker contains validated Git metadata; its SHA intentionally resembles a long token.
     $body += $marker
     $body | Out-File -LiteralPath $OutputPath -Encoding utf8
