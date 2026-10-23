@@ -1,0 +1,148 @@
+"""No test, and no code a test runs, reads a file on the CI skip list (#750).
+
+A change touching only `CI_SKIP_UNREAD_PATHS` entries skips the test jobs, so a test reading one of them would never
+run against a change to it. The scan fails closed: any string literal naming a listed path counts as a read.
+"""
+
+import ast
+import io
+import tokenize
+import warnings
+from pathlib import Path, PurePosixPath
+
+import yaml
+
+from test_ci_workflow import ROOT, WORKFLOW, _skip_list
+
+
+SCANNED_DIRS = ("tests", "harness", "harness_modules", "sdk", "scripts", "macrunner", "bakeoff", "tools")
+SKIPPED_DIR_NAMES = {"node_modules", "__pycache__", ".venv"}
+
+EXEMPT_FILES = {
+    # The skip list's own guard: it names every entry to pin the list.
+    "tests/test_ci_workflow.py",
+    # Passes `LICENSE` and `docs/phase0-results.md` to ci_gate as values and writes them only into a tmp_path repo.
+    "tests/test_ci_gate.py",
+    # This scan and its synthetic self-test trees.
+    "tests/test_ci_skip_list.py",
+}
+
+EXEMPT_PAIRS = {
+    # Module metadata the settings API returns as a string (`"docs": spec.docs`); never opened.
+    ("harness_modules/images/__init__.py", "docs/flux-fast.md"),
+}
+
+_STRING_PART_TOKENS = {
+    tokenize.STRING,
+    *(getattr(tokenize, name) for name in ("FSTRING_MIDDLE", "TSTRING_MIDDLE") if hasattr(tokenize, name)),
+}
+
+
+def _docstring_spans(tree: ast.AST) -> dict[tuple[int, int], tuple[int, int]]:
+    """Map each docstring's start position to its end."""
+    spans = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        first = node.body[0] if node.body else None
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+            spans[(first.lineno, first.col_offset)] = (first.end_lineno, first.end_col_offset)
+    return spans
+
+
+def _literal_text(tok: tokenize.TokenInfo) -> str:
+    if tok.type != tokenize.STRING:
+        return tok.string
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            return ast.literal_eval(tok.string)
+    except (ValueError, SyntaxError):
+        # An f-string tokenized whole (Python < 3.12): drop the prefix and quotes, keep the text.
+        body = tok.string.lstrip("rRbBuUfFtT")
+        quote = body[:3] if body[:3] in ('"""', "'''") else body[:1]
+        return body[len(quote) : len(body) - len(quote)]
+
+
+def _string_literals(source: str):
+    """Yield (line, text) for every string literal and f-string part, skipping docstrings; comments never tokenize as strings."""
+    with warnings.catch_warnings():
+        # Some scanned sources hold invalid escape sequences; that is for lint to report, not this scan.
+        warnings.simplefilter("ignore", SyntaxWarning)
+        docstrings = _docstring_spans(ast.parse(source))
+    docstring_end = (0, 0)
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type not in _STRING_PART_TOKENS:
+            continue
+        docstring_end = docstrings.get(tok.start, docstring_end)
+        if tok.end <= docstring_end:
+            continue
+        text = _literal_text(tok)
+        if isinstance(text, str):
+            yield tok.start[0], text
+
+
+def _names(literal: str, listed: str, basename: str) -> bool:
+    if "." not in basename:
+        # `LICENSE` counts only as the whole literal, so `LICENSE.txt` and prose don't trip it.
+        return literal == basename or ("/" in listed and listed in literal)
+    return basename in literal
+
+
+def find_reads(root: Path, listed_paths: list[str]) -> list[str]:
+    """Return `file:line names listed/path` for each scanned literal naming a listed path, minus the exemptions."""
+    basenames = {listed: PurePosixPath(listed).name for listed in listed_paths}
+    found = []
+    for top in SCANNED_DIRS:
+        for path in sorted((root / top).rglob("*.py")):
+            rel = path.relative_to(root).as_posix()
+            if rel in EXEMPT_FILES or SKIPPED_DIR_NAMES.intersection(path.relative_to(root).parts):
+                continue
+            source = path.read_text(encoding="utf-8")
+            for line, literal in _string_literals(source):
+                for listed, basename in basenames.items():
+                    if _names(literal, listed, basename) and (rel, listed) not in EXEMPT_PAIRS:
+                        found.append(f"{rel}:{line} names {listed}")
+    return found
+
+
+def test_no_scanned_code_reads_a_ci_skip_list_entry():
+    listed = _skip_list(yaml.safe_load(WORKFLOW.read_text(encoding="utf-8")))
+    assert listed
+    found = find_reads(ROOT, listed)
+    assert not found, (
+        "These files name a CI_SKIP_UNREAD_PATHS entry, so a change to it would skip them. Remove the path from the "
+        "list in .github/workflows/ci.yml (and EXPECTED_SKIP_PATHS) in the same change:\n" + "\n".join(found)
+    )
+
+
+def test_scan_reports_a_read_by_path_parts_and_ignores_lookalikes(tmp_path):
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_reads.py").write_text(
+        'from pathlib import Path\nROOT = Path(__file__).parents[1]\n\n\n'
+        'def test_x():\n    assert (ROOT / "docs" / "phase0-results.md").read_text()\n',
+        encoding="utf-8",
+    )
+    (tests / "test_lookalikes.py").write_text(
+        '"""Cites docs/phase0-results.md and LICENSE in a docstring."""\n'
+        "# docs/phase0-results.md in a comment\n"
+        'NAME = "LICENSE.txt"\nPROSE = "see the LICENSE file"\n',
+        encoding="utf-8",
+    )
+
+    found = find_reads(tmp_path, ["LICENSE", "docs/phase0-results.md"])
+
+    assert found == ["tests/test_reads.py:6 names docs/phase0-results.md"]
+
+
+def test_scan_catches_whole_license_and_f_string_parts(tmp_path):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "reader.py").write_text(
+        'import pathlib\n\nlicense = pathlib.Path("LICENSE")\nresults = f"{pathlib.Path.cwd()}/docs/phase4-results.md"\n',
+        encoding="utf-8",
+    )
+
+    found = find_reads(tmp_path, ["LICENSE", "docs/phase4-results.md"])
+
+    assert found == ["scripts/reader.py:3 names LICENSE", "scripts/reader.py:4 names docs/phase4-results.md"]
