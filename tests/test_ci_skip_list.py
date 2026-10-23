@@ -16,7 +16,6 @@ from test_ci_workflow import ROOT, WORKFLOW, _skip_list
 
 
 SCANNED_DIRS = ("tests", "harness", "harness_modules", "sdk", "scripts", "macrunner", "bakeoff", "tools")
-SKIPPED_DIR_NAMES = {"node_modules", "__pycache__", ".venv"}
 
 EXEMPT_FILES = {
     # The skip list's own guard: it names every entry to pin the list.
@@ -38,15 +37,22 @@ _STRING_PART_TOKENS = {
 }
 
 
-def _docstring_spans(tree: ast.AST) -> dict[tuple[int, int], tuple[int, int]]:
-    """Map each docstring's start position to its end."""
+def _docstring_spans(tree: ast.AST, lines: list[str]) -> dict[tuple[int, int], tuple[int, int]]:
+    """Map each docstring's start position to its end, in tokenize's (line, character) coordinates."""
+
+    def position(line: int, byte_col: int) -> tuple[int, int]:
+        # ast columns count UTF-8 bytes; tokenize columns count characters.
+        return line, len(lines[line - 1].encode("utf-8")[:byte_col].decode("utf-8"))
+
     spans = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         first = node.body[0] if node.body else None
         if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
-            spans[(first.lineno, first.col_offset)] = (first.end_lineno, first.end_col_offset)
+            # The string's own span, not the statement's, which starts at a `(` around it.
+            doc = first.value
+            spans[position(doc.lineno, doc.col_offset)] = position(doc.end_lineno, doc.end_col_offset)
     return spans
 
 
@@ -69,7 +75,7 @@ def _string_literals(source: str):
     with warnings.catch_warnings():
         # Some scanned sources hold invalid escape sequences; that is for lint to report, not this scan.
         warnings.simplefilter("ignore", SyntaxWarning)
-        docstrings = _docstring_spans(ast.parse(source))
+        docstrings = _docstring_spans(ast.parse(source), source.splitlines(keepends=True))
     docstring_end = (0, 0)
     for tok in tokenize.generate_tokens(io.StringIO(source).readline):
         if tok.type not in _STRING_PART_TOKENS:
@@ -96,7 +102,7 @@ def find_reads(root: Path, listed_paths: list[str]) -> list[str]:
     for top in SCANNED_DIRS:
         for path in sorted((root / top).rglob("*.py")):
             rel = path.relative_to(root).as_posix()
-            if rel in EXEMPT_FILES or SKIPPED_DIR_NAMES.intersection(path.relative_to(root).parts):
+            if rel in EXEMPT_FILES:
                 continue
             source = path.read_text(encoding="utf-8")
             for line, literal in _string_literals(source):
@@ -146,3 +152,17 @@ def test_scan_catches_whole_license_and_f_string_parts(tmp_path):
     found = find_reads(tmp_path, ["LICENSE", "docs/phase4-results.md"])
 
     assert found == ["scripts/reader.py:3 names LICENSE", "scripts/reader.py:4 names docs/phase4-results.md"]
+
+
+def test_scan_ignores_only_the_docstring_itself(tmp_path):
+    (tmp_path / "tools" / ".venv").mkdir(parents=True)
+    (tmp_path / "tools" / "accented.py").write_text(
+        '"""' + "é" * 80 + '"""; import pathlib; pathlib.Path("docs/phase0-results.md").read_text()\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "tools" / "parenthesized.py").write_text('("docs/phase0-results.md")\n', encoding="utf-8")
+    (tmp_path / "tools" / ".venv" / "reader.py").write_text('open("docs/phase0-results.md")\n', encoding="utf-8")
+
+    found = find_reads(tmp_path, ["docs/phase0-results.md"])
+
+    assert found == ["tools/.venv/reader.py:1 names docs/phase0-results.md", "tools/accented.py:1 names docs/phase0-results.md"]
