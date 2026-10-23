@@ -142,8 +142,12 @@ def pin_session_free_space(monkeypatch, free_gb: float):
 
 
 @pytest.fixture(autouse=True)
-def plenty_of_disk(monkeypatch):
-    pin_session_free_space(monkeypatch, PLENTY_FREE_GB)
+def plenty_of_disk():
+    """Its own patcher, so a test's `monkeypatch.undo()` does not drop the pin (#789)."""
+    patcher = pytest.MonkeyPatch()
+    pin_session_free_space(patcher, PLENTY_FREE_GB)
+    yield
+    patcher.undo()
 
 
 def awake_model(monkeypatch):
