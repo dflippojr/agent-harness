@@ -81,6 +81,7 @@ ACTIVE = ("queued", "running", *WAITING)
 # Set on `run` when the run first goes `running`: it holds a place under its member's or App's running cap until the
 # run ends, parked or queued again meanwhile (and across a daemon restart). new_run() does not carry it (#524).
 HOLDS_PLACE = "holds_place"
+DEVICE_KEY = "device_key"  # a `_backend_credential` source: a device key's session, never run on a hosted backend (#786)
 RUN_SECONDS = "run_seconds"  # on `run`: its time spent running so far, kept for a restart (#524)
 # Set on `run` in the write that commits a live run's final status, RUN_FINISHED once its run_finished commits, and
 # cleared after its branch save and transcript: a daemon stopped in between leaves it set, and the next start finishes
@@ -1329,6 +1330,8 @@ class Runner:
         if credential["policy"] == "denied" and credential["source"] == "member_api_key":
             raise CliBackendError(f"add your API key in your settings to use {backend_name.title()}",
                                   member_keys.REQUIRED)
+        if credential["policy"] == "denied" and credential["source"] == DEVICE_KEY:
+            raise CliBackendError(f"device tokens cannot use {backend_name}; they run on the local model")
         if credential["policy"] == "denied":
             raise CliBackendError(f"{backend_name} credential policy was revoked for this app")
         use_api_key = credential["policy"] == "api_key" or s["run"].get("backend_auth") == "api_key"
@@ -1540,6 +1543,11 @@ class Runner:
         app_id = s.get("app_id") or ""
         assignment = self.db.app_provider_credential(app_id, s["backend"]) if app_id else None
         member = member_keys.member_of(s.get("end_user") or "") if not app_id else ""
+        if app_id and (self.db.get_api_key(app_id) or {}).get("kind") == "device":
+            # A device key's session never runs on a hosted or kind: cli backend (#786), not even one it started
+            # before `create` refused that, when it is resumed.
+            return {"policy": "denied", "key": "", "source": DEVICE_KEY, "assignment_id": "", "path": "",
+                    "marker": None}
         if member:
             # A household member's own API key (#393), whatever the owner has configured: never the owner's login,
             # token or key. Without a key the credential is denied and the session refused.

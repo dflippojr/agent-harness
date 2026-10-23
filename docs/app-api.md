@@ -588,7 +588,9 @@ for a retry under the same [`Idempotency-Key`](#retrying-a-create-safely-idempot
   that long, as `DELETE` does; without it your App's default retention applies (see
   [Where an App's data lives](#where-an-apps-data-lives)).
 - `backend` is `local` (the tower model) or a hosted CLI id such as `claude`, `codex`, or `cursor`
-  (`GET /api/v1` lists enabled backends). Hosted sessions use the user's own subscription login.
+  (`GET /api/v1` lists enabled backends). Hosted sessions use the user's own subscription login. A device token
+  gets `403 provider_not_allowed` for any backend but `local`, whatever login comes with it, and a device session is
+  never resumed on one either (#786).
 - `end_user` (optional, App tokens only, with `backend` `claude` or `codex`) runs the session on **that person's own
   subscription**: your App's own opaque id for them, 1-128 letters, digits and `_.@:-`. The person must have signed
   in first ([End users' own logins](#end-users-own-logins)). Without a login the request is refused with `409
