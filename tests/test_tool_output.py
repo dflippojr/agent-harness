@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from harness import config
+from harness import compaction, config
 from harness.config import (Project, ToolOutputConfig, VerifyCheck, _tool_output, _verify_checks,
                             clamp_tool_limit, resolve_tool_output)
 from harness.llm import Completion
@@ -335,4 +335,60 @@ def test_bookkeeping_results_are_bounded_like_every_other_result(tmp_path):
         finally:
             await m.stop()
     m = sid = None
+    asyncio.run(body())
+
+
+def _assert_recoverable(m: Manager, sid: str, seen: str, digest: str) -> None:
+    """A result cut to fit the turn keeps its read_artifact footer, and the footer's id recovers the whole page."""
+    assert ARTIFACT_FOOTER.format(total=len(PAGE), artifact_id=digest) in seen, seen[-400:]
+    assert seen.startswith(PAGE[:200]) and m.db.full_artifact(sid, digest) == PAGE
+
+
+def test_a_bounded_result_cut_to_fit_a_small_context_keeps_its_footer(tmp_path):
+    """#775 review: at 8192 tokens the turn's budget (about 8,600 characters) cut the bounded result's tail and
+    footer, so the model never learned the artifact id."""
+    digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call("web_fetch", 0, url="big")]), Completion(content="done")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path, context_tokens=8192), chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        try:
+            sid = m.create("read the page")["id"]
+            s = await wait_status(m, sid, "done", "failed")
+            assert s["status"] == "done", s["stop_reason"]
+            seen = script.requests[1][-1]["content"]
+            _assert_recoverable(m, sid, seen, digest)
+            assert compaction.OUTPUT_CUT in seen
+            budget = int(0.35 * 8192 * 3.0)
+            assert len(seen) <= budget, len(seen)
+            assert events(m, sid, "tool_result")[0]["artifact_id"] == digest
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
+def test_several_large_results_in_one_turn_all_keep_their_footers(tmp_path):
+    """#775 review: four large fetches in one turn at the shipped 65,536 tokens; the fourth lost its footer."""
+    digest = hashlib.sha256(PAGE.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call("web_fetch", i, url="big") for i in range(4)]),
+                     Completion(content="done")])
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=script)
+        m.runner.web = _FakeWeb()
+        await m.start()
+        try:
+            sid = m.create("read the pages")["id"]
+            s = await wait_status(m, sid, "done", "failed")
+            assert s["status"] == "done", s["stop_reason"]
+            results = [msg["content"] for msg in script.requests[1] if msg["role"] == "tool"]
+            assert len(results) == 4
+            for seen in results:
+                _assert_recoverable(m, sid, seen, digest)
+            assert compaction.OUTPUT_CUT in results[-1]
+            assert sum(len(r) for r in results) <= int(0.35 * 65536 * 3.0)
+        finally:
+            await m.stop()
     asyncio.run(body())
