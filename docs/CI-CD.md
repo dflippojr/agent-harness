@@ -359,7 +359,18 @@ backtick (otherwise no span hides anything), and never on a line where a span ho
 wherever a `|` is. Rule `line-break` rejects, raw or decoded and before any of this, every line break but LF and CRLF:
 a bare CR (GitHub ends a line there; the scans do not), vertical tab, form feed, NEL, U+2028 and U+2029. So
 `$5 and $10`, `$HOME/$USER` and `` `$a` `` still publish. Rule `mermaid` rejects a `mermaid` fence. GeoJSON, TopoJSON
-and STL are not modeled, and no scan stops a value spelled out in pieces in prose. Known
+and STL are not modeled, and no scan stops a value spelled out in pieces in prose. Once every rule above passes, the
+wrapper also asks GitHub's own renderer: it sends the body to `POST /markdown` (`gfm` mode, the repository as context,
+through `gh` on stdin), drops every tag from the returned HTML, decodes its character references and runs the
+credential, path and long-token rules and `bidi-control` on that text (forms `github`, `github-decoded` and
+`github-unescaped`), so the scan also sees what GitHub's renderer shows. It is an extra form, never a replacement: the
+HTML does not show what the browser does next (hidden ruby text, `dir` reordering, math and Mermaid drawn by scripts),
+so every rule above stays. A body those rules reject is never sent, and validated metadata is never rendered. If the
+call fails, returns nothing or takes more than 30 seconds, rule `markdown-render` fails the body closed; the warning says
+which, without the body or `gh`'s output. `tests/fixtures/review_markdown/rendered.json` holds GitHub's real answers for
+the scan's test payloads (regenerate it with `Update-RenderedFixtures.ps1` beside it), so the tests make no network
+calls; it also records which fail-closed rejections GitHub renders harmlessly, the candidates for relaxing a rule in a
+separate, reviewed change. Known
 citations are masked in the raw text before decoding and again in each decoded form, in their raw, normalized and
 rendered spellings; a name counts as known only if every one of those spellings is relative. This is intentionally
 conservative: benign prose and examples matching a credential or path rule are also rejected, so the review prompt
@@ -367,7 +378,8 @@ tells the backend to cite only repository-relative paths and describe credential
 treated as a token when it reads as an identifier (only letters, slashes, underscores and hyphens, with at least one
 underscore or hyphen, and digits only as up to four ending a lowercase word, as in `c1` or `sha256`), so long test and
 function names stay publishable. A rejection logs a warning per hit naming the rule, the scan form (`raw`, `decoded`,
-`unescaped`, `rendered`, `literal` or `html`) and the offset and length of the match, never the matched text. The base ref in the coverage
+`unescaped`, `rendered`, `literal`, `html`, `github`, `github-decoded` or `github-unescaped`) and the offset and length
+of the match, never the matched text. The base ref in the coverage
 marker is already validated as a branch name and is checked against the credential patterns only. For publication, the bearer
 and named-credential rules (`token`, `secret`, `password`, `api_key` and similar followed by `:` or `=`) match only a
 value that looks like a credential: a non-empty quoted literal that is not a reference (`$VAR`, `${{ ... }}`, `%VAR%`,

@@ -18,6 +18,12 @@ SCRIPT = ROOT / "ops" / "review" / "run-review.ps1"
 WORKFLOW = ROOT / ".github" / "workflows" / "review.yml"
 CI_DOCS = ROOT / "docs" / "CI-CD.md"
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
+# GitHub's renderer for the publication scan, stubbed so no dot-sourced test calls the network: plain text
+# renders as itself, encoded. The script-level tests below answer the real call through their fake gh.
+RENDER_STUB = (
+    "function Invoke-ReviewMarkdownRender { param([string]$Text, [string]$Repository, [string]$WorkingDirectory) "
+    "'<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }"
+)
 
 
 def run_powershell(tmp_path: Path, body: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -26,7 +32,7 @@ def run_powershell(tmp_path: Path, body: str, timeout: int = 30) -> subprocess.C
     wrapper = tmp_path / "review-test.ps1"
     script_path = str(SCRIPT).replace("'", "''")
     wrapper.write_text(
-        f". '{script_path}'\n{body}\n",
+        f". '{script_path}'\n{RENDER_STUB}\n{body}\n",
         encoding="utf-8",
     )
     return subprocess.run(
@@ -1587,6 +1593,7 @@ static class Launcher
 '''
 
 FAKE_CLI_PY = r'''
+import html
 import json
 import os
 import sys
@@ -1595,7 +1602,9 @@ from pathlib import Path
 here = Path(__file__).resolve().parent
 name, argv = sys.argv[1], sys.argv[2:]
 config = json.loads((here / "config.json").read_text(encoding="utf-8"))
-stdin = "" if name == "gh" else sys.stdin.buffer.read().decode("utf-8")
+# gh reads stdin only when told to (gh api --input -); its other calls inherit an open stdin.
+reads_stdin = name != "gh" or argv[-2:] == ["--input", "-"]
+stdin = sys.stdin.buffer.read().decode("utf-8") if reads_stdin else ""
 cwd = Path.cwd()
 record = {
     "name": name, "argv": argv, "stdin": stdin, "cwd": str(cwd),
@@ -1610,6 +1619,9 @@ if rule is None:
     sys.exit(99)
 if "result" in rule:
     Path(argv[argv.index("--output-last-message") + 1]).write_text(rule["result"], encoding="utf-8")
+if rule.get("render"):
+    # POST /markdown for plain text: the text, HTML-encoded, in a paragraph.
+    rule["stdout"] = "<p>" + html.escape(json.loads(stdin)["text"]) + "</p>"
 sys.stdout.buffer.write(rule.get("stdout", "").encode("utf-8"))
 sys.stderr.buffer.write(rule.get("stderr", "").encode("utf-8"))
 sys.exit(rule.get("exit", 0))
@@ -1627,6 +1639,7 @@ CAFE_DIFF = (
 APP_DIFF = "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-old value\n+new value\n"
 REPO_COMMENTS_ARGV = ["api", "repos/owner/repo/issues/7/comments?per_page=100&page=1"]
 PR_VIEW_ARGV = ["pr", "view", "7", "--json", "headRefOid,baseRefName"]
+MARKDOWN_ARGV = ["api", "--method", "POST", "markdown", "--input", "-"]
 BACKEND_SECRETS = {"GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"}
 PARENT_ONLY_NAMES = {"GITHUB_OUTPUT", "GITHUB_REPOSITORY", "PR_NUMBER", "REVIEW_PROMPT", "RUNNER_TEMP"}
 
@@ -1658,6 +1671,7 @@ def _gh_responses(diff: str | None = APP_DIFF, comments: list | None = None, com
         rules.append({"match": [compare_url], "stdout": json.dumps(compare)})
     if diff is not None:
         rules.append({"match": ["pr diff 7"], "stdout": diff})
+    rules.append({"match": [" ".join(MARKDOWN_ARGV)], "render": True})
     return rules
 
 
@@ -1764,8 +1778,8 @@ def test_review_script_falls_back_to_claude_and_publishes_a_full_review(tmp_path
     assert "Review completed with backend: claude (full)" in run.text
     assert "rate limit or quota response" in run.text
 
-    assert [call["name"] for call in run.calls] == ["gh", "gh", "gh", "codex", "claude"]
-    assert [call["argv"] for call in run.gh] == [PR_VIEW_ARGV, REPO_COMMENTS_ARGV, ["pr", "diff", "7"]]
+    assert [call["name"] for call in run.calls] == ["gh", "gh", "gh", "codex", "claude", "gh"]
+    assert [call["argv"] for call in run.gh] == [PR_VIEW_ARGV, REPO_COMMENTS_ARGV, ["pr", "diff", "7"], MARKDOWN_ARGV]
     codex, claude = run.backends
     assert _flag_value(codex["argv"], "--model") == "gpt-test"
     assert _flag_value(codex["argv"], "--sandbox") == "read-only"
@@ -1794,6 +1808,10 @@ def test_review_script_falls_back_to_claude_and_publishes_a_full_review(tmp_path
         "backend": "claude", "verdict": "findings", "findings": "1", "omitted_files": "0",
         "model": "claude-opus-5-5", "effort": "high",
     }
+    # GitHub rendered the body that was published, minus the marker, as gfm in this repository's context (#767).
+    request = json.loads(run.gh[-1]["stdin"])
+    assert request == {"text": request["text"], "mode": "gfm", "context": "owner/repo"}
+    assert request["text"].replace("\r\n", "\n") == run.body.rstrip().rsplit("\n\n", 1)[0]
 
 
 def test_review_script_reviews_only_the_new_commits_when_a_bot_marker_allows_it(tmp_path, fake_cli_launcher):
@@ -1831,6 +1849,7 @@ def test_review_script_reviews_only_the_new_commits_when_a_bot_marker_allows_it(
         REPO_COMMENTS_ARGV,
         ["api", compare_url],
         ["api", "-H", "Accept: application/vnd.github.v3.diff", compare_url],
+        MARKDOWN_ARGV,
     ]
     assert [call["name"] for call in run.backends] == ["codex"]
     _assert_backend_environment_is_scrubbed(run)
@@ -1860,7 +1879,7 @@ def test_review_script_names_omitted_files_and_withholds_the_marker_for_an_overs
         {"REVIEW_BACKEND": "claude", "REVIEW_MAX_DIFF_BYTES": "20480"},
     )
     assert run.result.returncode == 0, run.text
-    assert [call["argv"] for call in run.gh][-1] == ["pr", "diff", "7"]
+    assert [call["argv"] for call in run.gh][-2:] == [["pr", "diff", "7"], MARKDOWN_ARGV]
     first = run.body.splitlines()[0]
     assert first.startswith("PARTIAL REVIEW: reviewed 1 of 2 files (")
     assert first.endswith("Not reviewed: src/two.py")
@@ -1894,6 +1913,29 @@ def test_review_script_refuses_to_publish_a_token_in_the_review(tmp_path, fake_c
     assert token not in run.text
     assert run.body is None
     assert run.outputs is None
+    # A body the local scan forms reject is never sent to GitHub's renderer (#767).
+    assert MARKDOWN_ARGV not in [call["argv"] for call in run.gh]
+
+
+def test_review_script_fails_closed_when_github_cannot_render_the_review(tmp_path, fake_cli_launcher):
+    """Scenario (d2): the review is safe but GitHub's renderer fails, so the github form goes unscanned and the job
+    fails with no body and no outputs. The warning names the rule and echoes neither the review nor gh's stderr."""
+    finding = "- src/app.py:1: synthetic finding text"
+    failing = {"match": [" ".join(MARKDOWN_ARGV)], "exit": 1, "stderr": f"gh: HTTP 502 for {finding}"}
+    run = _run_review_script(
+        tmp_path,
+        fake_cli_launcher,
+        {
+            "gh": [failing] + _gh_responses(),
+            "claude": [{"match": ["-p"], "stdout": f"{finding}\nREVIEW_VERDICT: FINDINGS 1\nREVIEW_STATUS: COMPLETE"}],
+        },
+        {"REVIEW_BACKEND": "claude"},
+    )
+    assert run.result.returncode != 0
+    assert "rule markdown-render failed: GitHub's renderer failed (gh exited with code 1)" in run.text
+    assert "Review did not complete" in run.text
+    assert "synthetic finding text" not in run.text
+    assert run.body is None and run.outputs is None
 
 
 # --- review-v3: the PR description and linked issues reach the reviewer as fenced untrusted data. ---
@@ -1951,6 +1993,7 @@ def test_review_script_spec_mode_fences_the_injected_issue_and_publishes_the_sum
         # Only this repository's issue is read; owner/elsewhere#99 is not.
         ["api", "repos/owner/repo/issues/12"],
         ["api", "repos/owner/repo/issues/12/comments?per_page=100&page=1"],
+        MARKDOWN_ARGV,
     ]
     _assert_backend_environment_is_scrubbed(run)
 
@@ -2080,6 +2123,6 @@ def test_review_script_without_spec_mode_keeps_the_review_v2_contract(tmp_path, 
         {"REVIEW_BACKEND": "claude"},
     )
     assert run.result.returncode == 0, run.text
-    assert [call["argv"] for call in run.gh] == [PR_VIEW_ARGV, REPO_COMMENTS_ARGV, ["pr", "diff", "7"]]
+    assert [call["argv"] for call in run.gh] == [PR_VIEW_ARGV, REPO_COMMENTS_ARGV, ["pr", "diff", "7"], MARKDOWN_ARGV]
     assert "UNTRUSTED SPECIFICATION" not in run.backends[0]["stdin"]
     assert "criteria=" not in run.body and "criteria" not in run.outputs
