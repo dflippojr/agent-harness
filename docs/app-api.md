@@ -199,8 +199,8 @@ Session ids stay unique across all stores. The `/api/v1` responses are the same 
 An enabled Tailscale member is a human principal on the same-origin `/api/v1` surface. `GET /api/v1/me` returns
 `role`, opaque `user_id`, and usage. Members may create empty tower projects or clone credential-free public HTTPS
 repositories from github.com, gitlab.com, or codeberg.org into their own managed area (`POST /api/v1/projects`,
-ambient Tailscale human only — never an app token). They create, list, steer, cancel, approve, and review only
-their own tower sessions (the local model, or Claude and Codex on their own API key), search only their own transcripts, and receive only their own live events.
+ambient Tailscale human only — never an App or device token, which get 403 whatever login comes with them). They
+create, list, steer, cancel, approve, and review only their own tower sessions (the local model, or Claude and Codex on their own API key), search only their own transcripts, and receive only their own live events.
 
 When the owner has turned on member GitHub sign-in ([`member-github-auth.md`](member-github-auth.md)), an
 ambient same-origin member (never a bearer token) manages **their own** connection:
@@ -268,7 +268,7 @@ member. Device and runner tokens gain no member authority.
 | Create projects | yes | empty or public HTTPS allowlist | no | no | no |
 | `/api/admin/v1`, `ho-` owner tokens | yes | 403 | 403 | 403 | 403 |
 | App-tools-only sessions (`tools_only`) | no | no | no | own only, never `sessions:all` | no |
-| Hosted backends, images, jobs, runners, Remote Control | yes | Claude and Codex on their own API key only; no images, jobs, runners or Remote Control | no | scopes for images/remote_control only | no |
+| Hosted backends, images, jobs, runners, Remote Control | yes | Claude and Codex on their own API key only; no images, jobs, runners or Remote Control | no | scopes for images/remote_control only | images and Remote Control only with an owner-granted scope (`images`, `remote_control`); no hosted backends, jobs or runners |
 | Homelab, memory library | yes | no | no | only with the `homelab` / `memory_library` scope | no |
 | Notifications, backups, keys | yes | no | no | no | no |
 | Member prompts, transcripts, diffs, repo contents | no (aggregate metadata only) | own only | no | no | no |
@@ -510,7 +510,7 @@ Generated from the route registrations (`scripts/docs/build.py`; do not edit bet
 | POST | `/api/v1/pair/requests/{rid}/token` | see source | Fetch the App's token once the owner approved (#519): minted now, returned once, to the verifier's holder. Until then it answers 409 `pairing_pending`. The body is read by hand, so a validation error can never echo the verifier back. | `harness/pairing_requests.py` `redeem_pairing_request` |
 | GET | `/api/v1/profile` | scope `sessions` | The profile emoji or its default; the choices list is always empty. | `harness/apps.py` `api_profile` |
 | GET | `/api/v1/projects` | scope `sessions` | The account's catalog projects, with repository URLs withheld. | `harness/apps.py` `api_projects` |
-| POST | `/api/v1/projects` | scope `sessions` | Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected. | `harness/apps.py` `api_create_project` |
+| POST | `/api/v1/projects` | scope `sessions` | Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected. App and device tokens get 403. | `harness/apps.py` `api_create_project` |
 | GET | `/api/v1/queue` | scope `sessions` | Queue positions of the caller's sessions for the GPU slot, where 0 holds it and 1 and up are waiting. | `harness/apps.py` `api_queue` |
 | GET | `/api/v1/remote-control` | scope `remote_control` | Report whether Remote Control is enabled and each project's state. | `harness_modules/remote_control/routes.py` `app_rc_status` |
 | POST | `/api/v1/remote-control/{project}` | scope `remote_control` | Start a Remote Control server for a project and return once it is ready to pair; Claude Code must already trust the folder. | `harness_modules/remote_control/routes.py` `app_rc_launch` |
@@ -588,7 +588,11 @@ for a retry under the same [`Idempotency-Key`](#retrying-a-create-safely-idempot
   that long, as `DELETE` does; without it your App's default retention applies (see
   [Where an App's data lives](#where-an-apps-data-lives)).
 - `backend` is `local` (the tower model) or a hosted CLI id such as `claude`, `codex`, or `cursor`
-  (`GET /api/v1` lists enabled backends). Hosted sessions use the user's own subscription login.
+  (`GET /api/v1` lists enabled backends). Hosted sessions use the user's own subscription login. A device token
+  gets `403 provider_not_allowed` for a built-in hosted backend (`claude`, `codex`, `cursor`), whatever login comes
+  with it, and a device session is never resumed on one either: a message to one gets the same 403 (#786).
+  `GET /api/v1/backends` lists those backends to a device token as unavailable, with `provider_policy.allowed`
+  false.
 - `end_user` (optional, App tokens only, with `backend` `claude` or `codex`) runs the session on **that person's own
   subscription**: your App's own opaque id for them, 1-128 letters, digits and `_.@:-`. The person must have signed
   in first ([End users' own logins](#end-users-own-logins)). Without a login the request is refused with `409

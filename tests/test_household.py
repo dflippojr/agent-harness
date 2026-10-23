@@ -16,8 +16,9 @@ from harness.accounts import AccountService, DEFAULT_DISK_QUOTA_BYTES
 from harness.admin import PREFIX
 from harness.api import create_app
 from harness.apps import API_VERSION as APP_API_VERSION
+from harness.cli_backends import CliBackendError
 from harness.clone import CloneRefused, QuotaExceeded, isolated_clone_env, isolated_prepare, isolated_refresh_origin, public_https_url
-from harness.config import GuestAccess, Project
+from harness.config import BackendConfig, GuestAccess, Project
 from harness.db import Database
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
@@ -27,6 +28,7 @@ from harness.storage import (ContainmentError, account_usage_bytes, contained, e
                              require_contained, user_root, workspaces_dir)
 from harness.tools import ToolError, Workspace
 
+from test_cli_print_mode import opencode_backend
 from test_daemon import Script, make_cfg
 from waits import scaled
 
@@ -286,6 +288,140 @@ def test_two_member_adversarial_matrix(tmp_path):
         assert alice_s["id"] in own
         assert bob_s["id"] not in own
         assert owner_s["id"] not in own
+
+
+def test_device_keys_cannot_create_projects_whatever_identity_comes_with_them(tmp_path):
+    """#786: a device key gets the App token's refusal on loopback and beside the owner's Tailscale login, and no
+    project is stored; the owner's key and the owner's login still create one."""
+    client, m = household(tmp_path)
+    with client:
+        device = client.post("/keys", json={"name": "zed", "scopes": ["sessions"]}).json()
+        owner = client.post("/keys", json={"name": "cc", "kind": "owner", "scopes": ["admin"]}).json()
+        assert (device["kind"], owner["kind"]) == ("device", "owner")
+        client.local_owner = False  # a pure bearer caller on loopback
+        bearer = {"Authorization": f"Bearer {device['key']}"}
+        before = set(m.cfg.projects)
+        for headers in (bearer, {**H(OWNER), **bearer}):
+            r = client.post("/api/v1/projects", headers=headers, json={"name": "from-device", "repo": str(tmp_path)})
+            assert r.status_code == 403, r.text
+            error = r.json()["error"]
+            assert (error["code"], error["message"]) == ("forbidden", "device tokens cannot create projects")
+        assert set(m.cfg.projects) == before
+        overlay = m.cfg.projects_overlay_path
+        assert not overlay.exists() or "from-device" not in overlay.read_text(encoding="utf-8")
+        for name, headers in (("by-key", {"Authorization": f"Bearer {owner['key']}"}), ("by-login", H(OWNER))):
+            created = client.post("/api/v1/projects", headers=headers, json={"name": name, "repo": str(tmp_path)})
+            assert created.status_code == 201, created.text
+            assert m.cfg.projects[name].owner_id == OWNER_USER_ID
+
+
+def test_device_keys_cannot_start_hosted_sessions_whatever_identity_comes_with_them(tmp_path):
+    """#786: with the built-in backends enabled, a `sessions` device key gets 403 for each of them on loopback and
+    beside the owner's Tailscale login, and no session starts; it keeps the local model, a kind: cli backend keeps
+    its own grant rule, and an App key and the owner's key still start hosted sessions."""
+    client, m = household(tmp_path)
+    m.cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5")
+    m.cfg.backends["codex"] = BackendConfig(enabled=True, model="gpt-5.6-sol")
+    m.cfg.backends["opencode"] = opencode_backend()
+    m.cfg.cleanup.min_free_gb = 0
+    m._spawn = lambda *_args, **_kwargs: None
+    with client:
+        device = client.post("/keys", json={"name": "zed", "scopes": ["sessions"]}).json()
+        app = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions"]}).json()
+        owner = client.post("/keys", json={"name": "cc", "kind": "owner", "scopes": ["admin"]}).json()
+        assert (device["kind"], app["kind"], owner["kind"]) == ("device", "app", "owner")
+        client.local_owner = False  # a pure bearer caller on loopback
+        bearer = {"Authorization": f"Bearer {device['key']}"}
+        device_sessions = m.db.for_app(device["id"])
+        for headers in (bearer, {**H(OWNER), **bearer}):
+            for backend in ("claude", "codex"):
+                r = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hello", "backend": backend})
+                assert r.status_code == 403, r.text
+                error = r.json()["error"]
+                assert (error["code"], error["message"]) == (
+                    "provider_not_allowed",
+                    f"backend {backend!r} is only for the owner and App tokens; device tokens run on the local model")
+            # Not a built-in backend: the answer any key the owner has not granted it gets (#168), as before.
+            r = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hello", "backend": "opencode"})
+            assert r.status_code == 403, r.text
+            assert r.json()["error"]["message"] == "this app is not allowed to use backend 'opencode'"
+        assert device_sessions.list_sessions(50, owner_id="owner") == []
+        local = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "hello", "backend": "local"})
+        assert local.status_code == 201, local.text
+        for key in (app, owner):
+            hosted = client.post("/api/v1/sessions", headers={"Authorization": f"Bearer {key['key']}"},
+                                 json={"prompt": "hello", "backend": "claude"})
+            assert hosted.status_code == 201, hosted.text
+            assert hosted.json()["backend"] == "claude"
+            assert m.runner._backend_credential(m.db.get_session(hosted.json()["id"]))["policy"] != "denied"
+        # A device's hosted session from before this check (a message or an approval resumes it) is refused when
+        # it runs, not only when it is created.
+        sid = local.json()["id"]
+        device_sessions.update_session(sid, backend="claude", model="claude-opus-5")
+        s = m.db.get_session(sid)
+        assert m.runner._backend_credential(s)["policy"] == "denied"
+        with pytest.raises(CliBackendError, match="device tokens cannot use claude"):
+            m.runner._cli_credentials(sid, s, "claude")
+
+
+def test_device_keys_reach_no_built_in_hosted_backend_by_any_route(tmp_path, monkeypatch):
+    """#786: the backend list, the default backend, a rerun and a message agree with the create check. A device key
+    sees each built-in backend as unavailable and gets 403 wherever a session would run on one, before anything is
+    queued; an App key and the owner's key still see them available."""
+    client, m = household(tmp_path)
+    monkeypatch.setattr("harness.cli_backends.cli_route_ready", lambda *_: True)  # opencode's route is up: no docker call
+    for name, model in (("claude", "claude-opus-5"), ("codex", "gpt-5.6-sol"), ("cursor", "composer-2")):
+        m.cfg.backends[name] = BackendConfig(enabled=True, model=model)
+    m.cfg.backends["opencode"] = opencode_backend()
+    m.cfg.cleanup.min_free_gb = 0
+    m._spawn = lambda *_args, **_kwargs: None
+    refusal = ("provider_not_allowed",
+               "backend 'claude' is only for the owner and App tokens; device tokens run on the local model")
+    with client:
+        device = client.post("/keys", json={"name": "zed", "scopes": ["sessions"]}).json()
+        app = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions"]}).json()
+        owner = client.post("/keys", json={"name": "cc", "kind": "owner", "scopes": ["admin"]}).json()
+        client.local_owner = False  # a pure bearer caller on loopback
+        bearer = {"Authorization": f"Bearer {device['key']}"}
+
+        def listed(key: dict) -> dict:
+            r = client.get("/api/v1/backends", headers={"Authorization": f"Bearer {key['key']}"})
+            assert r.status_code == 200, r.text
+            return {b["name"]: b for b in r.json()}
+
+        mine = listed(device)
+        for name in ("claude", "codex", "cursor"):
+            assert mine[name]["available"] is False, mine[name]
+            assert mine[name]["provider_policy"]["allowed"] is False
+            r = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "hello", "backend": name})
+            assert r.status_code == 403, r.text
+            assert r.json()["error"]["code"] == "provider_not_allowed"
+        assert mine["opencode"]["available"] is False  # not granted: the rule every key the owner hasn't granted has
+        theirs = listed(app)  # an App's availability also needs a login of its own (#371); its policy allows them
+        assert all(theirs[name]["provider_policy"]["allowed"] for name in ("claude", "codex", "cursor"))
+        assert all(listed(owner)[name]["available"] for name in ("claude", "codex", "cursor"))
+
+        local = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "hello", "backend": "local"})
+        assert local.status_code == 201, local.text
+        sid = local.json()["id"]
+        m.db.for_app(device["id"]).update_session(sid, backend="claude", model="claude-opus-5")
+        before = m.db.get_session(sid)
+        events = len(m.db.events(sid))
+        for path, body in (("messages", {"content": "go on"}), ("rerun", None)):
+            r = client.post(f"/api/v1/sessions/{sid}/{path}", headers=bearer, json=body)
+            assert r.status_code == 403, (path, r.text)
+            error = r.json()["error"]
+            assert (error["code"], error["message"]) == refusal, path
+        after = m.db.get_session(sid)
+        assert (after["inbox"], after["context"], after["status"]) == (before["inbox"], before["context"],
+                                                                        before["status"])
+        assert len(m.db.events(sid)) == events
+        assert [s["id"] for s in m.db.for_app(device["id"]).list_sessions(50, owner_id="owner")] == [sid]
+
+        m.cfg.modules.local_model = False  # no backend named: the default is the first enabled hosted one
+        r = client.post("/api/v1/sessions", headers=bearer, json={"prompt": "hello"})
+        assert r.status_code == 403, r.text
+        assert (r.json()["error"]["code"], r.json()["error"]["message"]) == refusal
 
 
 def test_member_cannot_use_hosted_or_owner_modules(tmp_path):

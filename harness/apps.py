@@ -715,13 +715,17 @@ async def api_projects(request: Request):
 
 @route_table.post("/api/v1/projects", status_code=201)
 async def api_create_project(body: dict, request: Request):
-    """Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected."""
+    """Create a managed project and clone its repo; `github` clones through a connected GitHub account and fails if none is connected. App and device tokens get 403."""
     key = auth(request, "sessions")
+    # The key decides, not the ambient identity: on loopback and over Tailscale a device key arrives with the
+    # owner's, so only the owner's and members' own credentials pass (#786).
+    if key.get("kind") == "app":
+        raise HarnessError(403, "app tokens cannot create projects")
+    if key.get("kind") not in ("owner", "member"):
+        raise HarnessError(403, "device tokens cannot create projects")
     ident = getattr(request.state, "access", None)
     if not ident or ident.kind not in ("owner", "member") or not ident.bundled:
         raise HarnessError(403, "project creation is only for an ambient same-origin Tailscale human")
-    if key.get("kind") == "app":
-        raise HarnessError(403, "app tokens cannot create projects")
     m = mgr(request)
     name = str((body or {}).get("name") or "")
     description = str((body or {}).get("description") or "")

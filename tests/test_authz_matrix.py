@@ -15,7 +15,7 @@ import pytest
 
 from harness import local_owner, secret_scan
 from harness.admin import ADMIN_SCOPE, OWNER_KIND, PREFIX
-from harness.config import GuestAccess
+from harness.config import BackendConfig, GuestAccess
 from harness_modules.local_model import resources, routes
 from harness_modules.local_model.warmup import READY, ModelWarmer
 
@@ -24,6 +24,7 @@ from test_hub_claim import HUB_ORIGIN, _bearer, _claim
 
 STRANGER = "stranger@example.com"
 ELSEWHERE = "https://other.example"
+HOSTED_REFUSED = "backend 'claude' is only for the owner and App tokens"
 ALL_APP_SCOPES = ["sessions", "sessions:all", "approvals", "images", "inference", "remote_control"]
 
 # The nine owner status routes of test_access_checks.py, and what a member (not the owner) gets from each.
@@ -37,9 +38,10 @@ OWNER_STATUS_PATHS = {
 OWNERISH = ("owner", "local", "ownerkey", "hub")           # the four ways to be the owner
 UNAUTHENTICATED = ("none", "wrongtok", "emptytok", "unknown")
 MEMBERS = ("alice", "bob")
-NOT_OWNER_KEYS = ("app", "device", "noadmin", "app+login", "device+login", "noadmin+login")
+NOT_OWNER_KEYS = ("app", "device", "device+sessions", "noadmin", "app+login", "device+login",
+                  "device+sessions+login", "noadmin+login")
 TABLES = ("api_keys", "sessions", "accounts", "google_link_invitations", "web_sessions", "pairing_requests",
-          "pairing_codes", "runner_pairing_codes", "github_connections")
+          "pairing_codes", "runner_pairing_codes", "github_connections", "member_projects")
 
 
 class Route(SimpleNamespace):
@@ -99,6 +101,16 @@ def routes_table(alice_id: str, bob_id: str, alice_sid: str, app_sid: str) -> li
         Route("member_only", "GET", "/api/v1/me/github-connection"),
         Route("member_only", "POST", "/api/v1/me/github-connection/connect", mutates=True,
               member=(409, "GitHub sign-in")),
+        # Only the owner and members create projects (#786): an App's or a device's key is refused whatever login
+        # comes with it. One admitted caller, the owner, since each admitted call creates the same project.
+        Route("create_project", "POST", "/api/v1/projects", ok=201, body={"name": "from-matrix"}, mutates=True,
+              override={"app+login": (403, "app tokens cannot create projects"),
+                        "device+sessions+login": (403, "device tokens cannot create projects")}),
+        # A device key never reaches a hosted backend (#786), whatever login comes with it; an App key with no
+        # provider policy and the owner do, and a member needs their own API key.
+        Route("hosted_session", "POST", "/api/v1/sessions", ok=201, body={"prompt": "x", "backend": "claude"},
+              mutates=True, member=(403, "API key in your settings"),
+              override={"device+sessions+login": (403, HOSTED_REFUSED), "noadmin+login": (403, HOSTED_REFUSED)}),
     ]
     # Routes a member must be refused (the loop test_household's two-member test used to carry); only members
     # are checked, since the other callers' answers on a feature that is off in this app say nothing about authz.
@@ -147,13 +159,25 @@ def expect(route: Route, caller: str):
     if family == "api_v1":
         if caller == "device":
             return 403, "'sessions' scope"
-        return (200, "") if caller in (*OWNERISH, *MEMBERS, "app") else None
+        return (200, "") if caller in (*OWNERISH, *MEMBERS, "app", "device+sessions") else None
+    if family == "create_project":
+        if caller == "device":
+            return 403, "'sessions' scope"
+        return {"owner": (route.ok, ""), "app": (403, "app tokens cannot create projects"),
+                "device+sessions": (403, "device tokens cannot create projects")}.get(caller)
+    if family == "hosted_session":
+        if caller in MEMBERS:
+            return route.member
+        if caller == "device":
+            return 403, "'sessions' scope"
+        return (route.ok, "") if caller in (*OWNERISH, "app") else (403, HOSTED_REFUSED)
     if family == "member_only":
         if caller in MEMBERS:
             return route.member
         if caller == "device":
             return 403, "'sessions' scope"
-        return (403, "signed-in household member") if caller in (*OWNERISH, "app", "noadmin") else None
+        return ((403, "signed-in household member") if caller in (*OWNERISH, "app", "device+sessions", "noadmin")
+                else None)
     raise AssertionError(family)
 
 
@@ -175,15 +199,18 @@ def matrix(tmp_path_factory, gitleaks_tools):
         client, m = household(tmp_path_factory.mktemp("authz"),
                               guests=[GuestAccess(login=GUEST, until="2099-01-01T00:00:00+00:00")])
         m._spawn = lambda sid: None  # sessions are created, not run, so no background run touches a snapshot
+        m.cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5")  # a built-in hosted backend
         with client:
             alice, bob = create_member(client, ALICE, "Alice"), create_member(client, BOB, "Bob")
             # The kinds and prefixes of each credential are part of the contract (#24).
             app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ALL_APP_SCOPES}).json()
             device = client.post("/keys", json={"name": "zed"}).json()
+            device_sessions = client.post("/keys", json={"name": "phone", "scopes": ["sessions"]}).json()
             # Legacy pre-#91 display names remain valid owner credentials.
             owner = client.post("/keys", json={"name": "control-center", "kind": OWNER_KIND,
                                                "scopes": [ADMIN_SCOPE]}).json()
-            assert (app["kind"], device["kind"], owner["kind"]) == ("app", "device", OWNER_KIND)
+            assert (app["kind"], device["kind"], device_sessions["kind"], owner["kind"]) == (
+                "app", "device", "device", OWNER_KIND)
             assert (app["key"][:3], device["key"][:3], owner["key"][:3]) == ("ha-", "hk-", "ho-")
             assert owner["scopes"] == ADMIN_SCOPE
             for kind in ("app", "device"):  # only an owner key can carry the admin scope
@@ -204,6 +231,8 @@ def matrix(tmp_path_factory, gitleaks_tools):
                 "hub": _bearer(hub), "noadmin": _bearer(noadmin), "unknown": _bearer("ho-made-up"),
                 # A bearer token wins over a Tailscale login the same request carries.
                 "app+login": {**H(OWNER), **_bearer(app["key"])}, "device+login": {**H(OWNER), **_bearer(device["key"])},
+                "device+sessions": _bearer(device_sessions["key"]),
+                "device+sessions+login": {**H(OWNER), **_bearer(device_sessions["key"])},
                 "noadmin+login": {**H(OWNER), **_bearer(noadmin)},
                 # Browser origins: the Hub key is bound to the origin it claimed from, and a login is not valid
                 # on a cross-origin request.
@@ -222,6 +251,7 @@ def snapshot(m) -> dict:
         row.pop("last_used_at", None)
         row.pop("last_activity_at", None)
     state["session_ids"] = sorted(m.db.find_session_ids(""))  # Web's store and every App's store
+    state["owner_projects"] = sorted(m.cfg.projects)
     return state
 
 

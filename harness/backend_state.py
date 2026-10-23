@@ -178,7 +178,7 @@ def tools_only_supported(manager, name: str) -> bool:
 
 def _credential_state(cfg, provider_policy: dict | None, check_auth: bool) -> tuple[bool, str, bool]:
     """(allowed, effective auth mode, api key ready) for a backend under an optional app provider policy."""
-    if provider_policy and provider_policy["managed"]:
+    if provider_policy and (provider_policy["managed"] or not provider_policy["allowed"]):
         allowed = provider_policy["allowed"]
         effective_auth = provider_policy["policy"] if allowed else "denied"
         key_ready = provider_policy["available"] if provider_policy["credential_source"] == "app_file" else False
