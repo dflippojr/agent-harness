@@ -342,3 +342,124 @@ def test_a_hosted_session_read_taints_from_the_session_it_read_when_sessions_cha
             ("session", "session 7mread0001 (evil.example)")]
         await m.stop()
     asyncio.run(body())
+
+
+SEARCH_BANNER = taint.banner("session transcript")
+
+
+def _earlier(m, sid: str, src: list, owner_id: str = "owner", app_id: str = "") -> None:
+    now = 1_700_000_000.0
+    m.db.insert_session({"id": sid, "project": "scratch", "target": "tower", "model": "fake", "title": sid,
+                         "status": "done", "workspace": "", "created_at": now, "updated_at": now, "context": [],
+                         "answer": "", "owner_id": owner_id, "app_id": app_id, "taint": src})
+    m.db.insert_event(sid, "user_message", {"content": f"quarterly notes in {sid}"})
+
+
+def _search_router(messages):
+    if any(msg["role"] == "tool" for msg in messages):
+        return Completion(content="noted")
+    return Completion(tool_calls=[call("session_search", 0, query="quarterly")])
+
+
+def _hit_blocks(output: str) -> dict[str, str]:
+    """Each hit's block of session_search output, keyed by the session id that opens its header line."""
+    blocks = {}
+    for block in output.split("\n\n")[1:]:
+        head = next(line for line in block.splitlines() if not line.startswith("[Untrusted"))
+        if " · " in head:
+            blocks[head.split(" · ")[0]] = block
+    return blocks
+
+
+EVIL2 = taint.add([], "mcp", "mcp__evil__fetch")
+SEARCH_CASES = {
+    "tainted": ({"7mtaint001": SRC, "7mtaint002": EVIL2, "7mclean001": []},
+                {("session", "session 7mtaint001 (evil.example)"), ("session", "session 7mtaint002 (mcp__evil__fetch)")}),
+    "clean": ({"7mclean001": [], "7mclean002": []}, set()),
+}
+
+
+@pytest.mark.parametrize("case", SEARCH_CASES)
+def test_session_search_taints_the_reader_from_each_tainted_hit_and_banners_it(tmp_path, case):
+    """Issue #795: session_search shows snippets and answers of earlier sessions, so each tainted hit taints the
+    reader as session_read does and is marked with the session-transcript banner; clean hits do neither."""
+    earlier, expected = SEARCH_CASES[case]
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([_search_router]))
+        _with_search(m)
+        await m.start()
+        for sid, src in earlier.items():
+            _earlier(m, sid, src)
+        s = m.create("find my quarterly notes")
+        await wait_status(m, s["id"], "done")
+        found = events(m, s["id"], "tool_result")[0]
+        assert found["ok"]
+        blocks = _hit_blocks(found["output"])
+        assert sorted(blocks) == sorted(earlier)
+        assert {sid for sid, block in blocks.items() if SEARCH_BANNER in block} == {
+            sid for sid, src in earlier.items() if src}
+        assert found["output"].count(SEARCH_BANNER) == len(expected)
+        assert {(t["kind"], t["origin"]) for t in m.db.get_session(s["id"])["taint"]} == expected
+        await m.stop()
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("case", SEARCH_CASES)
+def test_a_hosted_session_search_taints_the_reader_from_each_tainted_hit_and_banners_it(tmp_path, case):
+    """Issue #795 on the MCP path: mcp__harness__session_search taints the hosted reader and banners tainted hits."""
+    from harness.cli_backends import CliBackendError
+    from harness.config import BackendConfig
+    from test_mcp_server import FakeCli
+    earlier, expected = SEARCH_CASES[case]
+
+    async def body():
+        cfg = make_cfg(tmp_path)
+        cfg.backends["claude"] = BackendConfig(enabled=True, model="claude-opus-5")
+        m = Manager(cfg)
+        m.runner.cli_factory = lambda **kw: (_ for _ in ()).throw(CliBackendError("stop here"))
+        _with_search(m)
+        await m.start()
+        sid = m.create("what happened earlier?", backend="claude")["id"]
+        await wait_status(m, sid, "failed")
+        await asyncio.gather(*m.tasks.values())
+        for other, src in earlier.items():
+            _earlier(m, other, src)
+        cli, args = FakeCli(), {"query": "quarterly"}
+        await m.runner._allow_cli(sid, cli, "req-1", "mcp__harness__session_search", args, "toolu-1")
+        output, ok = await m.runner.mcp_call(sid, "session_search", args, "toolu-1")
+        assert ok
+        blocks = _hit_blocks(output)
+        assert sorted(blocks) == sorted(earlier)
+        assert {other for other, block in blocks.items() if SEARCH_BANNER in block} == {
+            other for other, src in earlier.items() if src}
+        assert {(t["kind"], t["origin"]) for t in m.db.get_session(sid)["taint"]} == expected
+        await m.stop()
+    asyncio.run(body())
+
+
+def test_session_search_taints_only_from_hits_in_the_readers_scope(tmp_path):
+    """Issue #795: a member's search can't see, and isn't tainted by, the owner's or an App's tainted sessions that
+    match the query; their own tainted session still taints them. GET /search keeps returning no taint field."""
+    from harness_modules.search.service import search
+    from test_household import ALICE, create_member, household
+
+    client, m = household(tmp_path, steps=[_search_router])
+    with client:
+        uid = create_member(client, ALICE, "Alice")["user_id"]
+        app, _ = m.db.create_api_key("shop", "sessions", "app")
+        _earlier(m, "7mmember01", SRC, owner_id=uid)
+        _earlier(m, "7mmember02", [], owner_id=uid)
+        _earlier(m, "7mowner001", EVIL2)
+        _earlier(m, "7mapp00001", EVIL2, app_id=app["id"])
+
+        async def body():
+            s = m.create("find my quarterly notes", owner_id=uid)
+            await wait_status(m, s["id"], "done")
+            found = events(m, s["id"], "tool_result")[0]
+            assert found["ok"] and sorted(_hit_blocks(found["output"])) == ["7mmember01", "7mmember02"]
+            assert "7mowner001" not in found["output"] and "7mapp00001" not in found["output"]
+            assert [(t["kind"], t["origin"]) for t in m.db.get_session(s["id"])["taint"]] == [
+                ("session", "session 7mmember01 (evil.example)")]
+        client.portal.call(body)
+        assert all("taint" not in r for r in search(m.db, "quarterly")["results"])
