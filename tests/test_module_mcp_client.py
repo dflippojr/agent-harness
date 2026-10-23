@@ -323,6 +323,36 @@ def test_a_large_mcp_result_is_bounded_after_its_banner_and_recovered_whole(tmp_
     asyncio.run(body())
 
 
+def test_a_lone_surrogate_in_a_bounded_result_is_recorded_and_shown(tmp_path, fake_transport):
+    """#777: a JSON "\\ud800" in a result big enough to be bounded and hashed no longer fails the run; the model, the
+    event and the artifact all get U+FFFD in its place."""
+    banner = taint.banner("MCP tool result") + "\n"
+    text = "x" * 3000 + "\ud800 tail"
+    clean = json.dumps({"content": [{"type": "text", "text": text.replace("\ud800", "\ufffd")}], "isError": False},
+                       ensure_ascii=False)
+    digest = hashlib.sha256(clean.encode("utf-8")).hexdigest()
+    script = Script([Completion(tool_calls=[call(NAME, text=text)]), Completion(content="done")])
+
+    async def body():
+        m = manager(tmp_path, packages=["harness_modules.mcp_client"], steps=script)
+        m.cfg.tool_output = config.ToolOutputConfig(result_chars=1000)
+        m.cfg.projects["scratch"].mcp_servers[0]["rules"] = [{"tool": NAME, "action": "allow"}]
+        await m.start()
+        try:
+            sid = m.create("echo")["id"]
+            final = await wait_status(m, sid, "done", "failed")
+            assert final["status"] == "done", final["stop_reason"]
+            (result,) = events(m, sid, "tool_result")
+            assert result["ok"] and result["artifact_id"] == digest
+            assert m.db.full_artifact(sid, digest) == clean
+            assert result["output"] == bound_shell_text(clean, 1000, digest)
+            assert script.requests[1][-1]["content"] == banner + bound_shell_text(clean, 1000, digest)
+            assert "\ufffd tail" in script.requests[1][-1]["content"]
+        finally:
+            await m.stop()
+    asyncio.run(body())
+
+
 def test_context_banner_names_only_mcp_and_session_read():
     assert taint.context_banner(NAME).startswith("[Untrusted MCP tool result:")
     assert taint.context_banner("session_read").startswith("[Untrusted session transcript:")
