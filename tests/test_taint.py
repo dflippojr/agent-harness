@@ -216,3 +216,37 @@ def test_rerun_keeps_the_original_sessions_taint(tmp_path):
         assert extra["status"] == "pending" and m.runner.smart.calls == []
         await m.stop()
     asyncio.run(body())
+
+
+def test_session_read_taints_from_the_session_it_read_in_the_readers_scope(tmp_path):
+    """Issue #791: the taint comes from the session session_read resolved in the reader's scope. A member's prefix
+    that is unique among their own sessions but also matches the owner's and an App's still passes the taint on."""
+    from test_household import ALICE, create_member, household
+
+    def router(messages):
+        if any(m["role"] == "tool" for m in messages):
+            return Completion(content="noted")
+        return Completion(tool_calls=[call("session_read", 0, session_id="7m")])
+
+    client, m = household(tmp_path, steps=[router])
+    with client:
+        uid = create_member(client, ALICE, "Alice")["user_id"]
+        app, _ = m.db.create_api_key("shop", "sessions", "app")
+        now = 1_700_000_000.0
+        for sid, owner_id, app_id in (("7mmember01", uid, ""), ("7mowner001", "owner", ""),
+                                      ("7mapp00001", "owner", app["id"])):
+            m.db.insert_session({"id": sid, "project": "scratch", "target": "tower", "model": "fake",
+                                 "title": sid, "status": "done", "workspace": "", "created_at": now,
+                                 "updated_at": now, "context": [], "answer": "", "owner_id": owner_id,
+                                 "app_id": app_id, "taint": SRC})
+            m.db.insert_event(sid, "user_message", {"content": f"notes in {sid}"})
+        assert sorted(m.db.find_session_ids("7m", kind="agent")) == ["7mapp00001", "7mmember01", "7mowner001"]
+
+        async def body():
+            s = m.create("read my earlier notes", owner_id=uid)
+            await wait_status(m, s["id"], "done")
+            read = events(m, s["id"], "tool_result")[0]
+            assert read["ok"] and "notes in 7mmember01" in read["output"]
+            assert [(t["kind"], t["origin"]) for t in m.db.get_session(s["id"])["taint"]] == [
+                ("session", "session 7mmember01 (evil.example)")]
+        client.portal.call(body)
