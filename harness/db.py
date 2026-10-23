@@ -1167,9 +1167,12 @@ class Database:
         return [dict(r) for r in rows]
 
     @_reads
-    def session_brief(self, sid: str, user_id: str | None = None, kind: str | None = "agent") -> dict | None:
+    def session_brief(self, sid: str, user_id: str | None = None, kind: str | None = "agent",
+                      with_taint: bool = False) -> dict | None:
+        """A search hit's session fields; `with_taint` adds its taint list, read in the same row (#795)."""
         query = ("SELECT id, project, target, title, status, created_at, updated_at, branch, "
-                 "review, owner_id, substr(answer, 1, 400) AS answer FROM sessions WHERE id = ?")
+                 "review, owner_id, substr(answer, 1, 400) AS answer" + (", taint" if with_taint else "")
+                 + " FROM sessions WHERE id = ?")
         params: list = [sid]
         if kind is not None:
             query += AND_KIND
@@ -1179,7 +1182,9 @@ class Database:
             params.append(user_id)
         with self.lock:
             row = self.conn.execute(query, params).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        return {**dict(row), "taint": json.loads(row["taint"] or "[]")} if with_taint else dict(row)
 
     @_reads
     def events(self, sid: str, after: int = 0) -> list[dict]:

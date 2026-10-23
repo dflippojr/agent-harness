@@ -25,7 +25,8 @@ import re
 import time
 
 from harness.modules import (SEARCH_TOOLS as TOOLS, ToolError, ToolOutput, caller_user_id, readable_session_ids,
-                             restrict_app_id, scoped_store as scoped, session_calling_app as calling_app)
+                             restrict_app_id, scoped_store as scoped, session_calling_app as calling_app,
+                             untrusted_banner)
 
 READ_PAGE_CHARS = 12000
 KIND_WEIGHT = {"title": 3.0, "answer": 2.0, "message": 1.5, "assistant": 1.2, "context": 1.0, "tool": 0.8}
@@ -96,14 +97,14 @@ def _term_coverage(db, query: str, exclude: str, user_id: str | None, app_id: st
 
 def search(db, query: str, project: str = "", limit: int = 20, exclude: str = "",
            user_id: str | None = None, app_id: str | None = None,
-           session_kind: str | None = "agent", with_app: str = "") -> dict:
+           session_kind: str | None = "agent", with_app: str = "", with_taint: bool = False) -> dict:
     """Sessions ranked by their best-matching event. Falls back to matching any term when all of them don't.
 
     `user_id` is applied in SQL before ranking or truncation so another account's rows cannot affect
     totals, pagination, or timing of this result. `app_id`, when set, keeps unauthorized sessions
     out of ranking and the result limit. `with_app` is the caller's own App, whose store is searched besides the
     main store; no other App's ever is. `session_kind` defaults to agent conversations so Chat
-    never appears in `/search` or `session_search`.
+    never appears in `/search` or `session_search`. `with_taint` adds each result's taint list (session_search).
     """
     db = scoped(db, with_app)
     if not query.strip():
@@ -119,14 +120,15 @@ def search(db, query: str, project: str = "", limit: int = 20, exclude: str = ""
             continue
         mode = "any" if any_term else "all"
         coverage = _term_coverage(db, q, exclude, user_id, app_id, session_kind) if any_term else None
-        results = _group(db, rows, project, limit, coverage, user_id=user_id, session_kind=session_kind)
+        results = _group(db, rows, project, limit, coverage, user_id=user_id, session_kind=session_kind,
+                         with_taint=with_taint)
         if results:
             break
     return {"query": query, "mode": mode, "results": results}
 
 
 def _group(db, rows: list[dict], project: str, limit: int, coverage: dict | None = None,
-           user_id: str | None = None, session_kind: str | None = "agent") -> list[dict]:
+           user_id: str | None = None, session_kind: str | None = "agent", with_taint: bool = False) -> list[dict]:
     by_session: dict[str, dict] = {}
     for r in rows:
         score = -r["rank"] * KIND_WEIGHT.get(r["kind"], 1.0)  # bm25: lower is better, so negate
@@ -137,7 +139,7 @@ def _group(db, rows: list[dict], project: str, limit: int, coverage: dict | None
             hit["passages"].append({"kind": r["kind"], "seq": r["seq"], "text": r["snippet"]})
     out = []
     for sid, hit in by_session.items():
-        s = db.session_brief(sid, user_id=user_id, kind=session_kind)
+        s = db.session_brief(sid, user_id=user_id, kind=session_kind, with_taint=with_taint)
         if s is None or (project and s["project"] != project):
             continue
         out.append({**s, **hit, "terms": (coverage or {}).get(sid, 0)})
@@ -242,19 +244,31 @@ class SessionSearch:
         return schemas()
 
     def session_search(self, query: str, project: str = "", limit: int = 5, _session: str = "") -> str:
+        return self._search(query, project, limit, _session).text
+
+    def _search(self, query: str, project: str = "", limit: int = 5, _session: str = "") -> ToolOutput:
+        """session_search's results, carrying the taint of each tainted session shown, whose hit opens with the
+        session-transcript banner: its snippets and answer are that session's content, as session_read's are (#795).
+        The taint is read in the row that let the hit in, after its snippets were."""
         limit = max(1, min(int(limit), 10))
         app_id = restrict_app_id(self.db, _session)
         user_id = caller_user_id(self.db, _session)
         found = search(self.db, query, project=project.strip(), limit=limit, exclude=_session,
-                       user_id=user_id, app_id=app_id, with_app=calling_app(self.db, _session))
+                       user_id=user_id, app_id=app_id, with_app=calling_app(self.db, _session), with_taint=True)
         if not found["results"]:
-            return f"No earlier sessions match {query!r}" + (f" in project {project}" if project else "") + "."
+            return ToolOutput(f"No earlier sessions match {query!r}" + (f" in project {project}" if project else "")
+                              + ".")
         lines = ["[Earlier sessions: background only; they may be outdated or wrong.]"]
         if found["mode"] == "any":
             lines.append("(no session matched every term; showing sessions that match some)")
+        sources = []
         for r in found["results"]:
             day = time.strftime("%Y-%m-%d", time.localtime(r["created_at"]))
-            lines.append(f"\n{r['id']} · {r['title']} · project {r['project']} · {day} · {r['status']} "
+            lines.append("")
+            if r["taint"]:
+                sources.append(("session", f"session {r['id']} ({r['taint'][0]['origin']})"))
+                lines.append(untrusted_banner("session transcript"))
+            lines.append(f"{r['id']} · {r['title']} · project {r['project']} · {day} · {r['status']} "
                          f"· {r['hits']} matching event{'s' if r['hits'] != 1 else ''}")
             for p in r["passages"]:
                 text = " ".join(p["text"].replace(MARK_START, "[").replace(MARK_END, "]").split())
@@ -262,7 +276,7 @@ class SessionSearch:
             if r.get("answer"):
                 lines.append(f"  answer: {' '.join(r['answer'].split())[:300]}")
         lines.append("\nRead one with session_read(session_id).")
-        return "\n".join(lines)
+        return ToolOutput("\n".join(lines), taint=sources)
 
     def session_read(self, session_id: str, start: int = 0, find: str = "", _session: str = "") -> str:
         return self._read(session_id, start, find, _session).text
@@ -277,7 +291,7 @@ class SessionSearch:
         text = compact_transcript(self.db, ids[0])
         read = self.db.get_session(ids[0]) or before  # taint added during the read counts; a deleted one keeps its own
         tainted = (read or {}).get("taint") or []
-        source = ("session", f"session {ids[0]} ({tainted[0]['origin']})") if tainted else None
+        source = [("session", f"session {ids[0]} ({tainted[0]['origin']})")] if tainted else []
         return ToolOutput(self._page(text, start, find), taint=source)
 
     @staticmethod
@@ -304,4 +318,4 @@ class SessionSearch:
 
     async def call(self, name: str, args: dict, session: dict | None = None, **_kwargs) -> str | ToolOutput:
         payload = {**args, "_session": (session or {}).get("id", "")}
-        return await asyncio.to_thread(self._read if name == "session_read" else getattr(self, name), **payload)
+        return await asyncio.to_thread({"session_read": self._read, "session_search": self._search}[name], **payload)

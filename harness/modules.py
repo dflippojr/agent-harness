@@ -101,6 +101,7 @@ _PUBLIC = {
     "session_calling_app": ("harness.search_index", "calling_app"),
     "caller_user_id": ("harness.search_index", "caller_user_id"),
     "readable_session_ids": ("harness.search_index", "readable_session_ids"),
+    "untrusted_banner": ("harness.taint", "banner"),
     "scoped_store": ("harness.app_stores", "scoped"),
     "TOOLS_ONLY": ("harness.policy", "TOOLS_ONLY"),
     "frozen_app_defaults": ("harness.settings", "frozen_app_defaults"),
