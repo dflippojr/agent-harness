@@ -142,6 +142,13 @@ def capped_app(db, app_id: str) -> bool:
     return key is not None and key.get("kind") == "app"
 
 
+def hosted_refused(key: dict | None, backend_cfg) -> bool:
+    """Is a session under `key` refused `backend_cfg`? A key that is no App (a device's) never reaches a built-in hosted
+    backend (#786); a kind: cli backend runs on the local model and keeps its own grant rule. `key` is None for the
+    owner's own sessions. `create`, `send`, the backend list and the run itself all ask this, so they agree."""
+    return key is not None and key.get("kind") != "app" and backend_cfg is not None and not backend_cfg.is_cli
+
+
 def admission_key(db, s: dict) -> str:
     """Whose caps a session counts against: its member's, its App's, or "" (the owner's, uncapped)."""
     user_id = session_user_id(s)
@@ -1543,7 +1550,7 @@ class Runner:
         app_id = s.get("app_id") or ""
         assignment = self.db.app_provider_credential(app_id, s["backend"]) if app_id else None
         member = member_keys.member_of(s.get("end_user") or "") if not app_id else ""
-        if app_id and not backend.is_cli and (self.db.get_api_key(app_id) or {}).get("kind") == "device":
+        if app_id and hosted_refused(self.db.get_api_key(app_id), backend):
             # A device key's session never runs on a built-in hosted backend (#786), not even one it started before
             # `create` refused that, when it is resumed.
             return {"policy": "denied", "key": "", "source": DEVICE_KEY, "assignment_id": "", "path": "",

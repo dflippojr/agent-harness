@@ -590,7 +590,9 @@ for a retry under the same [`Idempotency-Key`](#retrying-a-create-safely-idempot
 - `backend` is `local` (the tower model) or a hosted CLI id such as `claude`, `codex`, or `cursor`
   (`GET /api/v1` lists enabled backends). Hosted sessions use the user's own subscription login. A device token
   gets `403 provider_not_allowed` for a built-in hosted backend (`claude`, `codex`, `cursor`), whatever login comes
-  with it, and a device session is never resumed on one either (#786).
+  with it, and a device session is never resumed on one either: a message to one gets the same 403 (#786).
+  `GET /api/v1/backends` lists those backends to a device token as unavailable, with `provider_policy.allowed`
+  false.
 - `end_user` (optional, App tokens only, with `backend` `claude` or `codex`) runs the session on **that person's own
   subscription**: your App's own opaque id for them, 1-128 letters, digits and `_.@:-`. The person must have signed
   in first ([End users' own logins](#end-users-own-logins)). Without a login the request is refused with `409

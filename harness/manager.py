@@ -25,8 +25,8 @@ from .app_stores import EVERY_APP, SessionStores
 from .db import Database, finish_then_cancel
 from .principal import OWNER_USER_ID, require_owner_allowlist, session_user_id
 from .runner_contract import RunnerError, NoRunnerHub, RunnerOffline
-from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, holds_place, MAC_REPO_PROMPT,
-                     MAC_SYSTEM_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner, new_run)
+from .runner import (ACTIVE, WAITING, admission_key, capped_app, END_PENDING, holds_place, hosted_refused,
+                     MAC_REPO_PROMPT, MAC_SYSTEM_PROMPT, REPO_PROMPT, SYSTEM_PROMPT, Runner, new_run)
 from .scheduler import GpuScheduler
 from .settings import app_allows
 from .policy import TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED
@@ -827,9 +827,7 @@ class Manager:
     def _check_app_provider(self, app: dict, backend: str, model: str) -> None:
         # A device key is no App: whatever its scopes or the identity it arrives with, it never reaches a built-in
         # hosted backend (#786). A kind: cli backend keeps its own rule below.
-        if app.get("kind") != "app" and not self._needs_grant(backend):
-            raise HarnessError(403, f"backend {backend!r} is only for the owner and App tokens; device tokens run "
-                                    "on the local model", "provider_not_allowed")
+        self._refuse_hosted(app, backend)
         # A kind: cli backend is invisible to every App until the owner grants it, managed or not (#168).
         if not self.db.app_provider_managed(app["id"]) and not self._needs_grant(backend):
             return
@@ -840,6 +838,11 @@ class Manager:
         if credential["models"] and model not in credential["models"]:
             raise HarnessError(403, f"this app is not allowed to use model {model!r} on {backend}",
                                "provider_model_not_allowed")
+
+    def _refuse_hosted(self, app: dict | None, backend: str) -> None:
+        if hosted_refused(app, self.cfg.backends.get(backend)):
+            raise HarnessError(403, f"backend {backend!r} is only for the owner and App tokens; device tokens run "
+                                    "on the local model", "provider_not_allowed")
 
     def _hosted_backend(self, backend: str, target: str):
         backend_cfg = self.cfg.backends.get(backend)
@@ -969,6 +972,8 @@ class Manager:
             s = self.db.get_session(sid)
         self._refuse_during_operation(sid)
         self._refuse_unsettled(s)
+        # A device's hosted session from before `create` refused it would only fail when it runs: say so now (#786).
+        self._refuse_hosted(self.db.get_api_key(s["app_id"]) if s.get("app_id") else None, s.get("backend") or "local")
         if s["status"] not in ACTIVE:
             user_id = session_user_id(s)
             if user_id != OWNER_USER_ID:
@@ -2229,6 +2234,9 @@ class Manager:
 
     def app_provider_status(self, app_id: str, backend: str) -> dict:
         managed = self.db.app_provider_managed(app_id)
+        if hosted_refused(self.db.get_api_key(app_id), self.cfg.backends.get(backend)):  # as `create` refuses it
+            return {"managed": managed, "allowed": False, "policy": "denied", "models": [],
+                    "credential_source": "server_default", "available": False}
         row = self.db.app_provider_credential(app_id, backend)
         if row is None:
             allowed = not managed and not self._needs_grant(backend)
