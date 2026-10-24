@@ -1136,6 +1136,22 @@ async def _next_bus_event(sub, request: Request) -> tuple[dict | None, bool]:
         return None, await request.is_disconnected()
 
 
+def _stream_key(request: Request, m: Manager) -> dict | None:
+    """The bearer key `require_admin` admitted this stream with on the admin surface, or None for an ambient Web
+    identity (Tailscale owner, local owner token), whose streams end only on an epoch bump (#787)."""
+    kid = getattr(request.state, "authenticated_key_id", None)
+    return m.db.get_api_key(kid) if kid else None
+
+
+def _stream_live(m: Manager, scope: str, epoch: int, key: dict | None) -> bool:
+    """Whether a stream may yield another frame: its scope's epoch is unchanged and, if a key opened it, that key is
+    neither revoked nor replaced, the same check the `/api/v1` streams make (#527)."""
+    if key is None:
+        return m.stream_epoch.get(scope, 0) == epoch
+    from .apps import _stream_active
+    return _stream_active(m, key, scope, epoch)
+
+
 def _session_list_payload(m: Manager, scope: str, e: dict) -> str | None:
     """SSE frame for a status-level event of one of this scope's agent sessions, else None. An App's session is never
     one (#330 decision 3): its store is not even read."""
@@ -1156,15 +1172,16 @@ async def all_events(request: Request):
     """Status-level events for every session (the session list). Live only; reload the list to catch up."""
     m = mgr(request)
     scope = owner_id(request)
+    key = _stream_key(request, m)
 
     async def stream():
         sub = m.bus.subscribe("*")
         epoch = m.stream_epoch.get(scope, 0)
         try:
             yield ": connected\n\n"
-            while m.stream_epoch.get(scope, 0) == epoch:
+            while _stream_live(m, scope, epoch, key):
                 e, gone = await _next_bus_event(sub, request)
-                if gone:
+                if gone or not _stream_live(m, scope, epoch, key):
                     return
                 if e is None:
                     yield KEEPALIVE
@@ -1197,19 +1214,25 @@ def _advance_seq(last: int, e: dict) -> int | None:
 async def _conversation_events(request: Request, m: Manager, sid: str, after: int, follow: bool):
     sub = m.bus.subscribe(sid)
     last = after
-    epoch = m.stream_epoch.get(owner_id(request), 0)
+    scope = owner_id(request)
+    epoch = m.stream_epoch.get(scope, 0)
+    key = _stream_key(request, m)
     try:
         yield ": connected\n\n"
         for e in m.db.events(sid, after):
+            if not _stream_live(m, scope, epoch, key):
+                return
             last = e["seq"]
             yield sse(e)
-        while follow and m.stream_epoch.get(owner_id(request), 0) == epoch:
+        while follow and _stream_live(m, scope, epoch, key):
             if sub.overflowed:
                 for e in _resync_after_overflow(m, sub, sid, last):
+                    if not _stream_live(m, scope, epoch, key):
+                        return
                     last = e["seq"]
                     yield sse(e)
             e, gone = await _next_bus_event(sub, request)
-            if gone:
+            if gone or not _stream_live(m, scope, epoch, key):
                 return
             if e is None:
                 yield KEEPALIVE
