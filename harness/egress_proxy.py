@@ -5,6 +5,11 @@ destination once, refuses it (403, no upstream connection) if any resolved addre
 connects to exactly an address that passed the check, so a second lookup can't rebind the name to the host, the LAN
 or the tailnet. One log line per request: destination, port and decision; never headers or bodies.
 
+Client slots (#788): a request holds one of `max_clients` global slots and one of its source address's
+`max_clients_per_source` slots from its parse until its tunnel ends. Each session's container reaches the proxy from
+its own network, so the source address is the session. Over the per-source cap a request gets 429 at once; one that
+can't get a global slot within `slot_timeout` seconds gets 503. Neither is left waiting with no answer.
+
 Standard library only: ops/egress/sandbox.Dockerfile copies this one file onto a slim Python image, and the policy
 (ports, deny list, timeouts) comes from the owner-reviewed ops/egress/sandbox-proxy.conf, which compose mounts
 read-only at CONFIG. The path is fixed: nothing on the command line or in the environment chooses another file.
@@ -20,9 +25,10 @@ import re
 import socket
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 from urllib.parse import urlsplit
 
 Address = ipaddress.IPv4Address | ipaddress.IPv6Address
@@ -58,6 +64,8 @@ class Policy:
     connect_timeout: float = 10
     idle_timeout: float = 600
     max_clients: int = 64
+    max_clients_per_source: int = 8
+    slot_timeout: float = 10
 
 
 def embedded_ipv4(addr: Address) -> ipaddress.IPv4Address | None:
@@ -120,9 +128,11 @@ def load_policy(path: Path) -> Policy:
     connect_ports: set[int] = set()
     http_ports: set[int] = set()
     deny: list[Network] = []
-    scalars: dict[str, str] = {}
-    keys = {"listen": "listen", "port": "port", "connecttimeout": "connect_timeout",
-            "idletimeout": "idle_timeout", "maxclients": "max_clients"}
+    scalars: dict[str, Any] = {}
+    keys: dict[str, tuple[str, Callable[[str], Any]]] = {
+        "listen": ("listen", str), "port": ("port", _port), "connecttimeout": ("connect_timeout", _seconds),
+        "idletimeout": ("idle_timeout", _seconds), "maxclients": ("max_clients", _count),
+        "maxclientspersource": ("max_clients_per_source", _count), "slottimeout": ("slot_timeout", _seconds)}
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
@@ -137,18 +147,14 @@ def load_policy(path: Path) -> Policy:
             elif key == "deny":
                 deny.append(ipaddress.ip_network(value, strict=True))
             elif key in keys and value:
-                scalars[keys[key]] = value
+                field, parse = keys[key]
+                scalars[field] = parse(value)
             else:
                 raise ValueError("unknown key or missing value")
         except ValueError as e:
             raise ValueError(f"{path}:{number}: {raw.strip()!r}: {e}") from None
-    defaults = Policy()
-    return Policy(
-        connect_ports=frozenset(connect_ports), http_ports=frozenset(http_ports), deny=tuple(deny),
-        listen=scalars.get("listen", defaults.listen), port=_port(scalars.get("port", str(defaults.port))),
-        connect_timeout=float(scalars.get("connect_timeout", defaults.connect_timeout)),
-        idle_timeout=float(scalars.get("idle_timeout", defaults.idle_timeout)),
-        max_clients=int(scalars.get("max_clients", defaults.max_clients)))
+    return Policy(connect_ports=frozenset(connect_ports), http_ports=frozenset(http_ports), deny=tuple(deny),
+                  **scalars)
 
 
 def _port(value: str) -> int:
@@ -156,6 +162,20 @@ def _port(value: str) -> int:
     if not 0 < port < 65536:
         raise ValueError(f"port {port} out of range")
     return port
+
+
+def _count(value: str) -> int:
+    count = int(value)
+    if count < 1:
+        raise ValueError(f"{count} must be at least 1")
+    return count
+
+
+def _seconds(value: str) -> float:
+    seconds = float(value)
+    if not seconds > 0 or seconds == float("inf"):   # `not >` also refuses nan
+        raise ValueError(f"{value} must be a number of seconds greater than 0")
+    return seconds
 
 
 class BadRequest(Exception):
@@ -246,6 +266,7 @@ class EgressProxy:
         self.connector = connector
         self.log = log
         self._slots = asyncio.Semaphore(policy.max_clients)
+        self._per_source: Counter[str] = Counter()
 
     async def serve(self, host: str | None = None, port: int | None = None) -> asyncio.Server:
         return await asyncio.start_server(
@@ -257,22 +278,52 @@ class EgressProxy:
         self.log(f"{stamp} {host} {port} {decision}")
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        async with self._slots:
-            try:
-                await self._handle(reader, writer)
-            finally:
-                writer.close()
+        try:
+            request = await self._read_request(reader, writer)
+            if request is not None:
+                await self._slotted(request, _source(writer), reader, writer)
+        finally:
+            writer.close()
 
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def _read_request(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> Request | None:
         try:
             head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEADER_TIMEOUT)
-            request = parse_request(head)
+            return parse_request(head)
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError, ConnectionError):
-            return
+            return None
         except BadRequest as e:
             self._record("-", "-", f"deny ({e})")
             await _answer(writer, 400, "Bad Request", str(e))
+            return None
+
+    async def _slotted(self, request: Request, source: str, reader: asyncio.StreamReader,
+                       writer: asyncio.StreamWriter) -> None:
+        """Forward `request` holding a per-source and a global slot, or answer at once why it can't have them."""
+        cap = self.policy.max_clients_per_source
+        if self._per_source[source] >= cap:
+            refusal = f"{source} has {cap} requests open, the most one address may have"
+            self._record(request.host, request.port, f"deny ({refusal})")
+            await _answer(writer, 429, "Too Many Requests", f"sandbox egress proxy: {refusal}")
             return
+        self._per_source[source] += 1
+        try:
+            try:
+                await asyncio.wait_for(self._slots.acquire(), self.policy.slot_timeout)
+            except TimeoutError:
+                reason = f"no free client slot within {self.policy.slot_timeout:g} s"
+                self._record(request.host, request.port, f"fail ({reason})")
+                await _answer(writer, 503, "Service Unavailable", f"sandbox egress proxy: {reason}")
+                return
+            try:
+                await self._forward(request, reader, writer)
+            finally:
+                self._slots.release()
+        finally:
+            self._per_source[source] -= 1
+            if not self._per_source[source]:
+                del self._per_source[source]
+
+    async def _forward(self, request: Request, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         refusal = port_refusal(self.policy, request.connect, request.port)
         addresses: list[str] = []
         if refusal is None:
@@ -313,6 +364,12 @@ class EgressProxy:
                 continue
             return up_reader, up_writer, address
         return None
+
+
+def _source(writer: asyncio.StreamWriter) -> str:
+    """The client's IP address, which names its session's network; the port differs per connection."""
+    peer = writer.get_extra_info("peername")
+    return str(peer[0]) if isinstance(peer, tuple) and peer else "-"
 
 
 async def _answer(writer: asyncio.StreamWriter, code: int, reason: str, detail: str) -> None:
