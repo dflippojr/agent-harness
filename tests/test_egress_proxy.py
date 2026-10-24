@@ -119,6 +119,7 @@ def test_the_committed_config():
     assert COMMITTED.connect_ports == {443} and COMMITTED.http_ports == {80}
     assert (COMMITTED.listen, COMMITTED.port, COMMITTED.max_clients) == ("0.0.0.0", 8888, 64)
     assert (COMMITTED.connect_timeout, COMMITTED.idle_timeout) == (10, 600)
+    assert (COMMITTED.max_clients_per_source, COMMITTED.slot_timeout) == (8, 10)
     named = {str(n) for n in COMMITTED.deny}
     for net in ("127.0.0.0/8", "0.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
                 "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4", "::1/128", "::/128", "fc00::/7", "fe80::/10",
@@ -565,3 +566,15 @@ def test_a_bad_slot_value_names_the_file_and_line(tmp_path, text, error):
     with pytest.raises(ValueError, match=error) as e:
         ep.load_policy(path)
     assert f"{path}:2: {text.strip()!r}:" in str(e.value)
+
+
+def test_the_source_is_the_peer_address_without_its_port():
+    class Writer:
+        def __init__(self, peer):
+            self.peer = peer
+
+        def get_extra_info(self, name):
+            return self.peer if name == "peername" else None
+    assert ep._source(Writer(("172.30.4.2", 51234))) == "172.30.4.2"
+    assert ep._source(Writer(("fd00::5", 51234, 0, 0))) == "fd00::5"
+    assert ep._source(Writer(None)) == "-"

@@ -454,7 +454,9 @@ address it resolves to is not public: loopback, RFC 1918, the tailnet's 100.64.0
 multicast, reserved, Docker's host gateway and `host.docker.internal`, and their IPv4-mapped and NAT64 forms. It then
 connects to the address it checked, so a second DNS answer cannot redirect it. It logs one line per request
 (destination, port, decision), never headers or bodies: `docker logs harness-egress-sandbox`. Port 22 is refused,
-so clone over HTTPS. Change the policy only with a pull request the owner reviews; nothing changes it at runtime.
+so clone over HTTPS. One session can have at most `MaxClientsPerSource` (8) requests open at once; one more gets
+429 at once. If every one of the `MaxClients` (64) slots is in use, a new request gets 503 after `SlotTimeout` (10)
+seconds instead of hanging. Change the policy only with a pull request the owner reviews; nothing changes it at runtime.
 
 Every profile's installer starts the proxy; `harness doctor` reports it as `Sandbox egress`. If it is not running,
 network commands fail and name the command that starts it, from the checkout:
