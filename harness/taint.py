@@ -18,6 +18,7 @@ WEB_FETCH_TOOLS = ("web_fetch", "WebFetch")
 WEB_SEARCH_TOOLS = ("web_search", "WebSearch")
 ALWAYS_TAINT_ASK = ("restart_service", "rebuild_service", "memory_write")
 SESSION_READ = "session_read"
+SESSION_SEARCH = "session_search"
 
 
 def banner(what: str) -> str:
@@ -30,13 +31,15 @@ def is_mcp_tool(name: str) -> bool:
     return name.startswith("mcp__") and not name.startswith("mcp__harness__")
 
 
-def context_banner(name: str, *, mcp_client: bool = False) -> str:
-    """The banner prefixed to this tool's result in the model's context only (#644): MCP results and session_read
-    transcripts. Stored events and artifacts keep the plain text. Web tools put theirs in the output itself.
+def context_banner(name: str, *, mcp_client: bool = False, tainted: bool = False) -> str:
+    """The banner prefixed to this tool's result in the model's context only (#644): MCP results, session_read
+    transcripts and session_search results with a tainted hit (`tainted`), whose bounded head and tail or a
+    read_artifact range may leave out the banner that hit carries inline (#798). Stored events and artifacts keep the
+    plain text. Web tools put theirs in the output itself.
     `mcp_client` marks a configured server's tool, which may sit under mcp__harness__ (a server named harness__x)."""
     if mcp_client or is_mcp_tool(name):
         return banner("MCP tool result") + "\n"
-    if name == SESSION_READ:
+    if name == SESSION_READ or (name == SESSION_SEARCH and tainted):
         return banner("session transcript") + "\n"
     return ""
 

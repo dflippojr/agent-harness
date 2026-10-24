@@ -43,7 +43,11 @@ artifact: `... (output truncated; N characters total; recover with
 read_artifact(artifact_id=…, start=0, end=20000))`. MCP results and
 `session_read` transcripts still open with their untrusted-content banner; the
 artifact holds the plain text. `session_search` marks each hit from a tainted
-session with that banner in the result itself, so the artifact keeps it. Where `read_artifact` is unavailable (see
+session with that banner in the result itself, so the artifact keeps it, and
+cuts each passage, answer and title (marked `… [cut]`) so ten hits fit the
+default bound. A result with a tainted hit also opens with the banner, as does
+a `read_artifact` range of it, so a bounded head and tail or a range that starts
+past a hit's own banner stays marked (#798). Where `read_artifact` is unavailable (see
 below), the result is middle-truncated with no footer. `read_artifact` itself
 is never bounded or stored again.
 
