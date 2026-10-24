@@ -401,3 +401,167 @@ def test_an_idle_tunnel_is_closed():
         server.close()
         upstream.close()
     run(go())
+
+
+# client slots (#788): one source can't hold every slot, and a request that can't get one is answered, not parked
+
+class Slots:
+    """A proxy whose upstream accepts and stays quiet, so every tunnel holds its slots until the test closes it."""
+
+    def __init__(self, policy: ep.Policy):
+        self.policy = policy
+        self.logs: list[str] = []
+        self.upstreams: list[asyncio.StreamWriter] = []
+
+    async def __aenter__(self):
+        async def quiet(reader, writer):
+            self.upstreams.append(writer)
+            await reader.read()
+            writer.close()
+        self.upstream = await asyncio.start_server(quiet, "127.0.0.1", 0)
+        upstream_port = self.upstream.sockets[0].getsockname()[1]
+
+        async def connector(address, _):
+            return await asyncio.open_connection("127.0.0.1", upstream_port)
+
+        async def resolver(host, _):
+            return ["8.8.8.8"]
+        proxy = ep.EgressProxy(self.policy, resolver=resolver, connector=connector, log=self.logs.append)
+        self.server = await proxy.serve("127.0.0.1", 0)
+        self.port = self.server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *_):
+        self.server.close()
+        self.upstream.close()
+
+    async def request(self, source="127.0.0.1", host=b"a.example"):
+        """Send a CONNECT from `source`; return the stream pair and the response head (b"" if none came in 5 s)."""
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port, local_addr=(source, 0))
+        writer.write(b"CONNECT " + host + b":443 HTTP/1.1\r\n\r\n")
+        await writer.drain()
+        try:
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+        except TimeoutError:
+            head = b""
+        return reader, writer, head
+
+
+async def _still_open(reader: asyncio.StreamReader) -> bool:
+    try:
+        return await asyncio.wait_for(reader.read(1), 0.2) != b""
+    except TimeoutError:
+        return True
+
+
+def test_one_source_over_its_cap_gets_429_at_once_and_another_source_is_served():
+    async def go():
+        async with Slots(ep.Policy(max_clients_per_source=2, slot_timeout=5)) as slots:
+            held = [await slots.request() for _ in range(2)]
+            assert all(head.startswith(b"HTTP/1.1 200") for _, _, head in held)
+            loop = asyncio.get_running_loop()
+            start = loop.time()
+            reader, writer, head = await slots.request(host=b"b.example")
+            assert head.startswith(b"HTTP/1.1 429 Too Many Requests\r\n")
+            assert loop.time() - start < 1
+            body = await asyncio.wait_for(reader.read(), 5)
+            assert body.count(b"\n") == 1 and b"127.0.0.1" in body
+            assert slots.logs[-1].endswith(" b.example 443 deny (127.0.0.1 has 2 requests open, the most one "
+                                           "address may have)")
+            writer.close()
+            for held_reader, _, _ in held:
+                assert await _still_open(held_reader)
+            _, other, head = await slots.request(source="127.0.0.2")
+            assert head.startswith(b"HTTP/1.1 200")
+            for _, held_writer, _ in held:
+                held_writer.close()
+            other.close()
+    run(go())
+
+
+def test_with_every_global_slot_held_a_request_gets_503_within_the_slot_timeout():
+    async def go():
+        async with Slots(ep.Policy(max_clients=2, max_clients_per_source=8, slot_timeout=0.3)) as slots:
+            held = [await slots.request() for _ in range(2)]
+            assert all(head.startswith(b"HTTP/1.1 200") for _, _, head in held)
+            loop = asyncio.get_running_loop()
+            start = loop.time()
+            reader, writer, head = await slots.request(source="127.0.0.2", host=b"b.example")
+            waited = loop.time() - start
+            assert head.startswith(b"HTTP/1.1 503 Service Unavailable\r\n")
+            assert 0.25 <= waited < 3
+            body = await asyncio.wait_for(reader.read(), 5)
+            assert body.count(b"\n") == 1
+            assert slots.logs[-1].endswith(" b.example 443 fail (no free client slot within 0.3 s)")
+            writer.close()
+            for held_reader, held_writer, _ in held:
+                assert await _still_open(held_reader)
+                held_writer.write(b"still here")
+                await held_writer.drain()
+            await asyncio.sleep(0.1)
+            for upstream in slots.upstreams:
+                assert not upstream.is_closing()
+            for _, held_writer, _ in held:
+                held_writer.close()
+    run(go())
+
+
+def test_a_finished_tunnel_frees_its_global_and_its_per_source_slot():
+    async def go():
+        async with Slots(ep.Policy(max_clients=1, max_clients_per_source=1, slot_timeout=2)) as slots:
+            for _ in range(3):
+                reader, writer, head = await slots.request()
+                assert head.startswith(b"HTTP/1.1 200")
+                writer.close()
+                await writer.wait_closed()
+                for upstream in slots.upstreams:
+                    upstream.close()
+                assert await asyncio.wait_for(reader.read(), 5) == b""
+            _, writer, head = await slots.request()
+            assert head.startswith(b"HTTP/1.1 200")
+            writer.close()
+    run(go())
+
+
+def test_a_request_refused_before_it_tunnels_frees_its_slots():
+    """A 403 holds its slots only while it is decided; with one slot of each, refusals don't add up."""
+    async def go():
+        async with Slots(ep.Policy(max_clients=1, max_clients_per_source=1, slot_timeout=0.3)) as slots:
+            for _ in range(3):
+                reader, writer, head = await slots.request(host=b"10.0.0.1")
+                assert head.startswith(b"HTTP/1.1 403")
+                await asyncio.wait_for(reader.read(), 5)
+                writer.close()
+            _, writer, head = await slots.request()
+            assert head.startswith(b"HTTP/1.1 200")
+            writer.close()
+    run(go())
+
+
+def test_load_policy_reads_the_slot_keys(tmp_path):
+    path = tmp_path / "proxy.conf"
+    path.write_text("MaxClients 32\nMaxClientsPerSource 4\nSlotTimeout 2.5\n", encoding="utf-8")
+    policy = ep.load_policy(path)
+    assert (policy.max_clients, policy.max_clients_per_source, policy.slot_timeout) == (32, 4, 2.5)
+    defaults = ep.load_policy(_write(tmp_path / "empty.conf", ""))
+    assert (defaults.max_clients_per_source, defaults.slot_timeout) == (8, 10)
+    assert (COMMITTED.max_clients_per_source, COMMITTED.slot_timeout) == (8, 10)
+
+
+def _write(path: Path, text: str) -> Path:
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("text, error", [
+    ("MaxClientsPerSource many\n", "invalid literal"), ("MaxClientsPerSource 0\n", "at least 1"),
+    ("MaxClientsPerSource 2.5\n", "invalid literal"), ("SlotTimeout soon\n", "could not convert"),
+    ("SlotTimeout 0\n", "greater than 0"), ("SlotTimeout -1\n", "greater than 0"), ("SlotTimeout nan\n", "greater"),
+    ("MaxClients lots\n", "invalid literal"), ("MaxClients 0\n", "at least 1"), ("IdleTimeout x\n", "could not"),
+    ("SlotTimeout\n", "missing value"),
+])
+def test_a_bad_slot_value_names_the_file_and_line(tmp_path, text, error):
+    path = _write(tmp_path / "proxy.conf", "# slots\n" + text)
+    with pytest.raises(ValueError, match=error) as e:
+        ep.load_policy(path)
+    assert f"{path}:2: {text.strip()!r}:" in str(e.value)
