@@ -173,14 +173,14 @@ def _open_admin_stream(client, monkeypatch, path: str, headers: dict):
         opened.append(stream)
         return PlainTextResponse("")
 
-    monkeypatch.setattr(harness_api, "_event_stream_response", capture)
-    response = client.get(path, headers=headers)
-    monkeypatch.undo()
+    with monkeypatch.context() as patch:
+        patch.setattr(harness_api, "_event_stream_response", capture)
+        response = client.get(path, headers=headers)
     assert response.status_code == 200, response.text
     return opened[0]
 
 
-def _short_tick(monkeypatch, before=None):
+def _short_tick(patch, before=None):
     """Make each stream wait return at once: the queued event, or a quiet interval, with the client still connected
     (the request the handler kept has already been answered). `before` runs first."""
     async def tick(awaitable, timeout):
@@ -197,8 +197,8 @@ def _short_tick(monkeypatch, before=None):
 
     async def connected(_request):
         return False
-    monkeypatch.setattr(harness_api.asyncio, "wait_for", tick)
-    monkeypatch.setattr(Request, "is_disconnected", connected)
+    patch.setattr(harness_api.asyncio, "wait_for", tick)
+    patch.setattr(Request, "is_disconnected", connected)
 
 
 ADMIN_STREAMS = {
@@ -230,21 +230,21 @@ def test_revoking_an_owner_key_ends_its_admin_surface_stream(tmp_path, monkeypat
             if when == "during_wait":
                 m.bus.emit("owner00001", "status", {"status": "done", "answer": "must not leak"})
 
-        async def consume():
+        async def consume(patch):
             assert await anext(stream) == ": connected\n\n"
             if when == "before_wait":
                 revoked = await asyncio.to_thread(client.delete, f"/api/admin/v1/keys/{key['id']}")
                 assert revoked.status_code == 204, revoked.text
                 m.bus.emit("owner00001", "status", {"status": "done", "answer": "must not leak"})
-                _short_tick(monkeypatch)
+                _short_tick(patch)
             else:
-                _short_tick(monkeypatch, before=revoke_during_wait)
+                _short_tick(patch, before=revoke_during_wait)
             with pytest.raises(StopAsyncIteration):
                 await anext(stream)
             assert not m.bus._subs[subscription]
 
-        asyncio.run(consume())
-        monkeypatch.undo()
+        with monkeypatch.context() as patch:
+            asyncio.run(consume(patch))
         reconnect = path.replace("follow=true", "follow=false")
         assert client.get(reconnect, headers=headers).status_code == 401
 
@@ -258,19 +258,19 @@ def test_releasing_the_hub_ends_the_admin_surface_stream_its_key_holds(tmp_path,
         path, subscription = _seeded_stream_path(m, surface)
         stream = _open_admin_stream(client, monkeypatch, path, headers)
 
-        async def consume():
+        async def consume(patch):
             assert await anext(stream) == ": connected\n\n"
             released = await asyncio.to_thread(client.post, f"{CLAIM}/release", headers=_host(m),
                                                json={"confirm": True})
             assert released.status_code == 200, released.text
             m.bus.emit("owner00001", "status", {"status": "done", "answer": "must not leak"})
-            _short_tick(monkeypatch)
+            _short_tick(patch)
             with pytest.raises(StopAsyncIteration):
                 await anext(stream)
             assert not m.bus._subs[subscription]
 
-        asyncio.run(consume())
-        monkeypatch.undo()
+        with monkeypatch.context() as patch:
+            asyncio.run(consume(patch))
         assert client.get(path.replace("follow=true", "follow=false"), headers=headers).status_code == 401
 
 
@@ -282,14 +282,15 @@ def test_ambient_owner_admin_stream_survives_revoking_an_unrelated_key(tmp_path,
         path, _ = _seeded_stream_path(m, surface)
         stream = _open_admin_stream(client, monkeypatch, path, {})
 
-        async def consume():
+        async def consume(patch):
             assert await anext(stream) == ": connected\n\n"
             revoked = await asyncio.to_thread(client.delete, f"/api/admin/v1/keys/{other['id']}")
             assert revoked.status_code == 204, revoked.text
-            _short_tick(monkeypatch)
+            _short_tick(patch)
             assert await anext(stream) == ": keepalive\n\n"
             m.bus.emit("owner00001", "status", {"status": "done", "answer": "still live"})
             assert "still live" in await anext(stream)
             await stream.aclose()
 
-        asyncio.run(consume())
+        with monkeypatch.context() as patch:
+            asyncio.run(consume(patch))
