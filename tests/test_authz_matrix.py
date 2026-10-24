@@ -19,6 +19,7 @@ from harness.config import BackendConfig, GuestAccess
 from harness_modules.local_model import resources, routes
 from harness_modules.local_model.warmup import READY, ModelWarmer
 
+from conftest import PLENTY_FREE_GB, pin_session_free_space
 from test_household import ALICE, BOB, GUEST, H, OWNER, create_member, household
 from test_hub_claim import HUB_ORIGIN, _bearer, _claim
 
@@ -195,6 +196,7 @@ def matrix(tmp_path_factory, gitleaks_tools):
     patcher.setattr(ModelWarmer, "state", awake)
     patcher.setattr(routes, "_resources_status", status)
     patcher.setattr(resources, "diagnostics", status)
+    pin_session_free_space(patcher, PLENTY_FREE_GB)   # a module-scoped fixture is set up before the autouse pin (#789)
     try:
         client, m = household(tmp_path_factory.mktemp("authz"),
                               guests=[GuestAccess(login=GUEST, until="2099-01-01T00:00:00+00:00")])

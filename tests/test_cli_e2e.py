@@ -25,6 +25,17 @@ from harness import cli
 from waits import scaled
 
 ROOT = Path(__file__).resolve().parents[1]
+# The daemon is its own interpreter, so the in-process session free-space pin never reaches it (#789). This starts
+# fake_instance with the same stand-in for harness.manager's shutil that conftest installs, then runs it as __main__.
+DAEMON_START = """
+import runpy, sys
+sys.path.append({tests!r})
+from conftest import PLENTY_FREE_GB, ManagerShutil
+from harness import manager
+manager.shutil = ManagerShutil(PLENTY_FREE_GB * 2**30)
+sys.argv = ["harness.fake_instance", *sys.argv[1:]]
+runpy.run_module("harness.fake_instance", run_name="__main__")
+"""
 ADMIN = "/api/admin/v1"
 TWO_APPROVALS = "Please make two approvals"       # script approval-batch: a.json and b.json under protected/
 PROTECTED = "Update the protected settings"       # script approval-sheet: protected/settings.json, then "Finished."
@@ -85,7 +96,8 @@ def daemon(tmp_path_factory):
     env.pop("NO_PROXY", None)
     env.pop("no_proxy", None)
     log = (base / "server.log").open("w", encoding="utf-8")
-    proc = subprocess.Popen([sys.executable, "-m", "harness.fake_instance", "--dir", str(instance), "--no-seed"],
+    start = DAEMON_START.format(tests=str(Path(__file__).resolve().parent))
+    proc = subprocess.Popen([sys.executable, "-c", start, "--dir", str(instance), "--no-seed"],
                             cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=log, text=True, encoding="utf-8")
     lines: queue.Queue = queue.Queue()
     threading.Thread(target=_read_lines, args=(proc.stdout, lines), daemon=True).start()

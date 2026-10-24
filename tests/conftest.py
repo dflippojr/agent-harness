@@ -1,11 +1,13 @@
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from harness import backend_state, cli_domains, metrics, secret_scan, stables_shell
+from harness import backend_state, cli_domains, manager as manager_mod, metrics, secret_scan, stables_shell
 from harness.fileops import grant_tree_owner_access
 from harness_modules.local_model import service as gpu_guard
 from harness_modules.local_model.warmup import READY, ModelWarmer
@@ -124,6 +126,37 @@ def plenty_of_ram(monkeypatch):
     fixed_ram(monkeypatch)
 
 
+PLENTY_FREE_GB = 1024  # 1 TiB: more room than any cleanup.min_free_gb a test sets
+
+
+class ManagerShutil:
+    """What harness.manager sees as `shutil`: disk_usage reports the pinned free space, and every other name is the live
+    module's. A test that patches shutil.disk_usage itself does not reach the session guard (#789)."""
+
+    def __init__(self, free_bytes: int):
+        self.disk_usage = lambda path: SimpleNamespace(total=free_bytes, used=0, free=free_bytes)
+
+    def __getattr__(self, name):
+        return getattr(shutil, name)
+
+
+def pin_session_free_space(monkeypatch, free_gb: float):
+    """Creating a session refuses with 507 when the disk its workspace lands on has less than cleanup.min_free_gb free
+    (Manager._check_free_space). The suite must not depend on the free space of the temp filesystem (#789), so only
+    harness.manager's name for shutil changes; the real module keeps its disk_usage for the tests that read real usage.
+    A test that exercises the refusal pins the low reading it wants."""
+    monkeypatch.setattr(manager_mod, "shutil", ManagerShutil(int(free_gb * 2**30)))
+
+
+@pytest.fixture(autouse=True)
+def plenty_of_disk():
+    """Its own patcher, so a test's `monkeypatch.undo()` does not drop the pin (#789)."""
+    patcher = pytest.MonkeyPatch()
+    pin_session_free_space(patcher, PLENTY_FREE_GB)
+    yield
+    patcher.undo()
+
+
 def awake_model(monkeypatch):
     """Scripted-model tests have no llama-server to ask whether the model is asleep."""
     async def state(self, model):
@@ -188,6 +221,7 @@ def module_isolation(tmp_path_factory, gitleaks_tools):
     fresh_metric_values(patcher)
     block_real_cli_volumes(patcher)
     fixed_ram(patcher)
+    pin_session_free_space(patcher, PLENTY_FREE_GB)
     awake_model(patcher)
     pin_scanner(patcher, gitleaks_tools)
     guard_process_signals(patcher)
