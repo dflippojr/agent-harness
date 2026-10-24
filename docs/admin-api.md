@@ -622,7 +622,8 @@ The standalone Hub (#546) is the owner's admin console. It pairs by itself and t
    to its origin. If another Hub was recorded since the approval, the redeem gets 409 `hub_claimed` and the request is
    finished.
 4. **Release.** `harness hub release --confirm` revokes the Hub's key at once and clears the record; a new Hub may then
-   claim. `DELETE /keys/{id}` on the Hub's key answers 409 and names this command; no other route replaces the Hub.
+   claim. An event stream the key holds open (`/api/admin/v1/events`, `/api/admin/v1/sessions/{ref}/events`) ends on its
+   next event or keepalive, as it does when `DELETE /keys/{kid}` revokes any other owner key. `DELETE /keys/{id}` on the Hub's key answers 409 and names this command; no other route replaces the Hub.
    The response lists in `hub_minted_owner_keys` any live owner key whose `key.create` audit row is attributed to the
    Hub; revoke each with `harness keys revoke <id>`.
 
