@@ -467,8 +467,8 @@ def test_session_search_taints_only_from_hits_in_the_readers_scope(tmp_path):
 
 
 def _flooded(m, earlier: dict[str, list]) -> None:
-    """Earlier sessions whose matching events are each one oversized snippet, as in the #797 review's probe: three
-    hits of three such events make a search result of about 73,000 characters, past the 20,000 output bound."""
+    """Earlier sessions with two oversized matching events beside _earlier's short one, after the #797 review's probe:
+    three such hits make a search result of about 49,000 characters, past the 20,000-character output bound."""
     for sid, src in earlier.items():
         _earlier(m, sid, src)
         for _ in range(2):
