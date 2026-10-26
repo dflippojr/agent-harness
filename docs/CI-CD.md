@@ -304,10 +304,18 @@ has no effort variable: choose effort through the model id (for example `cursor-
 
 Optional `REVIEW_MAX_DIFF_BYTES` sets how many bytes of PR diff are embedded in the review prompt (default `204800`; accepted range `20480` to `2097152`, digits only). A larger cap covers more of a big PR but grows the prompt, so each review costs more tokens and risks exceeding the model's context; a smaller cap is cheaper but omits more. An invalid value fails closed before a backend runs. When the diff exceeds the cap, whole files are dropped by a fixed rule: source files are kept first, then tests, then docs, then lockfiles and generated or vendored output, in diff order within each tier; a file that does not fit is omitted even if a smaller later file still fits. The comment then opens with `PARTIAL REVIEW: reviewed N of M files (X of Y KB of diff). Not reviewed: <files>` instead of `Reviewed the full diff`, and the `<!-- agent-review: ... -->` marker is withheld so the next run reviews the whole PR instead of treating it as covered. A single file larger than the cap is always listed as not reviewed. Omitted files are not reviewed in additional passes; raise the cap to cover them.
 
-All three CLIs run under the review runner service user and must be logged in for that same user. Cursor uses ask mode
+All three CLIs run under the review runner service user and must be logged in for that same user. The workflow runs
+every step in PowerShell 7 (`shell: pwsh`, review-v4, #806), so a review runner needs `pwsh`, `git` and `gh` on the
+service user's PATH on Linux and Windows alike. The backends receive only an allowlisted environment: the Windows
+profile and system variables, and on Linux `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`/`LC_*` and the XDG base
+directories, so each CLI finds the service user's login. Cursor uses ask mode
 with its sandbox enabled on non-Windows hosts; the flag is skipped on Windows because that CLI does not support it.
-Windows ask mode is not an OS sandbox; keep Cursor opt-in rather than adding it to the default Windows pool. Codex ignores the service user's configuration, restores only the required unelevated Windows
-sandbox setting, disables apps and plugins, and supplies an empty MCP server table before entering its read-only sandbox.
+Windows ask mode is not an OS sandbox; keep Cursor opt-in rather than adding it to the default Windows pool. The
+wrapper starts Cursor's bundled `node` from the newest version under `~/.local/share/cursor-agent/versions` (or
+`$XDG_DATA_HOME/cursor-agent`) on Linux and `%LOCALAPPDATA%\cursor-agent\versions` (`node.exe`) on Windows. Codex
+ignores the service user's configuration, restores only the required unelevated Windows sandbox setting on Windows (on
+Linux, Codex uses its own OS sandbox and gets no Windows setting),
+disables apps and plugins, and supplies an empty MCP server table before entering its read-only sandbox.
 Claude exposes only Read/Grep/Glob, with `--allowedTools Read(./**)` anchored to the PR workspace as its working
 directory. No bare Read, Grep or Glob allow is passed, and `--setting-sources=` disables inherited settings that could
 add broader permissions or additional directories. `--restricted` explicitly fences built-in file tools to working
@@ -461,13 +469,13 @@ permissions:
 
 jobs:
   review:
-    uses: dflippojr/agent-harness/.github/workflows/review.yml@review-v3
+    uses: dflippojr/agent-harness/.github/workflows/review.yml@review-v4
     with:
       pr_number: ${{ inputs.pr_number }}
       backend: ${{ inputs.backend }}
       mode: ${{ inputs.mode }}
-      runs_on: '["self-hosted","Windows","X64","financial-planner-review"]'
-      tooling_ref: review-v3
+      runs_on: '["self-hosted","Linux","X64","financial-planner-review"]'
+      tooling_ref: review-v4
     secrets: inherit
 ```
 
@@ -477,9 +485,12 @@ PR. Optional inputs: `max_diff_bytes` (otherwise the consumer's `REVIEW_MAX_DIFF
 `tooling_ref` (use the trusted default branch or a maintainer-pinned tag, never a PR ref). The `REVIEW_*` repository variables are read from the consumer
 repository.
 
-**Runner label.** Register a self-hosted Windows runner for the consumer repo with
-`ops/github/install-runner.ps1 -Labels <project>-review` under a service user whose Codex, Claude, and Cursor CLIs are
-logged in, and pass that label in `runs_on`.
+**Runner label.** Register a self-hosted Linux runner for the consumer repo with
+`sudo ops/github/install-runner.sh --token <token> --repo dflippojr/<project> --labels <project>-review --name <name>`
+under a service user whose Codex, Claude, and Cursor CLIs are logged in, and pass that label in `runs_on`
+(see [Review runner pool](#review-runner-pool)). For a Windows fallback runner, use
+`ops/github/install-runner.ps1 -Labels <project>-review` and `"Windows"` in place of `"Linux"` in `runs_on`; review-v4
+runs on either, as long as the runner has PowerShell 7 (`pwsh`).
 
 **Runner access (owner step).** Create a self-hosted runner group in GitHub and restrict it to the specific trusted
 review/deploy workflows that need those runners, with workflow refs on the default branch or trusted tags. Labels
@@ -495,21 +506,29 @@ workflow can only narrow these, so a review-v3 caller without `issues: read` fai
 `SonarSource/sonarqube-scan-action@*`) must also allow `dflippojr/agent-harness/.github/workflows/review.yml@*`
 (Settings -> Actions -> General -> "Allow or block specified actions and reusable workflows").
 
-**Version pin.** The `@review-v3` reference selects the workflow definition. The script follows trusted `main` by
-default; pinning only the workflow does not stage script changes. For staged rollout, set `tooling_ref: review-v3`
+**Version pin.** The `@review-v4` reference selects the workflow definition. The script follows trusted `main` by
+default; pinning only the workflow does not stage script changes. For staged rollout, set `tooling_ref: review-v4`
 as in the caller above so both workflow and script follow the same maintainer-controlled tag. After a change has
 been verified here, the owner moves that tag deliberately:
 
 ```powershell
-git tag -f review-v3 <verified commit on main>
-git push -f origin refs/tags/review-v3
+git tag -f review-v4 <verified commit on main>
+git push -f origin refs/tags/review-v4
 ```
 
 A breaking change to the caller contract (renamed or new required inputs, or a new permission) gets a new tag.
 review-v3 added the spec review and the `issues: read` permission, so it is a new tag: the review-v2 tag stays on its
 commit and its callers keep the diff-only review until each repository moves its caller (workflow ref, `tooling_ref`
 and the `issues: read` grant) to review-v3. review-v3 exists: the owner created it at the merge commit of #725 on `main`,
-after a dispatched review here had passed. Callers pin it as shown above and need no tag of their own.
+after a dispatched review here had passed.
+
+review-v4 (#806) runs the same spec review on Linux or Windows runners: every step uses PowerShell 7 (`shell: pwsh`)
+instead of Windows PowerShell 5.1, which Linux does not have, and the default label for this repository's own runs is
+`["self-hosted","Linux","X64","agent-harness-review"]`. The caller contract is unchanged except for the OS label in
+`runs_on`, but review-v3's steps cannot start on a Linux runner, so review-v4 is a new tag and review-v3 stays on its
+commit for Windows-only callers. The owner creates review-v4 at the merge commit of #806 on `main` after a dispatched
+review has passed on a Linux runner; each caller then moves its `uses` ref, `tooling_ref` and `runs_on` OS label in one
+change. Callers pin it as shown above and need no tag of their own.
 
 **Gate guard required check (owner step).** The `main` ruleset must require `gate-guard-target / gate-guard` next to `gate`.
 That check is the job `gate-guard-target` in `.github/workflows/gate-guard-target.yml`, which runs from `main`, so it appears
@@ -606,9 +625,39 @@ pass.
 
 ## Review runner pool
 
-Automated review (`.github/workflows/review.yml`) uses three repository-scoped self-hosted runners that share the
-`agent-harness-review` label. Each member takes one job, so reviews of different PRs can run in parallel. They are
-named, installed, and started as:
+Automated review (`.github/workflows/review.yml`) uses repository-scoped self-hosted runners that share the
+`agent-harness-review` label. Each member takes one job, so reviews of different PRs can run in parallel.
+
+### Linux (the tower, from 2026-10-26)
+
+The tower runs Ubuntu, so the pool runs there as systemd services under a dedicated service user. Install each member
+with `ops/github/install-runner.sh` (the Linux counterpart of `install-runner.ps1`), as root, one at a time, with a
+fresh short-lived registration token for each. The owner or liaison does this step: the token needs the owner's `gh`.
+
+```bash
+for n in 1 2 3; do
+  token=$(gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token)
+  sudo ops/github/install-runner.sh --token "$token" --labels agent-harness-review \
+    --name "dflippotower-agent-harness-review-$n"
+done
+```
+
+Each member unpacks the pinned runner release (SHA-256 checked) into
+`/home/github-runner/runners/<name>`, registers it as the `github-runner` service user (created if missing, with no
+sudo or docker group), and installs the runner's own systemd unit (`svc.sh install github-runner`), so it starts at
+boot and jobs never run as root. `--user` and `--install-dir` choose another user or directory; the directory must stay
+under `/home`, because the publication scan rejects home-directory paths and so cannot post a leaked runner path. A
+consumer repository's runner adds `--repo dflippojr/<project> --labels <project>-review`. `--dry-run` prints the plan
+and changes nothing. Install `pwsh`, `git` and `gh` for the service user, and log in its Codex, Claude and Cursor CLIs
+as that user (`sudo -iu github-runner`), before dispatching a review.
+
+To repair or remove a member, delete the runner in GitHub (**Settings > Actions > Runners**), then from its install
+directory run `sudo ./svc.sh stop`, `sudo ./svc.sh uninstall`, and delete the directory.
+
+### Windows (fallback boot)
+
+The Windows members remain as a fallback for a Windows boot of the tower. review-v4 needs PowerShell 7 (`pwsh`) on
+them too. They are named, installed, and started as:
 
 | GitHub name | Install dir | Hidden logon task |
 | --- | --- | --- |
