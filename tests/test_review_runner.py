@@ -26,6 +26,9 @@ RENDER_STUB = (
     "function Invoke-ReviewMarkdownRender { param([string]$Text, [string]$Repository, [string]$WorkingDirectory) "
     "'<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }"
 )
+# pwsh's default error view wraps a long message across lines in ANSI colour, so a test could not find it in the
+# output; this prints each error's message on one plain line, as Windows PowerShell did.
+PLAIN_ERRORS = "$ErrorView = 'NormalView'; $PSStyle.OutputRendering = 'PlainText'"
 
 
 def require_powershell() -> None:
@@ -42,7 +45,7 @@ def run_powershell(tmp_path: Path, body: str, timeout: int = 30) -> subprocess.C
     wrapper = tmp_path / "review-test.ps1"
     script_path = str(SCRIPT).replace("'", "''")
     wrapper.write_text(
-        f". '{script_path}'\n{RENDER_STUB}\n{body}\n",
+        f"{PLAIN_ERRORS}\n. '{script_path}'\n{RENDER_STUB}\n{body}\n",
         encoding="utf-8",
     )
     return subprocess.run(

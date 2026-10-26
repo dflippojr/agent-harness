@@ -230,13 +230,23 @@ function Resolve-ReviewMode {
     return [pscustomobject]@{ Mode = 'incremental'; Reason = 'safe incremental range' }
 }
 
+function ConvertFrom-ReviewJson {
+    param([AllowEmptyString()][string]$Json)
+
+    # GitHub's text as text: PowerShell 7 turns ISO 8601 strings (a comment's created_at, or a title that is only a
+    # date) into DateTime values unless -DateKind String (7.5 and later) says otherwise. Windows PowerShell 5.1 has
+    # no -DateKind and keeps them as strings already.
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { return ($Json | ConvertFrom-Json -DateKind String) }
+    return ($Json | ConvertFrom-Json)
+}
+
 function Get-CompareReviewFacts {
     [CmdletBinding()]
     param([AllowEmptyString()][string]$Json)
 
     if ([string]::IsNullOrWhiteSpace($Json)) { return $null }
     try {
-        $data = $Json | ConvertFrom-Json
+        $data = ConvertFrom-ReviewJson -Json $Json
     } catch {
         return $null
     }
@@ -1253,6 +1263,8 @@ function Set-ProcessEnvironmentSnapshot {
 
     foreach ($name in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
         [Environment]::SetEnvironmentVariable([string]$name, $null, 'Process')
+        # PowerShell 7 on Linux keeps a name cleared that way, empty, in a child's environment; the Env: drive removes it.
+        if (Test-Path -LiteralPath "Env:$name") { Remove-Item -LiteralPath "Env:$name" }
     }
     foreach ($entry in $Environment.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
@@ -1729,7 +1741,7 @@ function Get-PullRequestReviewRefs {
         throw "gh pr view $PrNumber did not return review refs: $(([string]$attempt.Stderr).Trim())"
     }
     try {
-        $data = ([string]$attempt.Stdout) | ConvertFrom-Json
+        $data = ConvertFrom-ReviewJson -Json ([string]$attempt.Stdout)
     } catch {
         throw "gh pr view $PrNumber did not return review refs: $(([string]$attempt.Stderr).Trim())"
     }
@@ -1821,7 +1833,7 @@ function ConvertFrom-ReviewGitHubJson {
     param([Parameter(Mandatory = $true)]$Attempt, [Parameter(Mandatory = $true)][string]$What)
 
     if ($Attempt.ExitCode -ne 0) { throw "could not read $What`: $(([string]$Attempt.Stderr).Trim())" }
-    try { return (([string]$Attempt.Stdout) | ConvertFrom-Json) }
+    try { return (ConvertFrom-ReviewJson -Json ([string]$Attempt.Stdout)) }
     catch { throw "could not parse $What" }
 }
 
@@ -2122,7 +2134,7 @@ function Get-LastReviewedSha {
         $raw = ([string]$attempt.Stdout).Trim()
         if ([string]::IsNullOrWhiteSpace($raw) -or $raw -eq '[]') { break }
         try {
-            $parsed = $raw | ConvertFrom-Json
+            $parsed = ConvertFrom-ReviewJson -Json $raw
         } catch {
             return [pscustomobject]@{ Sha = ''; BaseRef = '' }
         }
