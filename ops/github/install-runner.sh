@@ -7,7 +7,7 @@
 # User= set to the service user, so jobs never run as root.
 #
 # Each review pool member needs distinct --name and --install-dir, and the service user's Codex, Claude and Cursor
-# CLIs logged in. Review runners also need PowerShell 7 (pwsh) on PATH: review.yml runs every step in it. Keep the
+# CLIs logged in. Review runners also need PowerShell 7.5+ (pwsh) on PATH: review.yml runs every step in it. Keep the
 # install directory under /home: the review's publication scan rejects a path through a home directory, so a
 # leaked runner path cannot be posted.
 #

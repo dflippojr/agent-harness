@@ -305,8 +305,9 @@ has no effort variable: choose effort through the model id (for example `cursor-
 Optional `REVIEW_MAX_DIFF_BYTES` sets how many bytes of PR diff are embedded in the review prompt (default `204800`; accepted range `20480` to `2097152`, digits only). A larger cap covers more of a big PR but grows the prompt, so each review costs more tokens and risks exceeding the model's context; a smaller cap is cheaper but omits more. An invalid value fails closed before a backend runs. When the diff exceeds the cap, whole files are dropped by a fixed rule: source files are kept first, then tests, then docs, then lockfiles and generated or vendored output, in diff order within each tier; a file that does not fit is omitted even if a smaller later file still fits. The comment then opens with `PARTIAL REVIEW: reviewed N of M files (X of Y KB of diff). Not reviewed: <files>` instead of `Reviewed the full diff`, and the `<!-- agent-review: ... -->` marker is withheld so the next run reviews the whole PR instead of treating it as covered. A single file larger than the cap is always listed as not reviewed. Omitted files are not reviewed in additional passes; raise the cap to cover them.
 
 All three CLIs run under the review runner service user and must be logged in for that same user. The workflow runs
-every step in PowerShell 7 (`shell: pwsh`, review-v4, #806), so a review runner needs `pwsh`, `git` and `gh` on the
-service user's PATH on Linux and Windows alike. The backends receive only an allowlisted environment: the Windows
+every step in PowerShell 7 (`shell: pwsh`, review-v4, #806), so a review runner needs PowerShell 7.5 or later (`pwsh`;
+earlier 7.x releases turn GitHub's ISO 8601 timestamps into dates), `git` and `gh` on the service user's PATH on Linux
+and Windows alike. The backends receive only an allowlisted environment: the Windows
 profile and system variables, and on Linux `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`/`LC_*` and the XDG base
 directories, so each CLI finds the service user's login. Cursor uses ask mode
 with its sandbox enabled on non-Windows hosts; the flag is skipped on Windows because that CLI does not support it.
