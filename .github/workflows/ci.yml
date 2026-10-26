@@ -4,6 +4,7 @@ name: CI
 #   openapi   - the committed OpenAPI document (tools/openapi/openapi.json) matches the Server
 #   test      - the complete pytest suite with coverage (coverage.xml artifact)
 #   test-py313 - the same suite on Python 3.13, after an import smoke test (#730); no coverage
+#   review-linux - the review tooling's tests under PowerShell 7 on Linux, where the review runners live (#806)
 #   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
 #   hub-contract - the pinned Hub's (dflippojr/agent-harness-hub) contract suite against this daemon in fake-model mode
@@ -24,7 +25,7 @@ name: CI
 # The workflow always runs, so `gate` always reports and a ruleset can require it
 # (#726, dflippojr/agent-ops#48). The docs-only skip lives in the `changes` job:
 # CI_SKIP_UNREAD_PATHS is an allow-list of files no pytest currently reads, and
-# `test`, `test-py313`, `openapi`, `ui-tests` and `hub-contract` skip only when every changed file
+# `test`, `test-py313`, `review-linux`, `openapi`, `ui-tests` and `hub-contract` skip only when every changed file
 # is on it.
 # Entries are exact paths, not globs. Do not add `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
 # INSTALL.md, admin-api.md, app-api.md, mac-client.md, and service-profile.md
@@ -164,6 +165,44 @@ jobs:
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: >
           python -m pytest tests -q -n 4 --dist loadfile -o faulthandler_timeout=300
+
+  review-linux:
+    # review.yml runs every step in PowerShell 7 (pwsh), and the review runners are Linux (#806). The suite above
+    # runs the review tooling's tests under pwsh on Windows; this job runs them on Linux, where ubuntu-latest ships
+    # pwsh and Pester. REVIEW_TESTS_REQUIRE_PWSH turns a missing pwsh into a failure instead of a skip. No coverage:
+    # `test` measures it.
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt
+
+      - name: PowerShell and Pester versions
+        shell: pwsh
+        run: |
+          Write-Host "pwsh $($PSVersionTable.PSVersion)"
+          Get-Module -ListAvailable Pester | Select-Object -First 1 Name, Version | Format-Table -AutoSize
+
+      - name: Review tooling tests under pwsh
+        env:
+          REVIEW_TESTS_REQUIRE_PWSH: "1"
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
+        run: >
+          python -m pytest tests/test_review_runner.py tests/test_runner_install.py -q -rs -p no:cacheprovider
 
   sonar:
     # SonarCloud analysis of the `test` job's coverage. Automatic analysis is
@@ -432,10 +471,10 @@ jobs:
 
   gate:
     # The required check. It always runs and needs every job above, so it reports on docs-only changes too
-    # (`test`, `test-py313`, `openapi`, `ui-tests` and `hub-contract` skipped by `changes`). Any needed job failed or
-    # cancelled fails it; see scripts/ci_gate.py for the rules. Add every new job here.
+    # (`test`, `test-py313`, `review-linux`, `openapi`, `ui-tests` and `hub-contract` skipped by `changes`). Any needed
+    # job failed or cancelled fails it; see scripts/ci_gate.py for the rules. Add every new job here.
     if: always()
-    needs: [changes, lint, test, test-py313, sonar, openapi, ui-tests, hub-contract, gate-guard]
+    needs: [changes, lint, test, test-py313, review-linux, sonar, openapi, ui-tests, hub-contract, gate-guard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -1216,15 +1216,17 @@ function Get-ReviewBackendEnvironment {
     # Provider authentication is read from the runner service user's profile.
     # Deliberately exclude inherited tokens, API keys, workflow metadata, and
     # repository-controlled environment variables from reviewer processes.
+    # The list covers both Windows and Linux runners; names absent on a host are skipped.
     $allowedNames = @(
         'ALLUSERSPROFILE', 'APPDATA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
         'COLORTERM', 'COMSPEC', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'LANG',
-        'LC_ALL', 'LOCALAPPDATA', 'NO_COLOR', 'NUMBER_OF_PROCESSORS', 'OS',
+        'LC_ALL', 'LC_CTYPE', 'LOCALAPPDATA', 'LOGNAME', 'NO_COLOR', 'NUMBER_OF_PROCESSORS', 'OS',
         'PATH', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
         'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'PROGRAMDATA', 'PROGRAMFILES',
-        'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PSMODULEPATH', 'SYSTEMDRIVE',
-        'SYSTEMROOT', 'TEMP', 'TERM', 'TMP', 'USERDOMAIN',
-        'USERDOMAIN_ROAMINGPROFILE', 'USERNAME', 'USERPROFILE', 'WINDIR'
+        'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PSMODULEPATH', 'SHELL', 'SYSTEMDRIVE',
+        'SYSTEMROOT', 'TEMP', 'TERM', 'TMP', 'TMPDIR', 'USER', 'USERDOMAIN',
+        'USERDOMAIN_ROAMINGPROFILE', 'USERNAME', 'USERPROFILE', 'WINDIR',
+        'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR', 'XDG_STATE_HOME'
     )
     $environment = @{}
     foreach ($name in $allowedNames) {
@@ -1350,19 +1352,34 @@ function Get-ReviewVerdict {
     }
 }
 
+function Get-CursorAgentBase {
+    param([bool]$WindowsPlatform = ($env:OS -eq 'Windows_NT'))
+
+    # Where Cursor's installer puts cursor-agent for the runner service user.
+    if ($WindowsPlatform) { return (Join-Path ([string]$env:LOCALAPPDATA) 'cursor-agent') }
+    $dataHome = [string]$env:XDG_DATA_HOME
+    if ([string]::IsNullOrWhiteSpace($dataHome)) { $dataHome = Join-Path ([string]$env:HOME) '.local/share' }
+    return (Join-Path $dataHome 'cursor-agent')
+}
+
 function Get-CursorAgentEntrypoint {
     [CmdletBinding()]
-    param([string]$CursorBase = (Join-Path $env:LOCALAPPDATA 'cursor-agent'))
+    param(
+        [string]$CursorBase = '',
+        [bool]$WindowsPlatform = ($env:OS -eq 'Windows_NT')
+    )
 
+    if ([string]::IsNullOrWhiteSpace($CursorBase)) { $CursorBase = Get-CursorAgentBase -WindowsPlatform $WindowsPlatform }
     $versions = Join-Path $CursorBase 'versions'
     $latest = Get-ChildItem -LiteralPath $versions -Directory -ErrorAction Stop |
         Sort-Object Name -Descending |
         Select-Object -First 1
     if (-not $latest) { throw "no cursor-agent version under $versions" }
-    $node = Join-Path $latest.FullName 'node.exe'
+    $nodeName = $(if ($WindowsPlatform) { 'node.exe' } else { 'node' })
+    $node = Join-Path $latest.FullName $nodeName
     $index = Join-Path $latest.FullName 'index.js'
     if (-not (Test-Path -LiteralPath $node) -or -not (Test-Path -LiteralPath $index)) {
-        throw "cursor-agent node.exe/index.js missing in $($latest.FullName)"
+        throw "cursor-agent $nodeName/index.js missing in $($latest.FullName)"
     }
     return [pscustomobject]@{ Node = $node; Index = $index }
 }
@@ -1429,11 +1446,7 @@ function Get-ReviewBackendCommand {
     }
     switch ($name) {
         'cursor' {
-            if ([string]::IsNullOrWhiteSpace($CursorBase)) {
-                $entrypoint = Get-CursorAgentEntrypoint
-            } else {
-                $entrypoint = Get-CursorAgentEntrypoint -CursorBase $CursorBase
-            }
+            $entrypoint = Get-CursorAgentEntrypoint -CursorBase $CursorBase -WindowsPlatform $WindowsPlatform
             $arguments = @($entrypoint.Index, '-p', '--output-format', 'text', '--mode', 'ask')
             if (-not $WindowsPlatform) {
                 $arguments += @('--sandbox', 'enabled')
@@ -1453,14 +1466,17 @@ function Get-ReviewBackendCommand {
         }
         'codex' {
             $resultPath = Join-Path $ScratchDirectory 'codex-review-output.md'
+            # The unelevated sandbox is a Windows setting; Linux and macOS use Codex's own OS sandbox.
+            $platformArgs = @()
+            if ($WindowsPlatform) { $platformArgs = @('-c', 'windows.sandbox="unelevated"') }
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'codex'
                 Arguments = @(
                     'exec'
                 ) + $modelArgs + $effortArgs + @(
-                    '--ignore-user-config',
-                    '-c', 'windows.sandbox="unelevated"',
+                    '--ignore-user-config'
+                ) + $platformArgs + @(
                     '-c', 'mcp_servers={}',
                     '--disable', 'apps',
                     '--disable', 'plugins',
@@ -2489,7 +2505,8 @@ function Invoke-ReviewMain {
     if ([string]::IsNullOrWhiteSpace($PrNumber)) { throw 'PR_NUMBER is required' }
     if ([string]::IsNullOrWhiteSpace($Prompt)) { throw 'REVIEW_PROMPT is required' }
     if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { $ScratchDirectory = $env:TEMP }
-    if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { throw 'RUNNER_TEMP or TEMP is required' }
+    if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { $ScratchDirectory = $env:TMPDIR }
+    if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { throw 'RUNNER_TEMP, TEMP or TMPDIR is required' }
     if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = Join-Path $Workspace 'review-output.md' }
 
     Assert-ReviewModelConfiguration

@@ -20,7 +20,7 @@ from typing import Callable, Iterable, Mapping
 ZERO_SHA = "0" * 40
 
 # Jobs whose `if:` reads the `changes` output. They may be skipped only when no changed file needs the tests.
-TEST_JOBS = ("test", "test-py313", "openapi", "ui-tests", "hub-contract")
+TEST_JOBS = ("test", "test-py313", "review-linux", "openapi", "ui-tests", "hub-contract")
 # Jobs that run on every change (#729); skipped is never expected of them.
 ALWAYS_JOBS = ("lint",)
 

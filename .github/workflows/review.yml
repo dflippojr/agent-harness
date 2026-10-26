@@ -3,10 +3,13 @@ name: Automated Code Review
 # One shared review workflow. This repository runs it directly (PR open, plus
 # workflow_dispatch for an on-demand re-review after later commits); other
 # projects call it through workflow_call from a thin dispatch-only caller pinned
-# to a maintainer-moved tag: review-v3 for this spec-aware review, review-v2 for
+# to a maintainer-moved tag: review-v4 for this spec-aware review on Linux or
+# Windows runners, review-v3 for the same review on Windows only, review-v2 for
 # the earlier diff-only one (see "Adopting the review workflow" in
 # docs/CI-CD.md). It runs on a self-hosted review runner so it can reuse the
 # runner service user's already-authenticated Codex, Claude, and Cursor CLIs.
+# Every step runs in PowerShell 7 (pwsh), which review runners need on both
+# operating systems.
 # The backend input can select one backend; auto uses the ordered
 # REVIEW_BACKENDS repository variable, then codex,claude by default. Codex (GPT)
 # leads on purpose: a reviewer from a different model family than the usual
@@ -78,7 +81,7 @@ on:
         default: auto
         type: string
       runs_on:
-        description: "JSON array of runner labels, e.g. [\"self-hosted\",\"Windows\",\"X64\",\"my-project-review\"]"
+        description: "JSON array of runner labels, e.g. [\"self-hosted\",\"Linux\",\"X64\",\"my-project-review\"]"
         required: true
         type: string
       max_diff_bytes:
@@ -106,12 +109,13 @@ permissions:
 
 jobs:
   review:
-    # This repository's own runs use the pool of dedicated review runners
-    # (D:\Agents\github-runner-review-1..3, one job each, same provider CLI logins)
-    # so reviews of different PRs run in parallel. Add or remove pool members with
-    # ops/github/install-runner.ps1 -Labels agent-harness-review. Callers pass
+    # This repository's own runs use the pool of dedicated review runners on the
+    # Linux tower (one job each, same provider CLI logins) so reviews of different
+    # PRs run in parallel. Add or remove pool members with
+    # ops/github/install-runner.sh --labels agent-harness-review (Windows:
+    # ops/github/install-runner.ps1 -Labels agent-harness-review). Callers pass
     # their own label through runs_on.
-    runs-on: ${{ fromJSON(inputs.runs_on || '["self-hosted","Windows","X64","agent-harness-review"]') }}
+    runs-on: ${{ fromJSON(inputs.runs_on || '["self-hosted","Linux","X64","agent-harness-review"]') }}
     # Do not even schedule a fork's pull_request run on the self-hosted runner.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     concurrency:
@@ -134,12 +138,13 @@ jobs:
           persist-credentials: false
 
       - name: Ensure GitHub CLI is on PATH
-        shell: powershell
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\GitHub CLI'
 
       - name: Resolve PR number
         id: pr
-        shell: powershell
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -166,7 +171,7 @@ jobs:
       - name: Attach running check to the PR
         id: check
         continue-on-error: true
-        shell: powershell
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
@@ -194,7 +199,7 @@ jobs:
 
       - name: Run automated review
         id: agent
-        shell: powershell
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
@@ -237,7 +242,7 @@ jobs:
 
             Do not edit files, commit, push, open a PR, or merge. Print only the review text; this job posts it as the PR comment. Only after you have actually inspected the embedded diff and reported findings or no significant findings, end with exactly three lines. First a criteria line: `REVIEW_CRITERIA: <met>/<total>`, where <total> counts the criteria marked Met or Not met and <met> those marked Met (`REVIEW_CRITERIA: 0/0` when no issue is linked). Then a verdict line: `REVIEW_VERDICT: CLEAN` if you reported no findings, or `REVIEW_VERDICT: FINDINGS <n>` where <n> is the number of items you listed under Findings (advisory style and structure suggestions are never counted). Then a final line exactly `REVIEW_STATUS: COMPLETE`. Do not print these lines if you could not inspect the diff.
         run: |
-          & .\.review-tooling\ops\review\run-review.ps1 `
+          & ./.review-tooling/ops/review/run-review.ps1 `
             -Backend $env:REQUESTED_BACKEND `
             -ConfiguredBackends $env:REVIEW_BACKENDS `
             -Mode $env:REVIEW_MODE `
@@ -248,7 +253,7 @@ jobs:
 
       - name: Post review as PR comment
         id: post
-        shell: powershell
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
@@ -257,7 +262,7 @@ jobs:
 
       - name: Complete PR check
         if: always() && steps.check.outcome == 'success' && steps.check.outputs.id != ''
-        shell: powershell
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CHECK_ID: ${{ steps.check.outputs.id }}
