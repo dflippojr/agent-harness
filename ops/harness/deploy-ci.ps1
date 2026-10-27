@@ -268,13 +268,15 @@ if ($onLinux) {
     $supervisorChanged = $supervisorText -cne $previousSupervisorText
 }
 
-$restart = Join-Path $release 'ops\harness\restart-daemon.ps1'
-if (-not $DryRun -and -not $onLinux) {
-    try { . $restart }
-    catch {
-        Remove-DeploymentDirectory $stagedVenv
-        if ($stablesChanged) { Remove-DeploymentDirectory $stagedStablesRoot }
-        throw
+if (-not $onLinux) {
+    $restart = Join-Path $release 'ops\harness\restart-daemon.ps1'
+    if (-not $DryRun) {
+        try { . $restart }
+        catch {
+            Remove-DeploymentDirectory $stagedVenv
+            if ($stablesChanged) { Remove-DeploymentDirectory $stagedStablesRoot }
+            throw
+        }
     }
 }
 function Wait-LinuxDaemonHealth {
