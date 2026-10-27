@@ -1,7 +1,8 @@
 """The tower deployment script's Linux path (#812): pwsh 7, systemd, and the installer's supervisor.
 
 tests/test_deploy_ci.py covers the Windows path with Windows PowerShell; these run the same script under pwsh on
-Linux with fake git, docker, sudo and systemctl commands on PATH.
+Linux with fake git, docker and systemctl commands on PATH. The daemon is a systemd user unit, so a fake sudo on
+PATH only records calls, and every run asserts there were none.
 """
 
 from __future__ import annotations
@@ -32,8 +33,11 @@ case $3 in
     rev-parse)
         if [[ $4 == origin/main || $2 == "$FAKE_RELEASE" ]]; then echo "$FAKE_COMMIT"; else cat "$FAKE_CHECKOUT_STATE"; fi ;;
     branch) [[ -n $FAKE_BRANCH ]] && echo "$FAKE_BRANCH" ;;
-    status|fetch|merge-base) ;;
-    merge|reset) echo "$5" >"$FAKE_CHECKOUT_STATE" ;;
+    status|fetch) ;;
+    merge-base) [[ $FAKE_NOT_ANCESTOR == 1 ]] && exit 1 ;;
+    merge) [[ $FAKE_FAIL_MERGE == 1 ]] && { echo "fatal: Not possible to fast-forward, aborting." >&2; exit 128; }
+        echo "$5" >"$FAKE_CHECKOUT_STATE" ;;
+    reset) echo "$5" >"$FAKE_CHECKOUT_STATE" ;;
     *) exit 91 ;;
 esac
 exit 0
@@ -51,28 +55,40 @@ esac
 exit 0
 """
 
-# Read-only `systemctl show`; the deploy changes the unit's state only through `sudo -n systemctl`.
+# The user manager, as `systemctl --user` reaches it: only through $XDG_RUNTIME_DIR, the way systemd connects when
+# DBUS_SESSION_BUS_ADDRESS is unset. The system manager has no such unit.
 FAKE_SYSTEMCTL = r"""#!/usr/bin/env bash
-if [[ $1 == show && $2 == --property=ExecStart && $3 == --value ]]; then echo "$FAKE_EXEC_START"; exit 0; fi
-exit 93
-"""
-
-FAKE_SUDO = r"""#!/usr/bin/env bash
-[[ $1 == -n ]] || exit 94
+if [[ $1 != --user ]]; then echo "Failed to stop ${@: -1}: Unit ${@: -1} not found." >&2; exit 5; fi
 shift
-if [[ $1 == -l ]]; then [[ $FAKE_SUDO_DENY == 1 ]] && exit 1; echo "/usr/bin/$2"; exit 0; fi
-[[ $1 == systemctl && $3 == "$FAKE_UNIT" ]] || exit 95
-echo "$2" >>"$FAKE_SUDO_LOG"
-calls=$(grep -c "^$2\$" "$FAKE_SUDO_LOG")
-if [[ $2 == stop ]]; then
+if [[ -z $XDG_RUNTIME_DIR ]]; then
+    echo 'Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined' >&2
+    exit 1
+fi
+echo "$XDG_RUNTIME_DIR" >"$FAKE_RUNTIME_DIR_SEEN"
+if [[ $1 == show ]]; then
+    [[ $2 == --property=LoadState && $3 == --property=ExecStart && $4 == "$FAKE_UNIT" ]] || exit 93
+    if [[ $FAKE_UNIT_MISSING == 1 ]]; then echo LoadState=not-found; echo ExecStart=; exit 0; fi
+    echo LoadState=loaded
+    echo "ExecStart=$FAKE_EXEC_START"
+    exit 0
+fi
+[[ $2 == "$FAKE_UNIT" ]] || exit 95
+echo "$1" >>"$FAKE_SYSTEMCTL_LOG"
+calls=$(grep -c "^$1\$" "$FAKE_SYSTEMCTL_LOG")
+if [[ $1 == stop ]]; then
     [[ $FAKE_FAIL_STOP_CALL == "$calls" ]] && { echo "unexpected systemctl stop failure" >&2; exit 1; }
     echo inactive >"$FAKE_UNIT_STATE"
-elif [[ $2 == start ]]; then
+elif [[ $1 == start ]]; then
     echo active >"$FAKE_UNIT_STATE"
 else
     exit 96
 fi
 exit 0
+"""
+
+FAKE_SUDO = r"""#!/usr/bin/env bash
+echo "$*" >>"$FAKE_SUDO_LOG"
+exit 97
 """
 
 
@@ -113,9 +129,11 @@ def _layout(tmp_path: Path, *, python: Path | None = None, exec_start: str | Non
     _executable(bin_dir / "systemctl", FAKE_SYSTEMCTL)
     _executable(bin_dir / "sudo", FAKE_SUDO)
 
-    state = {name: tmp_path / f"{name}.txt" for name in ("checkout", "unit", "sudo_log", "sandbox", "cli")}
+    state = {name: tmp_path / f"{name}.txt"
+             for name in ("checkout", "unit", "systemctl_log", "sudo_log", "runtime_dir", "sandbox", "cli")}
     state["checkout"].write_text(PREVIOUS_COMMIT, encoding="utf-8")
     state["unit"].write_text("active", encoding="utf-8")
+    state["systemctl_log"].write_text("", encoding="utf-8")
     state["sudo_log"].write_text("", encoding="utf-8")
     state["sandbox"].write_text("sha256:old-sandbox", encoding="utf-8")
     state["cli"].write_text("sha256:old-cli", encoding="utf-8")
@@ -125,7 +143,7 @@ def _layout(tmp_path: Path, *, python: Path | None = None, exec_start: str | Non
             " ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
         )
     env = {
-        **os.environ,
+        **{key: value for key, value in os.environ.items() if key != "DBUS_SESSION_BUS_ADDRESS"},
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         "FAKE_COMMIT": COMMIT,
         "FAKE_BRANCH": "main",
@@ -135,11 +153,16 @@ def _layout(tmp_path: Path, *, python: Path | None = None, exec_start: str | Non
         "FAKE_CHECKOUT_STATE": str(state["checkout"]),
         "FAKE_UNIT": UNIT,
         "FAKE_UNIT_STATE": str(state["unit"]),
+        "FAKE_SYSTEMCTL_LOG": str(state["systemctl_log"]),
         "FAKE_SUDO_LOG": str(state["sudo_log"]),
+        "FAKE_RUNTIME_DIR_SEEN": str(state["runtime_dir"]),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
         "FAKE_SANDBOX_STATE": str(state["sandbox"]),
         "FAKE_CLI_STATE": str(state["cli"]),
         "FAKE_EXEC_START": exec_start,
-        "FAKE_SUDO_DENY": "0",
+        "FAKE_UNIT_MISSING": "0",
+        "FAKE_NOT_ANCESTOR": "0",
+        "FAKE_FAIL_MERGE": "0",
         "FAKE_FAIL_STOP_CALL": "0",
     }
     return {
@@ -172,12 +195,13 @@ def dry_run(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str
          *_deploy_arguments(layout), "-DryRun"],
         cwd=ROOT, env=layout["env"], capture_output=True, text=True, timeout=60, check=False,
     )
+    assert_no_sudo(layout)
     return result, layout
 
 
 WRAPPER = r"""param([string]$DeployScript, [string]$StatusPath, [string]$Failure, [string]$DeployArgumentsJson, [switch]$DryRun)
 $ErrorActionPreference = 'Stop'
-# The health poll and its waits; the unit's state comes from the fake sudo.
+# The health poll and its waits; the unit's state comes from the fake systemctl.
 function Start-Sleep { }
 function Invoke-RestMethod {
     [pscustomobject]@{ ok = ((Get-Content -Raw -LiteralPath $env:FAKE_UNIT_STATE).Trim() -eq 'active') }
@@ -195,7 +219,7 @@ try {
 }
 [ordered]@{
     unit_state = (Get-Content -Raw -LiteralPath $env:FAKE_UNIT_STATE).Trim()
-    systemctl = @(Get-Content -LiteralPath $env:FAKE_SUDO_LOG | Where-Object { $_ })
+    systemctl = @(Get-Content -LiteralPath $env:FAKE_SYSTEMCTL_LOG | Where-Object { $_ })
     error = $errorMessage
 } | ConvertTo-Json | Set-Content -LiteralPath $StatusPath
 exit $exitCode
@@ -216,7 +240,12 @@ def invoke(
          *(["-DryRun"] if dry else [])],
         cwd=ROOT, env=layout["env"], capture_output=True, text=True, timeout=180, check=False,
     )
+    assert_no_sudo(layout)
     return result, json.loads(status_path.read_text(encoding="utf-8-sig"))
+
+
+def assert_no_sudo(layout: dict[str, object]) -> None:
+    assert layout["state"]["sudo_log"].read_text(encoding="utf-8") == "", "the deployment called sudo"
 
 
 def output(result: subprocess.CompletedProcess[str]) -> str:
@@ -234,13 +263,13 @@ def test_linux_dry_run_plans_systemd_steps_against_linux_paths_without_restartin
     verified = plan.index("[deploy] Stables v9.9.9 verified")
     resolve = plan.index("[deploy] dependencies staged")
     staged = plan.index("[deploy] Stables staged")
-    stop = plan.index(f"[dry run] sudo -n systemctl stop {UNIT}")
+    stop = plan.index(f"[dry run] systemctl --user stop {UNIT}")
     stopped = plan.index("[deploy] daemon stopped")
     swap = plan.index("[deploy] virtual environment swapped")
     selected = plan.index("[deploy] Stables v9.9.9 selected")
     supervisor = plan.index("[deploy] supervisor updated")
     merge = plan.index("[deploy] checkout fast-forwarded")
-    start = plan.index(f"[dry run] sudo -n systemctl start {UNIT}")
+    start = plan.index(f"[dry run] systemctl --user start {UNIT}")
     started = plan.index("[deploy] daemon started and healthy")
     assert unit < guards < verified < resolve < staged < stop < stopped < swap < selected < supervisor < merge
     assert merge < start < started
@@ -259,8 +288,9 @@ def test_linux_dry_run_plans_systemd_steps_against_linux_paths_without_restartin
     # No Windows paths, tools or services on the Linux path.
     for windows in ("\\", "Scripts", "python.exe", "powershell.exe", "D:", "ScheduledTask", "-Mode Stop"):
         assert windows not in plan, windows
+    assert "sudo" not in plan
     # A dry run changes nothing: it never stops or starts the unit and writes nothing.
-    assert layout["state"]["sudo_log"].read_text(encoding="utf-8") == ""
+    assert layout["state"]["systemctl_log"].read_text(encoding="utf-8") == ""
     assert layout["state"]["unit"].read_text(encoding="utf-8") == "active"
     assert layout["supervisor"].read_text(encoding="utf-8") == OLD_SUPERVISOR
     assert not (layout["deploy"] / ".venv-path").exists()
@@ -269,20 +299,53 @@ def test_linux_dry_run_plans_systemd_steps_against_linux_paths_without_restartin
 
 def test_linux_deploy_refuses_a_unit_that_does_not_run_the_installed_supervisor(tmp_path):
     layout = _layout(tmp_path, exec_start="{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -m harness }")
-    result, status = invoke(tmp_path, layout, dry=True)
-    assert result.returncode != 0
-    assert status["error"].startswith(f"{UNIT} does not run {layout['supervisor']} for {layout['deploy']}")
-    assert "[deploy] dependencies staged" not in output(result)
-
-
-def test_linux_deploy_refuses_without_passwordless_systemctl(tmp_path):
-    layout = _layout(tmp_path)
-    layout["env"]["FAKE_SUDO_DENY"] = "1"
     result, status = invoke(tmp_path, layout)
     assert result.returncode != 0
-    assert status["error"].startswith(f"this user may not run sudo -n systemctl stop {UNIT}")
+    assert status["error"].startswith(f"{UNIT} does not run {layout['supervisor']} for {layout['deploy']}")
     assert status["systemctl"] == []
-    assert "[deploy] dependencies staged" not in output(result)
+    assert "[deploy] guards passed" not in output(result)
+
+
+def test_linux_deploy_refuses_when_the_user_unit_is_missing(tmp_path):
+    layout = _layout(tmp_path)
+    layout["env"]["FAKE_UNIT_MISSING"] = "1"
+    result, status = invoke(tmp_path, layout)
+    assert result.returncode != 0
+    assert status["error"].startswith(f"user unit {UNIT} is not installed for this user (LoadState=not-found)")
+    assert status["systemctl"] == []
+    assert status["unit_state"] == "active"
+    assert "[deploy] guards passed" not in output(result)
+
+
+def test_linux_deploy_sets_the_runtime_dir_a_runner_service_lacks(tmp_path):
+    # A runner installed as a service has no user session: neither XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS.
+    layout = _layout(tmp_path)
+    del layout["env"]["XDG_RUNTIME_DIR"]
+    result, status = invoke(tmp_path, layout, dry=True)
+    assert result.returncode == 0, output(result)
+    runtime_dir = f"/run/user/{os.getuid()}"
+    assert f"[deploy] XDG_RUNTIME_DIR={runtime_dir}" in output(result)
+    assert layout["state"]["runtime_dir"].read_text(encoding="utf-8").strip() == runtime_dir
+    assert f"[deploy] {UNIT} runs {layout['supervisor']}" in output(result)
+
+
+def test_linux_deploy_keeps_the_runtime_dir_it_was_given(tmp_path):
+    layout = _layout(tmp_path)
+    result, _ = invoke(tmp_path, layout, dry=True)
+    assert result.returncode == 0, output(result)
+    assert "[deploy] XDG_RUNTIME_DIR=" not in output(result)
+    assert layout["state"]["runtime_dir"].read_text(encoding="utf-8").strip() == layout["env"]["XDG_RUNTIME_DIR"]
+
+
+def test_linux_deploy_refuses_a_non_fast_forward_without_touching_the_daemon(tmp_path):
+    layout = _layout(tmp_path)
+    layout["env"]["FAKE_NOT_ANCESTOR"] = "1"
+    result, status = invoke(tmp_path, layout)
+    assert result.returncode != 0
+    assert status["error"].startswith(f"live checkout is not an ancestor of {COMMIT}")
+    assert status["systemctl"] == []
+    assert status["unit_state"] == "active"
+    assert layout["state"]["checkout"].read_text(encoding="utf-8").strip() == PREVIOUS_COMMIT
 
 
 @pytest.fixture(scope="session")
@@ -295,12 +358,13 @@ def deploy_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def real_deploy(
-    tmp_path: Path, deploy_venv: Path, failure: str, *, fail_stop_call: int = 0
+    tmp_path: Path, deploy_venv: Path, failure: str, *, fail_stop_call: int = 0, fail_merge: bool = False
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], dict[str, object]]:
     venv = tmp_path / "install" / "venv"
     shutil.copytree(deploy_venv, venv, symlinks=True)
     layout = _layout(tmp_path, python=venv / "bin" / "python")
     layout["env"]["FAKE_FAIL_STOP_CALL"] = str(fail_stop_call)
+    layout["env"]["FAKE_FAIL_MERGE"] = "1" if fail_merge else "0"
     old_stables = tmp_path / f".agent-harness.stables-{'5' * 40}" / "public"
     old_stables.mkdir(parents=True)
     (old_stables / "index.html").write_text("old Stables", encoding="utf-8")
@@ -355,6 +419,20 @@ def test_linux_real_rollback_restores_previous_deployment(tmp_path, deploy_venv,
     assert layout["state"]["checkout"].read_text(encoding="utf-8").strip() == PREVIOUS_COMMIT
     assert layout["state"]["sandbox"].read_text(encoding="utf-8").strip() == "sha256:old-sandbox"
     assert layout["state"]["cli"].read_text(encoding="utf-8").strip() == "sha256:old-cli"
+
+
+def test_linux_failed_fast_forward_restarts_the_previous_daemon(tmp_path, deploy_venv):
+    result, status, layout = real_deploy(tmp_path, deploy_venv, "None", fail_merge=True)
+
+    assert result.returncode != 0
+    assert "deployment failed after daemon stop; previous deployment restored: git failed" in output(result)
+    # The new release never starts: the rollback starts the previous daemon once, so the unit is not left stopped.
+    assert status["systemctl"] == ["stop", "stop", "start"]
+    assert status["unit_state"] == "active"
+    assert not (layout["deploy"] / ".venv-path").exists()
+    assert layout["supervisor"].read_text(encoding="utf-8") == OLD_SUPERVISOR
+    assert layout["state"]["checkout"].read_text(encoding="utf-8").strip() == PREVIOUS_COMMIT
+    assert layout["state"]["sandbox"].read_text(encoding="utf-8").strip() == "sha256:old-sandbox"
 
 
 def test_linux_rollback_continues_after_a_failed_systemctl_stop(tmp_path, deploy_venv):

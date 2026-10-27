@@ -14,17 +14,17 @@ tools/stables/pin.json; this script verifies that checkout is the pinned commit,
 before downtime, and points .stables-path at the copy with the virtual environment swap. run-daemon.ps1 hands that
 path to the daemon as HARNESS_STABLES_DIR. A rollback restores the previous pointer.
 
-Under pwsh on Linux (#812) the daemon is the systemd unit install/install.sh's layout runs: -DaemonUnit runs
-<InstallDir>/bin/run-daemon.sh for the live checkout, and <InstallDir>/venv is its environment until a deployment writes
-.venv-path. The script stops and starts that unit with `sudo -n systemctl` and checks both before downtime. The
-supervisor reads the pointers, so while the daemon is stopped it is replaced by the release's install/run-daemon.sh,
-and a rollback puts the previous one back.
+Under pwsh on Linux (#812) the daemon is the systemd user unit install/install.sh installs for the runner's user:
+-DaemonUnit runs <InstallDir>/bin/run-daemon.sh for the live checkout, and <InstallDir>/venv is its environment until a
+deployment writes .venv-path. The script stops and starts that unit with `systemctl --user`, as the runner's user, and
+checks before downtime that the unit exists and runs that supervisor. The supervisor reads the pointers, so while the
+daemon is stopped it is replaced by the release's install/run-daemon.sh, and a rollback puts the previous one back.
 #>
 param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit,
     [string]$ReleaseRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
     [string]$DeployDir = $(if ($IsLinux) { '/home/daniel/Projects/agent-harness' } else { 'D:\Projects\agent-harness' }),
-    # Linux only: the install/install.sh layout and the systemd unit that runs the daemon.
+    # Linux only: the install/install.sh layout and the systemd user unit that runs the daemon.
     [string]$InstallDir = '/home/daniel/.local/share/agent-harness',
     [string]$DaemonUnit = 'agent-harness-main-daemon.service',
     [string]$Registry = 'ghcr.io/dflippojr',
@@ -119,21 +119,34 @@ $deploy = (Resolve-Path -LiteralPath $DeployDir).Path
 if (-not (Test-Path -LiteralPath (Join-Path $release '.git'))) { throw "release checkout is not a git repository: $release" }
 if (-not (Test-Path -LiteralPath (Join-Path $deploy '.git'))) { throw "deploy checkout is not a git repository: $deploy" }
 if ($onLinux) {
+    # A runner service has no user session, so nothing sets XDG_RUNTIME_DIR. systemctl --user finds the user manager
+    # through $XDG_RUNTIME_DIR (systemd/private, then the bus socket there), so DBUS_SESSION_BUS_ADDRESS is not needed.
+    if (-not $env:XDG_RUNTIME_DIR) {
+        $uid = (& id -u)
+        if ($LASTEXITCODE -ne 0) { throw "could not resolve this user's uid (id exit code $LASTEXITCODE)" }
+        $env:XDG_RUNTIME_DIR = "/run/user/$(([string]$uid).Trim())"
+        Write-Host "[deploy] XDG_RUNTIME_DIR=$env:XDG_RUNTIME_DIR"
+    }
     $supervisor = [System.IO.Path]::Combine($InstallDir, 'bin', 'run-daemon.sh')
+    $unitProperties = @{}
+    $shown = & systemctl --user show --property=LoadState --property=ExecStart $DaemonUnit
+    if ($LASTEXITCODE -ne 0) {
+        throw "could not read the user unit $DaemonUnit (systemctl --user exit code $LASTEXITCODE; is lingering on " +
+            "and $env:XDG_RUNTIME_DIR this user's runtime directory?); refusing deployment"
+    }
+    foreach ($line in [string[]]@($shown)) {
+        $name, $value = $line -split '=', 2
+        if ($name) { $unitProperties[$name] = [string]$value }
+    }
+    if ($unitProperties['LoadState'] -ne 'loaded') {
+        throw "user unit $DaemonUnit is not installed for this user (LoadState=$($unitProperties['LoadState'])); refusing deployment"
+    }
     # A unit that runs another supervisor or checkout would never read the pointers this deployment switches.
-    $execStart = & systemctl show --property=ExecStart --value $DaemonUnit
-    if ($LASTEXITCODE -ne 0) { throw "could not read $DaemonUnit (systemctl exit code $LASTEXITCODE)" }
-    $execStart = [string]::Join(' ', [string[]]@($execStart))
+    $execStart = [string]$unitProperties['ExecStart']
     if (-not ($execStart.Contains(" $supervisor ") -and $execStart.Contains(" $deploy "))) {
         throw "$DaemonUnit does not run $supervisor for $deploy; refusing deployment. ExecStart: $execStart"
     }
     if (-not (Test-Path -LiteralPath $supervisor)) { throw "daemon supervisor is missing: $supervisor" }
-    foreach ($action in @('stop', 'start')) {
-        & sudo -n -l systemctl $action $DaemonUnit | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "this user may not run sudo -n systemctl $action $DaemonUnit; refusing deployment before downtime"
-        }
-    }
     Write-Host "[deploy] $DaemonUnit runs $supervisor"
 }
 
@@ -289,10 +302,10 @@ function Wait-LinuxDaemonHealth {
             }
         } catch { }
     }
-    throw "daemon did not come back within 60 s; see journalctl -u $DaemonUnit and $InstallDir/logs"
+    throw "daemon did not come back within 60 s; see journalctl --user -u $DaemonUnit and $InstallDir/logs"
 }
 function Stop-DeploymentDaemon {
-    if ($onLinux) { Run sudo @('-n', 'systemctl', 'stop', $DaemonUnit); return }
+    if ($onLinux) { Run systemctl @('--user', 'stop', $DaemonUnit); return }
     if ($DryRun) {
         Write-Host "[dry run] powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $restart -Mode Stop"
         return
@@ -301,7 +314,7 @@ function Stop-DeploymentDaemon {
 }
 function Start-DeploymentDaemon {
     if ($onLinux) {
-        Run sudo @('-n', 'systemctl', 'start', $DaemonUnit)
+        Run systemctl @('--user', 'start', $DaemonUnit)
         if (-not $DryRun) { Wait-LinuxDaemonHealth }
         return
     }

@@ -49,8 +49,8 @@ after that workflow succeeds for the exact commit pushed to `main`:
 3. **deploy-tower** runs only after image publication for that same tested SHA. The repository-scoped runner on the
    Ubuntu tower (`agent-harness-tower-linux`, #812) runs `ops/harness/deploy-ci.ps1` under `pwsh`. It pulls the
    immutable images, verifies that the live checkout is clean `main` and can fast-forward, builds a fresh side-by-side
-   virtual environment, stops the daemon (`sudo -n systemctl stop agent-harness-main-daemon.service`), swaps
-   environments, fast-forwards, retags the images, starts the daemon, and waits for `/health`.
+   virtual environment, stops the daemon (`systemctl --user stop agent-harness-main-daemon.service`, as the runner's
+   user), swaps environments, fast-forwards, retags the images, starts the daemon, and waits for `/health`.
 
 The SHA tags are immutable deployment inputs; the stable tags match the local names already expected by the daemon.
 The CLI Dockerfile accepts `SANDBOX_IMAGE` so its hosted build is based on the exact sandbox image from the same commit.
@@ -59,10 +59,12 @@ the newly built environment, so entry points keep their original absolute paths;
 untouched for first-deployment rollback. Later successful deployments remove the superseded managed environment.
 On Linux the daemon's unit runs the installer's supervisor (`~/.local/share/agent-harness/bin/run-daemon.sh`, a copy
 of `install/run-daemon.sh`), and the original environment is the installer's `~/.local/share/agent-harness/venv`.
-Before downtime the deployment checks that the unit runs that supervisor for the live checkout and that the runner
-user may run `sudo -n systemctl stop` and `start` on it; while the daemon is stopped it replaces the supervisor with
-the release's `install/run-daemon.sh`, and a rollback restores the previous one. The Hub, llama-server and metrics
-proxy units are not touched.
+The daemon's unit is a systemd user unit of the runner's user, so the deployment needs no sudo. A runner service has
+no user session, so when `XDG_RUNTIME_DIR` is unset the script sets it to `/run/user/$(id -u)`, which is how
+`systemctl --user` reaches the user manager (it needs no `DBUS_SESSION_BUS_ADDRESS`). Before downtime it checks that
+the user unit is installed and runs that supervisor for the live checkout, and stops, naming the problem, otherwise;
+while the daemon is stopped it replaces the supervisor with the release's `install/run-daemon.sh`, and a rollback
+restores the previous one. The Hub, llama-server and metrics proxy units are not touched.
 Deploys (production and staging) install `requirements.txt` plus, when present, `requirements-telemetry.txt`, so tracing
 works in production; `requirements-repomap.txt` stays opt-in.
 
@@ -581,26 +583,45 @@ hatch: `python -m pytest tests -q -p no:xdist`.
 
 ## Tower runner
 
-The tower runs Ubuntu since 2026-10-26, and production runs there as systemd system units
-(`agent-harness-main-daemon.service`, `agent-harness-hub.service`, `agent-harness-main-llama.service`,
-`harness-metrics-proxy.service`) from the live checkout `/home/daniel/Projects/agent-harness`. The Windows runner
+The tower runs Ubuntu since 2026-10-26. Production runs there from the live checkout
+`/home/daniel/Projects/agent-harness` as systemd user units of `daniel` (`~/.config/systemd/user/`, lingering on):
+`agent-harness-main-daemon.service`, whose `ExecStart` runs `~/.local/share/agent-harness/bin/run-daemon.sh`,
+`agent-harness-main-llama.service` and `agent-harness-hub.service`. `harness-metrics-proxy.service` is a system unit,
+and the deployment leaves it alone. The Windows runner
 `dflippotower-agent-harness` (label `agent-harness-tower`) is retired; `deploy-tower` runs on a Linux runner
-registered only to `dflippojr/agent-harness` with the custom label `agent-harness-tower-linux` (#812). The runner's
+registered only to `dflippojr/agent-harness` with the custom label `agent-harness-tower-linux` (#812). The runner
+runs as `daniel`, the user that owns the daemon's unit: `systemctl --user` reaches only its own user's manager. That
 user must own the live checkout and its parent directory (deployments stage environments and Stables copies next to
-it), write `~/.local/share/agent-harness/bin/run-daemon.sh`, use Docker, and have `pwsh` 7 on its `PATH`. It needs
-exactly two passwordless commands, for example in `/etc/sudoers.d/agent-harness-deploy`:
-
-```
-daniel ALL=(root) NOPASSWD: /usr/bin/systemctl stop agent-harness-main-daemon.service, /usr/bin/systemctl start agent-harness-main-daemon.service
-```
+it), write `~/.local/share/agent-harness/bin/run-daemon.sh`, use Docker, and have `pwsh` 7 on its `PATH`. No sudo or
+sudoers rule is involved.
 
 Register it with a fresh short-lived token (`gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token
 --jq .token`) and the official runner's `./config.sh --url https://github.com/dflippojr/agent-harness --token <token>
---labels agent-harness-tower-linux`, then install it as a service (`sudo ./svc.sh install <user>`, `sudo ./svc.sh
-start`). The token is never saved. The `tower-production` environment keeps its protection.
+--labels agent-harness-tower-linux`. The token is never saved. Then keep it running as a systemd user unit of
+`daniel` beside the production units, for example `~/.config/systemd/user/github-runner-agent-harness.service`:
 
-Before the first real deployment, dry-run the script on the tower as the runner's user, against the real paths. It
-changes nothing and never stops or starts the unit:
+```
+[Unit]
+Description=GitHub Actions runner for dflippojr/agent-harness (agent-harness-tower-linux)
+After=network-online.target
+
+[Service]
+ExecStart=<runner dir>/run.sh
+WorkingDirectory=<runner dir>
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=default.target
+```
+
+and `systemctl --user daemon-reload`, `systemctl --user enable --now github-runner-agent-harness.service`. The
+deployment also works from a runner started another way as `daniel`, since it sets `XDG_RUNTIME_DIR` itself. The
+`tower-production` environment keeps its protection.
+
+Before the first real deployment, dry-run the script on the tower as `daniel`, against the real paths. It changes
+nothing and never stops or starts the unit; it reads the unit with `systemctl --user show`:
 
 ```
 git clone --depth 1 https://github.com/dflippojr/agent-harness /tmp/ah-release
@@ -609,8 +630,10 @@ pwsh -NoProfile -File /tmp/ah-release/ops/harness/deploy-ci.ps1 -DryRun \
     -Commit "$(git -C /tmp/ah-release rev-parse HEAD)" -ReleaseRoot /tmp/ah-release -StablesRelease /tmp/ah-stables
 ```
 
-It prints each step it would take (`[dry run] sudo -n systemctl stop ...`, the venv and pip commands, the pointer
-writes, the fast-forward, the image tags) and fails, before any of them, on the same guards a real run checks.
+It prints `[deploy] agent-harness-main-daemon.service runs /home/daniel/.local/share/agent-harness/bin/run-daemon.sh`,
+then each step it would take (`[dry run] systemctl --user stop ...`, the venv and pip commands, the pointer writes,
+the fast-forward, the image tags), and fails, before any of them, on the same guards a real run checks: a missing user
+unit, a unit that runs another supervisor or checkout, a dirty or non-`main` live checkout.
 
 The live checkout must itself be on `main`; deployment intentionally fails closed on another branch or detached HEAD.
 After first confirming that the checkout has no work that must be preserved, put it on `main` and fast-forward it:
