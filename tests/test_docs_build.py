@@ -98,6 +98,12 @@ def test_kind_must_match_target(repo):
     assert "takes kind 'doc-index'" in build.check(repo)[0]
 
 
+@pytest.mark.parametrize("target", ["[readme-docs-index]", "{a: 1}"])
+def test_non_string_target_is_reported_not_raised(repo, target):
+    add(repo, "1-a.yaml", frag(target=target))
+    assert "unknown target" in build.check(repo)[0]
+
+
 def test_check_passes_after_build_and_fails_on_hand_edit(repo, capsys):
     add(repo, "1-a.yaml", frag("Alpha"))
     build.build(repo)

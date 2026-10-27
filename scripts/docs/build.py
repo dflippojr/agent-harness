@@ -117,7 +117,7 @@ def parse_fragment(name: str, text: str) -> Fragment:
     if kind not in KINDS:
         bad(f"kind must be one of {', '.join(KINDS)}, got {kind!r}")
     target = data.get("target")
-    if target not in TARGETS:
+    if not isinstance(target, str) or target not in TARGETS:
         bad(f"unknown target {target!r}; known targets: {', '.join(sorted(TARGETS))}")
     if TARGETS[target].kind != kind:
         bad(f"target {target!r} takes kind {TARGETS[target].kind!r}, not {kind!r}")

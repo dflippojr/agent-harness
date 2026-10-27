@@ -644,7 +644,7 @@ class Harness:
                         yield event
                 if not follow:
                     return
-            except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ConnectError):
+            except (httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError):
                 time.sleep(2)
 
     def _serve_tool_call(self, sid: str, by_name: dict[str, Tool], handled: set[str], call: dict) -> None:

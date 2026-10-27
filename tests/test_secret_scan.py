@@ -102,6 +102,18 @@ def test_workspace_gitleaks_config_has_no_effect(gitleaks_tools, tmp_path, monke
     assert [(f["file"], f["rule"]) for f in result["findings"]] == [("creds.py", "aws-access-token")]
 
 
+def test_untracked_names_git_would_quote_are_diffed(tmp_path):
+    repo = make_repo(tmp_path / "ws")
+    names = ["my notes.txt", 'q"x.txt', "tab\there.txt"] if sys.platform != "win32" else ["my notes.txt"]
+    for name in names:
+        (repo / name).write_text(f"aws {KEY}\n")
+    (repo / "app.py").write_text("VALUE = 2\n")
+    sh(repo, "mv", "app.py", "moved.py")
+    [d] = repo_diffs(repo, strict=True)
+    assert sorted(f["path"] for f in d["files"]) == sorted([*names, "moved.py"])
+    assert d["diff"].count(KEY) == len(names)  # each untracked file's content reaches the scan
+
+
 def test_missing_or_broken_scanner_is_reported(tmp_path):
     missing = scanner(tmp_path / "none").scan([{"path": ".", "head": "h", "diff": diff_of("a", ["x"])}], "s")
     assert missing["status"] == "unavailable" and "not installed" in missing["message"]
