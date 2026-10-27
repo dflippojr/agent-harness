@@ -13,11 +13,20 @@ Stables, the browser client, ships from dflippojr/stables (#334). The workflow c
 tools/stables/pin.json; this script verifies that checkout is the pinned commit, copies its public/ side by side
 before downtime, and points .stables-path at the copy with the virtual environment swap. run-daemon.ps1 hands that
 path to the daemon as HARNESS_STABLES_DIR. A rollback restores the previous pointer.
+
+Under pwsh on Linux (#812) the daemon is the systemd unit install/install.sh's layout runs: -DaemonUnit runs
+<InstallDir>/bin/run-daemon.sh for the live checkout, and <InstallDir>/venv is its environment until a deployment writes
+.venv-path. The script stops and starts that unit with `sudo -n systemctl` and checks both before downtime. The
+supervisor reads the pointers, so while the daemon is stopped it is replaced by the release's install/run-daemon.sh,
+and a rollback puts the previous one back.
 #>
 param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit,
     [string]$ReleaseRoot = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
-    [string]$DeployDir = 'D:\Projects\agent-harness',
+    [string]$DeployDir = $(if ($IsLinux) { '/home/daniel/Projects/agent-harness' } else { 'D:\Projects\agent-harness' }),
+    # Linux only: the install/install.sh layout and the systemd unit that runs the daemon.
+    [string]$InstallDir = '/home/daniel/.local/share/agent-harness',
+    [string]$DaemonUnit = 'agent-harness-main-daemon.service',
     [string]$Registry = 'ghcr.io/dflippojr',
     [string]$StablesRelease = '',
     [switch]$DryRun,
@@ -25,6 +34,9 @@ param(
     [string]$DryRunFailure = 'None'
 )
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 has no $IsLinux.
+$onLinux = [bool]$IsLinux
+$venvPython = if ($onLinux) { 'bin/python' } else { 'Scripts\python.exe' }
 
 function Run([string]$File, [string[]]$Arguments) {
     if ($DryRun) { Write-Host "[dry run] $File $($Arguments -join ' ')"; return }
@@ -88,6 +100,12 @@ function Copy-DeploymentStables([string]$Source, [string]$Target) {
     Copy-Item -LiteralPath $Source -Destination $Target -Recurse
 }
 
+function Set-DeploymentSupervisor([string]$Path, [string]$Text, [string]$Source) {
+    if ($DryRun) { Write-Host "[dry run] install $Source -> $Path"; return }
+    # Rewriting the file in place keeps its mode; the unit reads it only when it starts.
+    [System.IO.File]::WriteAllText($Path, $Text)
+}
+
 function Invoke-DryRunFailure([string]$Stage) {
     if ($DryRunFailure -eq $Stage) {
         $message = "simulated dry-run failure after $($Stage.Substring(5).ToLowerInvariant())"
@@ -100,6 +118,24 @@ $release = (Resolve-Path -LiteralPath $ReleaseRoot).Path
 $deploy = (Resolve-Path -LiteralPath $DeployDir).Path
 if (-not (Test-Path -LiteralPath (Join-Path $release '.git'))) { throw "release checkout is not a git repository: $release" }
 if (-not (Test-Path -LiteralPath (Join-Path $deploy '.git'))) { throw "deploy checkout is not a git repository: $deploy" }
+if ($onLinux) {
+    $supervisor = [System.IO.Path]::Combine($InstallDir, 'bin', 'run-daemon.sh')
+    # A unit that runs another supervisor or checkout would never read the pointers this deployment switches.
+    $execStart = & systemctl show --property=ExecStart --value $DaemonUnit
+    if ($LASTEXITCODE -ne 0) { throw "could not read $DaemonUnit (systemctl exit code $LASTEXITCODE)" }
+    $execStart = [string]::Join(' ', [string[]]@($execStart))
+    if (-not ($execStart.Contains(" $supervisor ") -and $execStart.Contains(" $deploy "))) {
+        throw "$DaemonUnit does not run $supervisor for $deploy; refusing deployment. ExecStart: $execStart"
+    }
+    if (-not (Test-Path -LiteralPath $supervisor)) { throw "daemon supervisor is missing: $supervisor" }
+    foreach ($action in @('stop', 'start')) {
+        & sudo -n -l systemctl $action $DaemonUnit | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "this user may not run sudo -n systemctl $action $DaemonUnit; refusing deployment before downtime"
+        }
+    }
+    Write-Host "[deploy] $DaemonUnit runs $supervisor"
+}
 
 $releaseCommit = Get-GitOutput -FailureMessage 'could not resolve Actions checkout HEAD' `
     -GitArguments @('-C', $release, 'rev-parse', 'HEAD')
@@ -132,14 +168,13 @@ if (-not $DryRun) {
 }
 Write-Host '[deploy] guards passed'
 
-$pinPath = Join-Path $release 'tools\stables\pin.json'
+$pinPath = [System.IO.Path]::Combine($release, 'tools', 'stables', 'pin.json')
 if (-not (Test-Path -LiteralPath $pinPath)) { throw "Stables pin is missing: $pinPath" }
 $stablesPin = Get-Content -Raw -LiteralPath $pinPath | ConvertFrom-Json
 if ([string]$stablesPin.commit -notmatch '^[0-9a-f]{40}$') { throw "Stables pin names no commit: $pinPath" }
 if (-not $StablesRelease) { $StablesRelease = Join-Path $release 'stables-release' }
-if (-not (Test-Path -LiteralPath (Join-Path $StablesRelease 'public\index.html'))) {
-    throw "Stables checkout has no public\index.html: $StablesRelease"
-}
+$stablesIndex = [System.IO.Path]::Combine($StablesRelease, 'public', 'index.html')
+if (-not (Test-Path -LiteralPath $stablesIndex)) { throw "Stables checkout has no $stablesIndex" }
 $stablesCommit = Get-GitOutput -FailureMessage 'could not resolve the Stables checkout HEAD' `
     -GitArguments @('-C', $StablesRelease, 'rev-parse', 'HEAD')
 if ($stablesCommit -ne $stablesPin.commit) {
@@ -170,10 +205,12 @@ if ($hadVenvPointer) {
     if (-not [System.IO.Path]::IsPathRooted($previousVenv) -or -not (Test-Path -LiteralPath $previousVenv)) {
         throw "deployment virtual environment pointer is invalid: $venvPointer"
     }
+} elseif ($onLinux) {
+    $previousVenv = Join-Path $InstallDir 'venv'
 } else {
     $previousVenv = $liveVenv
 }
-$python = Join-Path $previousVenv 'Scripts\python.exe'
+$python = Join-Path $previousVenv $venvPython
 if (-not (Test-Path -LiteralPath $python)) { throw "deployment Python is missing: $python" }
 $stagedVenv = Join-Path $deployParent ".$deployName.venv.deploy-$Commit"
 if (Test-Path -LiteralPath $stagedVenv) { throw "staged virtual environment already exists: $stagedVenv" }
@@ -185,7 +222,7 @@ if (-not $DryRun -and -not (Test-Path -LiteralPath $requirements)) {
 
 try {
     Run $python @('-m', 'venv', $stagedVenv)
-    $stagedPython = Join-Path $stagedVenv 'Scripts\python.exe'
+    $stagedPython = Join-Path $stagedVenv $venvPython
     if (-not $DryRun -and -not (Test-Path -LiteralPath $stagedPython)) {
         throw "staged deployment Python is missing: $stagedPython"
     }
@@ -223,8 +260,16 @@ if ($stablesChanged) {
 }
 Write-Host '[deploy] Stables staged'
 
+if ($onLinux) {
+    $releaseSupervisor = [System.IO.Path]::Combine($release, 'install', 'run-daemon.sh')
+    if (-not (Test-Path -LiteralPath $releaseSupervisor)) { throw "release supervisor is missing: $releaseSupervisor" }
+    $supervisorText = [System.IO.File]::ReadAllText($releaseSupervisor)
+    $previousSupervisorText = [System.IO.File]::ReadAllText($supervisor)
+    $supervisorChanged = $supervisorText -cne $previousSupervisorText
+}
+
 $restart = Join-Path $release 'ops\harness\restart-daemon.ps1'
-if (-not $DryRun) {
+if (-not $DryRun -and -not $onLinux) {
     try { . $restart }
     catch {
         Remove-DeploymentDirectory $stagedVenv
@@ -232,7 +277,20 @@ if (-not $DryRun) {
         throw
     }
 }
+function Wait-LinuxDaemonHealth {
+    foreach ($i in 1..30) {
+        Start-Sleep -Seconds 2
+        try {
+            if ((Invoke-RestMethod http://127.0.0.1:8100/health -TimeoutSec 3).ok) {
+                Write-Host "daemon up after $($i * 2) s"
+                return
+            }
+        } catch { }
+    }
+    throw "daemon did not come back within 60 s; see journalctl -u $DaemonUnit and $InstallDir/logs"
+}
 function Stop-DeploymentDaemon {
+    if ($onLinux) { Run sudo @('-n', 'systemctl', 'stop', $DaemonUnit); return }
     if ($DryRun) {
         Write-Host "[dry run] powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $restart -Mode Stop"
         return
@@ -240,6 +298,11 @@ function Stop-DeploymentDaemon {
     Stop-HarnessDaemon
 }
 function Start-DeploymentDaemon {
+    if ($onLinux) {
+        Run sudo @('-n', 'systemctl', 'start', $DaemonUnit)
+        if (-not $DryRun) { Wait-LinuxDaemonHealth }
+        return
+    }
     if ($DryRun) {
         Write-Host "[dry run] powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $restart -Mode Start"
         return
@@ -249,6 +312,7 @@ function Start-DeploymentDaemon {
 $stopInitiated = $false
 $venvSwitchInitiated = $false
 $stablesSwitchInitiated = $false
+$supervisorSwitchInitiated = $false
 $mergeInitiated = $false
 $imageRetagInitiated = $false
 try {
@@ -265,6 +329,11 @@ try {
         Set-DeploymentPointer $stablesPointer $stablesPointerTemp $stagedStables
     }
     Write-Host "[deploy] Stables $($stablesPin.tag) selected"
+    if ($onLinux -and $supervisorChanged) {
+        $supervisorSwitchInitiated = $true
+        Set-DeploymentSupervisor $supervisor $supervisorText $releaseSupervisor
+        Write-Host '[deploy] supervisor updated'
+    }
     Invoke-DryRunFailure 'AfterSwap'
 
     $mergeInitiated = $true
@@ -319,6 +388,15 @@ try {
         Write-Host '[rollback] restored previous Stables'
     } catch {
         $rollbackErrors.Add("Stables: $($_.Exception.Message)")
+    }
+
+    if ($supervisorSwitchInitiated) {
+        try {
+            Set-DeploymentSupervisor $supervisor $previousSupervisorText 'the previous supervisor'
+            Write-Host '[rollback] restored previous supervisor'
+        } catch {
+            $rollbackErrors.Add("supervisor: $($_.Exception.Message)")
+        }
     }
 
     if ($imageRetagInitiated) {

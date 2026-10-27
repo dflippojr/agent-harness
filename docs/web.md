@@ -36,7 +36,8 @@ Daemon administration is not in Stables (#545); see below.
 2. `stables/public` inside the Server's checkout: clone dflippojr/stables there as `stables/`, which git ignores.
 
 The tower's deployment uses the first: `ops/harness/deploy-ci.ps1` copies the pinned release (`tools/stables/pin.json`)
-next to the checkout, writes its path to `.stables-path`, and `run-daemon.ps1` passes it to the daemon. To move the
+next to the checkout, writes its path to `.stables-path`, and the supervisor (`install/run-daemon.sh` on Linux,
+`ops/harness/run-daemon.ps1` on Windows) passes it to the daemon. To move the
 tower to another Stables release, tag it in dflippojr/stables and re-pin it here (`tools/stables/README.md`).
 
 The bundled Server accepts requests only for `127.0.0.1`, `localhost`, or `[::1]` on its configured listen port,

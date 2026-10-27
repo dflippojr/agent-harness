@@ -46,16 +46,23 @@ after that workflow succeeds for the exact commit pushed to `main`:
    both runtime images to GHCR:
    - `ghcr.io/dflippojr/agent-harness-sandbox:sha-<commit>` and `:py312`
    - `ghcr.io/dflippojr/agent-harness-cli:sha-<commit>` and `:1`
-3. **deploy-tower** runs only after image publication for that same tested SHA. The repository-scoped runner pulls the
+3. **deploy-tower** runs only after image publication for that same tested SHA. The repository-scoped runner on the
+   Ubuntu tower (`agent-harness-tower-linux`, #812) runs `ops/harness/deploy-ci.ps1` under `pwsh`. It pulls the
    immutable images, verifies that the live checkout is clean `main` and can fast-forward, builds a fresh side-by-side
-   virtual environment, stops the daemon, swaps environments, fast-forwards, retags the images, starts the daemon, and
-   waits for `/health`.
+   virtual environment, stops the daemon (`sudo -n systemctl stop agent-harness-main-daemon.service`), swaps
+   environments, fast-forwards, retags the images, starts the daemon, and waits for `/health`.
 
 The SHA tags are immutable deployment inputs; the stable tags match the local names already expected by the daemon.
 The CLI Dockerfile accepts `SANDBOX_IMAGE` so its hosted build is based on the exact sandbox image from the same commit.
 The supervisor reads the ignored `.venv-path` file when present. Deployment switches that pointer rather than moving
-the newly built environment, so Windows entry points keep their original absolute paths; the original `.venv` remains
+the newly built environment, so entry points keep their original absolute paths; the original environment remains
 untouched for first-deployment rollback. Later successful deployments remove the superseded managed environment.
+On Linux the daemon's unit runs the installer's supervisor (`~/.local/share/agent-harness/bin/run-daemon.sh`, a copy
+of `install/run-daemon.sh`), and the original environment is the installer's `~/.local/share/agent-harness/venv`.
+Before downtime the deployment checks that the unit runs that supervisor for the live checkout and that the runner
+user may run `sudo -n systemctl stop` and `start` on it; while the daemon is stopped it replaces the supervisor with
+the release's `install/run-daemon.sh`, and a rollback restores the previous one. The Hub, llama-server and metrics
+proxy units are not touched.
 Deploys (production and staging) install `requirements.txt` plus, when present, `requirements-telemetry.txt`, so tracing
 works in production; `requirements-repomap.txt` stays opt-in.
 
@@ -103,7 +110,7 @@ CI and gate-guard wait scripts. End-to-end App operation must be checked after t
 The daemon itself is deliberately not containerized. It is a host Python process because it coordinates Windows
 scheduled tasks, local repository paths, Docker sandbox creation, GPU/model controls, and native provider logins.
 
-The owner explicitly approved the repository-scoped self-hosted runners. The `agent-harness-tower` runner gives
+The owner explicitly approved the repository-scoped self-hosted runners. The `agent-harness-tower-linux` runner gives
 trusted `main` workflow code the tower user's filesystem, Docker, credentials, and service-restart authority. It is
 reserved for deployment; tests and SonarCloud use GitHub-hosted Windows, and automated review uses the
 `agent-harness-review` pool.
@@ -574,27 +581,42 @@ hatch: `python -m pytest tests -q -p no:xdist`.
 
 ## Tower runner
 
-The pinned official runner is installed in `D:\Agents\github-runner`, with job work under its `_work` directory.
-It is registered only to `dflippojr/agent-harness`, carries the custom
-`agent-harness-tower` label, and starts at user logon through the hidden `AgentHarness-GitHubRunner` scheduled task.
-Diagnostics live in `D:\Agents\github-runner\_diag`.
+The tower runs Ubuntu since 2026-10-26, and production runs there as systemd system units
+(`agent-harness-main-daemon.service`, `agent-harness-hub.service`, `agent-harness-main-llama.service`,
+`harness-metrics-proxy.service`) from the live checkout `/home/daniel/Projects/agent-harness`. The Windows runner
+`dflippotower-agent-harness` (label `agent-harness-tower`) is retired; `deploy-tower` runs on a Linux runner
+registered only to `dflippojr/agent-harness` with the custom label `agent-harness-tower-linux` (#812). The runner's
+user must own the live checkout and its parent directory (deployments stage environments and Stables copies next to
+it), write `~/.local/share/agent-harness/bin/run-daemon.sh`, use Docker, and have `pwsh` 7 on its `PATH`. It needs
+exactly two passwordless commands, for example in `/etc/sudoers.d/agent-harness-deploy`:
 
-To repair or reinstall it, remove the runner in GitHub and its local install directory, obtain a fresh short-lived
-registration token, then run:
-
-```powershell
-$gh = 'C:\Program Files\GitHub CLI\gh.exe'
-$token = & $gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token
-.\ops\github\install-runner.ps1 -Token $token
+```
+daniel ALL=(root) NOPASSWD: /usr/bin/systemctl stop agent-harness-main-daemon.service, /usr/bin/systemctl start agent-harness-main-daemon.service
 ```
 
-The token is never saved by the installer. GitHub stores the runner's own credential files in its install directory.
+Register it with a fresh short-lived token (`gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token
+--jq .token`) and the official runner's `./config.sh --url https://github.com/dflippojr/agent-harness --token <token>
+--labels agent-harness-tower-linux`, then install it as a service (`sudo ./svc.sh install <user>`, `sudo ./svc.sh
+start`). The token is never saved. The `tower-production` environment keeps its protection.
+
+Before the first real deployment, dry-run the script on the tower as the runner's user, against the real paths. It
+changes nothing and never stops or starts the unit:
+
+```
+git clone --depth 1 https://github.com/dflippojr/agent-harness /tmp/ah-release
+gh repo clone dflippojr/stables /tmp/ah-stables -- --depth 1 --branch "$(jq -r .tag /tmp/ah-release/tools/stables/pin.json)"
+pwsh -NoProfile -File /tmp/ah-release/ops/harness/deploy-ci.ps1 -DryRun \
+    -Commit "$(git -C /tmp/ah-release rev-parse HEAD)" -ReleaseRoot /tmp/ah-release -StablesRelease /tmp/ah-stables
+```
+
+It prints each step it would take (`[dry run] sudo -n systemctl stop ...`, the venv and pip commands, the pointer
+writes, the fast-forward, the image tags) and fails, before any of them, on the same guards a real run checks.
 
 The live checkout must itself be on `main`; deployment intentionally fails closed on another branch or detached HEAD.
 After first confirming that the checkout has no work that must be preserved, put it on `main` and fast-forward it:
 
-```powershell
-Set-Location D:\Projects\agent-harness
+```
+cd /home/daniel/Projects/agent-harness
 git status --short
 git switch main
 git fetch origin
@@ -695,7 +717,7 @@ location out and `Assert-StagingTarget` refuses any path that is, or is inside, 
 | Tailscale Serve | `:443` (`ops/tailscale/serve.ps1`) | `:8444` (`ops/tailscale/serve-staging.ps1`) |
 | Scheduled task | `AgentHarness-Daemon` | `AgentHarness-Daemon-Staging` |
 | GitHub environment | `tower-production` | `tower-staging` (no production secrets) |
-| Runner | `agent-harness-tower` | `agent-harness-staging` |
+| Runner | `agent-harness-tower-linux` | `agent-harness-staging` |
 
 `tower-staging` holds no secrets at all today; the staging job needs only `contents: read`. Restrict the environment
 to this repository's default branch so a candidate copy of the workflow cannot claim it.
@@ -745,7 +767,7 @@ gh workflow run staging.yml -f reset=true
 
 Production never waits on staging: `staging.yml` uses its own `agent-harness-staging` concurrency group, so
 `deploy-tower` (`agent-harness-main-deployment`) is never queued behind it, and staging never runs on
-`agent-harness-tower` or `agent-harness-ci`. If host contention ever forces a choice, cancel the staging run;
+`agent-harness-tower-linux` or `agent-harness-ci`. If host contention ever forces a choice, cancel the staging run;
 production is never cancelled or delayed for staging. The staging job is capped at **30 minutes**, after which it
 fails closed with production unchanged. A healthy staging daemon then stays up until it is replaced or reset.
 

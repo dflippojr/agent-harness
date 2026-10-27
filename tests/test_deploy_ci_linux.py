@@ -148,23 +148,23 @@ def _layout(tmp_path: Path, *, python: Path | None = None, exec_start: str | Non
     }
 
 
-def _deploy_arguments(layout: dict[str, object]) -> list[str]:
-    return [
-        "-Commit", COMMIT,
-        "-ReleaseRoot", str(layout["release"]),
-        "-DeployDir", str(layout["deploy"]),
-        "-InstallDir", str(layout["install"]),
-        "-StablesRelease", str(layout["stables"]),
-        "-Registry", "example.invalid/harness",
-    ]
-
-
 def _deploy_object(layout: dict[str, object]) -> dict[str, str]:
-    arguments = _deploy_arguments(layout)
-    return {name.lstrip("-"): value for name, value in zip(arguments[::2], arguments[1::2])}
+    return {
+        "Commit": COMMIT,
+        "ReleaseRoot": str(layout["release"]),
+        "DeployDir": str(layout["deploy"]),
+        "InstallDir": str(layout["install"]),
+        "StablesRelease": str(layout["stables"]),
+        "Registry": "example.invalid/harness",
+    }
+
+
+def _deploy_arguments(layout: dict[str, object]) -> list[str]:
+    return [part for name, value in _deploy_object(layout).items() for part in (f"-{name}", value)]
 
 
 def dry_run(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    """The dry run as the tower runs it: `pwsh -File deploy-ci.ps1 ... -DryRun`."""
     layout = _layout(tmp_path)
     layout["env"].update(env)
     result = subprocess.run(
@@ -173,6 +173,50 @@ def dry_run(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str
         cwd=ROOT, env=layout["env"], capture_output=True, text=True, timeout=60, check=False,
     )
     return result, layout
+
+
+WRAPPER = r"""param([string]$DeployScript, [string]$StatusPath, [string]$Failure, [string]$DeployArgumentsJson, [switch]$DryRun)
+$ErrorActionPreference = 'Stop'
+# The health poll and its waits; the unit's state comes from the fake sudo.
+function Start-Sleep { }
+function Invoke-RestMethod {
+    [pscustomobject]@{ ok = ((Get-Content -Raw -LiteralPath $env:FAKE_UNIT_STATE).Trim() -eq 'active') }
+}
+$exitCode = 0
+$errorMessage = ''
+$arguments = @{}
+(ConvertFrom-Json $DeployArgumentsJson).psobject.Properties | ForEach-Object { $arguments[$_.Name] = $_.Value }
+try {
+    & $DeployScript @arguments -DryRunFailure $Failure -DryRun:$DryRun
+} catch {
+    $exitCode = 1
+    $errorMessage = $_.Exception.Message
+    Write-Output $errorMessage
+}
+[ordered]@{
+    unit_state = (Get-Content -Raw -LiteralPath $env:FAKE_UNIT_STATE).Trim()
+    systemctl = @(Get-Content -LiteralPath $env:FAKE_SUDO_LOG | Where-Object { $_ })
+    error = $errorMessage
+} | ConvertTo-Json | Set-Content -LiteralPath $StatusPath
+exit $exitCode
+"""
+
+
+def invoke(
+    tmp_path: Path, layout: dict[str, object], failure: str = "None", *, dry: bool = False
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    """Runs the script through WRAPPER, which records the unit's state and the unwrapped error message."""
+    wrapper = tmp_path / "invoke-deploy.ps1"
+    wrapper.write_text(WRAPPER, encoding="utf-8")
+    status_path = tmp_path / "status.json"
+    result = subprocess.run(
+        [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper),
+         "-DeployScript", str(ROOT / "ops/harness/deploy-ci.ps1"), "-StatusPath", str(status_path),
+         "-Failure", failure, "-DeployArgumentsJson", json.dumps(_deploy_object(layout)),
+         *(["-DryRun"] if dry else [])],
+        cwd=ROOT, env=layout["env"], capture_output=True, text=True, timeout=180, check=False,
+    )
+    return result, json.loads(status_path.read_text(encoding="utf-8-sig"))
 
 
 def output(result: subprocess.CompletedProcess[str]) -> str:
@@ -198,7 +242,7 @@ def test_linux_dry_run_plans_systemd_steps_against_linux_paths_without_restartin
     merge = plan.index("[deploy] checkout fast-forwarded")
     start = plan.index(f"[dry run] sudo -n systemctl start {UNIT}")
     started = plan.index("[deploy] daemon started and healthy")
-    assert guards < unit < verified < resolve < staged < stop < stopped < swap < selected < supervisor < merge
+    assert unit < guards < verified < resolve < staged < stop < stopped < swap < selected < supervisor < merge
     assert merge < start < started
 
     # The installer's environment builds the side-by-side one, which holds the release's requirements.
@@ -224,18 +268,20 @@ def test_linux_dry_run_plans_systemd_steps_against_linux_paths_without_restartin
 
 
 def test_linux_deploy_refuses_a_unit_that_does_not_run_the_installed_supervisor(tmp_path):
-    result, layout = dry_run(tmp_path, FAKE_EXEC_START="{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -m harness }")
+    layout = _layout(tmp_path, exec_start="{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 -m harness }")
+    result, status = invoke(tmp_path, layout, dry=True)
     assert result.returncode != 0
-    message = " ".join(output(result).split())
-    assert f"{UNIT} does not run {layout['supervisor']} for {layout['deploy']}" in message
+    assert status["error"].startswith(f"{UNIT} does not run {layout['supervisor']} for {layout['deploy']}")
     assert "[deploy] dependencies staged" not in output(result)
 
 
 def test_linux_deploy_refuses_without_passwordless_systemctl(tmp_path):
-    result, _ = dry_run(tmp_path, FAKE_SUDO_DENY="1")
+    layout = _layout(tmp_path)
+    layout["env"]["FAKE_SUDO_DENY"] = "1"
+    result, status = invoke(tmp_path, layout)
     assert result.returncode != 0
-    message = " ".join(output(result).split())
-    assert f"this user may not run sudo -n systemctl stop {UNIT}" in message
+    assert status["error"].startswith(f"this user may not run sudo -n systemctl stop {UNIT}")
+    assert status["systemctl"] == []
     assert "[deploy] dependencies staged" not in output(result)
 
 
@@ -246,31 +292,6 @@ def deploy_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return venv
 
 
-WRAPPER = r"""param([string]$DeployScript, [string]$StatusPath, [string]$Failure, [string]$DeployArgumentsJson)
-$ErrorActionPreference = 'Stop'
-# The health poll and its waits; the unit's state comes from the fake sudo.
-function Start-Sleep { }
-function Invoke-RestMethod {
-    [pscustomobject]@{ ok = ((Get-Content -Raw -LiteralPath $env:FAKE_UNIT_STATE).Trim() -eq 'active') }
-}
-$exitCode = 0
-$errorMessage = ''
-$arguments = @{}
-(ConvertFrom-Json $DeployArgumentsJson).psobject.Properties | ForEach-Object { $arguments[$_.Name] = $_.Value }
-try {
-    & $DeployScript @arguments -DryRunFailure $Failure
-} catch {
-    $exitCode = 1
-    $errorMessage = $_.Exception.Message
-    Write-Output $errorMessage
-}
-[ordered]@{
-    unit_state = (Get-Content -Raw -LiteralPath $env:FAKE_UNIT_STATE).Trim()
-    systemctl = @(Get-Content -LiteralPath $env:FAKE_SUDO_LOG | Where-Object { $_ })
-    error = $errorMessage
-} | ConvertTo-Json | Set-Content -LiteralPath $StatusPath
-exit $exitCode
-"""
 
 
 def real_deploy(
@@ -288,16 +309,7 @@ def real_deploy(
     layout["staged_stables"] = tmp_path / f".agent-harness.stables-{STABLES_COMMIT}"
     layout["staged_venv"] = tmp_path / f".agent-harness.venv.deploy-{COMMIT}"
 
-    wrapper = tmp_path / "invoke-deploy.ps1"
-    wrapper.write_text(WRAPPER, encoding="utf-8")
-    status_path = tmp_path / "status.json"
-    result = subprocess.run(
-        [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(wrapper),
-         "-DeployScript", str(ROOT / "ops/harness/deploy-ci.ps1"), "-StatusPath", str(status_path),
-         "-Failure", failure, "-DeployArgumentsJson", json.dumps(_deploy_object(layout))],
-        cwd=ROOT, env=layout["env"], capture_output=True, text=True, timeout=180, check=False,
-    )
-    status = json.loads(status_path.read_text(encoding="utf-8-sig"))
+    result, status = invoke(tmp_path, layout, failure)
     return result, status, layout
 
 
