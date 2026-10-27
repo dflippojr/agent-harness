@@ -17,8 +17,8 @@ after that workflow succeeds for the exact commit pushed to `main`:
    the same shared guard pinned to the same commit, and its own job, `gate-guard-target / gate-guard`, is the verdict on each pull request's head. It
    fails a pull request that deletes or skips a test, adds a retry, or edits workflow, Sonar, coverage or lint config,
    unless the owner applied `gate-change-approved` after the newest push. **CI / changes** lists the
-   changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `test-py313`, `openapi`, `ui-tests`
-   and `hub-contract` skip and
+   changed files; when every one is on its `CI_SKIP_UNREAD_PATHS` list, `test`, `test-py313`, `openapi`, `ui-tests`,
+   `hub-contract` and `deploy-linux` skip and
    `gate` still passes, so a docs-only PR is not left pending. A push to `main` is never cancelled by a later push:
    each main commit gets its own CI run, and only pull-request runs cancel their older run.
    **CI / lint** (#729) runs on every change, on `ubuntu-latest`: `ruff check` with the small rule set in
@@ -30,6 +30,10 @@ after that workflow succeeds for the exact commit pushed to `main`:
    fake-model mode on loopback, on `ubuntu-latest`. A daemon change that renames a field, changes a status code or
    drops an endpoint the Hub calls fails it; AGENTS.md describes the deliberate-break flow (Hub PR first, then bump
    the pinned ref).
+   **CI / deploy-linux** (#812) runs `tests/test_deploy_ci_linux.py` on GitHub-hosted `ubuntu-latest`, which ships
+   PowerShell 7: `ops/harness/deploy-ci.ps1` under `pwsh` with fake git, docker and systemctl (stop, start, rollback,
+   reruns), and `install/run-daemon.sh` with a fake daemon. The Windows suite jobs skip that module. It never runs on
+   the tower's `agent-harness-tower-linux` runner, which deploys `main` and never runs pull request code.
    **CI / test-py313** (#730) runs the same suite on Python 3.13, on `windows-latest`, after an import smoke test
    (`tests/test_import_smoke.py`) that compiles every shipped source file and imports every shipped module with
    `SyntaxWarning` as an error. It has no coverage. `gate` needs it, so a failure fails the CI run, and `guard` deploys
@@ -884,5 +888,16 @@ to the slot), and dispatch again.
   the partially deployed daemon is stopped, the previous checkout and untouched virtual environment are restored, and
   the previous daemon is started and health-checked. The Actions job still exits non-zero and reports whether rollback
   itself had any errors.
+- On Linux the rollback confirms with `systemctl --user is-active` that the unit stopped, retrying the stop up to three
+  times, before it restores anything: the unit's supervisor reads `.venv-path` only when it starts, so one that never
+  stopped would keep the new environment, and a `start` on its still-active unit would be a no-op. If the unit will
+  not stop, the rollback still restores the files and then restarts the unit, so a fresh supervisor reads the restored
+  pointers. If that restart fails too, the new environment is kept for the supervisor still running it, and the job
+  fails naming the unit's state and the `systemctl --user restart` that finishes the rollback.
+- Rerunning a commit that is already live (a re-run of its workflow): if the checkout, `.venv-path`, `.stables-path`,
+  the stable image tags and, on Linux, the supervisor and an active unit all match it and `/health` answers, the
+  deployment reports that nothing needs doing and succeeds without stopping anything. Otherwise it fails, naming what
+  differs, and never removes or restages the active environment. A side-by-side environment left by an interrupted
+  run of a commit that is not live still stops a deployment of that commit; remove it by hand.
 - A newer `main` commit superseding an older queued deployment makes the older deployment exit without changing the
   tower; the serialized newer workflow run handles it.

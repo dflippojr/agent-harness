@@ -19,6 +19,11 @@ Under pwsh on Linux (#812) the daemon is the systemd user unit install/install.s
 deployment writes .venv-path. The script stops and starts that unit with `systemctl --user`, as the runner's user, and
 checks before downtime that the unit exists and runs that supervisor. The supervisor reads the pointers, so while the
 daemon is stopped it is replaced by the release's install/run-daemon.sh, and a rollback puts the previous one back.
+A rollback confirms the unit is inactive before it restarts it, because a supervisor that never stopped keeps the new
+environment. One it cannot stop is restarted instead, and if that fails too the new environment is kept for it.
+
+Rerunning the live commit changes nothing: if its environment, Stables copy, images (and on Linux the supervisor and
+unit) are the deployed ones and the daemon is healthy, the script reports that and exits; otherwise it fails.
 #>
 param(
     [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$Commit,
@@ -104,6 +109,23 @@ function Set-DeploymentSupervisor([string]$Path, [string]$Text, [string]$Source)
     if ($DryRun) { Write-Host "[dry run] install $Source -> $Path"; return }
     # Rewriting the file in place keeps its mode; the unit reads it only when it starts.
     [System.IO.File]::WriteAllText($Path, $Text)
+}
+
+function Read-DeploymentPointer([string]$Pointer) {
+    if (-not (Test-Path -LiteralPath $Pointer)) { return '' }
+    return ([string](Get-Content -Raw -LiteralPath $Pointer)).Trim()
+}
+
+function Test-DaemonHealth {
+    try { return [bool](Invoke-RestMethod http://127.0.0.1:8100/health -TimeoutSec 3).ok } catch { return $false }
+}
+
+function Get-LinuxUnitState {
+    # is-active prints the unit's state (active, inactive, failed, deactivating, ...); an unreachable manager, none.
+    $shown = & systemctl --user is-active $DaemonUnit 2>$null
+    $state = ([string]::Join("`n", [string[]]@($shown))).Trim()
+    if ($state) { return $state }
+    return 'unknown'
 }
 
 function Invoke-DryRunFailure([string]$Stage) {
@@ -202,13 +224,53 @@ $sandboxStable = 'agent-harness-sandbox:py312'
 $cliStable = 'agent-harness-cli:1'
 Run docker @('pull', $sandbox)
 Run docker @('pull', $cli)
+
+$deployParent = Split-Path $deploy -Parent
+$deployName = Split-Path $deploy -Leaf
+$stagedVenv = Join-Path $deployParent ".$deployName.venv.deploy-$Commit"
+$managedStablesPrefix = Join-Path $deployParent ".$deployName.stables-"
+$stagedStablesRoot = "$managedStablesPrefix$stablesCommit"
+$stagedStables = Join-Path $stagedStablesRoot 'public'
+
+# A rerun of the live commit (#812). Its environment is the active one, which a deployment never restages or removes,
+# so a commit that is fully deployed and healthy is a verified no-op, and anything less fails without touching it.
+if (-not $DryRun -and $previousCommit -eq $Commit) {
+    $mismatches = [System.Collections.Generic.List[string]]::new()
+    $liveVenvTarget = Read-DeploymentPointer (Join-Path $deploy '.venv-path')
+    if ($liveVenvTarget -ne $stagedVenv) { $mismatches.Add(".venv-path names '$liveVenvTarget', not $stagedVenv") }
+    $liveStablesTarget = Read-DeploymentPointer (Join-Path $deploy '.stables-path')
+    if ($liveStablesTarget -ne $stagedStables) {
+        $mismatches.Add(".stables-path names '$liveStablesTarget', not $stagedStables")
+    }
+    foreach ($tags in @(@($sandbox, $sandboxStable), @($cli, $cliStable))) {
+        try {
+            if ((Get-DockerImageId $tags[0]) -ne (Get-DockerImageId $tags[1])) {
+                $mismatches.Add("$($tags[1]) is not $($tags[0])")
+            }
+        } catch { $mismatches.Add($_.Exception.Message) }
+    }
+    if ($onLinux) {
+        $releaseSupervisor = [System.IO.Path]::Combine($release, 'install', 'run-daemon.sh')
+        if ([System.IO.File]::ReadAllText($releaseSupervisor) -cne [System.IO.File]::ReadAllText($supervisor)) {
+            $mismatches.Add("$supervisor is not this release's install/run-daemon.sh")
+        }
+        $unitState = Get-LinuxUnitState
+        if ($unitState -ne 'active') { $mismatches.Add("$DaemonUnit is $unitState") }
+    }
+    if ($mismatches.Count -eq 0 -and -not (Test-DaemonHealth)) { $mismatches.Add('the daemon does not answer /health') }
+    if ($mismatches.Count -gt 0) {
+        throw "live checkout is already at $Commit, but its deployment is incomplete ($($mismatches -join '; ')); " +
+            'refusing to redeploy over the active environment'
+    }
+    Write-Host "$Commit is already deployed and the daemon is healthy; nothing to do"
+    exit 0
+}
+
 $previousSandboxImage = Get-DockerImageId $sandboxStable
 $previousCliImage = Get-DockerImageId $cliStable
 
 $liveVenv = Join-Path $deploy '.venv'
 $venvPointer = Join-Path $deploy '.venv-path'
-$deployParent = Split-Path $deploy -Parent
-$deployName = Split-Path $deploy -Leaf
 $venvPointerTemp = Join-Path $deployParent ".$deployName.venv-path-$Commit.tmp"
 $hadVenvPointer = Test-Path -LiteralPath $venvPointer
 if ($hadVenvPointer) {
@@ -225,7 +287,6 @@ if ($hadVenvPointer) {
 }
 $python = Join-Path $previousVenv $venvPython
 if (-not (Test-Path -LiteralPath $python)) { throw "deployment Python is missing: $python" }
-$stagedVenv = Join-Path $deployParent ".$deployName.venv.deploy-$Commit"
 if (Test-Path -LiteralPath $stagedVenv) { throw "staged virtual environment already exists: $stagedVenv" }
 if (Test-Path -LiteralPath $venvPointerTemp) { throw "temporary virtual environment pointer already exists: $venvPointerTemp" }
 $requirements = Join-Path $release 'requirements.txt'
@@ -255,9 +316,6 @@ $stablesPointer = Join-Path $deploy '.stables-path'
 $stablesPointerTemp = Join-Path $deployParent ".$deployName.stables-path-$Commit.tmp"
 $hadStablesPointer = Test-Path -LiteralPath $stablesPointer
 $previousStables = if ($hadStablesPointer) { ([string](Get-Content -Raw -LiteralPath $stablesPointer)).Trim() } else { '' }
-$managedStablesPrefix = Join-Path $deployParent ".$deployName.stables-"
-$stagedStablesRoot = "$managedStablesPrefix$stablesCommit"
-$stagedStables = Join-Path $stagedStablesRoot 'public'
 $stablesChanged = ($previousStables -ne $stagedStables) -or `
     -not (Test-Path -LiteralPath (Join-Path $stagedStables 'index.html'))
 if ($stablesChanged) {
@@ -295,12 +353,10 @@ if (-not $onLinux) {
 function Wait-LinuxDaemonHealth {
     foreach ($i in 1..30) {
         Start-Sleep -Seconds 2
-        try {
-            if ((Invoke-RestMethod http://127.0.0.1:8100/health -TimeoutSec 3).ok) {
-                Write-Host "daemon up after $($i * 2) s"
-                return
-            }
-        } catch { }
+        if (Test-DaemonHealth) {
+            Write-Host "daemon up after $($i * 2) s"
+            return
+        }
     }
     throw "daemon did not come back within 60 s; see journalctl --user -u $DaemonUnit and $InstallDir/logs"
 }
@@ -311,6 +367,19 @@ function Stop-DeploymentDaemon {
         return
     }
     Stop-HarnessDaemon
+}
+function Stop-RollbackDaemon {
+    # Returns whether the daemon is stopped. On Linux a failed or unconfirmed stop is retried: the unit's supervisor
+    # reads the pointers only when it starts, so one left running keeps the new environment whatever is restored.
+    if (-not $onLinux -or $DryRun) { $null = Stop-DeploymentDaemon; return $true }
+    foreach ($attempt in 1..3) {
+        try { $null = Stop-DeploymentDaemon }
+        catch { Write-Warning "[rollback] stop attempt $attempt failed: $($_.Exception.Message)" }
+        $script:rollbackUnitState = Get-LinuxUnitState
+        if ($script:rollbackUnitState -in 'inactive', 'failed') { return $true }
+        if ($attempt -lt 3) { Start-Sleep -Seconds 2 }
+    }
+    return $false
 }
 function Start-DeploymentDaemon {
     if ($onLinux) {
@@ -371,12 +440,22 @@ try {
     }
 
     $rollbackErrors = [System.Collections.Generic.List[string]]::new()
+    $rollbackUnitState = 'unknown'
+    $daemonStopped = $false
+    $stopFailure = ''
     try {
-        Stop-DeploymentDaemon
-        Write-Host '[rollback] stopped partially deployed daemon'
+        $daemonStopped = Stop-RollbackDaemon
+        if ($daemonStopped) { Write-Host '[rollback] stopped partially deployed daemon' }
+        else {
+            $stopFailure = "$DaemonUnit is still $rollbackUnitState after 3 attempts, on the new release's supervisor"
+            Write-Warning "[rollback] $stopFailure; restarting it after the restore"
+        }
     } catch {
-        $rollbackErrors.Add("daemon stop: $($_.Exception.Message)")
+        $stopFailure = $_.Exception.Message
     }
+    # Whether the new release's supervisor is gone, so nothing runs the staged environment. Windows keeps its cleanup:
+    # a running interpreter's files are locked there, so removing them fails instead of pulling them from under it.
+    $stagedVenvReleased = (-not $onLinux) -or $daemonStopped
 
     if ($mergeInitiated) {
         try {
@@ -434,9 +513,23 @@ try {
     }
 
     try {
-        Start-DeploymentDaemon
+        if ($onLinux) {
+            # A start is a no-op on a unit that never stopped, so that one is restarted: either way a fresh supervisor
+            # reads the restored pointers.
+            $verb = if ($daemonStopped) { 'start' } else { 'restart' }
+            Run systemctl @('--user', $verb, $DaemonUnit)
+            $stagedVenvReleased = $true
+            if (-not $daemonStopped) { Write-Host '[rollback] restarted the unit on the restored pointers' }
+            if (-not $DryRun) { Wait-LinuxDaemonHealth }
+        } else {
+            Start-DeploymentDaemon
+        }
         Write-Host '[rollback] previous daemon started and healthy'
     } catch { $rollbackErrors.Add("daemon restart: $($_.Exception.Message)") }
+    # A Linux restart replaced the supervisor the stop could not, so only a stop nothing recovered from is a failure.
+    if ($stopFailure -and -not ($onLinux -and $stagedVenvReleased)) {
+        $rollbackErrors.Insert(0, "daemon stop: $stopFailure")
+    }
 
     try {
         $activeVenv = if (Test-Path -LiteralPath $venvPointer) {
@@ -444,6 +537,10 @@ try {
         } else { $liveVenv }
         if ($activeVenv -eq $stagedVenv) {
             $rollbackErrors.Add('staged environment cleanup: skipped because it is still the active virtual environment')
+        } elseif (-not $stagedVenvReleased) {
+            $rollbackErrors.Add("staged environment cleanup: kept $stagedVenv because $DaemonUnit is still " +
+                "$rollbackUnitState on the new release's supervisor, which runs it; the previous deployment's files " +
+                "are restored, so run systemctl --user restart $DaemonUnit, then remove $stagedVenv")
         } else {
             Remove-DeploymentDirectory $stagedVenv
         }

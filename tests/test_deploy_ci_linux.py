@@ -43,10 +43,16 @@ esac
 exit 0
 """
 
+# A pulled tag's image id is its name; a stable tag's is whatever was last tagged to it.
 FAKE_DOCKER = r"""#!/usr/bin/env bash
 case $1 in
     pull) ;;
-    image) if [[ $5 == agent-harness-sandbox:py312 ]]; then echo sha256:old-sandbox; else echo sha256:old-cli; fi ;;
+    image)
+        case $5 in
+            agent-harness-sandbox:py312) cat "$FAKE_SANDBOX_STATE" ;;
+            agent-harness-cli:1) cat "$FAKE_CLI_STATE" ;;
+            *) echo "$5" ;;
+        esac ;;
     tag)
         [[ $3 == agent-harness-sandbox:py312 ]] && echo "$2" >"$FAKE_SANDBOX_STATE"
         [[ $3 == agent-harness-cli:1 ]] && echo "$2" >"$FAKE_CLI_STATE" ;;
@@ -56,7 +62,9 @@ exit 0
 """
 
 # The user manager, as `systemctl --user` reaches it: only through $XDG_RUNTIME_DIR, the way systemd connects when
-# DBUS_SESSION_BUS_ADDRESS is unset. The system manager has no such unit.
+# DBUS_SESSION_BUS_ADDRESS is unset. The system manager has no such unit. A start or restart that launches the unit's
+# supervisor records the environment it reads from .venv-path (the installer's when there is none) in
+# $FAKE_SUPERVISOR_VENV; a start on an active unit is a no-op, as in systemd, so it keeps the one it has.
 FAKE_SYSTEMCTL = r"""#!/usr/bin/env bash
 if [[ $1 != --user ]]; then echo "Failed to stop ${@: -1}: Unit ${@: -1} not found." >&2; exit 5; fi
 shift
@@ -75,14 +83,22 @@ fi
 [[ $2 == "$FAKE_UNIT" ]] || exit 95
 echo "$1" >>"$FAKE_SYSTEMCTL_LOG"
 calls=$(grep -c "^$1\$" "$FAKE_SYSTEMCTL_LOG")
-if [[ $1 == stop ]]; then
-    [[ $FAKE_FAIL_STOP_CALL == "$calls" ]] && { echo "unexpected systemctl stop failure" >&2; exit 1; }
-    echo inactive >"$FAKE_UNIT_STATE"
-elif [[ $1 == start ]]; then
+launch() {
     echo active >"$FAKE_UNIT_STATE"
-else
-    exit 96
-fi
+    if [[ -f $FAKE_DEPLOY/.venv-path ]]; then cat "$FAKE_DEPLOY/.venv-path"; else echo installer; fi >"$FAKE_SUPERVISOR_VENV"
+}
+state=$(cat "$FAKE_UNIT_STATE")
+case $1 in
+    stop)
+        [[ ,$FAKE_FAIL_STOP_CALLS, == *,$calls,* ]] && { echo "Failed to stop $FAKE_UNIT: Transport endpoint is not connected" >&2; exit 1; }
+        echo inactive >"$FAKE_UNIT_STATE" ;;
+    start) [[ $state == active ]] || launch ;;
+    restart)
+        [[ $FAKE_FAIL_RESTART == 1 ]] && { echo "Failed to restart $FAKE_UNIT: Transport endpoint is not connected" >&2; exit 1; }
+        launch ;;
+    is-active) echo "$state"; [[ $state == active ]] || exit 3 ;;
+    *) exit 96 ;;
+esac
 exit 0
 """
 
@@ -130,9 +146,11 @@ def _layout(tmp_path: Path, *, python: Path | None = None, exec_start: str | Non
     _executable(bin_dir / "sudo", FAKE_SUDO)
 
     state = {name: tmp_path / f"{name}.txt"
-             for name in ("checkout", "unit", "systemctl_log", "sudo_log", "runtime_dir", "sandbox", "cli")}
+             for name in ("checkout", "unit", "supervisor_venv", "systemctl_log", "sudo_log", "runtime_dir", "sandbox",
+                          "cli")}
     state["checkout"].write_text(PREVIOUS_COMMIT, encoding="utf-8")
     state["unit"].write_text("active", encoding="utf-8")
+    state["supervisor_venv"].write_text("installer", encoding="utf-8")
     state["systemctl_log"].write_text("", encoding="utf-8")
     state["sudo_log"].write_text("", encoding="utf-8")
     state["sandbox"].write_text("sha256:old-sandbox", encoding="utf-8")
@@ -153,6 +171,9 @@ def _layout(tmp_path: Path, *, python: Path | None = None, exec_start: str | Non
         "FAKE_CHECKOUT_STATE": str(state["checkout"]),
         "FAKE_UNIT": UNIT,
         "FAKE_UNIT_STATE": str(state["unit"]),
+        "FAKE_DEPLOY": str(deploy),
+        "FAKE_SUPERVISOR_VENV": str(state["supervisor_venv"]),
+        "FAKE_UNHEALTHY_VENV": "",
         "FAKE_SYSTEMCTL_LOG": str(state["systemctl_log"]),
         "FAKE_SUDO_LOG": str(state["sudo_log"]),
         "FAKE_RUNTIME_DIR_SEEN": str(state["runtime_dir"]),
@@ -163,7 +184,8 @@ def _layout(tmp_path: Path, *, python: Path | None = None, exec_start: str | Non
         "FAKE_UNIT_MISSING": "0",
         "FAKE_NOT_ANCESTOR": "0",
         "FAKE_FAIL_MERGE": "0",
-        "FAKE_FAIL_STOP_CALL": "0",
+        "FAKE_FAIL_STOP_CALLS": "",
+        "FAKE_FAIL_RESTART": "0",
     }
     return {
         "release": release, "deploy": deploy, "install": install, "supervisor": supervisor,
@@ -201,10 +223,12 @@ def dry_run(tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str
 
 WRAPPER = r"""param([string]$DeployScript, [string]$StatusPath, [string]$Failure, [string]$DeployArgumentsJson, [switch]$DryRun)
 $ErrorActionPreference = 'Stop'
-# The health poll and its waits; the unit's state comes from the fake systemctl.
+# The health poll and its waits; the unit's state and its supervisor's environment come from the fake systemctl.
 function Start-Sleep { }
 function Invoke-RestMethod {
-    [pscustomobject]@{ ok = ((Get-Content -Raw -LiteralPath $env:FAKE_UNIT_STATE).Trim() -eq 'active') }
+    $active = (Get-Content -Raw -LiteralPath $env:FAKE_UNIT_STATE).Trim() -eq 'active'
+    $venv = (Get-Content -Raw -LiteralPath $env:FAKE_SUPERVISOR_VENV).Trim()
+    [pscustomobject]@{ ok = $active -and $venv -ne $env:FAKE_UNHEALTHY_VENV }
 }
 $exitCode = 0
 $errorMessage = ''
@@ -219,6 +243,7 @@ try {
 }
 [ordered]@{
     unit_state = (Get-Content -Raw -LiteralPath $env:FAKE_UNIT_STATE).Trim()
+    supervisor_venv = (Get-Content -Raw -LiteralPath $env:FAKE_SUPERVISOR_VENV).Trim()
     systemctl = @(Get-Content -LiteralPath $env:FAKE_SYSTEMCTL_LOG | Where-Object { $_ })
     error = $errorMessage
 } | ConvertTo-Json | Set-Content -LiteralPath $StatusPath
@@ -355,16 +380,19 @@ def deploy_venv(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return venv
 
 
-
-
 def real_deploy(
-    tmp_path: Path, deploy_venv: Path, failure: str, *, fail_stop_call: int = 0, fail_merge: bool = False
+    tmp_path: Path, deploy_venv: Path, failure: str, *, fail_stop_calls: str = "", fail_restart: bool = False,
+    fail_merge: bool = False, unhealthy: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object], dict[str, object]]:
     venv = tmp_path / "install" / "venv"
     shutil.copytree(deploy_venv, venv, symlinks=True)
     layout = _layout(tmp_path, python=venv / "bin" / "python")
-    layout["env"]["FAKE_FAIL_STOP_CALL"] = str(fail_stop_call)
+    layout["env"]["FAKE_FAIL_STOP_CALLS"] = fail_stop_calls
+    layout["env"]["FAKE_FAIL_RESTART"] = "1" if fail_restart else "0"
     layout["env"]["FAKE_FAIL_MERGE"] = "1" if fail_merge else "0"
+    if unhealthy:
+        # The new release's daemon never answers /health.
+        layout["env"]["FAKE_UNHEALTHY_VENV"] = str(tmp_path / f".agent-harness.venv.deploy-{COMMIT}")
     old_stables = tmp_path / f".agent-harness.stables-{'5' * 40}" / "public"
     old_stables.mkdir(parents=True)
     (old_stables / "index.html").write_text("old Stables", encoding="utf-8")
@@ -383,6 +411,7 @@ def test_linux_real_deploy_switches_environment_stables_and_supervisor(tmp_path,
     assert result.returncode == 0, output(result)
     assert status["systemctl"] == ["stop", "start"]
     assert status["unit_state"] == "active"
+    assert status["supervisor_venv"] == str(layout["staged_venv"])
     assert "daemon up after 2 s" in output(result)
     assert (layout["deploy"] / ".venv-path").read_text(encoding="utf-8") == str(layout["staged_venv"])
     assert (layout["staged_venv"] / "bin" / "python").exists()
@@ -405,10 +434,12 @@ def test_linux_real_rollback_restores_previous_deployment(tmp_path, deploy_venv,
     assert result.returncode != 0
     assert "simulated" in output(result)
     assert "deployment failed after daemon stop; previous deployment restored" in output(result)
-    # The rollback always stops the unit first (a no-op when it is already inactive), then starts the old daemon.
+    # The rollback always stops the unit first (a no-op when it is already inactive) and confirms it is inactive, then
+    # starts the old daemon.
     deployed = ["stop", "start"] if failure == "AfterStart" else ["stop"]
-    assert status["systemctl"] == [*deployed, "stop", "start"]
+    assert status["systemctl"] == [*deployed, "stop", "is-active", "start"]
     assert status["unit_state"] == "active"
+    assert status["supervisor_venv"] == "installer"
     # The first deployment had no pointer: the installer's environment stays the daemon's.
     assert not (layout["deploy"] / ".venv-path").exists()
     assert not layout["staged_venv"].exists()
@@ -427,7 +458,7 @@ def test_linux_failed_fast_forward_restarts_the_previous_daemon(tmp_path, deploy
     assert result.returncode != 0
     assert "deployment failed after daemon stop; previous deployment restored: git failed" in output(result)
     # The new release never starts: the rollback starts the previous daemon once, so the unit is not left stopped.
-    assert status["systemctl"] == ["stop", "stop", "start"]
+    assert status["systemctl"] == ["stop", "stop", "is-active", "start"]
     assert status["unit_state"] == "active"
     assert not (layout["deploy"] / ".venv-path").exists()
     assert layout["supervisor"].read_text(encoding="utf-8") == OLD_SUPERVISOR
@@ -435,17 +466,89 @@ def test_linux_failed_fast_forward_restarts_the_previous_daemon(tmp_path, deploy
     assert layout["state"]["sandbox"].read_text(encoding="utf-8").strip() == "sha256:old-sandbox"
 
 
-def test_linux_rollback_continues_after_a_failed_systemctl_stop(tmp_path, deploy_venv):
-    result, status, layout = real_deploy(tmp_path, deploy_venv, "AfterStart", fail_stop_call=2)
-
-    assert result.returncode != 0
-    assert "rollback also failed" in output(result)
-    assert "daemon stop:" in " ".join(output(result).split())
-    assert status["unit_state"] == "active"
-    assert status["systemctl"] == ["stop", "start", "stop", "start"]
+def assert_previous_files_restored(layout: dict[str, object]) -> None:
+    assert not (layout["deploy"] / ".venv-path").exists()
+    assert (layout["deploy"] / ".stables-path").read_text(encoding="utf-8") == str(layout["old_stables"])
     assert layout["supervisor"].read_text(encoding="utf-8") == OLD_SUPERVISOR
     assert layout["state"]["checkout"].read_text(encoding="utf-8").strip() == PREVIOUS_COMMIT
     assert layout["state"]["sandbox"].read_text(encoding="utf-8").strip() == "sha256:old-sandbox"
+    assert layout["state"]["cli"].read_text(encoding="utf-8").strip() == "sha256:old-cli"
+
+
+# The new release's supervisor is up but its daemon never answers /health, and the rollback's stop fails: a start on
+# the still-active unit would be a no-op, leaving that supervisor on the new environment the cleanup removes.
+def test_linux_rollback_retries_a_failed_stop_before_restoring(tmp_path, deploy_venv):
+    result, status, layout = real_deploy(tmp_path, deploy_venv, "None", fail_stop_calls="2", unhealthy=True)
+
+    assert result.returncode != 0
+    assert "daemon did not come back within 60 s" in output(result)
+    assert "deployment failed after daemon stop; previous deployment restored" in output(result)
+    assert "stop attempt 1 failed" in output(result)
+    assert status["systemctl"] == ["stop", "start", "stop", "is-active", "stop", "is-active", "start"]
+    assert status["unit_state"] == "active"
+    assert status["supervisor_venv"] == "installer"
+    assert_previous_files_restored(layout)
+    assert not layout["staged_venv"].exists()
+
+
+def test_linux_rollback_restarts_a_unit_it_cannot_stop(tmp_path, deploy_venv):
+    result, status, layout = real_deploy(tmp_path, deploy_venv, "None", fail_stop_calls="2,3,4", unhealthy=True)
+
+    assert result.returncode != 0
+    assert f"{UNIT} is still active after 3 attempts" in output(result)
+    assert "[rollback] restarted the unit on the restored pointers" in output(result)
+    assert "deployment failed after daemon stop; previous deployment restored" in output(result)
+    assert status["systemctl"] == ["stop", "start", *["stop", "is-active"] * 3, "restart"]
+    # A fresh supervisor reads the restored pointers, so the new environment is no longer anyone's.
+    assert status["supervisor_venv"] == "installer"
+    assert_previous_files_restored(layout)
+    assert not layout["staged_venv"].exists()
+
+
+def test_linux_rollback_keeps_the_new_environment_for_a_supervisor_it_cannot_replace(tmp_path, deploy_venv):
+    result, status, layout = real_deploy(
+        tmp_path, deploy_venv, "None", fail_stop_calls="2,3,4", fail_restart=True, unhealthy=True)
+
+    assert result.returncode != 0
+    text = " ".join(output(result).split())
+    assert "rollback also failed: daemon stop: " + f"{UNIT} is still active after 3 attempts" in text
+    assert "daemon restart: systemctl failed" in text
+    assert f"staged environment cleanup: kept {layout['staged_venv']} because {UNIT} is still active" in text
+    assert f"run systemctl --user restart {UNIT}, then remove {layout['staged_venv']}" in text
+    assert status["systemctl"] == ["stop", "start", *["stop", "is-active"] * 3, "restart"]
+    # The new release's supervisor still runs, on the environment the rollback kept for it.
+    assert status["unit_state"] == "active"
+    assert status["supervisor_venv"] == str(layout["staged_venv"])
+    assert (layout["staged_venv"] / "bin" / "python").exists()
+    assert_previous_files_restored(layout)
+
+
+def test_linux_rerun_of_the_deployed_commit_is_a_verified_no_op(tmp_path, deploy_venv):
+    result, status, layout = real_deploy(tmp_path, deploy_venv, "None")
+    assert result.returncode == 0, output(result)
+
+    rerun, status = invoke(tmp_path, layout)
+    assert rerun.returncode == 0, output(rerun)
+    assert f"{COMMIT} is already deployed and the daemon is healthy; nothing to do" in output(rerun)
+    assert "staged" not in output(rerun)
+    assert status["systemctl"] == ["stop", "start", "is-active"]
+    assert status["supervisor_venv"] == str(layout["staged_venv"])
+    assert (layout["staged_venv"] / "bin" / "python").exists()
+
+
+def test_linux_rerun_of_an_unhealthy_deployed_commit_fails_without_touching_it(tmp_path, deploy_venv):
+    result, _, layout = real_deploy(tmp_path, deploy_venv, "None")
+    assert result.returncode == 0, output(result)
+    layout["state"]["unit"].write_text("failed", encoding="utf-8")
+
+    rerun, status = invoke(tmp_path, layout)
+    assert rerun.returncode != 0
+    assert status["error"].startswith(f"live checkout is already at {COMMIT}, but its deployment is incomplete")
+    assert f"{UNIT} is failed" in status["error"]
+    assert status["error"].endswith("refusing to redeploy over the active environment")
+    assert status["systemctl"] == ["stop", "start", "is-active"]
+    assert (layout["deploy"] / ".venv-path").read_text(encoding="utf-8") == str(layout["staged_venv"])
+    assert (layout["staged_venv"] / "bin" / "python").exists()
 
 
 # install/run-daemon.sh: the systemd unit's supervisor reads the pointers a deployment writes.
