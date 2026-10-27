@@ -234,6 +234,8 @@ $stagedStables = Join-Path $stagedStablesRoot 'public'
 
 # A rerun of the live commit (#812). Its environment is the active one, which a deployment never restages or removes,
 # so a commit that is fully deployed and healthy is a verified no-op, and anything less fails without touching it.
+# That includes a pointer whose interpreter or Stables index is gone: /health answers without either, and redeploying
+# would restage the very directories the running daemon uses, so the job fails naming them and leaves the unit up.
 if (-not $DryRun -and $previousCommit -eq $Commit) {
     $mismatches = [System.Collections.Generic.List[string]]::new()
     $liveVenvTarget = Read-DeploymentPointer (Join-Path $deploy '.venv-path')
@@ -241,6 +243,9 @@ if (-not $DryRun -and $previousCommit -eq $Commit) {
     $liveStablesTarget = Read-DeploymentPointer (Join-Path $deploy '.stables-path')
     if ($liveStablesTarget -ne $stagedStables) {
         $mismatches.Add(".stables-path names '$liveStablesTarget', not $stagedStables")
+    }
+    foreach ($target in @((Join-Path $stagedVenv $venvPython), (Join-Path $stagedStables 'index.html'))) {
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { $mismatches.Add("$target is missing") }
     }
     foreach ($tags in @(@($sandbox, $sandboxStable), @($cli, $cliStable))) {
         try {
@@ -531,6 +536,9 @@ try {
         $rollbackErrors.Insert(0, "daemon stop: $stopFailure")
     }
 
+    # The new release's supervisor read both pointers when it started, so while it runs it keeps the staged
+    # environment and Stables whatever the restored pointers name; both stay until it is replaced.
+    $keptForSupervisor = [System.Collections.Generic.List[string]]::new()
     try {
         $activeVenv = if (Test-Path -LiteralPath $venvPointer) {
             ([string](Get-Content -Raw -LiteralPath $venvPointer)).Trim()
@@ -538,9 +546,7 @@ try {
         if ($activeVenv -eq $stagedVenv) {
             $rollbackErrors.Add('staged environment cleanup: skipped because it is still the active virtual environment')
         } elseif (-not $stagedVenvReleased) {
-            $rollbackErrors.Add("staged environment cleanup: kept $stagedVenv because $DaemonUnit is still " +
-                "$rollbackUnitState on the new release's supervisor, which runs it; the previous deployment's files " +
-                "are restored, so run systemctl --user restart $DaemonUnit, then remove $stagedVenv")
+            $keptForSupervisor.Add($stagedVenv)
         } else {
             Remove-DeploymentDirectory $stagedVenv
         }
@@ -550,8 +556,18 @@ try {
         $activeStables = if (Test-Path -LiteralPath $stablesPointer) {
             ([string](Get-Content -Raw -LiteralPath $stablesPointer)).Trim()
         } else { '' }
-        if ($stablesChanged -and $activeStables -ne $stagedStables) { Remove-DeploymentDirectory $stagedStablesRoot }
+        if ($stablesChanged -and $activeStables -ne $stagedStables) {
+            if ($stagedVenvReleased) { Remove-DeploymentDirectory $stagedStablesRoot }
+            else { $keptForSupervisor.Add($stagedStablesRoot) }
+        }
     } catch { $rollbackErrors.Add("staged Stables cleanup: $($_.Exception.Message)") }
+
+    if ($keptForSupervisor.Count -gt 0) {
+        $kept = $keptForSupervisor -join ' and '
+        $rollbackErrors.Add("staged environment cleanup: kept $kept because $DaemonUnit is still " +
+            "$rollbackUnitState on the new release's supervisor, which read them at startup; the previous " +
+            "deployment's files are restored, so run systemctl --user restart $DaemonUnit, then remove $kept")
+    }
 
     if ($rollbackErrors.Count -gt 0) {
         throw "deployment failed after daemon stop ($deploymentError); rollback also failed: $($rollbackErrors -join '; ')"

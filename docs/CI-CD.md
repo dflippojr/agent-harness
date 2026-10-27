@@ -892,12 +892,16 @@ to the slot), and dispatch again.
   times, before it restores anything: the unit's supervisor reads `.venv-path` only when it starts, so one that never
   stopped would keep the new environment, and a `start` on its still-active unit would be a no-op. If the unit will
   not stop, the rollback still restores the files and then restarts the unit, so a fresh supervisor reads the restored
-  pointers. If that restart fails too, the new environment is kept for the supervisor still running it, and the job
-  fails naming the unit's state and the `systemctl --user restart` that finishes the rollback.
+  pointers. If that restart fails too, the new environment and its Stables copy are kept for the supervisor still
+  running them (it read both pointers when it started), and the job fails naming the unit's state, the
+  `systemctl --user restart` that finishes the rollback, and the two directories to remove after it.
 - Rerunning a commit that is already live (a re-run of its workflow): if the checkout, `.venv-path`, `.stables-path`,
-  the stable image tags and, on Linux, the supervisor and an active unit all match it and `/health` answers, the
-  deployment reports that nothing needs doing and succeeds without stopping anything. Otherwise it fails, naming what
-  differs, and never removes or restages the active environment. A side-by-side environment left by an interrupted
-  run of a commit that is not live still stops a deployment of that commit; remove it by hand.
+  the stable image tags and, on Linux, the supervisor and an active unit all match it, the interpreter and the Stables
+  `index.html` those pointers name both exist, and `/health` answers, the deployment reports that nothing needs doing
+  and succeeds without stopping anything. Otherwise it fails, naming what differs or is missing, without stopping the
+  unit, and never removes or restages the active environment: that commit's environment and Stables copy are the ones
+  the running daemon uses, so a redeploy over them is never safe. Recovery is by hand, and a rerun repeats the same
+  check. A side-by-side environment left by an interrupted run of a commit that is not live still stops a deployment
+  of that commit; remove it by hand.
 - A newer `main` commit superseding an older queued deployment makes the older deployment exit without changing the
   tower; the serialized newer workflow run handles it.
