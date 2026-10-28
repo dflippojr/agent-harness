@@ -146,7 +146,8 @@ curl --proto =https --fail --silent --show-error --location --output "$download/
 echo "$SHA256  $download/$archive" | sha256sum --check --status || fail "runner archive hash mismatch"
 
 install -d -o "$RUNNER_USER" -g "$(id -gn "$RUNNER_USER")" -m 0750 "$dest"
-runuser -u "$RUNNER_USER" -- tar -xzf "$download/$archive" -C "$dest"
+# Root opens the verified archive from its private temp tree and the service user's tar reads it on stdin.
+runuser -u "$RUNNER_USER" -- tar -xzf - -C "$dest" < "$download/$archive"
 
 cd "$dest"
 runuser -u "$RUNNER_USER" -- ./config.sh --unattended --url "https://github.com/$REPO" --token "$TOKEN" \
