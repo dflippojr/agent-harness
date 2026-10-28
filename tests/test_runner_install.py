@@ -259,3 +259,65 @@ def test_install_crosses_from_root_to_the_service_user_and_reaches_registration_
     assert f"systemctl enable {UNIT}" in calls
     assert f"systemctl start {UNIT}" in calls
     assert not any(line.startswith("useradd") for line in calls)
+
+
+def plant_protected_directory(host: FakeHost) -> tuple[Path, tuple[int, int, int]]:
+    protected = host.tmp / "protected"
+    protected.mkdir(mode=0o755)
+    protected.chmod(0o755)
+    info = protected.stat()
+    return protected, (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
+
+
+def assert_refused_before_any_change(host: FakeHost, result: subprocess.CompletedProcess[str], protected: Path,
+                                     before: tuple[int, int, int], message: str) -> None:
+    assert result.returncode != 0, result.stdout
+    assert message in result.stderr
+    info = protected.stat()
+    assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == before
+    assert list(protected.iterdir()) == []
+    assert not any(line.startswith(("curl", "systemctl", "config.sh", "svc.sh")) for line in host.calls())
+
+
+def test_install_refuses_a_destination_the_service_user_planted_as_a_symlink(tmp_path):
+    # The existing service user can plant the next pool member's destination as a link to a protected directory.
+    host = FakeHost(tmp_path)
+    protected, before = plant_protected_directory(host)
+    host.dest.parent.mkdir(parents=True)
+    host.dest.symlink_to(protected, target_is_directory=True)
+    result = host.install()
+    assert_refused_before_any_change(host, result, protected, before, f"{host.install_dir} is a symlink")
+
+
+def test_install_refuses_a_destination_with_a_symlinked_component(tmp_path):
+    host = FakeHost(tmp_path)
+    protected, before = plant_protected_directory(host)
+    host.dest.parent.symlink_to(protected, target_is_directory=True)
+    result = host.install()
+    assert_refused_before_any_change(host, result, protected, before, f"/home/{host.user}/runners is a symlink")
+
+
+def test_install_refuses_a_destination_under_a_parent_others_can_write(tmp_path):
+    host = FakeHost(tmp_path)
+    protected, before = plant_protected_directory(host)
+    (host.fsroot / "home").chmod(0o777)
+    try:
+        result = host.install()
+    finally:
+        (host.fsroot / "home").chmod(0o755)
+    assert_refused_before_any_change(host, result, protected, before, "/home must be owned by root and writable only by root")
+
+
+def test_install_never_runs_a_file_from_the_service_users_tree_as_root(tmp_path):
+    # The service user owns the install tree, so root must not create it, nor execute svc.sh or anything else in it.
+    host = FakeHost(tmp_path)
+    result = host.install()
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = host.calls()
+    assert not [line for line in calls if " as=root" in line], calls
+    assert f"runuser -u {host.user} -- mkdir -p -m 0750 -- {host.dest}" in calls
+    unit = (host.fsroot / "etc" / "systemd" / "system" / UNIT).read_text(encoding="utf-8").splitlines()
+    assert f"ExecStart={host.install_dir}/runsvc.sh" in unit
+    assert f"WorkingDirectory={host.install_dir}" in unit
+    assert (host.dest / "runsvc.sh").is_file()
+    assert (host.dest / ".service").read_text(encoding="utf-8").strip() == UNIT
