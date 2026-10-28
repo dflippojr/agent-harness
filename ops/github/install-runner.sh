@@ -80,8 +80,12 @@ arch="${HARNESS_INSTALLER_ARCH:-$(uname -m)}"
 [[ "$os" = "Linux" ]] || fail "this installer is for Linux; on Windows use ops/github/install-runner.ps1"
 [[ "$arch" = "x86_64" ]] || fail "only x86_64 (the X64 runner label) is supported, not $arch"
 # Tests run the install path without root: HARNESS_INSTALLER_FAKE_ROOT names a synthetic directory standing in for /,
-# and the caller's uid stands in for root's. sudo resets the environment, so a real install never sees it.
+# and the caller's uid stands in for root's. sudo -E or a sudoers env_keep can still pass it to root, whose unit write
+# would then follow a prefix the caller can repoint after the checks, so root refuses it before changing anything.
 fsroot="${HARNESS_INSTALLER_FAKE_ROOT:-}"
+if [[ -n "$fsroot" ]] && [[ "$EUID" -eq 0 ]]; then
+  fail "HARNESS_INSTALLER_FAKE_ROOT is for unprivileged tests; refusing it as root"
+fi
 root_uid=0
 if [[ -n "$fsroot" ]]; then
   root_uid="$(id -u)"
