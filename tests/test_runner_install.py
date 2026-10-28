@@ -12,6 +12,7 @@ import getpass
 import hashlib
 import io
 import os
+import pwd
 import re
 import shutil
 import stat
@@ -228,11 +229,9 @@ class FakeHost:
         self.install_dir = f"/home/{self.user}/runners/tower-review-1"
         self.dest = self.fsroot / self.install_dir.lstrip("/")
 
-    def install(
-        self, *args: str, token: str = "synthetic-token", prefix: tuple[str, ...] = (),
-    ) -> subprocess.CompletedProcess[str]:
-        env = {
-            **os.environ,
+    def fake_env(self) -> dict[str, str]:
+        """The variables that point the installer at this synthetic host and its recording fake commands."""
+        return {
             "HARNESS_INSTALLER_OS": "Linux",
             "HARNESS_INSTALLER_ARCH": "x86_64",
             "HARNESS_INSTALLER_FAKE_ROOT": str(self.fsroot),
@@ -243,6 +242,11 @@ class FakeHost:
             "FAKE_ARCHIVE": str(self.archive),
             "FAKE_TOKEN_SEEN": str(self.token_seen),
         }
+
+    def install(
+        self, *args: str, token: str = "synthetic-token", prefix: tuple[str, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
+        env = {**os.environ, **self.fake_env()}
         try:
             return subprocess.run(
                 [*prefix, BASH, str(SCRIPT), "--name", "tower-review-1", "--user", self.user,
@@ -353,15 +357,32 @@ def test_install_hands_the_token_to_config_sh_without_any_command_line(tmp_path)
     assert not [line for line in host.calls() if "--token" in line]
 
 
-def uid0_prefix() -> tuple[str, ...]:
-    """A command prefix that runs the installer with EUID 0: none as real root, else a user namespace mapping us to 0."""
+def uid0_prefix(host: FakeHost) -> tuple[str, ...]:
+    """A command prefix that runs the installer with EUID 0.
+
+    None as real root, else a user namespace mapping us to 0. ubuntu-latest blocks unprivileged user namespaces through
+    AppArmor, so in CI, where passwordless sudo works, real root runs it with only the fake host's variables.
+    """
     if os.geteuid() == 0:
         return ()
     unshare = shutil.which("unshare")
     probe = [unshare, "--user", "--map-root-user", "--", "sh", "-c", 'test "$(id -u)" = 0'] if unshare else None
-    if not probe or subprocess.run(probe, capture_output=True, check=False).returncode != 0:
-        pytest.skip("neither root nor an unprivileged user namespace (unshare --map-root-user) is available")
-    return (unshare, "--user", "--map-root-user", "--")
+    if probe and subprocess.run(probe, capture_output=True, check=False).returncode == 0:
+        return (unshare, "--user", "--map-root-user", "--")
+    in_ci = os.environ.get("CI") == "true" or bool(os.environ.get("GITHUB_ACTIONS"))
+    sudo = shutil.which("sudo")
+    if in_ci and sudo and subprocess.run([sudo, "-n", "true"], capture_output=True, check=False).returncode == 0:
+        return (sudo, "-n", "env", "-i", *(f"{name}={value}" for name, value in host.fake_env().items()))
+    pytest.skip("neither root nor an unprivileged user namespace (unshare --map-root-user) is available")
+
+
+def tree(path: Path) -> list[tuple[str, int, int, int]]:
+    """Every path under path with its owner, mode and size, so a write by root shows."""
+    entries = []
+    for entry in sorted([path, *path.rglob("*")]):
+        info = entry.lstat()
+        entries.append((str(entry.relative_to(path)), info.st_uid, info.st_mode, info.st_size))
+    return entries
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
@@ -370,10 +391,15 @@ def test_root_refuses_the_fake_root_seam_before_any_host_change(tmp_path, dry_ru
     # caller can repoint after the checks. At EUID 0 the script refuses it outright.
     host = FakeHost(tmp_path, as_root=True)
     unit = host.fsroot / "etc" / "systemd" / "system" / UNIT
-    result = host.install(*(("--dry-run",) if dry_run else ()), prefix=uid0_prefix())
+    system_units = Path("/etc/systemd/system")
+    before = (tree(tmp_path), sorted(user.pw_name for user in pwd.getpwall()), sorted(os.listdir(system_units)))
+    result = host.install(*(("--dry-run",) if dry_run else ()), prefix=uid0_prefix(host))
     assert result.returncode != 0, result.stdout
     assert "HARNESS_INSTALLER_FAKE_ROOT is for unprivileged tests; refusing it as root" in result.stderr
+    # No fake runuser, useradd, curl or systemctl ran, and nothing changed on the fake root or the real host.
     assert host.calls() == []
     assert not unit.exists()
     assert not host.dest.exists()
     assert "dry run:" not in result.stdout
+    after = (tree(tmp_path), sorted(user.pw_name for user in pwd.getpwall()), sorted(os.listdir(system_units)))
+    assert after == before
