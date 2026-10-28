@@ -138,7 +138,8 @@ jobs:
       group: agent-harness-main-deployment
       # Never interrupt a main deployment between updating code, retagging images, and restarting the daemon.
       cancel-in-progress: false
-    runs-on: [self-hosted, Windows, X64, agent-harness-tower]
+    # The production runner on the Ubuntu tower (#812). The Windows runner (agent-harness-tower) is retired.
+    runs-on: [self-hosted, Linux, X64, agent-harness-tower-linux]
     timeout-minutes: 15
     environment: tower-production
     permissions:
@@ -151,7 +152,7 @@ jobs:
       # read-only deploy key. deploy-ci.ps1 checks it is the pinned commit and serves it (HARNESS_STABLES_DIR).
       - name: Read the Stables pin
         id: stables
-        shell: powershell
+        shell: pwsh
         run: |
           $pin = Get-Content -Raw tools/stables/pin.json | ConvertFrom-Json
           "repository=$($pin.repository)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
@@ -165,12 +166,12 @@ jobs:
           ssh-key: ${{ secrets.STABLES_DEPLOY_KEY }}
           persist-credentials: false
       - name: Pull images, fast-forward the live checkout, and restart
-        shell: powershell
+        shell: pwsh
         run: >-
-          .\ops\harness\deploy-ci.ps1
+          ./ops/harness/deploy-ci.ps1
           -Commit $env:DEPLOY_COMMIT
           -ReleaseRoot $env:GITHUB_WORKSPACE
-          -StablesRelease $env:GITHUB_WORKSPACE\stables-release
+          -StablesRelease "$env:GITHUB_WORKSPACE/stables-release"
           -Registry ghcr.io/${{ github.repository_owner }}
         env:
           DEPLOY_COMMIT: ${{ github.event.workflow_run.head_sha }}
