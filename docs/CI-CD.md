@@ -504,7 +504,8 @@ PR. Optional inputs: `max_diff_bytes` (otherwise the consumer's `REVIEW_MAX_DIFF
 repository.
 
 **Runner label.** Register a self-hosted Linux runner for the consumer repo with
-`sudo ops/github/install-runner.sh --token <token> --repo dflippojr/<project> --labels <project>-review --name <name>`
+`sudo ops/github/install-runner.sh --repo dflippojr/<project> --labels <project>-review --name <name>`, with the
+registration token on its standard input,
 under a service user whose Codex, Claude, and Cursor CLIs are logged in, and pass that label in `runs_on`
 (see [Review runner pool](#review-runner-pool)). For a Windows fallback runner, use
 `ops/github/install-runner.ps1 -Labels <project>-review` and `"Windows"` in place of `"Linux"` in `runs_on`; review-v4
@@ -690,22 +691,28 @@ fresh short-lived registration token for each. The owner or liaison does this st
 
 ```bash
 for n in 1 2 3; do
-  token=$(gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token)
-  sudo ops/github/install-runner.sh --token "$token" --labels agent-harness-review \
-    --name "dflippotower-agent-harness-review-$n"
+  gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token |
+    sudo ops/github/install-runner.sh --labels agent-harness-review --name "dflippotower-agent-harness-review-$n"
 done
 ```
+
+The token goes on standard input (on a terminal, the installer prompts for it without echo), never in a command line,
+where other local users could read it in the process table and sudo would keep it in its log. `--token` is refused.
+The installer hands it to `config.sh` through the runner's `ACTIONS_RUNNER_INPUT_TOKEN` environment variable. The
+runner drops that variable from the environment its children inherit. While registration runs, only root and the
+service user can read it (in `/proc/<pid>/environ`), and the token is spent once registration succeeds.
 
 Each member unpacks the pinned runner release (SHA-256 checked) into
 `/home/github-runner/runners/<name>`, registers it as the `github-runner` service user (created if missing, with no
 sudo or docker group), and installs the systemd unit `svc.sh install github-runner` would
 (`actions.runner.<owner>-<repo>.<name>.service`, `User=github-runner`), so it starts at boot and jobs never run as root.
-The service user owns that tree, so root acts on nothing in it: the installer refuses a destination with a symlink in
-it or under a `/` or `/home` that is not root's alone, the service user creates the directory and unpacks the runner
-(root feeds it the checked archive on stdin), and root writes the unit itself rather than run the runner's `svc.sh`. `--user` and `--install-dir` choose another user or directory; the directory must stay
-under `/home`, because the publication scan rejects home-directory paths and so cannot post a leaked runner path. A
-consumer repository's runner adds `--repo dflippojr/<project> --labels <project>-review`. `--dry-run` prints the plan
-and changes nothing. Install `pwsh`, `git` and `gh` for the service user, and log in its Codex, Claude and Cursor CLIs
+The service user owns that tree, so root acts on nothing in it. The installer refuses a destination with a symlink in
+it, or under a `/` or `/home` that is not root's alone. The service user creates the directory and unpacks the runner,
+with root feeding it the checked archive on stdin. Root writes the unit itself rather than run the runner's `svc.sh`.
+
+`--user` and `--install-dir` choose another user or directory. The directory must stay under `/home`, because the
+publication scan rejects home-directory paths and so cannot post a leaked runner path. A consumer repository's runner
+adds `--repo dflippojr/<project> --labels <project>-review`. `--dry-run` prints the plan and changes nothing. Install `pwsh`, `git` and `gh` for the service user, and log in its Codex, Claude and Cursor CLIs
 as that user (`sudo -iu github-runner`), before dispatching a review.
 
 To repair or remove a member, delete the runner in GitHub (**Settings > Actions > Runners**), then

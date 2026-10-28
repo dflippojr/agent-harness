@@ -318,7 +318,8 @@ def test_install_refuses_a_destination_under_a_parent_others_can_write(tmp_path)
         result = host.install()
     finally:
         (host.fsroot / "home").chmod(0o755)
-    assert_refused_before_any_change(host, result, protected, before, "/home must be owned by root and writable only by root")
+    message = "/home must be owned by root and writable only by root"
+    assert_refused_before_any_change(host, result, protected, before, message)
 
 
 def test_install_never_runs_a_file_from_the_service_users_tree_as_root(tmp_path):

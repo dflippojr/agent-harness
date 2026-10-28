@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Registers a pinned GitHub Actions runner on Linux as a systemd service under a dedicated user.
 #
-# The Linux counterpart of ops/github/install-runner.ps1 (#806). The registration token is used once and is not
-# saved. Run it as root (sudo): it creates the service user if needed, unpacks the runner into that user's home,
-# registers it as that user (config.sh refuses root), and installs a systemd unit with User= set to the service user,
-# so jobs never run as root.
+# The Linux counterpart of ops/github/install-runner.ps1 (#806). The registration token is read from standard input,
+# used once and not saved. It never goes in a command line, where the process table and sudo's log would show it:
+# config.sh gets it through the runner's ACTIONS_RUNNER_INPUT_TOKEN environment variable. Run it as root (sudo): it
+# creates the service user if needed, unpacks the runner into that user's home, registers it as that user (config.sh
+# refuses root), and installs a systemd unit with User= set to the service user, so jobs never run as root.
 #
 # The service user owns everything under its home, and a job running as that user could rewrite any of it. So root
 # never acts on a path there: it refuses a destination with a symlink in it or under a parent others can write, the
@@ -16,8 +17,8 @@
 # install directory under /home: the review's publication scan rejects a path through a home directory, so a
 # leaked runner path cannot be posted.
 #
-#   token=$(gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token)
-#   sudo ops/github/install-runner.sh --token "$token" --labels agent-harness-review --name dflippotower-review-1
+#   gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token |
+#     sudo ops/github/install-runner.sh --labels agent-harness-review --name dflippotower-review-1
 #
 # --dry-run prints the plan and changes nothing: no download, user, files or systemd unit.
 set -euo pipefail
@@ -36,9 +37,10 @@ SHA256="70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
 
 usage() {
   cat <<'EOF'
-Usage: sudo ops/github/install-runner.sh --token TOKEN [options]
+Usage: <registration token> | sudo ops/github/install-runner.sh [options]
 
-  --token TOKEN        one-time runner registration token (required)
+The one-time runner registration token is read from standard input (or prompted for, hidden, on a terminal).
+
   --repo OWNER/NAME    repository to register with (default dflippojr/agent-harness)
   --labels LIST        comma-separated runner labels (default agent-harness-review)
   --name NAME          runner name (default <short hostname>-<first label>)
@@ -57,7 +59,7 @@ custom_version=0
 custom_sha=0
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
-    --token) TOKEN="${2:-}"; shift 2 ;;
+    --token) fail "--token is not accepted: pass the registration token on standard input" ;;
     --repo) REPO="${2:-}"; shift 2 ;;
     --labels) LABELS="${2:-}"; shift 2 ;;
     --name) NAME="${2:-}"; shift 2 ;;
@@ -85,7 +87,14 @@ if [[ -n "$fsroot" ]]; then
   root_uid="$(id -u)"
 fi
 
-[[ -n "$TOKEN" ]] || fail "--token is required"
+if [[ -t 0 ]]; then
+  read -rsp "registration token: " TOKEN || true
+  echo >&2
+else
+  IFS= read -r TOKEN || true
+fi
+TOKEN="${TOKEN//[[:space:]]/}"
+[[ -n "$TOKEN" ]] || fail "a registration token is required on standard input"
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "invalid --repo: $REPO"
 [[ "$LABELS" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]] || fail "invalid --labels: $LABELS"
 [[ "$RUNNER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || fail "invalid --user: $RUNNER_USER"
@@ -182,8 +191,9 @@ runuser -u "$RUNNER_USER" -- mkdir -p -m 0750 -- "$dest"
 # Root opens the verified archive from its private temp tree and the service user's tar reads it on stdin.
 runuser -u "$RUNNER_USER" -- tar -xzf - -C "$dest" < "$download/$archive"
 
-runuser -u "$RUNNER_USER" -- env -C "$dest" ./config.sh --unattended --url "https://github.com/$REPO" \
-  --token "$TOKEN" --name "$NAME" --labels "$LABELS" --work "$WORK_DIR"
+# runuser keeps the environment. The runner reads the token from it and drops it from what its children inherit.
+ACTIONS_RUNNER_INPUT_TOKEN="$TOKEN" runuser -u "$RUNNER_USER" -- env -C "$dest" ./config.sh --unattended \
+  --url "https://github.com/$REPO" --name "$NAME" --labels "$LABELS" --work "$WORK_DIR"
 
 # What svc.sh install does, with root writing only under /etc/systemd/system and the service user doing the rest.
 cat > "$unit_path" <<UNIT
