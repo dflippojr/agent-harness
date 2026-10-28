@@ -50,7 +50,7 @@ fail() { echo "install-runner: $*" >&2; exit 1; }
 
 custom_version=0
 custom_sha=0
-while [ "$#" -gt 0 ]; do
+while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --token) TOKEN="${2:-}"; shift 2 ;;
     --repo) REPO="${2:-}"; shift 2 ;;
@@ -70,26 +70,26 @@ done
 # The OS and architecture can be overridden so tests can exercise the checks on any host.
 os="${HARNESS_INSTALLER_OS:-$(uname -s)}"
 arch="${HARNESS_INSTALLER_ARCH:-$(uname -m)}"
-[ "$os" = "Linux" ] || fail "this installer is for Linux; on Windows use ops/github/install-runner.ps1"
-[ "$arch" = "x86_64" ] || fail "only x86_64 (the X64 runner label) is supported, not $arch"
+[[ "$os" = "Linux" ]] || fail "this installer is for Linux; on Windows use ops/github/install-runner.ps1"
+[[ "$arch" = "x86_64" ]] || fail "only x86_64 (the X64 runner label) is supported, not $arch"
 
-[ -n "$TOKEN" ] || fail "--token is required"
+[[ -n "$TOKEN" ]] || fail "--token is required"
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "invalid --repo: $REPO"
 [[ "$LABELS" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]] || fail "invalid --labels: $LABELS"
 [[ "$RUNNER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || fail "invalid --user: $RUNNER_USER"
-[ "$RUNNER_USER" != "root" ] || fail "the runner must not run as root"
+[[ "$RUNNER_USER" != "root" ]] || fail "the runner must not run as root"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid --version: $VERSION"
-if [ "$custom_version" -eq 1 ] && [ "$custom_sha" -eq 0 ]; then
+if [[ "$custom_version" -eq 1 ]] && [[ "$custom_sha" -eq 0 ]]; then
   fail "--version needs the matching --sha256 from the runner release notes"
 fi
 [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "invalid --sha256: $SHA256"
-if [ -z "$NAME" ]; then
+if [[ -z "$NAME" ]]; then
   host="$(hostname -s 2>/dev/null || hostname)"
   NAME="${host,,}-${LABELS%%,*}"
 fi
 [[ "$NAME" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "invalid --name: $NAME"
-[[ "$WORK_DIR" =~ ^[A-Za-z0-9_.-]+$ ]] && [ "$WORK_DIR" != ".." ] || fail "invalid --work: $WORK_DIR"
-[ -n "$INSTALL_DIR" ] || INSTALL_DIR="/home/$RUNNER_USER/runners/$NAME"
+[[ "$WORK_DIR" =~ ^[A-Za-z0-9_.-]+$ ]] && [[ "$WORK_DIR" != ".." ]] || fail "invalid --work: $WORK_DIR"
+[[ -n "$INSTALL_DIR" ]] || INSTALL_DIR="/home/$RUNNER_USER/runners/$NAME"
 case "$INSTALL_DIR" in
   /home/?*/?*) ;;
   *) fail "--install-dir must be under /home, so the review's path scan covers it: $INSTALL_DIR" ;;
@@ -107,11 +107,11 @@ echo "service user: $RUNNER_USER"
 echo "install directory: $INSTALL_DIR (work: $WORK_DIR)"
 echo "runner release: $VERSION ($archive, sha256 $SHA256)"
 
-if [ -e "$INSTALL_DIR/.runner" ]; then
+if [[ -e "$INSTALL_DIR/.runner" ]]; then
   fail "a runner is already configured in $INSTALL_DIR"
 fi
 
-if [ "$DRY_RUN" -eq 1 ]; then
+if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "dry run: would create user $RUNNER_USER if missing (no sudo or docker group)"
   echo "dry run: would download $url and check its sha256"
   echo "dry run: would unpack into $INSTALL_DIR, owned by $RUNNER_USER"
@@ -120,7 +120,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
-[ "$(id -u)" -eq 0 ] || fail "run as root (sudo); the runner itself runs as $RUNNER_USER"
+[[ "$(id -u)" -eq 0 ]] || fail "run as root (sudo); the runner itself runs as $RUNNER_USER"
 for tool in curl sha256sum tar systemctl useradd runuser; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
 done
@@ -134,7 +134,7 @@ fi
 
 download="$(mktemp -d)"
 trap 'rm -rf "$download"' EXIT
-curl --fail --silent --show-error --location --output "$download/$archive" "$url"
+curl --proto =https --fail --silent --show-error --location --output "$download/$archive" "$url"
 echo "$SHA256  $download/$archive" | sha256sum --check --status || fail "runner archive hash mismatch"
 
 install -d -o "$RUNNER_USER" -g "$(id -gn "$RUNNER_USER")" -m 0750 "$INSTALL_DIR"
