@@ -131,6 +131,13 @@ def test_other_platforms_are_refused(os_name, arch, message):
     assert message in result.stderr
 
 
+def test_the_module_imports_without_pwd():
+    # The windows-latest test jobs collect this module, and CPython on Windows has no pwd.
+    code = "import sys; sys.modules['pwd'] = None; import tests.test_runner_install"
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 FAKE_COMMANDS = {
     "runuser": """#!/bin/sh
 [ "$1" = -u ] && [ "$3" = -- ] || { echo "fake runuser: unexpected $*" >&2; exit 2; }
