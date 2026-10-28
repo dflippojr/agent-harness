@@ -29,13 +29,15 @@ WINDOWS_INSTALLER = ROOT / "ops" / "github" / "install-runner.ps1"
 LINUX_X64_SHA256 = "70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
 
 
-def run_install(*args: str, os_name: str = "Linux", arch: str = "x86_64") -> subprocess.CompletedProcess[str]:
+def run_install(
+    *args: str, token: str = "t", os_name: str = "Linux", arch: str = "x86_64",
+) -> subprocess.CompletedProcess[str]:
     if not BASH:
         pytest.skip("bash is not installed")
     env = {**os.environ, "HARNESS_INSTALLER_OS": os_name, "HARNESS_INSTALLER_ARCH": arch}
     return subprocess.run(
         [BASH, "ops/github/install-runner.sh", *args],
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=30, check=False,
+        cwd=ROOT, env=env, input=f"{token}\n", capture_output=True, text=True, timeout=30, check=False,
     )
 
 
@@ -48,7 +50,7 @@ def test_script_has_lf_and_parses_with_bash():
 
 
 def test_dry_run_plans_a_review_runner_as_a_systemd_service_under_a_dedicated_user():
-    result = run_install("--token", "synthetic-token", "--name", "tower-review-1", "--dry-run")
+    result = run_install("--name", "tower-review-1", "--dry-run", token="synthetic-token")
     assert result.returncode == 0, result.stderr
     out = result.stdout
     assert "repository: dflippojr/agent-harness" in out
@@ -64,7 +66,7 @@ def test_dry_run_plans_a_review_runner_as_a_systemd_service_under_a_dedicated_us
 
 def test_dry_run_takes_a_caller_repository_label_and_install_directory():
     result = run_install(
-        "--token", "t", "--repo", "dflippojr/box-office", "--labels", "box-office-review", "--name", "tower-box-office",
+        "--repo", "dflippojr/box-office", "--labels", "box-office-review", "--name", "tower-box-office",
         "--user", "review-runner", "--install-dir", "/home/review-runner/box-office", "--dry-run",
     )
     assert result.returncode == 0, result.stderr
@@ -72,6 +74,18 @@ def test_dry_run_takes_a_caller_repository_label_and_install_directory():
     assert "--labels box-office-review" in result.stdout
     assert "install directory: /home/review-runner/box-office" in result.stdout
     assert "would create user review-runner if missing" in result.stdout
+
+
+def test_the_token_comes_on_stdin_and_is_refused_as_an_argument():
+    # Arguments show in the process table and sudo's log; the token never goes there.
+    missing = run_install("--dry-run", token="")
+    assert missing.returncode != 0
+    assert "a registration token is required on standard input" in missing.stderr
+    argv = run_install("--token", "synthetic-token", "--dry-run")
+    assert argv.returncode != 0
+    assert "--token is not accepted: pass the registration token on standard input" in argv.stderr
+    assert "synthetic-token" not in argv.stdout + argv.stderr
+    assert "dry run:" not in missing.stdout + argv.stdout
 
 
 def test_linux_and_windows_installers_pin_the_same_runner_release():
@@ -85,18 +99,17 @@ def test_linux_and_windows_installers_pin_the_same_runner_release():
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        ((), "--token is required"),
-        (("--token", "t", "--user", "root"), "must not run as root"),
+        (("--user", "root"), "must not run as root"),
         # The review's publication scan rejects home-directory paths, so a runner outside /home could leak its path.
-        (("--token", "t", "--install-dir", "/opt/actions-runner"), "must be under /home"),
-        (("--token", "t", "--install-dir", "/home/github-runner/../etc"), "invalid --install-dir"),
-        (("--token", "t", "--labels", "review;rm -rf /"), "invalid --labels"),
-        (("--token", "t", "--repo", "not a repo"), "invalid --repo"),
-        (("--token", "t", "--name", "has space"), "invalid --name"),
-        (("--token", "t", "--work", ".."), "invalid --work"),
-        (("--token", "t", "--version", "2.400.0"), "needs the matching --sha256"),
-        (("--token", "t", "--sha256", "abc"), "invalid --sha256"),
-        (("--token", "t", "--bogus"), "unknown argument: --bogus"),
+        (("--install-dir", "/opt/actions-runner"), "must be under /home"),
+        (("--install-dir", "/home/github-runner/../etc"), "invalid --install-dir"),
+        (("--labels", "review;rm -rf /"), "invalid --labels"),
+        (("--repo", "not a repo"), "invalid --repo"),
+        (("--name", "has space"), "invalid --name"),
+        (("--work", ".."), "invalid --work"),
+        (("--version", "2.400.0"), "needs the matching --sha256"),
+        (("--sha256", "abc"), "invalid --sha256"),
+        (("--bogus",), "unknown argument: --bogus"),
     ],
 )
 def test_invalid_arguments_are_refused_before_anything_changes(args, message):
@@ -111,7 +124,7 @@ def test_invalid_arguments_are_refused_before_anything_changes(args, message):
     ("Linux", "aarch64", "only x86_64"),
 ])
 def test_other_platforms_are_refused(os_name, arch, message):
-    result = run_install("--token", "t", "--dry-run", os_name=os_name, arch=arch)
+    result = run_install("--dry-run", os_name=os_name, arch=arch)
     assert result.returncode != 0
     assert message in result.stderr
 
@@ -229,9 +242,9 @@ class FakeHost:
         }
         try:
             return subprocess.run(
-                [BASH, str(SCRIPT), "--token", token, "--name", "tower-review-1", "--user", self.user,
+                [BASH, str(SCRIPT), "--name", "tower-review-1", "--user", self.user,
                  "--version", "9.9.9", "--sha256", self.sha256, *args],
-                cwd=self.tmp, env=env, capture_output=True, text=True, timeout=60, check=False,
+                cwd=self.tmp, env=env, input=f"{token}\n", capture_output=True, text=True, timeout=60, check=False,
             )
         finally:
             self.root_tmp.chmod(0o700)
@@ -321,3 +334,16 @@ def test_install_never_runs_a_file_from_the_service_users_tree_as_root(tmp_path)
     assert f"WorkingDirectory={host.install_dir}" in unit
     assert (host.dest / "runsvc.sh").is_file()
     assert (host.dest / ".service").read_text(encoding="utf-8").strip() == UNIT
+
+
+def test_install_hands_the_token_to_config_sh_without_any_command_line(tmp_path):
+    host = FakeHost(tmp_path)
+    token = "AABBSYNTHETICREGISTRATIONTOKEN"
+    result = host.install(token=token)
+    assert result.returncode == 0, result.stdout + result.stderr
+    # Every recorded runuser, curl, systemctl, config.sh and svc.sh argument list, and the output.
+    assert token not in host.log.read_text(encoding="utf-8")
+    assert token not in result.stdout + result.stderr
+    # config.sh gets it from the runner's ACTIONS_RUNNER_INPUT_TOKEN, which it then removes from its environment.
+    assert host.token_seen.read_text(encoding="utf-8") == token
+    assert not [line for line in host.calls() if "--token" in line]
