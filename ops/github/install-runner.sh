@@ -3,8 +3,13 @@
 #
 # The Linux counterpart of ops/github/install-runner.ps1 (#806). The registration token is used once and is not
 # saved. Run it as root (sudo): it creates the service user if needed, unpacks the runner into that user's home,
-# registers it as that user (config.sh refuses root), and installs the runner's own systemd unit (svc.sh) with
-# User= set to the service user, so jobs never run as root.
+# registers it as that user (config.sh refuses root), and installs a systemd unit with User= set to the service user,
+# so jobs never run as root.
+#
+# The service user owns everything under its home, and a job running as that user could rewrite any of it. So root
+# never acts on a path there: it refuses a destination with a symlink in it or under a parent others can write, the
+# service user creates the directory and unpacks the runner, and root writes the unit itself instead of running the
+# runner's svc.sh, which config.sh writes as the service user and which moves, copies and chowns files there as root.
 #
 # Each review pool member needs distinct --name and --install-dir, and the service user's Codex, Claude and Cursor
 # CLIs logged in. Review runners also need PowerShell 7.5+ (pwsh) on PATH: review.yml runs every step in it. Keep the
@@ -102,10 +107,13 @@ case "$INSTALL_DIR" in
   *) fail "--install-dir must be under /home, so the review's path scan covers it: $INSTALL_DIR" ;;
 esac
 case "$INSTALL_DIR" in
-  *[!A-Za-z0-9_./-]*|*/../*|*/..|*/./*) fail "invalid --install-dir: $INSTALL_DIR" ;;
+  *[!A-Za-z0-9_./-]*|*/../*|*/..|*/./*|*//*) fail "invalid --install-dir: $INSTALL_DIR" ;;
 esac
 
 dest="$fsroot$INSTALL_DIR"
+# The unit name svc.sh would use, so the runner's own tools still find the service.
+unit="actions.runner.${REPO//\//-}.$NAME.service"
+unit_path="$fsroot/etc/systemd/system/$unit"
 archive="actions-runner-linux-x64-$VERSION.tar.gz"
 url="https://github.com/actions/runner/releases/download/v$VERSION/$archive"
 
@@ -124,12 +132,12 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "dry run: would download $url and check its sha256"
   echo "dry run: would unpack into $INSTALL_DIR, owned by $RUNNER_USER"
   echo "dry run: would run config.sh --unattended as $RUNNER_USER with --labels $LABELS"
-  echo "dry run: would install and start the systemd service with svc.sh install $RUNNER_USER"
+  echo "dry run: would write, as root, the unit svc.sh install $RUNNER_USER writes ($unit) and start it"
   exit 0
 fi
 
 [[ "$(id -u)" -eq "$root_uid" ]] || fail "run as root (sudo); the runner itself runs as $RUNNER_USER"
-for tool in curl sha256sum tar systemctl useradd runuser; do
+for tool in curl sha256sum tar systemctl useradd runuser stat; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
 done
 
@@ -140,18 +148,64 @@ if ! runuser -u "$RUNNER_USER" -- bash -lc 'command -v pwsh' >/dev/null 2>&1; th
   echo "warning: pwsh is not on $RUNNER_USER's PATH; review.yml needs PowerShell 7 (pwsh)" >&2
 fi
 
+# Checks each existing component of the destination without following links. / and /home must be root's alone; below
+# them, every directory that exists must belong to the service user, who creates the rest.
+trusted_dir() {
+  local path="$1" label="${2:-${1#"$fsroot"}}" info
+  [[ ! -L "$path" ]] && [[ -d "$path" ]] || fail "refusing $INSTALL_DIR: $label is not a plain directory"
+  info="$(stat -c '%u %a' -- "$path")"
+  [[ "${info% *}" -eq "$root_uid" ]] && (( (8#${info#* } & 8#022) == 0 )) \
+    || fail "refusing $INSTALL_DIR: $label must be owned by root and writable only by root"
+}
+trusted_dir "$fsroot/" /
+trusted_dir "$fsroot/home"
+runner_uid="$(id -u "$RUNNER_USER")"
+path="$fsroot/home"
+IFS=/ read -ra parts <<< "${INSTALL_DIR#/home/}"
+for part in "${parts[@]}"; do
+  path="$path/$part"
+  [[ ! -L "$path" ]] || fail "refusing $INSTALL_DIR: ${path#"$fsroot"} is a symlink"
+  [[ -e "$path" ]] || break
+  [[ -d "$path" ]] || fail "refusing $INSTALL_DIR: ${path#"$fsroot"} is not a directory"
+  owner="$(stat -c %u -- "$path")"
+  [[ "$owner" -eq "$runner_uid" ]] || fail "refusing $INSTALL_DIR: ${path#"$fsroot"} does not belong to $RUNNER_USER"
+done
+[[ ! -e "$unit_path" ]] && [[ ! -L "$unit_path" ]] || fail "$unit_path already exists"
+
 download="$(mktemp -d)"
 trap 'rm -rf "$download"' EXIT
 curl --proto =https --fail --silent --show-error --location --output "$download/$archive" "$url"
 echo "$SHA256  $download/$archive" | sha256sum --check --status || fail "runner archive hash mismatch"
 
-install -d -o "$RUNNER_USER" -g "$(id -gn "$RUNNER_USER")" -m 0750 "$dest"
+# The service user creates its own directory, so a link swapped in after the checks only redirects its own mkdir.
+runuser -u "$RUNNER_USER" -- mkdir -p -m 0750 -- "$dest"
 # Root opens the verified archive from its private temp tree and the service user's tar reads it on stdin.
 runuser -u "$RUNNER_USER" -- tar -xzf - -C "$dest" < "$download/$archive"
 
-cd "$dest"
-runuser -u "$RUNNER_USER" -- ./config.sh --unattended --url "https://github.com/$REPO" --token "$TOKEN" \
-  --name "$NAME" --labels "$LABELS" --work "$WORK_DIR"
-./svc.sh install "$RUNNER_USER"
-./svc.sh start
-./svc.sh status
+runuser -u "$RUNNER_USER" -- env -C "$dest" ./config.sh --unattended --url "https://github.com/$REPO" \
+  --token "$TOKEN" --name "$NAME" --labels "$LABELS" --work "$WORK_DIR"
+
+# What svc.sh install does, with root writing only under /etc/systemd/system and the service user doing the rest.
+cat > "$unit_path" <<UNIT
+[Unit]
+Description=GitHub Actions Runner (${REPO//\//-}.$NAME)
+After=network-online.target
+
+[Service]
+ExecStart=$INSTALL_DIR/runsvc.sh
+User=$RUNNER_USER
+WorkingDirectory=$INSTALL_DIR
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+chmod 0644 "$unit_path"
+runuser -u "$RUNNER_USER" -- install -m 0755 -- "$dest/bin/runsvc.sh" "$dest/runsvc.sh"
+echo "$unit" | runuser -u "$RUNNER_USER" -- tee "$dest/.service" >/dev/null
+systemctl daemon-reload
+systemctl enable "$unit"
+systemctl start "$unit"
+systemctl --no-pager status "$unit" || true

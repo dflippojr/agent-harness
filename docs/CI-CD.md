@@ -698,15 +698,20 @@ done
 
 Each member unpacks the pinned runner release (SHA-256 checked) into
 `/home/github-runner/runners/<name>`, registers it as the `github-runner` service user (created if missing, with no
-sudo or docker group), and installs the runner's own systemd unit (`svc.sh install github-runner`), so it starts at
-boot and jobs never run as root. `--user` and `--install-dir` choose another user or directory; the directory must stay
+sudo or docker group), and installs the systemd unit `svc.sh install github-runner` would
+(`actions.runner.<owner>-<repo>.<name>.service`, `User=github-runner`), so it starts at boot and jobs never run as root.
+The service user owns that tree, so root acts on nothing in it: the installer refuses a destination with a symlink in
+it or under a `/` or `/home` that is not root's alone, the service user creates the directory and unpacks the runner
+(root feeds it the checked archive on stdin), and root writes the unit itself rather than run the runner's `svc.sh`. `--user` and `--install-dir` choose another user or directory; the directory must stay
 under `/home`, because the publication scan rejects home-directory paths and so cannot post a leaked runner path. A
 consumer repository's runner adds `--repo dflippojr/<project> --labels <project>-review`. `--dry-run` prints the plan
 and changes nothing. Install `pwsh`, `git` and `gh` for the service user, and log in its Codex, Claude and Cursor CLIs
 as that user (`sudo -iu github-runner`), before dispatching a review.
 
-To repair or remove a member, delete the runner in GitHub (**Settings > Actions > Runners**), then from its install
-directory run `sudo ./svc.sh stop`, `sudo ./svc.sh uninstall`, and delete the directory.
+To repair or remove a member, delete the runner in GitHub (**Settings > Actions > Runners**), then
+`sudo systemctl disable --now <unit>`, `sudo rm /etc/systemd/system/<unit>` and `sudo systemctl daemon-reload`, and
+delete the install directory as the service user. Don't run the runner's `svc.sh` as root: the service user can
+rewrite it.
 
 ### Windows (fallback boot)
 
