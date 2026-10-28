@@ -13,6 +13,7 @@ import hashlib
 import io
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -195,12 +196,12 @@ def build_archive(path: Path) -> str:
 class FakeHost:
     """A synthetic root filesystem, private root temp tree and recording fake commands for one install run."""
 
-    def __init__(self, tmp_path: Path):
+    def __init__(self, tmp_path: Path, *, as_root: bool = False):
         if not BASH:
             pytest.skip("bash is not installed")
         if not sys.platform.startswith("linux"):
             pytest.skip("the install path needs Linux (GNU stat, env -C)")
-        if os.geteuid() == 0:
+        if os.geteuid() == 0 and not as_root:
             pytest.skip("root ignores the permissions that model the service user's limits")
         self.user = getpass.getuser()
         if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", self.user) or self.user == "root":
@@ -227,7 +228,9 @@ class FakeHost:
         self.install_dir = f"/home/{self.user}/runners/tower-review-1"
         self.dest = self.fsroot / self.install_dir.lstrip("/")
 
-    def install(self, *args: str, token: str = "synthetic-token") -> subprocess.CompletedProcess[str]:
+    def install(
+        self, *args: str, token: str = "synthetic-token", prefix: tuple[str, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
         env = {
             **os.environ,
             "HARNESS_INSTALLER_OS": "Linux",
@@ -242,7 +245,7 @@ class FakeHost:
         }
         try:
             return subprocess.run(
-                [BASH, str(SCRIPT), "--name", "tower-review-1", "--user", self.user,
+                [*prefix, BASH, str(SCRIPT), "--name", "tower-review-1", "--user", self.user,
                  "--version", "9.9.9", "--sha256", self.sha256, *args],
                 cwd=self.tmp, env=env, input=f"{token}\n", capture_output=True, text=True, timeout=60, check=False,
             )
@@ -348,3 +351,29 @@ def test_install_hands_the_token_to_config_sh_without_any_command_line(tmp_path)
     # config.sh gets it from the runner's ACTIONS_RUNNER_INPUT_TOKEN, which it then removes from its environment.
     assert host.token_seen.read_text(encoding="utf-8") == token
     assert not [line for line in host.calls() if "--token" in line]
+
+
+def uid0_prefix() -> tuple[str, ...]:
+    """A command prefix that runs the installer with EUID 0: none as real root, else a user namespace mapping us to 0."""
+    if os.geteuid() == 0:
+        return ()
+    unshare = shutil.which("unshare")
+    probe = [unshare, "--user", "--map-root-user", "--", "sh", "-c", 'test "$(id -u)" = 0'] if unshare else None
+    if not probe or subprocess.run(probe, capture_output=True, check=False).returncode != 0:
+        pytest.skip("neither root nor an unprivileged user namespace (unshare --map-root-user) is available")
+    return (unshare, "--user", "--map-root-user", "--")
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_root_refuses_the_fake_root_seam_before_any_host_change(tmp_path, dry_run):
+    # sudo -E or a sudoers env_keep can hand the seam to real root, whose unit write would then follow a prefix the
+    # caller can repoint after the checks. At EUID 0 the script refuses it outright.
+    host = FakeHost(tmp_path, as_root=True)
+    unit = host.fsroot / "etc" / "systemd" / "system" / UNIT
+    result = host.install(*(("--dry-run",) if dry_run else ()), prefix=uid0_prefix())
+    assert result.returncode != 0, result.stdout
+    assert "HARNESS_INSTALLER_FAKE_ROOT is for unprivileged tests; refusing it as root" in result.stderr
+    assert host.calls() == []
+    assert not unit.exists()
+    assert not host.dest.exists()
+    assert "dry run:" not in result.stdout
