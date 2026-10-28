@@ -12,7 +12,6 @@ import getpass
 import hashlib
 import io
 import os
-import pwd
 import re
 import shutil
 import stat
@@ -397,6 +396,8 @@ def test_root_refuses_the_fake_root_seam_before_any_host_change(tmp_path, dry_ru
     # sudo -E or a sudoers env_keep can hand the seam to real root, whose unit write would then follow a prefix the
     # caller can repoint after the checks. At EUID 0 the script refuses it outright.
     host = FakeHost(tmp_path, as_root=True)
+    import pwd  # Linux only, and FakeHost has skipped elsewhere; CPython on Windows has no pwd.
+
     unit = host.fsroot / "etc" / "systemd" / "system" / UNIT
     system_units = Path("/etc/systemd/system")
     before = (tree(tmp_path), sorted(user.pw_name for user in pwd.getpwall()), sorted(os.listdir(system_units)))
