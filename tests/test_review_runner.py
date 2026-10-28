@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,22 +18,34 @@ ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "ops" / "review" / "run-review.ps1"
 WORKFLOW = ROOT / ".github" / "workflows" / "review.yml"
 CI_DOCS = ROOT / "docs" / "CI-CD.md"
-POWERSHELL = shutil.which("powershell.exe") or shutil.which("powershell")
+# The workflow runs every step in PowerShell 7 (pwsh) on Linux and Windows runners, so the tests use it too.
+POWERSHELL = shutil.which("pwsh")
 # GitHub's renderer for the publication scan, stubbed so no dot-sourced test calls the network: plain text
 # renders as itself, encoded. The script-level tests below answer the real call through their fake gh.
 RENDER_STUB = (
     "function Invoke-ReviewMarkdownRender { param([string]$Text, [string]$Repository, [string]$WorkingDirectory) "
     "'<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }"
 )
+# pwsh's default error view wraps a long message across lines in ANSI colour, so a test could not find it in the
+# output; this prints each error's message on one plain line, as Windows PowerShell did.
+PLAIN_ERRORS = "$ErrorView = 'NormalView'; $PSStyle.OutputRendering = 'PlainText'"
+
+
+def require_powershell() -> None:
+    """Skip without pwsh, except in CI's review-linux job, where a missing pwsh must fail rather than hide the tests."""
+    if POWERSHELL:
+        return
+    if os.environ.get("REVIEW_TESTS_REQUIRE_PWSH"):
+        pytest.fail("PowerShell 7 (pwsh) is required here but is not on PATH")
+    pytest.skip("PowerShell 7 (pwsh) is not installed")
 
 
 def run_powershell(tmp_path: Path, body: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    if not POWERSHELL:
-        pytest.skip("Windows PowerShell is not installed")
+    require_powershell()
     wrapper = tmp_path / "review-test.ps1"
     script_path = str(SCRIPT).replace("'", "''")
     wrapper.write_text(
-        f". '{script_path}'\n{RENDER_STUB}\n{body}\n",
+        f"{PLAIN_ERRORS}\n. '{script_path}'\n{RENDER_STUB}\n{body}\n",
         encoding="utf-8",
     )
     return subprocess.run(
@@ -59,6 +72,12 @@ def run_powershell_json(tmp_path_factory, body: str):
     result = run_powershell(tmp_path_factory.mktemp("ps-batch"), body)
     assert result.returncode == 0, output(result)
     return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def _touch_cursor_agent(version: Path) -> None:
+    """A fake cursor-agent install: node.exe on Windows, node elsewhere, beside index.js."""
+    for name in ("node.exe", "node", "index.js"):
+        (version / name).touch()
 
 
 def write_rows(tmp_path_factory, rows) -> Path:
@@ -523,8 +542,7 @@ def test_backend_commands_enforce_read_only_review_access(tmp_path):
     cursor_base = tmp_path / "cursor-agent"
     version = cursor_base / "versions" / "2026.09.18"
     version.mkdir(parents=True)
-    (version / "node.exe").touch()
-    (version / "index.js").touch()
+    _touch_cursor_agent(version)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     workspace = tmp_path / "checkout"
@@ -539,12 +557,14 @@ $commands = @(
     Get-ReviewBackendCommand -Backend cursor -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -CursorBase '{cursor_base}' -WindowsPlatform $false
     Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
     Get-ReviewBackendCommand -Backend claude -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}'
+    Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -WindowsPlatform $true
+    Get-ReviewBackendCommand -Backend codex -Workspace '{workspace}' -Prompt prompt -ScratchDirectory '{scratch}' -WindowsPlatform $false
 )
 $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath,WorkingDirectory | ConvertTo-Json -Depth 4 -Compress
 """,
     )
     assert result.returncode == 0, output(result)
-    cursor_windows, cursor_posix, codex, claude = json.loads(result.stdout.strip())
+    cursor_windows, cursor_posix, codex, claude, codex_windows, codex_posix = json.loads(result.stdout.strip())
 
     # Cursor reviews in ask mode, scoped to the workspace, with its sandbox on wherever the flag is supported.
     for command in (cursor_windows, cursor_posix):
@@ -554,6 +574,8 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath,Workin
         assert command["InputText"] == "prompt"
     assert "--sandbox" not in cursor_windows["Arguments"]
     assert _flag_value(cursor_posix["Arguments"], "--sandbox") == "enabled"
+    assert Path(cursor_windows["FilePath"]).name == "node.exe"
+    assert Path(cursor_posix["FilePath"]).name == "node"
 
     codex_args = codex["Arguments"]
     result_path = str(scratch / "codex-review-output.md")
@@ -564,6 +586,13 @@ $commands | Select-Object Backend,FilePath,Arguments,InputText,ResultPath,Workin
     assert "--ephemeral" in codex_args
     assert {"apps", "plugins"} <= {codex_args[i + 1] for i, arg in enumerate(codex_args) if arg == "--disable"}
     assert _flag_value(codex_args, "--cd") == str(workspace)
+    # The unelevated sandbox setting is Windows-only; elsewhere Codex uses its own OS sandbox.
+    unelevated = 'windows.sandbox="unelevated"'
+    windows_args = codex_windows["Arguments"]
+    at = windows_args.index(unelevated)
+    assert windows_args[at - 1] == "-c"
+    assert windows_args[:at - 1] + windows_args[at + 1:] == codex_posix["Arguments"]
+    assert _flag_value(codex_posix["Arguments"], "--sandbox") == "read-only"
     assert _flag_value(codex_args, "--output-last-message") == result_path
     assert codex_args[-1] == "-"
     assert codex["ResultPath"] == result_path
@@ -589,8 +618,7 @@ def test_review_model_env_set_unset_and_invalid_per_backend(tmp_path):
     cursor_base = tmp_path / "cursor-agent"
     version = cursor_base / "versions" / "2026.09.18"
     version.mkdir(parents=True)
-    (version / "node.exe").touch()
-    (version / "index.js").touch()
+    _touch_cursor_agent(version)
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     workspace = tmp_path / "checkout"
@@ -749,8 +777,7 @@ Invoke-ReviewFallback -Backends @('codex','claude') -Workspace '{tmp_path}' -Pro
 def test_empty_and_rate_limited_successes_fall_through(tmp_path):
     version = tmp_path / "versions" / "2026.09.18"
     version.mkdir(parents=True)
-    (version / "node.exe").touch()
-    (version / "index.js").touch()
+    _touch_cursor_agent(version)
     result = run_powershell(
         tmp_path,
         f"""
@@ -1202,8 +1229,7 @@ def _complete_check(
     all_calls: bool = False,
 ):
     """Run the workflow's real "Complete PR check" script against a fake gh."""
-    if not POWERSHELL:
-        pytest.skip("Windows PowerShell is not installed")
+    require_powershell()
     step = _workflow_step("Complete PR check")
     (tmp_path / "review-output.md").write_text(review, encoding="utf-8-sig")
     calls = tmp_path / "gh-calls.json"
@@ -1491,7 +1517,7 @@ def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     assert env["REVIEW_WORKSPACE"] == "${{ steps.pr.outputs.workspace }}"
     assert "inputs.max_diff_bytes" in env["REVIEW_MAX_DIFF_BYTES"]
     run = agent["run"]
-    assert r".\.review-tooling\ops\review\run-review.ps1" in run
+    assert "./.review-tooling/ops/review/run-review.ps1" in run
     assert "-Workspace $env:REVIEW_WORKSPACE" in run
     assert "-Mode $env:REVIEW_MODE" in run
     # An environment switch, not a parameter: older tooling must not fail on an unknown -Spec.
@@ -1524,6 +1550,22 @@ def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     assert "gh pr diff" not in prompt
 
 
+def test_workflow_runs_every_step_in_pwsh_on_linux_or_windows_runners():
+    # review-v4 (#806): the tower's review runners are Linux, with Windows as a fallback boot. PowerShell 7 runs the
+    # same steps on both; Windows PowerShell 5.1 (shell: powershell) does not exist on Linux.
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["review"]
+    assert '"Linux"' in job["runs-on"] and '"Windows"' not in job["runs-on"]
+    assert "Linux" in workflow[True]["workflow_call"]["inputs"]["runs_on"]["description"]
+    run_steps = [step for step in job["steps"] if "run" in step]
+    assert run_steps and all(step.get("shell") == "pwsh" for step in run_steps), [s.get("name") for s in run_steps]
+    # gh's install folder is a Windows path; Linux runners already have gh on PATH.
+    assert _workflow_step("Ensure GitHub CLI is on PATH")["if"] == "runner.os == 'Windows'"
+    assert "\\" not in _workflow_step("Run automated review")["run"].split("-OutputPath")[0]
+
+
 def test_adoption_docs_caller_matches_reusable_workflow():
     import yaml
 
@@ -1533,25 +1575,27 @@ def test_adoption_docs_caller_matches_reusable_workflow():
     assert list(caller[True]) == ["workflow_dispatch"]
     assert caller["permissions"] == {"contents": "read", "pull-requests": "write", "checks": "write", "issues": "read"}
     job = caller["jobs"]["review"]
-    assert job["uses"] == "dflippojr/agent-harness/.github/workflows/review.yml@review-v3"
-    assert job["with"]["tooling_ref"] == "review-v3"
+    assert job["uses"] == "dflippojr/agent-harness/.github/workflows/review.yml@review-v4"
+    assert job["with"]["tooling_ref"] == "review-v4"
     assert job["secrets"] == "inherit"
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     call_inputs = workflow[True]["workflow_call"]["inputs"]
     assert set(job["with"]) <= set(call_inputs)
     assert {name for name, spec in call_inputs.items() if spec.get("required")} <= set(job["with"])
-    assert json.loads(job["with"]["runs_on"])[-1] == "financial-planner-review"
+    assert json.loads(job["with"]["runs_on"]) == ["self-hosted", "Linux", "X64", "financial-planner-review"]
     assert "dflippojr/agent-harness/.github/workflows/review.yml@*" in section
     assert '"context": "Automated Code Review", "integration_id": 15368' in section
-    assert "git tag -f review-v3" in section
-    # review-v2 stays where it is for callers that have not moved.
+    assert "git tag -f review-v4" in section
+    # review-v3 and review-v2 stay where they are for callers that have not moved.
+    assert "review-v3" in section and "git tag -f review-v3" not in section
     assert "review-v2" in section and "git tag -f review-v2" not in section
 
 
 # --- Script-level end-to-end: run-review.ps1 as a script, with fake gh, codex and claude executables on PATH. ---
 #
-# Each fake is a copy of one small compiled launcher that runs fake_cli.py. They have to be real executables:
-# a .cmd shim would split the comments URL at its "&", and a .ps1 shim would decorate stderr.
+# On Windows each fake is a copy of one small compiled launcher that runs fake_cli.py. They have to be real
+# executables: a .cmd shim would split the comments URL at its "&", and a .ps1 shim would decorate stderr.
+# Elsewhere each fake is an executable sh script that hands its arguments to fake_cli.py unchanged.
 # fake_cli.py logs argv, stdin, working directory and environment, then answers from config.json.
 
 FAKE_CLI_LAUNCHER_CS = r'''
@@ -1646,8 +1690,9 @@ PARENT_ONLY_NAMES = {"GITHUB_OUTPUT", "GITHUB_REPOSITORY", "PR_NUMBER", "REVIEW_
 
 @pytest.fixture(scope="module")
 def fake_cli_launcher(tmp_path_factory):
-    if not POWERSHELL:
-        pytest.skip("Windows PowerShell is not installed")
+    require_powershell()
+    if os.name != "nt":
+        return None  # _run_review_script writes sh shims instead.
     csc = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
     if not csc.is_file():
         pytest.skip("csc.exe is not available to build the fake CLIs")
@@ -1688,7 +1733,15 @@ def _run_review_script(tmp_path, launcher, responses: dict, env: dict[str, str])
     shims = tmp_path / "shims"
     shims.mkdir()
     for name in ("gh", "codex", "claude"):
-        shutil.copyfile(launcher, shims / f"{name}.exe")
+        if launcher is None:
+            shim = shims / name
+            shim.write_text(
+                f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(shims / 'fake_cli.py'))} {name} \"$@\"\n",
+                encoding="utf-8",
+            )
+            shim.chmod(0o755)
+        else:
+            shutil.copyfile(launcher, shims / f"{name}.exe")
     (shims / "launcher.txt").write_text(f"{sys.executable}\n{shims / 'fake_cli.py'}\n", encoding="utf-8")
     (shims / "fake_cli.py").write_text(FAKE_CLI_PY, encoding="utf-8")
     (shims / "config.json").write_text(json.dumps(responses), encoding="utf-8")
@@ -1743,7 +1796,7 @@ def _assert_backend_environment_is_scrubbed(run) -> None:
     for call in run.backends:
         names = {name.upper() for name in call["env"]}
         assert not names & (BACKEND_SECRETS | PARENT_ONLY_NAMES), call["name"]
-        assert call["env"]["USERPROFILE"] and str(run.shims) in call["env"]["PATH"]
+        assert call["env"]["USERPROFILE" if os.name == "nt" else "HOME"] and str(run.shims) in call["env"]["PATH"]
         assert os.path.normcase(os.path.realpath(call["cwd"])) == os.path.normcase(os.path.realpath(run.workspace))
         # The untrusted agent configuration is gone by the time a backend starts.
         assert "src" in call["entries"]
