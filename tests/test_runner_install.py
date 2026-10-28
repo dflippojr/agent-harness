@@ -1,10 +1,23 @@
-"""Issue #806: the Linux GitHub Actions runner installer (ops/github/install-runner.sh), checked by dry run."""
+"""Issue #806: the Linux GitHub Actions runner installer (ops/github/install-runner.sh).
+
+Most cases are dry runs. The install cases run the real install path without root: a synthetic filesystem root
+stands in for / (HARNESS_INSTALLER_FAKE_ROOT), and fake runuser, curl and systemctl on PATH record every call. The
+fake runuser locks root's private temp tree for as long as a service-user command runs, so a path from root's side
+that the service user could not open fails here too.
+"""
 
 from __future__ import annotations
 
+import getpass
+import hashlib
+import io
 import os
 import re
+import stat
 import subprocess
+import sys
+import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -101,3 +114,148 @@ def test_other_platforms_are_refused(os_name, arch, message):
     result = run_install("--token", "t", "--dry-run", os_name=os_name, arch=arch)
     assert result.returncode != 0
     assert message in result.stderr
+
+
+FAKE_COMMANDS = {
+    "runuser": """#!/bin/sh
+[ "$1" = -u ] && [ "$3" = -- ] || { echo "fake runuser: unexpected $*" >&2; exit 2; }
+printf 'runuser %s\\n' "$*" >> "$FAKE_LOG"
+shift 3
+chmod 000 "$FAKE_ROOT_TMP"
+FAKE_AS=service-user "$@"
+rc=$?
+chmod 700 "$FAKE_ROOT_TMP"
+exit $rc
+""",
+    "curl": """#!/bin/sh
+printf 'curl %s\\n' "$*" >> "$FAKE_LOG"
+while [ "$#" -gt 0 ]; do
+  case "$1" in --output) out="$2"; shift 2 ;; *) shift ;; esac
+done
+cp "$FAKE_ARCHIVE" "$out"
+""",
+    "systemctl": """#!/bin/sh
+printf 'systemctl %s\\n' "$*" >> "$FAKE_LOG"
+""",
+    "useradd": """#!/bin/sh
+printf 'useradd %s\\n' "$*" >> "$FAKE_LOG"
+exit 1
+""",
+}
+
+# The runner archive's config.sh writes .runner and generates svc.sh, as the real one does.
+FAKE_ARCHIVE_FILES = {
+    "config.sh": """#!/bin/sh
+printf 'config.sh as=%s %s\\n' "${FAKE_AS:-root}" "$*" >> "$FAKE_LOG"
+printf '%s' "${ACTIONS_RUNNER_INPUT_TOKEN:-}" > "$FAKE_TOKEN_SEEN"
+echo '{}' > .runner
+cp bin/svc.sh.template svc.sh
+chmod 755 svc.sh
+""",
+    "bin/svc.sh.template": """#!/bin/sh
+printf 'svc.sh as=%s %s\\n' "${FAKE_AS:-root}" "$*" >> "$FAKE_LOG"
+unit=actions.runner.dflippojr-agent-harness.tower-review-1.service
+case "$1" in
+  install)
+    printf '[Service]\\nUser=%s\\n' "$2" > "$HARNESS_INSTALLER_FAKE_ROOT/etc/systemd/system/$unit"
+    systemctl daemon-reload
+    systemctl enable "$unit" ;;
+  start) systemctl start "$unit" ;;
+esac
+""",
+    "bin/runsvc.sh": "#!/bin/sh\n",
+}
+UNIT = "actions.runner.dflippojr-agent-harness.tower-review-1.service"
+
+
+def build_archive(path: Path) -> str:
+    with tarfile.open(path, "w:gz") as archive:
+        for name, text in FAKE_ARCHIVE_FILES.items():
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o755
+            archive.addfile(info, io.BytesIO(data))
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class FakeHost:
+    """A synthetic root filesystem, private root temp tree and recording fake commands for one install run."""
+
+    def __init__(self, tmp_path: Path):
+        if not BASH:
+            pytest.skip("bash is not installed")
+        if not sys.platform.startswith("linux"):
+            pytest.skip("the install path needs Linux (GNU stat, env -C)")
+        if os.geteuid() == 0:
+            pytest.skip("root ignores the permissions that model the service user's limits")
+        self.user = getpass.getuser()
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", self.user) or self.user == "root":
+            pytest.skip(f"the current user name {self.user!r} is not a valid --user")
+        self.tmp = tmp_path
+        self.fsroot = tmp_path / "fsroot"
+        self.home = self.fsroot / "home" / self.user
+        self.home.mkdir(parents=True, mode=0o755)
+        (self.fsroot / "etc" / "systemd" / "system").mkdir(parents=True)
+        for directory in (self.fsroot, self.fsroot / "home"):
+            directory.chmod(0o755)
+        self.root_tmp = tmp_path / "root-tmp"
+        self.root_tmp.mkdir(mode=0o700)
+        self.bin = tmp_path / "bin"
+        self.bin.mkdir()
+        for name, text in FAKE_COMMANDS.items():
+            (self.bin / name).write_text(text, encoding="utf-8")
+            (self.bin / name).chmod(0o755)
+        self.log = tmp_path / "calls.log"
+        self.log.write_text("", encoding="utf-8")
+        self.token_seen = tmp_path / "token-seen"
+        self.archive = tmp_path / "archive.tar.gz"
+        self.sha256 = build_archive(self.archive)
+        self.install_dir = f"/home/{self.user}/runners/tower-review-1"
+        self.dest = self.fsroot / self.install_dir.lstrip("/")
+
+    def install(self, *args: str, token: str = "synthetic-token") -> subprocess.CompletedProcess[str]:
+        env = {
+            **os.environ,
+            "HARNESS_INSTALLER_OS": "Linux",
+            "HARNESS_INSTALLER_ARCH": "x86_64",
+            "HARNESS_INSTALLER_FAKE_ROOT": str(self.fsroot),
+            "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+            "TMPDIR": str(self.root_tmp),
+            "FAKE_LOG": str(self.log),
+            "FAKE_ROOT_TMP": str(self.root_tmp),
+            "FAKE_ARCHIVE": str(self.archive),
+            "FAKE_TOKEN_SEEN": str(self.token_seen),
+        }
+        try:
+            return subprocess.run(
+                [BASH, str(SCRIPT), "--token", token, "--name", "tower-review-1", "--user", self.user,
+                 "--version", "9.9.9", "--sha256", self.sha256, *args],
+                cwd=self.tmp, env=env, capture_output=True, text=True, timeout=60, check=False,
+            )
+        finally:
+            self.root_tmp.chmod(0o700)
+
+    def calls(self) -> list[str]:
+        return self.log.read_text(encoding="utf-8").splitlines()
+
+
+def test_install_crosses_from_root_to_the_service_user_and_reaches_registration_and_service_setup(tmp_path):
+    host = FakeHost(tmp_path)
+    result = host.install()
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = host.calls()
+    # The archive is downloaded into root's private temp tree, yet the service user unpacks it.
+    assert (host.dest / "config.sh").is_file()
+    assert stat.S_IMODE(host.root_tmp.stat().st_mode) == 0o700
+    config = [line for line in calls if line.startswith("config.sh ")]
+    assert len(config) == 1, calls
+    assert config[0].startswith("config.sh as=service-user --unattended ")
+    for expected in ("--url https://github.com/dflippojr/agent-harness", "--name tower-review-1",
+                     "--labels agent-harness-review", "--work _work"):
+        assert expected in config[0]
+    unit = host.fsroot / "etc" / "systemd" / "system" / UNIT
+    assert f"User={host.user}" in unit.read_text(encoding="utf-8").splitlines()
+    assert f"systemctl enable {UNIT}" in calls
+    assert f"systemctl start {UNIT}" in calls
+    assert not any(line.startswith("useradd") for line in calls)

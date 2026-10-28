@@ -72,6 +72,13 @@ os="${HARNESS_INSTALLER_OS:-$(uname -s)}"
 arch="${HARNESS_INSTALLER_ARCH:-$(uname -m)}"
 [[ "$os" = "Linux" ]] || fail "this installer is for Linux; on Windows use ops/github/install-runner.ps1"
 [[ "$arch" = "x86_64" ]] || fail "only x86_64 (the X64 runner label) is supported, not $arch"
+# Tests run the install path without root: HARNESS_INSTALLER_FAKE_ROOT names a synthetic directory standing in for /,
+# and the caller's uid stands in for root's. sudo resets the environment, so a real install never sees it.
+fsroot="${HARNESS_INSTALLER_FAKE_ROOT:-}"
+root_uid=0
+if [[ -n "$fsroot" ]]; then
+  root_uid="$(id -u)"
+fi
 
 [[ -n "$TOKEN" ]] || fail "--token is required"
 [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "invalid --repo: $REPO"
@@ -98,6 +105,7 @@ case "$INSTALL_DIR" in
   *[!A-Za-z0-9_./-]*|*/../*|*/..|*/./*) fail "invalid --install-dir: $INSTALL_DIR" ;;
 esac
 
+dest="$fsroot$INSTALL_DIR"
 archive="actions-runner-linux-x64-$VERSION.tar.gz"
 url="https://github.com/actions/runner/releases/download/v$VERSION/$archive"
 
@@ -107,7 +115,7 @@ echo "service user: $RUNNER_USER"
 echo "install directory: $INSTALL_DIR (work: $WORK_DIR)"
 echo "runner release: $VERSION ($archive, sha256 $SHA256)"
 
-if [[ -e "$INSTALL_DIR/.runner" ]]; then
+if [[ -e "$dest/.runner" ]]; then
   fail "a runner is already configured in $INSTALL_DIR"
 fi
 
@@ -120,7 +128,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   exit 0
 fi
 
-[[ "$(id -u)" -eq 0 ]] || fail "run as root (sudo); the runner itself runs as $RUNNER_USER"
+[[ "$(id -u)" -eq "$root_uid" ]] || fail "run as root (sudo); the runner itself runs as $RUNNER_USER"
 for tool in curl sha256sum tar systemctl useradd runuser; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is required"
 done
@@ -137,10 +145,10 @@ trap 'rm -rf "$download"' EXIT
 curl --proto =https --fail --silent --show-error --location --output "$download/$archive" "$url"
 echo "$SHA256  $download/$archive" | sha256sum --check --status || fail "runner archive hash mismatch"
 
-install -d -o "$RUNNER_USER" -g "$(id -gn "$RUNNER_USER")" -m 0750 "$INSTALL_DIR"
-runuser -u "$RUNNER_USER" -- tar -xzf "$download/$archive" -C "$INSTALL_DIR"
+install -d -o "$RUNNER_USER" -g "$(id -gn "$RUNNER_USER")" -m 0750 "$dest"
+runuser -u "$RUNNER_USER" -- tar -xzf "$download/$archive" -C "$dest"
 
-cd "$INSTALL_DIR"
+cd "$dest"
 runuser -u "$RUNNER_USER" -- ./config.sh --unattended --url "https://github.com/$REPO" --token "$TOKEN" \
   --name "$NAME" --labels "$LABELS" --work "$WORK_DIR"
 ./svc.sh install "$RUNNER_USER"
