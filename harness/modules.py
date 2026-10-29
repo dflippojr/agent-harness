@@ -124,6 +124,7 @@ _PUBLIC = {
     "setting_float": ("harness.settings_keys", "_float"),
     "setting_bool": ("harness.settings_keys", "_bool"),
     "setting_hidden": ("harness.settings_keys", "_hidden"),
+    "cfg_field": ("harness.settings_keys", "cfg_field"),
     "job_summary": ("harness.job_results", "summary"),
     "parse_job_status": ("harness.job_results", "parse_status"),
     "require_url": ("harness.settings_keys", "_require_url"),
