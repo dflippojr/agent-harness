@@ -33,6 +33,7 @@ import httpx
 
 from . import stables_shell
 from .config import ROOT
+from .digests import sha256_hex
 from .principal import NOT_ALLOWED_DETAIL, OWNER_USER_ID, Principal, _member_principal, resolve_human
 
 log = logging.getLogger("harness.google_signin")
@@ -85,10 +86,6 @@ class GoogleSigninError(Exception):
         self.status = status
         self.reason = reason or code
         self.code = code
-
-
-def _hash(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _b64(data: bytes) -> str:
@@ -635,7 +632,7 @@ class GoogleSignin:
     def session_row(self, token: str) -> dict | None:
         if not token or len(token) > 128:
             return None
-        id_hash = _hash(token)
+        id_hash = sha256_hex(token)
         row = self.db.web_session(id_hash)
         now = self.clock()
         if (row is None or row.get("revoked_at") is not None or now >= row["expires_at"]
@@ -651,14 +648,14 @@ class GoogleSignin:
     def issue_session(self, user_id: str, replacing: str = "") -> str:
         now = self.clock()
         if replacing:
-            self.db.revoke_web_session(_hash(replacing), now)
+            self.db.revoke_web_session(sha256_hex(replacing), now)
         token = secrets.token_urlsafe(32)
-        self.db.insert_web_session(_hash(token), user_id, now, now + ABSOLUTE_SECONDS)
+        self.db.insert_web_session(sha256_hex(token), user_id, now, now + ABSOLUTE_SECONDS)
         self.db.purge_web_sessions(now - ABSOLUTE_SECONDS)
         return token
 
     def logout(self, token: str, actor_id: str) -> None:
-        user_id = self.db.revoke_web_session(_hash(token), self.clock()) if token else None
+        user_id = self.db.revoke_web_session(sha256_hex(token), self.clock()) if token else None
         if user_id:
             self.db.insert_audit(actor_id, user_id, "google_logout", "ok")
             self.m.revoke_member_streams(user_id)
@@ -715,7 +712,7 @@ class GoogleSignin:
             raise GoogleSigninError(409, "unlink the current Google account first", code="already_linked")
         code = "ahg-" + secrets.token_urlsafe(32)  # 256 bits
         now = self.clock()
-        self.db.put_google_invitation(user_id, _hash(code), now, now + INVITE_SECONDS)
+        self.db.put_google_invitation(user_id, sha256_hex(code), now, now + INVITE_SECONDS)
         self.db.insert_audit(actor_id, user_id, "google_invite", "ok")
         return {"code": code, "expires_at": now + INVITE_SECONDS}
 
@@ -768,7 +765,7 @@ class GoogleSignin:
                 raise GoogleSigninError(409, "unlink the current Google account first", code="already_linked")
         else:
             code = (code or "").strip()
-            invite_hash = _hash(code) if 0 < len(code) <= 128 else ""
+            invite_hash = sha256_hex(code) if 0 < len(code) <= 128 else ""
             user_id = self.db.google_invitation_user(invite_hash, self.clock()) if invite_hash else None
             if (not user_id or not self._enabled_member(user_id) or self.db.google_identity(user_id) is not None
                     or not (web.admitted or (ident.is_member and ident.user_id == user_id))):
@@ -786,7 +783,7 @@ class GoogleSignin:
             self._prune(now)
             if len(self._attempts) >= MAX_ATTEMPTS:
                 raise GoogleSigninError(429, "too many sign-in attempts; try again shortly", code="busy")
-            self._attempts[_hash(browser)] = attempt
+            self._attempts[sha256_hex(browser)] = attempt
         params = {
             "response_type": "code", "client_id": self.cfg.google_signin.client_id,
             "redirect_uri": redirect_uri(self.cfg), "scope": SCOPE, "state": attempt.state,
@@ -799,7 +796,7 @@ class GoogleSignin:
         if not browser or len(browser) > 128:
             return None
         with self._lock:
-            return self._attempts.pop(_hash(browser), None)  # single use, even when the callback then fails
+            return self._attempts.pop(sha256_hex(browser), None)  # single use, even when the callback then fails
 
     def finish(self, request, ident: Principal, params) -> tuple[str, str]:
         """Complete the callback. Returns (user_id, new session token) or raises GoogleSigninError (generic)."""

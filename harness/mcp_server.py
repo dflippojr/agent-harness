@@ -19,7 +19,6 @@ transcript through the CLI's own tool-result records, like any other tool.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import secrets
@@ -28,6 +27,7 @@ import threading
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from .digests import sha256_hex
 from .policy import MCP_SERVER
 from .sandbox import run_cmd
 
@@ -68,10 +68,6 @@ def codex_mcp_overrides() -> list[str]:
     return ["-c", f"mcp_servers.{MCP_SERVER}={server}"]
 
 
-def _digest(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
 class McpTokens:
     """Per-session bearer tokens, in memory only. Stored by digest, so a lookup doesn't compare secrets char by char."""
 
@@ -83,13 +79,13 @@ class McpTokens:
         """A fresh token for this session, replacing (and so revoking) any earlier one."""
         self.revoke(sid)
         token = secrets.token_urlsafe(32)
-        digest = _digest(token)
+        digest = sha256_hex(token)
         self._sessions[digest] = sid
         self._digests[sid] = digest
         return token
 
     def session_for(self, token: str) -> str | None:
-        return self._sessions.get(_digest(token)) if token else None
+        return self._sessions.get(sha256_hex(token)) if token else None
 
     def revoke(self, sid: str) -> None:
         digest = self._digests.pop(sid, None)

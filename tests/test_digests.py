@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from harness.db import Database
+from harness.delegate_edit import text_digest
+from harness.digests import sha256_hex
 
 # sha256("<prefix>-fixed"), computed once outside the harness
 HK_FIXED = "18caa7c9597bf905a3499d5f955198be8e4a112e536dc715ea87236cd88a1df8"
@@ -16,6 +18,16 @@ HO_FIXED = "a5ff6ef216dc8c3ff0a46dd6d90be4e526825cbdd154873da688a58790f2d9ae"
 HP_FIXED = "fa59c8b270586f4fac7e55dd8a1fbbeb1750819f462067beb6ff71fff28c0d98"
 HRP_FIXED = "8a276afaae55a87beef532352e63773f71f310824922f3344dbb0fcb987ce1f8"
 HS_FIXED = "6af71b3e49f9bc377ea02fce459dbbdb940d22fb1764aadb86fa327b9cc86078"
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    ("abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+    ("h\u00e9llo \u2713", "5657cdef8a85a584e0e961e6f8247cf5d3f8ed21496ed6fdbcfd43a761e94245"),  # UTF-8, not Latin-1
+])
+def test_sha256_hex_matches_fixed_vectors(text: str, expected: str):
+    assert sha256_hex(text) == expected
+    assert text_digest(text) == expected  # #155 receipts keep the same convention
 
 
 @pytest.fixture
