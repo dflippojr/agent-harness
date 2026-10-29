@@ -161,8 +161,9 @@ duplicate and fight it. To rotate the token, create a new SonarCloud user token,
 a `main` push, and a real Dependabot PR. A green notice-only job is not evidence of analysis. The old `SONAR_TOKEN` and
 `SONAR_HOST_URL` secrets are already deleted and must not be reintroduced.
 
-Local SonarQube on `localhost:9000`, published by `ops/tailscale/serve.ps1` as `https://<tower>.ts.net:9000`, is
-local-only. CI does not depend on it.
+Local SonarQube on `localhost:9000`, published on the Windows tower by `ops/tailscale/serve.ps1` as
+`https://<tower>.ts.net:9000`, is local-only. CI does not depend on it. The Ubuntu tower did not recreate that
+`:9000` Serve entry when it took over on 2026-10-26.
 
 ## Scheduled dependency updates
 
@@ -615,7 +616,8 @@ hatch: `python -m pytest tests -q -p no:xdist`.
 ## Tower runner
 
 The tower runs Ubuntu since 2026-10-26. Production runs there from the live checkout
-`/home/daniel/Projects/agent-harness` as systemd user units of `daniel` (`~/.config/systemd/user/`, lingering on):
+`/home/daniel/Projects/agent-harness` as systemd user units of `daniel` (`~/.config/systemd/user/`, lingering on, so they start whenever the tower boots
+into Ubuntu; until the owner does step 11, the boot-order change, a reboot lands in Windows instead):
 `agent-harness-main-daemon.service`, whose `ExecStart` runs `~/.local/share/agent-harness/bin/run-daemon.sh`,
 `agent-harness-main-llama.service` and `agent-harness-hub.service`. `harness-metrics-proxy.service` is a system unit,
 and the deployment leaves it alone. The Windows runner
@@ -707,7 +709,8 @@ service user can read it (in `/proc/<pid>/environ`), and the token is spent once
 Each member unpacks the pinned runner release (SHA-256 checked) into
 `/home/github-runner/runners/<name>`, registers it as the `github-runner` service user (created if missing, with no
 sudo or docker group), and installs the systemd unit `svc.sh install github-runner` would
-(`actions.runner.<owner>-<repo>.<name>.service`, `User=github-runner`), so it starts at boot and jobs never run as root.
+(`actions.runner.<owner>-<repo>.<name>.service`, `User=github-runner`), so it starts at boot into Ubuntu (every boot only after step 11; until then a reboot lands in
+Windows) and jobs never run as root.
 The service user owns that tree, so root acts on nothing in it. The installer refuses a destination with a symlink in
 it, or under a `/` or `/home` that is not root's alone. The service user creates the directory and unpacks the runner,
 with root feeding it the checked archive on stdin. Root writes the unit itself rather than run the runner's `svc.sh`.
