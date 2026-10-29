@@ -21,6 +21,7 @@ import importlib
 import importlib.util
 import logging
 import pkgutil
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -152,6 +153,29 @@ def __getattr__(name: str) -> Any:
     # Not cached: patches to a public core attribute reach its consumers too.
     module = importlib.import_module(target[0])
     return module if target[1] is None else getattr(module, target[1])
+
+
+def lazy(path: str, attr: str, *, call: bool = False) -> Callable[..., Any]:
+    """A Module hook that imports ``path`` (relative to the calling package) only when the core calls it.
+
+    It returns ``attr`` from that module, or with ``call`` calls it with the hook's arguments. A module package's
+    ``__init__`` builds its hooks with this so importing the package (the CLI does, to list commands) imports none
+    of its runtime code. Resolved on every call, like ``_PUBLIC``, so a patched attribute is the one reached.
+    """
+    package = sys._getframe(1).f_globals["__package__"]
+
+    def hook(*args, **kwargs):
+        target = getattr(importlib.import_module(path, package), attr)
+        return target(*args, **kwargs) if call else target
+    hook.__qualname__ = hook.__name__ = f"lazy({path!r}, {attr!r})"
+    return hook
+
+
+def enabled_flag(section: str) -> Callable[[Any, str], bool]:
+    """A ``runtime_enabled`` hook that answers ``cfg.<section>.enabled`` for every switch."""
+    def runtime_enabled(cfg, switch: str) -> bool:
+        return bool(getattr(cfg, section).enabled)
+    return runtime_enabled
 
 
 @dataclass(frozen=True)

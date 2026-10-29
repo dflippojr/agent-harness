@@ -1,20 +1,5 @@
 """Optional remote runner and Mac client support."""
-from harness.modules import Module
-
-
-def _runtime(manager, module):
-    from .runtime import RunnersRuntime
-    return RunnersRuntime(manager, module)
-
-
-def _owner_routes():
-    from .routes import owner_routes
-    return owner_routes
-
-
-def _public_routes():
-    from .routes import public_routes
-    return public_routes
+from harness.modules import Module, lazy
 
 
 def _capabilities(owner, scopes):
@@ -23,8 +8,8 @@ def _capabilities(owner, scopes):
 
 MODULE = Module(
     name="runners", switches=("runners",), title="Remote runners and Mac client",
-    docs=("docs/mac-client.md", "docs/modules.md"), runtime=_runtime,
-    owner_routes=_owner_routes, public_routes=_public_routes,
+    docs=("docs/mac-client.md", "docs/modules.md"), runtime=lazy(".runtime", "RunnersRuntime", call=True),
+    owner_routes=lazy(".routes", "owner_routes"), public_routes=lazy(".routes", "public_routes"),
     principal_capabilities=_capabilities,
     admin_paths=frozenset({"/runners", "/runners/{name}/update", "/runner-pairing-codes",
                            "/runner-pairing-codes/{pid}"}),
