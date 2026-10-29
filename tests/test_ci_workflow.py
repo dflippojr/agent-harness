@@ -140,6 +140,19 @@ def test_review_linux_runs_the_review_tooling_tests_under_pwsh_on_ubuntu():
     assert "-n " not in suite["run"]
 
 
+def test_unix_installers_run_on_every_pull_request_in_an_ubuntu_job_the_gate_needs():
+    # tests/test_unix_installers.py pins the Linux and macOS installers; no CI job ran it before #825.
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    assert "unix-installers" in jobs, "no CI job runs tests/test_unix_installers.py"
+    job = jobs["unix-installers"]
+    assert "unix-installers" in jobs["gate"]["needs"]
+    assert job["runs-on"] == "ubuntu-latest"
+    # Not behind `changes`: the job runs on every pull request, as #825 asks.
+    assert "needs" not in job and "if" not in job
+    suite = job["steps"][-1]
+    assert "tests/test_unix_installers.py" in suite["run"]
+
+
 def test_ci_reruns_when_an_owner_label_changes_so_gate_reevaluates_the_early_guard():
     # The early gate-guard job reads labels when it runs, and `gate` needs it. Without labeled/unlabeled here, applying
     # gate-change-approved leaves the failed gate in place until someone reruns CI by hand (#727).
