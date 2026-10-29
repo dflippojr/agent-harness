@@ -286,7 +286,17 @@ git pull
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
+On Linux and macOS, `git pull`, then run `install/install.sh` again. On the tower, a rerun currently writes a quoted
+`WorkingDirectory=` into `agent-harness-main-daemon.service`, which systemd rejects, until #810 lands. The tower's
+production checkout is updated by `deploy-tower` instead ([CI-CD.md](CI-CD.md#tower-runner)).
+
 ## Switch the local model (tower)
+
+This section describes the Windows tower (`run-qwen.ps1`, `C:/AI/...`). Since 2026-10-26 the tower runs Ubuntu. There
+the model file is fixed in the `agent-harness-main-llama.service` user unit's `ExecStart` (`install/run-server.sh`
+with `~/.local/share/agent-harness/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`), and the Qwen3.8 distill file is not
+on that disk, so the `default_model` line alone does not switch it. Changing the unit is an owner step, and the
+manual GPU hold is on.
 
 `config/harness.yaml` lists two local models on the same llama-server (127.0.0.1:8090): `qwen3.6-35b-a3b` (the
 default) and `qwen3.8-35b-a3b-distill` (empero-ai's distill, adopted in #413 from the

@@ -1,6 +1,6 @@
 # Resource guard (#311)
 
-The tower has 31.8 GB of RAM and a 16 GB GPU, shared with Docker/WSL, Plex, games, several Claude/Codex sessions and a
+The tower has 31.8 GB of RAM and a 16 GB GPU, shared with Docker, Plex, games, several Claude/Codex sessions and a
 browser. The local model (Qwen3.6-35B-A3B, a MoE whose expert tensors stay in system RAM) costs about 14 GB of RAM when
 loaded. The resource guard (formerly the GPU guard, `harness_modules/local_model/service.py`) makes the harness share that better. It
 covers the VRAM triggers (games, Plex transcodes), a free-memory threshold, the manual hold, and manual load/unload in
@@ -8,6 +8,12 @@ one place: **Actions → Resources**.
 
 On Linux, how the model's VRAM can share the card with one Plex transcode and a Sunshine stream, and which guard
 thresholds follow from that, is designed in `docs/gpu-vram-budget.md` (#823).
+
+The supervisor details below (`ops/llama-server/run-qwen.ps1`, `C:/AI/...` paths, logon tasks) describe the Windows
+tower. Since 2026-10-26 the tower runs Ubuntu: llama-server runs as the `agent-harness-main-llama.service` user unit
+through `install/run-server.sh`, and its pause flag is `~/.local/share/agent-harness/llama-server.paused`. The
+Windows text applies to a Windows boot only. Plex detection on Linux is #811. The measurements further down are
+records from the Windows tower.
 
 ## When the model loads
 

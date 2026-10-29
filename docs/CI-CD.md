@@ -119,8 +119,8 @@ CI and gate-guard wait scripts. End-to-end App operation must be checked after t
 
 ## Deployment boundary
 
-The daemon itself is deliberately not containerized. It is a host Python process because it coordinates Windows
-scheduled tasks, local repository paths, Docker sandbox creation, GPU/model controls, and native provider logins.
+The daemon itself is deliberately not containerized. It is a host Python process because it coordinates the host's
+services (systemd user units on the Ubuntu tower, scheduled tasks on Windows), local repository paths, Docker sandbox creation, GPU/model controls, and native provider logins.
 
 The owner explicitly approved the repository-scoped self-hosted runners. The `agent-harness-tower-linux` runner gives
 trusted `main` workflow code the tower user's filesystem, Docker, credentials, and service-restart authority. It is
@@ -775,6 +775,11 @@ Replace `-1` with the member you are removing. The same GitHub-delete + uninstal
 is the repair path used for the tower runner.
 
 ## Staging smoke slot
+
+Windows only. The slot's runner (`[self-hosted, Windows, X64, agent-harness-staging]` in `staging.yml`) and its
+`ops/harness/*staging*.ps1` scripts exist only on a Windows boot of the tower, and the slot is parked there. The
+Production column under Locations gives the Windows paths. On the Ubuntu tower production is described under
+[Tower runner](#tower-runner), and there is no staging slot.
 
 `.github/workflows/staging.yml` keeps one disposable Agent Harness Server slot on the same tower, so a candidate
 branch or pull-request head can be opened in a browser before it is merged. It is deliberately not a second
