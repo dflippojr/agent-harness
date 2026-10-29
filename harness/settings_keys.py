@@ -183,8 +183,11 @@ def _hidden(key, label, help, category, yaml_path, modules=()):
     )
 
 
-def cfg_field(*path: str, cast):
-    """Getter and setter for a Config field at a path: cfg_field("images", "max_pixels", cast=int)."""
+def cfg_field(*path: str, cast=None):
+    """Getter and setter for a Config field at a path: cfg_field("images", "max_pixels", cast=int).
+
+    Without a cast the setter stores the value as given.
+    """
     def getter(cfg: Config):
         value = cfg
         for name in path:
@@ -195,7 +198,7 @@ def cfg_field(*path: str, cast):
         owner = cfg
         for name in path[:-1]:
             owner = getattr(owner, name)
-        setattr(owner, path[-1], cast(value))
+        setattr(owner, path[-1], value if cast is None else cast(value))
     return getter, setter
 
 

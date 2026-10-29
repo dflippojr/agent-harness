@@ -45,14 +45,14 @@ def discovery_specs():
                  'all reparse points (including OneDrive), credentials, caches and build folders are excluded.')
     specs = [
         _bool('remote_control.discovery.enabled', 'Folder discovery', help_text,
-              'Remote Control discovery', False, *cfg_field('remote_control', 'discovery', 'enabled', cast=bool),
+              'Remote Control discovery', False, *cfg_field('remote_control', 'discovery', 'enabled'),
               ('remote_control', 'discovery', 'enabled')),
         SettingSpec(key='remote_control.discovery.roots', label='Discovery roots', help=help_text,
                     category='Remote Control discovery', value_type='discovery_root_list', default=[],
                     scope='admin', apply_mode='live', getter=_get_discovery_roots, setter=_set_discovery_roots,
                     bounds=Bounds(max_length=8), yaml_path=('remote_control', 'discovery', 'roots')),
         _int('remote_control.discovery.max_depth', 'Discovery depth', help_text,
-             'Remote Control discovery', 3, *cfg_field('remote_control', 'discovery', 'max_depth', cast=int), 1, 5,
+             'Remote Control discovery', 3, *cfg_field('remote_control', 'discovery', 'max_depth'), 1, 5,
              ('remote_control', 'discovery', 'max_depth')),
     ]
     for spec in specs:
