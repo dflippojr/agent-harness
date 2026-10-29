@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -249,11 +250,21 @@ class GpuGuardConfig:
     plex: bool = True
 
 
+def _default_backup_dir() -> str:
+    """Windows keeps its D: folder. Elsewhere it is the XDG data dir (#837), never a relative path in the checkout.
+    A relative or empty XDG_DATA_HOME counts as unset, as the XDG Base Directory spec says."""
+    if sys.platform == "win32":
+        return "D:/My Backups/agent-harness"
+    xdg = os.environ.get("XDG_DATA_HOME", "")
+    data_home = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
+    return str(data_home / "agent-harness" / "backups")
+
+
 @dataclass
 class BackupConfig:
     """Nightly copy of the session database and transcripts (maintenance.py)."""
     enabled: bool = False
-    dir: str = "D:/My Backups/agent-harness"
+    dir: str = field(default_factory=_default_backup_dir)
     at: str = "03:30"        # local time
     keep_days: int = 14
     member_key_dir: str = ""   # default: backup.dir/member-keys, outside dated snapshots
