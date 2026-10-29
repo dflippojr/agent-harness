@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
+import yaml
 
 from harness import canary
 from harness.canary import Canary, CanaryStore, Nightly, Report
@@ -876,3 +880,59 @@ def test_a_missing_suite_file_disables_only_the_canary_and_doctor_fails(tmp_path
     errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
     assert len(errors) == 1 and "canary.suite" in errors[0] and "missing.yaml" in errors[0]
     assert _doctor_lines(SimpleNamespace(canary=cfg))[0][0] == "fail"
+
+
+
+def _canary_config_dir(tmp_path, data_dir=None, fixture_dir=None):
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    raw = {"models": {"fake": {"base_url": "http://unused", "context_tokens": 1024}},
+           "canary": {"enabled": True, **({"fixture_dir": fixture_dir} if fixture_dir else {})}}
+    if data_dir:
+        raw["data_dir"] = data_dir.as_posix()
+    (cfg_dir / "harness.yaml").write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return cfg_dir
+
+
+@pytest.mark.parametrize("source", ["argument", "environment", "yaml"])
+def test_an_omitted_fixture_dir_resolves_under_the_effective_data_dir(tmp_path, monkeypatch, source):
+    """#810: the default fixture is <data_dir>/web-fixture, whichever way `load` picked data_dir, not a D: path."""
+    from harness import config
+    chosen = tmp_path / "data dir" / source
+    # Each lower-precedence source names another directory, so only the winning source can produce the path.
+    if source == "yaml":
+        monkeypatch.delenv("HARNESS_DATA_DIR", raising=False)
+    else:
+        monkeypatch.setenv("HARNESS_DATA_DIR", str(chosen if source == "environment" else tmp_path / "env data"))
+    cfg_dir = _canary_config_dir(tmp_path, chosen if source == "yaml" else tmp_path / "yaml data")
+    argument = chosen if source == "argument" else None
+    expected = chosen / "web-fixture"
+
+    cfg = config.load(cfg_dir, data_dir=argument)
+    assert cfg.data_dir == chosen and cfg.canary.fixture_dir == str(expected)
+    assert cfg.canary.enabled is False and str(expected) in cfg.canary.disabled_reason
+    assert str(expected) in _doctor_lines(SimpleNamespace(canary=cfg.canary))[0][2]
+
+    expected.mkdir(parents=True)
+    (expected / "manifest.json").write_text("{}", encoding="utf-8")
+    cfg = config.load(cfg_dir, data_dir=argument)
+    assert cfg.canary.enabled is True and not cfg.canary.disabled_reason
+    assert Path(cfg.canary.fixture_dir) == expected  # what Manager._build_canary hands CanaryRunner
+
+
+def test_an_omitted_fixture_dir_without_a_data_dir_uses_the_repository_data_dir(tmp_path, monkeypatch):
+    from harness import config
+    monkeypatch.delenv("HARNESS_DATA_DIR", raising=False)
+    cfg = config.load(_canary_config_dir(tmp_path))
+    assert cfg.canary.fixture_dir == str(config.ROOT / "data" / "web-fixture")
+    assert config.CanaryConfig().fixture_dir == ""  # no machine-specific default left in the dataclass
+
+
+def test_an_explicit_fixture_dir_is_kept_whatever_the_data_dir(tmp_path, monkeypatch):
+    from harness import config
+    monkeypatch.setenv("HARNESS_DATA_DIR", str(tmp_path / "env data"))
+    explicit = tmp_path / "recorded web"
+    explicit.mkdir()
+    (explicit / "manifest.json").write_text("{}", encoding="utf-8")
+    cfg = config.load(_canary_config_dir(tmp_path, tmp_path / "data", explicit.as_posix()), data_dir=tmp_path / "x")
+    assert cfg.canary.enabled is True and cfg.canary.fixture_dir == explicit.as_posix()
