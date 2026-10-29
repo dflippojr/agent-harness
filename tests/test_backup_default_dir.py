@@ -3,6 +3,7 @@ writes a `D:` folder into the checkout. Synthetic paths only; anything created i
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -75,15 +76,17 @@ def test_a_configured_backup_dir_wins_over_the_default(tmp_path):
     assert config.load(cfg_dir, data_dir=tmp_path / "data").backup.dir == "/synthetic/backups"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="Windows keeps its own D: default")
 def test_a_manual_backup_never_writes_a_d_folder_into_the_checkout(tmp_path, monkeypatch):
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     monkeypatch.chdir(checkout)
     xdg = tmp_path / "xdg-data"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
-    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="hi")]))
+    cfg = make_cfg(tmp_path)
+    if sys.platform == "win32":  # the Windows default is the real D: drive, so keep this run's backups under tmp_path
+        cfg.backup.dir = str(xdg / "agent-harness" / "backups")
+    m = Manager(cfg, chat=Script([Completion(content="hi")]))
     with TestClient(create_app(m)) as client:
         assert client.post("/maintenance/backup").json()["ok_at"]
-    assert not (checkout / "D:").exists()
+    assert "D:" not in os.listdir(checkout)
     assert (xdg / "agent-harness" / "backups").is_dir()
