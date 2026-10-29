@@ -14,6 +14,7 @@ import pkgutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -156,3 +157,17 @@ def test_each_hook_reaches_the_same_code(module, monkeypatch):
             ("returns", short, name) for short, sub in subs.items() for name, value in vars(sub).items()
             if value is result)
     assert reached == HOOKS[module.name]
+
+
+def test_enabled_flag_reads_its_section_for_every_switch():
+    hook = modules.enabled_flag("notify")
+    assert hook(SimpleNamespace(notify=SimpleNamespace(enabled=1)), "notifications") is True
+    assert hook(SimpleNamespace(notify=SimpleNamespace(enabled=0)), "other") is False
+
+
+def test_lazy_resolves_relative_to_its_package_on_every_call(monkeypatch):
+    from harness_modules.search import MODULE, routes
+    assert MODULE.owner_routes() is routes.owner_routes
+    replaced = object()
+    monkeypatch.setattr(routes, "owner_routes", replaced)
+    assert MODULE.owner_routes() is replaced
