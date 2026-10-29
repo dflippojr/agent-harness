@@ -1161,7 +1161,7 @@ def test_linux_supervisor_stops_the_container_when_the_flag_appears(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     docker = bin_dir / "docker"
-    docker.write_text(FAKE_DOCKER, encoding="utf-8")
+    docker.write_text(FAKE_DOCKER, encoding="utf-8", newline="\n")  # bash rejects CRLF
     docker.chmod(0o755)
     log = tmp_path / "docker.log"
     flag = tmp_path / "llama-server.paused"
