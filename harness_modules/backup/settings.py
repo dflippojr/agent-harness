@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from harness.modules import Bounds, SettingSpec, setting_bool, setting_hidden, setting_int
+from harness.modules import Bounds, SettingSpec, cfg_field, setting_bool, setting_hidden, setting_int
 
 from .member_key import key_dir
 
@@ -31,14 +31,6 @@ def apply_backup_schedule(manager, old, new) -> None:
         runtime.service.reschedule_backup()
 
 
-def _get_enabled(cfg):
-    return cfg.backup.enabled
-
-
-def _set_enabled(cfg, value):
-    cfg.backup.enabled = bool(value)
-
-
 def _get_at(cfg):
     return cfg.backup.at
 
@@ -48,14 +40,6 @@ def _set_at(cfg, value):
     if not TIME_OF_DAY.fullmatch(text):
         raise ValueError("backup.at must be HH:MM in 24-hour local time")
     cfg.backup.at = text
-
-
-def _get_keep(cfg):
-    return cfg.backup.keep_days
-
-
-def _set_keep(cfg, value):
-    cfg.backup.keep_days = int(value)
 
 
 def specs() -> list:
@@ -72,10 +56,11 @@ def specs() -> list:
         ),
         setting_int("backup.keep_days", "Backup retention (days)",
                     "Delete dated backup folders older than this.",
-                    "Backup", 14, _get_keep, _set_keep, 1, 365, ("backup", "keep_days"), modules=("backup",)),
+                    "Backup", 14, *cfg_field("backup", "keep_days", cast=int), 1, 365, ("backup", "keep_days"),
+                    modules=("backup",)),
         setting_bool("backup.enabled", "Backups",
                      "Runtime enable for the nightly backup. Does not change the backup directory.",
-                     "Features", False, _get_enabled, _set_enabled, ("backup", "enabled"),
+                     "Features", False, *cfg_field("backup", "enabled", cast=bool), ("backup", "enabled"),
                      apply_mode="daemon_restart", modules=("backup",), enable_check=check_backup),
         setting_hidden("backup.dir", "Backup directory", "Where nightly backups are written.",
                        "Backup", ("backup", "dir"), modules=("backup",)),

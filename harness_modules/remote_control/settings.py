@@ -1,13 +1,5 @@
 """Remote Control runtime and owner discovery settings."""
-from harness.modules import SettingSpec, Bounds, setting_bool as _bool, setting_int as _int
-
-def _get_discovery_enabled(cfg):
-    return cfg.remote_control.discovery.enabled
-
-
-def _set_discovery_enabled(cfg, value):
-    cfg.remote_control.discovery.enabled = value
-
+from harness.modules import SettingSpec, Bounds, cfg_field, setting_bool as _bool, setting_int as _int
 
 def _get_discovery_roots(cfg):
     return list(cfg.remote_control.discovery.roots)
@@ -21,14 +13,6 @@ def _set_discovery_roots(cfg, value):
     if not isinstance(value, list) or len(value) > 8 or not all(isinstance(v, str) for v in value):
         raise DiscoveryError('up_to_eight_roots')
     cfg.remote_control.discovery.roots = [lexical(v) for v in value]
-
-
-def _get_discovery_depth(cfg):
-    return cfg.remote_control.discovery.max_depth
-
-
-def _set_discovery_depth(cfg, value):
-    cfg.remote_control.discovery.max_depth = value
 
 
 def validate_discovery(cfg, proposed):
@@ -61,27 +45,19 @@ def discovery_specs():
                  'all reparse points (including OneDrive), credentials, caches and build folders are excluded.')
     specs = [
         _bool('remote_control.discovery.enabled', 'Folder discovery', help_text,
-              'Remote Control discovery', False, _get_discovery_enabled, _set_discovery_enabled,
+              'Remote Control discovery', False, *cfg_field('remote_control', 'discovery', 'enabled', cast=bool),
               ('remote_control', 'discovery', 'enabled')),
         SettingSpec(key='remote_control.discovery.roots', label='Discovery roots', help=help_text,
                     category='Remote Control discovery', value_type='discovery_root_list', default=[],
                     scope='admin', apply_mode='live', getter=_get_discovery_roots, setter=_set_discovery_roots,
                     bounds=Bounds(max_length=8), yaml_path=('remote_control', 'discovery', 'roots')),
         _int('remote_control.discovery.max_depth', 'Discovery depth', help_text,
-             'Remote Control discovery', 3, _get_discovery_depth, _set_discovery_depth, 1, 5,
+             'Remote Control discovery', 3, *cfg_field('remote_control', 'discovery', 'max_depth', cast=int), 1, 5,
              ('remote_control', 'discovery', 'max_depth')),
     ]
     for spec in specs:
         spec.platforms = ('win32',)
     return specs
-
-
-def _get_enabled(cfg):
-    return cfg.remote_control.enabled
-
-
-def _set_enabled(cfg, value):
-    cfg.remote_control.enabled = bool(value)
 
 
 def check_remote_control(cfg):
@@ -101,5 +77,5 @@ def specs():
             spec.normalize_change = normalize_roots
     return [*result, _bool('remote_control.enabled', 'Remote Control',
             'Runtime enable for Remote Control. Does not install the module.', 'Features', False,
-            _get_enabled, _set_enabled, ('remote_control', 'enabled'),
+            *cfg_field('remote_control', 'enabled', cast=bool), ('remote_control', 'enabled'),
             apply_mode='daemon_restart', modules=('remote_control',), enable_check=check_remote_control)]
