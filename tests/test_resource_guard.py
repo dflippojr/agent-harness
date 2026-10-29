@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -994,6 +997,8 @@ def test_park_stops_a_llama_server_that_is_not_listening_yet(tmp_path, monkeypat
     cfg.gpu_guard = GpuGuardConfig(enabled=True, pause_flag=str(tmp_path / "llama-server.paused"))
     model = cfg.models[cfg.default_model]
     port = ServerControl(cfg.gpu_guard, model).port
+    import harness_modules.local_model.service as gpu_guard
+    monkeypatch.setattr(gpu_guard, "sys", SimpleNamespace(platform="win32"))  # taskkill and netstat; asyncio keeps its loop
     alive, killed = _fake_llama_processes(monkeypatch, [
         (4242, "llama-server.exe", ["C:\AI\llama-server.exe", "-m", "q.gguf", "--port", str(port)]),
         (4343, "llama-server.exe", ["C:\AI\llama-server.exe", "--port", str(port + 1)]),  # someone else's server
@@ -1007,3 +1012,204 @@ def test_park_stops_a_llama_server_that_is_not_listening_yet(tmp_path, monkeypat
         assert killed == [4242] and set(alive) == {4343, 4444}
         assert control.flagged()  # the supervisor won't start another
     asyncio.run(body())
+
+
+def test_windows_listening_pids_parse_netstat(tmp_path, monkeypatch):
+    import harness_modules.local_model.service as gpu_guard
+    from harness_modules.local_model.service import ServerControl
+    cfg = make_cfg(tmp_path)
+    control = ServerControl(GpuGuardConfig(pause_flag=str(tmp_path / "paused")), cfg.models[cfg.default_model])
+    port = control.port
+    monkeypatch.setattr(gpu_guard, "sys", SimpleNamespace(platform="win32"))
+    netstat = (f"  Proto  Local Address          Foreign Address        State           PID\n"
+               f"  TCP    127.0.0.1:{port}         0.0.0.0:0              LISTENING       4242\n"
+               f"  TCP    127.0.0.1:{port}1        0.0.0.0:0              LISTENING       4343\n"
+               f"  TCP    127.0.0.1:{port}         127.0.0.1:50000        ESTABLISHED     4444\n"
+               f"  TCP    0.0.0.0:{port}           0.0.0.0:0              LISTENING       4\n")
+    calls = []
+
+    async def fake_run(args, timeout=60, **kw):
+        calls.append(args)
+        return 0, netstat, ""
+    monkeypatch.setattr(gpu_guard, "run_cmd", fake_run)
+    assert asyncio.run(control._listening_pids()) == {4242}
+    assert calls == [["netstat", "-ano", "-p", "TCP"]]
+
+
+# Linux page-out (#835): no taskkill or netstat; psutil finds and stops a native llama-server
+def _fake_linux_server(monkeypatch, port):
+    """A native llama-server (pid 5151) listening on `port`, as psutil reports it. Returns the commands run through
+    run_cmd and the pids psutil terminated."""
+    import psutil
+    import harness_modules.local_model.service as gpu_guard
+    monkeypatch.setattr(gpu_guard, "sys", SimpleNamespace(platform="linux"))
+    addr = SimpleNamespace
+    conns = [
+        SimpleNamespace(laddr=addr(ip="127.0.0.1", port=port), status=psutil.CONN_LISTEN, pid=5151),
+        SimpleNamespace(laddr=addr(ip="127.0.0.1", port=port + 1), status=psutil.CONN_LISTEN, pid=5252),
+        SimpleNamespace(laddr=addr(ip="127.0.0.1", port=port), status=psutil.CONN_ESTABLISHED, pid=5353),
+        SimpleNamespace(laddr=addr(ip="127.0.0.1", port=port), status=psutil.CONN_LISTEN, pid=None),  # another user's
+    ]
+    monkeypatch.setattr(psutil, "net_connections", lambda kind="inet": list(conns) if kind == "tcp" else [])
+    commands, terminated = [], []
+
+    async def fake_run(args, timeout=60, **kw):
+        commands.append(args)
+        return 0, "", ""
+    monkeypatch.setattr(gpu_guard, "run_cmd", fake_run)
+
+    class Proc:
+        def __init__(self, pid):
+            self.pid = pid
+
+        def terminate(self):
+            terminated.append(self.pid)
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            raise AssertionError("terminate was enough")
+    monkeypatch.setattr(psutil, "Process", Proc)
+    return commands, terminated
+
+
+def test_linux_listening_pids_come_from_psutil(tmp_path, monkeypatch):
+    from harness_modules.local_model.service import ServerControl
+    cfg = make_cfg(tmp_path)
+    control = ServerControl(GpuGuardConfig(pause_flag=str(tmp_path / "paused")), cfg.models[cfg.default_model])
+    commands, _ = _fake_linux_server(monkeypatch, control.port)
+    assert asyncio.run(control._listening_pids()) == {5151}
+    assert commands == []  # no netstat -ano on Linux
+
+
+def test_linux_park_stops_the_server_without_taskkill(tmp_path, monkeypatch):
+    from harness_modules.local_model.service import ServerControl
+    cfg = make_cfg(tmp_path)
+    control = ServerControl(GpuGuardConfig(pause_flag=str(tmp_path / "paused")), cfg.models[cfg.default_model])
+    commands, terminated = _fake_linux_server(monkeypatch, control.port)
+
+    async def body():
+        await control.stop()
+        assert control.flagged()
+        assert terminated == [5151]
+        assert not [c for c in commands if c[0] in ("taskkill", "netstat")], commands
+        await control.start()
+        assert not control.flagged()
+    asyncio.run(body())
+
+
+def test_linux_stop_kills_a_server_that_ignores_sigterm_and_leaves_one_it_cannot_signal(tmp_path, monkeypatch):
+    import psutil
+    from harness_modules.local_model.service import ServerControl
+    cfg = make_cfg(tmp_path)
+    control = ServerControl(GpuGuardConfig(pause_flag=str(tmp_path / "paused")), cfg.models[cfg.default_model])
+    _fake_linux_server(monkeypatch, control.port)
+    signals = []
+
+    class Proc:
+        def __init__(self, pid):
+            if pid == 6060:
+                raise psutil.AccessDenied(pid)  # a container's root process
+            self.pid = pid
+
+        def terminate(self):
+            signals.append(("TERM", self.pid))
+
+        def wait(self, timeout=None):
+            raise psutil.TimeoutExpired(timeout, self.pid)
+
+        def kill(self):
+            signals.append(("KILL", self.pid))
+    monkeypatch.setattr(psutil, "Process", Proc)
+    assert ServerControl._terminate(5151) == "killed"
+    assert signals == [("TERM", 5151), ("KILL", 5151)]
+    assert ServerControl._terminate(6060) == "not stopped (AccessDenied)"
+
+
+def test_linux_listening_pids_survive_a_denied_socket_listing(tmp_path, monkeypatch):
+    import psutil
+    from harness_modules.local_model.service import ServerControl
+    cfg = make_cfg(tmp_path)
+    control = ServerControl(GpuGuardConfig(pause_flag=str(tmp_path / "paused")), cfg.models[cfg.default_model])
+    _fake_linux_server(monkeypatch, control.port)
+
+    def denied(kind="inet"):
+        raise psutil.AccessDenied()  # macOS without root
+    monkeypatch.setattr(psutil, "net_connections", denied)
+    assert asyncio.run(control._listening_pids()) == set()
+
+
+RUN_SERVER = Path(__file__).resolve().parents[1] / "install" / "run-server.sh"
+FAKE_DOCKER = """#!/usr/bin/env bash
+# Records each call; `run` blocks like a running container until `stop` (or `rm -f`) is called.
+echo "$*" >>"$DOCKER_LOG"
+case "$1" in
+    rm) rm -f "$DOCKER_STOPPED" ;;
+    stop) touch "$DOCKER_STOPPED" ;;
+    run) while [[ ! -e "$DOCKER_STOPPED" ]]; do sleep 0.05; done ;;
+esac
+exit 0
+"""
+
+
+def test_linux_supervisor_stops_the_container_when_the_flag_appears(tmp_path):
+    """install/run-server.sh stops its running container once the pause flag is written, stays paused while the flag
+    exists, and starts the container again once ServerControl.start() removes it (#835)."""
+    from tests.installer_support import BASH
+    assert BASH, "the Linux supervisor test needs bash (Git Bash on Windows)"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(FAKE_DOCKER, encoding="utf-8", newline="\n")  # bash rejects CRLF
+    docker.chmod(0o755)
+    log = tmp_path / "docker.log"
+    flag = tmp_path / "llama-server.paused"
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_LOG": log.as_posix(),
+           "DOCKER_STOPPED": (tmp_path / "stopped").as_posix(), "HARNESS_LOG_DIR": (tmp_path / "logs").as_posix(),
+           "HARNESS_PAUSE_POLL_SECONDS": "0.2"}
+
+    def calls(verb):
+        lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        return [line for line in lines if line.split()[0] == verb]
+
+    def wait_for(cond, seconds):
+        deadline = time.monotonic() + scaled(seconds)
+        while time.monotonic() < deadline:
+            if cond():
+                return True
+            time.sleep(0.05)
+        return cond()
+
+    proc = subprocess.Popen([BASH, RUN_SERVER.as_posix(), "Main", "llama:test", (tmp_path / "m.gguf").as_posix(), "qwen",
+                             "8099", "4096", flag.as_posix()], env=env, stdin=subprocess.DEVNULL)
+    try:
+        assert wait_for(lambda: len(calls("run")) == 1, 10), "the supervisor never started the container"
+        assert "--name agent-harness-main-llama" in calls("run")[0]
+        flag.write_text("paused by test\n", encoding="utf-8")
+        assert wait_for(lambda: calls("stop"), 15), "the pause flag did not stop the running container"
+        assert calls("stop")[0] == "stop -t 10 agent-harness-main-llama"
+        time.sleep(1)
+        assert len(calls("run")) == 1, "the supervisor restarted the container while the flag exists"
+        assert proc.poll() is None
+        from harness_modules.local_model.service import ServerControl
+        control = ServerControl(GpuGuardConfig(pause_flag=str(flag)), SimpleNamespace(base_url="http://127.0.0.1:8099"))
+        asyncio.run(control.start())
+        assert wait_for(lambda: len(calls("run")) == 2, 10), "removing the flag did not resume the container"
+    finally:
+        # Park before ending it: on Windows terminate() skips bash's TERM trap, so the supervisor must already have
+        # reaped its fake container and flag watcher, leaving only its paused wait loop.
+        supervisor_log = tmp_path / "logs" / "llama-server-supervisor.log"
+
+        def parked():
+            text = supervisor_log.read_text(encoding="utf-8") if supervisor_log.exists() else ""
+            return text.count("stopped for the pause flag") >= len(calls("run"))
+        flag.write_text("paused by test\n", encoding="utf-8")
+        (tmp_path / "stopped").touch()
+        wait_for(parked, 10)
+        proc.terminate()
+        try:
+            proc.wait(timeout=scaled(15))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()

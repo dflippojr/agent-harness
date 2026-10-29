@@ -336,10 +336,15 @@ class ServerControl:
         self.flag.write_text(f"paused by agent-harness at {time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
 
     async def stop(self) -> None:
+        """Writes the pause flag, then stops whatever serves the port. On Linux the supervisor (install/run-server.sh)
+        also stops its container once the flag appears: the daemon can't signal a container's root process (#835)."""
         self.write_flag()
         for pid in await self._server_pids():
-            code, out, err = await run_cmd(["taskkill", "/PID", str(pid), "/F"], timeout=30)
-            log.info("stopped model server pid %s (exit %s) %s", pid, code, (out + err).strip()[:200])
+            if sys.platform == "win32":
+                code, out, err = await run_cmd(["taskkill", "/PID", str(pid), "/F"], timeout=30)
+                log.info("stopped model server pid %s (exit %s) %s", pid, code, (out + err).strip()[:200])
+            else:
+                log.info("stopped model server pid %s: %s", pid, await asyncio.to_thread(self._terminate, pid))
 
     async def start(self) -> None:
         await asyncio.to_thread(self.flag.unlink, missing_ok=True)
@@ -373,7 +378,25 @@ class ServerControl:
                 continue
         return pids
 
+    @staticmethod
+    def _terminate(pid: int) -> str:
+        """SIGTERM, then SIGKILL after 10 s: the Linux counterpart of `taskkill /F`."""
+        import psutil
+        try:
+            proc = psutil.Process(pid)
+            proc.terminate()
+            try:
+                proc.wait(10)
+                return "terminated"
+            except psutil.TimeoutExpired:
+                proc.kill()
+                return "killed"
+        except psutil.Error as e:  # gone already, or another user's process (a container's llama-server)
+            return f"not stopped ({type(e).__name__})"
+
     async def _listening_pids(self) -> set[int]:
+        if sys.platform != "win32":
+            return await asyncio.to_thread(self._psutil_listening_pids)
         _, out, _ = await run_cmd(["netstat", "-ano", "-p", "TCP"], timeout=30)
         pids = set()
         for line in out.splitlines():
@@ -382,6 +405,18 @@ class ServerControl:
                 if parts[4].isdigit() and int(parts[4]) > 4:
                     pids.add(int(parts[4]))
         return pids
+
+    def _psutil_listening_pids(self) -> set[int]:
+        """Processes listening on our port. psutil leaves the pid out for another user's socket, so a container's
+        server run as root isn't listed; run-server.sh stops that one itself."""
+        import psutil
+        try:
+            conns = psutil.net_connections(kind="tcp")
+        except psutil.Error:  # macOS needs root for this
+            log.warning("could not list listening sockets", exc_info=True)
+            return set()
+        return {c.pid for c in conns if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == self.port
+                and c.pid}
 
 
 # ---------- guard ----------

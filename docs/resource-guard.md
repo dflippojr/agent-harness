@@ -55,6 +55,17 @@ These **don't** load the model:
   the flag after launching; the supervisor is unchanged. The flag is written first, so it won't start another. A
   server started in the instant between the process listing and the supervisor's flag check is the only window left.
 
+- **Linux page-out (#835).** On Linux, `install/run-server.sh` runs llama-server in the
+  `agent-harness-<instance>-llama` Docker container. The daemon can't signal that container's root process, and
+  psutil gives no pid for another user's socket. So while the container runs, the supervisor polls the pause flag every
+  5 s (`HARNESS_PAUSE_POLL_SECONDS`). When the flag appears it runs `docker stop -t 10` on the container, so the VRAM
+  comes free within 15 s. Then it waits, without the usual 15 s restart delay, until `ServerControl.start()` removes
+  the flag. `ServerControl.stop()` on Linux finds the port's listeners with `psutil.net_connections(kind="tcp")` instead
+  of `netstat -ano`, and stops a native llama-server it may signal with SIGTERM (SIGKILL after 10 s) instead of
+  `taskkill`. *Decision:* the supervisor watches the flag, rather than the daemon running `docker stop`. The
+  supervisor already owns the container's name and its `docker stop` trap, and the daemon then needs neither the
+  instance name nor Docker access. Windows is unchanged.
+
 `lazy_load: false` in `config/harness.yaml` restores the old eager reload after holds and image batches.
 
 **Unload now** (Actions → Resources, `POST /resources/unload`) parks the model straight away without holding the queue.
