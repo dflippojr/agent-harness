@@ -6,6 +6,9 @@ loaded. The resource guard (formerly the GPU guard, `harness_modules/local_model
 covers the VRAM triggers (games, Plex transcodes), a free-memory threshold, the manual hold, and manual load/unload in
 one place: **Actions → Resources**.
 
+On Linux, how the model's VRAM can share the card with one Plex transcode and a Sunshine stream, and which guard
+thresholds follow from that, is designed in `docs/gpu-vram-budget.md` (#823).
+
 ## When the model loads
 
 llama-server loads the model whenever its process starts, so the harness controls loading through the supervisor's
