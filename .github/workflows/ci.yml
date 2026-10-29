@@ -5,6 +5,7 @@ name: CI
 #   test      - the complete pytest suite with coverage (coverage.xml artifact)
 #   test-py313 - the same suite on Python 3.13, after an import smoke test (#730); no coverage
 #   review-linux - the review tooling's tests under PowerShell 7 on Linux, where the review runners live (#806)
+#   unix-installers - tests/test_unix_installers.py on Linux: the installer contracts, on every pull request (#825)
 #   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
 #   hub-contract - the pinned Hub's (dflippojr/agent-harness-hub) contract suite against this daemon in fake-model mode
@@ -204,6 +205,28 @@ jobs:
           GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
         run: >
           python -m pytest tests/test_review_runner.py tests/test_runner_install.py -q -rs -p no:cacheprovider
+
+  unix-installers:
+    # tests/test_unix_installers.py pins the Linux and macOS installers (#15, #810). No job ran it before #825, so an
+    # installer change could break it unseen. It runs on every pull request, docs-only ones too: no `changes` gate.
+    # One hosted ubuntu-latest run of a few minutes. No coverage: `test` measures it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt
+
+      - name: Unix installer tests
+        run: python -m pytest tests/test_unix_installers.py -q -rs -p no:cacheprovider
 
   sonar:
     # SonarCloud analysis of the `test` job's coverage. Automatic analysis is
@@ -498,7 +521,7 @@ jobs:
     # `changes`). Any needed job failed or cancelled fails it; see scripts/ci_gate.py for the rules. Add every new job
     # here.
     if: always()
-    needs: [changes, lint, test, test-py313, review-linux, sonar, openapi, ui-tests, hub-contract, deploy-linux, gate-guard]
+    needs: [changes, lint, test, test-py313, review-linux, unix-installers, sonar, openapi, ui-tests, hub-contract, deploy-linux, gate-guard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -38,6 +38,8 @@ after that workflow succeeds for the exact commit pushed to `main`:
    `ubuntu-latest`, which ships PowerShell 7 and Pester: `ops/review/run-review.ps1`, its Pester suites and
    `ops/github/install-runner.sh` on Linux, where the review runners live. `REVIEW_TESTS_REQUIRE_PWSH=1` turns a
    missing `pwsh` into a failure rather than a skip. No coverage; `test` measures it.
+   **CI / unix-installers** (#825) runs `tests/test_unix_installers.py` on GitHub-hosted `ubuntu-latest` on every pull
+   request, with no `changes` gate, so a docs-only PR runs it too. `gate` needs it, so a failure fails the CI run.
    **CI / test-py313** (#730) runs the same suite on Python 3.13, on `windows-latest`, after an import smoke test
    (`tests/test_import_smoke.py`) that compiles every shipped source file and imports every shipped module with
    `SyntaxWarning` as an error. It has no coverage. `gate` needs it, so a failure fails the CI run, and `guard` deploys
