@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from . import audit_context, catalog_ids, credential_audit
 from .manager import HarnessError
+from .origins import normalize_origin, request_origin as _request_origin
 
 PENDING, ARMED, CLAIMED, APPROVED = "pending", "armed", "claimed", "approved"
 DENIED, REDEEMED, EXPIRED = "denied", "redeemed", "expired"
@@ -228,18 +229,6 @@ def _challenge(value: str, method: str) -> str:
     if not CHALLENGE.fullmatch(value or ""):
         raise ValueError("code_challenge must be the unpadded base64url SHA-256 of the code_verifier (43 characters)")
     return _digest(value)
-
-
-def _request_origin(request: Request) -> str:
-    """The caller's normalized Origin, "" for a native caller, or 403 for something that isn't an origin."""
-    from .apps import normalize_origin
-    raw = request.headers.get("origin", "")
-    if not raw:
-        return ""
-    try:
-        return normalize_origin(raw)
-    except ValueError as e:
-        raise HarnessError(403, str(e)) from e
 
 
 def _caller(request: Request) -> str:
@@ -519,7 +508,6 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
     @app.post(base, status_code=201, responses={409: {"description": "disclosures_changed: preview again before arming"}})
     async def arm_pairing_request(body: ArmPairingRequest, request: Request):
         """Arm a pre-approved slot for a Hub entry (#519): no secret; the App claims it with its own challenge."""
-        from .apps import normalize_origin
         key = require_admin(request, mgr)
         m = mgr(request)
         ctx = audit_context.owner_context(key)

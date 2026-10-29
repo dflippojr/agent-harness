@@ -36,6 +36,7 @@ from . import transcript
 from .manager import HarnessError, Manager, public_approval
 from .api_models import WebSessionResponse
 from .modules import principal_capabilities
+from .origins import LOOPBACK_HOSTS, daemon_origins, normalize_origin
 from .webgzip import WebGzipMiddleware
 
 
@@ -250,7 +251,7 @@ class _OriginInfo:
 
 
 def _origin_info(request: Request, m: Manager, public_path: str) -> _OriginInfo:
-    from .apps import cors_origin_allowed, daemon_origins, normalize_origin
+    from .apps import cors_origin_allowed
     raw_origin = request.headers.get("origin", "")
     try:
         origin = normalize_origin(raw_origin) if raw_origin else ""
@@ -320,7 +321,6 @@ def _cors_preflight(request: Request, info: _OriginInfo) -> Response:
 
 def _cross_site_refused(request: Request, m: Manager, info: _OriginInfo) -> bool:
     """Browsers send Origin on POSTs: refuse cross-site requests (a web page can't drive the agent)."""
-    from .apps import daemon_origins
     if request.method in ("GET", "HEAD", "OPTIONS") or info.cross_origin_api:
         return False
     return bool((info.raw and info.origin not in daemon_origins(m.cfg))
@@ -418,14 +418,13 @@ async def _access_guard(request: Request, call_next):
 
 def _host_allowed(request: Request, cfg: config_mod.Config) -> bool:
     """Match one exact authority, never a forwarded host or a caller-supplied URL."""
-    from .apps import normalize_origin
-
     hosts = request.headers.getlist("host")
     if len(hosts) != 1:
         return False
-    allowed = {f"{host}:{cfg.port}" for host in ("127.0.0.1", "localhost", "[::1]")}
+    loopback = {f"[{host}]" if ":" in host else host for host in LOOPBACK_HOSTS}
+    allowed = {f"{host}:{cfg.port}" for host in loopback}
     if cfg.port == 80:
-        allowed.update({"127.0.0.1", "localhost", "[::1]"})
+        allowed.update(loopback)
     try:
         public = urlsplit(normalize_origin(cfg.public_url))
     except ValueError:
@@ -1275,7 +1274,6 @@ def _key_origins(body: dict, kind: str) -> list:
     raw_origins = body["origins"]
     if not isinstance(raw_origins, list) or not all(isinstance(value, str) for value in raw_origins):
         raise HarnessError(400, "origins must be a list of browser origins")
-    from .apps import normalize_origin
     try:
         return list(dict.fromkeys(normalize_origin(value) for value in raw_origins))
     except ValueError as e:

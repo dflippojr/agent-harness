@@ -83,3 +83,45 @@ def test_an_owner_token_refused_on_the_app_api_gets_the_app_message():
     with pytest.raises(HarnessError) as caught:
         apps.auth(_request(m, "https://other.example"), "sessions")
     assert str(caught.value) == MESSAGES["approved"]["app"]
+
+
+def test_the_origin_helpers_live_in_a_leaf_module_with_no_lazy_apps_import():
+    """harness/origins.py imports none of its callers, and no caller reaches the helpers through `.apps` lazily."""
+    import ast
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    loaded = subprocess.run([sys.executable, "-c", "import sys, harness.origins; print(sorted(m for m in sys.modules "
+                             "if m in ('harness.admin', 'harness.apps', 'harness.api', 'harness.pairing_requests')))"],
+                            capture_output=True, text=True, check=True, cwd=Path(__file__).resolve().parents[1])
+    assert loaded.stdout.strip() == "[]"
+    helpers = {"normalize_origin", "daemon_origins", "check_key_origin", "request_origin"}
+    offenders = []
+    for path in (Path(__file__).resolve().parents[1] / "harness").glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                for inner in ast.walk(node):
+                    if (isinstance(inner, ast.ImportFrom) and inner.module == "apps" and inner.level == 1
+                            and helpers & {alias.name for alias in inner.names}):
+                        offenders.append(f"{path.name}:{inner.lineno}")
+    assert offenders == []
+
+
+def test_one_loopback_constant():
+    from harness import api, cli, google_signin, origins
+
+    assert origins.LOOPBACK_HOSTS == {"127.0.0.1", "localhost", "::1"}
+    assert google_signin.LOOPBACK_HOSTS is origins.LOOPBACK_HOSTS
+    assert api.LOOPBACK_HOSTS is origins.LOOPBACK_HOSTS
+    # The client keeps a copy: the Mac bundle ships cli.py without the harness package.
+    assert set(cli.LOOPBACK_HOSTS) == origins.LOOPBACK_HOSTS
+
+
+@pytest.mark.parametrize("host,loopback", [("127.0.0.1", True), ("::1", True), ("localhost", True),
+                                           ("::ffff:127.0.0.1", False), ("100.64.0.1", False)])
+def test_google_sign_in_peer_check_fails_closed_on_a_mapped_address(host, loopback):
+    """Owner decision on #842: an IPv4-mapped loopback peer is not trusted as loopback."""
+    from harness.google_signin import peer_is_loopback
+
+    assert peer_is_loopback(SimpleNamespace(client=SimpleNamespace(host=host))) is loopback

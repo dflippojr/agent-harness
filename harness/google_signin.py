@@ -33,6 +33,7 @@ import httpx
 
 from . import stables_shell
 from .config import ROOT
+from .origins import LOOPBACK_HOSTS
 from .principal import NOT_ALLOWED_DETAIL, OWNER_USER_ID, Principal, _member_principal, resolve_human
 
 log = logging.getLogger("harness.google_signin")
@@ -63,7 +64,6 @@ STATIC_CACHE_SECONDS = 300
 MAX_ATTEMPTS = 256
 SECRET_MAX_BYTES = 16384
 
-LOOPBACK_PEERS = frozenset({"127.0.0.1", "::1", "localhost"})
 CLIENT_ID_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,200}\.apps\.googleusercontent\.com$")
 SECRET_RE = re.compile(r"^[\x21-\x7e]{8,512}$")
 SUB_RE = re.compile(r"^[\x21-\x7e]{1,255}$")
@@ -250,7 +250,7 @@ def config_problems(cfg, member_logins=()) -> list[str]:
     problems = []
     if not public_origin(cfg):
         problems.append("public_url must be the HTTPS Tailscale Serve origin, e.g. https://tower.tailnet.ts.net")
-    if (cfg.host or "").strip().lower() not in LOOPBACK_PEERS:
+    if (cfg.host or "").strip().lower() not in LOOPBACK_HOSTS:
         problems.append("listen.host must be loopback so only Tailscale Serve can supply member logins")
     if not cfg.allowed_logins:
         problems.append("allowed_logins must name the owner before members can sign in")
@@ -466,8 +466,10 @@ class Attempt:
 
 
 def peer_is_loopback(request) -> bool:
+    """A plain string test: an IPv4-mapped peer such as ::ffff:127.0.0.1 is not loopback here, so this fails closed
+    (owner decision on #842; tailscale_peer.is_loopback canonicalizes, and widening this trust check is the owner's)."""
     client = request.client
-    return bool(client and client.host in LOOPBACK_PEERS)
+    return bool(client and client.host in LOOPBACK_HOSTS)
 
 
 def _origin_of(value: str) -> str:
