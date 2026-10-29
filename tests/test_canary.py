@@ -910,8 +910,9 @@ def test_an_omitted_fixture_dir_resolves_under_the_effective_data_dir(tmp_path, 
 
     cfg = config.load(cfg_dir, data_dir=argument)
     assert cfg.data_dir == chosen and cfg.canary.fixture_dir == str(expected)
-    assert cfg.canary.enabled is False and str(expected) in cfg.canary.disabled_reason
-    assert str(expected) in _doctor_lines(SimpleNamespace(canary=cfg.canary))[0][2]
+    quoted = repr(str(expected))  # the loader names the path with !r (Windows backslashes come out doubled)
+    assert cfg.canary.enabled is False and quoted in cfg.canary.disabled_reason
+    assert quoted in _doctor_lines(SimpleNamespace(canary=cfg.canary))[0][2]
 
     expected.mkdir(parents=True)
     (expected / "manifest.json").write_text("{}", encoding="utf-8")
