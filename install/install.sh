@@ -166,6 +166,10 @@ xml_escape() {
 systemd_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
 }
+# WorkingDirectory= is a bare path: systemd rejects quotes there and reads spaces and backslashes literally.
+systemd_path() {
+    printf '%s' "$1" | sed -e 's/%/%%/g'
+}
 
 printf 'Agent harness installer (platform: %s, profile: %s, app: %s, install: %s)\n' \
     "$platform" "$profile" "$app_dir" "$install_dir"
@@ -373,7 +377,7 @@ After=default.target
 
 [Service]
 Type=simple
-WorkingDirectory="$(systemd_escape "$app_dir")"
+WorkingDirectory=$(systemd_path "$app_dir")
 ExecStart=/bin/bash "$(systemd_escape "$bin_dir/run-daemon.sh")" "$(systemd_escape "$app_dir")" "$(systemd_escape "$config_dir")" "$(systemd_escape "$python")" "$(systemd_escape "$log_dir")"
 Restart=on-failure
 RestartSec=10

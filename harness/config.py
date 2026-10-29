@@ -418,7 +418,7 @@ class CanaryConfig:
     drop_points: float = 15.0
     metrics_limit: int = 30
     suite: str = "bakeoff/canary.yaml"
-    fixture_dir: str = "D:/Agents/harness/web-fixture"  # the recorded web for the web tasks (bakeoff/web_suite.py)
+    fixture_dir: str = ""                # the recorded web for the web tasks (bakeoff/web_suite.py); "": <data_dir>/web-fixture
     disabled_reason: str = ""            # set by the loader when `enabled` was turned off for a bad suite/fixture (doctor reports it)
 
 
@@ -761,16 +761,18 @@ def _canary_fixture_problem(raw: dict) -> str:
         web = (yaml.safe_load((ROOT / suite).read_text(encoding="utf-8")) or {}).get("web")
     except (OSError, yaml.YAMLError, AttributeError) as e:
         return f"canary.suite {suite!r} can't be read: {e}"
-    fixture = Path(raw.get("fixture_dir", CanaryConfig.fixture_dir))
+    fixture = Path(raw["fixture_dir"])
     if web and not (fixture / "manifest.json").is_file():  # every web task would fail against an empty replay
         return f"canary.fixture_dir {str(fixture)!r} has no manifest.json (the suite has web tasks)"
     return ""
 
 
-def _load_canary(raw) -> CanaryConfig:
-    """`at` comes back as "HH:MM"; anything the nightly can't use is a config error here, not a dead loop at night."""
+def _load_canary(raw, data_dir: Path = ROOT / "data") -> CanaryConfig:
+    """`at` comes back as "HH:MM"; anything the nightly can't use is a config error here, not a dead loop at night.
+    An omitted fixture_dir is the effective data_dir's web-fixture (#810)."""
     from .canary import parse_at
     raw = dict(raw or {})
+    raw["fixture_dir"] = str(raw.get("fixture_dir") or Path(data_dir) / "web-fixture")
     at = raw.get("at", CanaryConfig.at)
     if isinstance(at, int) and not isinstance(at, bool):  # YAML 1.1 reads an unquoted 3:05 as 3 * 60 + 5
         at = f"{at // 60}:{at % 60}" if 0 <= at < 24 * 60 else str(at)
@@ -1110,7 +1112,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         images=images,
         search=search,
         repo_map=RepoMapConfig(**(raw.get("repo_map") or {})),
-        canary=_load_canary(raw.get("canary")),
+        canary=_load_canary(raw.get("canary"), resolved_data_dir),
         jobs=jobs,
         skills=skills,
         remote_control=remote_control,
