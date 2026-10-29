@@ -88,6 +88,9 @@ class GoogleSigninError(Exception):
         self.code = code
 
 
+_hash = sha256_hex  # the tests' name for the stored session and invite hash
+
+
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
