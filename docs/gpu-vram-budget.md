@@ -100,7 +100,7 @@ transcode as a reason to park.
 | Game (library folder, Big Picture window) | park | park (unchanged). On Linux `process_paths()` and `window_titles()` return nothing, so this trigger is off there; follow-up 5 |
 | Sunshine desktop stream | no action | no action (unchanged); it is inside the 2,048 margin |
 | Plex hardware transcodes | park on the first | new `gpu_guard.plex_transcodes_allowed` (default 0 = today's behaviour; the tower sets 1). Park when the count of hardware transcodes is above it, or when any of them has a 4K or HDR tone-mapped source (~1,400, over budget). Needs #811's Plex detection on Linux |
-| Free VRAM | none | new `gpu_guard.min_free_vram_mib` (tower: 256; 0 = off). Park when `nvidia-smi` free VRAM stays below it for two polls. This is the backstop for every estimate above being wrong: a second stream, a 4K source, an unknown CUDA app. The reading already exists (`harness_modules/local_model/resources.py`, `gpu_stats`) |
+| Free VRAM | none | new `gpu_guard.min_free_vram_mib` (tower: 256; 0 = off). Park when `nvidia-smi` free VRAM stays below it for two polls. This is the backstop for every estimate above being wrong: a second stream, a 4K source, an unknown CUDA app. The reading already exists (`harness_modules/local_model/resources.py`, `gpu_reading`) |
 
 How this ties to #811: #811 makes `Detector._plex()` work on Linux (a token file instead of the registry). This design
 needs a **count** and a **source resolution** per hardware transcode from it, not only "any". `hw_transcodes()` already
@@ -194,7 +194,7 @@ No code changes in #823. These are the code and config changes this design impli
    `agent-harness-main-llama.service`. Decide whether `ops/llama-server/run-qwen.ps1` follows.
 2. **`gpu_guard.plex_transcodes_allowed`** (default 0, range 0 to 4), with the 4K/HDR rule. Registry entry in
    `harness_modules/local_model/settings.py`, docs in `docs/resource-guard.md`. Depends on #811.
-3. **`gpu_guard.min_free_vram_mib`** (default 0 = off) as a trigger from `gpu_stats`, two consecutive polls, with its
+3. **`gpu_guard.min_free_vram_mib`** (default 0 = off) as a trigger from `gpu_reading`, two consecutive polls, with its
    own drain timeout (for example `vram_drain_timeout_seconds`, default 30).
 4. **Plex detection without a token on Linux** (feeds #811): count `Plex Transcoder` processes in `nvidia-smi
    --query-compute-apps`, and show per-process VRAM in Actions → Resources diagnostics.
