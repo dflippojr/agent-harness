@@ -1563,16 +1563,26 @@ class Database:
     @_writes
     def create_api_key(self, name: str, scopes: str = "inference", kind: str = "device",
                        origins: list[str] | None = None, catalog_app_id: str = "") -> tuple[dict, str]:
-        prefix = {"app": "ha-", "owner": "ho-"}.get(kind, "hk-")
-        key = prefix + secrets.token_urlsafe(32)
-        row = {"id": "k-" + secrets.token_hex(4), "name": name, "prefix": key[:10], "created_at": time.time(),
-               "scopes": scopes, "kind": kind, "origins": origins or [], "catalog_app_id": catalog_app_id}
         with self.lock:
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
-                              "catalog_app_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                              (row["id"], name, row["prefix"], sha256_hex(key),
-                               row["created_at"], scopes, kind, json.dumps(row["origins"]), catalog_app_id))
-        return row, key
+            return self._insert_api_key(name, scopes, kind, origins or [], time.time(), catalog_app_id)
+
+    def _insert_api_key(self, name: str, scopes: str, kind: str, origins: list[str], now: float,
+                        catalog_app_id: str | None = "", role: str = "") -> tuple[dict, str]:
+        """Mint a `kind` key and write its row, the one api_keys insert for every minting path (#843). The caller
+        holds the lock or its transaction. Returns (key row, secret); the row names `role` only when one is set and
+        leaves out `catalog_app_id` when it is None, which a runner's owner key stores as NULL."""
+        secret = {"app": "ha-", "owner": "ho-"}.get(kind, "hk-") + secrets.token_urlsafe(32)
+        key = {"id": "k-" + secrets.token_hex(4), "name": name, "prefix": secret[:10], "created_at": now,
+               "scopes": scopes, "kind": kind, "origins": origins}
+        if catalog_app_id is not None:
+            key["catalog_app_id"] = catalog_app_id
+        if role:
+            key["role"] = role
+        self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
+                          "catalog_app_id, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (key["id"], name, key["prefix"], sha256_hex(secret), now, scopes, kind,
+                           json.dumps(origins), catalog_app_id, role))
+        return key, secret
 
     # browser pairing and EventSource tickets
     @_writes
@@ -1631,14 +1641,8 @@ class Database:
                 return None, "", "pairing code expired"
             if pairing["origin"] != origin:
                 return None, "", "pairing code is not approved for this origin"
-            secret = "ha-" + secrets.token_urlsafe(32)
-            key = {"id": "k-" + secrets.token_hex(4), "name": pairing["name"], "prefix": secret[:10],
-                   "created_at": now, "scopes": pairing["scopes"], "kind": "app", "origins": [origin],
-                   "catalog_app_id": pairing["catalog_app_id"] or ""}
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
-                              "catalog_app_id) VALUES (?, ?, ?, ?, ?, ?, 'app', ?, ?)",
-                              (key["id"], key["name"], key["prefix"], sha256_hex(secret),
-                               now, key["scopes"], json.dumps(key["origins"]), key["catalog_app_id"]))
+            key, secret = self._insert_api_key(pairing["name"], pairing["scopes"], "app", [origin], now,
+                                               pairing["catalog_app_id"] or "")
             self.conn.execute("UPDATE pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
                               (now, key["id"], pairing["id"]))
         return key, secret, ""
@@ -1772,14 +1776,9 @@ class Database:
                                     "AND state = 'approved' AND expires_at > ?", (rid, now)).fetchone()
             if req is None:
                 return None, ""
-            secret = "ha-" + secrets.token_urlsafe(32)
-            key = {"id": "k-" + secrets.token_hex(4), "name": req["name"], "prefix": secret[:10], "created_at": now,
-                   "scopes": req["scopes"], "kind": "app", "origins": [req["origin"]] if req["origin"] else [],
-                   "catalog_app_id": req["catalog_app_id"] or ""}
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
-                              "catalog_app_id) VALUES (?, ?, ?, ?, ?, ?, 'app', ?, ?)",
-                              (key["id"], key["name"], key["prefix"], sha256_hex(secret),
-                               now, key["scopes"], json.dumps(key["origins"]), key["catalog_app_id"]))
+            key, secret = self._insert_api_key(req["name"], req["scopes"], "app",
+                                               [req["origin"]] if req["origin"] else [], now,
+                                               req["catalog_app_id"] or "")
             self.conn.execute("UPDATE pairing_requests SET state = 'redeemed', finished_at = ?, key_id = ? "
                               "WHERE id = ?", (now, key["id"], rid))
         return key, secret
@@ -1803,14 +1802,9 @@ class Database:
                 return None, "", "used"
             if self.conn.execute("SELECT 1 FROM hub_claim WHERE slot = 1").fetchone():
                 return None, "", "claimed"
-            secret = "ho-" + secrets.token_urlsafe(32)
-            key = {"id": "k-" + secrets.token_hex(4), "name": req["name"], "prefix": secret[:10], "created_at": now,
-                   "scopes": "admin", "kind": "owner", "role": "hub",
-                   "origins": [req["origin"]] if req["origin"] else [], "catalog_app_id": req["catalog_app_id"] or ""}
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
-                              "catalog_app_id, role) VALUES (?, ?, ?, ?, ?, 'admin', 'owner', ?, ?, 'hub')",
-                              (key["id"], key["name"], key["prefix"], sha256_hex(secret),
-                               now, json.dumps(key["origins"]), key["catalog_app_id"]))
+            key, secret = self._insert_api_key(req["name"], "admin", "owner",
+                                               [req["origin"]] if req["origin"] else [], now,
+                                               req["catalog_app_id"] or "", role="hub")
             self.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, origin, request_id, claimed_at) "
                               "VALUES (1, ?, ?, ?, ?, ?, ?)",
                               (key["id"], key["name"], "browser" if req["origin"] else "native", req["origin"], rid,
@@ -1887,13 +1881,7 @@ class Database:
                 return None, None, "", "runner pairing code already used"
             if pairing["expires_at"] <= now:
                 return None, None, "", "runner pairing code expired"
-            secret = "ho-" + secrets.token_urlsafe(32)
-            key = {"id": "k-" + secrets.token_hex(4), "name": pairing["name"], "prefix": secret[:10],
-                   "created_at": now, "scopes": "admin", "kind": "owner", "origins": []}
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins) "
-                              "VALUES (?, ?, ?, ?, ?, 'admin', 'owner', '[]')",
-                              (key["id"], key["name"], key["prefix"], sha256_hex(secret),
-                               now))
+            key, secret = self._insert_api_key(pairing["name"], "admin", "owner", [], now, catalog_app_id=None)
             self.conn.execute("UPDATE runner_pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
                               (now, key["id"], pairing["id"]))
         return dict(pairing), key, secret, ""
