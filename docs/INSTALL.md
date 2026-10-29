@@ -286,9 +286,8 @@ git pull
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
-On Linux and macOS, `git pull`, then run `install/install.sh` again. On the tower, a rerun currently writes a quoted
-`WorkingDirectory=` into `agent-harness-main-daemon.service`, which systemd rejects, until #810 lands. The tower's
-production checkout is updated by `deploy-tower` instead ([CI-CD.md](CI-CD.md#tower-runner)).
+On Linux and macOS, `git pull`, then run `install/install.sh` again. The tower's production checkout is updated by
+`deploy-tower` instead ([CI-CD.md](CI-CD.md#tower-runner)).
 
 ## Switch the local model (tower)
 
