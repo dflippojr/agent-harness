@@ -214,3 +214,4 @@ No code changes in #823. These are the code and config changes this design impli
    `agent-harness-<instance>-llama` container (`docker stop`, as `run-server.sh`'s own trap does), or have
    `run-server.sh` watch the pause flag while the container runs and stop it when the flag appears. Replace the
    `netstat -ano` lookup with psutil or `ss`. Without this, none of the guard changes above free VRAM on Ubuntu.
+   *Done in #835:* `run-server.sh` watches the flag and stops its container; `docs/resource-guard.md` describes it.
