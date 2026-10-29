@@ -6,32 +6,7 @@ imports it to list commands, so routes, settings and the service load only when 
 
 from __future__ import annotations
 
-from harness.modules import Module, ToolGate
-
-
-def _runtime(manager, module):
-    from .runtime import ImagesRuntime
-    return ImagesRuntime(manager, module)
-
-
-def _owner_routes():
-    from .routes import owner_routes
-    return owner_routes
-
-
-def _app_routes():
-    from .routes import app_routes
-    return app_routes
-
-
-def _settings():
-    from .settings import specs
-    return specs()
-
-
-def _doctor(report, cfg) -> None:
-    from .doctor import run
-    run(report, cfg)
+from harness.modules import Module, ToolGate, lazy
 
 
 def _runtime_enabled(cfg, switch: str) -> bool:
@@ -50,8 +25,8 @@ MODULE = Module(
     title="Image generation",
     docs=("docs/modules.md", "docs/flux-fast.md", "docs/resource-guard.md"),
     runtime_enabled=_runtime_enabled,
-    runtime=_runtime,
-    owner_routes=_owner_routes,
+    runtime=lazy(".runtime", "ImagesRuntime", call=True),
+    owner_routes=lazy(".routes", "owner_routes"),
     member_forbidden=((("/images", "/api/v1/images"), "members cannot use image generation"),),
     admin_paths=frozenset({
         "/images",
@@ -65,13 +40,13 @@ MODULE = Module(
         "/maintenance/image-archive/retention/preview",
         "/maintenance/image-archive/retention/apply",
     }),
-    app_routes=_app_routes,
+    app_routes=lazy(".routes", "app_routes"),
     app_scopes={"images": "generate images, upscale them, and read them"},
     app_capabilities={"images": "images"},
     tools=ToolGate(project_flag="images", capability="images", members=False, mcp=True, workspace=True,
                    mutating=("generate_image",), span="image_job"),
     tool_names=("generate_image",),
-    settings=_settings,
+    settings=lazy(".settings", "specs", call=True),
     cli=(
         ("maintenance image-retention-preview", "POST", "/maintenance/image-archive/retention/preview",
          "show what image-archive retention would remove", ()),
@@ -92,5 +67,5 @@ MODULE = Module(
     ),
     cli_groups={"images": "image generation"},
     principal_capabilities=_principal_capabilities,
-    doctor=_doctor,
+    doctor=lazy(".doctor", "run", call=True),
 )
