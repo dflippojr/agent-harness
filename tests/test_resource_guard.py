@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -1100,7 +1099,7 @@ def test_linux_park_stops_the_server_without_taskkill(tmp_path, monkeypatch):
     asyncio.run(body())
 
 
-def test_linux_stop_kills_a_server_that_ignores_sigterm_and_skips_one_it_cannot_signal(tmp_path, monkeypatch):
+def test_linux_stop_kills_a_server_that_ignores_sigterm_and_leaves_one_it_cannot_signal(tmp_path, monkeypatch):
     import psutil
     from harness_modules.local_model.service import ServerControl
     cfg = make_cfg(tmp_path)
@@ -1154,10 +1153,11 @@ exit 0
 """
 
 
-@pytest.mark.skipif(sys.platform == "win32" or not shutil.which("bash"), reason="the Linux supervisor needs bash")
 def test_linux_supervisor_stops_the_container_when_the_flag_appears(tmp_path):
     """install/run-server.sh stops its running container once the pause flag is written, stays paused while the flag
     exists, and starts the container again once ServerControl.start() removes it (#835)."""
+    from tests.installer_support import BASH
+    assert BASH, "the Linux supervisor test needs bash (Git Bash on Windows)"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     docker = bin_dir / "docker"
@@ -1165,8 +1165,8 @@ def test_linux_supervisor_stops_the_container_when_the_flag_appears(tmp_path):
     docker.chmod(0o755)
     log = tmp_path / "docker.log"
     flag = tmp_path / "llama-server.paused"
-    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_LOG": str(log),
-           "DOCKER_STOPPED": str(tmp_path / "stopped"), "HARNESS_LOG_DIR": str(tmp_path / "logs"),
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_LOG": log.as_posix(),
+           "DOCKER_STOPPED": (tmp_path / "stopped").as_posix(), "HARNESS_LOG_DIR": (tmp_path / "logs").as_posix(),
            "HARNESS_PAUSE_POLL_SECONDS": "0.2"}
 
     def calls(verb):
@@ -1181,8 +1181,8 @@ def test_linux_supervisor_stops_the_container_when_the_flag_appears(tmp_path):
             time.sleep(0.05)
         return cond()
 
-    proc = subprocess.Popen(["bash", str(RUN_SERVER), "Main", "llama:test", str(tmp_path / "m.gguf"), "qwen", "8099",
-                             "4096", str(flag)], env=env, stdin=subprocess.DEVNULL)
+    proc = subprocess.Popen([BASH, RUN_SERVER.as_posix(), "Main", "llama:test", (tmp_path / "m.gguf").as_posix(), "qwen",
+                             "8099", "4096", flag.as_posix()], env=env, stdin=subprocess.DEVNULL)
     try:
         assert wait_for(lambda: len(calls("run")) == 1, 10), "the supervisor never started the container"
         assert "--name agent-harness-main-llama" in calls("run")[0]
