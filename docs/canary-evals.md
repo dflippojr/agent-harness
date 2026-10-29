@@ -13,8 +13,8 @@ in `harness.yaml`; off by default.
 
 `bakeoff/canary.yaml` lists 6 hard tasks (`bakeoff/tasks_hard.py`) and the recorded-web tasks
 (`bakeoff/web_suite.py`), each run twice. Hard tasks are written into the session's workspace and graded by their
-existing hidden checkers (Docker sandbox); web tasks replay the recorded web in `canary.fixture_dir` through a
-per-session `WebTools`. Everything goes through `Manager` and the runner: it does not import `bakeoff/agent.py`.
+existing hidden checkers (Docker sandbox); web tasks replay the recorded web in `canary.fixture_dir` (default
+`<data_dir>/web-fixture`, under the same `data_dir` the daemon uses) through a per-session `WebTools`. Everything goes through `Manager` and the runner: it does not import `bakeoff/agent.py`.
 
 Selection, from `docs/phase0-results.md` only (no new GPU measurement): hard tasks Qwen3.6 passed in some but not all
 recorded attempts, then the remainder by `max_turns`, which is 50 for every hard task, so ties were broken by
