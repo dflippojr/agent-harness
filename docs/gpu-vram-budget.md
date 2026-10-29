@@ -16,7 +16,7 @@ Two facts shape every option below:
   `--fit-target` MiB (default 1024) stay free; the MoE expert tensors that don't fit go to system RAM
   (`docs/phase0-results.md`, "Context size test": "`--fit` keeps VRAM full"; `docs/bonsai-2-study.md`,
   `docs/mitsuba-prompt-helper-study.md`). The model's VRAM is therefore *whatever is free minus the margin*, not a
-  property of the GGUF. A smaller quant alone frees nothing; the margin is the lever. Only `--fit-target` decides
+  property of the GGUF. A smaller quant or a smaller context alone frees nothing; the margin (or a fixed placement) is the lever. Only `--fit-target` decides
   the headroom.
 - **Linux doesn't page VRAM.** On Windows, WDDM could spill a late allocation to system memory. On Linux a CUDA or
   NVENC allocation that doesn't fit fails. Plex then falls back to software transcoding or the stream fails, and
@@ -75,7 +75,8 @@ per CPU expert layer, scaled by layer size for other quants.
 | 0. Today | Q4_K_XL, 64K, default margin | ~14,750 | **−176** (doesn't fit) | 85 (measured, #823) | baseline | |
 | **A. Smaller quant** | same model at UD-Q3_K_XL (~17 GB, **estimate** scaled from the Q4 file; not checked that this exact quant is published), 64K, `--fit-target 2048` | ~13,730 | **+848** | not measured; estimate 95 to 130 (about 11 expert layers on the CPU instead of 18, each ~25% smaller; the simple model gives ~130) | lower: a 3-bit quant; tool-call reliability unknown. Must pass the canary gates (`docs/canary-evals.md`) as #170/#174 did | the quant alone, with the default margin, would leave only 1,024 free and fail like today: `--fit` fills the card again |
 | **B. Partial offload, margin** | Q4_K_XL unchanged, 64K, `--fit-target 2048` | ~13,730 | **+848** | not measured; estimate 76 to 81 (two more expert layers on the CPU, ~1 GiB) | unchanged: same weights, same context | one flag; reversible; RAM: ~1 GiB more of the model in system RAM (the load gate's `model_ram_gb: 14` already covers it) |
-| B2. Partial offload, context | Q4_K_XL, **32K**, default margin | ~14,290 | **+288** | not measured; 32K decoded ~2% faster than 64K on Windows (`docs/phase0-results.md`) | worse for long files: 64K was needed for the memory-library tasks (`docs/phase0-results.md`, follow-up table) | clears the 256 safety margin by only ~30 MiB; one more 700 MiB consumer breaks it |
+| B2. Partial offload, fixed layers | Q4_K_XL, 64K, `--fit off --n-gpu-layers 99 --n-cpu-moe 20` (experts of 20 of 40 layers in RAM, fixed) | ~13,700 (**estimate**: today's ~14,750 with ~18 layers in RAM, minus 2 × ~525) | **+876** (estimate) | as B: not measured; estimate 76 to 81 | unchanged | the footprint no longer depends on what is free at load: it doesn't shrink when a stream is already running, and the load fails if less than ~13.7 GB is free. Needs its own `-lv 4` check of the real size |
+| B3. Smaller context only | Q4_K_XL, **32K**, default margin | ~14,750 | **−176** (doesn't fit, same as today) | not measured; 32K decoded ~2% faster than 64K on Windows (`docs/phase0-results.md`) | worse for long files: 64K was needed for the memory-library tasks (`docs/phase0-results.md`, follow-up table) | frees nothing under `--fit`: the margin stays 1,024 and `--fit` moves expert weights back onto the GPU. Measured: 14,806 MiB at 32K vs 14,712 at 64K (`docs/phase0-results.md`). With B2's fixed placement, 32K would add the ~340 MiB of KV it saves (**estimate**) to B2's headroom |
 | C. Fits entirely | an IQ2-class quant (~11 GB, **estimate**), 64K, all layers on the GPU | ~12,300 | **+2,276** | not measured; likely above 100 | much lower: 2-bit | no RAM offload at all; not recommended for agent work without a full canary run |
 
 Combinations follow the same arithmetic: each extra 1,024 of `--fit-target` buys one more ~700 MiB Plex stream and
@@ -85,7 +86,8 @@ costs about two expert layers (estimate about −6 tok/s per 1,024 with Q4).
 
 **Option B: keep Qwen3.6-35B-A3B Q4_K_XL at 64K and add `--fit-target 2048`.** It is the only option that fits one
 transcode plus Sunshine with no quality change, it is a single argument on the llama-server unit, and rolling it back
-is removing that argument. Option A is the next step only if B's measured decode lands below ~70 tok/s, and only
+is removing that argument. It is preferred over B2 because `--fit` adapts to what is free at load, while a fixed
+placement can fail to load beside a running stream. Option A is the next step only if B's measured decode lands below ~70 tok/s, and only
 after the canary gates pass on the 3-bit quant.
 
 ### Guard thresholds
@@ -145,13 +147,28 @@ a measurement run may use the GPU:
    Read `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` and the GPU line once each
    stream is steady (about 30 s in). Optionally one 4K HDR source for the guard's 4K rule.
 3. **Sunshine, model parked.** One desktop stream at the owner's usual resolution and frame rate; same two queries.
-4. **Option B.** A throwaway llama-server on another port with the production arguments plus `--fit-target 2048`,
-   `-lv 4` for the split, then `python -m bakeoff.context_test --ctx 65536` (`bakeoff/context_test.py`; method in
-   `docs/bonsai-2-study.md`). Record VRAM at `/health`, the expert layers on the CPU, decode at the 2K/16K/58K perf
-   points and load time. Compare with the same run at the default margin.
+4. **Option B.** The owner parks production first (*Unload now*): two copies don't fit. Then a throwaway server on
+   another port, with the image and model file named in the tower's `agent-harness-main-llama.service` and the same
+   arguments `run-server.sh` passes, plus the margin and verbose fit logging:
+
+   ```
+   docker run --rm --name ah823-measure --gpus all --network host -v <model.gguf>:/models/model.gguf:ro <image> \
+       -m /models/model.gguf --host 127.0.0.1 --port 8097 --ctx-size 65536 --flash-attn on --parallel 1 --jinja \
+       --metrics --fit on --cache-type-k q8_0 --cache-type-v q8_0 --fit-target 2048 -lv 4
+   ```
+
+   Once `/health` answers, record the split from the log (layers, expert layers overflowing, CUDA0 and CUDA_Host
+   buffers), `nvidia-smi --query-gpu=memory.used` and `--query-compute-apps`, and the server's resident memory
+   (`docker stats --no-stream ah823-measure`). Decode and prompt speed: `POST http://127.0.0.1:8097/completion` with
+   fixed prompts of about 2K, 16K and 58K tokens (`n_predict: 200`, `cache_prompt: false`), reading
+   `timings.predicted_per_second` and `timings.prompt_per_second` from each answer. Then `docker stop ah823-measure`
+   and repeat without `--fit-target 2048` as the baseline, in the same session. `bakeoff/context_test.py` doesn't do
+   this on Ubuntu as it stands: it starts its own server from `bakeoff/models.yaml` (Windows paths) and reads process
+   memory through PowerShell (follow-up 8).
 5. **Coexistence.** With option B loaded and idle, repeat 2 and 3 together, and confirm `nvidia-smi` free memory stays
    above 256 and that Plex's dashboard shows "(hw)" for the stream.
-6. **Option A, only if B is too slow.** Steps 4 and 5 with the Q3_K_XL file, then the canary gates
+6. **Option A, only if B is too slow.** Steps 4 and 5 with the Q3_K_XL file (and B2's arguments if a fixed
+   footprint is wanted), then the canary gates
    (`docs/canary-evals.md`).
 
 Write the results into this doc and replace each **estimate** it supersedes.
@@ -178,4 +195,6 @@ No code changes in #823. These are the code and config changes this design impli
    right after every load.
 7. **Metrics.** Export free VRAM and `encoder.stats.sessionCount` as `harness_resource_*` series for the
    `nvidia-gpu` dashboard.
-8. **Measurement run** (owner-gated, "Measuring later" above), then update this doc.
+8. **Measurement run** (owner-gated, "Measuring later" above), then update this doc. Optionally port
+   `bakeoff/context_test.py` first: a `--base-url` mode that measures an already running server, and Linux process
+   memory from `/proc` instead of PowerShell, so later model studies on the tower can reuse it.
