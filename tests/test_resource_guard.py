@@ -1197,6 +1197,16 @@ def test_linux_supervisor_stops_the_container_when_the_flag_appears(tmp_path):
         asyncio.run(control.start())
         assert wait_for(lambda: len(calls("run")) == 2, 10), "removing the flag did not resume the container"
     finally:
+        # Park before ending it: on Windows terminate() skips bash's TERM trap, so the supervisor must already have
+        # reaped its fake container and flag watcher, leaving only its paused wait loop.
+        supervisor_log = tmp_path / "logs" / "llama-server-supervisor.log"
+
+        def parked():
+            text = supervisor_log.read_text(encoding="utf-8") if supervisor_log.exists() else ""
+            return text.count("stopped for the pause flag") >= len(calls("run"))
+        flag.write_text("paused by test\n", encoding="utf-8")
+        (tmp_path / "stopped").touch()
+        wait_for(parked, 10)
         proc.terminate()
         try:
             proc.wait(timeout=scaled(15))
