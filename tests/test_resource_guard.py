@@ -1100,6 +1100,47 @@ def test_linux_park_stops_the_server_without_taskkill(tmp_path, monkeypatch):
     asyncio.run(body())
 
 
+def test_linux_stop_kills_a_server_that_ignores_sigterm_and_skips_one_it_cannot_signal(tmp_path, monkeypatch):
+    import psutil
+    from harness_modules.local_model.service import ServerControl
+    cfg = make_cfg(tmp_path)
+    control = ServerControl(GpuGuardConfig(pause_flag=str(tmp_path / "paused")), cfg.models[cfg.default_model])
+    _fake_linux_server(monkeypatch, control.port)
+    signals = []
+
+    class Proc:
+        def __init__(self, pid):
+            if pid == 6060:
+                raise psutil.AccessDenied(pid)  # a container's root process
+            self.pid = pid
+
+        def terminate(self):
+            signals.append(("TERM", self.pid))
+
+        def wait(self, timeout=None):
+            raise psutil.TimeoutExpired(timeout, self.pid)
+
+        def kill(self):
+            signals.append(("KILL", self.pid))
+    monkeypatch.setattr(psutil, "Process", Proc)
+    assert ServerControl._terminate(5151) == "killed"
+    assert signals == [("TERM", 5151), ("KILL", 5151)]
+    assert ServerControl._terminate(6060) == "not stopped (AccessDenied)"
+
+
+def test_linux_listening_pids_survive_a_denied_socket_listing(tmp_path, monkeypatch):
+    import psutil
+    from harness_modules.local_model.service import ServerControl
+    cfg = make_cfg(tmp_path)
+    control = ServerControl(GpuGuardConfig(pause_flag=str(tmp_path / "paused")), cfg.models[cfg.default_model])
+    _fake_linux_server(monkeypatch, control.port)
+
+    def denied(kind="inet"):
+        raise psutil.AccessDenied()  # macOS without root
+    monkeypatch.setattr(psutil, "net_connections", denied)
+    assert asyncio.run(control._listening_pids()) == set()
+
+
 RUN_SERVER = Path(__file__).resolve().parents[1] / "install" / "run-server.sh"
 FAKE_DOCKER = """#!/usr/bin/env bash
 # Records each call; `run` blocks like a running container until `stop` (or `rm -f`) is called.
