@@ -8,11 +8,8 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+from .compat import LOOPBACK_HOSTS  # a plain string set: ::ffff:127.0.0.1 is not in it (peer_is_loopback, #842)
 from .manager import HarnessError
-
-# Host names that mean this machine. A plain string set: an IPv4-mapped peer such as ::ffff:127.0.0.1 is not in it,
-# and google_signin.peer_is_loopback keeps failing closed on one (owner decision on #842).
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def normalize_origin(value: str) -> str:

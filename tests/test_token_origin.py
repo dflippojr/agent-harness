@@ -109,13 +109,12 @@ def test_the_origin_helpers_live_in_a_leaf_module_with_no_lazy_apps_import():
 
 
 def test_one_loopback_constant():
-    from harness import api, cli, google_signin, origins
+    """Defined once, in compat.py, which the Mac bundle ships beside the CLI."""
+    from harness import api, cli, compat, google_signin, origins
 
-    assert origins.LOOPBACK_HOSTS == {"127.0.0.1", "localhost", "::1"}
-    assert google_signin.LOOPBACK_HOSTS is origins.LOOPBACK_HOSTS
-    assert api.LOOPBACK_HOSTS is origins.LOOPBACK_HOSTS
-    # The client keeps a copy: the Mac bundle ships cli.py without the harness package.
-    assert set(cli.LOOPBACK_HOSTS) == origins.LOOPBACK_HOSTS
+    assert compat.LOOPBACK_HOSTS == {"127.0.0.1", "localhost", "::1"}
+    for module in (origins, google_signin, api, cli):
+        assert module.LOOPBACK_HOSTS is compat.LOOPBACK_HOSTS
 
 
 @pytest.mark.parametrize("host,loopback", [("127.0.0.1", True), ("::1", True), ("localhost", True),

@@ -25,6 +25,9 @@ CLIENT_PROTOCOLS = {"web": 2, "cli": 2, "runner": 3}
 MINIMUM_CLIENTS = {"web": "2026.09.16", "cli": "4.1", "runner": "4.2"}
 
 CLIENT_HEADER = "X-Agent-Harness-Client"
+# Host names that mean this machine, for the CLI and the server alike (harness/origins.py). Kept here because the Mac
+# bundle ships this file beside the CLI.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _HEADER_RE = re.compile(r"^(web|cli|runner)/(\d+)$")
 
 
