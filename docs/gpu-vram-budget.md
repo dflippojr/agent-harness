@@ -145,13 +145,21 @@ Tokens per second, the Plex and Sunshine costs, and the Ubuntu desktop figure ar
 on and #823 doesn't authorise a measurement, so none was taken. When the owner lifts the hold and says on a card that
 a measurement run may use the GPU:
 
+0. **Stop production and check the card is free.** Until follow-up 9 lands, *Unload now* and the guard's park don't
+   stop the Linux container (see "Page-out and page-in"), so the owner stops it through its unit instead:
+   `systemctl --user stop agent-harness-main-llama.service`. Its `ExecStart` is `run-server.sh`, whose `TERM` trap runs
+   `docker stop` on the container. Then confirm `docker ps --filter name=agent-harness-main-llama` lists nothing and
+   `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` shows no llama-server before going on.
+   Every "model parked" below means this state. Afterwards `systemctl --user start agent-harness-main-llama.service`
+   brings it back; the supervisor waits while the pause flag exists.
 1. **Baseline, model parked.** `nvidia-smi --query-gpu=memory.used,memory.total,encoder.stats.sessionCount
    --format=csv` with the desktop idle. That gives the Ubuntu desktop figure and the real card total.
 2. **Plex, model parked.** The owner starts one 1080p H.264 and then one 1080p HEVC hardware transcode from a client.
    Read `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` and the GPU line once each
    stream is steady (about 30 s in). Optionally one 4K HDR source for the guard's 4K rule.
 3. **Sunshine, model parked.** One desktop stream at the owner's usual resolution and frame rate; same two queries.
-4. **Option B.** The owner parks production first (*Unload now*): two copies don't fit. Then a throwaway server on
+4. **Option B.** Production stays stopped (step 0): two copies don't fit, and a leftover copy would push the
+   throwaway server's experts to the CPU. Then a throwaway server on
    another port, with the image and model file named in the tower's `agent-harness-main-llama.service` and the same
    arguments `run-server.sh` passes, plus the margin and verbose fit logging:
 
