@@ -120,7 +120,11 @@ already short of memory.
 2. **A transcode over the allowance, or a 4K/HDR one, or free VRAM under the floor for two polls (≤ 20 s).**
    Page-out as today: the queue pauses, the model turn in flight finishes (up to `drain_timeout_seconds`, or the
    shorter free-VRAM drain), then `ModelWarmer.park` writes the pause flag and stops llama-server. ~13.7 GB comes free
-   once the container exits. A second stream that started before the park may already have fallen back to software
+   once the container exits. **On Linux this needs follow-up 9 first:** `ServerControl.stop()` finds the server with
+   `netstat -ano` and stops it with `taskkill`, both Windows-only, and `install/run-server.sh` checks the pause flag
+   only before it launches a container. Today a park on Ubuntu writes the flag but leaves the running container
+   holding its VRAM. Whether the hold of 2026-10-23 stopped the container some other way (by hand, or through the
+   unit) was not checked. A second stream that started before the park may already have fallen back to software
    transcoding; Plex picks the GPU again for the next session, not the running one.
 3. **Page-in.** Once the triggers have been gone for `resume_after_seconds` (180 s), the queue reopens. With
    `lazy_load` the model stays parked until a turn, an endpoint request or *Load local model now* needs it, then loads
@@ -198,3 +202,7 @@ No code changes in #823. These are the code and config changes this design impli
 8. **Measurement run** (owner-gated, "Measuring later" above), then update this doc. Optionally port
    `bakeoff/context_test.py` first: a `--base-url` mode that measures an already running server, and Linux process
    memory from `/proc` instead of PowerShell, so later model studies on the tower can reuse it.
+9. **Linux page-out (prerequisite for the guard on the tower).** Make `ServerControl.stop()` work on Linux: stop the
+   `agent-harness-<instance>-llama` container (`docker stop`, as `run-server.sh`'s own trap does), or have
+   `run-server.sh` watch the pause flag while the container runs and stop it when the flag appears. Replace the
+   `netstat -ano` lookup with psutil or `ss`. Without this, none of the guard changes above free VRAM on Ubuntu.
