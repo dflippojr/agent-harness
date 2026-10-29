@@ -319,6 +319,8 @@ sends, not the file the server loads.
 
 With the `backup` module on (the default), the daemon writes `backup.dir/<YYYY-MM-DD>/` every night at `backup.at`
 and deletes dated folders older than `backup.keep_days`. `harness maintenance backup` takes one now.
+Unless `backup.dir` is set, it is `D:\My Backups\agent-harness` on Windows and `$XDG_DATA_HOME/agent-harness/backups`
+(`~/.local/share/agent-harness/backups` when `XDG_DATA_HOME` is unset) elsewhere.
 
 A backup folder holds exactly:
 
