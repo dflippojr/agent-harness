@@ -362,9 +362,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--capture-prompts", type=Path, metavar="PATH",
                         help="#774: append the exact messages and tools of every model call to this JSONL file")
     args = parser.parse_args(argv)
+    debug = {k: v for k, v in (("keep_metrics", args.keep_metrics), ("capture_prompts", args.capture_prompts)) if v}
     asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture,
-                               heldout=args.heldout, plan_reinject=args.plan_reinject,
-                               keep_metrics=args.keep_metrics, capture_prompts=args.capture_prompts))
+                               heldout=args.heldout, plan_reinject=args.plan_reinject, **debug))
     return 0
 
 

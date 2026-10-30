@@ -85,7 +85,7 @@ def test_main_passes_the_debug_options_through_and_leaves_them_off_by_default(mo
     monkeypatch.setattr(canary_cli, "run_standalone", standalone)
     canary_cli.main(["--tasks", "log_correlation", "--repeats", "1"])
     canary_cli.main(["--tasks", "a,b", "--keep-metrics", "m.json", "--capture-prompts", "p.jsonl"])
-    assert seen[0][2]["keep_metrics"] is None and seen[0][2]["capture_prompts"] is None
+    assert "keep_metrics" not in seen[0][2] and "capture_prompts" not in seen[0][2]
     assert seen[1][0] == ["a", "b"]
     assert seen[1][2]["keep_metrics"] == Path("m.json") and seen[1][2]["capture_prompts"] == Path("p.jsonl")
 
