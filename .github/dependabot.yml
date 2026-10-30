@@ -3,9 +3,16 @@ updates:
   - package-ecosystem: pip
     assignees:
       - dflippojr
-    directory: /
+    directories:
+      - /
+      - /tools/openapi
     schedule:
       interval: weekly
+    groups:
+      # One PR per dependency across both directories: tools/openapi pins fastapi
+      # exactly, so raising the floor at / alone makes the openapi job's install fail.
+      same-dependency:
+        group-by: dependency-name
 
   - package-ecosystem: docker
     assignees:

@@ -18,7 +18,7 @@ def test_scheduled_ecosystems_and_manifest_directories():
         assert ecosystem not in directories
         directories[ecosystem] = set(update.get("directories", [update.get("directory")]))
     assert directories == {
-        "pip": {"/"},
+        "pip": {"/", "/tools/openapi"},
         "docker": {"/sandbox", "/ops/egress", "/reference/hermes", "/reference/openclaw",
                    "/reference/opencode", "/reference/openhands"},
         "docker-compose": {"/ops/observability"},
@@ -26,8 +26,23 @@ def test_scheduled_ecosystems_and_manifest_directories():
     }
     for directory in directories["docker"]:
         assert (ROOT / directory.lstrip("/") / "Dockerfile").is_file()
-    for name in ("requirements.txt", "requirements-repomap.txt", "requirements-telemetry.txt"):
+    for name in ("requirements.txt", "requirements-repomap.txt", "requirements-telemetry.txt",
+                 "tools/openapi/requirements.txt"):
         assert (ROOT / name).is_file()
+
+
+def test_fastapi_bump_moves_the_server_floor_and_the_exporter_pin_together():
+    # One PR across both directories, or the exporter's exact pin rejects the raised floor (PR #820).
+    config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
+    pip = next(update for update in config["updates"] if update["package-ecosystem"] == "pip")
+    assert [group.get("group-by") for group in pip["groups"].values()] == ["dependency-name"]
+
+    def requirement(path):
+        lines = (ROOT / path).read_text(encoding="utf-8").splitlines()
+        return next(line for line in lines if line.startswith("fastapi"))
+
+    floor = requirement("requirements.txt").removeprefix("fastapi>=")
+    assert requirement("tools/openapi/requirements.txt") == f"fastapi=={floor}"
 
 
 def test_nonstandard_container_manifest_names_are_discoverable():
