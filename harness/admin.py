@@ -31,6 +31,7 @@ from . import audit_context, credential_audit
 from . import compat
 from .app_usage import AppsUsageResponse, snapshot as app_usage_snapshot
 from .manager import HarnessError
+from .origins import check_key_origin, daemon_origins, normalize_origin_or_403 as _normalized_origin
 
 log = logging.getLogger("harness.admin")
 
@@ -152,28 +153,9 @@ def parse_key_spec(body: dict | None) -> tuple[str, str, str]:
     return name[:60], " ".join(dict.fromkeys(scopes)), kind
 
 
-def _normalized_origin(raw_origin: str) -> str:
-    from .apps import normalize_origin
-    try:
-        return normalize_origin(raw_origin)
-    except ValueError as e:
-        raise HarnessError(403, str(e)) from e
-
-
-def _check_token_origin(request: Request, m, key: dict) -> None:
-    raw_origin = request.headers.get("origin", "")
-    if not raw_origin:
-        return
-    from .apps import daemon_origins
-    origin = _normalized_origin(raw_origin)
-    if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
-        raise HarnessError(403, "this owner token is not approved for this origin")
-
-
 def _check_browser_origin(request: Request, m) -> None:
     raw_origin = request.headers.get("origin", "")
     if raw_origin:
-        from .apps import daemon_origins
         if _normalized_origin(raw_origin) not in daemon_origins(m.cfg):
             raise HarnessError(401, "cross-origin browser requests require an owner token")
     elif request.headers.get("sec-fetch-site") == "cross-site":
@@ -196,7 +178,7 @@ def require_admin(request: Request, mgr) -> dict | None:
         scopes = set((key.get("scopes") or "").split())
         if key.get("kind") != OWNER_KIND or ADMIN_SCOPE not in scopes:
             raise HarnessError(403, "app tokens cannot use the owner API")
-        _check_token_origin(request, m, key)
+        check_key_origin(request, m, key, noun="owner")
         request.state.authenticated_key_id = key["id"]
         return key
     _check_browser_origin(request, m)

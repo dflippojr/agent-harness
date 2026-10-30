@@ -1,7 +1,8 @@
 """Typed, allowlisted configuration registry (issue #66).
 
-Every exposed setting has an explicit SettingSpec. Setters are named functions, never
-reflection, dotted traversal, dataclass deserialization, or YAML merge. Unknown keys
+Every exposed setting has an explicit SettingSpec. Getters and setters are named functions
+or cfg_field pairs over an attribute path written in the module. Nothing is looked up by
+key string: no reflection, dataclass deserialization, or YAML merge. Unknown keys
 are rejected. Installer-only entries may advertise safe metadata without a value.
 """
 

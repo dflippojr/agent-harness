@@ -119,8 +119,8 @@ CI and gate-guard wait scripts. End-to-end App operation must be checked after t
 
 ## Deployment boundary
 
-The daemon itself is deliberately not containerized. It is a host Python process because it coordinates Windows
-scheduled tasks, local repository paths, Docker sandbox creation, GPU/model controls, and native provider logins.
+The daemon itself is deliberately not containerized. It is a host Python process because it coordinates the host's
+services (systemd user units on the Ubuntu tower, scheduled tasks on Windows), local repository paths, Docker sandbox creation, GPU/model controls, and native provider logins.
 
 The owner explicitly approved the repository-scoped self-hosted runners. The `agent-harness-tower-linux` runner gives
 trusted `main` workflow code the tower user's filesystem, Docker, credentials, and service-restart authority. It is
@@ -161,8 +161,9 @@ duplicate and fight it. To rotate the token, create a new SonarCloud user token,
 a `main` push, and a real Dependabot PR. A green notice-only job is not evidence of analysis. The old `SONAR_TOKEN` and
 `SONAR_HOST_URL` secrets are already deleted and must not be reintroduced.
 
-Local SonarQube on `localhost:9000`, published by `ops/tailscale/serve.ps1` as `https://<tower>.ts.net:9000`, is
-local-only. CI does not depend on it.
+Local SonarQube on `localhost:9000`, published on the Windows tower by `ops/tailscale/serve.ps1` as
+`https://<tower>.ts.net:9000`, is local-only. CI does not depend on it. The Ubuntu tower did not recreate that
+`:9000` Serve entry when it took over on 2026-10-26.
 
 ## Scheduled dependency updates
 
@@ -615,7 +616,8 @@ hatch: `python -m pytest tests -q -p no:xdist`.
 ## Tower runner
 
 The tower runs Ubuntu since 2026-10-26. Production runs there from the live checkout
-`/home/daniel/Projects/agent-harness` as systemd user units of `daniel` (`~/.config/systemd/user/`, lingering on):
+`/home/daniel/Projects/agent-harness` as systemd user units of `daniel` (`~/.config/systemd/user/`, lingering on, so they start whenever the tower boots
+into Ubuntu; until the owner does step 11, the boot-order change, a reboot lands in Windows instead):
 `agent-harness-main-daemon.service`, whose `ExecStart` runs `~/.local/share/agent-harness/bin/run-daemon.sh`,
 `agent-harness-main-llama.service` and `agent-harness-hub.service`. `harness-metrics-proxy.service` is a system unit,
 and the deployment leaves it alone. The Windows runner
@@ -707,7 +709,8 @@ service user can read it (in `/proc/<pid>/environ`), and the token is spent once
 Each member unpacks the pinned runner release (SHA-256 checked) into
 `/home/github-runner/runners/<name>`, registers it as the `github-runner` service user (created if missing, with no
 sudo or docker group), and installs the systemd unit `svc.sh install github-runner` would
-(`actions.runner.<owner>-<repo>.<name>.service`, `User=github-runner`), so it starts at boot and jobs never run as root.
+(`actions.runner.<owner>-<repo>.<name>.service`, `User=github-runner`), so it starts at boot into Ubuntu (every boot only after step 11; until then a reboot lands in
+Windows) and jobs never run as root.
 The service user owns that tree, so root acts on nothing in it. The installer refuses a destination with a symlink in
 it, or under a `/` or `/home` that is not root's alone. The service user creates the directory and unpacks the runner,
 with root feeding it the checked archive on stdin. Root writes the unit itself rather than run the runner's `svc.sh`.
@@ -775,6 +778,11 @@ Replace `-1` with the member you are removing. The same GitHub-delete + uninstal
 is the repair path used for the tower runner.
 
 ## Staging smoke slot
+
+Windows only. The slot's runner (`[self-hosted, Windows, X64, agent-harness-staging]` in `staging.yml`) and its
+`ops/harness/*staging*.ps1` scripts exist only on a Windows boot of the tower, and the slot is parked there. The
+Production column under Locations gives the Windows paths. On the Ubuntu tower production is described under
+[Tower runner](#tower-runner), and there is no staging slot.
 
 `.github/workflows/staging.yml` keeps one disposable Agent Harness Server slot on the same tower, so a candidate
 branch or pull-request head can be opened in a browser before it is merged. It is deliberately not a second

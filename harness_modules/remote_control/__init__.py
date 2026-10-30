@@ -1,28 +1,8 @@
 """Optional Claude Code Remote Control and owner folder discovery."""
-from harness.modules import Module, ToolGate, app_allows
+from harness.modules import Module, ToolGate, app_allows, enabled_flag, lazy
 
 LIMITS = dict(visited_directories=20_000, candidates=500, seconds=30, errors=50,
               active_scans=1, expiry_seconds=900)
-
-
-def _runtime(manager, module):
-    from .runtime import RemoteControlRuntime
-    return RemoteControlRuntime(manager, module)
-
-
-def _owner_routes():
-    from .routes import owner_routes
-    return owner_routes
-
-
-def _app_routes():
-    from .routes import app_routes
-    return app_routes
-
-
-def _settings():
-    from .settings import specs
-    return specs()
 
 
 def _validate(cfg, proposed):
@@ -49,14 +29,14 @@ def _eligible(kit, session):
 
 MODULE = Module(
     name='remote_control', switches=('remote_control',), title='Remote Control',
-    docs=('docs/modules.md',), runtime=_runtime,
-    runtime_enabled=lambda cfg, switch: bool(cfg.remote_control.enabled),
-    owner_routes=_owner_routes, app_routes=_app_routes,
+    docs=('docs/modules.md',), runtime=lazy(".runtime", "RemoteControlRuntime", call=True),
+    runtime_enabled=enabled_flag("remote_control"),
+    owner_routes=lazy(".routes", "owner_routes"), app_routes=lazy(".routes", "app_routes"),
     app_scopes={'remote_control': 'start and stop Claude Code Remote Control servers in project folders'},
     app_capabilities={'remote_control': 'remote_control'},
     admin_paths=frozenset({'/remote-control', '/remote-control/{project}',
                            '/remote-control/{project}/trust', '/remote-control/{project}/stop'}),
-    register_admin=_register_admin, settings=_settings,
+    register_admin=_register_admin, settings=lazy(".settings", "specs", call=True),
     settings_validators=(_validate,), settings_change_validators=(_validate_change,),
     settings_schema={'discovery_limits': LIMITS},
     tool_names=('open_claude_remote_control',),
