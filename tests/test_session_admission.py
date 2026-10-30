@@ -536,11 +536,27 @@ def _mixed_manager(tmp_path, max_sessions: int = 1):
     return m, modes, key
 
 
-def test_an_apps_hosted_sessions_waiting_on_a_slot_cannot_both_pass_its_running_cap(tmp_path):
+def _slow_first_factory(m, kind: str, seconds: float = 0.8) -> None:
+    """Hold the first `kind` session ("owner" or "app") for `seconds` once its `running` has committed, before its
+    factory call: the gap a slow writer stretches (#867). Status alone doesn't say the factory has run."""
+    aset_status, slowed = m.runner.aset_status, []
+
+    async def wrapped(sid, status, **fields):
+        await aset_status(sid, status, **fields)
+        if status == "running" and not slowed and bool(m.db.get_session(sid)["app_id"]) == (kind == "app"):
+            slowed.append(sid)
+            await asyncio.sleep(seconds)
+    m.runner.aset_status = wrapped
+
+
+@pytest.mark.parametrize("slow", ["", "owner", "app"])
+def test_an_apps_hosted_sessions_waiting_on_a_slot_cannot_both_pass_its_running_cap(tmp_path, slow):
     """Both App sessions wait for a busy backend while the App has nothing running: when slots free up, only one
     may start; the cap check and counting as running happen together."""
     async def body():
         m, made, _ = _claude_manager(tmp_path, "cancel", max_sessions=2)
+        if slow:
+            _slow_first_factory(m, slow)
         await m.start()
         key = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
         m.set_app_provider_credential(key["id"], "claude", "", "subscription", [])
