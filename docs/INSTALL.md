@@ -169,6 +169,17 @@ registers `systemd --user` services for llama.cpp and Agent Harness Server. llam
 If the Docker GPU check fails, install NVIDIA Container Toolkit and restart Docker before rerunning the installer.
 On a headless host, an administrator may need to enable user lingering with `loginctl enable-linger <user>`.
 
+**A host that logs in automatically keeps its GNOME keyring locked** (the tower under GDM autologin). Any Secret
+Service call then waits for an unlock prompt that nobody answers, from an ssh session, a user unit or an agent alike:
+D-Bus clients find `$XDG_RUNTIME_DIR/bus` even when `DBUS_SESSION_BUS_ADDRESS` is unset. Keep each CLI login in its
+own file store at mode 600: gh with `--insecure-storage`, Claude Code's `.credentials.json`, Codex's `auth.json`.
+For a single command that might still reach the keyring, cut the bus off:
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent timeout 60 <command>`, or that line in one unit's `Environment=`.
+Never set it in a profile, `environment.d` or the user manager's environment, because it breaks the whole session
+bus. Never use it to store a credential either: the keyring write fails instead of hanging. Don't unlock the keyring
+with an empty password or a typed-in secret. Once it is unlocked, every process of that user can read all of it. The
+tower's tool-by-tool finding is in agent-ops `docs/tower-keyring.md` (agent-ops#280).
+
 Useful options include `--profile service`, `--enable-modules jobs,backup`, `--model gpt-oss`,
 `--install-dir /srv/agent-harness`, `--data-dir /srv/agents`, `--model-path /models/model.gguf`,
 `--existing-server http://127.0.0.1:8090`, `--no-start`, and `--dry-run`. Run `install/install.sh --help` for the
