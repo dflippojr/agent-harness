@@ -258,7 +258,8 @@ gpu_guard:
 # Also on demand: POST /maintenance/backup.
 backup:
   enabled: true
-  dir: D:/My Backups/agent-harness
+  # dir: unset here so each platform gets its default: D:/My Backups/agent-harness on Windows, the XDG data dir
+  # elsewhere (#854). Set it in harness.local.yaml.
   at: "03:30"
   keep_days: 14
   image_archive_keep_days: 0       # 0 = keep forever; deletion is still an explicit owner action
