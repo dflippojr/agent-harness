@@ -174,7 +174,8 @@ Service call then waits for an unlock prompt that nobody answers, from an ssh se
 D-Bus clients find `$XDG_RUNTIME_DIR/bus` even when `DBUS_SESSION_BUS_ADDRESS` is unset. Keep each CLI login in its
 own file store at mode 600: gh with `--insecure-storage`, Claude Code's `.credentials.json`, Codex's `auth.json`.
 For a single command that might still reach the keyring, cut the bus off:
-`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent timeout 60 <command>`, or that line in one unit's `Environment=`.
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent timeout 60 <command>`. In a unit, set only the variable,
+`Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`, and bound the run with `TimeoutStartSec=`.
 Never set it in a profile, `environment.d` or the user manager's environment, because it breaks the whole session
 bus. Never use it to store a credential either: the keyring write fails instead of hanging. Don't unlock the keyring
 with an empty password or a typed-in secret. Once it is unlocked, every process of that user can read all of it. The
