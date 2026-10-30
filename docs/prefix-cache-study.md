@@ -151,7 +151,7 @@ isolated.
 `docs/compaction.md` said each call re-reads the plan plus the new turn. Measured, it re-reads more. The server holds
 prompt N, plan included, and reply N. Request N+1 has the same history without that plan, so it departs at the plan's
 first token, and everything after that goes too: reply N is read again, not reused, and the fallback is to n-516. The
-fallback landed 425 to 432 tokens before the plan's start in 18 of the 22 turns.
+fallback landed 425 to 432 tokens before the plan's start in 17 of the 22 turns.
 
 | `cli_json_output` | Turns measured | Median beyond new, tokens | Median prefill, s |
 | --- | ---: | ---: | ---: |
@@ -181,6 +181,10 @@ idle sleep (`--sleep-idle-seconds 600`, left out of the throwaway server), and p
 - **Debug logging:** the second `log_correlation` run, the third `cli_json_output` run and the built-up `break_at_scale`
   table ran with `-lv 4`. Rates were similar on the at-scale re-reads (785 tok/s with it, 811 without), but these are
   not strictly the same server configuration as the rest.
+- **The daemon restart:** the production daemon restarted at 07:39:43 UTC, following a merge to `main`. One measurement
+  spanned it, the built-up `break_at_scale` run (07:37:56 to 07:40:36), during its 50% rewrite. That request read at
+  1.28 ms per token against 1.30 and 1.31 for the two before it. The run used its own server, data dir and checkout, and
+  the pause flag was not touched, so it was not rerun. All other sessions finished by 07:32:45 or started after 07:41.
 - **The `grep` loop's cause:** whether re-running that command is ordinary for this model was not studied. It is one
   session, and it weighs heavily in the 64K totals. Without it, the other six sessions reuse 83% and masking costs
   far less, about 38 s across 6 breaks.
