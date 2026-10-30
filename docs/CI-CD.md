@@ -168,7 +168,8 @@ Local SonarQube on `localhost:9000`, published on the Windows tower by `ops/tail
 ## Scheduled dependency updates
 
 `.github/dependabot.yml` schedules weekly updates for pip requirements at `/` (`requirements.txt`,
-`requirements-repomap.txt`, and `requirements-telemetry.txt`), Dockerfiles in `/sandbox`, `/ops/egress`, and
+`requirements-repomap.txt`, and `requirements-telemetry.txt`) and `/tools/openapi` (the exporter's exact pins), grouped
+by dependency name so a fastapi bump moves both in one PR, Dockerfiles in `/sandbox`, `/ops/egress`, and
 `/reference/{hermes,openclaw,opencode,openhands}`, Docker Compose at `/ops/observability`, and GitHub Actions at `/`.
 Dependabot's Dockerfile discovery includes `sandbox/cli.Dockerfile`; its Compose filename pattern includes
 `ops/observability/docker-compose.tempo.yml` ([Docker fetcher](https://github.com/dependabot/dependabot-core/blob/main/docker/lib/dependabot/docker/file_fetcher.rb),
