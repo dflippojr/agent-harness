@@ -584,6 +584,120 @@ def test_gpu_reading_parses_nvidia_smi_and_caches(monkeypatch):
     assert resources.gpu_reading() is None  # nvidia-smi missing
 
 
+COMPUTE_APPS = ("9953, /usr/bin/sunshine, 215\n"
+                "1661709, /app/llama-server, 14000\n"
+                "4403, /usr/lib/plexmediaserver/Plex Media Server, 12\n"
+                "71, /usr/lib/plexmediaserver/Plex Transcoder, 412\n"
+                "72, C:\\Program Files\\Plex\\Plex Transcoder.exe, [N/A]\n")
+
+
+def fake_compute_apps(monkeypatch, *outputs):
+    """nvidia-smi answers only the query the probe is meant to send; each output is one poll, None a failed tool."""
+    from harness_modules.local_model import resources
+    outputs = list(outputs)
+
+    def run(args, timeout=5):
+        assert args == ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+                        "--format=csv,noheader,nounits"]
+        return outputs.pop(0)
+    monkeypatch.setattr(resources, "_run", run)
+
+
+def test_gpu_processes_parses_compute_apps_and_tells_none_running_from_a_failed_tool(monkeypatch):
+    from harness_modules.local_model import resources
+    fake_compute_apps(monkeypatch, COMPUTE_APPS, "", "No running processes found\ngarbage, x, 1\n", None)
+    first = resources.gpu_processes()
+    assert first[1] == {"pid": 1661709, "name": "/app/llama-server", "used_bytes": 14000 * resources.MIB}
+    assert first[4] == {"pid": 72, "name": "C:\\Program Files\\Plex\\Plex Transcoder.exe", "used_bytes": None}
+    assert resources.gpu_processes() == []  # nothing on the GPU
+    assert resources.gpu_processes() == []  # lines that aren't rows
+    assert resources.gpu_processes() is None  # nvidia-smi missing or failed
+
+
+def test_plex_without_a_token_counts_transcoders_from_nvidia_smi(monkeypatch):
+    """#830: no Plex credential on Linux. One signal per Plex Transcoder; Plex Media Server and others don't count."""
+    from harness_modules.local_model import service
+    monkeypatch.setattr(service, "plex_token", lambda: "")
+    fake_compute_apps(monkeypatch, COMPUTE_APPS)
+    detector = service.Detector(GpuGuardConfig())
+    signals = asyncio.run(detector._plex())
+    assert [(s["key"], s["kind"]) for s in signals] == [("plex:pid71", "plex"), ("plex:pid72", "plex")]
+    assert "412 MiB" in signals[0]["detail"] and detector.plex_error == ""
+
+
+def test_plex_signal_key_ignores_vram_so_resume_anyway_holds(monkeypatch):
+    """The override compares keys across polls: a transcoder whose VRAM grows is still the same trigger."""
+    from harness_modules.local_model import service
+    monkeypatch.setattr(service, "plex_token", lambda: "")
+    fake_compute_apps(monkeypatch, "71, /x/Plex Transcoder, 400\n", "71, /x/Plex Transcoder, 700\n")
+    detector = service.Detector(GpuGuardConfig())
+    first, second = asyncio.run(detector._plex()), asyncio.run(detector._plex())
+    assert [s["key"] for s in first] == [s["key"] for s in second]
+
+
+def test_plex_with_no_transcoder_is_clear_and_a_failed_nvidia_smi_says_so(monkeypatch):
+    from harness_modules.local_model import service
+    monkeypatch.setattr(service, "plex_token", lambda: "")
+    fake_compute_apps(monkeypatch, None, "1661709, /app/llama-server, 14000\n")
+    detector = service.Detector(GpuGuardConfig())
+    assert asyncio.run(detector._plex()) == []
+    assert "nvidia-smi" in detector.plex_error  # blind, and status/doctor say so
+    assert asyncio.run(detector._plex()) == []
+    assert detector.plex_error == ""  # a working source with nothing on it is not an error
+
+
+def test_plex_with_a_token_asks_plex_and_never_counts_the_same_transcode_twice(monkeypatch):
+    """The registry path on Windows stays as it was; the two sources aren't added together."""
+    import httpx
+    from harness_modules.local_model import resources, service
+    monkeypatch.setattr(service, "plex_token", lambda: "token")
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: pytest.fail("nvidia-smi read beside the Plex API"))
+    body = {"MediaContainer": {"TranscodeSession": [
+        {"key": "/transcode/sessions/a", "videoDecision": "transcode", "transcodeHwEncoding": "nvenc"}]}}
+
+    class Client:
+        def __init__(self, timeout=None): ...
+        async def __aenter__(self): return self
+        async def __aexit__(self, *_): return False
+        async def get(self, url, headers=None):
+            return httpx.Response(200, json=body, request=httpx.Request("GET", url))
+    monkeypatch.setattr(service.httpx, "AsyncClient", Client)
+    assert [s["key"] for s in asyncio.run(service.Detector(GpuGuardConfig())._plex())] == ["plex:a"]
+
+
+def test_diagnostics_lists_vram_per_process(tmp_path, monkeypatch):
+    from harness_modules.local_model import resources
+    processes = [{"pid": 71, "name": "/x/Plex Transcoder", "used_bytes": 412 * resources.MIB}]
+    monkeypatch.setattr(resources, "gpu_reading", lambda cached=False: None)
+    monkeypatch.setattr(resources, "gpu_processes", lambda: processes)
+    monkeypatch.setattr(resources, "cpu_load", lambda: None)
+    monkeypatch.setattr(resources, "container_memory", lambda prefix="harness-": None)
+    monkeypatch.setattr(resources, "_process_memory", lambda match: None)
+
+    async def body():
+        m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="done")]))
+        m.guard = None
+        assert (await resources.diagnostics(m))["vram"]["processes"] == processes
+    asyncio.run(body())
+
+
+def test_doctor_warns_when_the_guard_cannot_see_plex(tmp_path, monkeypatch, capsys):
+    import httpx
+    from harness import doctor
+    from harness_modules.local_model.doctor import check_guard
+    cfg = make_cfg(tmp_path)
+    cfg.gpu_guard = GpuGuardConfig(enabled=True, pause_flag=str(tmp_path / "llama.paused"))
+    gpu = {"enabled": True, "state": "clear", "lazy_load": True, "plex_error": "nvidia-smi could not list GPU processes"}
+    monkeypatch.setattr(doctor.httpx, "get",
+                        lambda url, timeout=None: httpx.Response(200, json=gpu, request=httpx.Request("GET", url)))
+    r = doctor.Report()
+    check_guard(r, cfg)
+    assert r.warned == 1 and "nvidia-smi could not list GPU processes" in capsys.readouterr().out
+    gpu["plex_error"] = ""
+    check_guard(r, cfg)
+    assert r.warned == 1
+
+
 def test_run_returns_none_when_the_tool_is_missing():
     from harness_modules.local_model import resources
     assert resources._run(["definitely-not-a-real-tool-311"]) is None
