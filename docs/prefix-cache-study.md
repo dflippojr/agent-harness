@@ -86,13 +86,15 @@ checkpoint.
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | 64K | masking: observation receipt | 35 | 259,595 | 14,592 | 349.5 | 242,575 |
 | 64K | compaction: elide dropped reasoning | 1 | 13,877 | 13,877 | 18.7 | 118 |
-| 12K | compaction: summary request and the request after it | 6 | 27,504 | 7,607 | 37.0 | 9 |
+| 12K | compaction: summary request | 3 | 6,350 | 3,102 | 8.5 | 9 |
 | 12K | masking: observation receipt | 4 | 6,368 | 2,687 | 8.6 | 4,351 |
 | 12K | compaction: elide dropped reasoning | 1 | 2,701 | 2,701 | 3.6 | 515 |
 | Flag on | masking: observation receipt | 10 | 37,772 | 5,904 | 51.8 | 32,059 |
 | Flag on | injected state: plan re-injection | 30 | 17,369 | 1,635 | 27.7 | 10,876 |
 
-The masking estimate is an upper bound on what a fix could save. Without masking, those results stay in the prompt and
+The three requests right after those summary calls are not priced. They read 6,598, 6,949 and 7,607 tokens, mostly a new
+result of 12K to 14K characters, and telling the two apart needs a re-render against a server. The masking estimate is
+an upper bound on what a fix could save. Without masking, those results stay in the prompt and
 the context fills sooner.
 
 Each class from the issue:
@@ -188,6 +190,9 @@ idle sleep (`--sleep-idle-seconds 600`, left out of the throwaway server), and p
 - **The `grep` loop's cause:** whether re-running that command is ordinary for this model was not studied. It is one
   session, and it weighs heavily in the 64K totals. Without it, the other six sessions reuse 83% and masking costs
   far less, about 38 s across 6 breaks.
+- **Summary prompts' exact rendering:** these captures predate recording template options, so the summary calls were
+  rendered without `enable_thinking: false`. Nothing here depends on it: their token counts are the server's own, and a
+  summary call differs from its neighbours at the first message whatever the option does. No capture has a failed call.
 - **A flag change:** nothing here tried other llama-server flags (out of scope). #856 does.
 
 ## Commands

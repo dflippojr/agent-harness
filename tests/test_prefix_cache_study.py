@@ -37,13 +37,15 @@ def test_capture_writes_each_call_in_order_with_the_messages_as_sent(tmp_path):
     path = tmp_path / "out" / "p.jsonl"
     capture = canary_cli.PromptCapture(path, chat=chat, holder=lambda: "sid1")
     for text in ("one", "two"):
-        run(capture(SimpleNamespace(name="m"), [SYSTEM, {"role": "user", "content": text}], TOOLS, max_tokens=5))
+        run(capture(SimpleNamespace(name="m"), [SYSTEM, {"role": "user", "content": text}], TOOLS, max_tokens=5,
+                    extra={"chat_template_kwargs": {"enable_thinking": False}}))
     rows = prefix_diff.read_jsonl(path)
     assert [r["seq"] for r in rows] == [1, 2]
     assert [r["messages"][-1]["content"] for r in rows] == ["one", "two"]  # the snapshot is from before the call
     assert rows[0]["session"] == "sid1" and rows[0]["model"] == "m" and rows[0]["tools"] == TOOLS
     assert (rows[0]["prompt_tokens"], rows[0]["cache_tokens"], rows[0]["prompt_ms"]) == (10, 4, 12.5)
     assert rows[0]["reply"] == {"content": "ok", "reasoning": "think", "tool_calls": [{"id": "c1"}]}
+    assert rows[0]["extra"] == {"chat_template_kwargs": {"enable_thinking": False}}
     assert rows[0]["caller"] and all(isinstance(name, str) for name in rows[0]["caller"])
 
 
@@ -158,12 +160,51 @@ def test_pairs_and_summary_price_a_break_at_the_measured_prefill_rate():
     assert out["breaks"] == {"masking: observation receipt": {"count": 1, "lost_tokens": 800, "seconds": 0.8}}
 
 
-def test_nothing_counts_as_added_after_a_summary_call():
-    summary = row(1, [{"role": "system", "content": compaction.SUMMARY_SYSTEM}, {"role": "user", "content": "notes"}])
-    agent = row(2, [SYSTEM, {"role": "user", "content": "go"}, {"role": "user", "content": "more"}])
-    assert prefix_diff.new_messages(summary, agent) == []
-    assert prefix_diff.appended_tokens(summary, agent) == 0
-    assert prefix_diff.new_messages(row(1, [SYSTEM]), agent) == agent["messages"][1:]
+def test_new_messages_are_found_by_identity_not_position():
+    user = {"role": "user", "content": "go"}
+    result = {"role": "tool", "tool_call_id": "c1", "content": "x" * 300}
+    newest = {"role": "tool", "tool_call_id": "c2", "content": "y" * 300}
+    reply = {"role": "assistant", "content": "next"}
+    long_history = [SYSTEM, user, reply, result, reply, {"role": "tool", "tool_call_id": "c0", "content": "z"}, reply]
+    # A reset that shrinks the history still has to read the result it keeps, and its state note.
+    state = {"role": "user", "content": compaction.STATE_TAG + " {}"}
+    after_reset = row(2, [SYSTEM, user, state, reply, newest])
+    assert prefix_diff.new_messages(row(1, long_history), after_reset) == [state, newest]
+    assert prefix_diff.appended_tokens(row(1, long_history), after_reset) == round(len(json.dumps([state, newest])) / 3)
+    # A masked result is the same call: rewriting it adds nothing.
+    masked = {"role": "tool", "tool_call_id": "c1", "content": compaction.RECEIPT_PREFIX}
+    assert prefix_diff.new_messages(row(1, [SYSTEM, user, reply, result]), row(2, [SYSTEM, user, reply, masked])) == []
+    # A plan appended to the user's own message is not a new message once it is gone.
+    planned = {"role": "user", "content": "go" + planning.block("Plan:\n1. read")}
+    assert prefix_diff.new_messages(row(1, [SYSTEM, planned]), row(2, [SYSTEM, user])) == []
+
+
+def test_a_request_after_a_summary_is_compared_with_the_last_agent_request():
+    user = {"role": "user", "content": "go"}
+    result = {"role": "tool", "tool_call_id": "c1", "content": "r" * 3000}
+    reply = {"role": "assistant", "content": "next"}
+    rows = [row(1, [SYSTEM, user], prompt_tokens=100, cache_tokens=0),
+            row(2, [{"role": "system", "content": compaction.SUMMARY_SYSTEM}, {"role": "user", "content": "notes"}],
+                prompt_tokens=300, cache_tokens=0),
+            row(3, [SYSTEM, user, reply, result], prompt_tokens=1500, cache_tokens=50)]
+    summary_call, after = prefix_diff.pairs(rows)
+    assert summary_call["class"] == after["class"] == "compaction summary request"
+    assert summary_call["lost_tokens"] == 300  # the whole summary prompt is what compacting cost
+    assert after["lost_tokens"] == 1500 - 50 - round(len(json.dumps([result])) / 3)  # its new result is not
+
+
+def test_a_failed_call_does_not_hide_a_break_from_its_retry():
+    user = {"role": "user", "content": "go"}
+    result = {"role": "tool", "tool_call_id": "c1", "content": "x" * 3000}
+    masked = {"role": "tool", "tool_call_id": "c1", "content": compaction.RECEIPT_PREFIX}
+    rows = [row(1, [SYSTEM, user, result], prompt_tokens=1000, cache_tokens=0, prompt_ms=1000),
+            row(2, [SYSTEM, user, masked], error="LLMError: connection reset"),
+            row(3, [SYSTEM, user, masked], prompt_tokens=800, cache_tokens=100, prompt_ms=700)]
+    [only] = prefix_diff.pairs(rows)
+    assert only["seq"] == 3 and only["class"] == "masking: observation receipt" and only["lost_tokens"] == 700
+    out = prefix_diff.summary(rows)
+    assert out["failed_requests"] == 1 and out["sessions"]["s1"]["requests"] == 2
+    assert out["breaks"]["masking: observation receipt"]["lost_tokens"] == 700
 
 
 def test_report_reads_a_capture_and_writes_json(tmp_path, capsys):
@@ -197,11 +238,14 @@ def test_render_asks_the_server_for_the_template_and_tokens(monkeypatch):
     import httpx
     monkeypatch.setattr(httpx, "Client", Client)
     reply = {"role": "assistant", "content": "calling"}
-    result = {"role": "tool", "content": "output"}
-    first, second = prefix_diff.render([row(1, [SYSTEM]), row(2, [SYSTEM, reply, result])], "http://127.0.0.1:1")
+    result = {"role": "tool", "tool_call_id": "c1", "content": "output"}
+    options = {"chat_template_kwargs": {"enable_thinking": False}}
+    first, second = prefix_diff.render([row(1, [SYSTEM], extra=options), row(2, [SYSTEM, {"role": "user"}], error="x"),
+                                        row(3, [SYSTEM, reply, result])], "http://127.0.0.1:1")
     assert first["prompt"] == "<rendered>" and first["tokens"] == [1, 2, 3] and "new_tokens" not in first
     assert second["new_tokens"] == 3 + prefix_diff.MESSAGE_OVERHEAD  # the tool result; the reply was generated
-    assert posted[0] == ("/apply-template", {"messages": [SYSTEM], "tools": TOOLS})
+    assert second["seq"] == 3  # the failed call is left out
+    assert posted[0] == ("/apply-template", {"messages": [SYSTEM], "tools": TOOLS, **options})
     assert posted[1][1] == {"content": "<rendered>", "add_special": False, "parse_special": True}
     assert {"content": "output", "add_special": False, "parse_special": True} in [body for _, body in posted]
     assert not [body for _, body in posted if body.get("content") == "calling"]

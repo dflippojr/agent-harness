@@ -112,14 +112,28 @@ def classify(prev: dict, cur: dict, where: tuple[int, int] | None) -> str:
     return "other"
 
 
+def is_summary_call(row: dict) -> bool:
+    return (row["messages"] or [{}])[0].get("content") == compaction.SUMMARY_SYSTEM
+
+
+def completed(rows: list[dict]) -> list[dict]:
+    """The requests that got an answer. A failed call has no counts and is retried, so its retry is compared with the
+    last request that finished, and any break it carried is charged to that retry."""
+    return [r for r in rows if not r.get("error")]
+
+
 def new_messages(prev: dict, cur: dict) -> list[dict]:
-    """The messages `cur` adds after `prev`'s, without the assistant turn that holds `prev`'s reply: the server has
-    already generated that one, the rest it has to read whatever the cache holds. A request after a summary call
-    shares nothing with it, so nothing in it counts as added."""
-    if (prev["messages"] or [{}])[0].get("content") == compaction.SUMMARY_SYSTEM:
+    """The messages `cur` holds that its session's last request `prev` did not: tool results by call id, whatever
+    position a reset or summary moved them to, and user messages by text without any appended plan. The server has to
+    read these whatever the cache holds. Assistant turns never count: the server generated the newest one and the
+    others are old. A summary call counts nothing, so its whole prompt is charged as the cost of compacting."""
+    if is_summary_call(cur):
         return []
-    tail = cur["messages"][len(prev["messages"]):]
-    return tail[1:] if tail and tail[0].get("role") == "assistant" else tail
+    results = {m.get("tool_call_id") for m in prev["messages"] if m.get("role") == "tool"}
+    users = {planning.strip(_text(m)) for m in prev["messages"] if m.get("role") == "user"}
+    return [m for m in cur["messages"]
+            if (m.get("role") == "tool" and m.get("tool_call_id") not in results)
+            or (m.get("role") == "user" and planning.strip(_text(m)) not in users)]
 
 
 def appended_tokens(prev: dict, cur: dict) -> int:
@@ -134,7 +148,10 @@ def pairs(rows: list[dict]) -> list[dict]:
     """One row per request after the first: prompt and cache sizes, where it departs from the previous request
     and the break's class. Token fields are filled when the rows carry rendered `tokens`."""
     out = []
-    for prev, cur in itertools.pairwise(rows):
+    agent = None  # the session's last request that wasn't a summary call: what a request after a summary adds to
+    for prev, cur in itertools.pairwise(completed(rows)):
+        if not is_summary_call(prev):
+            agent = prev
         where = first_message_diff(prev["messages"], cur["messages"])
         tools_changed = prev.get("tools") != cur.get("tools")
         row = {"seq": cur["seq"], "session": cur.get("session"), "prompt_tokens": cur.get("prompt_tokens"),
@@ -144,7 +161,7 @@ def pairs(rows: list[dict]) -> list[dict]:
                                                        or prev.get("session") != cur.get("session")) else ""}
         cache = cur.get("cache_tokens") or 0
         # What the server read beyond the messages this request added: re-reading it is the break's cost.
-        row["lost_tokens"] = max(0, (cur.get("prompt_tokens") or 0) - cache - appended_tokens(prev, cur))
+        row["lost_tokens"] = max(0, (cur.get("prompt_tokens") or 0) - cache - appended_tokens(agent or prev, cur))
         if "tokens" in prev and "tokens" in cur:
             shared = common_prefix(prev["tokens"], cur["tokens"])
             row.update(shared_tokens=shared, broke=shared < len(prev["tokens"]),
@@ -157,7 +174,7 @@ def prefill_rate(rows: list[dict]) -> float:
     """Milliseconds per prompt token actually processed, over the requests that processed at least 256 tokens
     (the first request of a server run is left out: it includes warm-up)."""
     ms = tokens = 0.0
-    for r in rows[1:]:
+    for r in completed(rows)[1:]:
         done = (r.get("prompt_tokens") or 0) - (r.get("cache_tokens") or 0)
         if done >= 256 and r.get("prompt_ms"):
             ms += r["prompt_ms"]
@@ -169,7 +186,7 @@ def summary(rows: list[dict]) -> dict:
     """Per-session reuse (cached / prompt tokens over its requests) and the cost of each break class."""
     rate = prefill_rate(rows)
     sessions: dict[str, dict] = {}
-    for r in rows:
+    for r in completed(rows):
         s = sessions.setdefault(r.get("session") or "?", {"requests": 0, "prompt_tokens": 0, "cache_tokens": 0})
         s["requests"] += 1
         s["prompt_tokens"] += r.get("prompt_tokens") or 0
@@ -185,24 +202,30 @@ def summary(rows: list[dict]) -> dict:
         b["lost_tokens"] += p.get("lost_tokens", 0)
     for b in breaks.values():
         b["seconds"] = round(b["lost_tokens"] * rate / 1000, 1)
-    return {"ms_per_token": round(rate, 3), "sessions": sessions, "breaks": breaks}
+    return {"ms_per_token": round(rate, 3), "failed_requests": len(rows) - len(completed(rows)), "sessions": sessions,
+            "breaks": breaks}
 
 
 def render(rows: list[dict], server: str) -> list[dict]:
-    """`rows` with `prompt` and `tokens` as the server's chat template and tokenizer make them."""
+    """The finished `rows` with `prompt` and `tokens` as the server's chat template and tokenizer make them, using the
+    template options each call was sent with (a summary call turns thinking off)."""
     import httpx
     out: list[dict] = []
+    agent = None
     with httpx.Client(base_url=server, timeout=120) as client:
         def tokenize(text: str) -> list[int]:
             return client.post("/tokenize", json={"content": text, "add_special": False,
                                                   "parse_special": True}).raise_for_status().json()["tokens"]
 
-        for r in rows:
-            body = {"messages": r["messages"], **({"tools": r["tools"]} if r.get("tools") else {})}
+        for r in completed(rows):
+            body = {"messages": r["messages"], **({"tools": r["tools"]} if r.get("tools") else {}),
+                    **(r.get("extra") or {})}
             prompt = client.post("/apply-template", json=body).raise_for_status().json()["prompt"]
             row = {**r, "prompt": prompt, "tokens": tokenize(prompt)}
-            if out:
-                row["new_tokens"] = sum(len(tokenize(_text(m))) + MESSAGE_OVERHEAD for m in new_messages(out[-1], r))
+            if agent is not None:
+                row["new_tokens"] = sum(len(tokenize(_text(m))) + MESSAGE_OVERHEAD for m in new_messages(agent, r))
+            if not is_summary_call(r):
+                agent = r
             out.append(row)
     return out
 
@@ -234,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
     for p in result["pairs"]:
         print(" ".join(f"{k}={p[k]}" for k in ("seq", "prompt_tokens", "cache_tokens", "shared_tokens",
                                                  "lost_tokens", "message", "offset", "class") if k in p))
-    print(json.dumps({k: result[k] for k in ("ms_per_token", "sessions", "breaks")}, indent=1))
+    print(json.dumps({k: result[k] for k in ("ms_per_token", "failed_requests", "sessions", "breaks")}, indent=1))
     return 0
 
 
