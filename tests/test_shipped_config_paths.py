@@ -72,6 +72,7 @@ def machine(tmp_path, monkeypatch):
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)
+    monkeypatch.setattr(config, "_apply_managed_overlay", lambda cfg: None)  # takes a real Windows file lock under "win32"
     return tmp_path
 
 
@@ -102,6 +103,13 @@ def test_the_defaults_off_windows_are_absolute(machine, monkeypatch):
         assert Path(_lookup(cfg, dotted)).is_absolute(), dotted
     assert config.resolve_data_dir(_shipped_config(machine / "again")).is_absolute()
     assert cfg.repos_dir.is_absolute()
+
+
+def test_off_windows_an_unset_data_dir_is_this_checkouts_not_the_deployed_daemons(monkeypatch):
+    # The XDG data dir is where install.sh puts a deployed daemon's database: a checkout's run must not open it.
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert config._default_data_dir() == ROOT / "data"
+    assert config._default_repos_dir() == ROOT / "data" / "repos"
 
 
 def test_the_xdg_defaults_honour_xdg_data_home(machine, monkeypatch):

@@ -921,11 +921,12 @@ def test_an_omitted_fixture_dir_resolves_under_the_effective_data_dir(tmp_path, 
     assert Path(cfg.canary.fixture_dir) == expected  # what Manager._build_canary hands CanaryRunner
 
 
-def test_an_omitted_fixture_dir_without_a_data_dir_uses_the_repository_data_dir(tmp_path, monkeypatch):
+def test_an_omitted_fixture_dir_without_a_data_dir_uses_the_default_data_dir(tmp_path, monkeypatch):
     from harness import config
     monkeypatch.delenv("HARNESS_DATA_DIR", raising=False)
+    monkeypatch.setattr(config, "_default_data_dir", lambda: tmp_path / "default-data")  # never a real machine's data
     cfg = config.load(_canary_config_dir(tmp_path))
-    assert cfg.canary.fixture_dir == str(config.ROOT / "data" / "web-fixture")
+    assert cfg.canary.fixture_dir == str(tmp_path / "default-data" / "web-fixture")
     assert config.CanaryConfig().fixture_dir == ""  # no machine-specific default left in the dataclass
 
 

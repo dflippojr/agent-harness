@@ -18,7 +18,7 @@ records from the Windows tower.
 ## When the model loads
 
 llama-server loads the model whenever its process starts, so the harness controls loading through the supervisor's
-pause flag (`gpu_guard.pause_flag`, `C:/AI/llama-server.paused`). While the flag exists the supervisor
+pause flag (`gpu_guard.pause_flag`, by default `C:/AI/llama-server.paused` on Windows). While the flag exists the supervisor
 (`ops/llama-server/run-qwen.ps1`) doesn't start the server. The model is **parked**: unloaded, with the server
 process not running.
 
