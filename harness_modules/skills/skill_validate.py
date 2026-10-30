@@ -415,9 +415,10 @@ def validate_dir(root: Path) -> dict:
 
 
 SANDBOX_WORK = "/sandbox-work"
-# /workspace as a whole path component. A longer name such as /workspaces is another path; anything else after it
-# (a separator, a glob, trailing dots Windows strips) still counts as /workspace.
-_WORKSPACE_COMPONENT = re.compile(r"/workspace(?!\.*[\w+~@-])")
+# /workspace as a whole path component, ending at the end of the text, a separator, whitespace, a quote, or a character
+# that can expand to something else, with any trailing dots (Windows strips them). Any other name that goes on, such as
+# /workspaces or /workspace#2, is another path.
+_WORKSPACE_COMPONENT = re.compile(r"""/workspace(?=\.*(?:$|[\s/\\:,;"'`*?\[\]{}$%)<>|&]))""")
 
 
 def _container_user() -> str:

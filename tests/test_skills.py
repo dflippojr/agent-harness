@@ -253,6 +253,7 @@ def test_sandbox_argv_is_isolated(tmp_path):
 
 @pytest.mark.parametrize("component", [
     "workspaces", "WORKSPACES", "workspace-old", "workspace_2", "workspace.bak", "workspace2",
+    "workspace#2", "workspace!", "workspace(2)", "workspace=x", "workspace+x", "workspace~", "workspace@x", "workspace^",
 ])
 def test_sandbox_allows_install_path_with_longer_component(tmp_path, component):
     install = tmp_path / "orca" / component / "agent-harness"
@@ -289,6 +290,14 @@ def test_sandbox_allows_install_path_with_longer_component(tmp_path, component):
     "/workspace*",
     "/workspace?",
     "/workspace 2",
+    "/workspace$x",
+    "/workspace%x%",
+    "/workspace[1]",
+    "/workspace{a,b}",
+    "(/workspace)",
+    "/workspace;",
+    "/workspace..",
+    "/workspace|x",
 ])
 def test_sandbox_refuses_a_command_reaching_workspace(tmp_path, arg):
     proposal = tmp_path / "proposal"
