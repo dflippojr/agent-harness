@@ -11,6 +11,7 @@ from harness import backend_state, cli_domains, manager as manager_mod, metrics,
 from harness.fileops import grant_tree_owner_access
 from harness_modules.local_model import service as gpu_guard
 from harness_modules.local_model.warmup import READY, ModelWarmer
+from stray_drive_guard import pytest_sessionfinish, pytest_sessionstart  # noqa: F401 - pytest finds these hooks by name
 
 # Stables lives in its own repository (#334). The Server's tests serve a stand-in shell instead of whatever copy the
 # machine has (tests/fixtures/stables_shell/README.md); tests that need no shell set the variable themselves.
