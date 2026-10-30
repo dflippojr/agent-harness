@@ -175,7 +175,9 @@ D-Bus clients find `$XDG_RUNTIME_DIR/bus` even when `DBUS_SESSION_BUS_ADDRESS` i
 own file store at mode 600: gh with `--insecure-storage`, Claude Code's `.credentials.json`, Codex's `auth.json`.
 For a single command that might still reach the keyring, cut the bus off:
 `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent timeout 60 <command>`. In a unit, set only the variable,
-`Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`, and bound the run with `TimeoutStartSec=`.
+`Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`. Bound the run with `TimeoutStartSec=` in a
+`Type=oneshot` unit, or with `RuntimeMaxSec=` in any other type (the installer's units are `Type=simple`, which
+`TimeoutStartSec=` doesn't limit once started).
 Never set it in a profile, `environment.d` or the user manager's environment, because it breaks the whole session
 bus. Never use it to store a credential either: the keyring write fails instead of hanging. Don't unlock the keyring
 with an empty password or a typed-in secret. Once it is unlocked, every process of that user can read all of it. The
