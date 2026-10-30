@@ -275,11 +275,13 @@ def test_render_asks_the_server_for_the_template_and_tokens(monkeypatch):
     reply = {"role": "assistant", "content": "calling"}
     result = {"role": "tool", "tool_call_id": "c1", "content": "output"}
     options = {"chat_template_kwargs": {"enable_thinking": False}}
-    first, second = prefix_diff.render([row(1, [SYSTEM], extra=options), row(2, [SYSTEM, {"role": "user"}], error="x"),
-                                        row(3, [SYSTEM, reply, result])], "http://127.0.0.1:1")
+    first, failed, second = prefix_diff.render(
+        [row(1, [SYSTEM], extra=options), row(2, [SYSTEM, {"role": "user"}], error="x"),
+         row(3, [SYSTEM, reply, result])], "http://127.0.0.1:1")
     assert first["prompt"] == "<rendered>" and first["tokens"] == [1, 2, 3] and "new_tokens" not in first
     assert second["new_tokens"] == 3 + prefix_diff.MESSAGE_OVERHEAD  # the tool result; the reply was generated
-    assert second["seq"] == 3  # the failed call is left out
+    assert "tokens" not in failed and prefix_diff.summary([first, failed, second])["failed_requests"] == 1
+    assert len(posted) == 5  # two prompts, their tokens and the new result: nothing is rendered for the failed call
     assert posted[0] == ("/apply-template", {"messages": [SYSTEM], "tools": TOOLS, **options})
     assert posted[1][1] == {"content": "<rendered>", "add_special": False, "parse_special": True}
     assert {"content": "output", "add_special": False, "parse_special": True} in [body for _, body in posted]

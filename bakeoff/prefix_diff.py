@@ -211,8 +211,9 @@ def summary(rows: list[dict]) -> dict:
 
 
 def render(rows: list[dict], server: str) -> list[dict]:
-    """The finished `rows` with `prompt` and `tokens` as the server's chat template and tokenizer make them, using the
-    template options each call was sent with (a summary call turns thinking off)."""
+    """`rows` with `prompt` and `tokens` as the server's chat template and tokenizer make them, using the template
+    options each call was sent with (a summary call turns thinking off). A failed call stays in, unrendered, so the
+    report still counts it."""
     import httpx
     out: list[dict] = []
     agent = None
@@ -221,7 +222,10 @@ def render(rows: list[dict], server: str) -> list[dict]:
             return client.post("/tokenize", json={"content": text, "add_special": False,
                                                   "parse_special": True}).raise_for_status().json()["tokens"]
 
-        for r in completed(rows):
+        for r in rows:
+            if r.get("error"):
+                out.append(r)
+                continue
             body = {"messages": r["messages"], **({"tools": r["tools"]} if r.get("tools") else {}),
                     **(r.get("extra") or {})}
             prompt = client.post("/apply-template", json=body).raise_for_status().json()["prompt"]
