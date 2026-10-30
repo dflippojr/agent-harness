@@ -9,6 +9,8 @@ The daemon calls `CanaryRunner.run` from its nightly trigger (harness/canary.py)
     python -m bakeoff.canary --heldout --repeats 3  # #674 calibration: the held-out tasks, never the nightly set
     python -m bakeoff.canary --plan-reinject        # #641: the set with planning.reinject on (docs/compaction.md)
     python -m bakeoff.canary --xy --system-line "..."  # #773: XY-problem variants, an extra project-instructions line
+    python -m bakeoff.canary --tasks log_correlation --repeats 1 --keep-metrics runs/m.json --capture-prompts runs/p.jsonl
+                                                    # #774: per-turn cache reuse and the exact prompts (prefix study)
 
 Hard tasks are written into the session's workspace and graded by their existing hidden checkers (Docker sandbox, as
 in the bake-off). Web tasks replay the recorded web (web_suite.py) through a per-session WebTools.
@@ -22,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import inspect
 import json
 import shutil
 import sys
@@ -267,9 +270,58 @@ def grade_hard_task(task, ws: Path, answer: str, baseline: dict[str, str]) -> tu
         return False, f"checker error: {e}"
 
 
+# #774 (docs/prefix-cache-study.md): debug output for the prefix-cache study, off unless asked for
+class PromptCapture:
+    """Wraps llm.chat and appends one JSON line per call: the exact messages and tools sent, in order, with the
+    session holding the GPU and what the server reported (prompt and cached tokens, prompt_ms). Consecutive lines are
+    what docs/prefix-cache-study/prefix_diff.py compares."""
+
+    def __init__(self, path: Path, chat=None, holder: Callable[[], str | None] = lambda: None):
+        from harness import llm
+        self.path, self.chat, self.holder, self.seq = path, chat or llm.chat, holder, 0
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+
+    async def __call__(self, model, messages, tools=None, *args, **kwargs):
+        self.seq += 1
+        # Serialized before the call: the runner keeps changing its context lists afterwards.
+        row = {"seq": self.seq, "session": self.holder(), "model": getattr(model, "name", ""),
+               "caller": [f.function for f in inspect.stack(0)[1:6]],
+               "messages": json.loads(json.dumps(messages)), "tools": json.loads(json.dumps(tools)),
+               # what llm._payload merges into the request, so a render uses the same template options
+               "extra": {**(getattr(model, "sampling", None) or {}),
+                         **(kwargs.get("extra", args[2] if len(args) > 2 else None) or {})}}
+        try:
+            completion = await self.chat(model, messages, tools, *args, **kwargs)
+        except BaseException as e:
+            row["error"] = f"{type(e).__name__}: {e}"[:300]
+            self._write(row)
+            raise
+        row.update(prompt_tokens=completion.prompt_tokens, cache_tokens=completion.cache_tokens,
+                   prompt_ms=completion.prompt_ms, completion_tokens=completion.completion_tokens,
+                   decode_ms=completion.decode_ms, finish_reason=completion.finish_reason,
+                   # what the server's cache holds after this call, past the prompt: the next prompt re-renders it
+                   reply={"content": completion.content, "reasoning": completion.reasoning,
+                          "tool_calls": completion.tool_calls})
+        self._write(row)
+        return completion
+
+    def _write(self, row: dict) -> None:
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+
+
+def turn_metrics_by_session(db) -> list[dict]:
+    """Every finished session's persisted `turn_metrics` rows, oldest session first (--keep-metrics)."""
+    return [{"session": s["id"], "title": s["title"], "status": s["status"],
+             "turns": [e["data"] for e in db.events(s["id"]) if e["type"] == "turn_metrics"]}
+            for s in db.sessions_with_status(*DONE)]
+
+
 # by hand, daemon stopped
 async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path, heldout: bool = False,
-                         plan_reinject: bool = False, xy: bool = False, system_line: str = "") -> Path:
+                         plan_reinject: bool = False, xy: bool = False, system_line: str = "",
+                         keep_metrics: Path | None = None, capture_prompts: Path | None = None) -> Path:
     from harness import config as config_mod
     from harness.manager import Manager
 
@@ -289,13 +341,19 @@ async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path
                             web=config_mod.WebConfig(enabled=True, page_chars=base.web.page_chars,
                                                      fixture_dir=str(fixture)),
                             planning=config_mod.PlanningConfig(reinject=plan_reinject or base.planning.reinject))
-    m = Manager(cfg)
+    capture = PromptCapture(capture_prompts) if capture_prompts else None
+    m = Manager(cfg, chat=capture) if capture else Manager(cfg)
+    if capture:
+        capture.holder = lambda: m.scheduler.holder
     await m.start(maintenance=False)
     try:
         runner = CanaryRunner(m, cfg.canary, fixture, suite, system_line=system_line)
         report = await runner.run("manual", task_ids or None)
     finally:
         await m.stop()
+        if keep_metrics:  # the data dir goes next
+            keep_metrics.parent.mkdir(parents=True, exist_ok=True)
+            keep_metrics.write_text(json.dumps(turn_metrics_by_session(m.db), indent=1), encoding="utf-8")
         m.db.close()
         shutil.rmtree(tmp, ignore_errors=True)
     name = ("heldout" if heldout else "xy" if xy else "canary") + ("-plan" if cfg.planning.reinject else "") + (
@@ -321,12 +379,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="#773: the XY-problem variants (bakeoff/tasks_xy.py; 2 repeats unless --repeats)")
     parser.add_argument("--system-line", default="", metavar="TEXT",
                         help="#773: add TEXT to the canary sessions' system prompt as project instructions")
+    parser.add_argument("--keep-metrics", type=Path, metavar="PATH",
+                        help="#774: write each session's turn_metrics rows to this JSON file before the data dir goes")
+    parser.add_argument("--capture-prompts", type=Path, metavar="PATH",
+                        help="#774: append the exact messages and tools of every model call to this JSONL file")
     args = parser.parse_args(argv)
     if args.heldout and args.xy:
         parser.error("--heldout and --xy are separate task sets; pick one")
+    debug = {k: v for k, v in (("keep_metrics", args.keep_metrics), ("capture_prompts", args.capture_prompts)) if v}
     asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture,
                                heldout=args.heldout, plan_reinject=args.plan_reinject, xy=args.xy,
-                               system_line=args.system_line.strip()))
+                               system_line=args.system_line.strip(), **debug))
     return 0
 
 
