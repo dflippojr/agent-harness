@@ -1,11 +1,12 @@
 """#774: what one prefix break costs on a long prompt, on a running llama-server. No canary session gets this long.
 
-    python docs/prefix-cache-study/break_at_scale.py CAPTURE.jsonl OUT.json [--server URL] [--tokens 40000]
+    python docs/prefix-cache-study/break_at_scale.py CAPTURE.jsonl OUT.json [--server URL] [--tokens 40000] [--grow]
 
 CAPTURE.jsonl (`bakeoff.canary --capture-prompts`) gives the real system prompt, task and tool schemas. A conversation
 of tool results is built to about --tokens tokens, sent once cold, then with one earlier result replaced by a masking
 receipt at 90%, 50% and 10% of its length. Between them the original is sent again to refill the slot. One token is
-generated each time; `timings` gives prompt_n, cache_n and prompt_ms.
+generated each time; `timings` gives prompt_n, cache_n and prompt_ms. --grow reaches that length one result at a time,
+as a session does, instead of reading it in one go, so the server can leave checkpoints along the way.
 """
 
 from __future__ import annotations
@@ -68,6 +69,7 @@ def main() -> None:
     ap.add_argument("out", type=Path)
     ap.add_argument("--server", default="http://127.0.0.1:8082")
     ap.add_argument("--tokens", type=int, default=40000)
+    ap.add_argument("--grow", action="store_true")
     a = ap.parse_args()
     row = json.loads(a.capture.read_text(encoding="utf-8").splitlines()[0])
     results = []
@@ -83,6 +85,9 @@ def main() -> None:
             print(results[-1], flush=True)
             a.out.write_text(json.dumps(results, indent=1), encoding="utf-8")
 
+        if a.grow:
+            for count in range(1, a.tokens // per_result):
+                step(f"grow {count}", None, conversation(row, count))
         step("cold", None, messages)
         step("same again", None, messages)
         for fraction in (0.9, 0.5, 0.1):

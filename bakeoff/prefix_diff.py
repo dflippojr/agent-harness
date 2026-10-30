@@ -124,9 +124,10 @@ def new_messages(prev: dict, cur: dict) -> list[dict]:
 
 def appended_tokens(prev: dict, cur: dict) -> int:
     """Tokens of new_messages: counted by `render`, or estimated at 3 characters a token for an unrendered capture."""
-    if "new_tokens" in cur:
-        return cur["new_tokens"]
-    return round(len(json.dumps(new_messages(prev, cur))) / 3) if new_messages(prev, cur) else 0
+    new = new_messages(prev, cur)
+    if not new:
+        return 0
+    return cur["new_tokens"] if "new_tokens" in cur else round(len(json.dumps(new)) / 3)
 
 
 def pairs(rows: list[dict]) -> list[dict]:
