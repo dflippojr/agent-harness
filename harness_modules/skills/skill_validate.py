@@ -415,6 +415,9 @@ def validate_dir(root: Path) -> dict:
 
 
 SANDBOX_WORK = "/sandbox-work"
+# /workspace as a whole path component. A longer name such as /workspaces is another path; anything else after it
+# (a separator, a glob, trailing dots Windows strips) still counts as /workspace.
+_WORKSPACE_COMPONENT = re.compile(r"/workspace(?!\.*[\w+~@-])")
 
 
 def _container_user() -> str:
@@ -478,12 +481,14 @@ def sandbox_command_is_isolated(argv: list[str]) -> list[str]:
     if "--cap-drop" not in argv or "ALL" not in argv:
         reasons.append("capabilities are not dropped")
     forbidden_needles = (
-        "docker.sock", "/var/run/docker", "/workspace", "provider-auth", "harness-auth",
+        "docker.sock", "/var/run/docker", "provider-auth", "harness-auth",
         "/secrets", "memory-library", "com.docker.desktop", "\\\\.\\pipe\\docker",
     )
     for needle in forbidden_needles:
         if needle.lower() in joined.lower():
             reasons.append(f"forbidden mount or path {needle}")
+    if _WORKSPACE_COMPONENT.search(joined.lower()):
+        reasons.append("forbidden mount or path /workspace")
     reasons += _mount_reasons(argv)
     if any(a in argv for a in ("--privileged", "--pid=host", "--network=host")):
         reasons.append("host namespaces are forbidden")
