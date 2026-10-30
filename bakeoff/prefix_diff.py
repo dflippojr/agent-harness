@@ -65,8 +65,8 @@ def classify(prev: dict, cur: dict, where: tuple[int, int] | None) -> str:
     if any((r["messages"] or [{}])[0].get("content") == compaction.SUMMARY_SYSTEM for r in (prev, cur)):
         return "compaction summary request"  # a separate call with its own prompt, before or after it
     if prev.get("tools") != cur.get("tools"):
-        names = [[t.get("function", {}).get("name") for t in (r.get("tools") or [])] for r in (prev, cur)]
-        return "tool-schema order" if sorted(names[0]) == sorted(names[1]) else "tool schemas changed"
+        schemas = [sorted(json.dumps(t, sort_keys=True) for t in (r.get("tools") or [])) for r in (prev, cur)]
+        return "tool-schema order" if schemas[0] == schemas[1] else "tool schemas changed"
     if where is None:
         return ""
     index, offset = where
@@ -183,8 +183,11 @@ def prefill_rate(rows: list[dict]) -> float:
 
 
 def summary(rows: list[dict]) -> dict:
-    """Per-session reuse (cached / prompt tokens over its requests) and the cost of each break class."""
+    """Per-session reuse (cached / prompt tokens over its requests) and the cost of each break class, each break priced
+    at its own session's rate (the capture's overall rate for a session that read too little to have one)."""
     rate = prefill_rate(rows)
+    rates = {sid: prefill_rate([r for r in rows if r.get("session") == sid]) or rate
+             for sid in {r.get("session") for r in rows}}
     sessions: dict[str, dict] = {}
     for r in completed(rows):
         s = sessions.setdefault(r.get("session") or "?", {"requests": 0, "prompt_tokens": 0, "cache_tokens": 0})
@@ -197,11 +200,12 @@ def summary(rows: list[dict]) -> dict:
     for p in pairs(rows):
         if not p["class"] or p["class"] == "other session":
             continue
-        b = breaks.setdefault(p["class"], {"count": 0, "lost_tokens": 0})
+        b = breaks.setdefault(p["class"], {"count": 0, "lost_tokens": 0, "seconds": 0.0})
         b["count"] += 1
         b["lost_tokens"] += p.get("lost_tokens", 0)
+        b["seconds"] += p.get("lost_tokens", 0) * rates[p.get("session")] / 1000
     for b in breaks.values():
-        b["seconds"] = round(b["lost_tokens"] * rate / 1000, 1)
+        b["seconds"] = round(b["seconds"], 1)
     return {"ms_per_token": round(rate, 3), "failed_requests": len(rows) - len(completed(rows)), "sessions": sessions,
             "breaks": breaks}
 

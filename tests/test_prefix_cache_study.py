@@ -107,6 +107,8 @@ def test_first_message_diff():
     (row(1, [SYSTEM]), row(2, [SYSTEM], session="s2"), "other session"),
     (row(1, [SYSTEM]), row(2, [SYSTEM], tools=TOOLS[::-1]), "tool-schema order"),
     (row(1, [SYSTEM]), row(2, [SYSTEM], tools=TOOLS[:1]), "tool schemas changed"),
+    (row(1, [SYSTEM]), row(2, [SYSTEM], tools=[{"type": "function", "function": {"name": "read_file", "description": "x"}},
+                                               TOOLS[1]]), "tool schemas changed"),
     (row(1, [{"role": "system", "content": "x {base_branch}"}]), row(2, [{"role": "system", "content": "x main"}]),
      "system prompt: {base_branch} filled"),
     (row(1, [SYSTEM]), row(2, [{"role": "system", "content": SYSTEM["content"] + "\n\n<repo-map>\nm\n</repo-map>"}]),
@@ -205,6 +207,22 @@ def test_a_failed_call_does_not_hide_a_break_from_its_retry():
     out = prefix_diff.summary(rows)
     assert out["failed_requests"] == 1 and out["sessions"]["s1"]["requests"] == 2
     assert out["breaks"]["masking: observation receipt"]["lost_tokens"] == 700
+
+
+def test_each_break_is_priced_at_its_own_sessions_rate():
+    user = {"role": "user", "content": "go"}
+    result = {"role": "tool", "tool_call_id": "c1", "content": "x" * 3000}
+    masked = {"role": "tool", "tool_call_id": "c1", "content": compaction.RECEIPT_PREFIX}
+
+    def session(sid: str, ms: int) -> list[dict]:
+        return [row(1, [SYSTEM, user, result], session=sid, prompt_tokens=1000, cache_tokens=0, prompt_ms=ms),
+                row(2, [SYSTEM, user, masked], session=sid, prompt_tokens=1000, cache_tokens=0, prompt_ms=ms)]
+
+    fast = session("fast", 1000)
+    alone = prefix_diff.summary(fast)["breaks"]["masking: observation receipt"]
+    both = prefix_diff.summary(fast + session("slow", 10000))["breaks"]["masking: observation receipt"]
+    assert alone == {"count": 1, "lost_tokens": 1000, "seconds": 1.0}
+    assert both == {"count": 2, "lost_tokens": 2000, "seconds": 11.0}  # 1 s and 10 s, not the pooled rate twice
 
 
 def test_report_reads_a_capture_and_writes_json(tmp_path, capsys):
