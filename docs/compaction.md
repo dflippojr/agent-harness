@@ -332,9 +332,13 @@ on, a native agent session (backend `local`, kind `agent`) works like this:
   templates still render the reasoning of the assistant turns after the last
   user message. `s["context"]`, the transcript, checkpoints, compaction,
   masking and the events never contain it.
-- Nothing is inserted above the newest turn, so llama-server's reused prefix
-  ends only where the plan began: each call re-reads the plan plus the new
-  turn, not the whole newest turn again.
+- Nothing is inserted above the newest turn, but the previous request's plan
+  sits before that request's reply, so each call departs from the cache at the
+  old plan and re-reads the previous reply too. On the Qwen3.6 hybrid model the
+  server also falls back to a checkpoint up to 516 tokens before the end of the
+  previous prompt. Measured in
+  [`prefix-cache-study.md`](prefix-cache-study.md): a turn's median prefill goes
+  from 0.18 s to 1.33 s.
 - One sentence asking the model to keep its plan current with `update_state`
   is added to the system prompt when the session is created. It is fixed for
   the session and never breaks the prefix.

@@ -271,6 +271,7 @@ def test_a_fake_session_breaks_the_prefix_only_where_compaction_or_the_plan_does
     rows = prefix_diff.read_jsonl(path)
     agent = [r for r in rows if r["messages"][0]["content"] != compaction.SUMMARY_SYSTEM]
     assert len({json.dumps(r["tools"]) for r in agent}) == 1
+    assert len({r["messages"][0]["content"] for r in agent}) == 1
     classes = {p["class"] for p in prefix_diff.pairs(rows)}
     assert "masking: observation receipt" in classes and "compaction: round reset" in classes
     assert ("injected state: plan re-injection" in classes) is reinject
