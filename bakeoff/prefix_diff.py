@@ -28,7 +28,8 @@ from harness import compaction, planning, repomap, workspace_guidance
 DATE_TIME = re.compile(r"\d{4}-\d\d-\d\d|\d\d:\d\d")
 # compaction's trim and elide notes (harness/compaction.py: SAME_AS_BELOW, SUPERSEDED, LINES_OMITTED, elided output)
 TRIM_MARK = re.compile(r"\[Same output as a later|\[Older read of|lines omitted|chars omitted|earliest part omitted|"
-                       r"characters of prior notes shortened")
+                       r"characters of prior notes shortened|older tool output shortened")
+MESSAGE_OVERHEAD = 8  # tokens the template adds around one message (role markers, <tool_response> tags)
 
 
 def _text(message: dict) -> str:
@@ -94,6 +95,8 @@ def classify(prev: dict, cur: dict, where: tuple[int, int] | None) -> str:
         if DATE_TIME.search(a[near]) or DATE_TIME.search(b[near]):
             return "date or time"
         return "system prompt: other"
+    if index < len(old) and old[index].get("reasoning_content") and not new[index].get("reasoning_content"):
+        return "compaction: elide dropped reasoning"  # the elide tier strips older assistant turns' reasoning
     if texts[index].startswith(compaction.RECEIPT_PREFIX):
         return "masking: observation receipt"  # a used tool result replaced by its receipt (mask_min_chars)
     if planning.MARKER in a[offset:] and planning.MARKER not in b[offset:]:
@@ -109,6 +112,23 @@ def classify(prev: dict, cur: dict, where: tuple[int, int] | None) -> str:
     return "other"
 
 
+def new_messages(prev: dict, cur: dict) -> list[dict]:
+    """The messages `cur` adds after `prev`'s, without the assistant turn that holds `prev`'s reply: the server has
+    already generated that one, the rest it has to read whatever the cache holds. A request after a summary call
+    shares nothing with it, so nothing in it counts as added."""
+    if (prev["messages"] or [{}])[0].get("content") == compaction.SUMMARY_SYSTEM:
+        return []
+    tail = cur["messages"][len(prev["messages"]):]
+    return tail[1:] if tail and tail[0].get("role") == "assistant" else tail
+
+
+def appended_tokens(prev: dict, cur: dict) -> int:
+    """Tokens of new_messages: counted by `render`, or estimated at 3 characters a token for an unrendered capture."""
+    if "new_tokens" in cur:
+        return cur["new_tokens"]
+    return round(len(json.dumps(new_messages(prev, cur))) / 3) if new_messages(prev, cur) else 0
+
+
 def pairs(rows: list[dict]) -> list[dict]:
     """One row per request after the first: prompt and cache sizes, where it departs from the previous request
     and the break's class. Token fields are filled when the rows carry rendered `tokens`."""
@@ -122,9 +142,8 @@ def pairs(rows: list[dict]) -> list[dict]:
                "class": classify(prev, cur, where) if (where or tools_changed
                                                        or prev.get("session") != cur.get("session")) else ""}
         cache = cur.get("cache_tokens") or 0
-        # Tokens the cache held from the previous prompt but the server read again. The previous reply's tokens
-        # are left out, so this undercounts by at most one reply.
-        row["lost_tokens"] = max(0, (prev.get("prompt_tokens") or 0) - cache)
+        # What the server read beyond the messages this request added: re-reading it is the break's cost.
+        row["lost_tokens"] = max(0, (cur.get("prompt_tokens") or 0) - cache - appended_tokens(prev, cur))
         if "tokens" in prev and "tokens" in cur:
             shared = common_prefix(prev["tokens"], cur["tokens"])
             row.update(shared_tokens=shared, broke=shared < len(prev["tokens"]),
@@ -171,14 +190,19 @@ def summary(rows: list[dict]) -> dict:
 def render(rows: list[dict], server: str) -> list[dict]:
     """`rows` with `prompt` and `tokens` as the server's chat template and tokenizer make them."""
     import httpx
-    out = []
+    out: list[dict] = []
     with httpx.Client(base_url=server, timeout=120) as client:
+        def tokenize(text: str) -> list[int]:
+            return client.post("/tokenize", json={"content": text, "add_special": False,
+                                                  "parse_special": True}).raise_for_status().json()["tokens"]
+
         for r in rows:
             body = {"messages": r["messages"], **({"tools": r["tools"]} if r.get("tools") else {})}
             prompt = client.post("/apply-template", json=body).raise_for_status().json()["prompt"]
-            tokens = client.post("/tokenize", json={"content": prompt, "add_special": False,
-                                                    "parse_special": True}).raise_for_status().json()["tokens"]
-            out.append({**r, "prompt": prompt, "tokens": tokens})
+            row = {**r, "prompt": prompt, "tokens": tokenize(prompt)}
+            if out:
+                row["new_tokens"] = sum(len(tokenize(_text(m))) + MESSAGE_OVERHEAD for m in new_messages(out[-1], r))
+            out.append(row)
     return out
 
 

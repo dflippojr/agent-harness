@@ -117,6 +117,8 @@ def test_first_message_diff():
     (row(1, [SYSTEM, {"role": "tool", "content": "a\nb\nc"}]),
      row(2, [SYSTEM, {"role": "tool", "content": "a\n[... 1 lines omitted: older command output ...]\nc"}]),
      "compaction: trim or elide"),
+    (row(1, [SYSTEM, {"role": "assistant", "content": "a", "reasoning_content": "think"}]),
+     row(2, [SYSTEM, {"role": "assistant", "content": "a"}]), "compaction: elide dropped reasoning"),
     (row(1, [SYSTEM, {"role": "user", "content": "go"}, {"role": "assistant", "content": "x" * 900}]),
      row(2, [SYSTEM, {"role": "user", "content": "go"}, {"role": "user", "content": compaction.STATE_TAG + " {}"},
              {"role": "user", "content": "Continue."}]), "compaction: round reset"),
@@ -149,11 +151,19 @@ def test_pairs_and_summary_price_a_break_at_the_measured_prefill_rate():
     [first, second] = prefix_diff.pairs(rows)
     assert first["class"] == "" and first["lost_tokens"] == 0 and first["broke"] is False
     assert second["class"] == "masking: observation receipt" and second["message"] == 2
-    assert (second["shared_tokens"], second["lost_tokens"], second["server_shortfall"]) == (1100, 1600, 700)
+    assert (second["shared_tokens"], second["lost_tokens"], second["server_shortfall"]) == (1100, 800, 700)
     out = prefix_diff.summary(rows)
     assert out["ms_per_token"] == 1.0  # (1000 + 800) ms over (1000 + 800) tokens; the cold first request left out
     assert out["sessions"]["s1"] == {"requests": 3, "prompt_tokens": 4200, "cache_tokens": 1400, "reuse": 0.333}
-    assert out["breaks"] == {"masking: observation receipt": {"count": 1, "lost_tokens": 1600, "seconds": 1.6}}
+    assert out["breaks"] == {"masking: observation receipt": {"count": 1, "lost_tokens": 800, "seconds": 0.8}}
+
+
+def test_nothing_counts_as_added_after_a_summary_call():
+    summary = row(1, [{"role": "system", "content": compaction.SUMMARY_SYSTEM}, {"role": "user", "content": "notes"}])
+    agent = row(2, [SYSTEM, {"role": "user", "content": "go"}, {"role": "user", "content": "more"}])
+    assert prefix_diff.new_messages(summary, agent) == []
+    assert prefix_diff.appended_tokens(summary, agent) == 0
+    assert prefix_diff.new_messages(row(1, [SYSTEM]), agent) == agent["messages"][1:]
 
 
 def test_report_reads_a_capture_and_writes_json(tmp_path, capsys):
@@ -186,10 +196,15 @@ def test_render_asks_the_server_for_the_template_and_tokens(monkeypatch):
 
     import httpx
     monkeypatch.setattr(httpx, "Client", Client)
-    [out] = prefix_diff.render([row(1, [SYSTEM])], "http://127.0.0.1:1")
-    assert out["prompt"] == "<rendered>" and out["tokens"] == [1, 2, 3]
+    reply = {"role": "assistant", "content": "calling"}
+    result = {"role": "tool", "content": "output"}
+    first, second = prefix_diff.render([row(1, [SYSTEM]), row(2, [SYSTEM, reply, result])], "http://127.0.0.1:1")
+    assert first["prompt"] == "<rendered>" and first["tokens"] == [1, 2, 3] and "new_tokens" not in first
+    assert second["new_tokens"] == 3 + prefix_diff.MESSAGE_OVERHEAD  # the tool result; the reply was generated
     assert posted[0] == ("/apply-template", {"messages": [SYSTEM], "tools": TOOLS})
     assert posted[1][1] == {"content": "<rendered>", "add_special": False, "parse_special": True}
+    assert {"content": "output", "add_special": False, "parse_special": True} in [body for _, body in posted]
+    assert not [body for _, body in posted if body.get("content") == "calling"]
 
 
 # decision 2's harness-side pass: the real runner with the scripted model
