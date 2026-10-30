@@ -646,6 +646,25 @@ def test_plex_with_no_transcoder_is_clear_and_a_failed_nvidia_smi_says_so(monkey
     assert detector.plex_error == ""  # a working source with nothing on it is not an error
 
 
+def test_a_transcoder_on_the_gpu_parks_the_model_through_the_real_detector(monkeypatch):
+    """#830's point: with no token, the guard itself holds and clears on what nvidia-smi shows."""
+    from harness_modules.local_model import service
+    from test_phase5 import make_guard
+    monkeypatch.setattr(service, "plex_token", lambda: "")
+    fake_compute_apps(monkeypatch, COMPUTE_APPS, "1661709, /app/llama-server, 14000\n")
+
+    async def body():
+        guard, _, control, scheduler, _ = make_guard(resume_after_seconds=0)
+        guard.detector = service.Detector(GpuGuardConfig())
+        await guard.check()
+        assert guard.state == PAUSED and scheduler.paused and control.stops == 1
+        assert [r["key"] for r in guard.reasons] == ["plex:pid71", "plex:pid72"]
+        assert guard.status()["plex_error"] == ""
+        await guard.check()
+        assert not any(s["kind"] == "plex" for s in guard.signals)
+    asyncio.run(body())
+
+
 def test_plex_with_a_token_asks_plex_and_never_counts_the_same_transcode_twice(monkeypatch):
     """The registry path on Windows stays as it was; the two sources aren't added together."""
     import httpx
