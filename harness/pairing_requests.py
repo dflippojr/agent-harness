@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import audit_context, catalog_ids, credential_audit
+from .digests import sha256_hex
 from .manager import HarnessError
 
 PENDING, ARMED, CLAIMED, APPROVED = "pending", "armed", "claimed", "approved"
@@ -159,10 +160,6 @@ def challenge_of(verifier: str) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
 
 
-def _digest(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
 def _match_code() -> str:
     return f"{secrets.randbelow(10 ** 6):06d}"
 
@@ -227,7 +224,7 @@ def _challenge(value: str, method: str) -> str:
         raise ValueError("code_challenge_method must be S256")
     if not CHALLENGE.fullmatch(value or ""):
         raise ValueError("code_challenge must be the unpadded base64url SHA-256 of the code_verifier (43 characters)")
-    return _digest(value)
+    return sha256_hex(value)
 
 
 def _request_origin(request: Request) -> str:
@@ -247,7 +244,7 @@ def _caller(request: Request) -> str:
     which any native client can set to anything, so one caller cannot spend another's allowance by naming its App."""
     login = request.headers.get("tailscale-user-login")
     raw = "login:" + login if login else "addr:" + (request.client.host if request.client else "")
-    return _digest(raw)
+    return sha256_hex(raw)
 
 
 NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
@@ -436,7 +433,7 @@ def _redeem_refusal(row: dict | None, origin: str, verifier: str) -> tuple[int, 
         return 403, "this pairing request is not approved for this origin", "origin_mismatch"
     if not row["origin"] and origin:
         return 403, "a native App's pairing request cannot be redeemed from a browser", "native_only"
-    if not verifier or not hmac.compare_digest(_digest(challenge_of(verifier)), row["challenge_hash"]):
+    if not verifier or not hmac.compare_digest(sha256_hex(challenge_of(verifier)), row["challenge_hash"]):
         return 400, "invalid code_verifier", "invalid_verifier"
     if state != APPROVED:
         return 409, "waiting for the owner to approve this pairing request", ""
