@@ -70,7 +70,7 @@
       "app_surface": false
     },
     {
-      "where": "public/lib/router.mjs:166",
+      "where": "public/lib/router.mjs:171",
       "pattern": "/images/cooldown",
       "sample": "/images/cooldown",
       "methods": [
@@ -1226,11 +1226,11 @@
       "sample": "/"
     },
     {
-      "where": "public/lib/router.mjs:110",
+      "where": "public/lib/router.mjs:113",
       "sample": "/"
     },
     {
-      "where": "public/lib/router.mjs:166",
+      "where": "public/lib/router.mjs:171",
       "sample": "/images/cooldown"
     },
     {

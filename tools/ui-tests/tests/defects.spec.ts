@@ -467,3 +467,39 @@ test('#634 Phone jump buttons keep 8px from the session tabs and the Session men
     for (const other of others) expect(gapBetween(jumpBox, await boxOf(other))).toBeGreaterThanOrEqual(8);
   }
 });
+
+// #868: Back then a new hash, both while /me is slow, must leave one chat view. Each hashchange starts a route(), and
+// both read the same hash once /me answers.
+test('#868 A later route supersedes one still waiting on /me', async ({ signedIn: page }) => {
+  await page.goto('/#/chat');
+  await page.getByRole('region', { name: 'Recent chats', exact: true })
+    .getByRole('link', { name: 'Hello from Chat. What can you do?' }).first().click();
+  await expect(page).toHaveURL(/#\/chat\/[A-Za-z0-9_-]+$/);
+  await expect(page.locator('.chat-feed')).toContainText('Hi! This is the fake model.');
+  const chatUrl = page.url();
+
+  let release!: () => void;
+  const released = new Promise<void>(resolve => { release = resolve; });
+  const held: Promise<unknown>[] = [];
+  let bothHeld!: () => void;
+  const overlapping = new Promise<void>(resolve => { bothHeld = resolve; });
+  await page.route(/\/me(\?|$)/, async route => {
+    if (route.request().method() !== 'GET') return route.continue();
+    held.push(route.request().response().then(response => response?.finished()));
+    if (held.length === 2) bothHeld();
+    await released;
+    await route.continue();
+  });
+
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/chat$/);
+  await page.goto(chatUrl);
+  await overlapping;
+  release();
+  await Promise.all(held);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+  await expect(page.locator('.chat-feed')).toHaveCount(1);
+  await expect(page.locator('.chat-feed')).toContainText('Hi! This is the fake model.');
+  await expect(page.locator('.composer')).toHaveCount(1);
+});
