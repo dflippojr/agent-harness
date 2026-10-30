@@ -112,18 +112,23 @@ def test_a_backup_from_the_shipped_config_writes_no_d_folder_into_the_checkout(t
     assert Path(result["path"]).is_relative_to(xdg / "agent-harness" / "backups")
 
 
-@pytest.mark.parametrize(("body", "code", "blamed"), [
-    # A stand-in name, because Windows cannot create a folder literally called D:.
-    ("import os, stray_drive_guard\nstray_drive_guard.FOLDER = 'stray'\ndef test_writes():\n    os.mkdir('stray')\n", 1, True),
-    ("def test_clean():\n    pass\n", 0, False),
+USE_STAND_IN = "import os, stray_drive_guard\nstray_drive_guard.FOLDER = 'stray'\n"  # Windows cannot create a D: folder
+
+
+@pytest.mark.parametrize(("body", "left_before", "code", "blamed"), [
+    (USE_STAND_IN + "def test_writes():\n    os.mkdir('stray')\n", False, 1, True),
+    (USE_STAND_IN + "def test_clean():\n    pass\n", True, 1, True),  # left by an earlier run
+    (USE_STAND_IN + "def test_clean():\n    pass\n", False, 0, False),
 ])
-def test_the_suite_guard_fails_a_run_that_leaves_the_folder(tmp_path, body, code, blamed):
+def test_the_suite_guard_fails_a_run_that_ends_with_the_folder(tmp_path, body, left_before, code, blamed):
     (tmp_path / "test_sample.py").write_text(body, encoding="utf-8")
+    if left_before:
+        (tmp_path / "stray").mkdir()
     run = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "stray_drive_guard", "-p", "no:cacheprovider",
                           "test_sample.py"], cwd=tmp_path, capture_output=True, text=True, timeout=60,
                          env={**os.environ, "PYTHONPATH": str(GUARD_DIR)})
     assert run.returncode == code, run.stdout + run.stderr
-    assert ("this run left a literal" in run.stdout + run.stderr) is blamed
+    assert ("a literal stray folder is in" in run.stdout + run.stderr) is blamed
 
 
 def test_a_manual_backup_never_writes_a_d_folder_into_the_checkout(tmp_path, monkeypatch):
