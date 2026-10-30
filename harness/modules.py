@@ -110,6 +110,7 @@ _PUBLIC = {
     "ToolError": ("harness.fileops", "ToolError"),
     "run_cmd": ("harness.sandbox", "run_cmd"),
     "HarnessError": ("harness.manager", "HarnessError"),
+    "normalize_origin": ("harness.origins", "normalize_origin"),  # canonical browser origin, as keys and pairing use it
     "RouteTable": ("harness.api", "RouteTable"),
     "WebSessionResponse": ("harness.api_models", "WebSessionResponse"),
     "require_owner": ("harness.api", "require_owner"),
@@ -423,12 +424,6 @@ def cli_rows(cfg=None) -> tuple[tuple, ...]:
 def cli_groups(cfg=None) -> dict[str, str]:
     modules = discovered(cfg) if cfg is not None else discover()
     return {group: text for module in modules for group, text in module.cli_groups.items()}
-
-
-def normalize_origin(value: str) -> str:
-    """Canonical browser origin shared with key creation and pairing."""
-    from .apps import normalize_origin as normalize
-    return normalize(value)
 
 
 def normalize_catalog_app_id(value) -> str:

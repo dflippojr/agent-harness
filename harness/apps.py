@@ -22,7 +22,6 @@ import asyncio
 import logging
 import re
 import time
-from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -33,6 +32,7 @@ from .api_models import ApprovalResponse, SessionResponse
 from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
+from .origins import check_key_origin, daemon_origins, normalize_origin
 from .policy import TOOLS_ONLY
 from . import audit_context, catalog_ids, compat, credential_audit, idempotency, namespace_audit
 
@@ -56,37 +56,6 @@ DEFAULT_TOOL_TIMEOUT = 600
 HOLD_SLOT_SECONDS = 3      # an app answering faster than this keeps the session on the GPU
 PAIRING_TTL_SECONDS = 10 * 60
 STREAM_TICKET_TTL_SECONDS = 60
-
-
-def normalize_origin(value: str) -> str:
-    """Return a canonical web origin, or raise ValueError for URLs that are not origins."""
-    value = (value or "").strip()
-    try:
-        parsed = urlsplit(value)
-        port = parsed.port
-    except ValueError as e:
-        raise ValueError("origin must be a valid http(s) origin") from e
-    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password
-            or parsed.query or parsed.fragment or parsed.path not in ("", "/")):
-        raise ValueError("origin must contain only an http(s) scheme, host, and optional port")
-    host = parsed.hostname.lower()
-    if parsed.scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
-        raise ValueError("browser origins must use https (http is allowed only for loopback development)")
-    if ":" in host:
-        host = f"[{host}]"
-    default_port = (parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443)
-    return f"{parsed.scheme}://{host}{f':{port}' if port is not None and not default_port else ''}"
-
-
-def daemon_origins(cfg) -> set[str]:
-    values = [cfg.public_url, f"http://127.0.0.1:{cfg.port}", f"http://localhost:{cfg.port}"]
-    out = set()
-    for value in values:
-        try:
-            out.add(normalize_origin(value))
-        except ValueError:
-            pass
-    return out
 
 
 def cors_origin_allowed(m, request: Request, origin: str) -> bool:
@@ -440,17 +409,6 @@ def _bundled_identity(request: Request, m, token: str) -> dict:
     raise HarnessError(401, "missing or invalid app token")
 
 
-def _check_token_origin(request: Request, m, key: dict) -> None:
-    raw_origin = request.headers.get("origin", "")
-    if raw_origin:
-        try:
-            origin = normalize_origin(raw_origin)
-        except ValueError as e:
-            raise HarnessError(403, str(e)) from e
-        if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
-            raise HarnessError(403, "this app token is not approved for this origin")
-
-
 def auth(request: Request, scope: str) -> dict:
     m = mgr(request)
     header = request.headers.get("authorization", "")
@@ -462,7 +420,7 @@ def auth(request: Request, scope: str) -> dict:
     if (not owner_key(key) and scope not in scopes
             and not (scope == "sessions" and SESSIONS_ALL in scopes and request.method == "GET")):
         raise HarnessError(403, f"this token lacks the {scope!r} scope")
-    _check_token_origin(request, m, key)
+    check_key_origin(request, m, key, noun="app")
     key["scope_set"] = scopes
     request.state.authenticated_key_id = key["id"]
     return key
