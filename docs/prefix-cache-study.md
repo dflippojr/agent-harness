@@ -174,7 +174,7 @@ idle sleep (`--sleep-idle-seconds 600`, left out of the throwaway server), and p
 
 - **Real sessions:** none were read. Repository projects, follow-up messages, long waits and the idle sleep were not
   exercised, and neither was the `{base_branch}` path at run time.
-- **The stall:** `cli_json_output`'s third run stopped after turn 13 and sat until the runner's 45-minute cap
+- **The stall:** `cli_json_output`'s third run stopped after turn 13 and sat until the runner's cap, then 45 minutes
   (`still waiting for the GPU at the run's cap`, recorded as suspended). Its last call was a harmless `run_shell`. The
   data dir is deleted at the end of a run, so the cause was not found. It happened once, with debug logging on and other
   work on the host.
@@ -217,7 +217,7 @@ docker run --rm --name ah774-llama --gpus all --network host \
   --fit on --cache-type-k q8_0 --cache-type-v q8_0
 # For the checkpoint log add -lv 4, with --log-driver none on docker run, and filter the output with grep.
 
-# One session per invocation: a run's cap is the nightly 45 minutes. Add --plan-reinject for the flag rows.
+# One session per invocation, so each capture file holds one session. Add --plan-reinject for the flag rows.
 for t in log_correlation sqlite_report merge_conflict cli_json_output duration_parser multi_bug_inventory; do
   HARNESS_CONFIG_DIR=$PWD/.tmp/config python -m bakeoff.canary --tasks $t --repeats 1 \
     --keep-metrics .tmp/ah774/$t.metrics.json --capture-prompts .tmp/ah774/$t.prompts.jsonl
