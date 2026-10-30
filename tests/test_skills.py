@@ -243,11 +243,71 @@ def test_sandbox_argv_is_isolated(tmp_path):
     assert argv[argv.index("--workdir") + 1] not in ("/tmp", "/var/tmp")
     assert f"{SANDBOX_WORK}:rw,noexec,nosuid,size=16m" in argv
     assert f"TMPDIR={SANDBOX_WORK}" in argv
-    joined = " ".join(argv)
+    # What the command adds on its own, whatever directory the test temp folder happens to sit under (#861).
+    joined = " ".join(argv).replace(str(tmp_path.resolve()), "")
     for needle in ("docker.sock", "/workspace", "harness-auth", "/secrets", "memory-library"):
         assert needle not in joined
     bad = argv + ["--mount", "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock"]
     assert sandbox_command_is_isolated(bad)
+
+
+@pytest.mark.parametrize("component", [
+    "workspaces", "WORKSPACES", "workspace-old", "workspace_2", "workspace.bak", "workspace2",
+])
+def test_sandbox_allows_install_path_with_longer_component(tmp_path, component):
+    install = tmp_path / "orca" / component / "agent-harness"
+    proposal = install / "proposal"
+    proposal.mkdir(parents=True)
+    validator = install / "validate.py"
+    validator.write_text("print(1)\n", encoding="utf-8")
+    assert sandbox_command_is_isolated(sandbox_command("image", proposal, validator)) == []
+
+
+@pytest.mark.parametrize("arg", [
+    "type=bind,source=/workspace,target=/x",
+    "type=bind,source=/workspace/,target=/x",
+    "type=bind,source=/workspace/repo,target=/x",
+    "type=bind,source=/x,target=/workspace",
+    "type=bind,source=/x,target=/workspace,readonly",
+    "/workspace",
+    "/workspace:/x",
+    "/workspace:/x:ro",
+    "--volume=/workspace:/x",
+    "/WORKSPACE/repo",
+    "/Workspace",
+    "/workspace/../etc",
+    "/x/../workspace",
+    "//workspace",
+    "/./workspace",
+    "/workspaces/../workspace",
+    "/home/owner/workspace/repo",
+    "C:/workspace/repo",
+    "/workspace\\repo",
+    "\"/workspace\"",
+    "/workspace.",
+    "/workspace./repo",
+    "/workspace*",
+    "/workspace?",
+    "/workspace 2",
+])
+def test_sandbox_refuses_a_command_reaching_workspace(tmp_path, arg):
+    proposal = tmp_path / "proposal"
+    proposal.mkdir()
+    validator = tmp_path / "validate.py"
+    validator.write_text("print(1)\n", encoding="utf-8")
+    argv = sandbox_command("image", proposal, validator)
+    assert "forbidden mount or path /workspace" in sandbox_command_is_isolated(argv + ["--mount", arg])
+    assert "forbidden mount or path /workspace" in sandbox_command_is_isolated(argv[:-1] + [arg])
+
+
+def test_sandbox_refuses_workspace_mount_beside_a_longer_component(tmp_path):
+    proposal = tmp_path / "workspaces" / "proposal"
+    proposal.mkdir(parents=True)
+    validator = tmp_path / "workspaces" / "validate.py"
+    validator.write_text("print(1)\n", encoding="utf-8")
+    argv = sandbox_command("image", proposal, validator)
+    assert sandbox_command_is_isolated(argv) == []
+    assert "forbidden mount or path /workspace" in sandbox_command_is_isolated(argv + ["-v", "/workspace:/x"])
 
 
 def test_extract_json_strips_markdown_fences_without_regex():
