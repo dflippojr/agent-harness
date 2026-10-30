@@ -40,6 +40,7 @@ from .web_suite import DEFAULT_FIXTURE, TASKS as WEB_TASKS, ungrounded_quotes
 
 ROOT = Path(__file__).resolve().parent.parent
 SUITE = Path(__file__).with_name("canary.yaml")
+WEB_WALL_LIMIT = 1500  # seconds of GPU time a web task attempt may use (hard tasks carry their own)
 MAX_RESTARTS = 2  # a task attempt that was suspended mid-way restarts, up to this many times
 DONE = ("done", "failed", "cancelled")
 
@@ -72,8 +73,9 @@ def xy_suite(repeats: int) -> dict:
 def heldout_cap_seconds(suite: dict, only: list[str] | None) -> int:
     """Room for every selected attempt to use its whole wall-clock limit, plus a minute each for setup and grading.
     The nightly `total_cap_seconds` (45 min) would cut a calibration off after two slow attempts."""
-    tasks = [t for t in suite["hard"] if not only or t.id in only]
-    return int(sum(t.wall_limit + 60 for t in tasks) * suite["repeats"])
+    limits = [t.wall_limit for t in suite["hard"] if not only or t.id in only]
+    limits += [WEB_WALL_LIMIT for t in suite["web"] if not only or t.id in only]
+    return int(sum(limit + 60 for limit in limits) * suite["repeats"])
 
 
 class CanaryRunner:
@@ -180,7 +182,7 @@ class CanaryRunner:
             # The limit counts only time the canary had the GPU: never time queued behind a real session (even
             # before its first turn), stepped aside, paused by the guard, or held up by an image batch that took the
             # GPU over. A wait that outlasts the run's cap is no verdict on the agent: stopped, excluded as suspended.
-            limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else 1500), 0.0, False, False
+            limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else WEB_WALL_LIMIT), 0.0, False, False
             while m.db.get_session(sid)["status"] not in DONE:
                 held, before = self._has_gpu(sid), self.clock()
                 await self.sleep(1 if self.poll > 1 else self.poll)

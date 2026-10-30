@@ -212,3 +212,11 @@ def test_the_system_line_reaches_the_sessions_system_prompt(tmp_path):
     assert LINE in _first_system_prompt(tmp_path / "with", LINE)
     without = _first_system_prompt(tmp_path / "without", None)
     assert LINE not in without and "Project instructions (" not in without
+
+
+def test_a_named_web_task_run_by_hand_gets_room_for_its_attempts(monkeypatch, tmp_path):
+    """Named --tasks runs get the experiment cap, so it must count web tasks too, not only hard ones."""
+    _, _, seen = _standalone(monkeypatch, tmp_path, task_ids=["searxng_license"], repeats=2, fixture=tmp_path)
+    assert seen["cap"] == 2 * (canary.WEB_WALL_LIMIT + 60)
+    assert canary.heldout_cap_seconds(canary.load_suite(), ["sqlite_report", "searxng_license"]) == 2 * (
+        1800 + 60 + canary.WEB_WALL_LIMIT + 60)
