@@ -58,6 +58,8 @@ def check_guard(r, cfg):
                 memory = gpu.get("memory") or {}
                 low = "; RAM low, new work waits" if memory.get("low") else ""
                 r.ok("Resource guard", f"state {gpu['state']}{parked}{low}")
+            if gpu.get("plex_error"):
+                r.warn("Plex detection", gpu["plex_error"])
     except (httpx.HTTPError, ValueError, KeyError) as error:
         r.warn("Resource guard", f"{base} not answering ({type(error).__name__})")
 

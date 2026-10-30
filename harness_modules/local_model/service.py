@@ -15,7 +15,9 @@ and ComfyUI jobs wait (MemoryWatch; the runner and the image service check it be
 
 Windows doesn't report VRAM per process, so the triggers are what's running, not memory numbers: an executable
 under a game library folder, a Steam Big Picture window (Sunshine's Big Picture app), or a Plex transcode with
-hardware encoding or decoding. Desktop streaming with nothing else running doesn't pause anything.
+hardware encoding or decoding. Plex is asked through its API when the registry holds a token; without one (Linux) a
+`Plex Transcoder` process in nvidia-smi's compute apps counts, with no credential. Desktop streaming with nothing
+else running doesn't pause anything.
 
 Sessions hear about it through `gpu_paused` / `gpu_resumed` events (see Runner.note_gpu_pause), which also notify
 the phone. From the app the user can pause by hand, or resume anyway while a trigger is still present; that
@@ -177,6 +179,19 @@ def hw_transcodes(body: dict) -> list[dict]:
     return out
 
 
+def plex_transcoders(processes: list[dict]) -> list[dict]:
+    """One signal per Plex Transcoder among the GPU's processes (#830). The key is the pid, never the VRAM: a "resume
+    anyway" override compares keys between polls."""
+    out = []
+    for proc in processes:
+        if re.split(r"[\\/]", proc["name"])[-1].lower().removesuffix(".exe") != "plex transcoder":
+            continue
+        used = proc["used_bytes"]
+        detail = "Plex transcode" + (f" ({used // 1024 ** 2} MiB)" if used is not None else "")
+        out.append({"key": f"plex:pid{proc['pid']}", "kind": "plex", "detail": detail})
+    return out
+
+
 class Detector:
     def __init__(self, cfg: GpuGuardConfig):
         self.cfg = cfg
@@ -193,8 +208,7 @@ class Detector:
         if not self._token:
             self._token = await asyncio.to_thread(plex_token)
         if not self._token:
-            self.plex_error = "no Plex token in the registry"
-            return []
+            return await self._plex_from_gpu()
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(f"{self.cfg.plex_url}/transcode/sessions",
@@ -207,6 +221,15 @@ class Detector:
         except (httpx.HTTPError, ValueError) as e:
             self.plex_error = f"{type(e).__name__}: {e}"[:200]  # Plex down: it isn't transcoding either
             return []
+
+    async def _plex_from_gpu(self) -> list[dict]:
+        from . import resources  # it imports this module
+        processes = await asyncio.to_thread(resources.gpu_processes)
+        if processes is None:
+            self.plex_error = "nvidia-smi could not list GPU processes, so Plex transcodes can't be seen"
+            return []
+        self.plex_error = ""
+        return plex_transcoders(processes)
 
 
 # ---------- memory ----------
