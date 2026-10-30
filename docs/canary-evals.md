@@ -218,20 +218,21 @@ record `xy` and `system_line`.
 Setup: `default_model` `qwen3.6-35b-a3b` (`Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`) served by our own container of the
 service's image, `ghcr.io/ggml-org/llama.cpp:server-cuda-b10830`, with the service's flags (`--ctx-size 65536
 --flash-attn on --parallel 1 --jinja --fit on --cache-type-k q8_0 --cache-type-v q8_0`) on a spare loopback port. A
-copy of the deployed config pointed at that port through `HARNESS_CONFIG_DIR`. Harness at the #773 branch. Two
+copy of the deployed config pointed at that port through `HARNESS_CONFIG_DIR`. Harness at `70d9a79f` (this branch). Two
 attempts per task per condition. Every attempt finished (`done`, no timeout, no suspension, no restart).
 
-| Condition | `duration_parser` | `sqlite_report` | `multi_bug_inventory` | Total | Turns (per attempt) |
+| Condition | `duration_parser` | `sqlite_report` | `multi_bug_inventory` | Total | Mean turns |
 | --- | --- | --- | --- | --- | --- |
-| plain | 2/2 (11, 20) | 0/2 (5, 7) | 2/2 (6, 6) | 4/6 | mean 9.2 |
-| XY | 2/2 (11, 16) | 0/2 (4, 6) | 2/2 (6, 8) | 4/6 | mean 8.5 |
-| XY + line | 2/2 (18, 11) | 0/2 (7, 5) | 2/2 (10, 7) | 4/6 | mean 9.7 |
-| plain + line | 2/2 (20, 24) | 0/2 (9, 5) | 2/2 (6, 6) | 4/6 | mean 11.7 |
+| plain | 2/2 (11, 20) | 0/2 (5, 7) | 2/2 (6, 6) | 4/6 | 9.2 |
+| XY | 2/2 (11, 16) | 0/2 (4, 6) | 2/2 (6, 8) | 4/6 | 8.5 |
+| XY + line | 2/2 (18, 11) | 0/2 (7, 5) | 2/2 (10, 7) | 4/6 | 9.7 |
+| plain + line | 2/2 (20, 24) | 0/2 (9, 5) | 2/2 (6, 6) | 4/6 | 11.7 |
 
-Turns per attempt are in brackets.
+Turns per attempt are in parentheses.
 
 - **No measurable XY drop.** Qwen passed `duration_parser` and `multi_bug_inventory` in every condition, with the
-  wrong suggestion and without it. It ran the code and tests instead of stopping at the hint.
+  wrong suggestion and without it, in a similar number of turns. Whether it said the suggestion was wrong wasn't
+  recorded: the runner keeps outcomes, not transcripts.
 - **`sqlite_report` is at the floor, so its variant can't show a drop.** Plain attempts fail it too, and with the
   same mistake the hint suggests. The checker records the first 200 characters of a wrong answer. Four of the eight
   failed attempts match the LEFT JOIN query's output exactly over that span (one plain, both plain + line, one XY +
