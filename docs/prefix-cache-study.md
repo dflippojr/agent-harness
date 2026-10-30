@@ -87,13 +87,19 @@ checkpoint.
 | 64K | masking: observation receipt | 35 | 259,595 | 14,592 | 349.5 | 242,575 |
 | 64K | compaction: elide dropped reasoning | 1 | 13,877 | 13,877 | 18.7 | 118 |
 | 12K | compaction: summary request | 3 | 6,350 | 3,102 | 8.5 | 9 |
+| 12K | compaction: the request after a summary (estimated) | 3 | about 3,700 | about 1,300 | about 5 | not measured |
 | 12K | masking: observation receipt | 4 | 6,368 | 2,687 | 8.6 | 4,351 |
 | 12K | compaction: elide dropped reasoning | 1 | 2,701 | 2,701 | 3.6 | 515 |
 | Flag on | masking: observation receipt | 10 | 37,772 | 5,904 | 51.8 | 32,059 |
 | Flag on | injected state: plan re-injection | 30 | 17,369 | 1,635 | 27.7 | 10,876 |
 
-The three requests right after those summary calls are not priced. They read 6,598, 6,949 and 7,607 tokens, mostly a new
-result of 12K to 14K characters, and telling the two apart needs a re-render against a server. The masking estimate is
+The three requests right after a summary read 6,598, 6,949 and 7,607 tokens, mostly a new result of 12K to 14K
+characters. These captures can't be re-rendered without a server, so the new result is estimated: the next request
+masks it, so the prompt's drop, plus that turn's reply and new messages and the receipt, gives its tokens (about 5,300,
+5,650 and 6,500, or 2.2 characters a token). The rest, about 1,300, 1,300 and 1,100 tokens, is priced at that session's
+1.34 ms per token. The receipt is taken as 170 tokens, so read these as good to a few hundred tokens each.
+
+The masking estimate is
 an upper bound on what a fix could save. Without masking, those results stay in the prompt and
 the context fills sooner.
 
