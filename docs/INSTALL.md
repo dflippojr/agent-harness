@@ -108,7 +108,7 @@ Docker (Docker Desktop on Windows/macOS) and at least one provider login are the
 and Cursor adapters; an unused provider can remain logged out. Add modules with a PowerShell array, for example
 `-EnableModules jobs,backup`. `endpoint`, `images`, `image_edit`, and `gpu_guard` automatically opt into `local_model` and restore
 the GPU/model requirements. `image_edit` is a separate ~20 GB Qwen-Image-Edit download; ordinary installs and daemon
-upgrades never fetch it. Those weights go in `images.models_dir` (default `C:/AI/comfy-models`, the same root as
+upgrades never fetch it. Those weights go in `images.models_dir` (default `C:/AI/comfy-models` on Windows, the same root as
 Z-Image/quality). If that directory is missing, the installer uses `<InstallDir>/comfy-models` and writes
 `images.models_dir` into the generated config so `python -m harness.doctor` and the daemon look in the same place.
 The complete module catalog and security boundary are in
@@ -343,7 +343,9 @@ sends, not the file the server loads.
 With the `backup` module on (the default), the daemon writes `backup.dir/<YYYY-MM-DD>/` every night at `backup.at`
 and deletes dated folders older than `backup.keep_days`. `harness maintenance backup` takes one now.
 Unless `backup.dir` is set, it is `D:\My Backups\agent-harness` on Windows and `$XDG_DATA_HOME/agent-harness/backups`
-(`~/.local/share/agent-harness/backups` when `XDG_DATA_HOME` is unset) elsewhere.
+(`~/.local/share/agent-harness/backups` when `XDG_DATA_HOME` is unset) elsewhere. `config/harness.yaml` sets no machine
+path (#854): the others work the same way, with defaults in `harness/config.py`, and `harness.local.yaml` overrides any of
+them. Off Windows, `data_dir` defaults to the checkout's `data/`, and key and token files have no default.
 
 A backup folder holds exactly:
 

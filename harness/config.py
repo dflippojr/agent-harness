@@ -23,8 +23,30 @@ MODULE_NAMES = (
 )
 # Opt-in even on a full profile: the Qwen-Image-Edit weights are ~20 GB and must not arrive with an ordinary install.
 OPT_IN_MODULES = frozenset({"image_edit", "mcp_client"})
+WINDOWS_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
+
+
+def _platform_path(windows: str, *elsewhere: str) -> str:
+    """Windows keeps its drive path. Elsewhere it is under the XDG data dir (#837, #854), never a relative path in the
+    checkout, or "" for a file with no sensible place to guess. A relative or empty XDG_DATA_HOME counts as unset, as
+    the XDG Base Directory spec says."""
+    if sys.platform == "win32":
+        return windows
+    if not elsewhere:
+        return ""
+    xdg = os.environ.get("XDG_DATA_HOME", "")
+    data_home = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
+    return str(data_home.joinpath("agent-harness", *elsewhere))
+
+
+def _path_field(windows: str, *elsewhere: str):
+    return field(default_factory=lambda: _platform_path(windows, *elsewhere))
+
+
 # extra_model_paths root shared by installer, doctor, and image components (Z-Image / quality / image_edit).
-DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
+DEFAULT_IMAGES_MODELS_DIR = _platform_path(WINDOWS_IMAGES_MODELS_DIR, "comfy-models")
+
+
 # Core switches whose on/off is ``cfg.<section>.enabled``.
 MODULE_ENABLE_SECTIONS = {
     "web": "web",
@@ -112,7 +134,7 @@ class BackendConfig:
     proxy: str = "http://harness-egress-claude:8888"
     volume: str = "harness-auth-claude"
     network: str = "harness-cli-claude"
-    api_key_file: str = "D:/Agents/harness/secrets/claude-api-key"
+    api_key_file: str = _path_field("D:/Agents/harness/secrets/claude-api-key")
     # Claude only (#390): file holding the owner's `claude setup-token` token. When set, Web and the Apps in
     # `oauth_token_apps` authenticate with it as CLAUDE_CODE_OAUTH_TOKEN and no login volume is mounted; any other
     # App on the subscription is refused. Owner's own sessions only (docs/per-user-subscriptions-study.md).
@@ -198,7 +220,7 @@ class HomelabService:
 
 @dataclass
 class HomelabConfig:
-    docker_root: str = "D:/Docker"
+    docker_root: str = _path_field("D:/Docker", "docker")
     prometheus_url: str = "http://127.0.0.1:9090"
     services: dict[str, HomelabService] = field(default_factory=dict)
     # Never readable through read_service_config, matched against the path relative to docker_root.
@@ -237,7 +259,7 @@ class GpuGuardConfig:
     keepalive_seconds: float = 300        # a pinned model gets a one-token request this often; keep under the idle unload
     drain_timeout_seconds: float = 300    # longest wait for the current model turn before the server is stopped
     # The model server's supervisor (ops/llama-server/run-qwen.ps1) doesn't restart the server while this file exists.
-    pause_flag: str = "C:/AI/llama-server.paused"
+    pause_flag: str = _path_field("C:/AI/llama-server.paused", "llama-server.paused")
     # A running executable whose path contains one of these (case-insensitive) is a game ...
     game_dirs: list[str] = field(default_factory=lambda: [
         "\\steamapps\\common\\", "\\Epic Games\\", "\\GOG Galaxy\\Games\\", "\\XboxGames\\"])
@@ -250,21 +272,11 @@ class GpuGuardConfig:
     plex: bool = True
 
 
-def _default_backup_dir() -> str:
-    """Windows keeps its D: folder. Elsewhere it is the XDG data dir (#837), never a relative path in the checkout.
-    A relative or empty XDG_DATA_HOME counts as unset, as the XDG Base Directory spec says."""
-    if sys.platform == "win32":
-        return "D:/My Backups/agent-harness"
-    xdg = os.environ.get("XDG_DATA_HOME", "")
-    data_home = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
-    return str(data_home / "agent-harness" / "backups")
-
-
 @dataclass
 class BackupConfig:
     """Nightly copy of the session database and transcripts (maintenance.py)."""
     enabled: bool = False
-    dir: str = field(default_factory=_default_backup_dir)
+    dir: str = _path_field("D:/My Backups/agent-harness", "backups")
     at: str = "03:30"        # local time
     keep_days: int = 14
     member_key_dir: str = ""   # default: backup.dir/member-keys, outside dated snapshots
@@ -302,7 +314,7 @@ class MemoryLibraryConfig:
     """The user's memory library for agents (harness_modules/memory_library/service.py): reads, approved writes, and the agent profile."""
     enabled: bool = False
     repo: str = ""                      # git URL or path; the daemon keeps its own clone
-    clone_dir: str = "D:/Agents/memory-library"
+    clone_dir: str = _path_field("D:/Agents/memory-library", "memory-library")
     refresh_minutes: float = 10         # `git pull` at most this often, when an agent uses the tools
     categories: list[str] = field(default_factory=list)  # readable categories; everything else is invisible
     writes: bool = False                # memory_edit / memory_write: every change needs approval, then commit + push
@@ -454,11 +466,11 @@ class ImagesConfig:
     """Local image generation with ComfyUI (images.py). The language model is unloaded while jobs run."""
     enabled: bool = False
     edit_enabled: bool = False                 # resolved opt-in; absent YAML follows modules.image_edit
-    comfy_dir: str = "C:/AI/ComfyUI"          # portable install (python_embeded + ComfyUI)
-    models_dir: str = DEFAULT_IMAGES_MODELS_DIR  # extra_model_paths root (diffusion_models / text_encoders / vae)
+    comfy_dir: str = _path_field("C:/AI/ComfyUI", "ComfyUI")  # portable install (python_embeded + ComfyUI)
+    models_dir: str = _path_field(WINDOWS_IMAGES_MODELS_DIR, "comfy-models")  # extra_model_paths root (diffusion_models / text_encoders / vae)
     port: int = 8188
-    work_dir: str = "D:/Agents/harness/images-work"  # ComfyUI output/temp and the harness's PNGs (images/)
-    log_dir: str = "D:/Agents/harness/logs"
+    work_dir: str = _path_field("D:/Agents/harness/images-work", "images-work")  # ComfyUI output/temp and the harness's PNGs (images/)
+    log_dir: str = _path_field("D:/Agents/harness/logs", "logs")
     linger_seconds: float = 0                  # unused; kept so existing YAML still loads. GPU is released when the queue is empty.
     start_timeout_seconds: float = 180
     job_timeout_seconds: float = 1200
@@ -823,7 +835,7 @@ def _load_guests(raw) -> list[GuestAccess]:
 def resolve_images_models_dir(cfg=None) -> Path:
     """Single models root used by installer, daemon, doctor, and image components."""
     configured = getattr(cfg, "models_dir", None) if cfg is not None else None
-    return Path(configured or DEFAULT_IMAGES_MODELS_DIR)
+    return Path(configured or _platform_path(WINDOWS_IMAGES_MODELS_DIR, "comfy-models"))
 
 
 def images_models_dir_matches(left: str | Path, right: str | Path) -> bool:
@@ -856,6 +868,36 @@ def _apply_profile_overlay(raw: dict, profile_raw: dict) -> None:
         raise ValueError("backends must be a mapping")
     raw["backends"] = {name: {**(spec or {}), **(existing_backends.get(name) or {})}
                        for name, spec in profile_backends.items()} | existing_backends
+
+
+def _default_data_dir() -> Path:
+    # Off Windows, per checkout: a run from a checkout with no data_dir must not share a deployed daemon's database.
+    return Path("D:/Agents/harness") if sys.platform == "win32" else ROOT / "data"
+
+
+def _default_repos_dir() -> Path:
+    return Path("D:/Agents/repos") if sys.platform == "win32" else ROOT / "data" / "repos"
+
+
+def _apply_windows_defaults(raw: dict) -> None:
+    """Values config/harness.yaml used to set that have no dataclass default, so a Windows host on that file keeps them
+    (#854). They name one tower's layout, so a generated config, which never had them, stays out: only the shipped file
+    sets windows_tower_layout. Explicit values, "" included, win."""
+    if sys.platform != "win32" or not raw.get("windows_tower_layout"):
+        return
+    raw["notify"] = {"token_file": "D:/Docker/ntfy/secrets/harness-publisher.token", **(raw.get("notify") or {})}
+    raw["remote_control"] = {
+        "folders": {"agent-harness": "D:/Projects/agent-harness",
+                    "agent-memory-library": "~/OneDrive/Documents/agent-memory-library"},
+        **(raw.get("remote_control") or {}),
+    }
+    backends = raw.get("backends") or {}
+    for name in ("codex", "cursor"):  # the dataclass default is Claude's key
+        if name in backends:
+            backends[name] = {"api_key_file": f"D:/Agents/harness/secrets/{name}-api-key", **(backends[name] or {})}
+    runners = raw.get("runners") or {}
+    for name, spec in runners.items():
+        runners[name] = {"token_file": f"D:/Agents/harness/secrets/runner-{name}.token", **(spec or {})}
 
 
 def _read_raw_config(config_dir: Path) -> dict:
@@ -1039,19 +1081,20 @@ def resolve_port(config_dir: Path | None = None) -> int:
 def resolve_data_dir(config_dir: Path | None = None) -> Path:
     """The data_dir `load` would use, without building the whole Config (the local CLI reads its token from here)."""
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
-    return Path(os.environ.get("HARNESS_DATA_DIR") or _read_raw_config(config_dir).get("data_dir", ROOT / "data"))
+    return Path(os.environ.get("HARNESS_DATA_DIR") or _read_raw_config(config_dir).get("data_dir") or _default_data_dir())
 
 
 def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
     from .smart_approvals import load_smart_config
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
     raw = _read_raw_config(config_dir)
+    _apply_windows_defaults(raw)
     if "fake_model" in raw:
         raise ValueError("fake_model is not a config key: fake model mode is opt-in through HARNESS_FAKE_MODEL only "
                          "(docs/ui-testing.md)")
     profile, raw_modules, selected = _resolve_profile(raw)
     provider_secret_files = _load_provider_secret_files(raw)
-    resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data"))
+    resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir") or _default_data_dir())
 
     models = {
         name: ModelConfig(name=name, **spec) for name, spec in (raw.get("models") or {}).items()
@@ -1090,7 +1133,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         host=listen.get("host", "127.0.0.1"),
         port=int(listen.get("port", 8100)),
         data_dir=resolved_data_dir,
-        repos_dir=Path(raw.get("repos_dir", ROOT / "data" / "repos")),
+        repos_dir=Path(raw.get("repos_dir") or _default_repos_dir()),
         default_model=(raw.get("default_model") or next(iter(models), "")) if models else "",
         models=models,
         sandbox=SandboxConfig(**(raw.get("sandbox") or {})),

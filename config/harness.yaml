@@ -49,10 +49,15 @@ notify:
   enabled: true
   server: http://127.0.0.1:8095                  # ntfy container (D:/Docker/ntfy), published at :8443 on the tailnet
   topic: agent-harness
-  token_file: D:/Docker/ntfy/secrets/harness-publisher.token
+  # token_file: unset here, like every machine path in this file (#854). Set it in harness.local.yaml.
 
-data_dir: D:/Agents/harness   # SQLite DB, per-session workspaces, transcripts
-repos_dir: D:/Agents/repos    # git_clone "local:<name>" clones from here (host-side, no network)
+# Machine paths are not set here: an unset one takes its platform default from harness/config.py (Windows: the tower's
+# drive paths; elsewhere: the XDG data dir, or this checkout's data/ for these two). Set them in harness.local.yaml.
+# windows_tower_layout: on Windows, also use the tower's notify token, key and runner token files and Remote Control
+# folders (harness/config.py). A generated config leaves this out. It has no effect elsewhere.
+windows_tower_layout: true
+# data_dir:    SQLite DB, per-session workspaces, transcripts
+# repos_dir:   git_clone "local:<name>" clones from here (host-side, no network)
 
 default_model: qwen3.6-35b-a3b
 models:
@@ -118,7 +123,6 @@ backends:
     proxy: http://harness-egress-codex:8888
     volume: harness-auth-codex
     network: harness-cli-codex
-    api_key_file: D:/Agents/harness/secrets/codex-api-key
   cursor:
     enabled: true
     image: agent-harness-cli:1
@@ -131,7 +135,6 @@ backends:
     proxy: http://harness-egress-cursor:8888
     volume: harness-auth-cursor
     network: harness-cli-cursor
-    api_key_file: D:/Agents/harness/secrets/cursor-api-key
   # A config-declared print-mode CLI (#168, docs/cli-backends.md): OpenCode on the local llama-server, keyless.
   # Each turn is one `docker run` of `command`; follow-ups resume with `resume_args`. Needs the
   # harness-cli-opencode network and its forwarder: docker compose -f ops/cli-llm/compose.yaml up -d.
@@ -152,7 +155,6 @@ backends:
 # Homelab tools for projects with `homelab: true` (harness/homelab.py). The daemon runs these on the host;
 # agents only name a service from this allowlist. Restarts always need approval.
 homelab:
-  docker_root: D:/Docker
   prometheus_url: http://127.0.0.1:9090   # 127.0.0.1, not localhost: wslrelay holds ::1:9090
   services:                               # name = container_name = compose service unless overridden
     plex-webhook: {stack: plex-webhook}
@@ -167,7 +169,6 @@ homelab:
 # the token in token_file. Its sandbox and allowed project directories are set on the runner itself.
 runners:
   macbook:
-    token_file: D:/Agents/harness/secrets/runner-macbook.token
     min_free_gb: 10          # the Mac's disk is nearly full; refuse new workspaces below this
     workspace_quota_mb: 3000
 
@@ -247,7 +248,6 @@ gpu_guard:
   poll_seconds: 10
   resume_after_seconds: 180
   drain_timeout_seconds: 300
-  pause_flag: C:/AI/llama-server.paused   # also in ops/llama-server/run-qwen.ps1
   lazy_load: true
   min_available_ram_gb: 4          # 0 turns the RAM check off
   model_ram_gb: 14                 # a model load waits unless available RAM minus this stays above the minimum
@@ -258,7 +258,6 @@ gpu_guard:
 # Also on demand: POST /maintenance/backup.
 backup:
   enabled: true
-  dir: D:/My Backups/agent-harness
   at: "03:30"
   keep_days: 14
   image_archive_keep_days: 0       # 0 = keep forever; deletion is still an explicit owner action
@@ -281,7 +280,6 @@ telemetry:
 memory_library:
   enabled: true
   repo: ""
-  clone_dir: D:/Agents/memory-library
   refresh_minutes: 10
   categories: [project-ideas, work, home-and-pets, sport, taste-and-media, communication-preferences]
   writes: true
@@ -336,10 +334,8 @@ remote_control:
   spawn: worktree
   permission_mode: default
   capacity: 4
-  folders:
-    agent-harness: D:/Projects/agent-harness
-    # The user's private working copy, not memory_library.clone_dir. Keep its remote private.
-    agent-memory-library: ~/OneDrive/Documents/agent-memory-library
+  # folders: {name: path}: extra local folders, only for native Remote Control. Set them in harness.local.yaml. A
+  # memory-library entry there is your private working copy, not memory_library.clone_dir: keep its remote private.
 
 # OpenAI/Anthropic-compatible inference endpoint for other tools (harness/endpoint.py): /v1/chat/completions,
 # /v1/completions, /v1/responses, /v1/messages, /v1/models, /v1/capabilities, and optionally /v1/embeddings.
@@ -385,10 +381,7 @@ endpoint:
 images:
   enabled: true
   # edit_enabled: false       # optional override; absent follows the image_edit module selection
-  comfy_dir: C:/AI/ComfyUI
-  models_dir: C:/AI/comfy-models
   port: 8188
-  work_dir: D:/Agents/harness/images-work
   linger_seconds: 0
   max_upload_bytes: 20971520
   max_pixels: 20000000
