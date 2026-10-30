@@ -254,6 +254,7 @@ def test_sandbox_argv_is_isolated(tmp_path):
 @pytest.mark.parametrize("component", [
     "workspaces", "WORKSPACES", "workspace-old", "workspace_2", "workspace.bak", "workspace2",
     "workspace#2", "workspace!", "workspace(2)", "workspace=x", "workspace+x", "workspace~", "workspace@x", "workspace^",
+    "workspace 2", "workspace$x", "workspace%x%", "workspace*", "workspace;x", "workspace&", "workspace[1]",
 ])
 def test_sandbox_allows_install_path_with_longer_component(tmp_path, component):
     install = tmp_path / "orca" / component / "agent-harness"
@@ -298,6 +299,17 @@ def test_sandbox_allows_install_path_with_longer_component(tmp_path, component):
     "/workspace;",
     "/workspace..",
     "/workspace|x",
+    "type=bind,src=/workspace,target=/x",
+    "type=bind,SOURCE=/workspace,target=/x",
+    "type=bind,source=/home/owner/workspace/repo,target=/x",
+    "type=bind,source=/WORKSPACE,target=/x",
+    "type=bind,source=/workspace.,target=/x",
+    "type=bind,source=/workspace /repo,target=/x",
+    "type=bind,source=\"/workspace\",target=/x",
+    "\"type=bind,source=/workspace,target=/x\"",
+    "type=bind,source=/workspace\\repo,target=/x",
+    "type=bind,source=/workspaces/../workspace,target=/x",
+    "type=bind,source=C:/workspace/repo,target=/x",
 ])
 def test_sandbox_refuses_a_command_reaching_workspace(tmp_path, arg):
     proposal = tmp_path / "proposal"
