@@ -63,6 +63,11 @@ A failed check reports `not_configured`, `store_unavailable`, `unsupported_conte
 feature then fails closed with no silent downgrade. A daemon running as a Windows service in session 0, over SSH,
 or without a keyring usually fails preflight or the first connect with `unsupported_context`.
 
+On a Linux host whose keyring stays locked because the desktop logs in automatically (the tower), choose `gpg`. With
+`secretservice`, preflight and every connect would wait on an unlock prompt that nobody answers. The
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent` workaround in [INSTALL.md](INSTALL.md#install-on-linux-with-nvidia)
+doesn't help here, because this store needs the Secret Service itself.
+
 On Windows, ACLs on the GCM path are not inspected. Choose an administrator-owned location such as
 `Program Files`.
 
