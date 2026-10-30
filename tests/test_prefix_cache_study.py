@@ -62,6 +62,23 @@ def test_a_failed_call_is_recorded_and_still_raises(tmp_path):
     assert only["error"].startswith("LLMError: HTTP 500") and "prompt_tokens" not in only
 
 
+def test_capture_records_the_options_the_request_merges_from_the_model_and_the_call(tmp_path):
+    async def chat(*args, **kwargs):
+        return Completion()
+
+    off = {"enable_thinking": False}
+    on = {"enable_thinking": True}
+    model = SimpleNamespace(name="m", sampling={"temperature": 0.6, "chat_template_kwargs": off})
+    path = tmp_path / "p.jsonl"
+    capture = canary_cli.PromptCapture(path, chat=chat)
+    run(capture(model, [SYSTEM], TOOLS))
+    run(capture(model, [SYSTEM], TOOLS, extra={"chat_template_kwargs": on}))
+    run(capture(model, [SYSTEM], TOOLS, None, 5, {"chat_template_kwargs": on}))  # llm.chat's positional extra
+    first, keyword, positional = prefix_diff.read_jsonl(path)
+    assert first["extra"] == {"temperature": 0.6, "chat_template_kwargs": off}
+    assert keyword["extra"] == positional["extra"] == {"temperature": 0.6, "chat_template_kwargs": on}
+
+
 # --keep-metrics
 def test_turn_metrics_by_session_keeps_only_turn_metrics_rows():
     events = {"a": [{"type": "turn_metrics", "data": {"turn": 1, "cache_tokens": 0}},

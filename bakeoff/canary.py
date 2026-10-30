@@ -288,7 +288,9 @@ class PromptCapture:
         row = {"seq": self.seq, "session": self.holder(), "model": getattr(model, "name", ""),
                "caller": [f.function for f in inspect.stack(0)[1:6]],
                "messages": json.loads(json.dumps(messages)), "tools": json.loads(json.dumps(tools)),
-               "extra": kwargs.get("extra", args[2] if len(args) > 2 else None)}  # llm.chat's template options
+               # what llm._payload merges into the request, so a render uses the same template options
+               "extra": {**(getattr(model, "sampling", None) or {}),
+                         **(kwargs.get("extra", args[2] if len(args) > 2 else None) or {})}}
         try:
             completion = await self.chat(model, messages, tools, *args, **kwargs)
         except BaseException as e:
