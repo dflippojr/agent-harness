@@ -23,8 +23,7 @@ MODULE_NAMES = (
 )
 # Opt-in even on a full profile: the Qwen-Image-Edit weights are ~20 GB and must not arrive with an ordinary install.
 OPT_IN_MODULES = frozenset({"image_edit", "mcp_client"})
-# extra_model_paths root shared by installer, doctor, and image components (Z-Image / quality / image_edit).
-DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
+WINDOWS_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
 
 
 def _platform_path(windows: str, *elsewhere: str) -> str:
@@ -42,6 +41,10 @@ def _platform_path(windows: str, *elsewhere: str) -> str:
 
 def _path_field(windows: str, *elsewhere: str):
     return field(default_factory=lambda: _platform_path(windows, *elsewhere))
+
+
+# extra_model_paths root shared by installer, doctor, and image components (Z-Image / quality / image_edit).
+DEFAULT_IMAGES_MODELS_DIR = _platform_path(WINDOWS_IMAGES_MODELS_DIR, "comfy-models")
 
 
 # Core switches whose on/off is ``cfg.<section>.enabled``.
@@ -464,7 +467,7 @@ class ImagesConfig:
     enabled: bool = False
     edit_enabled: bool = False                 # resolved opt-in; absent YAML follows modules.image_edit
     comfy_dir: str = _path_field("C:/AI/ComfyUI", "ComfyUI")  # portable install (python_embeded + ComfyUI)
-    models_dir: str = _path_field(DEFAULT_IMAGES_MODELS_DIR, "comfy-models")  # extra_model_paths root (diffusion_models / text_encoders / vae)
+    models_dir: str = _path_field(WINDOWS_IMAGES_MODELS_DIR, "comfy-models")  # extra_model_paths root (diffusion_models / text_encoders / vae)
     port: int = 8188
     work_dir: str = _path_field("D:/Agents/harness/images-work", "images-work")  # ComfyUI output/temp and the harness's PNGs (images/)
     log_dir: str = _path_field("D:/Agents/harness/logs", "logs")
@@ -832,7 +835,7 @@ def _load_guests(raw) -> list[GuestAccess]:
 def resolve_images_models_dir(cfg=None) -> Path:
     """Single models root used by installer, daemon, doctor, and image components."""
     configured = getattr(cfg, "models_dir", None) if cfg is not None else None
-    return Path(configured or _platform_path(DEFAULT_IMAGES_MODELS_DIR, "comfy-models"))
+    return Path(configured or _platform_path(WINDOWS_IMAGES_MODELS_DIR, "comfy-models"))
 
 
 def images_models_dir_matches(left: str | Path, right: str | Path) -> bool:
