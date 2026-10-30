@@ -8,6 +8,7 @@ The daemon calls `CanaryRunner.run` from its nightly trigger (harness/canary.py)
     python -m bakeoff.canary --tasks sqlite_report --repeats 1
     python -m bakeoff.canary --heldout --repeats 3  # #674 calibration: the held-out tasks, never the nightly set
     python -m bakeoff.canary --plan-reinject        # #641: the set with planning.reinject on (docs/compaction.md)
+    python -m bakeoff.canary --xy --system-line "..."  # #773: XY-problem variants, an extra project-instructions line
 
 Hard tasks are written into the session's workspace and graded by their existing hidden checkers (Docker sandbox, as
 in the bake-off). Web tasks replay the recorded web (web_suite.py) through a per-session WebTools.
@@ -39,6 +40,7 @@ from .web_suite import DEFAULT_FIXTURE, TASKS as WEB_TASKS, ungrounded_quotes
 
 ROOT = Path(__file__).resolve().parent.parent
 SUITE = Path(__file__).with_name("canary.yaml")
+WEB_WALL_LIMIT = 1500  # seconds of GPU time a web task attempt may use (hard tasks carry their own)
 MAX_RESTARTS = 2  # a task attempt that was suspended mid-way restarts, up to this many times
 DONE = ("done", "failed", "cancelled")
 
@@ -62,11 +64,18 @@ def heldout_suite(repeats: int) -> dict:
     return {"repeats": repeats, "hard": list(HELDOUT_TASKS), "web": []}
 
 
+def xy_suite(repeats: int) -> dict:
+    """The #773 XY-problem variants (bakeoff/tasks_xy.py): hard tasks with a wrong user suggestion, by hand only."""
+    from .tasks_xy import XY_TASKS
+    return {"repeats": repeats, "hard": list(XY_TASKS), "web": []}
+
+
 def heldout_cap_seconds(suite: dict, only: list[str] | None) -> int:
     """Room for every selected attempt to use its whole wall-clock limit, plus a minute each for setup and grading.
     The nightly `total_cap_seconds` (45 min) would cut a calibration off after two slow attempts."""
-    tasks = [t for t in suite["hard"] if not only or t.id in only]
-    return int(sum(t.wall_limit + 60 for t in tasks) * suite["repeats"])
+    limits = [t.wall_limit for t in suite["hard"] if not only or t.id in only]
+    limits += [WEB_WALL_LIMIT for t in suite["web"] if not only or t.id in only]
+    return int(sum(limit + 60 for limit in limits) * suite["repeats"])
 
 
 class CanaryRunner:
@@ -74,8 +83,9 @@ class CanaryRunner:
 
     def __init__(self, manager, cfg, fixture: Path = DEFAULT_FIXTURE, suite: dict | None = None,
                  poll_seconds: float = 5, clock: Callable[[], float] = time.monotonic, sleep=asyncio.sleep,
-                 grade_hard: Callable | None = None, prepare_hard: Callable | None = None):
+                 grade_hard: Callable | None = None, prepare_hard: Callable | None = None, system_line: str = ""):
         self.m, self.cfg, self.fixture = manager, cfg, fixture
+        self.system_line = system_line  # #773, by hand only: the canary projects' instructions (production has none)
         self.suite = suite or load_suite(Path(ROOT / cfg.suite) if cfg.suite else SUITE)
         self.poll, self.clock, self.sleep = poll_seconds, clock, sleep
         self._grade_hard = grade_hard or grade_hard_task
@@ -119,10 +129,10 @@ class CanaryRunner:
             # without it every search misses and each web task fails: a false regression, not a result
             raise CanaryConfigError(f"canary web fixture {self.fixture} has no manifest.json")
         projects = self.m.cfg.projects
-        projects[HARD_PROJECT] = Project(name=HARD_PROJECT, web=False, memory_library=False, images=False,
-                                         session_search=False)
-        projects[WEB_PROJECT] = Project(name=WEB_PROJECT, web=True, memory_library=False, images=False,
-                                        session_search=False)
+        projects[HARD_PROJECT] = Project(name=HARD_PROJECT, instructions=self.system_line, web=False,
+                                         memory_library=False, images=False, session_search=False)
+        projects[WEB_PROJECT] = Project(name=WEB_PROJECT, instructions=self.system_line, web=True,
+                                        memory_library=False, images=False, session_search=False)
         web = WebTools(WebConfig(enabled=True, page_chars=self.m.cfg.web.page_chars, fixture_dir=str(self.fixture)))
         outcomes: list[dict] = []
         try:
@@ -172,7 +182,7 @@ class CanaryRunner:
             # The limit counts only time the canary had the GPU: never time queued behind a real session (even
             # before its first turn), stepped aside, paused by the guard, or held up by an image batch that took the
             # GPU over. A wait that outlasts the run's cap is no verdict on the agent: stopped, excluded as suspended.
-            limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else 1500), 0.0, False, False
+            limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else WEB_WALL_LIMIT), 0.0, False, False
             while m.db.get_session(sid)["status"] not in DONE:
                 held, before = self._has_gpu(sid), self.clock()
                 await self.sleep(1 if self.poll > 1 else self.poll)
@@ -259,16 +269,18 @@ def grade_hard_task(task, ws: Path, answer: str, baseline: dict[str, str]) -> tu
 
 # by hand, daemon stopped
 async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path, heldout: bool = False,
-                         plan_reinject: bool = False) -> Path:
+                         plan_reinject: bool = False, xy: bool = False, system_line: str = "") -> Path:
     from harness import config as config_mod
     from harness.manager import Manager
 
     base = config_mod.load()
-    suite = heldout_suite(3) if heldout else load_suite()
+    suite = heldout_suite(3) if heldout else xy_suite(2) if xy else load_suite()
     if repeats:
         suite["repeats"] = repeats
     canary_cfg = base.canary
-    if heldout:
+    # An experiment (a separate set, a prompt line or named tasks) gets room for every attempt, so its conditions are
+    # judged alike; only the whole nightly set by hand keeps the nightly cap.
+    if heldout or xy or system_line or task_ids:
         canary_cfg = dataclasses.replace(canary_cfg, total_cap_seconds=heldout_cap_seconds(suite, task_ids or None))
     tmp = Path(tempfile.mkdtemp(prefix="canary-"))
     cfg = config_mod.Config(host="127.0.0.1", port=0, data_dir=tmp, repos_dir=tmp / "repos",
@@ -280,15 +292,18 @@ async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path
     m = Manager(cfg)
     await m.start(maintenance=False)
     try:
-        report = await CanaryRunner(m, cfg.canary, fixture, suite).run("manual", task_ids or None)
+        runner = CanaryRunner(m, cfg.canary, fixture, suite, system_line=system_line)
+        report = await runner.run("manual", task_ids or None)
     finally:
         await m.stop()
         m.db.close()
         shutil.rmtree(tmp, ignore_errors=True)
-    name = ("heldout" if heldout else "canary") + ("-plan" if cfg.planning.reinject else "")
+    name = ("heldout" if heldout else "xy" if xy else "canary") + ("-plan" if cfg.planning.reinject else "") + (
+        "-line" if system_line else "")
     out = ROOT / "runs" / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     out.parent.mkdir(exist_ok=True)
-    out.write_text(json.dumps({"status": report.status, "outcomes": report.outcomes}, indent=1), encoding="utf-8")
+    out.write_text(json.dumps({"status": report.status, "xy": xy, "system_line": system_line,
+                               "outcomes": report.outcomes}, indent=1), encoding="utf-8")
     passed = sum(o["ok"] for o in report.outcomes)
     print(f"{report.status}: {passed}/{len(report.outcomes)} passed · results in {out}")
     return out
@@ -302,9 +317,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--heldout", action="store_true", help="the #673 held-out tasks (3 repeats unless --repeats)")
     parser.add_argument("--plan-reinject", action="store_true",
                         help="#641: re-inject the saved plan every turn (planning.reinject), whatever harness.yaml says")
+    parser.add_argument("--xy", action="store_true",
+                        help="#773: the XY-problem variants (bakeoff/tasks_xy.py; 2 repeats unless --repeats)")
+    parser.add_argument("--system-line", default="", metavar="TEXT",
+                        help="#773: add TEXT to the canary sessions' system prompt as project instructions")
     args = parser.parse_args(argv)
+    if args.heldout and args.xy:
+        parser.error("--heldout and --xy are separate task sets; pick one")
     asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture,
-                               heldout=args.heldout, plan_reinject=args.plan_reinject))
+                               heldout=args.heldout, plan_reinject=args.plan_reinject, xy=args.xy,
+                               system_line=args.system_line.strip()))
     return 0
 
 

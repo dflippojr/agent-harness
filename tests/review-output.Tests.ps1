@@ -589,18 +589,36 @@ Describe 'GitHub''s renderer call (#767)' {
     BeforeAll {
         . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
         # A stand-in for gh: records its arguments and stdin, then answers as the FAKE_GH_* variables say.
-        $script:fakeGh = Join-Path $TestDrive 'gh.cmd'
-        @(
-            '@echo off'
-            'echo %*> "%~dp0args.txt"'
-            'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
-            'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%"'
-            'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
-            'exit /b %FAKE_GH_EXIT%'
-        ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
+        # A batch file on Windows and an sh script elsewhere, as the review runners are Linux or Windows (#806).
+        $script:windowsHost = $env:OS -eq 'Windows_NT'
+        if ($script:windowsHost) {
+            $script:fakeGh = Join-Path $TestDrive 'gh.cmd'
+            @(
+                '@echo off'
+                'echo %*> "%~dp0args.txt"'
+                'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
+                'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%"'
+                'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
+                'exit /b %FAKE_GH_EXIT%'
+            ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
+        } else {
+            $script:fakeGh = Join-Path $TestDrive 'gh'
+            @(
+                '#!/bin/sh'
+                'dir=$(dirname "$0")'
+                'printf ''%s\n'' "$*" > "$dir/args.txt"'
+                'cat > "$dir/stdin.txt"'
+                'if [ -n "$FAKE_GH_SLEEP" ]; then sleep "$FAKE_GH_SLEEP"; fi'
+                'if [ -n "$FAKE_GH_HTML" ]; then printf ''%s\n'' "$FAKE_GH_HTML"; fi'
+                'exit "$FAKE_GH_EXIT"'
+            ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
+            & chmod +x $script:fakeGh
+        }
+        # cmd's echo needs ^ before < and >; sh prints the value as it is.
+        $script:ghHtml = { param([string]$Html) if ($script:windowsHost -and $Html) { $Html -replace '([<>])', '^$1' } else { $Html } }
     }
     BeforeEach {
-        $env:FAKE_GH_SLEEP = $null; $env:FAKE_GH_HTML = '^<p^>ok^</p^>'; $env:FAKE_GH_EXIT = '0'
+        $env:FAKE_GH_SLEEP = $null; $env:FAKE_GH_HTML = & $script:ghHtml '<p>ok</p>'; $env:FAKE_GH_EXIT = '0'
     }
     AfterAll {
         Remove-Item Env:FAKE_GH_SLEEP, Env:FAKE_GH_HTML, Env:FAKE_GH_EXIT -ErrorAction SilentlyContinue
@@ -619,13 +637,13 @@ Describe 'GitHub''s renderer call (#767)' {
     }
 
     It 'throws <Type> when gh <Case>' -TestCases @(
-        @{ Case = 'does not answer in time'; Sleep = '20'; Html = '^<p^>late^</p^>'; Exit = '0'; Type = 'TimeoutException'; Missing = $false }
+        @{ Case = 'does not answer in time'; Sleep = '20'; Html = '<p>late</p>'; Exit = '0'; Type = 'TimeoutException'; Missing = $false }
         @{ Case = 'fails'; Sleep = $null; Html = 'ghp_synthetic12345678'; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
         @{ Case = 'answers nothing'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $false }
         @{ Case = 'cannot start'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $true }
     ) {
         param($Case, $Sleep, $Html, $Exit, $Type, $Missing)
-        $env:FAKE_GH_SLEEP = $Sleep; $env:FAKE_GH_HTML = $Html; $env:FAKE_GH_EXIT = $Exit
+        $env:FAKE_GH_SLEEP = $Sleep; $env:FAKE_GH_HTML = & $script:ghHtml $Html; $env:FAKE_GH_EXIT = $Exit
         $path = if ($Missing) { Join-Path $TestDrive 'missing-gh.exe' } else { $script:fakeGh }
         $watch = [Diagnostics.Stopwatch]::StartNew()
         $caught = $null

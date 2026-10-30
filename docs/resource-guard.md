@@ -1,10 +1,19 @@
 # Resource guard (#311)
 
-The tower has 31.8 GB of RAM and a 16 GB GPU, shared with Docker/WSL, Plex, games, several Claude/Codex sessions and a
+The tower has 31.8 GB of RAM and a 16 GB GPU, shared with Docker, Plex, games, several Claude/Codex sessions and a
 browser. The local model (Qwen3.6-35B-A3B, a MoE whose expert tensors stay in system RAM) costs about 14 GB of RAM when
 loaded. The resource guard (formerly the GPU guard, `harness_modules/local_model/service.py`) makes the harness share that better. It
 covers the VRAM triggers (games, Plex transcodes), a free-memory threshold, the manual hold, and manual load/unload in
 one place: **Actions → Resources**.
+
+On Linux, how the model's VRAM can share the card with one Plex transcode and a Sunshine stream, and which guard
+thresholds follow from that, is designed in `docs/gpu-vram-budget.md` (#823).
+
+The supervisor details below (`ops/llama-server/run-qwen.ps1`, `C:/AI/...` paths, logon tasks) describe the Windows
+tower. Since 2026-10-26 the tower runs Ubuntu: llama-server runs as the `agent-harness-main-llama.service` user unit
+through `install/run-server.sh`, and its pause flag is `~/.local/share/agent-harness/llama-server.paused`. The
+Windows text applies to a Windows boot only. Plex detection on Linux is #811. The measurements further down are
+records from the Windows tower.
 
 ## When the model loads
 
@@ -51,6 +60,17 @@ These **don't** load the model:
   load while ComfyUI owns the GPU. *Decision:* match by process in the daemon rather than have the supervisor re-check
   the flag after launching; the supervisor is unchanged. The flag is written first, so it won't start another. A
   server started in the instant between the process listing and the supervisor's flag check is the only window left.
+
+- **Linux page-out (#835).** On Linux, `install/run-server.sh` runs llama-server in the
+  `agent-harness-<instance>-llama` Docker container. The daemon can't signal that container's root process, and
+  psutil gives no pid for another user's socket. So while the container runs, the supervisor polls the pause flag every
+  5 s (`HARNESS_PAUSE_POLL_SECONDS`). When the flag appears it runs `docker stop -t 10` on the container, so the VRAM
+  comes free within 15 s. Then it waits, without the usual 15 s restart delay, until `ServerControl.start()` removes
+  the flag. `ServerControl.stop()` on Linux finds the port's listeners with `psutil.net_connections(kind="tcp")` instead
+  of `netstat -ano`, and stops a native llama-server it may signal with SIGTERM (SIGKILL after 10 s) instead of
+  `taskkill`. *Decision:* the supervisor watches the flag, rather than the daemon running `docker stop`. The
+  supervisor already owns the container's name and its `docker stop` trap, and the daemon then needs neither the
+  instance name nor Docker access. Windows is unchanged.
 
 `lazy_load: false` in `config/harness.yaml` restores the old eager reload after holds and image batches.
 

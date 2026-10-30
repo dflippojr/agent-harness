@@ -18,12 +18,12 @@ import httpx
 
 try:
     from .atomic_io import write_atomic
-    from .compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
+    from .compat import CLIENT_PROTOCOLS, LOOPBACK_HOSTS, MAC_CLIENT_VERSION
     from .updater import apply_update
     from . import modules as _modules
 except ImportError:  # installed native bundle imports these as sibling modules
     from harness_atomic_io import write_atomic
-    from harness_compat import CLIENT_PROTOCOLS, MAC_CLIENT_VERSION
+    from harness_compat import CLIENT_PROTOCOLS, LOOPBACK_HOSTS, MAC_CLIENT_VERSION
     from harness_update import apply_update
     _modules = None
 MODULE_COMMANDS_FILE = "harness_module_commands.json"  # the Mac bundle's copy of the modules' rows (mac_client.py)
@@ -37,7 +37,6 @@ TOKEN = ""
 LOCAL_TOKEN = ""  # the daemon's local owner token, sent to a daemon on this machine (harness/local_owner.py)
 LOCAL_TOKEN_HEADER = "X-Agent-Harness-Local-Token"
 HUB_APPROVAL_HEADER = "X-Agent-Harness-Hub-Approval"  # the daemon host's Hub approval secret (harness/hub_claim.py)
-LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 CONFIG_PATH = DEFAULT_CONFIG
 ADMIN_PREFIX = "/api/admin/v1"
 TERMINAL = ("done", "cancelled", "failed")

@@ -273,7 +273,7 @@ def test_the_standalone_canary_can_turn_the_flag_on(monkeypatch, tmp_path):
     from harness.canary import Report
     seen = {}
 
-    async def fake_run(task_ids, repeats, fixture, heldout=False, plan_reinject=False):
+    async def fake_run(task_ids, repeats, fixture, heldout=False, plan_reinject=False, **_):
         seen["cli"] = plan_reinject
     monkeypatch.setattr(canary, "run_standalone", fake_run)
     canary.main(["--plan-reinject", "--tasks", "sqlite_report"])

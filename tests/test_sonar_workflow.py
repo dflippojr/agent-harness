@@ -87,16 +87,17 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     assert "runs-on: [self-hosted" not in workflow
     assert "runs-on: windows-latest" in workflow
     # Only the bookkeeping jobs (`changes`, `gate`, #726), the static checks (`lint`, #729), the Hub's contract suite
-    # (`hub-contract`, #736) and the Linux deployment tests (`deploy-linux`, #812) may use Ubuntu; the suite and its
-    # analysis cannot. `hub-contract` runs the Hub's tests and `deploy-linux` one module that skips on Windows; neither
-    # writes coverage. `gate-guard` (#727) calls the shared guard, whose diff check runs on the called workflow's
+    # (`hub-contract`, #736), the review tooling's Linux tests (`review-linux`, #806) and the Linux deployment tests
+    # (`deploy-linux`, #812) may use Ubuntu; the suite and its analysis cannot. `hub-contract` runs the Hub's tests,
+    # `review-linux` two test files, `deploy-linux` one module that skips on Windows and `unix-installers` one file
+    # (#825), not this suite, and none writes coverage. `gate-guard` (#727) calls the shared guard, whose diff check runs on the called workflow's
     # ubuntu-latest default, so it has no runs-on of its own.
     jobs = yaml.safe_load(workflow)["jobs"]
     for job in ("test", "test-py313", "sonar", "openapi", "ui-tests"):
         assert jobs[job]["runs-on"] == "windows-latest", job
     ubuntu = {name for name, job in jobs.items() if job.get("runs-on") == "ubuntu-latest"}
-    assert ubuntu == {"changes", "gate", "lint", "hub-contract", "deploy-linux"}
-    for job in ("hub-contract", "deploy-linux"):
+    assert ubuntu == {"changes", "gate", "lint", "hub-contract", "review-linux", "deploy-linux", "unix-installers"}
+    for job in ("hub-contract", "review-linux", "deploy-linux", "unix-installers"):
         assert "--cov" not in yaml.safe_dump(jobs[job]), job
     assert "uses" in jobs["gate-guard"] and "runs-on" not in jobs["gate-guard"]
     assert "sonar.qualitygate.wait=true" in workflow

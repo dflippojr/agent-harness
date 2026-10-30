@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 
 import pytest
@@ -223,3 +225,52 @@ def test_uninstall_removes_install_symlink_without_deleting_target(tmp_path, phy
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / "runtime").exists()
     assert (tmp_path / "real-install/models").read_text().strip() == "keep"
+
+
+def _install_linux_units(tmp_path: Path, app_dir: Path) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """Run install.sh for real from a copy at `app_dir`, with every tool and service call stubbed (#810)."""
+    if not BASH or os.name == "nt":
+        pytest.skip("needs bash on a POSIX host")
+    (app_dir / "install").mkdir(parents=True)
+    for script in ("install.sh", "run-daemon.sh"):
+        shutil.copy2(ROOT / "install" / script, app_dir / "install" / script)
+    install_dir = app_dir / "runtime"
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    calls = tmp_path / "calls"
+    for tool in ("git", "docker", "curl", "tar", "systemctl"):
+        (stubs / tool).write_text(f'#!/bin/sh\necho "{tool} $*" >> {shlex.quote(str(calls))}\nexit 0\n')
+    (stubs / "df").write_text('#!/bin/sh\necho "Filesystem 1K-blocks Used Available Capacity Mounted"\n'
+                              'echo "stub 209715200 0 104857600 0% /"\n')
+    for tool in (install_dir / "bin/uv", install_dir / "venv/bin/python"):
+        tool.parent.mkdir(parents=True, exist_ok=True)
+        tool.write_text("#!/bin/sh\nexit 0\n")
+    for stub in [*stubs.iterdir(), install_dir / "bin/uv", install_dir / "venv/bin/python"]:
+        stub.chmod(0o755)
+    home = tmp_path / "home"
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+           "HARNESS_INSTALLER_OS": "Linux", "HARNESS_INSTALLER_ARCH": "x86_64"}
+    result = subprocess.run(
+        [BASH, str(app_dir / "install/install.sh"), "--install-dir", str(install_dir), "--profile", "service",
+         "--no-hub"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60, check=False)
+    assert "systemctl --user enable --now agent-harness-main-daemon.service" in calls.read_text(), result.stdout
+    return result, home / ".config/systemd/user/agent-harness-main-daemon.service", install_dir
+
+
+@pytest.mark.parametrize("name", ["app", "my app", "app 100%done"])
+def test_linux_daemon_unit_working_directory_loads_in_systemd(tmp_path, name):
+    app_dir = tmp_path / name
+    result, unit, install_dir = _install_linux_units(tmp_path, app_dir)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = dict(line.split("=", 1) for line in unit.read_text().splitlines() if "=" in line)
+    working = lines["WorkingDirectory"]
+    # systemd takes WorkingDirectory= literally: no quotes, only specifiers (%) need escaping.
+    assert not working.startswith('"') and working.startswith("/")
+    assert working.replace("%%", "%") == str(app_dir)
+    exec_args = shlex.split(lines["ExecStart"].replace("%%", "%"))
+    assert exec_args[:3] == ["/bin/bash", str(install_dir / "bin/run-daemon.sh"), str(app_dir)]
+    if shutil.which("systemd-analyze"):
+        verified = subprocess.run(["systemd-analyze", "verify", "--user", str(unit)],
+                                  capture_output=True, text=True, timeout=30, check=False)
+        assert "WorkingDirectory" not in verified.stderr, verified.stderr
+        assert verified.returncode == 0, verified.stderr

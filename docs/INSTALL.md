@@ -169,6 +169,20 @@ registers `systemd --user` services for llama.cpp and Agent Harness Server. llam
 If the Docker GPU check fails, install NVIDIA Container Toolkit and restart Docker before rerunning the installer.
 On a headless host, an administrator may need to enable user lingering with `loginctl enable-linger <user>`.
 
+**A host that logs in automatically keeps its GNOME keyring locked** (the tower under GDM autologin). Any Secret
+Service call then waits for an unlock prompt that nobody answers, from an ssh session, a user unit or an agent alike:
+D-Bus clients find `$XDG_RUNTIME_DIR/bus` even when `DBUS_SESSION_BUS_ADDRESS` is unset. Keep each CLI login in its
+own file store at mode 600: gh with `--insecure-storage`, Claude Code's `.credentials.json`, Codex's `auth.json`.
+For a single command that might still reach the keyring, cut the bus off:
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent timeout 60 <command>`. In a unit, set only the variable,
+`Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`. Bound the run with `TimeoutStartSec=` in a
+`Type=oneshot` unit, or with `RuntimeMaxSec=` in any other type (the installer's units are `Type=simple`, which
+`TimeoutStartSec=` doesn't limit once started).
+Never set it in a profile, `environment.d` or the user manager's environment, because it breaks the whole session
+bus. Never use it to store a credential either: the keyring write fails instead of hanging. Don't unlock the keyring
+with an empty password or a typed-in secret. Once it is unlocked, every process of that user can read all of it. The
+tower's tool-by-tool finding is in agent-ops `docs/tower-keyring.md` (agent-ops#280).
+
 Useful options include `--profile service`, `--enable-modules jobs,backup`, `--model gpt-oss`,
 `--install-dir /srv/agent-harness`, `--data-dir /srv/agents`, `--model-path /models/model.gguf`,
 `--existing-server http://127.0.0.1:8090`, `--no-start`, and `--dry-run`. Run `install/install.sh --help` for the
@@ -286,7 +300,16 @@ git pull
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
+On Linux and macOS, `git pull`, then run `install/install.sh` again. The tower's production checkout is updated by
+`deploy-tower` instead ([CI-CD.md](CI-CD.md#tower-runner)).
+
 ## Switch the local model (tower)
+
+This section describes the Windows tower (`run-qwen.ps1`, `C:/AI/...`). Since 2026-10-26 the tower runs Ubuntu. There
+the model file is fixed in the `agent-harness-main-llama.service` user unit's `ExecStart` (`install/run-server.sh`
+with `~/.local/share/agent-harness/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`), and the Qwen3.8 distill file is not
+on that disk, so the `default_model` line alone does not switch it. Changing the unit is an owner step, and the
+manual GPU hold is on.
 
 `config/harness.yaml` lists two local models on the same llama-server (127.0.0.1:8090): `qwen3.6-35b-a3b` (the
 default) and `qwen3.8-35b-a3b-distill` (empero-ai's distill, adopted in #413 from the
@@ -319,6 +342,8 @@ sends, not the file the server loads.
 
 With the `backup` module on (the default), the daemon writes `backup.dir/<YYYY-MM-DD>/` every night at `backup.at`
 and deletes dated folders older than `backup.keep_days`. `harness maintenance backup` takes one now.
+Unless `backup.dir` is set, it is `D:\My Backups\agent-harness` on Windows and `$XDG_DATA_HOME/agent-harness/backups`
+(`~/.local/share/agent-harness/backups` when `XDG_DATA_HOME` is unset) elsewhere.
 
 A backup folder holds exactly:
 
