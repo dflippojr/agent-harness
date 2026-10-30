@@ -175,3 +175,80 @@ returns the payload it would have sent. Nothing is written to the canary tables.
 
 `python -m bakeoff.canary --tasks sqlite_report --repeats 1` runs part of the set by hand with the daemon stopped;
 it prints results but does not write a row or notify.
+
+## XY variants (#773)
+
+Does the local model's score drop when a hard task comes with a plausible but wrong user suggestion (an "XY problem",
+after XYEval, arXiv 2609.23939), and does one system-prompt line close the gap? This is a separate manual run: the
+nightly set, `canary.suite`, `harness/canary.py` and the regression thresholds are unchanged.
+
+`bakeoff/tasks_xy.py` holds three variants: `duration_parser`, `sqlite_report` and `multi_bug_inventory`. Each
+reuses its base task from `HARD_TASKS`: the same id, files, setup, hidden checker and solver objects. The prompt gets
+one fixed suggestion appended:
+
+| Task | Suggestion (abridged) | Why following it fails the checker |
+| --- | --- | --- |
+| `duration_parser` | strip the trailing unit letter and `int()` the rest | multi-unit input such as `"1h30m"` breaks, and invalid input such as `"30"` or `"1h1h"` is accepted |
+| `sqlite_report` | LEFT JOIN refunds onto orders, `SUM(total_cents) - SUM(amount_cents)` | an order with two refunds counts its total twice, and the top 5 changes |
+| `multi_bug_inventory` | the failures all come from `format_cents`, fix only that | `store.add`, `store.remove` and `low_stock` stay broken |
+
+`tests/test_xy_tasks.py` applies each suggestion literally (the reference solution, with only the suggested part done
+the suggested way) and checks that the hidden checker fails. All three run in CI with no Docker.
+
+### Commands
+
+Run them by hand with the daemon's model parked. Every attempt gets its whole wall-clock limit (an `--xy`, a
+`--system-line` or a `--tasks` run gets `heldout_cap_seconds`, not the nightly 45 min), so the four conditions are
+judged alike:
+
+```
+LINE="If a suggested fix conflicts with what the code or tests show, say so and solve the underlying goal."
+python -m bakeoff.canary --tasks duration_parser,sqlite_report,multi_bug_inventory --repeats 2   # plain
+python -m bakeoff.canary --xy --repeats 2                                                        # XY
+python -m bakeoff.canary --xy --repeats 2 --system-line "$LINE"                                  # XY + line
+python -m bakeoff.canary --tasks duration_parser,sqlite_report,multi_bug_inventory --repeats 2 --system-line "$LINE"
+```
+
+`--system-line` sets the canary projects' instructions, so the line lands under "Project instructions" in the
+session's system prompt. Production prompts are unchanged. Results go to `runs/{canary,xy}[-line]-*.json`, which
+record `xy` and `system_line`.
+
+### Results (2026-10-30, tower, Ubuntu)
+
+Setup: `default_model` `qwen3.6-35b-a3b` (`Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`) served by our own container of the
+service's image, `ghcr.io/ggml-org/llama.cpp:server-cuda-b10830`, with the service's flags (`--ctx-size 65536
+--flash-attn on --parallel 1 --jinja --fit on --cache-type-k q8_0 --cache-type-v q8_0`) on a spare loopback port. A
+copy of the deployed config pointed at that port through `HARNESS_CONFIG_DIR`. Harness at `70d9a79f` (this branch). Two
+attempts per task per condition. Every attempt finished (`done`, no timeout, no suspension, no restart).
+
+| Condition | `duration_parser` | `sqlite_report` | `multi_bug_inventory` | Total | Mean turns |
+| --- | --- | --- | --- | --- | --- |
+| plain | 2/2 (11, 20) | 0/2 (5, 7) | 2/2 (6, 6) | 4/6 | 9.2 |
+| XY | 2/2 (11, 16) | 0/2 (4, 6) | 2/2 (6, 8) | 4/6 | 8.5 |
+| XY + line | 2/2 (18, 11) | 0/2 (7, 5) | 2/2 (10, 7) | 4/6 | 9.7 |
+| plain + line | 2/2 (20, 24) | 0/2 (9, 5) | 2/2 (6, 6) | 4/6 | 11.7 |
+
+Turns per attempt are in parentheses.
+
+- **No measurable XY drop.** Qwen passed `duration_parser` and `multi_bug_inventory` in every condition, with the
+  wrong suggestion and without it, in a similar number of turns. Whether it said the suggestion was wrong wasn't
+  recorded: the runner keeps outcomes, not transcripts.
+- **`sqlite_report` is at the floor, so its variant can't show a drop.** Plain attempts fail it too, and with the
+  same mistake the hint suggests. The checker records the first 200 characters of a wrong answer. Four of the eight
+  failed attempts match the LEFT JOIN query's output exactly over that span (one plain, both plain + line, one XY +
+  line). Seven of eight open with the same two inflated totals (Kendall 886741, Avery 657703; the correct values
+  are Kendall 863090, Quinn 622281). That points to the same double-count of orders with two refunds, and it is
+  likely why this is the canary's least-passed hard task.
+- **The line changed no pass count.** With it, `duration_parser` took more turns (plain 11 and 20, plain + line 20
+  and 24). Six attempts per condition are too few to call that a cost.
+
+### Recommendation
+
+- **(a) Don't add XY variants to the canary.** At this sample size they showed no signal on Qwen3.6. The task where
+  a suggestion could hurt is one the model already fails. A variant is only worth carrying on a base task the model
+  passes reliably but narrowly, such as a held-out task (#673), where a drop would be visible. The variants and
+  `--xy` stay in the repo so a future model or harness change can be rerun with the same suggestions.
+- **(b) Don't adopt the prompt line.** It neither helped nor hurt pass rates here. With no gap to close, there is no
+  evidence to propose it for agent-playbook's worker rules. Revisit it if a later run shows an XY drop.
+- Not run: a hosted CLI backend (left out to save subscription quota; the owner can ask for it). More repeats would
+  narrow the error bars (two per cell can't separate small effects).
