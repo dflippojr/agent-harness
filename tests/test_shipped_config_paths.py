@@ -174,7 +174,8 @@ def test_a_local_overlay_wins_over_every_platform_default(machine, monkeypatch, 
 
 
 def test_a_generated_windows_install_gets_no_token_file_or_folders_it_never_had(machine, monkeypatch):
-    # An installed config has no D:/Docker or D:/Projects to point at; only a host on the shipped file does.
+    # An installed config has no D:/Docker or D:/Projects to point at, and the file is kept across upgrades: a folder
+    # named like one of its projects would take over that project in Remote Control.
     monkeypatch.setattr(sys, "platform", "win32")
     args = setup_config.argparse.Namespace(
         model=next(iter(setup_config.PRESETS)), data_dir="/synthetic/data", port=8100, public_url="", login="",
@@ -182,10 +183,16 @@ def test_a_generated_windows_install_gets_no_token_file_or_folders_it_never_had(
         images_models_dir="")
     cfg_dir = machine / "generated"
     cfg_dir.mkdir()
-    (cfg_dir / "harness.yaml").write_text(yaml.safe_dump(setup_config.build(args)), encoding="utf-8")
+    generated = setup_config.build(args)
+    assert "windows_tower_layout" not in generated
+    generated["backends"] = {"codex": {"enabled": True}}
+    generated["runners"] = {"macbook": {}}
+    (cfg_dir / "harness.yaml").write_text(yaml.safe_dump(generated), encoding="utf-8")
     cfg = config.load(cfg_dir, data_dir=machine / "data")
     assert cfg.notify.token_file == ""
     assert cfg.remote_control.folders == {}
+    assert cfg.runners["macbook"].token_file == ""
+    assert cfg.backends["codex"].api_key_file == WINDOWS_VALUES["backends.claude.api_key_file"]  # as it always was
 
 
 @pytest.mark.parametrize(("platform", "expected"), [("win32", "C:/AI/comfy-models"), ("linux", None)])

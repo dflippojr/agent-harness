@@ -76,7 +76,7 @@ def build(args) -> dict:
         "models": ({preset["name"]: {"base_url": args.llama_url, "context_tokens": preset["context_tokens"],
                                       "max_tokens": preset["max_tokens"], "sampling": preset["sampling"]}}
                    if local_model else {}),
-        "notify": {"enabled": False, "token_file": ""},
+        "notify": {"enabled": False},
         "sandbox": {"image": "agent-harness-sandbox:py312", "memory": "2g", "cpus": "2", "pids": 512,
                     "network": "harness-sandbox", "egress_network": "harness-egress",
                     "proxy": "http://harness-egress-sandbox:8888", "proxy_network": "harness-sandbox-egress"},
@@ -98,7 +98,7 @@ def build(args) -> dict:
         "search": {"enabled": "search" in enabled},
         "jobs": {"enabled": "jobs" in enabled},
         "skills": {"enabled": args.profile == "full" or "skills" in enabled},
-        "remote_control": {"enabled": "remote_control" in enabled, "folders": {}},
+        "remote_control": {"enabled": "remote_control" in enabled},
     }
     backends = dict(SERVICE_BACKENDS) if args.profile == "service" else {}
     if local_model:

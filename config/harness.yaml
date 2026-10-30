@@ -53,6 +53,9 @@ notify:
 
 # Machine paths are not set here: an unset one takes its platform default from harness/config.py (Windows: the tower's
 # drive paths; elsewhere: the XDG data dir, or this checkout's data/ for these two). Set them in harness.local.yaml.
+# windows_tower_layout: on Windows, also use the tower's notify token, key and runner token files and Remote Control
+# folders (harness/config.py). A generated config leaves this out. It has no effect elsewhere.
+windows_tower_layout: true
 # data_dir:    SQLite DB, per-session workspaces, transcripts
 # repos_dir:   git_clone "local:<name>" clones from here (host-side, no network)
 

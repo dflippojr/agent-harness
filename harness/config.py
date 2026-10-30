@@ -880,9 +880,10 @@ def _default_repos_dir() -> Path:
 
 
 def _apply_windows_defaults(raw: dict) -> None:
-    """Values config/harness.yaml used to set that have no dataclass default, so a Windows host keeps them (#854).
-    Here rather than on the dataclasses because they name this one tower's layout; explicit values, "" included, win."""
-    if sys.platform != "win32":
+    """Values config/harness.yaml used to set that have no dataclass default, so a Windows host on that file keeps them
+    (#854). They name one tower's layout, so a generated config, which never had them, stays out: only the shipped file
+    sets windows_tower_layout. Explicit values, "" included, win."""
+    if sys.platform != "win32" or not raw.get("windows_tower_layout"):
         return
     raw["notify"] = {"token_file": "D:/Docker/ntfy/secrets/harness-publisher.token", **(raw.get("notify") or {})}
     raw["remote_control"] = {
