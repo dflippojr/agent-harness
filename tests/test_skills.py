@@ -254,7 +254,7 @@ def test_sandbox_argv_is_isolated(tmp_path):
 @pytest.mark.parametrize("component", [
     "workspaces", "WORKSPACES", "workspace-old", "workspace_2", "workspace.bak", "workspace2",
     "workspace#2", "workspace!", "workspace(2)", "workspace=x", "workspace+x", "workspace~", "workspace@x", "workspace^",
-    "workspace 2", "workspace$x", "workspace%x%", "workspace*", "workspace;x", "workspace&", "workspace[1]",
+    "workspace 2", "workspace$x", "workspace%x%", "workspace;x", "workspace&", "workspace[1]",
 ])
 def test_sandbox_allows_install_path_with_longer_component(tmp_path, component):
     install = tmp_path / "orca" / component / "agent-harness"
@@ -310,6 +310,10 @@ def test_sandbox_allows_install_path_with_longer_component(tmp_path, component):
     "type=bind,source=/workspace\\repo,target=/x",
     "type=bind,source=/workspaces/../workspace,target=/x",
     "type=bind,source=C:/workspace/repo,target=/x",
+    "type=bind,source=C:\\workspace\\repo,target=/x",
+    "type=bind,source=C:/workspaces\\workspace,target=/x",
+    "C:\\workspace\\repo",
+    "C:/workspaces\\workspace",
 ])
 def test_sandbox_refuses_a_command_reaching_workspace(tmp_path, arg):
     proposal = tmp_path / "proposal"
@@ -319,6 +323,17 @@ def test_sandbox_refuses_a_command_reaching_workspace(tmp_path, arg):
     argv = sandbox_command("image", proposal, validator)
     assert "forbidden mount or path /workspace" in sandbox_command_is_isolated(argv + ["--mount", arg])
     assert "forbidden mount or path /workspace" in sandbox_command_is_isolated(argv[:-1] + [arg])
+
+
+def test_sandbox_reads_a_mount_source_as_one_literal_path(tmp_path):
+    proposal = tmp_path / "proposal"
+    proposal.mkdir()
+    validator = tmp_path / "validate.py"
+    validator.write_text("print(1)\n", encoding="utf-8")
+    argv = sandbox_command("image", proposal, validator)
+    # Windows can't create this directory, so the string goes straight to the check.
+    glob_name = ["--mount", "type=bind,source=/orca/workspace*/proposal,target=/x"]
+    assert "forbidden mount or path /workspace" not in sandbox_command_is_isolated(argv + glob_name)
 
 
 def test_sandbox_refuses_workspace_mount_beside_a_longer_component(tmp_path):

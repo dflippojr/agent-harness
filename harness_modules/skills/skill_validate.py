@@ -415,11 +415,11 @@ def validate_dir(root: Path) -> dict:
 
 
 SANDBOX_WORK = "/sandbox-work"
-# /workspace in free text: the name ends at the end of the text, a separator, whitespace, a quote, or a character that
-# can expand to something else, with any trailing dots (Windows strips them). A name that goes on, such as /workspaces
-# or /workspace#2, is another path.
-_WORKSPACE_IN_TEXT = re.compile(r"""/workspace(?=\.*(?:$|[\s/\\:,;"'`*?\[\]{}$%)<>|&]))""")
-_PATH_COMPONENT = re.compile(r"/([^/\\]*)")
+# /workspace in free text, after either separator since Windows reads both. The name ends at the end of the text, a
+# separator, whitespace, a quote, or a character that can expand to something else, with any trailing dots (Windows
+# strips them). A name that goes on, such as /workspaces or /workspace#2, is another path.
+_WORKSPACE_IN_TEXT = re.compile(r"""[/\\]workspace(?=\.*(?:$|[\s/\\:,;"'`*?\[\]{}$%)<>|&]))""")
+_PATH_COMPONENT = re.compile(r"[/\\]([^/\\]*)")
 
 
 def _container_user() -> str:
