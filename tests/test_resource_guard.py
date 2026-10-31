@@ -708,7 +708,7 @@ def test_doctor_warns_when_the_guard_cannot_see_plex(tmp_path, monkeypatch, caps
     cfg.gpu_guard = GpuGuardConfig(enabled=True, pause_flag=str(tmp_path / "llama.paused"))
     gpu = {"enabled": True, "state": "clear", "lazy_load": True, "plex_error": "nvidia-smi could not list GPU processes"}
     monkeypatch.setattr(doctor.httpx, "get",
-                        lambda url, timeout=None: httpx.Response(200, json=gpu, request=httpx.Request("GET", url)))
+                        lambda url, timeout=None, headers=None: httpx.Response(200, json=gpu, request=httpx.Request("GET", url)))
     r = doctor.Report()
     check_guard(r, cfg)
     assert r.warned == 1 and "nvidia-smi could not list GPU processes" in capsys.readouterr().out
@@ -878,7 +878,7 @@ def test_doctor_reports_the_resource_guard(tmp_path, monkeypatch, capsys):
     cfg.gpu_guard = GpuGuardConfig(enabled=True, pause_flag=str(tmp_path / "llama.paused"))
     gpu = {"enabled": True, "state": "clear", "lazy_load": True, "memory": {"low": True}}
 
-    def get(url, timeout=None):
+    def get(url, timeout=None, headers=None):
         payload = {"/health": {"profile": cfg.profile}, "/models/status": [{"state": "ready"}], "/gpu": gpu,
                    "/maintenance": {"backup": {}}}["/" + url.split("/", 3)[3]]
         return httpx.Response(200, json=payload, request=httpx.Request("GET", url))
