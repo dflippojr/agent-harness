@@ -590,6 +590,8 @@ Describe 'GitHub''s renderer call (#767)' {
         . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
         # A stand-in for gh: records its arguments and stdin, then answers as the FAKE_GH_* variables say.
         # A batch file on Windows and an sh script elsewhere, as the review runners are Linux or Windows (#806).
+        # Its sleep gets none of gh's pipes: the renderer kills only gh, and on Windows a survivor holding stdout and
+        # stderr blocks two thread-pool threads on their reads, which starves the next case's stdin write (#878).
         $script:windowsHost = $env:OS -eq 'Windows_NT'
         if ($script:windowsHost) {
             $script:fakeGh = Join-Path $TestDrive 'gh.cmd'
@@ -597,7 +599,7 @@ Describe 'GitHub''s renderer call (#767)' {
                 '@echo off'
                 'echo %*> "%~dp0args.txt"'
                 'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
-                'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%"'
+                'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%" <nul >nul 2>nul'
                 'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
                 'exit /b %FAKE_GH_EXIT%'
             ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
@@ -608,7 +610,7 @@ Describe 'GitHub''s renderer call (#767)' {
                 'dir=$(dirname "$0")'
                 'printf ''%s\n'' "$*" > "$dir/args.txt"'
                 'cat > "$dir/stdin.txt"'
-                'if [ -n "$FAKE_GH_SLEEP" ]; then sleep "$FAKE_GH_SLEEP"; fi'
+                'if [ -n "$FAKE_GH_SLEEP" ]; then sleep "$FAKE_GH_SLEEP" </dev/null >/dev/null 2>&1; fi'
                 'if [ -n "$FAKE_GH_HTML" ]; then printf ''%s\n'' "$FAKE_GH_HTML"; fi'
                 'exit "$FAKE_GH_EXIT"'
             ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
@@ -636,24 +638,25 @@ Describe 'GitHub''s renderer call (#767)' {
         if ($request.PSObject.Properties['context']) { throw 'An invalid repository was sent as context' }
     }
 
+    # Only the timeout case is about the budget; the others have the renderer's default, as gh's start is not their subject.
     It 'throws <Type> when gh <Case>' -TestCases @(
-        @{ Case = 'does not answer in time'; Sleep = '20'; Html = '<p>late</p>'; Exit = '0'; Type = 'TimeoutException'; Missing = $false }
-        @{ Case = 'fails'; Sleep = $null; Html = 'ghp_synthetic12345678'; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
-        @{ Case = 'fails after a slow start'; Sleep = '4'; Html = 'ghp_synthetic12345678'; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
-        @{ Case = 'answers nothing'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $false }
-        @{ Case = 'cannot start'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $true }
+        @{ Case = 'does not answer in time'; Sleep = '20'; Html = '<p>late</p>'; Budget = 3; Exit = '0'; Type = 'TimeoutException'; Missing = $false }
+        @{ Case = 'fails'; Sleep = $null; Html = 'ghp_synthetic12345678'; Budget = 30; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
+        @{ Case = 'fails after a slow start'; Sleep = '4'; Html = 'ghp_synthetic12345678'; Budget = 30; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
+        @{ Case = 'answers nothing'; Sleep = $null; Html = $null; Budget = 30; Exit = '0'; Type = 'InvalidOperationException'; Missing = $false }
+        @{ Case = 'cannot start'; Sleep = $null; Html = $null; Budget = 30; Exit = '0'; Type = 'InvalidOperationException'; Missing = $true }
     ) {
-        param($Case, $Sleep, $Html, $Exit, $Type, $Missing)
+        param($Case, $Sleep, $Html, $Budget, $Exit, $Type, $Missing)
         $env:FAKE_GH_SLEEP = $Sleep; $env:FAKE_GH_HTML = & $script:ghHtml $Html; $env:FAKE_GH_EXIT = $Exit
         $path = if ($Missing) { Join-Path $TestDrive 'missing-gh.exe' } else { $script:fakeGh }
         $watch = [Diagnostics.Stopwatch]::StartNew()
         $caught = $null
-        try { Invoke-ReviewMarkdownRender -Text 'body ghp_synthetic12345678' -FilePath $path -TimeoutSeconds 3 | Out-Null }
+        try { Invoke-ReviewMarkdownRender -Text 'body ghp_synthetic12345678' -FilePath $path -TimeoutSeconds $Budget | Out-Null }
         catch { $caught = $_.Exception }
         $name = if ($caught) { $caught.GetType().Name } else { 'no exception' }
         if ($name -ne $Type) { throw "Expected $Type, got $name" }
         if ($caught.Message -match 'synthetic') { throw "The error echoed text: $($caught.Message)" }
-        if ($watch.Elapsed.TotalSeconds -gt 15) { throw "The renderer outlived its timeout: $($watch.Elapsed.TotalSeconds) s" }
+        if ($watch.Elapsed.TotalSeconds -gt $Budget + 12) { throw "The renderer outlived its timeout: $($watch.Elapsed.TotalSeconds) s" }
     }
 }
 
