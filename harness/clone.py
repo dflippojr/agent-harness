@@ -82,7 +82,11 @@ def public_https_url(url: str) -> str:
     if parsed.username or parsed.password:
         raise CloneRefused("embedded credentials are not allowed")
     host = _allowed_host(parsed)
-    if parsed.port not in (None, 443):
+    try:
+        port = parsed.port
+    except ValueError:  # non-numeric or out of range
+        raise CloneRefused("repository url is invalid") from None
+    if port not in (None, 443):
         raise CloneRefused("non-default ports are not allowed")
     if parsed.query or parsed.fragment:
         # query/fragment can carry tokens; refuse rather than strip-and-continue

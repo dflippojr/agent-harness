@@ -453,6 +453,7 @@ def test_member_clone_allows_only_public_https(tmp_path):
         "https://evil.example/o/r", "https://github.com/o/r.git:2222",
         "https://user:pass@github.com/o/r", "https://github.com/o/r?token=1",
         "https://github.com/o/r#frag", ".", "../etc", "https://github.com/",
+        "https://github.com:abc/o/r", "https://github.com:99999/o/r",
     ]
     # urlsplit('https://github.com/o/r:2222') treats :2222 as path, not port — still unapproved if weird.
     for url in refused:

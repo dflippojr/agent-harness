@@ -374,3 +374,24 @@ def test_sdk_pair_keeps_the_minted_app_and_its_catalog_app_id():
         assert json.loads(seen[0].content) == {"code": "hp-code"}
     finally:
         paired.close()
+
+
+@pytest.mark.parametrize("error", [httpx.ReadError, httpx.ConnectTimeout, httpx.RemoteProtocolError])
+def test_events_reconnect_after_a_dropped_connection(monkeypatch, error):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params["after"])
+        if len(calls) == 1:
+            raise error("dropped", request=request)
+        return httpx.Response(200, text='data: {"seq": 4, "type": "run_finished"}\n\n')
+
+    monkeypatch.setattr(sdk_module.time, "sleep", lambda s: None)
+    sdk = Harness("https://daemon.example", "ha-secret")
+    sdk.client.close()
+    sdk.client = httpx.Client(base_url=sdk.base, transport=httpx.MockTransport(handler))
+    try:
+        assert [e["seq"] for e in sdk.events("s1", after=3, follow=False)] == [4]
+    finally:
+        sdk.client.close()
+    assert calls == ["3", "3"]

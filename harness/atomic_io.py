@@ -19,9 +19,9 @@ def write_atomic(path: Path, text: str, *, private: bool = False, prepare=None) 
         tmp.unlink(missing_ok=True)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if private else 0o666)
     try:
-        if prepare is not None:
-            prepare(tmp)
-        with open(fd, "w", encoding="utf-8") as fh:
+        with open(fd, "w", encoding="utf-8") as fh:  # owns fd from here, so a failing prepare still closes it
+            if prepare is not None:
+                prepare(tmp)
             fh.write(text)
         os.replace(tmp, path)
     except BaseException:
