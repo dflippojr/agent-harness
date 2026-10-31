@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
+import weakref
+from pathlib import Path
 
 import pytest
 
 from harness import sandbox
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
+# Prints a grandchild's pid and exits while that grandchild still holds stdout and stderr.
+DETACHES_A_CHILD = [sys.executable, "-c",
+                    "import subprocess, sys; print(subprocess.Popen("
+                    "[sys.executable, '-c', 'import time; time.sleep(67)'], stdin=subprocess.DEVNULL, "
+                    "stdout=sys.stdout.fileno(), stderr=sys.stderr.fileno()).pid)"]
 
 
 @pytest.fixture
@@ -182,6 +193,70 @@ def test_run_cmd_returns_when_detached_child_holds_the_pipe(tmp_path, monkeypatc
         if pid:
             subprocess.run([sh, "-c", f"kill {pid} 2>/dev/null; kill -9 {pid} 2>/dev/null"],
                            timeout=5, check=False)
+
+
+def test_a_descriptor_number_reused_after_the_first_close_stays_open(tmp_path, monkeypatch):
+    """#877: any close of a read end underneath its live stream frees the number while the stream still means to close
+    it. This hands the number to another file at that moment, as another thread's open() would."""
+    other = tmp_path / "other"
+    other.touch()
+    read_ends, read_end_fds, reused = [], set(), []
+    real_spawn, real_close = sandbox._spawn, os.close
+
+    def recording(*args, **kwargs):
+        proc = real_spawn(*args, **kwargs)
+        read_ends.extend([weakref.ref(proc.stdout), weakref.ref(proc.stderr)])
+        read_end_fds.update([proc.stdout.fileno(), proc.stderr.fileno()])
+        return proc
+
+    def finished():
+        gc.collect()
+        return all(ref() is None or ref().closed for ref in read_ends)
+
+    monkeypatch.setattr(sandbox, "_spawn", recording)
+    with other.open("rb") as file:
+        def close_then_reuse(fd):
+            real_close(fd)
+            if fd in read_end_fds:
+                os.dup2(file.fileno(), fd, inheritable=False)
+                reused.append(fd)
+
+        monkeypatch.setattr(sandbox.os, "close", close_then_reuse)
+        code, out, err = asyncio.run(sandbox.run_cmd(DETACHES_A_CHILD, timeout=30))
+        try:
+            assert code == 0, err
+        finally:
+            os.kill(int(out), signal.SIGTERM)
+        assert _wait_until(finished, 30), "run_cmd's read ends were never closed"
+        monkeypatch.setattr(sandbox.os, "close", real_close)
+        closed = []
+        for fd in reused:
+            try:
+                assert os.path.sameopenfile(fd, file.fileno())
+                real_close(fd)
+            except OSError:
+                closed.append(fd)
+    assert not closed, f"descriptor(s) {closed} now belonging to another file were closed underneath it"
+
+
+def test_the_detached_child_path_finalizes_its_streams_without_an_error():
+    """#877: a stream whose descriptor was closed underneath it reports `OSError: [Errno 9] Bad file descriptor` from
+    its finalizer. Dev mode is what makes every supported Python report it, so this runs in a process of its own."""
+    script = f"""
+import asyncio, os, signal, threading, time
+from harness import sandbox
+code, out, err = asyncio.run(sandbox.run_cmd({DETACHES_A_CHILD!r}, timeout=30))
+os.kill(int(out), signal.SIGTERM)
+deadline = time.monotonic() + 30
+while threading.active_count() > 1 and time.monotonic() < deadline:
+    time.sleep(0.05)
+print(code)
+"""
+    result = subprocess.run([sys.executable, "-X", "dev", "-c", script], cwd=REPO_ROOT, capture_output=True, text=True,
+                            timeout=90, check=False)
+    assert result.stdout.strip() == "0", result.stderr
+    assert "Bad file descriptor" not in result.stderr
+    assert "unclosed file <_io.BufferedReader" not in result.stderr
 
 
 def test_unblock_read_cancels_pending_io_then_closes(monkeypatch):
