@@ -717,6 +717,49 @@ def test_doctor_warns_when_the_guard_cannot_see_plex(tmp_path, monkeypatch, caps
     assert r.warned == 1
 
 
+def test_doctor_reads_plex_error_from_a_real_daemon(tmp_path, monkeypatch, capsys):
+    """Real socket, real local-owner check, real Detector: a daemon refuses /gpu to a caller without the token."""
+    import socket
+    import threading
+    import httpx
+    import uvicorn
+    from harness import doctor, local_owner
+    from harness.api import create_app
+    from harness_modules.local_model import resources, service
+    from harness_modules.local_model.doctor import check_guard
+
+    monkeypatch.setattr(service, "plex_token", lambda: "")
+    monkeypatch.setattr(resources, "_run", lambda *_args, **_kwargs: None)  # nvidia-smi can't be read
+    m = guarded_manager(tmp_path, pause_flag=str(tmp_path / "llama.paused"))
+    m.guard.detector = service.Detector(m.cfg.gpu_guard)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        m.cfg.port = probe.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(create_app(m), host="127.0.0.1", port=m.cfg.port, log_level="warning",
+                                           proxy_headers=False, forwarded_allow_ips=""))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + scaled(10)
+        while not server.started and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert server.started
+        url = f"http://127.0.0.1:{m.cfg.port}/gpu"
+        assert httpx.get(url, timeout=5).status_code == 401
+        token_headers = {local_owner.HEADER: local_owner.read_token(m.cfg.data_dir)}
+        while (not httpx.get(url, timeout=5, headers=token_headers).json()["plex_error"]
+               and time.monotonic() < deadline):
+            time.sleep(0.05)
+        r = doctor.Report()
+        check_guard(r, m.cfg)
+    finally:
+        server.should_exit = True
+        thread.join(scaled(10))
+    out = capsys.readouterr().out
+    assert "nvidia-smi could not list GPU processes" in out and "not answering" not in out
+    assert r.warned == 1
+
+
 def test_run_returns_none_when_the_tool_is_missing():
     from harness_modules.local_model import resources
     assert resources._run(["definitely-not-a-real-tool-311"]) is None
