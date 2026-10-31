@@ -15,61 +15,30 @@ $ErrorView = 'NormalView'
 $dir = Join-Path $env:DIAG_TMP 'fake'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $gh = Join-Path $dir 'gh.cmd'
-$stamp = '(Get-Date).ToString(''HH:mm:ss.ff'')'
+$redirect = if ($env:DIAG_FAKE -eq 'fixed') { ' <nul >nul 2>nul' } else { '' }
 @(
     '@echo off'
-    'echo cmd-start %time%>> "%~dp0stages.txt"'
     'echo %*> "%~dp0args.txt"'
-    ('powershell -NoProfile -NonInteractive -Command "$begin = ' + $stamp + '; $created = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToString(''HH:mm:ss.ff''); [Console]::InputEncoding = New-Object Text.UTF8Encoding($false); $in = [Console]::In.ReadToEnd(); $read = ' + $stamp + '; [IO.File]::WriteAllText(''%~dp0stdin.txt'', $in); $wrote = ' + $stamp + '; Add-Content -LiteralPath ''%~dp0stages.txt'' (''ps-created '' + $created + '' cmd-begin '' + $begin + '' stdin-read '' + $read + '' file-written '' + $wrote)"')
-    'echo ps-exited %time%>> "%~dp0stages.txt"'
-    'if "%FAKE_GH_MODE%"=="startsleep" powershell -NoProfile -NonInteractive -Command "Start-Sleep 8"'
-    'if "%FAKE_GH_MODE%"=="threadsleep" powershell -NoProfile -NonInteractive -Command "[Threading.Thread]::Sleep(8000)"'
-    'if "%FAKE_GH_MODE%"=="ping" ping -n 9 127.0.0.1 >nul'
+    'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
+    ('if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%"' + $redirect)
     'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
     'exit /b %FAKE_GH_EXIT%'
 ) | Set-Content -LiteralPath $gh -Encoding ascii
-$stages = Join-Path $dir 'stages.txt'
-
-function Invoke-Case([string]$Label, [string]$Mode, $Html, [string]$Exit, [int]$Budget) {
-    $env:FAKE_GH_MODE = $Mode; $env:FAKE_GH_HTML = $Html; $env:FAKE_GH_EXIT = $Exit
-    Remove-Item -LiteralPath $stages -ErrorAction SilentlyContinue
+function Get-Pool { "pool-threads=$([Threading.ThreadPool]::ThreadCount) pending=$([Threading.ThreadPool]::PendingWorkItemCount) completed=$([Threading.ThreadPool]::CompletedWorkItemCount)" }
+function Invoke-Case([string]$Label, $Sleep, $Html, [string]$Exit, [int]$Budget) {
+    $env:FAKE_GH_SLEEP = $Sleep; $env:FAKE_GH_HTML = $Html; $env:FAKE_GH_EXIT = $Exit
     $w = [Diagnostics.Stopwatch]::StartNew(); $name = 'none'
     try { Invoke-ReviewMarkdownRender -Text 'body' -FilePath $gh -TimeoutSeconds $Budget | Out-Null }
-    catch { $name = $_.Exception.GetType().Name }
-    $elapsed = [Math]::Round($w.Elapsed.TotalSeconds, 2)
-    $trace = if (Test-Path -LiteralPath $stages) { (Get-Content -LiteralPath $stages) -join ' | ' } else { 'no stages' }
-    $procs = @(Get-Process powershell -ErrorAction SilentlyContinue).Count
-    "DIAG $Label budget=$Budget elapsed=$elapsed exception=$name powershell-procs=$procs :: $trace"
+    catch { $name = $_.Exception.GetType().Name; $pool = Get-Pool }
+    "DIAG $env:DIAG_LABEL $Label budget=$Budget elapsed=$([Math]::Round($w.Elapsed.TotalSeconds, 2)) exception=$name $pool"
 }
-function Wait-Quiet {
-    $w = [Diagnostics.Stopwatch]::StartNew()
-    while ($w.Elapsed.TotalSeconds -lt 12 -and (@(Get-Process powershell, ping -ErrorAction SilentlyContinue).Count -gt 0)) { Start-Sleep -Milliseconds 200 }
-    [Threading.Thread]::Sleep(300)
-}
-function Invoke-Variant([string]$Variant, [string]$Round) {
-    Wait-Quiet
-    $load = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
-    "DIAG $Round-$Variant load=$load"
-    switch ($Variant) {
-        # Nothing before the two cases.
-        'none' { }
-        # A PowerShell that runs Start-Sleep to its end, with no kill and no orphan.
-        'done' { powershell -NoProfile -NonInteractive -Command 'Start-Sleep 3' }
-        # The kill, leaving an orphan that is not PowerShell.
-        'killping' { Invoke-Case "$Round-killping-timeout" 'ping' 'x' '0' 3 }
-        # The kill, leaving a PowerShell orphan that never loads a module for Start-Sleep.
-        'killthread' { Invoke-Case "$Round-killthread-timeout" 'threadsleep' 'x' '0' 3 }
-        # The kill as the Pester table does it: a PowerShell orphan in Start-Sleep.
-        'killstart' { Invoke-Case "$Round-killstart-timeout" 'startsleep' 'x' '0' 3 }
-    }
-    Invoke-Case "$Round-$Variant-fails" '' 'x' '1' 60
-    Invoke-Case "$Round-$Variant-empty" '' $null '0' 60
-}
-
-$variants = @('none', 'done', 'killping', 'killthread', 'killstart')
-foreach ($round in 0..4) {
-    # Rotated, so no variant always runs first or after the same neighbour.
-    foreach ($i in 0..4) { Invoke-Variant $variants[($i + $round) % 5] "R$round" }
+$workers = 0; $io = 0; [Threading.ThreadPool]::GetMinThreads([ref]$workers, [ref]$io)
+"DIAG $env:DIAG_LABEL cpus=$([Environment]::ProcessorCount) min-workers=$workers $(Get-Pool)"
+if ($env:DIAG_MAX) { "DIAG $env:DIAG_LABEL set-max=$([Threading.ThreadPool]::SetMaxThreads([int]$env:DIAG_MAX, 1000))" }
+foreach ($i in 1..[int]$env:DIAG_KILLS) { Invoke-Case "timeout$i" '20' 'x' '0' 3 }
+foreach ($i in 1..3) {
+    Invoke-Case "fails$i" $null 'x' '1' 3
+    Invoke-Case "empty$i" $null $null '0' 3
 }
 """
 
@@ -78,13 +47,23 @@ foreach ($round in 0..4) {
 def test_diag878_windows_timings(tmp_path):
     wrapper = tmp_path / "diag.ps1"
     wrapper.write_text(SCRIPT, encoding="utf-8")
-    env = dict(os.environ, DIAG_ROOT=str(ROOT), DIAG_TMP=str(tmp_path), NO_COLOR="1")
-    result = subprocess.run(
-        [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
-        capture_output=True,
-        text=True,
-        timeout=600,
-        check=False,
-        env=env,
-    )
-    pytest.fail("DIAG-OUTPUT\n" + result.stdout + "\nSTDERR\n" + result.stderr)
+    report = []
+    # Label, fake, kills before the cases, and the worker cap (the CPU count, so the pool cannot grow past blocked reads).
+    for label, fake, kills, cap in (
+        ("held-capped", "held", "2", "cpus"),
+        ("fixed-capped", "fixed", "2", "cpus"),
+        ("held-default", "held", "1", ""),
+        ("fixed-default", "fixed", "1", ""),
+    ):
+        env = dict(os.environ, DIAG_ROOT=str(ROOT), DIAG_TMP=str(tmp_path / label), DIAG_LABEL=label, DIAG_FAKE=fake, DIAG_KILLS=kills, NO_COLOR="1")
+        env["DIAG_MAX"] = str(os.cpu_count()) if cap else ""
+        result = subprocess.run(
+            [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+            capture_output=True,
+            text=True,
+            timeout=150,
+            check=False,
+            env=env,
+        )
+        report.append(result.stdout + "\nSTDERR\n" + result.stderr)
+    pytest.fail("DIAG-OUTPUT\n" + "\n".join(report))
