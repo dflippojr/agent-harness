@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import weakref
 from pathlib import Path
@@ -259,18 +260,37 @@ print(code)
     assert "unclosed file <_io.BufferedReader" not in result.stderr
 
 
-def test_unblock_read_cancels_pending_io_then_closes(monkeypatch):
+def test_run_cmd_closes_its_read_ends_when_the_command_exits(spawned):
+    code, _, err = asyncio.run(sandbox.run_cmd([sys.executable, "-c", "print('done')"]))
+    assert code == 0, err
+    assert spawned[0].stdout.closed and spawned[0].stderr.closed
+
+
+def test_wake_pumps_cancels_until_a_pump_between_reads_returns_and_closes_nothing(monkeypatch):
+    """Windows' path: the first cancel finds nothing pending, as when the pump has not re-entered read() yet."""
     cancelled, closed = [], []
-    monkeypatch.setattr(sandbox, "_CancelIoEx", lambda handle, overlapped: cancelled.append(handle) or 1)
-    monkeypatch.setattr(sandbox.os, "close", lambda fd: closed.append(fd))
-    sandbox._unblock_read(7, 99)
-    assert cancelled == [99] and closed == [7]
+    second_cancel = threading.Event()
+
+    def cancel(handle, overlapped):
+        cancelled.append(handle)
+        if len(cancelled) == 2:
+            second_cancel.set()
+        return 1
+
+    monkeypatch.setattr(sandbox, "_CancelIoEx", cancel)
+    monkeypatch.setattr(sandbox.os, "close", closed.append)
+    pump = threading.Thread(target=second_cancel.wait, daemon=True)
+    pump.start()
+    sandbox._wake_pumps([pump], None, [99, None])
+    assert not pump.is_alive()
+    assert cancelled[:2] == [99, 99]
+    assert closed == []
 
 
-def test_read_end_captures_fd_and_native_handle(monkeypatch):
+def test_read_handle_captures_the_native_handle(monkeypatch):
     class Stream:
         def fileno(self):
             return 3
     monkeypatch.setattr(sandbox, "msvcrt", type("M", (), {"get_osfhandle": staticmethod(lambda fd: 123)})())
-    assert sandbox._read_end(Stream()) == (3, 123)
-    assert sandbox._read_end(None) == (None, None)
+    assert sandbox._read_handle(Stream()) == 123
+    assert sandbox._read_handle(None) is None
