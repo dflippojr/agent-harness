@@ -287,6 +287,54 @@ def test_wake_pumps_cancels_until_a_pump_between_reads_returns_and_closes_nothin
     assert closed == []
 
 
+def test_closing_the_wake_pipe_wakes_a_blocked_read(monkeypatch):
+    """POSIX's path, on a real pipe, so every platform's run covers it."""
+    monkeypatch.setattr(sandbox, "_CancelIoEx", None)
+    with sandbox._wake_pipe() as (wake_read, wake_write):
+        woken = []
+        pump = threading.Thread(target=lambda: woken.append(os.read(wake_read.fileno(), 1)), daemon=True)
+        pump.start()
+        sandbox._wake_pumps([pump], wake_write, [None, None])
+        assert woken == [b""]
+    assert wake_read.closed and wake_write.closed
+
+
+def test_wake_pipe_is_only_made_where_a_pipe_can_be_polled(monkeypatch):
+    monkeypatch.setattr(sandbox, "_CancelIoEx", lambda handle, overlapped: 1)
+    with sandbox._wake_pipe() as ends:
+        assert ends == (None, None)
+
+
+def test_wakeable_read_returns_data_until_the_wake_pipe_fires(monkeypatch):
+    """Scripted poll results, because Windows has no select.poll; the detached-child tests run the real one on POSIX."""
+    class Poll:
+        events = [[(5, 1)], [(6, 1)], [(5, 1), (6, 1)]]
+
+        def register(self, fd, mask):
+            assert fd in (5, 6) and mask == 1
+
+        def poll(self):
+            return self.events.pop(0)
+
+    class End:
+        def __init__(self, fd):
+            self.fd = fd
+
+        def fileno(self):
+            return self.fd
+
+    class Stream(End):
+        def read1(self, size):
+            return b"data"
+
+    monkeypatch.setattr(sandbox.select, "poll", Poll, raising=False)
+    monkeypatch.setattr(sandbox.select, "POLLIN", 1, raising=False)
+    reader = sandbox._WakeableRead(Stream(5), End(6))
+    assert reader.read1(65536) == b"data"
+    assert reader.read1(65536) == b""
+    assert reader.read1(65536) == b"", "a wake must end the read even while a grandchild keeps writing"
+
+
 def test_read_handle_captures_the_native_handle(monkeypatch):
     class Stream:
         def fileno(self):
@@ -294,3 +342,8 @@ def test_read_handle_captures_the_native_handle(monkeypatch):
     monkeypatch.setattr(sandbox, "msvcrt", type("M", (), {"get_osfhandle": staticmethod(lambda fd: 123)})())
     assert sandbox._read_handle(Stream()) == 123
     assert sandbox._read_handle(None) is None
+
+    def closed_handle(fd):
+        raise OSError(9, "Bad file descriptor")
+    monkeypatch.setattr(sandbox, "msvcrt", type("M", (), {"get_osfhandle": staticmethod(closed_handle)})())
+    assert sandbox._read_handle(Stream()) is None
