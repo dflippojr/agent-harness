@@ -639,6 +639,7 @@ Describe 'GitHub''s renderer call (#767)' {
     It 'throws <Type> when gh <Case>' -TestCases @(
         @{ Case = 'does not answer in time'; Sleep = '20'; Html = '<p>late</p>'; Exit = '0'; Type = 'TimeoutException'; Missing = $false }
         @{ Case = 'fails'; Sleep = $null; Html = 'ghp_synthetic12345678'; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
+        @{ Case = 'fails after a slow start'; Sleep = '4'; Html = 'ghp_synthetic12345678'; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
         @{ Case = 'answers nothing'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $false }
         @{ Case = 'cannot start'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $true }
     ) {
