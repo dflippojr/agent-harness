@@ -12,8 +12,11 @@ import asyncio
 import codecs
 import hashlib
 import os
+import select
 import subprocess
 import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
@@ -25,6 +28,7 @@ from .principal import OWNER_USER_ID
 
 
 SETUP_TIMEOUT = 600
+PUMP_WAKE_WAIT = 10
 PROXY_START = "docker compose -f ops/egress/compose.yaml up -d --build sandbox"
 PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 
@@ -72,35 +76,63 @@ def _pump_stream(stream, cap: CappedStream) -> None:
         cap.feed(tail)
 
 
-def _read_end(stream) -> tuple[int | None, int | None]:
-    """Return (fd, native handle) captured before a pump blocks in read()."""
-    if stream is None:
-        return None, None
+@contextmanager
+def _wake_pipe():
+    """(read end, write end) of a pipe that wakes the pumps when its write end closes; (None, None) on Windows, which
+    can't poll a pipe. Made before the spawn so running out of descriptors can't strand a child."""
+    if _CancelIoEx is not None:
+        yield None, None
+        return
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb", buffering=0) as read_end, os.fdopen(write_fd, "wb", buffering=0) as write_end:
+        yield read_end, write_end
+
+
+class _WakeableRead:
+    """A pump's read of `stream` that ends, as if at end of stream, once the wake pipe's write end closes. Read1 leaves
+    nothing buffered when asked for more than the buffer holds, so a poll sees everything still to come."""
+
+    def __init__(self, stream, wake_read):
+        self._stream = stream
+        self._wake_fd = wake_read.fileno()
+        self._poll = select.poll()
+        self._poll.register(stream.fileno(), select.POLLIN)
+        self._poll.register(self._wake_fd, select.POLLIN)
+
+    def read1(self, size: int) -> bytes:
+        if any(fd == self._wake_fd for fd, _ in self._poll.poll()):
+            return b""
+        return self._stream.read1(size)
+
+
+def _read_handle(stream) -> int | None:
+    """The native handle CancelIoEx needs, captured before a pump blocks in read(). None off Windows."""
+    if stream is None or msvcrt is None:
+        return None
     try:
-        fd = stream.fileno()
+        return msvcrt.get_osfhandle(stream.fileno())
     except (OSError, ValueError):
-        return None, None
-    handle = None
-    if msvcrt is not None:
-        try:
-            handle = msvcrt.get_osfhandle(fd)
-        except OSError:
-            handle = None
-    return fd, handle
+        return None
 
 
-def _unblock_read(fd: int | None, handle: int | None) -> None:
-    """Wake a pump blocked in read() when a grandchild still holds the write end.
+def _wake_pumps(pumps: list[threading.Thread], wake_write, handles: list[int | None]) -> None:
+    """Wake pumps blocked in read() because a grandchild still holds the write end, and wait for them to return.
 
-    On Windows CloseHandle/os.close wait for pending I/O, so CancelIoEx first.
+    Never closes a read end: its stream owns the descriptor and would close that number again, by then perhaps another
+    thread's file (#877). Closing the wake pipe ends a POSIX pump's poll. On Windows CancelIoEx aborts the pending read,
+    repeatedly, because a pump between two reads has nothing pending to cancel yet. The caller still holds the streams,
+    so the handles stay valid.
     """
-    if _CancelIoEx is not None and handle is not None:
-        _CancelIoEx(handle, None)
-    if fd is not None:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+    if wake_write is not None:
+        wake_write.close()
+    deadline = time.monotonic() + PUMP_WAKE_WAIT
+    while any(t.is_alive() for t in pumps) and time.monotonic() < deadline:
+        if _CancelIoEx is not None:
+            for handle in handles:
+                if handle is not None:
+                    _CancelIoEx(handle, None)
+        for t in pumps:
+            t.join(timeout=0.05)
 
 
 def _run_blocking(args: list[str], input_: str | None, timeout: float, env: dict | None,
@@ -112,45 +144,49 @@ def _run_blocking(args: list[str], input_: str | None, timeout: float, env: dict
     Each of stdout and stderr is drained with a 1,000,000-character ceiling so a runaway command cannot exhaust
     daemon memory. Timeout is exit 124, matching the previous communicate() path.
     """
-    proc = _spawn(args, input_ is not None, env)
-    started.append(proc)
-    if cancelled.is_set():
-        proc.kill()
-    out_cap, err_cap = CappedStream(), CappedStream()
-    out_fd, out_handle = _read_end(proc.stdout)
-    err_fd, err_handle = _read_end(proc.stderr)
-    pumps = [
-        threading.Thread(target=_pump_stream, args=(proc.stdout, out_cap), daemon=True),
-        threading.Thread(target=_pump_stream, args=(proc.stderr, err_cap), daemon=True),
-    ]
-    for t in pumps:
-        t.start()
-    if input_ is not None and proc.stdin is not None:
-        def _write_stdin() -> None:
-            try:
-                proc.stdin.write(input_.encode("utf-8", errors="replace"))
-                proc.stdin.close()
-            except (BrokenPipeError, OSError):
-                pass
-        threading.Thread(target=_write_stdin, daemon=True).start()
-    timed_out = False
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        proc.kill()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
-    for t in pumps:
-        t.join(timeout=1)
-    if any(t.is_alive() for t in pumps):
-        _unblock_read(out_fd, out_handle)
-        _unblock_read(err_fd, err_handle)
+    with _wake_pipe() as (wake_read, wake_write):
+        proc = _spawn(args, input_ is not None, env)
+        started.append(proc)
+        if cancelled.is_set():
+            proc.kill()
+        out_cap, err_cap = CappedStream(), CappedStream()
+        handles = [_read_handle(proc.stdout), _read_handle(proc.stderr)]
+        out_read = proc.stdout if wake_read is None else _WakeableRead(proc.stdout, wake_read)
+        err_read = proc.stderr if wake_read is None else _WakeableRead(proc.stderr, wake_read)
+        pumps = [
+            threading.Thread(target=_pump_stream, args=(out_read, out_cap), daemon=True),
+            threading.Thread(target=_pump_stream, args=(err_read, err_cap), daemon=True),
+        ]
         for t in pumps:
-            t.join(timeout=10)
-        proc.stdout = proc.stderr = None
+            t.start()
+        if input_ is not None and proc.stdin is not None:
+            def _write_stdin() -> None:
+                try:
+                    proc.stdin.write(input_.encode("utf-8", errors="replace"))
+                    proc.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+            threading.Thread(target=_write_stdin, daemon=True).start()
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        for t in pumps:
+            t.join(timeout=1)
+        if any(t.is_alive() for t in pumps):
+            _wake_pumps(pumps, wake_write, handles)
+        if any(t.is_alive() for t in pumps):
+            proc.stdout = proc.stderr = None    # a pump still in read() keeps its stream, which closes when it returns
+        else:
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
     out, err = out_cap.get(), err_cap.get()
     if timed_out:
         return 124, out, err + f"\n[timed out after {timeout:.0f}s]"
