@@ -82,8 +82,9 @@ async def wait_status(m: Manager, sid: str, *statuses: str, timeout: float = 30)
                 return m.db.get_session(sid) if task is not None else s
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                reason = f": {s['stop_reason']}" if s.get("stop_reason") else ""
                 raise AssertionError(f"session stayed {s['status']}, wanted {statuses} "
-                                     f"(waited {scaled(timeout):.0f}s{', run still finishing' if task else ''})")
+                                     f"(waited {scaled(timeout):.0f}s{', run still finishing' if task else ''}){reason}")
             try:
                 await asyncio.wait_for(sub.queue.get(), min(remaining, 0.1))
             except asyncio.TimeoutError:
