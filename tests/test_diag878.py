@@ -15,55 +15,61 @@ $ErrorView = 'NormalView'
 $dir = Join-Path $env:DIAG_TMP 'fake'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $gh = Join-Path $dir 'gh.cmd'
+$stamp = '(Get-Date).ToString(''HH:mm:ss.ff'')'
 @(
     '@echo off'
     'echo cmd-start %time%>> "%~dp0stages.txt"'
     'echo %*> "%~dp0args.txt"'
-    'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
-    'echo stdin-captured %time%>> "%~dp0stages.txt"'
-    'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%"'
+    ('powershell -NoProfile -NonInteractive -Command "$begin = ' + $stamp + '; $created = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToString(''HH:mm:ss.ff''); [Console]::InputEncoding = New-Object Text.UTF8Encoding($false); $in = [Console]::In.ReadToEnd(); $read = ' + $stamp + '; [IO.File]::WriteAllText(''%~dp0stdin.txt'', $in); $wrote = ' + $stamp + '; Add-Content -LiteralPath ''%~dp0stages.txt'' (''ps-created '' + $created + '' cmd-begin '' + $begin + '' stdin-read '' + $read + '' file-written '' + $wrote)"')
+    'echo ps-exited %time%>> "%~dp0stages.txt"'
+    'if "%FAKE_GH_MODE%"=="startsleep" powershell -NoProfile -NonInteractive -Command "Start-Sleep 8"'
+    'if "%FAKE_GH_MODE%"=="threadsleep" powershell -NoProfile -NonInteractive -Command "[Threading.Thread]::Sleep(8000)"'
+    'if "%FAKE_GH_MODE%"=="ping" ping -n 9 127.0.0.1 >nul'
     'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
     'exit /b %FAKE_GH_EXIT%'
 ) | Set-Content -LiteralPath $gh -Encoding ascii
 $stages = Join-Path $dir 'stages.txt'
 
-function Measure-Exe([string]$File, [string]$Arguments) {
-    $w = [Diagnostics.Stopwatch]::StartNew()
-    $p = Start-Process -FilePath $File -ArgumentList $Arguments -NoNewWindow -PassThru -Wait
-    [Math]::Round($w.Elapsed.TotalSeconds, 2)
-}
-function Get-Load { (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average }
-function Invoke-Case([string]$Label, $Sleep, $Html, [string]$Exit, [int]$Budget) {
-    $env:FAKE_GH_SLEEP = $Sleep; $env:FAKE_GH_HTML = $Html; $env:FAKE_GH_EXIT = $Exit
+function Invoke-Case([string]$Label, [string]$Mode, $Html, [string]$Exit, [int]$Budget) {
+    $env:FAKE_GH_MODE = $Mode; $env:FAKE_GH_HTML = $Html; $env:FAKE_GH_EXIT = $Exit
     Remove-Item -LiteralPath $stages -ErrorAction SilentlyContinue
     $w = [Diagnostics.Stopwatch]::StartNew(); $name = 'none'
     try { Invoke-ReviewMarkdownRender -Text 'body' -FilePath $gh -TimeoutSeconds $Budget | Out-Null }
     catch { $name = $_.Exception.GetType().Name }
     $elapsed = [Math]::Round($w.Elapsed.TotalSeconds, 2)
     $trace = if (Test-Path -LiteralPath $stages) { (Get-Content -LiteralPath $stages) -join ' | ' } else { 'no stages' }
-    $orphans = @(Get-Process powershell -ErrorAction SilentlyContinue).Count
-    "DIAG $Label budget=$Budget elapsed=$elapsed exception=$name load=$(Get-Load) powershell-procs=$orphans :: $trace"
+    $procs = @(Get-Process powershell -ErrorAction SilentlyContinue).Count
+    "DIAG $Label budget=$Budget elapsed=$elapsed exception=$name powershell-procs=$procs :: $trace"
+}
+function Wait-Quiet {
+    $w = [Diagnostics.Stopwatch]::StartNew()
+    while ($w.Elapsed.TotalSeconds -lt 12 -and (@(Get-Process powershell, ping -ErrorAction SilentlyContinue).Count -gt 0)) { Start-Sleep -Milliseconds 200 }
+    [Threading.Thread]::Sleep(300)
+}
+function Invoke-Variant([string]$Variant, [string]$Round) {
+    Wait-Quiet
+    $load = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average
+    "DIAG $Round-$Variant load=$load"
+    switch ($Variant) {
+        # Nothing before the two cases.
+        'none' { }
+        # A PowerShell that runs Start-Sleep to its end, with no kill and no orphan.
+        'done' { powershell -NoProfile -NonInteractive -Command 'Start-Sleep 3' }
+        # The kill, leaving an orphan that is not PowerShell.
+        'killping' { Invoke-Case "$Round-killping-timeout" 'ping' 'x' '0' 3 }
+        # The kill, leaving a PowerShell orphan that never loads a module for Start-Sleep.
+        'killthread' { Invoke-Case "$Round-killthread-timeout" 'threadsleep' 'x' '0' 3 }
+        # The kill as the Pester table does it: a PowerShell orphan in Start-Sleep.
+        'killstart' { Invoke-Case "$Round-killstart-timeout" 'startsleep' 'x' '0' 3 }
+    }
+    Invoke-Case "$Round-$Variant-fails" '' 'x' '1' 60
+    Invoke-Case "$Round-$Variant-empty" '' $null '0' 60
 }
 
-"DIAG logical-cpus=$([Environment]::ProcessorCount) ps-version=$($PSVersionTable.PSVersion)"
-foreach ($round in 1..3) {
-    "DIAG raw round=$round cmd=$(Measure-Exe 'cmd.exe' '/c exit') powershell=$(Measure-Exe 'powershell.exe' '-NoProfile -NonInteractive -Command exit') pwsh=$(Measure-Exe 'pwsh.exe' '-NoProfile -NonInteractive -Command exit') load=$(Get-Load)"
-}
-# A: the no-sleep cases alone, with room to show their true length; no killed process before them.
-foreach ($round in 1..6) {
-    Invoke-Case "A$round-fails" $null 'x' '1' 60
-    Invoke-Case "A$round-empty" $null $null '0' 60
-}
-# B: the order the Pester table runs: the timeout case first (it kills cmd and orphans Start-Sleep), then the two cases.
-foreach ($round in 1..6) {
-    Invoke-Case "B$round-timeout" '20' 'x' '0' 3
-    Invoke-Case "B$round-fails" $null 'x' '1' 60
-    Invoke-Case "B$round-empty" $null $null '0' 60
-}
-Import-Module Pester -ErrorAction Stop
-foreach ($round in 1..3) {
-    "DIAG pester round=$round"
-    Invoke-Pester -Path (Join-Path $env:DIAG_ROOT 'tests/review-output.Tests.ps1') -FullName '*renderer call*' -Output Detailed | Out-Null
+$variants = @('none', 'done', 'killping', 'killthread', 'killstart')
+foreach ($round in 0..4) {
+    # Rotated, so no variant always runs first or after the same neighbour.
+    foreach ($i in 0..4) { Invoke-Variant $variants[($i + $round) % 5] "R$round" }
 }
 """
 
