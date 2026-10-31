@@ -619,6 +619,7 @@ Describe 'GitHub''s renderer call (#767)' {
         }
         # cmd's echo needs ^ before < and >; sh prints the value as it is.
         $script:ghHtml = { param([string]$Html) if ($script:windowsHost -and $Html) { $Html -replace '([<>])', '^$1' } else { $Html } }
+        $script:sleepers = @()
     }
     BeforeEach {
         $env:FAKE_GH_SLEEP = $null; $env:FAKE_GH_HTML = & $script:ghHtml '<p>ok</p>'; $env:FAKE_GH_EXIT = '0'
@@ -626,7 +627,9 @@ Describe 'GitHub''s renderer call (#767)' {
     AfterEach {
         $sleeper = Join-Path $TestDrive 'sleeper.txt'
         if (Test-Path -LiteralPath $sleeper) {
-            Stop-Process -Id (Get-Content -LiteralPath $sleeper) -Force -ErrorAction SilentlyContinue
+            $id = [int](Get-Content -LiteralPath $sleeper)
+            $script:sleepers += $id
+            Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $sleeper
         }
     }
@@ -665,6 +668,16 @@ Describe 'GitHub''s renderer call (#767)' {
         if ($name -ne $Type) { throw "Expected $Type, got $name" }
         if ($caught.Message -match 'synthetic') { throw "The error echoed text: $($caught.Message)" }
         if ($watch.Elapsed.TotalSeconds -gt $Budget + 12) { throw "The renderer outlived its timeout: $($watch.Elapsed.TotalSeconds) s" }
+    }
+
+    # Runs after the table: the timeout case's sleeper would otherwise outlive this check by about 15 s, and the wide
+    # budgets above would hide the starvation it causes (#878).
+    It 'leaves none of the fake''s sleepers running' {
+        if ($script:sleepers.Count -eq 0) { throw 'No sleeper was recorded' }
+        foreach ($id in $script:sleepers) {
+            $process = Get-Process -Id $id -ErrorAction SilentlyContinue
+            if ($process -and -not $process.WaitForExit(5000)) { throw "Sleeper $id is still running" }
+        }
     }
 }
 
