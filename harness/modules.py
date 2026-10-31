@@ -37,6 +37,7 @@ _PUBLIC = {
     "GpuGuardConfig": ("harness.config", "GpuGuardConfig"),
     "ACTIVE": ("harness.runner", "ACTIVE"),
     "doctor_run": ("harness.doctor", "run"),
+    "local_owner": ("harness.local_owner", None),
     "EXPECTED_WAKE_SECONDS": ("harness.local_inference", "EXPECTED_WAKE_SECONDS"),
     "LOW_MEMORY": ("harness.local_inference", "LOW_MEMORY"),
     "UNREACHABLE": ("harness.local_inference", "UNREACHABLE"),

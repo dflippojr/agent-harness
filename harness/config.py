@@ -268,7 +268,8 @@ class GpuGuardConfig:
     game_processes: list[str] = field(default_factory=list)  # extra executable names, e.g. [Game.exe]
     # A visible window with one of these titles (Sunshine's "Steam Big Picture" app) also counts.
     window_titles: list[str] = field(default_factory=lambda: ["Steam Big Picture Mode"])
-    plex_url: str = "http://127.0.0.1:32400"  # hardware transcodes; the token is read from Plex's registry key
+    plex_url: str = "http://127.0.0.1:32400"  # hardware transcodes, with the token in Plex's registry key; without
+                                              # one (Linux) nvidia-smi's Plex Transcoder processes count instead
     plex: bool = True
 
 

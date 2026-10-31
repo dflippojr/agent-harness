@@ -12,8 +12,18 @@ thresholds follow from that, is designed in `docs/gpu-vram-budget.md` (#823).
 The supervisor details below (`ops/llama-server/run-qwen.ps1`, `C:/AI/...` paths, logon tasks) describe the Windows
 tower. Since 2026-10-26 the tower runs Ubuntu: llama-server runs as the `agent-harness-main-llama.service` user unit
 through `install/run-server.sh`, and its pause flag is `~/.local/share/agent-harness/llama-server.paused`. The
-Windows text applies to a Windows boot only. Plex detection on Linux is #811. The measurements further down are
-records from the Windows tower.
+Windows text applies to a Windows boot only. The measurements further down are records from the Windows tower.
+
+Plex detection on Linux takes no Plex credential (#830). With no registry token, the guard runs `nvidia-smi
+--query-compute-apps=pid,process_name,used_memory` each poll and counts one trigger per `Plex Transcoder` process.
+Plex Media Server itself doesn't count, and a software transcode isn't on the GPU, so it doesn't either. If
+`nvidia-smi` fails, `plex_error` in `GET /resources` says so and `doctor` warns: the guard is blind to Plex until it
+works again. Windows keeps asking Plex's API while the registry holds a token, and the two sources are never added
+together. Whether an NVENC-only transcode appears in that query has not been checked against a real transcode yet;
+`nvidia-smi pmon -c 1` shows per-process encoder use if it turns out not to.
+
+Game detection is Windows-only: on Linux `process_paths()` and `window_titles()` return nothing, so a game or a
+Big Picture window doesn't trigger the guard there (`docs/gpu-vram-budget.md`, follow-up 5).
 
 ## When the model loads
 
@@ -137,7 +147,8 @@ count samples under 1 GB. The target after this change is 0 over 7 mornings.
 
 Actions → Resources shows a diagnostics card styled like Actions → Disk:
 
-- VRAM used and total, plus which harness process holds it
+- VRAM used and total, plus which harness process holds it, and VRAM per process from `nvidia-smi`
+  (`vram.processes` in the API and `harness resources diagnostics`; the page needs a Stables release to show it, #830)
 - RAM available, total and commit, plus the harness's share (daemon, llama-server, `harness-*` containers)
 - GPU load and CPU load
 - model state (unloaded, waking, loaded, or "loaded until HH:MM")

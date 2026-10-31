@@ -102,12 +102,11 @@ transcode as a reason to park.
 | Plex hardware transcodes | park on the first | new `gpu_guard.plex_transcodes_allowed` (default 0 = today's behaviour; the tower sets 1). Park when the count of hardware transcodes is above it, or when any of them has a 4K or HDR tone-mapped source (~1,400, over budget). Needs #811's Plex detection on Linux |
 | Free VRAM | none | new `gpu_guard.min_free_vram_mib` (tower: 256; 0 = off). Park when `nvidia-smi` free VRAM stays below it for two polls. This is the backstop for every estimate above being wrong: a second stream, a 4K source, an unknown CUDA app. The reading already exists (`harness_modules/local_model/resources.py`, `gpu_reading`) |
 
-How this ties to #811: #811 makes `Detector._plex()` work on Linux (a token file instead of the registry). This design
-needs a **count** and a **source resolution** per hardware transcode from it, not only "any". `hw_transcodes()` already
-returns one entry per session, so the count is free; the resolution may need `/status/sessions` (the media's
-`videoResolution`) beside `/transcode/sessions`, to be checked in #811. Without a Plex token on Linux, `nvidia-smi
---query-compute-apps=pid,process_name,used_memory` lists `Plex Transcoder` processes with their VRAM, which gives the
-count (not the resolution) with no credential (follow-up 4; to verify that NVENC-only transcodes appear there).
+How this ties to Plex detection: #830 makes `Detector._plex()` work on Linux with no credential (the owner chose this
+over #811's token file). `nvidia-smi --query-compute-apps=pid,process_name,used_memory` lists `Plex Transcoder`
+processes with their VRAM, and each is one signal. That gives this design its **count** but not a **source
+resolution**, so the 4K/HDR rule above has no input on Linux yet; it would need `/status/sessions`, and so a token, or
+another source. That NVENC-only transcodes appear in the query is still unverified (follow-up 4).
 
 Settings that stay: `poll_seconds` 10, `resume_after_seconds` 180, `lazy_load` true, `drain_timeout_seconds` 300 for
 the Plex-count trigger. The free-VRAM trigger gets a shorter drain (follow-up 3): by the time it fires, something is
@@ -196,13 +195,14 @@ No code changes in #823. These are the code and config changes this design impli
    `harness_modules/local_model/settings.py`, docs in `docs/resource-guard.md`. Depends on #811.
 3. **`gpu_guard.min_free_vram_mib`** (default 0 = off) as a trigger from `gpu_reading`, two consecutive polls, with its
    own drain timeout (for example `vram_drain_timeout_seconds`, default 30).
-4. **Plex detection without a token on Linux** (feeds #811): count `Plex Transcoder` processes in `nvidia-smi
-   --query-compute-apps`, and show per-process VRAM in Actions → Resources diagnostics.
+4. **Plex detection without a token on Linux** (#830, done): count `Plex Transcoder` processes in `nvidia-smi
+   --query-compute-apps`, and report per-process VRAM in the Actions → Resources diagnostics API. Still open: rendering
+   it on the Stables page, and checking an NVENC-only transcode appears in the query.
 5. **Game and Sunshine detection on Linux.** `process_paths()` and `window_titles()` are Windows-only (#811 asks to
    document this); a `/proc` scan for the game library folders, and a Linux way to tell a Sunshine Big Picture
    session from a desktop stream.
-6. **`doctor` warnings.** WARN when `gpu_guard` is on and no Plex detection source works on this platform (with #811);
-   WARN when `plex_transcodes_allowed > 0` but the llama-server arguments have no `--fit-target` of at least about
+6. **`doctor` warnings.** WARN when `gpu_guard` is on and no Plex detection source works on this platform (done in
+   #830, from `plex_error`); WARN when `plex_transcodes_allowed > 0` but the llama-server arguments have no `--fit-target` of at least about
    `700 × allowed + 500 + 256` MiB; WARN when `min_free_vram_mib` is not below the `--fit-target`, which would park
    right after every load.
 7. **Metrics.** Export free VRAM and `encoder.stats.sessionCount` as `harness_resource_*` series for the
