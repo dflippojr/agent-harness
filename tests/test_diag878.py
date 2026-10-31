@@ -15,12 +15,11 @@ $ErrorView = 'NormalView'
 $dir = Join-Path $env:DIAG_TMP 'fake'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $gh = Join-Path $dir 'gh.cmd'
-$redirect = if ($env:DIAG_FAKE -eq 'fixed') { ' <nul >nul 2>nul' } else { '' }
 @(
     '@echo off'
     'echo %*> "%~dp0args.txt"'
     'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
-    ('if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%"' + $redirect)
+    'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Set-Content -LiteralPath ''%~dp0sleeper.txt'' $PID; Start-Sleep %FAKE_GH_SLEEP%"'
     'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
     'exit /b %FAKE_GH_EXIT%'
 ) | Set-Content -LiteralPath $gh -Encoding ascii
@@ -31,6 +30,11 @@ function Invoke-Case([string]$Label, $Sleep, $Html, [string]$Exit, [int]$Budget)
     try { Invoke-ReviewMarkdownRender -Text 'body' -FilePath $gh -TimeoutSeconds $Budget | Out-Null }
     catch { $name = $_.Exception.GetType().Name; $pool = Get-Pool }
     "DIAG $env:DIAG_LABEL $Label budget=$Budget elapsed=$([Math]::Round($w.Elapsed.TotalSeconds, 2)) exception=$name $pool"
+    $sleeper = Join-Path $dir 'sleeper.txt'
+    if ($env:DIAG_FAKE -eq 'stopped' -and (Test-Path -LiteralPath $sleeper)) {
+        Stop-Process -Id (Get-Content -LiteralPath $sleeper) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $sleeper
+    }
 }
 $workers = 0; $io = 0; [Threading.ThreadPool]::GetMinThreads([ref]$workers, [ref]$io)
 "DIAG $env:DIAG_LABEL cpus=$([Environment]::ProcessorCount) min-workers=$workers $(Get-Pool)"
@@ -39,6 +43,12 @@ foreach ($i in 1..[int]$env:DIAG_KILLS) { Invoke-Case "timeout$i" '20' 'x' '0' 3
 foreach ($i in 1..3) {
     Invoke-Case "fails$i" $null 'x' '1' 3
     Invoke-Case "empty$i" $null $null '0' 3
+}
+if ($env:DIAG_PESTER) {
+    Import-Module Pester -ErrorAction Stop
+    "DIAG $env:DIAG_LABEL real-table with the pool capped; $(Get-Pool)"
+    Invoke-Pester -Path (Join-Path $env:DIAG_ROOT 'tests/review-output.Tests.ps1') -FullName '*renderer call*' -Output Detailed | Out-Null
+    "DIAG $env:DIAG_LABEL after-table $(Get-Pool)"
 }
 """
 
@@ -51,12 +61,13 @@ def test_diag878_windows_timings(tmp_path):
     # Label, fake, kills before the cases, and the worker cap (the CPU count, so the pool cannot grow past blocked reads).
     for label, fake, kills, cap in (
         ("held-capped", "held", "2", "cpus"),
-        ("fixed-capped", "fixed", "2", "cpus"),
+        ("stopped-capped", "stopped", "2", "cpus"),
         ("held-default", "held", "1", ""),
-        ("fixed-default", "fixed", "1", ""),
+        ("stopped-default", "stopped", "1", ""),
     ):
         env = dict(os.environ, DIAG_ROOT=str(ROOT), DIAG_TMP=str(tmp_path / label), DIAG_LABEL=label, DIAG_FAKE=fake, DIAG_KILLS=kills, NO_COLOR="1")
         env["DIAG_MAX"] = str(os.cpu_count()) if cap else ""
+        env["DIAG_PESTER"] = "1" if label == "stopped-capped" else ""
         result = subprocess.run(
             [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
             capture_output=True,

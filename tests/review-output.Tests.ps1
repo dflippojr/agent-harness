@@ -590,8 +590,9 @@ Describe 'GitHub''s renderer call (#767)' {
         . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
         # A stand-in for gh: records its arguments and stdin, then answers as the FAKE_GH_* variables say.
         # A batch file on Windows and an sh script elsewhere, as the review runners are Linux or Windows (#806).
-        # Its sleep gets none of gh's pipes: the renderer kills only gh, and on Windows a survivor holding stdout and
-        # stderr blocks two thread-pool threads on their reads, which starves the next case's stdin write (#878).
+        # Its sleep records its process id for AfterEach: the renderer kills only gh, and on Windows a survivor holds
+        # gh's pipes (redirecting it does not help, as a child inherits every inheritable handle), so two thread-pool
+        # threads stay blocked on their reads and the next case's stdin write waits for a free one (#878).
         $script:windowsHost = $env:OS -eq 'Windows_NT'
         if ($script:windowsHost) {
             $script:fakeGh = Join-Path $TestDrive 'gh.cmd'
@@ -599,7 +600,7 @@ Describe 'GitHub''s renderer call (#767)' {
                 '@echo off'
                 'echo %*> "%~dp0args.txt"'
                 'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
-                'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%" <nul >nul 2>nul'
+                'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Set-Content -LiteralPath ''%~dp0sleeper.txt'' $PID; Start-Sleep %FAKE_GH_SLEEP%"'
                 'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
                 'exit /b %FAKE_GH_EXIT%'
             ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
@@ -610,7 +611,7 @@ Describe 'GitHub''s renderer call (#767)' {
                 'dir=$(dirname "$0")'
                 'printf ''%s\n'' "$*" > "$dir/args.txt"'
                 'cat > "$dir/stdin.txt"'
-                'if [ -n "$FAKE_GH_SLEEP" ]; then sleep "$FAKE_GH_SLEEP" </dev/null >/dev/null 2>&1; fi'
+                'if [ -n "$FAKE_GH_SLEEP" ]; then sleep "$FAKE_GH_SLEEP" & echo "$!" > "$dir/sleeper.txt"; wait "$!"; fi'
                 'if [ -n "$FAKE_GH_HTML" ]; then printf ''%s\n'' "$FAKE_GH_HTML"; fi'
                 'exit "$FAKE_GH_EXIT"'
             ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
@@ -621,6 +622,13 @@ Describe 'GitHub''s renderer call (#767)' {
     }
     BeforeEach {
         $env:FAKE_GH_SLEEP = $null; $env:FAKE_GH_HTML = & $script:ghHtml '<p>ok</p>'; $env:FAKE_GH_EXIT = '0'
+    }
+    AfterEach {
+        $sleeper = Join-Path $TestDrive 'sleeper.txt'
+        if (Test-Path -LiteralPath $sleeper) {
+            Stop-Process -Id (Get-Content -LiteralPath $sleeper) -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $sleeper
+        }
     }
     AfterAll {
         Remove-Item Env:FAKE_GH_SLEEP, Env:FAKE_GH_HTML, Env:FAKE_GH_EXIT -ErrorAction SilentlyContinue
