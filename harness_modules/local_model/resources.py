@@ -48,6 +48,26 @@ def gpu_reading(cached: bool = False) -> dict | None:
     return reading
 
 
+def gpu_processes() -> list[dict] | None:
+    """Processes holding VRAM, from nvidia-smi: [] when nothing is on the GPU, None when it can't be read (#830)."""
+    out = _run(["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"])
+    if out is None:
+        return None
+    rows = []
+    for line in out.splitlines():
+        pid, _, rest = line.partition(",")
+        name, _, used = rest.rpartition(",")
+        try:
+            used_bytes = int(float(used) * MIB)
+        except ValueError:
+            used_bytes = None  # [N/A] where the driver doesn't report it
+        try:
+            rows.append({"pid": int(pid), "name": name.strip(), "used_bytes": used_bytes})
+        except ValueError:
+            continue
+    return rows
+
+
 def cpu_load() -> float | None:
     """System CPU load in percent over a short sample."""
     try:
@@ -134,8 +154,8 @@ async def model_status(m) -> dict:
 async def diagnostics(m) -> dict:
     """Everything the Resources tab shows, read once."""
     import asyncio
-    gpu, cpu, llama, daemon, containers = await asyncio.gather(
-        asyncio.to_thread(gpu_reading), asyncio.to_thread(cpu_load),
+    gpu, processes, cpu, llama, daemon, containers = await asyncio.gather(
+        asyncio.to_thread(gpu_reading), asyncio.to_thread(gpu_processes), asyncio.to_thread(cpu_load),
         asyncio.to_thread(_process_memory, lambda n: n.lower().startswith("llama-server")),
         asyncio.to_thread(daemon_memory), asyncio.to_thread(container_memory))
     memory = m.guard.memory.status() if m.guard is not None else gpu_guard.MemoryWatch(0).status()
@@ -147,7 +167,7 @@ async def diagnostics(m) -> dict:
     return {
         "as_of": time.time(),
         "vram": {"used_bytes": gpu and gpu["vram_used"], "total_bytes": gpu and gpu["vram_total"],
-                 "holders": holders},
+                 "holders": holders, "processes": processes},
         "ram": {**memory, "harness": {"daemon_bytes": daemon, "llama_server_bytes": llama,
                                       "containers_bytes": containers}},
         "gpu_load": gpu and gpu["gpu_load"],

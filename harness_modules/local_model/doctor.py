@@ -2,7 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 import httpx
-from harness.modules import doctor_run as run_command
+from harness.modules import doctor_run as run_command, local_owner
 
 GPU_CHECK, MODEL_CHECK = "NVIDIA GPU", "Model server"
 
@@ -48,7 +48,8 @@ def check_model_server(r, cfg) -> None:
 def check_guard(r, cfg):
     base = f"http://127.0.0.1:{cfg.port}"
     try:
-        gpu = httpx.get(f"{base}/gpu", timeout=5).raise_for_status().json()
+        gpu = httpx.get(f"{base}/gpu", timeout=5,  # the daemon answers local callers only with its local owner token
+                        headers={local_owner.HEADER: local_owner.read_token(cfg.data_dir)}).raise_for_status().json()
         if gpu.get("enabled"):
             flag = Path(cfg.gpu_guard.pause_flag).exists()
             if flag and gpu["state"] == "clear" and not gpu.get("lazy_load"):
@@ -58,6 +59,8 @@ def check_guard(r, cfg):
                 memory = gpu.get("memory") or {}
                 low = "; RAM low, new work waits" if memory.get("low") else ""
                 r.ok("Resource guard", f"state {gpu['state']}{parked}{low}")
+            if gpu.get("plex_error"):
+                r.warn("Plex detection", gpu["plex_error"])
     except (httpx.HTTPError, ValueError, KeyError) as error:
         r.warn("Resource guard", f"{base} not answering ({type(error).__name__})")
 
