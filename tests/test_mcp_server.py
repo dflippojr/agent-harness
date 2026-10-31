@@ -409,22 +409,17 @@ def test_hosted_claude_calls_harness_tools_through_policy_and_relay(tmp_path):
     asyncio.run(body())
 
 
-@pytest.mark.skipif(NODE is None, reason="node is needed to run the relay")
 def test_a_failed_session_wait_names_why_the_session_failed(tmp_path):
     """#871: the hosted relay test failed once on CI with only "session stayed failed", and every way this session can
-    fail reads the same in that message. Force one (the relay's port is taken) and require the reason in the failure."""
+    fail reads the same in that message. Force one (the relay exits at once) and require the reason in the failure."""
     async def body():
         m, *_ = _mcp_manager(tmp_path, [{"tool": "web_search", "input": {"query": "mcp"}}])
-        with socket.socket() as holder:
-            holder.bind(("127.0.0.1", 0))
-            holder.listen(1)
-            taken = holder.getsockname()[1]
-            m.runner.mcp_relay_factory = lambda **kw: McpRelay(**kw, command=[NODE, *relay_node_args(taken)])
-            await m.start()
-            sid = m.create("search", backend="claude")["id"]
-            await wait_status(m, sid, "failed")
-            with pytest.raises(AssertionError, match="EADDRINUSE"):
-                await wait_status(m, sid, "done", timeout=0)
+        m.runner.mcp_relay_factory = lambda **kw: McpRelay(**kw, command=[sys.executable, "-c", "raise SystemExit(1)"])
+        await m.start()
+        sid = m.create("search", backend="claude")["id"]
+        await wait_status(m, sid, "failed")
+        with pytest.raises(AssertionError, match="the MCP relay exited"):
+            await wait_status(m, sid, "done", timeout=0)
         await m.stop()
     asyncio.run(body())
 
