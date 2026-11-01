@@ -51,6 +51,11 @@ def _manual_reason() -> dict:
     return {"key": "manual", "kind": "manual", "detail": "paused from the app"}
 
 
+def _memory_reason(status: dict) -> dict:
+    """The pause reason while RAM admission alone keeps the model parked (#873). The app shows it as "Paused for ..."."""
+    return {"key": "memory_hold", "kind": "memory", "detail": f"memory: {describe_memory(status)}"}
+
+
 GIB = 1024 ** 3
 MEMORY_POLL_SECONDS = 5  # how often work waiting for memory looks again
 HEALTH_TIMEOUT_SECONDS = 300  # reopen the queue anyway after this; model calls then report their own errors
@@ -698,9 +703,13 @@ class GpuGuard:
                 return
             if self.memory.load_low():
                 # Removing the flag makes the supervisor load the model at once; stay parked until RAM admits it.
-                self.memory_hold = describe_memory(self.memory.status())
+                status = self.memory.status()
+                self.memory_hold = describe_memory(status)
+                self.reasons = [_memory_reason(status)]  # whatever began the pause is over; RAM alone holds it now
                 return
             self._resume_now = False
+            if self.memory_hold:
+                self.reasons = []
             self.memory_hold = ""
             await self.control.start()
             self._resume_started = now
@@ -712,6 +721,8 @@ class GpuGuard:
     async def _hold(self, now: float) -> None:
         self._clear_since = None
         self._resume_now = False
+        if self.state == PAUSED and self.manual and self.memory_hold:
+            self.reasons = [_manual_reason()]  # paused by hand during a memory hold: pause() leaves PAUSED's reasons
         self.memory_hold = ""
         if self.state == PAUSED and not self.manual and self.signals:
             self.reasons = list(self.signals)

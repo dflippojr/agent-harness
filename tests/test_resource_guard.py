@@ -139,6 +139,74 @@ def test_resume_with_load_low_keeps_the_flag_and_reports_why():
     asyncio.run(body())
 
 
+def _reason_text(guard) -> str:
+    """What the app shows for a pause (Stables' gpuText and the session's gpu_paused event read the reasons' details)."""
+    return guard.describe(guard.status()["reasons"])
+
+
+def test_memory_hold_after_a_manual_resume_names_memory_not_the_app():
+    """#873: the guard read `paused from the app` with manual false, which sent us looking for a hold that wasn't there."""
+    async def body():
+        guard, _, _, ram = _guard_with_ram(9, True)
+        guard.pause()
+        await guard.check()
+        assert _reason_text(guard) == "paused from the app"
+        guard.resume()
+        await guard.check()
+        status = guard.status()
+        assert status["state"] == PAUSED and status["manual"] is False
+        assert [r["key"] for r in status["reasons"]] == ["memory_hold"]
+        text = _reason_text(guard)
+        assert "paused from the app" not in text
+        assert text.startswith("memory: 9.0 GB RAM available")
+        assert "the model load needs 14 GB" in text
+        ram.available = 10 * GIB  # still held: the reason follows the reading
+        await guard.check()
+        assert _reason_text(guard).startswith("memory: 10.0 GB RAM available")
+        ram.available = 30 * GIB  # the load is admitted, and the reason goes with the hold
+        await guard.check()
+        assert all(r["key"] != "memory_hold" for r in guard.status()["reasons"])
+    asyncio.run(body())
+
+
+def test_memory_hold_after_a_trigger_clears_does_not_name_the_trigger():
+    async def body():
+        guard, _, _, _ = _guard_with_ram(9, True)
+        guard.detector.signals = [GAME]
+        await guard.check()
+        await guard.check()
+        assert guard.state == PAUSED and _reason_text(guard) == GAME["detail"]
+        guard.detector.signals = []
+        guard.resume(override_signals=False)
+        await guard.check()
+        assert guard.state == PAUSED
+        assert [r["key"] for r in guard.status()["reasons"]] == ["memory_hold"]
+        assert GAME["detail"] not in _reason_text(guard)
+    asyncio.run(body())
+
+
+def test_manual_pause_or_a_trigger_during_a_memory_hold_replaces_the_memory_reason():
+    """A real hold wins: the app must not call a hand pause or a game a memory wait."""
+    async def body():
+        guard, _, _, _ = _guard_with_ram(9, True)
+        guard.pause()
+        await guard.check()
+        guard.resume()
+        await guard.check()
+        assert [r["key"] for r in guard.status()["reasons"]] == ["memory_hold"]
+        guard.pause()
+        await guard.check()
+        assert guard.status()["manual"] is True and _reason_text(guard) == "paused from the app"
+        assert guard.status()["memory_hold"] == ""
+        guard.resume()
+        await guard.check()
+        assert [r["key"] for r in guard.status()["reasons"]] == ["memory_hold"]
+        guard.detector.signals = [GAME]
+        await guard.check()
+        assert _reason_text(guard) == GAME["detail"] and guard.status()["memory_hold"] == ""
+    asyncio.run(body())
+
+
 def test_daemon_start_with_parked_model_stays_clear_and_parked():
     async def body():
         guard, _, control, scheduler, log = make_guard(lazy_load=True, poll_seconds=3600)
