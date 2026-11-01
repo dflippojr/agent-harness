@@ -54,7 +54,11 @@ while :; do
     [[ -f "$server_log" ]] && mv -f "$server_log" "$server_log.prev"
     echo "$(stamp) starting llama-server image $image" >>"$supervisor_log"
     docker rm -f "$container" >/dev/null 2>&1 || true
+    # The image's own HEALTHCHECK probes :8080, llama-server's default, not the --port below, so the container read as
+    # unhealthy while the server answered (#858). Probe the configured port. The start period covers model loading,
+    # so a slow load does not read as unhealthy.
     docker run --rm --name "$container" --gpus all --network host \
+        --health-cmd "curl -f http://127.0.0.1:$port/health" --health-start-period 300s \
         -v "$model_path:/models/model.gguf:ro" "$image" \
         -m /models/model.gguf --alias "$model_name" --host 127.0.0.1 --port "$port" \
         --ctx-size "$context" --flash-attn on --parallel 1 --jinja --metrics \
