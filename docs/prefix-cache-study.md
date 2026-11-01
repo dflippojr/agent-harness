@@ -219,11 +219,14 @@ rm .tmp/config/harness.yaml && cp -L ~/.local/share/agent-harness/config/harness
 sed -i 's#127.0.0.1:8090#127.0.0.1:8082#g' .tmp/config/*.yaml
 # The 12K window: the same copy, with context_tokens: 12288 in place of 65536.
 
-# The server: the production unit's image, model and flags, without --sleep-idle-seconds.
+# The server: the production unit's image, model and flags, without --sleep-idle-seconds. The health check probes the
+# same port the server listens on, not the image's :8080 (#858).
+port=8082
 docker run --rm --name ah774-llama --gpus all --network host \
+  --health-cmd "curl -f http://127.0.0.1:$port/health" --health-start-period 300s \
   -v "$HOME/.local/share/agent-harness/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf:/models/model.gguf:ro" \
   ghcr.io/ggml-org/llama.cpp:server-cuda-b10830 \
-  -m /models/model.gguf --alias qwen3.6-35b-a3b --host 127.0.0.1 --port 8082 \
+  -m /models/model.gguf --alias qwen3.6-35b-a3b --host 127.0.0.1 --port "$port" \
   --ctx-size 65536 --flash-attn on --parallel 1 --jinja --metrics \
   --fit on --cache-type-k q8_0 --cache-type-v q8_0
 # For the checkpoint log add -lv 4, with --log-driver none on docker run, and filter the output with grep.

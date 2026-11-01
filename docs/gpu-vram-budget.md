@@ -201,8 +201,11 @@ the owner says so on a card first. Use only `/health` and `/props` on a sleeping
    arguments `run-server.sh` passes, plus the margin and verbose fit logging:
 
    ```
-   docker run --rm --name ah823-measure --gpus all --network host -v <model.gguf>:/models/model.gguf:ro <image> \
-       -m /models/model.gguf --host 127.0.0.1 --port 8097 --ctx-size 65536 --flash-attn on --parallel 1 --jinja \
+   port=8097
+   docker run --rm --name ah823-measure --gpus all --network host \
+       --health-cmd "curl -f http://127.0.0.1:$port/health" --health-start-period 300s \
+       -v <model.gguf>:/models/model.gguf:ro <image> \
+       -m /models/model.gguf --host 127.0.0.1 --port "$port" --ctx-size 65536 --flash-attn on --parallel 1 --jinja \
        --metrics --fit on --cache-type-k q8_0 --cache-type-v q8_0 --fit-target 2048 -lv 4
    ```
 

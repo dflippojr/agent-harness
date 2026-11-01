@@ -98,10 +98,12 @@ Each configuration runs in its own container (`serve.sh`). Production flags, exc
 bake-off's size; the 64K configs pass `--ctx-size 65536` last, which overrides it) and no `--sleep-idle-seconds`:
 
 ```
+port=8081
 docker run --rm --name ah772-bench --gpus all --network host \
+  --health-cmd "curl -f http://127.0.0.1:$port/health" --health-start-period 300s \
   -v ~/.local/share/agent-harness/models:/models:ro -v <repository>/.tmp/models:/drafters:ro \
   ghcr.io/ggml-org/llama.cpp:server-cuda-b10830 \
-  -m /models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --alias qwen3.6-35b-a3b --host 127.0.0.1 --port 8081 \
+  -m /models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --alias qwen3.6-35b-a3b --host 127.0.0.1 --port "$port" \
   --ctx-size 32768 --flash-attn on --parallel 1 --jinja --metrics \
   --fit on --cache-type-k q8_0 --cache-type-v q8_0 -lv 4 <config args>
 ```

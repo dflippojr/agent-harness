@@ -82,6 +82,11 @@ These **don't** load the model:
   supervisor already owns the container's name and its `docker stop` trap, and the daemon then needs neither the
   instance name nor Docker access. Windows is unchanged.
 
+- **Container health (#858).** Docker's status for `agent-harness-<instance>-llama` comes from a `--health-cmd` that
+  `run-server.sh` passes: `curl -f` on `/health` at the port it started llama-server on. The image's own HEALTHCHECK
+  probes port 8080, so it reported `unhealthy` while the server answered. The check's start period is 300 s, so a slow
+  model load does not read as unhealthy.
+
 `lazy_load: false` in `config/harness.yaml` restores the old eager reload after holds and image batches.
 
 **Unload now** (Actions → Resources, `POST /resources/unload`) parks the model straight away without holding the queue.

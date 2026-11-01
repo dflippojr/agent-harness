@@ -16,6 +16,13 @@ context=$6
 pause_flag=$7
 shift 7
 extra_args=("$@")
+# The health check probes $port, so a --port in the extra args would move llama-server off the probed port (#858).
+# llama-server has no short form for the port (-p is --prompt), so only the long forms are refused.
+for llama_arg in "${extra_args[@]}"; do
+    case $llama_arg in
+        --port|--port=*) echo "run-server.sh: give the port as PORT, not in LLAMA_ARGS ($llama_arg)" >&2; exit 64 ;;
+    esac
+done
 container="agent-harness-$(printf '%s' "$instance" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_.-' '-')-llama"
 log_dir=${HARNESS_LOG_DIR:-"$(dirname "$pause_flag")/logs"}
 server_log="$log_dir/llama-server.log"
@@ -54,7 +61,11 @@ while :; do
     [[ -f "$server_log" ]] && mv -f "$server_log" "$server_log.prev"
     echo "$(stamp) starting llama-server image $image" >>"$supervisor_log"
     docker rm -f "$container" >/dev/null 2>&1 || true
+    # The image's own HEALTHCHECK probes :8080, llama-server's default, not the --port below, so the container read as
+    # unhealthy while the server answered (#858). Probe the configured port. The start period covers model loading,
+    # so a slow load does not read as unhealthy.
     docker run --rm --name "$container" --gpus all --network host \
+        --health-cmd "curl -f http://127.0.0.1:$port/health" --health-start-period 300s \
         -v "$model_path:/models/model.gguf:ro" "$image" \
         -m /models/model.gguf --alias "$model_name" --host 127.0.0.1 --port "$port" \
         --ctx-size "$context" --flash-attn on --parallel 1 --jinja --metrics \
