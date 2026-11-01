@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 import zipfile
@@ -402,6 +403,25 @@ def wait_gone(entries):
     while time.monotonic() < deadline and any(verify.alive(p) for p in entries):
         time.sleep(0.2)
     return [p for p in entries if verify.alive(p)]
+
+
+def pid_running(pid: int) -> bool:
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+def wait_pid_gone(pid: int, seconds: float = 10) -> bool:
+    return pid_running(pid)  # red step: no wait yet
+
+
+def test_the_orphan_check_waits_for_a_process_that_exits_late():
+    late = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1)"])  # exits about a second from now
+    try:
+        assert not wait_pid_gone(late.pid)
+    finally:
+        late.wait()
 
 
 @pytest.mark.parametrize("session", ["same-session", "own-session"])
