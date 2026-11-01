@@ -4,12 +4,17 @@
 # MODELS_DIR holds the main GGUF; DRAFTERS_DIR is mounted at /drafters for -md.
 name=$1; log=$2; shift 2
 port=8081
+# The health check probes $port, so a port in the extra args would move llama-server off the probed port (#858).
+for llama_arg in "$@"; do
+    case $llama_arg in
+        -p|--port|--port=*) echo "serve.sh: the port is fixed at $port; drop $llama_arg" >&2; exit 64 ;;
+    esac
+done
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 models=${MODELS_DIR:-$HOME/.local/share/agent-harness/models}
 drafters=${DRAFTERS_DIR:-$repo/.tmp/models}
 docker rm -f "ah772-$name" >/dev/null 2>&1
-# The image's HEALTHCHECK probes :8080, not this port (#858), so probe the port the server listens on. A --port in the
-# extra args would move the server but not this probe.
+# The image's HEALTHCHECK probes :8080, not this port (#858), so probe the port the server listens on.
 exec docker run --rm --name "ah772-$name" --gpus all --network host \
   --health-cmd "curl -f http://127.0.0.1:$port/health" --health-start-period 300s \
   -v "$models:/models:ro" -v "$drafters:/drafters:ro" \
