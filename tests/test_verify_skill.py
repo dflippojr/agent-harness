@@ -440,7 +440,6 @@ def test_the_orphan_check_still_fails_for_a_process_that_stays_alive():
 
 @pytest.mark.parametrize("session", ["same-session", "own-session"])
 def test_cleanup_after_a_failed_drive_leaves_nothing_running(tmp_path, monkeypatch, session):
-    pytest.importorskip("psutil")
     run = stand_in_run(tmp_path, monkeypatch)
     run.doctor = lambda: run.step("doctor", True, "stand-in")
     orphan_file = tmp_path / "orphan.pid"
