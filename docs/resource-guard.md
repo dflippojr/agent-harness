@@ -134,8 +134,8 @@ Work already running isn't stopped. If nothing can be read (no psutil), work isn
 
 ### What a load costs on the Ubuntu tower (#873, 2026-11-01)
 
-`model_ram_gb` dates from the Windows host. On Ubuntu llama-server maps the GGUF, so most of what `VmHWM` reports (10.8
-to 13.0 GB in #827's runs) is file-backed. The split below uses existing data only: #827's runs, and Prometheus and
+`model_ram_gb` dates from the Windows host. On Ubuntu llama-server maps the GGUF, so most of what `VmHWM` reports (10,780
+to 12,958 MiB in #827's runs) is file-backed. The split below uses existing data only: #827's runs, and Prometheus and
 cAdvisor from 2026-10-26 to 2026-11-01. No model was loaded for it.
 
 | Part of the load | Size | Source |
@@ -147,14 +147,14 @@ cAdvisor from 2026-10-26 to 2026-11-01. No model was loaded for it.
 **The fall in available RAM is not the cost to plan for.** On the quietest load (2026-10-30 16:45 EST, other containers
 +13 MiB), the mapped pages rose 9,234 MiB and the container's anonymous memory 716 MiB, while `MemAvailable` fell only
 637 MiB. It counts mapped file pages as reclaimable. Those pages include the weights the CPU reads on every token, so
-reclaiming them means reading them back from disk. Other loads fell further (1.6 to 4.9 GB), but host work moved
+reclaiming them means reading them back from disk. Other loads fell further (1.6 to 4.8 GiB), but host work moved
 during those, so the falls aren't the model's alone.
 
 **Recommendation for the tower: `model_ram_gb: 11`.** Anonymous peak plus CPU-read weights at `--fit-target 2048` is
 1,194 + 9,157 = 10,351 MiB, or 10.1 GiB. Rounding up gives 11, so a load with `min_available_ram_gb: 2` needs 13 GiB
 available. That is not the 8 first planned: at 10 GiB available the model alone would want all of it, with nothing
-left for the 2 GiB the gate promises. It may well run there, but no measured load started below 15.8 GiB, and the
-lowest available RAM during a measured decode was 12.7 GiB, so 8 is untested.
+left for the 2 GiB the gate promises. It may well run there, but no measured load started below 15.4 GiB, and the
+lowest available RAM during a measured decode was 12.5 GiB, so 8 is untested.
 
 Time a load would have waited, over those six days (8,542 minutes, sampled each minute):
 
