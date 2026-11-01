@@ -22,6 +22,7 @@ existing_server=
 instance=Main
 port=8100
 server_port=8090
+vram_headroom_mib=0
 no_start=0
 dry_run=0
 force=0
@@ -45,7 +46,9 @@ usage: install/install.sh [options]
   --instance NAME         service name suffix (default: Main)
   --port N                daemon port (default: 8100)
   --server-port N         llama-server port (default: 8090)
-  --no-start              do not install or start systemd/launchd services
+  --vram-headroom-mib N   Qwen only: keep N MiB of VRAM free with --fit-target,
+                          for Plex or Sunshine (default: 0, llama-server's margin)
+  --no-start             do not install or start systemd/launchd services
   --dry-run               validate choices and print actions only
   --force                 rewrite base config files
   --with-hub              install and link the Hub after doctor passes
@@ -69,6 +72,7 @@ while [[ $# -gt 0 ]]; do
         --instance) need_value "$@"; instance=$2; shift 2 ;;
         --port) need_value "$@"; port=$2; shift 2 ;;
         --server-port) need_value "$@"; server_port=$2; shift 2 ;;
+        --vram-headroom-mib) need_value "$@"; vram_headroom_mib=$2; shift 2 ;;
         --no-start) no_start=1; shift ;;
         --dry-run) dry_run=1; shift ;;
         --force) force=1; shift ;;
@@ -90,6 +94,7 @@ case "$profile" in auto|full|service) ;; *) echo "invalid profile: $profile" >&2
 case "$model" in auto|qwen|gpt-oss) ;; *) echo "invalid model: $model" >&2; exit 64 ;; esac
 [[ $port =~ ^[0-9]+$ && $server_port =~ ^[0-9]+$ ]] || { echo "ports must be integers" >&2; exit 64; }
 [[ $instance =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "instance may contain only letters, digits, dot, underscore, and dash" >&2; exit 64; }
+[[ $vram_headroom_mib =~ ^(0|[1-9][0-9]*)$ ]] || { echo "--vram-headroom-mib must be a whole number of MiB" >&2; exit 64; }
 
 case "$os/$arch" in
     Linux/x86_64|Linux/amd64) platform=linux ;;
@@ -219,6 +224,15 @@ else
     llama_args=(--n-gpu-layers 99 --reasoning-effort medium)
 fi
 [[ $needs_local -eq 1 ]] && info "local model: $model_name" || info "local model: disabled (hosted-provider service profile)"
+if [[ $vram_headroom_mib -gt 0 ]]; then
+    # Only --fit reads the margin, and only a unit this installer writes carries it. docs/gpu-vram-budget.md has the budget.
+    if [[ $model == qwen && $needs_local -eq 1 && -z $existing_server ]]; then
+        llama_args+=(--fit-target "$vram_headroom_mib")
+        info "VRAM headroom: --fit-target $vram_headroom_mib"
+    else
+        info "--vram-headroom-mib ignored: only a local Qwen server managed by this installer uses --fit"
+    fi
+fi
 if [[ $dry_run -eq 0 ]]; then
     mkdir -p "$install_dir"
     free_gib=$(df -Pk "$install_dir" | awk 'NR == 2 {printf "%d", $4 / 1024 / 1024}')
