@@ -185,8 +185,14 @@ tower's tool-by-tool finding is in agent-ops `docs/tower-keyring.md` (agent-ops#
 
 Useful options include `--profile service`, `--enable-modules jobs,backup`, `--model gpt-oss`,
 `--install-dir /srv/agent-harness`, `--data-dir /srv/agents`, `--model-path /models/model.gguf`,
-`--existing-server http://127.0.0.1:8090`, `--no-start`, and `--dry-run`. Run `install/install.sh --help` for the
-complete list. The installer is idempotent and does not overwrite base config unless `--force` is passed.
+`--existing-server http://127.0.0.1:8090`, `--vram-headroom-mib 2048`, `--no-start`, and `--dry-run`. Run
+`install/install.sh --help` for the complete list. The installer is idempotent and does not overwrite base config unless
+`--force` is passed.
+
+`--vram-headroom-mib N` adds `--fit-target N` to the Qwen arguments in the llama-server unit, so `--fit` leaves N MiB of
+VRAM free for Plex transcodes or a Sunshine stream ([`gpu-vram-budget.md`](gpu-vram-budget.md) has the budget). The
+default, 0, leaves llama-server's own margin. The installer rewrites the unit on every run, so pass the flag again when
+you rerun it. The Windows installer has no such flag.
 
 ## Install on Apple Silicon macOS
 
