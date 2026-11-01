@@ -316,7 +316,7 @@ readiness signal.
     (`journeys.spec.ts`, `jobs.spec.ts`), every other test in `defects.spec.ts` and `redesign.spec.ts`, and
     `layout.spec.ts` "live resize…". Tests that already skip a device class (phone-only, iPhone-only) still do.
   - **`desktop-light` and `iphone-se-light` only** (`selfSizingTest`): the tests that set their own viewport sizes. A
-    `pixel7` run adds nothing to them, because they replace its viewport. They are #591, #593, "Settings subpages and
+    `pixel7` run adds nothing to them, because they replace its viewport. They are #591, #593, #885, "Settings subpages and
     Actions tabs reflow…" and "Chat thread and an existing job reflow…".
   - **Light and dark, on `desktop` and `iphone-se` only** (`reflowTest`): `layout.spec.ts` "primary pages reflow…", which asserts the
     scheme's `--bg` on every primary page. This is the one dark run.
