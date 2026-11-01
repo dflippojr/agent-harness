@@ -1318,12 +1318,19 @@ def test_linux_listening_pids_survive_a_denied_socket_listing(tmp_path, monkeypa
 
 RUN_SERVER = Path(__file__).resolve().parents[1] / "install" / "run-server.sh"
 FAKE_DOCKER = """#!/usr/bin/env bash
-# Records each call; `run` blocks like a running container until `stop` (or `rm -f`) is called.
+# Records each call; `run` blocks like a running container until `stop` (or `rm -f`) is called. With $DOCKER_HEALTH_CMD
+# set, `run` also writes the value of its --health-cmd there.
 echo "$*" >>"$DOCKER_LOG"
 case "$1" in
     rm) rm -f "$DOCKER_STOPPED" ;;
     stop) touch "$DOCKER_STOPPED" ;;
-    run) while [[ ! -e "$DOCKER_STOPPED" ]]; do sleep 0.05; done ;;
+    run)
+        prev=
+        for arg in "$@"; do
+            if [[ $prev == --health-cmd && -n ${DOCKER_HEALTH_CMD:-} ]]; then printf '%s' "$arg" >"$DOCKER_HEALTH_CMD"; fi
+            prev=$arg
+        done
+        while [[ ! -e "$DOCKER_STOPPED" ]]; do sleep 0.05; done ;;
 esac
 exit 0
 """
@@ -1391,22 +1398,25 @@ def test_linux_supervisor_stops_the_container_when_the_flag_appears(tmp_path):
             proc.wait()
 
 
-# Like FAKE_DOCKER, and also writes the value of `run --health-cmd` to $DOCKER_HEALTH_CMD.
-HEALTH_DOCKER = """#!/usr/bin/env bash
-echo "$*" >>"$DOCKER_LOG"
-case "$1" in
-    rm) rm -f "$DOCKER_STOPPED" ;;
-    stop) touch "$DOCKER_STOPPED" ;;
-    run)
-        prev=
-        for arg in "$@"; do
-            if [[ $prev == --health-cmd ]]; then printf '%s' "$arg" >"$DOCKER_HEALTH_CMD"; fi
-            prev=$arg
-        done
-        while [[ ! -e "$DOCKER_STOPPED" ]]; do sleep 0.05; done ;;
-esac
-exit 0
-"""
+def test_linux_supervisor_refuses_a_port_in_the_llama_args(tmp_path):
+    """A --port (or -p) in the llama args would move llama-server off the port the health check probes, so the
+    supervisor refuses to start and starts no container (#858)."""
+    from tests.installer_support import BASH
+    assert BASH, "the Linux supervisor test needs bash (Git Bash on Windows)"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(FAKE_DOCKER, encoding="utf-8", newline="\n")  # bash rejects CRLF
+    docker.chmod(0o755)
+    log = tmp_path / "docker.log"
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_LOG": log.as_posix(),
+           "DOCKER_STOPPED": (tmp_path / "stopped").as_posix(), "HARNESS_LOG_DIR": (tmp_path / "logs").as_posix()}
+    for override in (["--port", "8099"], ["--port=8099"], ["-p", "8099"]):
+        result = subprocess.run([BASH, RUN_SERVER.as_posix(), "Main", "llama:test", (tmp_path / "m.gguf").as_posix(),
+                                 "qwen", "8097", "4096", (tmp_path / "llama-server.paused").as_posix(), *override],
+                                env=env, capture_output=True, text=True, timeout=scaled(15))
+        assert result.returncode == 64, (override, result.stderr)
+    assert not log.exists(), "the supervisor called docker despite a port override"
 
 
 def test_linux_supervisor_healthcheck_probes_the_port_the_server_listens_on(tmp_path):
@@ -1436,7 +1446,7 @@ def test_linux_supervisor_healthcheck_probes_the_port_the_server_listens_on(tmp_
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     docker = bin_dir / "docker"
-    docker.write_text(HEALTH_DOCKER, encoding="utf-8", newline="\n")  # bash rejects CRLF
+    docker.write_text(FAKE_DOCKER, encoding="utf-8", newline="\n")  # bash rejects CRLF
     docker.chmod(0o755)
     health_file = tmp_path / "health-cmd.txt"
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_LOG": (tmp_path / "docker.log").as_posix(),
