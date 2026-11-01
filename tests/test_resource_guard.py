@@ -1389,3 +1389,85 @@ def test_linux_supervisor_stops_the_container_when_the_flag_appears(tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+
+
+# Like FAKE_DOCKER, and also writes the value of `run --health-cmd` to $DOCKER_HEALTH_CMD.
+HEALTH_DOCKER = """#!/usr/bin/env bash
+echo "$*" >>"$DOCKER_LOG"
+case "$1" in
+    rm) rm -f "$DOCKER_STOPPED" ;;
+    stop) touch "$DOCKER_STOPPED" ;;
+    run)
+        prev=
+        for arg in "$@"; do
+            if [[ $prev == --health-cmd ]]; then printf '%s' "$arg" >"$DOCKER_HEALTH_CMD"; fi
+            prev=$arg
+        done
+        while [[ ! -e "$DOCKER_STOPPED" ]]; do sleep 0.05; done ;;
+esac
+exit 0
+"""
+
+
+def test_linux_supervisor_healthcheck_probes_the_port_the_server_listens_on(tmp_path):
+    """The container's healthcheck must probe the port llama-server listens on (#858). The image's own HEALTHCHECK
+    probes :8080, so a server on any other port was reported unhealthy while it answered. Run the health command the
+    supervisor hands docker: it passes while the server answers /health on that port and fails once the server stops."""
+    import http.server
+    import shutil
+    import threading
+    from tests.installer_support import BASH
+    assert BASH, "the Linux supervisor test needs bash (Git Bash on Windows)"
+    assert shutil.which("curl"), "the healthcheck test runs the health command with curl, as the image does"
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200 if self.path == "/health" else 404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Health)
+    port = httpd.server_address[1]
+    serving = threading.Thread(target=httpd.serve_forever, daemon=True)
+    serving.start()
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(HEALTH_DOCKER, encoding="utf-8", newline="\n")  # bash rejects CRLF
+    docker.chmod(0o755)
+    health_file = tmp_path / "health-cmd.txt"
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_LOG": (tmp_path / "docker.log").as_posix(),
+           "DOCKER_STOPPED": (tmp_path / "stopped").as_posix(), "DOCKER_HEALTH_CMD": health_file.as_posix(),
+           "HARNESS_LOG_DIR": (tmp_path / "logs").as_posix(), "HARNESS_PAUSE_POLL_SECONDS": "0.2"}
+    proc = subprocess.Popen([BASH, RUN_SERVER.as_posix(), "Main", "llama:test", (tmp_path / "m.gguf").as_posix(), "qwen",
+                             str(port), "4096", (tmp_path / "llama-server.paused").as_posix()], env=env, stdin=subprocess.DEVNULL)
+    try:
+        def health_cmd():
+            return health_file.read_text(encoding="utf-8").strip() if health_file.exists() else ""
+        deadline = time.monotonic() + scaled(10)
+        while not health_cmd() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert health_cmd(), "the supervisor passed no --health-cmd to docker run"
+        assert f"127.0.0.1:{port}/health" in health_cmd(), health_cmd()
+
+        def probe():
+            return subprocess.run([BASH, "-c", health_cmd()], capture_output=True, text=True,
+                                  timeout=scaled(15)).returncode
+        assert probe() == 0, "the healthcheck fails while the server answers on its port"
+        httpd.shutdown()
+        httpd.server_close()
+        assert probe() != 0, "the healthcheck still passes after the server stopped answering"
+    finally:
+        if serving.is_alive():
+            httpd.shutdown()
+        httpd.server_close()
+        (tmp_path / "stopped").touch()  # the fake container exits, so the supervisor's TERM trap can reap it
+        proc.terminate()
+        try:
+            proc.wait(timeout=scaled(15))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
