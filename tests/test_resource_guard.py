@@ -1398,9 +1398,28 @@ def test_linux_supervisor_stops_the_container_when_the_flag_appears(tmp_path):
             proc.wait()
 
 
+def _end_supervisor(proc, flag, log_dir):
+    """Park a running supervisor, then end it. On Windows terminate() skips bash's TERM trap, so the supervisor must
+    already have reaped its fake container and flag watcher, leaving only its paused wait loop."""
+    flag.write_text("paused by test\n", encoding="utf-8")
+    supervisor_log = log_dir / "llama-server-supervisor.log"
+    deadline = time.monotonic() + scaled(10)
+    while time.monotonic() < deadline:
+        text = supervisor_log.read_text(encoding="utf-8") if supervisor_log.exists() else ""
+        if "paused by GPU guard" in text:
+            break
+        time.sleep(0.05)
+    proc.terminate()
+    try:
+        proc.wait(timeout=scaled(15))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
 def test_linux_supervisor_refuses_a_port_in_the_llama_args(tmp_path):
-    """A --port (or -p) in the llama args would move llama-server off the port the health check probes, so the
-    supervisor refuses to start and starts no container (#858)."""
+    """A --port in the llama args would move llama-server off the port the health check probes, so the supervisor
+    refuses to start and starts no container (#858). llama-server has no short port flag: -p is its prompt."""
     from tests.installer_support import BASH
     assert BASH, "the Linux supervisor test needs bash (Git Bash on Windows)"
     bin_dir = tmp_path / "bin"
@@ -1411,12 +1430,58 @@ def test_linux_supervisor_refuses_a_port_in_the_llama_args(tmp_path):
     log = tmp_path / "docker.log"
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_LOG": log.as_posix(),
            "DOCKER_STOPPED": (tmp_path / "stopped").as_posix(), "HARNESS_LOG_DIR": (tmp_path / "logs").as_posix()}
-    for override in (["--port", "8099"], ["--port=8099"], ["-p", "8099"]):
+    for override in (["--port", "8099"], ["--port=8099"]):
         result = subprocess.run([BASH, RUN_SERVER.as_posix(), "Main", "llama:test", (tmp_path / "m.gguf").as_posix(),
                                  "qwen", "8097", "4096", (tmp_path / "llama-server.paused").as_posix(), *override],
                                 env=env, capture_output=True, text=True, timeout=scaled(15))
         assert result.returncode == 64, (override, result.stderr)
     assert not log.exists(), "the supervisor called docker despite a port override"
+    # -p is llama-server's prompt flag, not a port: the supervisor still starts the container with it.
+    flag = tmp_path / "llama-server.paused"
+    proc = subprocess.Popen([BASH, RUN_SERVER.as_posix(), "Main", "llama:test", (tmp_path / "m.gguf").as_posix(), "qwen",
+                             "8097", "4096", flag.as_posix(), "-p", "warmup"], env=env, stdin=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + scaled(10)
+        while time.monotonic() < deadline and not (log.exists() and "run" in log.read_text(encoding="utf-8")):
+            time.sleep(0.05)
+        assert log.exists() and "run" in log.read_text(encoding="utf-8"), "the supervisor refused -p warmup"
+    finally:
+        _end_supervisor(proc, flag, tmp_path / "logs")
+
+
+SERVE_STUDY = Path(__file__).resolve().parents[1] / "docs" / "speculative-decoding-study" / "serve.sh"
+RECORD_DOCKER = """#!/usr/bin/env bash
+# Records the arguments of `run`, one per line, and exits, so serve.sh's exec returns at once.
+if [[ $1 == run ]]; then printf '%s\\n' "$@" >"$DOCKER_ARGS"; fi
+exit 0
+"""
+
+
+def test_speculative_study_serve_probes_the_port_it_serves(tmp_path):
+    """docs/speculative-decoding-study/serve.sh runs the image on :8081, so its health check must probe :8081, not the
+    image's :8080 (#858). A --port in its extra args is refused, since the probe would no longer match the server."""
+    from tests.installer_support import BASH
+    assert BASH, "the study launcher test needs bash (Git Bash on Windows)"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(RECORD_DOCKER, encoding="utf-8", newline="\n")  # bash rejects CRLF
+    docker.chmod(0o755)
+    args_file = tmp_path / "run-args.txt"
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_ARGS": args_file.as_posix(),
+           "MODELS_DIR": tmp_path.as_posix(), "DRAFTERS_DIR": tmp_path.as_posix()}
+    result = subprocess.run([BASH, SERVE_STUDY.as_posix(), "probe", (tmp_path / "probe.log").as_posix(), "--ctx-size",
+                             "4096"], env=env, capture_output=True, text=True, timeout=scaled(15))
+    assert result.returncode == 0, result.stderr
+    argv = args_file.read_text(encoding="utf-8").splitlines()
+    port = argv[argv.index("--port") + 1]
+    assert port == "8081", port
+    assert argv[argv.index("--health-cmd") + 1] == f"curl -f http://127.0.0.1:{port}/health"
+    args_file.unlink()
+    refused = subprocess.run([BASH, SERVE_STUDY.as_posix(), "probe", (tmp_path / "probe.log").as_posix(), "--port", "9000"],
+                             env=env, capture_output=True, text=True, timeout=scaled(15))
+    assert refused.returncode == 64, refused.stderr
+    assert not args_file.exists(), "serve.sh started a container despite a port override"
 
 
 def test_linux_supervisor_healthcheck_probes_the_port_the_server_listens_on(tmp_path):
@@ -1475,20 +1540,4 @@ def test_linux_supervisor_healthcheck_probes_the_port_the_server_listens_on(tmp_
         if serving.is_alive():
             httpd.shutdown()
         httpd.server_close()
-        # Park the supervisor before ending it: on Windows terminate() skips bash's TERM trap, so the supervisor must
-        # already have reaped its fake container and flag watcher, leaving only its paused wait loop.
-        flag.write_text("paused by test\n", encoding="utf-8")
-        supervisor_log = tmp_path / "logs" / "llama-server-supervisor.log"
-
-        def parked():
-            text = supervisor_log.read_text(encoding="utf-8") if supervisor_log.exists() else ""
-            return "paused by GPU guard" in text
-        deadline = time.monotonic() + scaled(10)
-        while not parked() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        proc.terminate()
-        try:
-            proc.wait(timeout=scaled(15))
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        _end_supervisor(proc, flag, tmp_path / "logs")

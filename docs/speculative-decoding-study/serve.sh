@@ -4,10 +4,11 @@
 # MODELS_DIR holds the main GGUF; DRAFTERS_DIR is mounted at /drafters for -md.
 name=$1; log=$2; shift 2
 port=8081
-# The health check probes $port, so a port in the extra args would move llama-server off the probed port (#858).
+# The health check probes $port, so a --port in the extra args would move llama-server off the probed port (#858).
+# llama-server has no short form for the port (-p is --prompt), so only the long forms are refused.
 for llama_arg in "$@"; do
     case $llama_arg in
-        -p|--port|--port=*) echo "serve.sh: the port is fixed at $port; drop $llama_arg" >&2; exit 64 ;;
+        --port|--port=*) echo "serve.sh: the port is fixed at $port; drop $llama_arg" >&2; exit 64 ;;
     esac
 done
 repo=$(cd "$(dirname "$0")/../.." && pwd)

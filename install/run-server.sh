@@ -16,10 +16,11 @@ context=$6
 pause_flag=$7
 shift 7
 extra_args=("$@")
-# The health check probes $port, so a port in the extra args would move llama-server off the probed port (#858).
+# The health check probes $port, so a --port in the extra args would move llama-server off the probed port (#858).
+# llama-server has no short form for the port (-p is --prompt), so only the long forms are refused.
 for llama_arg in "${extra_args[@]}"; do
     case $llama_arg in
-        -p|--port|--port=*) echo "run-server.sh: give the port as PORT, not in LLAMA_ARGS ($llama_arg)" >&2; exit 64 ;;
+        --port|--port=*) echo "run-server.sh: give the port as PORT, not in LLAMA_ARGS ($llama_arg)" >&2; exit 64 ;;
     esac
 done
 container="agent-harness-$(printf '%s' "$instance" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_.-' '-')-llama"
