@@ -1,7 +1,7 @@
 # GPU VRAM budget: Qwen vs Plex NVENC and Sunshine in 16 GB (#823)
 
-Design only. Nothing here was loaded, unloaded, paused or measured on the tower; the manual GPU hold from 2026-10-23
-stays on. It feeds #811 (the guard's Plex detection on Linux) and the resource guard (`docs/resource-guard.md`).
+Written as a design under #823, when nothing had been measured on the tower. #827 then measured option B on 2026-11-01:
+see "Measured" below, which replaces the estimates it covers. Plex and Sunshine costs are still estimates. It feeds #811 (the guard's Plex detection on Linux) and the resource guard (`docs/resource-guard.md`).
 
 ## Problem
 
@@ -39,15 +39,15 @@ Two facts shape every option below:
 
 | Item | Value | Source |
 | --- | --- | --- |
-| Card total | 16,376 | **estimate**: the size `nvidia-smi` reports for 16 GB Ada cards; the tower's value wasn't read (`hcli doctor` prints it) |
-| Desktop session, idle, model unloaded | 600 (range 300 to 700) | Windows measured 529 (`docs/resource-guard.md`, inventory 2026-10-06), 545 (`docs/mitsuba-prompt-helper-study.md`) and ~690 (`docs/qwen38-distill-study.md`). Ubuntu's GNOME session: **estimate**, not measured |
+| Card total | 16,376 | measured on the tower (`nvidia-smi`, #827) |
+| Desktop session, idle, model unloaded | 600 (range 300 to 700) | Windows measured 529 (`docs/resource-guard.md`, inventory 2026-10-06), 545 (`docs/mitsuba-prompt-helper-study.md`) and ~690 (`docs/qwen38-distill-study.md`). Ubuntu, measured in #827: 353 with the model's server stopped, including Sunshine's idle 215 |
 | Model, total, at 64K, default margin | 14,000 to 14,850 | ~14,150 for the server alone (`docs/qwen38-distill-study.md`, 14,658 total minus ~690 desktop, 32K); 14,712 total at 64K (`docs/phase0-results.md`); ~14,850 on Ubuntu (#823's "about 14.5 GB") |
 | · weights on the GPU | ~13,000 to 13,560 | 13,560 MiB CUDA0 model buffer at 8K with the default margin (`docs/mitsuba-prompt-helper-study.md`, `-lv 4`); at 64K `--fit` moves ~464 MiB more expert weight to RAM than at 32K (`docs/bonsai-2-study.md`), so 64K is lower: **estimate** |
-| · KV cache, 64K, q8_0 | ~680 | **estimate**, computed: 10 full-attention layers × K and V × 2 KV heads × head dim 256 × 34 bytes per 32 values (q8_0) = 10.6 KiB per token, × 65,536. Assumes the Qwen3.5-family hybrid layout (30 of 40 layers are linear attention with a fixed small state); the GGUF metadata would confirm it. Consistent with the measured 32K→64K displacement above (KV plus compute buffers) |
+| · KV cache, 64K, q8_0 | 680 (measured, `-lv 4`, #827) | matches the estimate, computed: 10 full-attention layers × K and V × 2 KV heads × head dim 256 × 34 bytes per 32 values (q8_0) = 10.6 KiB per token, × 65,536. Assumes the Qwen3.5-family hybrid layout (30 of 40 layers are linear attention with a fixed small state); the GGUF metadata would confirm it. Consistent with the measured 32K→64K displacement above (KV plus compute buffers) |
 | · compute buffers and CUDA context | ~400 to 700 | **estimate**: the remainder |
 | · expert layers left in system RAM | 17 to 18 of 40 | measured with `-lv 4` at 32K/64K (`docs/bonsai-2-study.md`) |
 | · one expert layer | ~525 (measured moves: 760 for one layer, 780 for two) | **estimate**: 22 GB file / 40 layers (`docs/INSTALL.md` gives 22 GB). The measured moves (`docs/bonsai-2-study.md`, `docs/mitsuba-prompt-helper-study.md`) disagree with each other because `--fit` can split a layer; use 0.5 to 0.8 GiB per layer |
-| Free with the model loaded | ~1,024 | the default `--fit-target`; Windows measured 1,664 at 64K (16,376 − 14,712), where the margin plus rounding was larger |
+| Free with the model loaded | 1,121 to 1,145 (measured, #827) | the default `--fit-target`; Windows measured 1,664 at 64K (16,376 − 14,712), where the margin plus rounding was larger |
 | Plex, one 1080p H.264 → H.264 transcode | 600 (range 150 to 560 reported) | **estimate**: forum reports of ~350 MB and ~560 MB per 1080p transcode and a 150 to 200 MB Plex process in `nvidia-smi` ([Plex forum](https://forums.plex.tv/t/hardware-requirements-suggestions-around-dedicated-gpu-nvidia-quadro-p2000/453114/12), [Plex forum](https://forums.plex.tv/t/plex-hardware-transcoding-hdr-nvenc/689111)) |
 | Plex, one 1080p HEVC (10-bit) → H.264 transcode | 700 (range 300 to 700) | **estimate**: as above, plus larger 10-bit decode surfaces. No HEVC-specific figure was found |
 | Plex, one 4K HEVC HDR → 1080p with tone mapping (for scale; not in the budget) | 1,400 (range 600 to 1,400) | **estimate**: forum reports of 1.2 to 1.4 GB per 4K transcode ([Plex forum](https://forums.plex.tv/t/plex-hardware-transcoding-hdr-nvenc/689111)) and one measured 600 MB on a GTX 1660 Ti ([ZimaSpace blog](https://shop.zimaspace.com/blogs/tech-ai-hub/plex-gpu-memory-remote-4k-streaming)) |
@@ -66,7 +66,7 @@ fit". Without the safety margin it is still 76 to 176 short.
 
 All VRAM figures are on the 16,376 MiB card with the desktop at 600 MiB. Headroom is what stays free with the model
 loaded plus **one 1080p HEVC Plex transcode (700) and one Sunshine stream (500)**; the H.264 case is 100 MiB better.
-Tokens per second are **not measured** for any option (see "Measuring later"). The decode column is an estimate from a
+Only option B and today's margin have been measured ("Measured" below). The decode column is an estimate from a
 simple model: today's 85 tok/s with ~18 expert layers on the CPU, a fixed GPU part of ~4 ms per token and ~0.43 ms
 per CPU expert layer, scaled by layer size for other quants.
 
@@ -74,7 +74,7 @@ per CPU expert layer, scaled by layer size for other quants.
 | --- | --- | --- | --- | --- | --- | --- |
 | 0. Today | Q4_K_XL, 64K, default margin | ~14,750 | **−176** (doesn't fit) | 85 (measured, #823) | baseline | |
 | **A. Smaller quant** | same model at UD-Q3_K_XL (~17 GB, **estimate** scaled from the Q4 file; not checked that this exact quant is published), 64K, `--fit-target 2048` | ~13,730 | **+848** | not measured; estimate 95 to 130 (about 11 expert layers on the CPU instead of 18, each ~25% smaller; the simple model gives ~130) | lower: a 3-bit quant; tool-call reliability unknown. Must pass the canary gates (`docs/canary-evals.md`) as #170/#174 did | the quant alone, with the default margin, would leave only 1,024 free and fail like today: `--fit` fills the card again |
-| **B. Partial offload, margin** | Q4_K_XL unchanged, 64K, `--fit-target 2048` | ~13,730 | **+848** | not measured; estimate 76 to 81 (two more expert layers on the CPU, ~1 GiB) | unchanged: same weights, same context | one flag; reversible; RAM: ~1 GiB more of the model in system RAM (the load gate's `model_ram_gb: 14` already covers it) |
+| **B. Partial offload, margin** | Q4_K_XL unchanged, 64K, `--fit-target 2048` | ~13,730 | **+848** | measured under load: no slowdown beyond noise against the default margin ("Measured" below); the estimate was 76 to 81 | unchanged: same weights, same context | one flag; reversible; RAM: ~1 GiB more of the model in system RAM (the load gate's `model_ram_gb: 14` already covers it) |
 | B2. Partial offload, fixed layers | Q4_K_XL, 64K, `--fit off --n-gpu-layers 99 --n-cpu-moe 20` (experts of 20 of 40 layers in RAM, fixed) | ~13,700 (**estimate**: today's ~14,750 with ~18 layers in RAM, minus 2 × ~525) | **+876** (estimate) | as B: not measured; estimate 76 to 81 | unchanged | the footprint no longer depends on what is free at load: it doesn't shrink when a stream is already running, and the load fails if less than ~13.7 GB is free. Needs its own `-lv 4` check of the real size |
 | B3. Smaller context only | Q4_K_XL, **32K**, default margin | ~14,750 | **−176** (doesn't fit, same as today) | not measured; 32K decoded ~2% faster than 64K on Windows (`docs/phase0-results.md`) | worse for long files: 64K was needed for the memory-library tasks (`docs/phase0-results.md`, follow-up table) | frees nothing under `--fit`: the margin stays 1,024 and `--fit` moves expert weights back onto the GPU. Measured: 14,806 MiB at 32K vs 14,712 at 64K (`docs/phase0-results.md`). With B2's fixed placement, 32K would add the ~340 MiB of KV it saves (**estimate**) to B2's headroom |
 | C. Fits entirely | an IQ2-class quant (~11 GB, **estimate**), 64K, all layers on the GPU | ~12,300 | **+2,276** | not measured; likely above 100 | much lower: 2-bit | no RAM offload at all; not recommended for agent work without a full canary run |
@@ -138,11 +138,49 @@ Not chosen: reloading with a bigger margin (say 4,096) instead of parking when a
 model available under load but costs a ~30 s reload each way plus code to switch arguments, for a case (two
 transcodes at once) that the owner hasn't reported. Revisit if it happens often.
 
+## Measured (#827, 2026-11-01)
+
+Steps 0, 1 and 4 of "Measuring later", with `ghcr.io/ggml-org/llama.cpp:server-cuda-b10830`, the Q4_K_XL file and 64K
+context. Prod's llama unit was stopped for 626 s. There were four runs in the order 2048, default, default, 2048: the
+first two with `-lv 4`, the last two at prod's verbosity. Each answered fixed prompts with `n_predict: 200`,
+`cache_prompt: false` and `ignore_eos: true`. Sunshine was running idle (215 MiB), with no Plex transcode. Other host
+work ran throughout, with a load average of about 7 to 17 on 28 threads, and swap was already full before the stop.
+
+| | Default margin | `--fit-target 2048` |
+| --- | --- | --- |
+| VRAM free once loaded (MiB) | 1,145 | 2,073 |
+| VRAM free after requests (MiB) | 1,121 | 2,049 |
+| llama-server in `--query-compute-apps` (MiB) | 14,440 | 13,512 |
+| Layers overflowing to system RAM (of 41) | 18 | 20 |
+| CUDA0 model buffer (MiB) | 13,096 | 12,168 |
+| Load to `/health` (s) | 29.1, 31.1 | 26.1, 26.1 |
+| Decode, 2K prompt, mean of the 2nd and 3rd request in both runs (tok/s) | 64.1 | 65.4 |
+| Decode, 16K prompt, mean of two runs (tok/s) | 60.9 | 60.1 |
+| Decode, 58K prompt, mean of two runs (tok/s) | 52.9 | 54.7 |
+| Prompt speed, 58K (tok/s) | 799, 793 | 742, 801 |
+| Peak server RSS, VmHWM (MiB) | 10,780, 12,353 | 12,582, 12,958 |
+| Peak anonymous RSS (MiB) | 561, 560 | 562, 553 |
+| Lowest available RAM (MiB) | 12,757, 14,232 | 14,905, 15,794 |
+
+What it shows:
+
+- The margin works: it frees 928 MiB and moves two more layers' experts to RAM (928 MiB more of the model).
+- No decode cost could be seen on this busy host. The differences between margins are within the spread between runs,
+  and don't show the estimated 6 tok/s drop. `-lv 4` made no visible difference either.
+- Most of the RSS is file-backed GGUF pages. Available RAM moved with other host work, so it can't be read as the
+  load's own cost.
+- Both margins decoded below the 85 tok/s in #823 and the ~70 tok/s bar in the recommendation. That compares a loaded
+  host with a quiet one, so it doesn't say option B is too slow; measure on a quiet host before applying that bar.
+- The first request after each load was slower (decode 55 to 59 tok/s, prompt 248 to 312 tok/s) while pages faulted in.
+
+Not measured: steps 2, 3 and 5, because a real Plex transcode or Sunshine stream needs the owner to start one. So the
+headroom column above is still arithmetic.
+
 ## Measuring later
 
-Tokens per second, the Plex and Sunshine costs, and the Ubuntu desktop figure are **not measured**. The GPU hold is
-on and #823 doesn't authorise a measurement, so none was taken. When the owner lifts the hold and says on a card that
-a measurement run may use the GPU:
+The Plex and Sunshine costs and coexistence (steps 2, 3 and 5) are still **not measured**. Whenever a run uses the GPU,
+the owner says so on a card first. Use only `/health` and `/props` on a sleeping prod server: `/slots` wakes the model
+(it did during #827). Starting the unit loads the model at once, and it sleeps again after 600 s idle.
 
 0. **Stop production and check the card is free.** Until follow-up 9 lands, *Unload now* and the guard's park don't
    stop the Linux container (see "Page-out and page-in"), so the owner stops it through its unit instead:
@@ -207,7 +245,7 @@ No code changes in #823. These are the code and config changes this design impli
    right after every load.
 7. **Metrics.** Export free VRAM and `encoder.stats.sessionCount` as `harness_resource_*` series for the
    `nvidia-gpu` dashboard.
-8. **Measurement run** (owner-gated, "Measuring later" above), then update this doc. Optionally port
+8. **Measurement run** (owner-gated, "Measuring later" above), then update this doc. *Option B done in #827.* Optionally port
    `bakeoff/context_test.py` first: a `--base-url` mode that measures an already running server, and Linux process
    memory from `/proc` instead of PowerShell, so later model studies on the tower can reuse it.
 9. **Linux page-out (prerequisite for the guard on the tower).** Make `ServerControl.stop()` work on Linux: stop the
