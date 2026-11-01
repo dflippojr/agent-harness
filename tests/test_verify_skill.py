@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import socket
+import subprocess
 import sys
 import time
 import zipfile
@@ -404,9 +405,41 @@ def wait_gone(entries):
     return [p for p in entries if verify.alive(p)]
 
 
+def pid_running(pid: int) -> bool:
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+def wait_pid_gone(pid: int, seconds: float = 10) -> bool:
+    """Whether `pid` still runs after up to `seconds`. A process just killed can outlive the kill for a moment (on
+    Windows), so this waits as wait_gone does for the recorded processes."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and pid_running(pid):
+        time.sleep(0.2)
+    return pid_running(pid)
+
+
+def test_the_orphan_check_waits_for_a_process_that_exits_late():
+    late = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1)"])  # exits about a second from now
+    try:
+        assert not wait_pid_gone(late.pid)
+    finally:
+        late.wait()
+
+
+def test_the_orphan_check_still_fails_for_a_process_that_stays_alive():
+    stays = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert wait_pid_gone(stays.pid, seconds=0.5)
+    finally:
+        stays.kill()
+        stays.wait()
+
+
 @pytest.mark.parametrize("session", ["same-session", "own-session"])
 def test_cleanup_after_a_failed_drive_leaves_nothing_running(tmp_path, monkeypatch, session):
-    psutil = pytest.importorskip("psutil")
     run = stand_in_run(tmp_path, monkeypatch)
     run.doctor = lambda: run.step("doctor", True, "stand-in")
     orphan_file = tmp_path / "orphan.pid"
@@ -419,7 +452,7 @@ def test_cleanup_after_a_failed_drive_leaves_nothing_running(tmp_path, monkeypat
     record = json.loads((tmp_path / "evidence" / "launch.json").read_text(encoding="utf-8"))
     assert {"instance", "drive"} <= {p["name"] for p in record["processes"]}
     orphan = int(orphan_file.read_text(encoding="utf-8"))
-    assert not psutil.pid_exists(orphan) or psutil.Process(orphan).status() == psutil.STATUS_ZOMBIE
+    assert not wait_pid_gone(orphan)
     assert not wait_gone(record["processes"])
     assert not Path(record["instance_dir"]).exists()
     for port in (record["server_port"], record["web_port"]):
