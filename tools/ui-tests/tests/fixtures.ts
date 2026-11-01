@@ -33,6 +33,9 @@ export const desktopAndPhoneTest = signedInOn(SELF_SIZING);
 export const phoneTest = signedInOn(PHONES);
 export { expect };
 export async function openSession(page: Page, title: string) {
+  // A resize just before this may have crossed the split breakpoint, and WebKit delivers that media query change in its
+  // next rendering update. Navigating ahead of it mounts the list twice, and a fill between the two loses its text (#885).
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.goto('/#/agents');
   const search = page.getByRole('searchbox', { name: 'Search', exact: true });
   await search.fill(title);
