@@ -125,7 +125,68 @@ and then pushed available RAM to 0.17 GB for 2 to 4 minutes. Worker containers a
 number. The wait polls every `MEMORY_POLL_SECONDS` and the session shows `waiting_memory` with the reason
 "the model load needs 14 GB and 4 GB must stay free".
 
+When RAM alone keeps a wanted resume parked, the guard stays `paused` and its status names that: `reasons` holds one
+entry with the key `memory_hold` and a detail that starts `memory:`, and `manual` is false. It replaces the reason that
+began the pause, so the app doesn't call a memory wait "paused from the app" (#873). A hand pause or a new trigger
+replaces it in turn.
+
 Work already running isn't stopped. If nothing can be read (no psutil), work isn't blocked.
+
+### What a load costs on the Ubuntu tower (#873, 2026-11-01)
+
+`model_ram_gb` dates from the Windows host. On Ubuntu llama-server maps the GGUF, so most of what `VmHWM` reports (10.8
+to 13.0 GB in #827's runs) is file-backed. The split below uses existing data only: #827's runs, and Prometheus and
+cAdvisor from 2026-10-26 to 2026-11-01. No model was loaded for it.
+
+| Part of the load | Size | Source |
+| --- | --- | --- |
+| Anonymous memory, the part nothing can reclaim with swap full | 553 to 562 MiB in #827's runs; **1,194 MiB** peak on prod | VmRSS split; `container_memory_rss` |
+| Weights the CPU reads on every token: GGUF minus the GPU buffer | 8,229 MiB at the default margin; **9,157 MiB** at `--fit-target 2048` | 21,325 MiB file; CUDA0 buffer 13,096 and 12,168 MiB |
+| Mapped pages at their peak, which also include GPU layers faulted in for the upload | 9,836 MiB on prod; 11,906 MiB in #827's runs | `container_memory_mapped_file` |
+
+**The fall in available RAM is not the cost to plan for.** On the quietest load (2026-10-30 16:45 EST, other containers
++13 MiB), the mapped pages rose 9,234 MiB and the container's anonymous memory 716 MiB, while `MemAvailable` fell only
+637 MiB. It counts mapped file pages as reclaimable. Those pages include the weights the CPU reads on every token, so
+reclaiming them means reading them back from disk. Other loads fell further (1.6 to 4.9 GB), but host work moved
+during those, so the falls aren't the model's alone.
+
+**Recommendation for the tower: `model_ram_gb: 11`.** Anonymous peak plus CPU-read weights at `--fit-target 2048` is
+1,194 + 9,157 = 10,351 MiB, or 10.1 GiB. Rounding up gives 11, so a load with `min_available_ram_gb: 2` needs 13 GiB
+available. That is not the 8 first planned: at 10 GiB available the model alone would want all of it, with nothing
+left for the 2 GiB the gate promises. It may well run there, but no measured load started below 15.8 GiB, and the
+lowest available RAM during a measured decode was 12.7 GiB, so 8 is untested.
+
+Time a load would have waited, over those six days (8,542 minutes, sampled each minute):
+
+| `model_ram_gb` + `min_available_ram_gb` | Needs | Would wait |
+| --- | --- | --- |
+| 14 + 4 (today) | 18 GiB | 35.6% |
+| 14 + 2 | 16 GiB | 6.8% |
+| 11 + 4 | 15 GiB | 4.1% |
+| **11 + 2** | **13 GiB** | **1.6%** |
+| 8 + 2 | 10 GiB | 0.3% |
+
+These values aren't applied. They go on one owner card with `--fit-target 2048` (#881). The shipped default stays 14: the
+reason it was set still holds on Windows, where `--load-mode none` makes the weights private memory (see below) and
+the 08:00 load once pushed available RAM to 0.17 GB.
+
+**What `min_available_ram_gb: 2` changes for the plain check** (worker containers, ComfyUI):
+
+- **Nothing that has happened so far.** On Ubuntu, available RAM never went below 4.34 GB in those six days, so neither
+  4 nor 2 would have held anything. `harness_resource_memory_low` was last set on 2026-10-09, on the Windows host.
+- **Worker containers keep less room.** Swap was full in 40.2% of those minutes, and then anonymous memory has nowhere
+  to go: what's available is the whole remaining cushion. A worker's `--memory 2g` limit equals the new margin, so one
+  worker at its limit could use all of it, where 4 left room for two. Workers actually peaked at 0.13 GB across 355
+  containers. The check reserves nothing, so several can start at once on the same reading. Past the margin the kernel
+  reclaims file pages first, the model's weights among them, so decode slows from disk reads; once those run out, the
+  OOM killer acts. That follows from how the kernel reclaims memory; it wasn't provoked here. CI runners (3 to 4 GB
+  each) aren't gated by this check at all.
+- **ComfyUI: nothing today.** `images` is disabled in the tower's overlay, and no image job ran in the 30 days Prometheus
+  keeps. If it's enabled, neither number says much: the `quality` model is 19.5 GB partly streamed from RAM, and the
+  check only runs before ComfyUI starts. Its peak RAM on Ubuntu hasn't been measured, so measure it before relying on
+  the check.
+
+The load gate is where the lower number matters, and most of that gain comes from `model_ram_gb` (see the table).
 
 ### Inventory (read-only, 2026-10-06)
 
