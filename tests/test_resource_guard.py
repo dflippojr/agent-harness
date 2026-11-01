@@ -1442,8 +1442,9 @@ def test_linux_supervisor_healthcheck_probes_the_port_the_server_listens_on(tmp_
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "DOCKER_LOG": (tmp_path / "docker.log").as_posix(),
            "DOCKER_STOPPED": (tmp_path / "stopped").as_posix(), "DOCKER_HEALTH_CMD": health_file.as_posix(),
            "HARNESS_LOG_DIR": (tmp_path / "logs").as_posix(), "HARNESS_PAUSE_POLL_SECONDS": "0.2"}
+    flag = tmp_path / "llama-server.paused"
     proc = subprocess.Popen([BASH, RUN_SERVER.as_posix(), "Main", "llama:test", (tmp_path / "m.gguf").as_posix(), "qwen",
-                             str(port), "4096", (tmp_path / "llama-server.paused").as_posix()], env=env, stdin=subprocess.DEVNULL)
+                             str(port), "4096", flag.as_posix()], env=env, stdin=subprocess.DEVNULL)
     try:
         def health_cmd():
             return health_file.read_text(encoding="utf-8").strip() if health_file.exists() else ""
@@ -1464,7 +1465,17 @@ def test_linux_supervisor_healthcheck_probes_the_port_the_server_listens_on(tmp_
         if serving.is_alive():
             httpd.shutdown()
         httpd.server_close()
-        (tmp_path / "stopped").touch()  # the fake container exits, so the supervisor's TERM trap can reap it
+        # Park the supervisor before ending it: on Windows terminate() skips bash's TERM trap, so the supervisor must
+        # already have reaped its fake container and flag watcher, leaving only its paused wait loop.
+        flag.write_text("paused by test\n", encoding="utf-8")
+        supervisor_log = tmp_path / "logs" / "llama-server-supervisor.log"
+
+        def parked():
+            text = supervisor_log.read_text(encoding="utf-8") if supervisor_log.exists() else ""
+            return "paused by GPU guard" in text
+        deadline = time.monotonic() + scaled(10)
+        while not parked() and time.monotonic() < deadline:
+            time.sleep(0.05)
         proc.terminate()
         try:
             proc.wait(timeout=scaled(15))
