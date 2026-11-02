@@ -11,7 +11,21 @@ Describe 'Review publication safety' {
         # Credentials and long tokens.
         @{ Payload = 'sk-synthetic12345678' }
         @{ Payload = 'ghp_synthetic12345678' }
-        @{ Payload = ('T' * 48) }
+        # #800: past 64 letters a run is not an identifier, however it is split up or quoted.
+        @{ Payload = ('T' * 65) }
+        @{ Payload = ('`' + ('T' * 65) + '`') }
+        @{ Payload = (('T' * 33) + '**' + ('T' * 32) + '**') }
+        # #800: every shape but letters alone stays matched, whatever its length past 40.
+        @{ Payload = 'cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a' }
+        @{ Payload = 'cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a.' }
+        @{ Payload = '(cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a)' }
+        @{ Payload = 'cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a/' }
+        @{ Payload = '`cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a`' }
+        @{ Payload = ('aB3' * 14) }
+        @{ Payload = (('Ab3+/' * 9) + '=') }
+        @{ Payload = (('Ab' * 21) + '+') }
+        @{ Payload = (('a' * 22) + '7' + ('b' * 22)) }
+        @{ Payload = (('a' * 41) + '`1`') }
         @{ Payload = (('T' * 48) + '/unknown.py') }
         @{ Payload = ('./' + ('T' * 48) + '/unknown.py') }
         @{ Payload = ('./' + ('T1' * 24) + '/unknown.py') }
@@ -266,6 +280,10 @@ Describe 'Review publication safety' {
     }
 
     It 'publishes ordinary review text' -TestCases @(
+        # #800: a run of letters alone, up to 64, is a code identifier (POW #233's Java test name).
+        @{ Payload = 'The recordedExpiryComparedWithPayerClockFails test covers it.' }
+        @{ Payload = 'The `recordedExpiryComparedWithPayerClockFails` test covers it.' }
+        @{ Payload = ('Name: ' + ('camelCase' * 7) + 'x') }
         @{ Payload = 'ops/review/run-review.ps1:340: the regex `[\\/]` misses `"\\n"`.' }
         @{ Payload = 'See https://learn.microsoft.com/dotnet/standard/io/file-path-formats#trim-characters.' }
         @{ Payload = 'docs/users.md, docs/root-ca.md and src/rooted/homepage.py' }
@@ -364,6 +382,26 @@ Describe 'Review publication safety' {
         if ($log -match 'synthetic|reviewer|a1a1') { throw "The log leaked the matched text: $log" }
     }
 
+    It 'logs a long token''s length and character classes, never its characters (#800)' -TestCases @(
+        @{ Text = ('x ' + ('T' * 65)); Length = 65; Classes = 'uppercase' }
+        @{ Text = ('x ' + ('camel' * 13)); Length = 65; Classes = 'lowercase' }
+        @{ Text = ('x ' + ('camelCase' * 8)); Length = 72; Classes = 'lowercase+uppercase' }
+        @{ Text = 'x cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a'; Length = 40; Classes = 'lowercase+digit' }
+        @{ Text = 'x cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a-'; Length = 41; Classes = 'lowercase+digit+other' }
+        @{ Text = ('x ' + ('aB3+' * 11)); Length = 44; Classes = 'lowercase+uppercase+digit+other' }
+    ) {
+        param($Text, $Length, $Classes)
+        try { Assert-ReviewOutputSafe -Text $Text -WarningVariable scanWarnings -WarningAction SilentlyContinue }
+        catch { Write-Verbose 'The scan fails closed; the warnings are what is checked.' }
+        $log = @($scanWarnings | ForEach-Object { $_.Message })
+        $expected = "Publication safety scan: rule long-token matched the raw form at offset 2 (length $Length, classes $Classes)."
+        if ($log -cnotcontains $expected) { throw "Missing $expected in: $($log -join "`n")" }
+        # Every line is fixed wording around the numbers and class names, so no character of the match can show.
+        $shape = '^Publication safety scan: rule long-token matched the [a-z-]+ form at offset \d+ \(length \d+, classes (?:lowercase|uppercase|digit|other)(?:\+(?:lowercase|uppercase|digit|other))*\)\.$'
+        $other = @($log | Where-Object { $_ -cnotmatch $shape })
+        if ($other.Count) { throw "A log line is not length and classes only: $($other -join "`n")" }
+    }
+
     Context 'GitHub''s rendered form (#767)' {
         BeforeAll {
             # GitHub's real POST /markdown answers for the payloads above (Update-RenderedFixtures.ps1).
@@ -396,7 +434,7 @@ Describe 'Review publication safety' {
                 $miss = $row.text -match $script:browserOnly -or $row.text -match $script:shownOtherwise
                 if ($hits.Count -and $miss) { "now caught, so drop it from the expected misses: $($row.text)" }
                 if (-not $hits.Count -and -not $miss) { "missed by the github form: $($row.text)" }
-                if (@($hits | Where-Object { $_ -notmatch '^rule [a-z-]+ matched the github(?:-decoded|-unescaped)? form at offset \d+ \(length \d+\)$' }).Count) { "unexpected hit format: $($hits -join '; ')" }
+                if (@($hits | Where-Object { $_ -notmatch '^rule [a-z-]+ matched the github(?:-decoded|-unescaped)? form at offset \d+ \(length \d+(?:, classes [a-z+]+)?\)$' }).Count) { "unexpected hit format: $($hits -join '; ')" }
             }
             if ($unexpected) { throw ($unexpected -join "`n") }
         }
