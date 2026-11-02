@@ -1851,7 +1851,7 @@ def test_a_reading_that_measures_nothing_does_not_retire_it(unknown):
 
 def test_a_new_trigger_ends_it_and_the_floor_counts_again_after_that_pause():
     async def body():
-        guard, detect, control, _, _ = floor_guard(100, 100, 100, 100, 100, floor=256, resume_after_seconds=0)
+        guard, detect, control, _, _ = floor_guard(100, 100, 100, 100, 100, 100, 100, floor=256, resume_after_seconds=0)
         await _park_on_the_floor(guard, control)
         await _reloaded_after_resume_anyway(guard, control, "eager")
         await _polls(guard, 2)
@@ -1870,11 +1870,11 @@ def test_a_new_trigger_ends_it_and_the_floor_counts_again_after_that_pause():
 
 def test_resuming_a_manual_hold_resets_it():
     async def body():
-        guard, _, control, _, _ = floor_guard(100, 100, 100, 100, floor=256, resume_after_seconds=0)
+        guard, _, control, _, _ = floor_guard(100, 100, 100, 100, 100, floor=256, resume_after_seconds=0)
         await _park_on_the_floor(guard, control)
         await _reloaded_after_resume_anyway(guard, control, "eager")
         guard.pause()
-        await guard.check()  # flag written: no reading
+        await guard.check()
         assert guard.state == PAUSED
         guard.resume(override_signals=False)  # what the route sends for a manual hold
         assert guard.status()["override"] is False
@@ -1902,8 +1902,8 @@ def test_turning_the_floor_off_resets_it():
 def test_a_resume_that_did_not_see_the_floor_acknowledges_nothing(cause):
     async def body():
         guard, detect, control, _, _ = floor_guard(100, 100, floor=256, lazy_load=False, resume_after_seconds=0)
+        control.flag = True  # parked already, so the floor can't be counting
         if cause == "game-only-pause":
-            control.flag = True  # parked already, so the floor can't be counting
             detect.signals = [GAME]
             await guard.check()
             assert guard.state == PAUSED

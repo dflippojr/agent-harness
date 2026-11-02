@@ -1,7 +1,7 @@
 """Supervision lifecycle and wiring, reached only through the module host."""
 import asyncio
 
-from harness.modules import ModuleRuntime, ACTIVE
+from harness.modules import ModuleRuntime, ACTIVE, READY
 from .service import GpuGuard, ServerControl, hold_reminder
 from .warmup import ModelWarmer
 
@@ -38,6 +38,10 @@ class LocalModelRuntime(ModuleRuntime):
         warmer.keepalive_seconds = cfg.gpu_guard.keepalive_seconds
         guard.on_change = warmer.notify
         guard.park = warmer.park
+
+        async def model_loaded() -> bool:
+            return await warmer.state(cfg.models[cfg.default_model]) == READY
+        guard.model_loaded = model_loaded
         guard.want_model = lambda: warmer.pinned() or m.runner.gpu_paused_waiting()
         m.runner.ram = guard.memory
         m.modules.wire_resources(guard, warmer)

@@ -250,6 +250,7 @@ class VramFloor:
         self.cfg = cfg
         self.read = read
         self.low_polls = 0
+        self.recovered = False  # the last poll measured free VRAM at or above the floor
 
     def _reading(self) -> dict | None:
         if self.read is not None:
@@ -259,6 +260,7 @@ class VramFloor:
         return resources.gpu_reading()
 
     async def __call__(self, parked: Callable[[], bool]) -> list[dict]:
+        self.recovered = False
         floor = self.cfg.min_free_vram_mib  # each poll: a Settings write applies live
         if floor <= 0 or parked():
             self.low_polls = 0
@@ -268,6 +270,7 @@ class VramFloor:
         # nvidia-smi can take seconds: a park that landed meanwhile may already have handed the card over.
         if free is None or free >= floor * MIB or parked():
             self.low_polls = 0
+            self.recovered = free is not None and free >= floor * MIB and not parked()
             return []
         self.low_polls += 1
         if self.low_polls < VRAM_LOW_POLLS:
@@ -520,6 +523,12 @@ class GpuGuard:
         self.manual_since: float | None = None  # epoch seconds the current manual hold began
         self.reminded_at: float | None = None   # the last indefinite-hold reminder (#732)
         self.override: frozenset | None = None  # triggers the user chose to ignore
+        # Resume anyway on the free-VRAM floor. Not in `override`: that ends when no trigger shows, and a park hides
+        # this one, as does the debounce after a reload. It ends on a measured recovery, a new trigger or a reset.
+        self.vram_acknowledged = False
+        self._floor_in_pause = False  # the floor is part of this pause, though parking has hidden its signal
+        # The model is on the card, so free VRAM counts as a recovery (ModelWarmer.state; /health alone can't tell).
+        self.model_loaded: Callable[[], Awaitable[bool]] = lambda: self.control.healthy()
         self.changed_at = time.time()
         self.last_check = 0.0
         self.pauses = 0
@@ -542,7 +551,7 @@ class GpuGuard:
         remaining = (max(0, round(self.manual_until - time.time()))
                      if self.manual and self.manual_until is not None else None)
         return {"enabled": self.cfg.enabled, "state": self.state, "signals": self.signals, "reasons": self.reasons,
-                "manual": self.manual, "override": bool(self.override), "since": self.changed_at,
+                "manual": self.manual, "override": bool(self.override) or self.vram_acknowledged, "since": self.changed_at,
                 "manual_until": self.manual_until, "manual_remaining_seconds": remaining,
                 "manual_duration_seconds": self.manual_duration_seconds, "manual_since": self.manual_since,
                 "last_check": self.last_check, "resume_after_seconds": self.cfg.resume_after_seconds,
@@ -680,7 +689,9 @@ class GpuGuard:
         self.manual_since = self.reminded_at = None
         self._clear_persisted_hold()
         keys = frozenset(s["key"] for s in self.signals)
-        self.override = (keys or None) if override_signals else None
+        self.override = ((keys - {VRAM_LOW_KEY}) or None) if override_signals else None
+        self.vram_acknowledged = override_signals and (self.vram_acknowledged or VRAM_LOW_KEY in keys
+                                                       or self._floor_in_pause)
         self._resume_now = True
         self._wake.set()
 
@@ -717,9 +728,15 @@ class GpuGuard:
         self.signals = await self.detector() + await self.vram_floor(self.control.flagged)
         self.last_check = time.time()
         keys = frozenset(s["key"] for s in self.signals)
-        if self.override is not None and (not keys or not keys <= self.override):
+        if self.vram_acknowledged and await self._floor_recovered():
+            self.vram_acknowledged = False
+        floor_key = {VRAM_LOW_KEY} if self.vram_acknowledged else set()
+        triggers = keys - (self.override or frozenset()) - floor_key
+        if triggers:  # a new trigger ends both
+            self.override, self.vram_acknowledged = None, False
+        elif not keys - floor_key:
             self.override = None
-        want = self.manual or (bool(keys) and self.override is None)
+        want = self.manual or bool(triggers)
         now = time.monotonic()
 
         if want:
@@ -727,6 +744,13 @@ class GpuGuard:
             return
 
         await self._release(startup, now)
+
+    async def _floor_recovered(self) -> bool:
+        """Off, or free VRAM read at or above the floor with the model loaded. Until it has loaded the model isn't on
+        the card, so a high reading says nothing about whether the two fit."""
+        if self.cfg.min_free_vram_mib <= 0:
+            return True
+        return self.vram_floor.recovered and await self.model_loaded()
 
     async def _release(self, startup: bool, now: float) -> None:
         if self._clear_since is None:
@@ -758,6 +782,7 @@ class GpuGuard:
             self._finish_resume()
 
     async def _hold(self, now: float) -> None:
+        self._floor_in_pause = self._floor_in_pause or any(s["key"] == VRAM_LOW_KEY for s in self.signals)
         self._clear_since = None
         self._resume_now = False
         if self.state == PAUSED and self.manual and self.memory_hold:
@@ -802,6 +827,7 @@ class GpuGuard:
         seconds = time.time() - self._paused_at if self._paused_at else 0.0
         self.paused_seconds_total += seconds
         self.reasons = []
+        self._floor_in_pause = False
         self._set(CLEAR)
         if self.on_resume:
             self.on_resume(seconds)

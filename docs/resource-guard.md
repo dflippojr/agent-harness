@@ -34,7 +34,7 @@ this repository doesn't.
 
 - **When it fires.** Each poll takes a fresh `nvidia-smi` reading, never the 10 s one `/metrics` caches. Free VRAM under
   the floor on two polls in a row raises one signal: key `vram:low`, kind `vram`, and a detail with both figures in MiB.
-  The key holds no reading, so a changing figure can't look like a new trigger to a *Resume anyway* override.
+  The key holds no reading, so a changing figure can't look like a new trigger.
 - **What resets the count.** A reading at or above the floor, a failed reading, or a reading whose free-VRAM field the
   driver reports as `[N/A]`. A failed reading raises no signal.
 - **Only while the model's server is meant to be up.** With the pause flag there, the count resets and `nvidia-smi`
@@ -48,6 +48,14 @@ this repository doesn't.
   as for any trigger. With nothing queued, the guard goes back to clear and the model stays parked. If something keeps
   VRAM low and a turn is waiting, or a new one asks for the model, the load's memory goes back on the card and the floor
   can park it again, after two polls: the floor doesn't look at what else holds VRAM.
+- ***Resume anyway*.** Pressed any time during a pause the floor was part of (the drain, the parked cooldown, or a RAM
+  wait that followed), it acknowledges the floor. The model can then reload and run under the floor: `vram:low` still
+  shows in `signals`, but it doesn't pause anything. The park hides the signal and the count restarts after a reload,
+  so neither of those ends it. It ends when:
+  - a reading is at or above the floor with the model loaded and awake. A high reading while the model is loading or
+    asleep doesn't count, because the model isn't on the card then, and neither does a failed reading;
+  - a new trigger appears, such as a game: that pauses as usual, and the floor counts again afterwards;
+  - a manual hold is resumed, the floor is set to 0, or the daemon restarts.
 
 `harness_gpu_guard_triggers{kind="vram"}` counts it, and `reasons` in `GET /resources` shows its detail. A floor above
 what the card can ever have free would park every load. #832 adds the warning for that.
