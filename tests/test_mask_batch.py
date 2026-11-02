@@ -315,3 +315,17 @@ def test_read_cost_prices_growth_and_a_rewrite():
     cost(masked)
     assert cost.breaks == 1
     assert cost.first_change - before_first < cost.fallback - before_fallback  # the checkpoint lies before the change
+
+
+def test_read_cost_counts_the_summary_requests_a_replay_sends():
+    """A summary request is a model call the server reads whole; the prompt after it still pays for its own rewrite."""
+    steps = trim_bench.fix_loop()
+    cost = trim_bench.ReadCost()
+    result = trim_bench.replay(steps, trim_bench.MASK_ARMS[0], n=8192, on_prompt=cost, on_summary=cost.summary_request)
+    assert result.summary_calls > 0
+    assert cost.summary_tokens == pytest.approx(result.summary_request_chars / trim_bench.CHARS_PER_TOKEN)
+    without = trim_bench.ReadCost()
+    trim_bench.replay(steps, trim_bench.MASK_ARMS[0], n=8192, on_prompt=without)
+    assert cost.first_change - without.first_change == pytest.approx(cost.summary_tokens)
+    assert cost.fallback - without.fallback == pytest.approx(cost.summary_tokens)
+    assert cost.breaks == without.breaks

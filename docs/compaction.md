@@ -131,8 +131,9 @@ grew reads what is new, and a rewritten one reads from the first change.
 **Fallback** is what the study usually saw: a change within the last 516 tokens
 of the previous prompt reads from there, and any earlier one reads from the end of
 the system prompt and task. A session built up slowly can have checkpoints in
-between, so the real cost is between the two. **Breaks** counts prompts that
-changed something already sent.
+between, so the real cost is between the two. Both columns include summary
+requests, which are read whole. **Breaks** counts agent prompts that changed
+something already sent.
 
 The production window (65,536 tokens):
 
@@ -159,10 +160,10 @@ A 32,768-token window (`--context 32768`):
 
 | Transcript | Arm | Tokens read, first change | Tokens read, fallback | Breaks | Mask passes | Summary calls | Compaction passes | Chars sent |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| test-fix loop (202 turns) | per-turn | 418,602 | 1,186,576 | 122 | 121 | 1 | 26 | 6,467,314 |
-| test-fix loop (202 turns) | batch 0.35 | 421,896 | 972,051 | 77 | 76 | 1 | 12 | 7,349,745 |
-| test-fix loop (202 turns) | batch 0.45 | 422,784 | 964,644 | 74 | 73 | 1 | 12 | 7,883,201 |
-| test-fix loop (202 turns) | batch 0.50 | 423,153 | 932,173 | 67 | 66 | 1 | 12 | 8,280,545 |
+| test-fix loop (202 turns) | per-turn | 431,806 | 1,199,781 | 122 | 121 | 1 | 26 | 6,467,314 |
+| test-fix loop (202 turns) | batch 0.35 | 435,100 | 985,255 | 77 | 76 | 1 | 12 | 7,349,745 |
+| test-fix loop (202 turns) | batch 0.45 | 435,988 | 977,849 | 74 | 73 | 1 | 12 | 7,883,201 |
+| test-fix loop (202 turns) | batch 0.50 | 436,357 | 945,377 | 67 | 66 | 1 | 12 | 8,280,545 |
 | exploration (170 turns) | per-turn | 170,995 | 1,081,224 | 87 | 80 | 0 | 36 | 7,007,982 |
 | exploration (170 turns) | batch 0.35 | 178,559 | 799,853 | 50 | 41 | 0 | 31 | 7,544,369 |
 | exploration (170 turns) | batch 0.45 | 178,577 | 793,862 | 49 | 40 | 0 | 31 | 7,661,357 |

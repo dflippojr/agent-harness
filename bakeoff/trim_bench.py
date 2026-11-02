@@ -19,7 +19,8 @@ docs/jev-compaction-study.md; the scripts are fixed, so this counts recurrences,
 tokens. A prompt that only grew reads what is new. A prompt rewritten earlier reads from the first change at best, and
 on a hybrid model from a checkpoint before it: "fallback" takes the last 516 tokens of the previous prompt when the
 change is among them and otherwise the end of the system prompt and task, what the study usually measured. A session
-built up slowly can have checkpoints in between, so the two columns bound the real cost.
+built up slowly can have checkpoints in between, so the two columns bound the real cost. Both include summary
+requests, which are read whole.
 """
 
 from __future__ import annotations
@@ -205,7 +206,7 @@ def _tokens(context: list[dict]) -> int:
 
 
 def _compact(context: list[dict], arm: Arm, outcomes: dict, mask: bool, turn: int, sigs: dict,
-             result: Result, n: int) -> list[dict]:
+             result: Result, n: int, on_summary: Callable[[list[dict]], None] | None = None) -> list[dict]:
     before = _tokens(context)  # per-turn, the runner compares the size before masking with elide_at
     if mask and compaction.mask_due(before, n, arm.mask_batch_at, arm.elide_at):
         masked, _, saved = compaction.mask_used_results(context, outcomes, MASK_MIN_CHARS)
@@ -233,18 +234,21 @@ def _compact(context: list[dict], arm: Arm, outcomes: dict, mask: bool, turn: in
     request = compaction.summary_request(context, *split, max_chars=int(0.45 * n * CHARS_PER_TOKEN))
     result.summary_calls += 1
     result.summary_request_chars += sum(compaction.message_chars(m) for m in request)
+    if on_summary:
+        on_summary(request)
     return compaction.apply_summary(context, *split, SUMMARY)
 
 
 def replay(steps: list[Step], arm: Arm, mask: bool = True, n: int = CONTEXT_TOKENS,
-           on_prompt: Callable[[list[dict]], None] | None = None) -> Result:
+           on_prompt: Callable[[list[dict]], None] | None = None,
+           on_summary: Callable[[list[dict]], None] | None = None) -> Result:
     result = Result()
     context = [{"role": "system", "content": "You are a software agent. " * 40},
                {"role": "user", "content": "Make the test suite pass and report what you changed."}]
     outcomes: dict[str, dict] = {}
     sigs: dict[str, str] = {}
     for turn, step in enumerate(steps):
-        context = _compact(context, arm, outcomes, mask, turn, sigs, result, n)
+        context = _compact(context, arm, outcomes, mask, turn, sigs, result, n, on_summary)
         result.chars_sent += sum(compaction.message_chars(m) for m in context) + OVERHEAD_CHARS
         if on_prompt:
             on_prompt(context)
@@ -266,7 +270,15 @@ class ReadCost:
 
     def __init__(self) -> None:
         self.previous: list[dict] = []
-        self.first_change = self.fallback = self.breaks = 0.0
+        self.first_change = self.fallback = self.breaks = self.summary_tokens = 0.0
+
+    def summary_request(self, request: list[dict]) -> None:
+        """An `on_summary`: the server reads a summary request whole, since it differs at the first message. `previous`
+        stays the last agent prompt, as in the study, so the prompt after it pays for the summary's rewrite."""
+        tokens = sum(compaction.message_chars(m) for m in request) / CHARS_PER_TOKEN
+        self.summary_tokens += tokens
+        self.first_change += tokens
+        self.fallback += tokens
 
     def __call__(self, context: list[dict]) -> None:
         def size(messages: list[dict]) -> int:
@@ -330,7 +342,7 @@ def mask_table(n: int = CONTEXT_TOKENS) -> str:
         steps = make()
         for arm in MASK_ARMS:
             cost = ReadCost()
-            r = replay(steps, arm, n=n, on_prompt=cost)
+            r = replay(steps, arm, n=n, on_prompt=cost, on_summary=cost.summary_request)
             rows.append(f"| {name} ({len(steps)} turns) | {arm.name} | {int(cost.first_change):,} | {int(cost.fallback):,} | "
                         f"{int(cost.breaks)} | {r.mask_passes} | {r.summary_calls} | {r.passes} | {r.chars_sent:,} |")
     return "\n".join(rows)
