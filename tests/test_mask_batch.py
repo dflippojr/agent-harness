@@ -107,8 +107,8 @@ def test_a_session_masks_each_result_one_turn_after_it_is_used(monkeypatch, tmp_
     assert [receipts(r) for r in run_session(monkeypatch, tmp_path)] == PER_TURN
 
 
-def test_the_shipped_setting_is_off():
-    assert config_mod.load(config_mod.ROOT / "config").mask_batch_at == 0
+def test_the_shipped_setting_is_off(tmp_path):
+    assert config_mod.load(config_mod.ROOT / "config", tmp_path / "data").mask_batch_at == 0
 
 
 def test_a_session_with_the_setting_named_off_sends_the_same_prompts(monkeypatch, tmp_path):
