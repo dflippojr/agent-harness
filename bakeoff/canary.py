@@ -8,6 +8,7 @@ The daemon calls `CanaryRunner.run` from its nightly trigger (harness/canary.py)
     python -m bakeoff.canary --tasks sqlite_report --repeats 1
     python -m bakeoff.canary --heldout --repeats 3  # #674 calibration: the held-out tasks, never the nightly set
     python -m bakeoff.canary --plan-reinject        # #641: the set with planning.reinject on (docs/compaction.md)
+    python -m bakeoff.canary --mask-batch-at 0.45   # #855: the set with batched masking on (docs/compaction.md)
     python -m bakeoff.canary --xy --system-line "..."  # #773: XY-problem variants, an extra project-instructions line
     python -m bakeoff.canary --tasks log_correlation --repeats 1 --keep-metrics runs/m.json --capture-prompts runs/p.jsonl
                                                     # #774: per-turn cache reuse and the exact prompts (prefix study)
@@ -36,6 +37,7 @@ from typing import Callable
 import yaml
 
 from harness.canary import HARD_PROJECT, WALL_LIMIT, WEB_PROJECT, CanaryConfigError, Report
+from harness.config import _mask_batch_at
 
 from .tasks import Context, hash_tree, materialize
 from .tasks_hard import HARD_TASKS
@@ -321,7 +323,8 @@ def turn_metrics_by_session(db) -> list[dict]:
 # by hand, daemon stopped
 async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path, heldout: bool = False,
                          plan_reinject: bool = False, xy: bool = False, system_line: str = "",
-                         keep_metrics: Path | None = None, capture_prompts: Path | None = None) -> Path:
+                         keep_metrics: Path | None = None, capture_prompts: Path | None = None,
+                         mask_batch_at: float = 0.0) -> Path:
     from harness import config as config_mod
     from harness.manager import Manager
 
@@ -340,7 +343,8 @@ async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path
                             projects={"scratch": config_mod.Project(name="scratch")}, canary=canary_cfg,
                             web=config_mod.WebConfig(enabled=True, page_chars=base.web.page_chars,
                                                      fixture_dir=str(fixture)),
-                            planning=config_mod.PlanningConfig(reinject=plan_reinject or base.planning.reinject))
+                            planning=config_mod.PlanningConfig(reinject=plan_reinject or base.planning.reinject),
+                            mask_batch_at=mask_batch_at)
     capture = PromptCapture(capture_prompts) if capture_prompts else None
     m = Manager(cfg, chat=capture) if capture else Manager(cfg)
     if capture:
@@ -357,7 +361,7 @@ async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path
         m.db.close()
         shutil.rmtree(tmp, ignore_errors=True)
     name = ("heldout" if heldout else "xy" if xy else "canary") + ("-plan" if cfg.planning.reinject else "") + (
-        "-line" if system_line else "")
+        "-line" if system_line else "") + ("-mask-batch" if mask_batch_at else "")
     out = ROOT / "runs" / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps({"status": report.status, "xy": xy, "system_line": system_line,
@@ -375,6 +379,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--heldout", action="store_true", help="the #673 held-out tasks (3 repeats unless --repeats)")
     parser.add_argument("--plan-reinject", action="store_true",
                         help="#641: re-inject the saved plan every turn (planning.reinject), whatever harness.yaml says")
+    parser.add_argument("--mask-batch-at", type=float, default=0.0, metavar="SHARE",
+                        help="#855: batch observation masking at this share of the window (below elide_at, 0.55)")
     parser.add_argument("--xy", action="store_true",
                         help="#773: the XY-problem variants (bakeoff/tasks_xy.py; 2 repeats unless --repeats)")
     parser.add_argument("--system-line", default="", metavar="TEXT",
@@ -386,7 +392,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.heldout and args.xy:
         parser.error("--heldout and --xy are separate task sets; pick one")
-    debug = {k: v for k, v in (("keep_metrics", args.keep_metrics), ("capture_prompts", args.capture_prompts)) if v}
+    if args.mask_batch_at and not _mask_batch_at(args.mask_batch_at):
+        parser.error("--mask-batch-at must be a share of the window below elide_at (0.55)")
+    debug = {k: v for k, v in (("keep_metrics", args.keep_metrics), ("capture_prompts", args.capture_prompts),
+                               ("mask_batch_at", args.mask_batch_at)) if v}
     asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture,
                                heldout=args.heldout, plan_reinject=args.plan_reinject, xy=args.xy,
                                system_line=args.system_line.strip(), **debug))

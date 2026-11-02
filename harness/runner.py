@@ -3354,20 +3354,18 @@ class Runner:
         context, artifacts, masked_chars, outcomes = s["context"], {}, 0, None
         if self.artifact_tool_available(s):  # a receipt tells the model to call read_artifact
             outcomes = self._tool_outcomes(sid)  # loaded once a pass: trim reuses them
-            context, artifacts, masked_chars = self._mask_used_results(s, outcomes)
-        if artifacts:
-            def mask_results() -> None:
-                for digest, content in artifacts.items():
-                    self.db.put_artifact(sid, digest, content)
-                self.db.update_session(sid, context=context)
-                if masked_chars > 0:
-                    self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
-                                                       "characters_saved": masked_chars})
-            await self.db.for_session(s["id"]).awrite(mask_results)
+            if compaction.mask_due(before, n, self.cfg.mask_batch_at, self.cfg.elide_at):
+                masked, found, saved = self._mask_used_results(s, outcomes)
+                if compaction.mask_batch_worthwhile(saved / cpt, before, n, self.cfg.mask_batch_at, self.cfg.elide_at):
+                    context, artifacts, masked_chars = masked, found, saved
+        await self._store_masked(sid, context, artifacts, masked_chars, cpt)
         s = self.db.get_session(sid)
+        # Per-turn masking keeps `before` close to the masked size. A batch can be most of it, and what it frees is
+        # no reason to reset or elide.
+        pressure = compaction.estimate_tokens(context, cpt) + overhead if self.cfg.mask_batch_at else before
         explicit = bool(s["run"].get("pending_round_reset"))
         valid = self.has_valid_saved_state(s)
-        if (explicit or before >= self.cfg.reset_at * n) and valid:
+        if (explicit or pressure >= self.cfg.reset_at * n) and valid:
             with telemetry.span("compaction", {"harness.compaction_tier": "round_reset",
                                                "harness.tokens_before": before}):
                 return self._round_reset(s, context, before, cpt, overhead)
@@ -3376,16 +3374,33 @@ class Runner:
             run.pop("pending_round_reset", None)
             self.db.update_session(sid, run=run)
             s = self.db.get_session(sid)
-        if before < self.cfg.elide_at * n:
+        if pressure < self.cfg.elide_at * n:
             return s
         return await self._elide_and_summarize(s, context, before, cpt, overhead, outcomes=outcomes)
+
+    async def _store_masked(self, sid: str, context: list, artifacts: dict, masked_chars: int, cpt: float) -> None:
+        if not artifacts:
+            return
+
+        def mask_results() -> None:
+            for digest, content in artifacts.items():
+                self.db.put_artifact(sid, digest, content)
+            self.db.update_session(sid, context=context)
+            if masked_chars > 0:
+                self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
+                                                   "characters_saved": masked_chars})
+        await self.db.for_session(sid).awrite(mask_results)
 
     async def _compact_on_overflow(self, s: dict) -> dict:
         """The model server rejected the prompt as too long: one summary pass whatever `summarize_at` says."""
         cpt = s["run"].get("chars_per_token", 3.0)
         overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
-        return await self._elide_and_summarize(s, s["context"], before, cpt, overhead, overflow=True)
+        context = s["context"]
+        if self.cfg.mask_batch_at and self.artifact_tool_available(s):  # results a batch hasn't reached yet go first
+            context, artifacts, masked_chars = self._mask_used_results(s, self._tool_outcomes(s["id"]))
+            await self._store_masked(s["id"], context, artifacts, masked_chars, cpt)
+        return await self._elide_and_summarize(s, context, before, cpt, overhead, overflow=True)
 
     async def _elide_and_summarize(self, s: dict, context: list, before: int, cpt: float, overhead: int,
                                    overflow: bool = False, outcomes: dict | None = None) -> dict:

@@ -1,0 +1,29 @@
+{
+ "digests": {
+  "build failures | 32768 | mask=False | baseline": "beba968af077632878f8fc85a7302395fcb0e4c33388bdd1d5d296105b24567a",
+  "build failures | 32768 | mask=False | trim": "8e80f29e8e2871f3d4617e19c64a7ed8c9feb50d0a2ffc0fc4ea26327f5b08dc",
+  "build failures | 32768 | mask=True | baseline": "47541b46d0fc8b142be11fda2ef9d2492e0cf490967d4955c9f7059e44229be0",
+  "build failures | 32768 | mask=True | trim": "47541b46d0fc8b142be11fda2ef9d2492e0cf490967d4955c9f7059e44229be0",
+  "build failures | 65536 | mask=False | baseline": "17435c00b0074d25c8f07be777f651a0cc938d1118ec0e3ebed443de1812e3ba",
+  "build failures | 65536 | mask=False | trim": "e0a41169a44809604cbd3672468a9b1a677db83a704dec7be37c749ddb2f667d",
+  "build failures | 65536 | mask=True | baseline": "47541b46d0fc8b142be11fda2ef9d2492e0cf490967d4955c9f7059e44229be0",
+  "build failures | 65536 | mask=True | trim": "47541b46d0fc8b142be11fda2ef9d2492e0cf490967d4955c9f7059e44229be0",
+  "exploration | 32768 | mask=False | baseline": "a89801f0f2a1fa92d006bfef5f7f96e9395c2a6f9746fecae4d05e9c253fcea6",
+  "exploration | 32768 | mask=False | trim": "6af45ac2d0f1ce9f8171fa78e304fd5817db5fe4bdb39e024e9e09edf3aa3fbc",
+  "exploration | 32768 | mask=True | baseline": "f5ee141cf9bc661f18137733c829806d4becd0e1e707b0e447452dd5ac385887",
+  "exploration | 32768 | mask=True | trim": "4122de7d616da154e070b2df38071f8804e76dc55a08de7be2d2b1fd62edd90e",
+  "exploration | 65536 | mask=False | baseline": "06ab9df3d86f9023b3d72553b4ba10a3bd8de8350c8c95cdc4325eaf46999285",
+  "exploration | 65536 | mask=False | trim": "aa50bbbca2fe98798586278f6763b834d0db856d77af9eb15e110fdbb4867aa0",
+  "exploration | 65536 | mask=True | baseline": "052df0008c9e7612ff0ed2c5416e6629a29843ea4a7ba7ce01294cb7820e42f3",
+  "exploration | 65536 | mask=True | trim": "fcd25c92bb74366349419d6163c41420cdbbae94262108a6dc7fc89e5f4848c3",
+  "test-fix loop | 32768 | mask=False | baseline": "bce60c4343e97d1e9102672d62e9e65533cf2e426df4c45a60a728a204695ae8",
+  "test-fix loop | 32768 | mask=False | trim": "95166aacf3a906e0f37842eb273a7a85e90efb7be520a5fb02a3938dea2d7065",
+  "test-fix loop | 32768 | mask=True | baseline": "740cd602a92f32249795fe0a11556b00372a1a9095ccfa6b50cc16b52cbec97a",
+  "test-fix loop | 32768 | mask=True | trim": "740cd602a92f32249795fe0a11556b00372a1a9095ccfa6b50cc16b52cbec97a",
+  "test-fix loop | 65536 | mask=False | baseline": "93743bc71d73384749bc8140fad74a68510532d113d367fa71494b611bde60f1",
+  "test-fix loop | 65536 | mask=False | trim": "1bac151399b3773303f1b652d9484457ffe170c44c4f78d797f8a993cf049c71",
+  "test-fix loop | 65536 | mask=True | baseline": "d9f9dc22fe2a029f8b21e97be338ac892458773768dd03fb5cc3b87fd07c8e44",
+  "test-fix loop | 65536 | mask=True | trim": "d9f9dc22fe2a029f8b21e97be338ac892458773768dd03fb5cc3b87fd07c8e44"
+ },
+ "overhead_chars": 5550
+}
