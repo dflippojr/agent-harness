@@ -633,10 +633,19 @@ user must own the live checkout and its parent directory (deployments stage envi
 it), write `~/.local/share/agent-harness/bin/run-daemon.sh`, use Docker, and have `pwsh` 7 on its `PATH`. No sudo or
 sudoers rule is involved.
 
-Register it with a fresh short-lived token (`gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token
---jq .token`) and the official runner's `./config.sh --url https://github.com/dflippojr/agent-harness --token <token>
---labels agent-harness-tower-linux`. The token is never saved. Then keep it running as a systemd user unit of
-`daniel` beside the production units, for example `~/.config/systemd/user/github-runner-agent-harness.service`:
+Register it with a fresh short-lived token and the official runner's `config.sh`, under the name the health check
+below looks for. The token is never saved, and goes in the environment rather than on a command line:
+
+```
+ACTIONS_RUNNER_INPUT_TOKEN="$(gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token)" \
+    ./config.sh --unattended --url https://github.com/dflippojr/agent-harness \
+    --name dflippotower-linux-agent-harness --labels agent-harness-tower-linux
+install -m 0755 bin/runsvc.sh runsvc.sh
+install -m 0755 /home/daniel/Projects/agent-harness/ops/github/runner-stop.sh runner-stop.sh
+```
+
+Then keep it running as a systemd user unit of `daniel` beside the production units, at
+`~/.config/systemd/user/github-runner-agent-harness.service`:
 
 ```
 [Unit]
@@ -644,11 +653,12 @@ Description=GitHub Actions runner for dflippojr/agent-harness (agent-harness-tow
 After=network-online.target
 
 [Service]
-ExecStart=<runner dir>/run.sh
+ExecStart=<runner dir>/runsvc.sh
+ExecStop=<runner dir>/runner-stop.sh
 WorkingDirectory=<runner dir>
-KillMode=process
-KillSignal=SIGTERM
-TimeoutStopSec=5min
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=6min
 
 [Install]
 WantedBy=default.target
@@ -658,34 +668,171 @@ and `systemctl --user daemon-reload`, `systemctl --user enable --now github-runn
 deployment also works from a runner started another way as `daniel`, since it sets `XDG_RUNTIME_DIR` itself. The
 `tower-production` environment keeps its protection.
 
-Before the first real deployment, dry-run the script on the tower as `daniel`, against the real paths. It changes
-nothing and never stops or starts the unit; it reads the unit with `systemctl --user show`:
+`runsvc.sh` takes its `PATH` from the `.path` file `config.sh` writes, not from the unit, so run `config.sh` from a
+shell whose `PATH` has `pwsh`, `gh` and Docker.
+
+### How the runner stops
+
+These settings stop the whole runner tree, and they differ from the unit the runner's own `svc.sh` writes.
+
+**Why `KillMode=process` was wrong.** The earlier unit ran `run.sh` with `KillMode=process` and `KillSignal=SIGTERM`. A
+stop signalled `run.sh` alone, so `run.sh` died and `Runner.Listener` stayed alive, orphaned. When the runner was then
+re-registered, that orphaned listener wiped the new registration's `.credentials`: the runner looked registered and was
+dead, with nothing to report it (#814).
+
+**Why `mixed`, not `control-group`.** `KillMode=control-group` sends the signal to every process in the unit, so a
+running job's steps get SIGINT at the same moment as the listener, before the runner can act on it. `KillMode=mixed`
+sends it to the main process first, and SIGKILL to whatever is left once the main process has exited or
+`TimeoutStopSec` has passed. So the runner handles the stop itself, and nothing can outlive it.
+
+**Why `runsvc.sh`, not `run.sh`.** `mixed` signals only the main process, so that process must pass the signal on.
+`runsvc.sh` does: it forwards SIGINT to `bin/RunnerService.js`, which sends it to the listener alone. `run.sh` doesn't
+forward it, so the stop would wait out `TimeoutStopSec` and end in SIGKILL. Setting `RUNNER_MANUALLY_TRAP_SIG=1` makes
+`run.sh` signal the listener's whole process group, which reaches the steps the way `control-group` does.
+
+**Why `runner-stop.sh`.** `RunnerService.js` kills the listener with SIGKILL 30 seconds after any signal, and `mixed` then
+kills what's left, so going through `runsvc.sh` alone gives a job's cleanup 30 seconds whatever `TimeoutStopSec` says.
+`ExecStop=` runs first, before systemd signals anything. `ops/github/runner-stop.sh` sends SIGINT straight to the
+listener, without that deadline, and waits up to 5 minutes. If the listener is still there after that, systemd goes on
+to signal `runsvc.sh`, so the 30-second kill and `mixed` still end the stop. `TimeoutStopSec=6min` stays above the
+script's 5 minutes, so systemd doesn't cut that wait short.
+
+**What a stop does to a running job.** It doesn't wait for the job to run to completion: the listener's SIGINT handler
+cancels the running job, and then waits for the worker, so steps get the runner's normal cancellation and the job's
+cleanup steps can run, for up to the 5 minutes. A job's cleanup that needs longer is killed. These are runner release
+2.337.0's scripts; recheck them when the pinned release changes. Before a restart, check that the runner is idle, because
+stopping it mid-`deploy-tower` cancels the deploy:
 
 ```
-git clone --depth 1 https://github.com/dflippojr/agent-harness /tmp/ah-release
-gh repo clone dflippojr/stables /tmp/ah-stables -- --depth 1 --branch "$(jq -r .tag /tmp/ah-release/tools/stables/pin.json)"
-pwsh -NoProfile -File /tmp/ah-release/ops/harness/deploy-ci.ps1 -DryRun \
-    -Commit "$(git -C /tmp/ah-release rev-parse HEAD)" -ReleaseRoot /tmp/ah-release -StablesRelease /tmp/ah-stables
+pgrep -fa '<runner dir>/bin/Runner.Worker' || echo idle
 ```
 
-It prints `[deploy] agent-harness-main-daemon.service runs /home/daniel/.local/share/agent-harness/bin/run-daemon.sh`,
-then each step it would take (`[dry run] systemctl --user stop ...`, the venv and pip commands, the pointer writes,
-the fast-forward, the image tags), and fails, before any of them, on the same guards a real run checks: a missing user
-unit, a unit that runs another supervisor or checkout, a dirty or non-`main` live checkout.
+### Re-registering the deploy runner
 
-The live checkout must itself be on `main`; deployment intentionally fails closed on another branch or detached HEAD.
-After first confirming that the checkout has no work that must be preserved, put it on `main` and fast-forward it:
+Stop the service first and check that no listener is left. `config.sh` writes the credentials a leftover listener
+would wipe, so don't go on until this prints `no listener`. If it prints a process, stop that process and check again.
 
 ```
-cd /home/daniel/Projects/agent-harness
-git status --short
-git switch main
-git fetch origin
-git merge --ff-only origin/main
+systemctl --user stop github-runner-agent-harness.service
+pgrep -fa '<runner dir>/bin/Runner.Listener' || echo 'no listener'
 ```
 
-Do this as an explicit maintenance action, not from the Actions runner. Never discard local changes to make a deploy
-pass.
+Then register it again and start it:
+
+```
+cd <runner dir>
+ACTIONS_RUNNER_INPUT_TOKEN="$(gh api -X POST repos/dflippojr/agent-harness/actions/runners/remove-token --jq .token)" \
+    ./config.sh remove
+ACTIONS_RUNNER_INPUT_TOKEN="$(gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token)" \
+    ./config.sh --unattended --url https://github.com/dflippojr/agent-harness \
+    --name dflippotower-linux-agent-harness --labels agent-harness-tower-linux
+systemctl --user start github-runner-agent-harness.service
+sleep 60; ls -l .credentials; systemctl --user is-active github-runner-agent-harness.service
+```
+
+`.credentials` should still be there a minute later, with the service active.
+
+### Runner health check
+
+`ops/github/runner-health.sh`, run every 5 minutes by the `runner-health.timer` user unit, raises an ntfy alert within 10
+minutes when the deploy runner stops working. A service stop is seen within about 5.5 minutes (the 5-minute timer and
+its 30-second accuracy). The rest of the 10 minutes allows for GitHub's delay in marking a dead runner offline, which
+this repository hasn't measured; step 6 below measures it.
+
+It asks both `systemctl --user is-active` and GitHub's runners API, because the service being active isn't enough: the
+runner in the incident above looked registered and was dead.
+
+| What it finds | Alert title |
+| --- | --- |
+| The service isn't active | Deploy runner: service not running |
+| GitHub reports `dflippotower-linux-agent-harness` offline, or doesn't list it | Deploy runner offline |
+| `systemctl` or the API can't answer: unreachable, 401 or 403, an unexpected answer, or no usable token | Deploy runner: can't tell if it is healthy |
+| Healthy again after any of these | Deploy runner recovered |
+
+One outage raises one alert rather than one every 5 minutes. A short GitHub outage raises a "can't tell" alert and a
+recovery notice. If ntfy doesn't accept a notice, the check fails and sends it again next time. The state file records
+what each check observed, what ntfy last accepted, and whether the current occurrence's notice is still pending, so a
+refused notice can't hide the next outage, and an outage that ends before any alert got through raises no recovery
+notice. The alerts run on the tower, so if the whole tower is down, or the timer isn't running,
+nothing alerts: `systemctl --user list-timers runner-health.timer` shows when it last ran.
+
+### Applying this on the tower
+
+Workers don't change the live runner: the owner or liaison does these steps, with the runner idle, once this change is
+on the live checkout's `main`.
+
+1. **Change the runner's unit.** Copy the new runner file and edit the unit to match the one above, then check the `PATH`
+   it will run with:
+
+   ```
+   cd <runner dir>
+   install -m 0755 bin/runsvc.sh runsvc.sh
+   install -m 0755 /home/daniel/Projects/agent-harness/ops/github/runner-stop.sh runner-stop.sh
+   ( PATH="$(cat .path)"; command -v pwsh gh docker )
+   systemctl --user edit --full github-runner-agent-harness.service
+   ```
+
+2. **Check a restart.** `systemctl --user restart` must leave only the new listener, and a stop must leave none:
+
+   ```
+   systemctl --user restart github-runner-agent-harness.service
+   pgrep -fa '<runner dir>/bin/Runner.Listener'      # one listener
+   systemctl --user stop github-runner-agent-harness.service
+   pgrep -fa '<runner dir>/bin/Runner.Listener'      # nothing
+   systemctl --user start github-runner-agent-harness.service
+   ```
+
+3. **Check a re-registration** by following the steps above once: it must keep its `.credentials`, and the runner must
+   be online in GitHub (**Settings > Actions > Runners**) a few minutes later.
+
+4. **Create the credentials.** The API check uses a fine-grained personal access token, scoped to
+   `dflippojr/agent-harness` alone with the repository permission **Administration: read-only** (listing runners needs
+   it; the workers' token gets a 403). It lives in a file only `daniel` can read, outside the checkout. Deploy jobs run as
+   `daniel` and could read it, which is why it gets nothing beyond read access. It expires when the owner chooses: an
+   expired token raises the "can't tell" alert. The ntfy token is the daemon's `notify.token_file`.
+
+   ```
+   mkdir -p -m 0700 ~/.config/agent-harness
+   install -m 0600 /dev/null ~/.config/agent-harness/runner-health-github-token
+   # Paste the token into that file, then write the settings:
+   cat > ~/.config/agent-harness/runner-health.env <<'EOF'
+   RUNNER_HEALTH_NTFY_SERVER=<notify.server>
+   RUNNER_HEALTH_NTFY_TOPIC=<notify.topic>
+   RUNNER_HEALTH_NTFY_TOKEN_FILE=<notify.token_file>
+   RUNNER_HEALTH_GH_TOKEN_FILE=/home/daniel/.config/agent-harness/runner-health-github-token
+   EOF
+   ```
+
+5. **Install the unit and timer:**
+
+   ```
+   cd /home/daniel/Projects/agent-harness/ops/github
+   install -m 0644 runner-health.service runner-health.timer ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user enable --now runner-health.timer
+   ```
+
+6. **Check an alert.** Stop the runner service, wait for the alert (at most 10 minutes), start it again and wait for the
+   recovery notice. The stop alerts on the service first, so also watch **Settings > Actions > Runners** and note how
+   long GitHub takes to show the runner offline: the 10 minutes assumes that delay is under about 4 minutes. A longer
+   delay means the stated interval needs changing here.
+
+7. **Change the review pool's units.** The installer writes the new stop settings for new members only. For each existing
+   member, from the checkout, copy the stop script in as the service user, then `sudo systemctl edit <unit>` and add the
+   lines below. Restart it while it's idle. These units already run `runsvc.sh`.
+
+   ```
+   sudo -u github-runner tee <member dir>/runner-stop.sh < ops/github/runner-stop.sh > /dev/null
+   sudo -u github-runner chmod 0755 <member dir>/runner-stop.sh
+   ```
+
+   ```
+   [Service]
+   ExecStop=<member dir>/runner-stop.sh
+   KillMode=mixed
+   KillSignal=SIGINT
+   TimeoutStopSec=6min
+   ```
 
 ## Review runner pool
 
@@ -714,7 +861,8 @@ service user can read it (in `/proc/<pid>/environ`), and the token is spent once
 Each member unpacks the pinned runner release (SHA-256 checked) into
 `/home/github-runner/runners/<name>`, registers it as the `github-runner` service user (created if missing, with no
 sudo or docker group), and installs the systemd unit `svc.sh install github-runner` would
-(`actions.runner.<owner>-<repo>.<name>.service`, `User=github-runner`), so it starts at boot into Ubuntu (every boot only after step 11; until then a reboot lands in
+(`actions.runner.<owner>-<repo>.<name>.service`, `User=github-runner`), except for its
+[stop settings](#how-the-runner-stops), so it starts at boot into Ubuntu (every boot only after step 11; until then a reboot lands in
 Windows) and jobs never run as root.
 The service user owns that tree, so root acts on nothing in it. The installer refuses a destination with a symlink in
 it, or under a `/` or `/home` that is not root's alone. The service user creates the directory and unpacks the runner,
@@ -722,7 +870,7 @@ with root feeding it the checked archive on stdin. Root writes the unit itself r
 
 `--user` and `--install-dir` choose another user or directory. The directory must stay under `/home`, because the
 publication scan rejects home-directory paths and so cannot post a leaked runner path. A consumer repository's runner
-adds `--repo dflippojr/<project> --labels <project>-review`. `--dry-run` prints the plan and changes nothing. Install `pwsh`, `git` and `gh` for the service user, and log in its Codex, Claude and Cursor CLIs
+adds `--repo dflippojr/<project> --labels <project>-review`. `--dry-run` prints the plan, with the unit it would write, and changes nothing. Install `pwsh`, `git` and `gh` for the service user, and log in its Codex, Claude and Cursor CLIs
 as that user (`sudo -iu github-runner`), before dispatching a review.
 
 To repair or remove a member, delete the runner in GitHub (**Settings > Actions > Runners**), then

@@ -1,0 +1,12 @@
+# Runs runner-health.service every 5 minutes (#814). docs/CI-CD.md states the alert interval this gives.
+[Unit]
+Description=Check the deploy runner every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=30s
+Persistent=true
+Unit=runner-health.service
+
+[Install]
+WantedBy=timers.target
