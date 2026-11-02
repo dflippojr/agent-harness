@@ -30,20 +30,36 @@ def _run(args: list[str], timeout: float = 5) -> str | None:
     return done.stdout if done.returncode == 0 else None
 
 
+def _number(text: str) -> float | None:
+    """One nvidia-smi field as a number; None for [N/A] or [Not Supported], where the driver doesn't report it."""
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def gpu_reading(cached: bool = False) -> dict | None:
-    """VRAM used/total in bytes and GPU load in percent from nvidia-smi (the first GPU)."""
+    """VRAM used/total in bytes, GPU load in percent, and free VRAM (bytes) and NVENC session count (#833), from
+    nvidia-smi (the first GPU). The first three fields must parse or there is no reading; free VRAM and the session
+    count are None on their own when the driver reports [N/A]."""
     global _gpu_cache
     if cached and time.monotonic() - _gpu_cache[0] < GPU_CACHE_SECONDS:
         return _gpu_cache[1]
-    out = _run(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu",
+    out = _run(["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu,memory.free,encoder.stats.sessionCount",
                 "--format=csv,noheader,nounits"])
     reading = None
     if out and out.strip():
+        fields = [x.strip() for x in out.strip().splitlines()[0].split(",")]
         try:
-            used, total, load = (float(x) for x in out.strip().splitlines()[0].split(","))
-            reading = {"vram_used": int(used * MIB), "vram_total": int(total * MIB), "gpu_load": load}
+            used, total, load = (float(x) for x in fields[:3])
         except ValueError:
-            reading = None
+            used = None
+        if used is not None:
+            free = _number(fields[3]) if len(fields) > 3 else None
+            sessions = _number(fields[4]) if len(fields) > 4 else None
+            reading = {"vram_used": int(used * MIB), "vram_total": int(total * MIB), "gpu_load": load,
+                       "vram_free": None if free is None else int(free * MIB),
+                       "nvenc_sessions": None if sessions is None else int(sessions)}
     _gpu_cache = (time.monotonic(), reading)
     return reading
 
