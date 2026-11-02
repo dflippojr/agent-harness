@@ -407,9 +407,13 @@ conservative: benign prose and examples matching a credential or path rule are a
 tells the backend to cite only repository-relative paths and describe credentials in words. A run of 40 or more token characters is not
 treated as a token when it reads as an identifier (only letters, slashes, underscores and hyphens, with at least one
 underscore or hyphen, and digits only as up to four ending a lowercase word, as in `c1` or `sha256`), so long test and
-function names stay publishable. A rejection logs a warning per hit naming the rule, the scan form (`raw`, `decoded`,
-`unescaped`, `rendered`, `literal`, `html`, `github`, `github-decoded` or `github-unescaped`) and the offset and length
-of the match, never the matched text. The base ref in the coverage
+function names stay publishable. Nor is a run of 40 to 64 letters and nothing else, so a long camelCase test name
+publishes in a review body; job-log diagnostics still redact it. Every other shape stays a token, including bare
+hexadecimal, so a review that quotes a commit sha should quote a short one. A rejection logs a warning per hit naming the
+rule, the scan form (`raw`, `decoded`, `unescaped`, `rendered`, `literal`, `html`, `github`, `github-decoded` or
+`github-unescaped`) and the offset and length of the match, never the matched text. A `long-token` hit also names the
+match's character classes (`lowercase`, `uppercase`, `digit`, `other`), never a character, so a false positive can be
+diagnosed from the log. The base ref in the coverage
 marker is already validated as a branch name and is checked against the credential patterns only. For publication, the bearer
 and named-credential rules (`token`, `secret`, `password`, `api_key` and similar followed by `:` or `=`) match only a
 value that looks like a credential: a non-empty quoted literal that is not a reference (`$VAR`, `${{ ... }}`, `%VAR%`,

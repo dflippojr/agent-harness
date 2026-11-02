@@ -617,6 +617,8 @@ Describe 'Review publication safety' {
         if ((Get-ReviewDiagnosticTail -Stderr 'open %2Fhome%2Freviewer then C:\temp\x') -ne '[REDACTED LINE]') { throw 'Encoded prefix survived truncation' }
         if ((Get-ReviewDiagnosticTail -Stderr 'value ghp%5Fsynthetic12345678') -ne '[REDACTED LINE]') { throw 'Encoded token survived' }
         if ((Get-ReviewDiagnosticTail -Stderr 'token=synthetic-value') -ne 'token=[REDACTED]') { throw 'Redaction marker was re-redacted' }
+        # #800 loosens publication only: a job log still redacts a long run of letters.
+        if ((Get-ReviewDiagnosticTail -Stderr 'x recordedExpiryComparedWithPayerClockFails') -ne 'x [REDACTED]') { throw 'Diagnostics exempted a run of letters' }
         $multiline = Get-ReviewDiagnosticTail -Stderr "password=`"synthetic-first`nsynthetic-rest`" done"
         if ($multiline -like '*synthetic*') { throw "Multiline quoted credential survived: $multiline" }
     }
