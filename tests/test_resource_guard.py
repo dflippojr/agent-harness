@@ -701,9 +701,9 @@ def test_gpu_reading_drops_only_the_field_that_is_not_reported(monkeypatch, line
     assert "memory.free,encoder.stats.sessionCount" in asked[0][1]  # the query asks for both new fields
 
 
-@pytest.mark.parametrize("line", ["NaN, 8192, 37, 7168, 2\n", "1024, inf, 37, 7168, 2\n"])
+@pytest.mark.parametrize("line", ["NaN, 8192, 37, 7168, 2\n", "1024, inf, 37, 7168, 2\n", "1e308, 8192, 37, 7168, 2\n"])
 def test_gpu_reading_with_a_non_finite_core_field_is_no_reading(monkeypatch, line):
-    """#833 review: a NaN or inf in VRAM used, total or load is an unparseable reading (None), never an exception."""
+    """#833 review: a NaN, inf or absurdly large figure in VRAM used, total or load is None, never an exception."""
     from harness_modules.local_model import resources
     monkeypatch.setattr(resources, "_run", lambda args, timeout=5: line)
     monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))

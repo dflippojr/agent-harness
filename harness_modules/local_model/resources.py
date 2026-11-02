@@ -8,6 +8,7 @@ so the panel works on a machine without an NVIDIA card or Docker.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import subprocess
 import time
@@ -31,11 +32,13 @@ def _run(args: list[str], timeout: float = 5) -> str | None:
 
 
 def _number(text: str) -> float | None:
-    """One nvidia-smi field as a number; None for [N/A] or [Not Supported], where the driver doesn't report it."""
+    """One nvidia-smi field as a finite number; None for [N/A] or [Not Supported], where the driver doesn't report it,
+    and for NaN or inf, which float() accepts but int() can't convert."""
     try:
-        return float(text)
+        value = float(text)
     except ValueError:
         return None
+    return value if math.isfinite(value) else None
 
 
 def gpu_reading(cached: bool = False) -> dict | None:
@@ -50,16 +53,16 @@ def gpu_reading(cached: bool = False) -> dict | None:
     reading = None
     if out and out.strip():
         fields = [x.strip() for x in out.strip().splitlines()[0].split(",")]
-        try:
-            used, total, load = (float(x) for x in fields[:3])
-        except ValueError:
-            used = None
-        if used is not None:
+        used, total, load = (_number(x) for x in (fields + ["", "", ""])[:3])
+        if used is not None and total is not None and load is not None:
             free = _number(fields[3]) if len(fields) > 3 else None
             sessions = _number(fields[4]) if len(fields) > 4 else None
-            reading = {"vram_used": int(used * MIB), "vram_total": int(total * MIB), "gpu_load": load,
-                       "vram_free": None if free is None else int(free * MIB),
-                       "nvenc_sessions": None if sessions is None else int(sessions)}
+            try:
+                reading = {"vram_used": int(used * MIB), "vram_total": int(total * MIB), "gpu_load": load,
+                           "vram_free": None if free is None else int(free * MIB),
+                           "nvenc_sessions": None if sessions is None else int(sessions)}
+            except OverflowError:  # a finite but absurd figure, e.g. 1e308 MiB, overflows to inf in the MiB product
+                reading = None
     _gpu_cache = (time.monotonic(), reading)
     return reading
 
