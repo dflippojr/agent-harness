@@ -422,7 +422,7 @@ def test_root_refuses_the_fake_root_seam_before_any_host_change(tmp_path, dry_ru
 HEALTH_SCRIPT = ROOT / "ops" / "github" / "runner-health.sh"
 HEALTH_SERVICE = ROOT / "ops" / "github" / "runner-health.service"
 HEALTH_TIMER = ROOT / "ops" / "github" / "runner-health.timer"
-CI_CD_DOC = ROOT / "docs" / "CI-CD.md"
+CI_CD_DOC = ROOT / "docs/CI-CD.md"
 STOP_SETTINGS = ("KillMode=mixed", "KillSignal=SIGINT", "TimeoutStopSec=5min")
 DEPLOY_RUNNER = "dflippotower-linux-agent-harness"
 DEPLOY_SERVICE = "github-runner-agent-harness.service"
