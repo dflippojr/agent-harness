@@ -341,3 +341,26 @@ def test_linux_daemon_unit_working_directory_loads_in_systemd(tmp_path, name):
                                   capture_output=True, text=True, timeout=30, check=False)
         assert "WorkingDirectory" not in verified.stderr, verified.stderr
         assert verified.returncode == 0, verified.stderr
+
+
+def test_linux_daemon_unit_is_not_ordered_after_default_target(tmp_path):
+    """WantedBy=default.target already starts the daemon at login. An After=default.target line made any user unit
+    ordered after the daemon an ordering cycle, and systemd dropped that unit's start job at boot (#889)."""
+    result, unit, _ = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    after = [line for line in unit.read_text().splitlines() if line.startswith("After=")]
+    assert not any("default.target" in line for line in after), unit.read_text()
+
+
+def test_linux_daemon_unit_verifies_with_a_unit_ordered_after_it(tmp_path):
+    """#889's acceptance check: systemd-analyze verifies the daemon unit and a unit ordered After= it. verify does not
+    report the ordering cycle itself, so the first test above is the regression guard for it."""
+    result, daemon, _ = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    dependent = daemon.with_name("agent-harness-main-dependent.service")
+    dependent.write_text("[Unit]\nDescription=Unit ordered after the daemon\nAfter=agent-harness-main-daemon.service\n\n"
+                         "[Service]\nType=oneshot\nExecStart=/bin/true\n\n[Install]\nWantedBy=default.target\n")
+    if shutil.which("systemd-analyze"):
+        verified = subprocess.run(["systemd-analyze", "verify", "--user", str(daemon), str(dependent)],
+                                  capture_output=True, text=True, timeout=30, check=False)
+        assert verified.returncode == 0, verified.stderr

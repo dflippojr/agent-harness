@@ -384,10 +384,11 @@ if [[ $no_start -eq 0 ]]; then
         unit_dir=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
         mkdir -p "$unit_dir"
         daemon_unit="agent-harness-$safe_instance-daemon.service"
+        # No After=default.target: WantedBy=default.target starts the daemon at login, and After= on the target
+        # makes any user unit ordered after the daemon a cycle that systemd drops at boot (#889).
         cat >"$unit_dir/$daemon_unit" <<EOF
 [Unit]
 Description=Agent harness daemon ($instance)
-After=default.target
 
 [Service]
 Type=simple
