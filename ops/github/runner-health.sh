@@ -9,8 +9,10 @@
 #   runner-offline    GitHub reports the runner offline, or doesn't list it
 #   cannot-tell       systemd or GitHub can't answer: a check that can't run must not read as a healthy runner
 #
-# It alerts when the state changes, so one outage raises one alert and its end raises one notice. The state is saved
-# only after ntfy accepts the post, so a failed post is sent again on the next check rather than lost.
+# One outage raises one alert and its end raises one notice. The state file keeps two things apart: what the last check
+# observed, saved after every check, and what ntfy last accepted a notice for, saved only on delivery. So a refused post
+# is sent again on the next check, and a refused recovery notice can't hide the next outage: the healthy check between
+# them is on record.
 #
 # runner-health.timer runs it. Settings come from the environment (runner-health.service's EnvironmentFile):
 #
@@ -36,6 +38,9 @@ NTFY_TOKEN_FILE="${RUNNER_HEALTH_NTFY_TOKEN_FILE:-}"
 GH_TOKEN_FILE="${RUNNER_HEALTH_GH_TOKEN_FILE:-}"
 STATE_FILE="${RUNNER_HEALTH_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-harness/runner-health.state}"
 
+# What the state file holds: the last check's state, and the last state ntfy accepted a notice for.
+observed=healthy
+delivered=healthy
 # What the current check found, and the alert for it.
 state=""
 title=""
@@ -131,9 +136,10 @@ notify() {
     token="$(read_token "$NTFY_TOKEN_FILE")" || return 1
     curl_config="header = \"Authorization: Bearer $token\""
   fi
-  # Every value here is a fixed string or passed validate_settings. Redirects stay off, so the token goes nowhere else,
-  # and only a 2xx counts: curl --fail lets a 3xx through, and an unfollowed redirect published nothing.
-  answer="$(printf '%s\n' "$curl_config" | timeout 60 curl --config - --silent --fail --output /dev/null \
+  # Every value here is a fixed string or passed validate_settings. -q must come first: it stops curl reading the user's
+  # .curlrc, where a trace setting would log the token and a location setting would follow a redirect. Redirects stay off,
+  # so the token goes nowhere else, and only a 2xx counts: --fail lets a 3xx through, and an unfollowed one published nothing.
+  answer="$(printf '%s\n' "$curl_config" | timeout 60 curl -q --config - --silent --fail --output /dev/null \
     --write-out '%{http_code}' --max-time 20 --retry 2 --proto '=https,http' \
     --header 'Content-Type: application/json' --data-raw \
     "{\"topic\":\"$NTFY_TOPIC\",\"title\":\"$title\",\"message\":\"$message\",\"priority\":$priority,\"tags\":[\"$tags\"]}" \
@@ -141,36 +147,63 @@ notify() {
   [[ "$answer" =~ ^2[0-9][0-9]$ ]]
 }
 
+# Reads the state file into observed and delivered. Anything missing or unrecognised reads as healthy.
+load_state() {
+  local key value
+  observed=healthy
+  delivered=healthy
+  [[ -r "$STATE_FILE" ]] || return 0
+  while IFS='=' read -r key value; do
+    case "$value" in healthy|service-inactive|runner-offline|cannot-tell) ;; *) continue ;; esac
+    case "$key" in
+      observed) observed="$value" ;;
+      delivered) delivered="$value" ;;
+    esac
+  done < "$STATE_FILE"
+  return 0
+}
+
 save_state() {
   local dir partial
   dir="$(dirname -- "$STATE_FILE")"
   mkdir -p -m 0700 -- "$dir" || return 1
   partial="$(mktemp "$dir/.runner-health.XXXXXX")" || return 1
-  printf '%s\n' "$state" > "$partial" && mv -f -- "$partial" "$STATE_FILE" || { rm -f -- "$partial"; return 1; }
+  printf 'observed=%s\ndelivered=%s\n' "$state" "$delivered" > "$partial" && mv -f -- "$partial" "$STATE_FILE" \
+    || { rm -f -- "$partial"; return 1; }
+}
+
+# An outage is news if it differs from the last check or from the last notice ntfy accepted. A healthy runner is news
+# only if ntfy accepted an alert whose end hasn't been announced: an outage nobody heard about has nothing to announce.
+notice_due() {
+  if [[ "$state" = healthy ]]; then
+    [[ "$delivered" != healthy ]]
+  else
+    [[ "$state" != "$observed" ]] || [[ "$state" != "$delivered" ]]
+  fi
 }
 
 main() {
-  local previous=""
+  local rc=0
   validate_settings
   check_service
   [[ -n "$state" ]] || check_github
-  [[ ! -r "$STATE_FILE" ]] || IFS= read -r previous < "$STATE_FILE" || true
-  # No state file yet means no outage has been alerted.
-  [[ -n "$previous" ]] || previous=healthy
+  load_state
 
-  echo "runner-health: $state (was $previous)"
-  [[ "$state" != "$previous" ]] || return 0
+  echo "runner-health: $state (was $observed; last notice: $delivered)"
   [[ "$state" != healthy ]] || priority=3
-
-  if ! notify; then
-    echo "runner-health: ntfy did not accept the alert; the next check sends it again" >&2
-    return 1
+  if notice_due; then
+    if notify; then
+      delivered="$state"
+    else
+      echo "runner-health: ntfy did not accept the alert; the next check sends it again" >&2
+      rc=1
+    fi
   fi
   if ! save_state; then
-    echo "runner-health: could not save $STATE_FILE; the next check alerts again" >&2
-    return 1
+    echo "runner-health: could not save $STATE_FILE; the next check may alert again" >&2
+    rc=1
   fi
-  return 0
+  return "$rc"
 }
 
 main

@@ -1033,7 +1033,7 @@ def test_curl_does_not_inherit_the_github_token(health, tmp_path):
 STAND_INS = {
     "main.sh": """#!/bin/bash
 trap 'kill -INT $PID' TERM INT
-env --default-signal=INT ./service.sh &
+env --default-signal=INT "$PWD/service.sh" &
 PID=$!
 wait $PID
 trap - TERM INT
@@ -1046,7 +1046,7 @@ shutdown() {
   TIMER=$!
 }
 trap shutdown INT TERM
-env --default-signal=INT ./Runner.Listener &
+env --default-signal=INT "$PWD/Runner.Listener" &
 LISTENER=$!
 while kill -0 "$LISTENER" 2>/dev/null; do wait "$LISTENER"; done
 [ -z "$TIMER" ] || kill "$TIMER" 2>/dev/null
@@ -1061,7 +1061,7 @@ cancel() {
   exit 0
 }
 trap cancel INT
-./worker.sh &
+"$PWD/worker.sh" &
 WORKER=$!
 while :; do sleep 0.2; done
 """,
@@ -1073,7 +1073,12 @@ cleanup() {
   exit 0
 }
 trap cleanup USR1
-sleep 600 &
+"$PWD/straggler.sh" &
+while :; do sleep 0.2; done
+""",
+    # Started by a job and never told to stop: only KillMode=mixed's SIGKILL ends it.
+    "straggler.sh": """#!/bin/bash
+trap '' INT TERM USR1
 while :; do sleep 0.2; done
 """,
 }
@@ -1115,19 +1120,20 @@ class StoppableUnit:
             capture_output=True, text=True, timeout=30, check=False,
         )
         assert started.returncode == 0, started.stderr
+        # Every process, down to the straggler, so a survivor check afterwards can't pass by looking at nothing.
         deadline = time.monotonic() + 20
-        while not self.running() and time.monotonic() < deadline:
+        while len(self.running()) < len(STAND_INS) and time.monotonic() < deadline:
             time.sleep(0.2)
-        assert self.running(), "the stand-in tree never started"
+        assert len(self.running()) >= len(STAND_INS), "the stand-in tree never started"
 
     def running(self) -> list[str]:
-        """The tree's processes still alive, by the marker in their working directory or command line."""
+        """The tree's processes still alive, from their command lines, which CI's non-root test can read as root's."""
         alive = []
         for entry in Path("/proc").iterdir():
             if not entry.name.isdigit():
                 continue
             try:
-                if os.readlink(entry / "cwd") == str(self.directory):
+                if str(self.directory).encode() in (entry / "cmdline").read_bytes():
                     alive.append(entry.name)
             except OSError:
                 continue

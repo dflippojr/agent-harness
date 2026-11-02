@@ -136,14 +136,18 @@ echo "service user: $RUNNER_USER"
 echo "install directory: $INSTALL_DIR (work: $WORK_DIR)"
 echo "runner release: $VERSION ($archive, sha256 $SHA256)"
 
+# Installed beside runsvc.sh, from the checkout this script runs from.
+stop_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/runner-stop.sh"
+[[ -f "$stop_script" ]] || fail "$stop_script is missing: run this installer from its checkout"
+
 if [[ -e "$dest/.runner" ]]; then
   fail "a runner is already configured in $INSTALL_DIR"
 fi
 
-# svc.sh's unit, except for how it stops (#814). KillMode=mixed sends SIGINT to runsvc.sh alone, which forwards it to the
-# listener, so the runner cancels a running job itself and the job's steps can report it; control-group would signal
-# those steps at the same moment. Whatever is left when runsvc.sh exits or the timeout passes gets SIGKILL, where
-# KillMode=process would leave it running. docs/CI-CD.md has the reasoning.
+# svc.sh's unit, except for how it stops (#814). runner-stop.sh signals the listener first and waits, so the runner can
+# finish cancelling a job: runsvc.sh's own path kills the listener after 30 seconds. KillMode=mixed then sends SIGINT to
+# runsvc.sh alone, and SIGKILL to anything left, where KillMode=process would leave it running and control-group would
+# signal a job's steps directly. TimeoutStopSec stays above runner-stop.sh's 5 minutes. docs/CI-CD.md has the reasoning.
 write_unit() {
   cat <<UNIT
 [Unit]
@@ -152,11 +156,12 @@ After=network-online.target
 
 [Service]
 ExecStart=$INSTALL_DIR/runsvc.sh
+ExecStop=$INSTALL_DIR/runner-stop.sh
 User=$RUNNER_USER
 WorkingDirectory=$INSTALL_DIR
 KillMode=mixed
 KillSignal=SIGINT
-TimeoutStopSec=5min
+TimeoutStopSec=6min
 
 [Install]
 WantedBy=multi-user.target
@@ -227,6 +232,9 @@ ACTIONS_RUNNER_INPUT_TOKEN="$TOKEN" runuser -u "$RUNNER_USER" -- env -C "$dest" 
 write_unit > "$unit_path"
 chmod 0644 "$unit_path"
 runuser -u "$RUNNER_USER" -- install -m 0755 -- "$dest/bin/runsvc.sh" "$dest/runsvc.sh"
+# Root reads the checkout's copy and the service user writes its own, as with the archive above.
+runuser -u "$RUNNER_USER" -- tee "$dest/runner-stop.sh" < "$stop_script" >/dev/null
+runuser -u "$RUNNER_USER" -- chmod 0755 -- "$dest/runner-stop.sh"
 echo "$unit" | runuser -u "$RUNNER_USER" -- tee "$dest/.service" >/dev/null
 systemctl daemon-reload
 systemctl enable "$unit"

@@ -637,6 +637,7 @@ ACTIONS_RUNNER_INPUT_TOKEN="$(gh api -X POST repos/dflippojr/agent-harness/actio
     ./config.sh --unattended --url https://github.com/dflippojr/agent-harness \
     --name dflippotower-linux-agent-harness --labels agent-harness-tower-linux
 install -m 0755 bin/runsvc.sh runsvc.sh
+install -m 0755 /home/daniel/Projects/agent-harness/ops/github/runner-stop.sh runner-stop.sh
 ```
 
 Then keep it running as a systemd user unit of `daniel` beside the production units, at
@@ -649,10 +650,11 @@ After=network-online.target
 
 [Service]
 ExecStart=<runner dir>/runsvc.sh
+ExecStop=<runner dir>/runner-stop.sh
 WorkingDirectory=<runner dir>
 KillMode=mixed
 KillSignal=SIGINT
-TimeoutStopSec=5min
+TimeoutStopSec=6min
 
 [Install]
 WantedBy=default.target
@@ -684,12 +686,18 @@ sends it to the main process first, and SIGKILL to whatever is left once the mai
 forward it, so the stop would wait out `TimeoutStopSec` and end in SIGKILL. Setting `RUNNER_MANUALLY_TRAP_SIG=1` makes
 `run.sh` signal the listener's whole process group, which reaches the steps the way `control-group` does.
 
-**What a stop does to a running job.** It doesn't wait for the job to finish: the listener's SIGINT handler cancels the
-running job, so steps get the runner's normal cancellation and the run normally ends as cancelled. `RunnerService.js`
-kills the listener with SIGKILL 30 seconds after forwarding the signal, so that is how long the cancellation has, and
-`TimeoutStopSec=5min` is only a backstop above it. These are runner release 2.337.0's scripts; recheck them when the
-pinned release changes. Before a restart, check that the runner is idle, because stopping it mid-`deploy-tower` cancels
-the deploy:
+**Why `runner-stop.sh`.** `RunnerService.js` kills the listener with SIGKILL 30 seconds after any signal, and `mixed` then
+kills what's left, so going through `runsvc.sh` alone gives a job's cleanup 30 seconds whatever `TimeoutStopSec` says.
+`ExecStop=` runs first, before systemd signals anything. `ops/github/runner-stop.sh` sends SIGINT straight to the
+listener, without that deadline, and waits up to 5 minutes. If the listener is still there after that, systemd goes on
+to signal `runsvc.sh`, so the 30-second kill and `mixed` still end the stop. `TimeoutStopSec=6min` stays above the
+script's 5 minutes, so systemd doesn't cut that wait short.
+
+**What a stop does to a running job.** It doesn't wait for the job to run to completion: the listener's SIGINT handler
+cancels the running job, and then waits for the worker, so steps get the runner's normal cancellation and the job's
+cleanup steps can run, for up to the 5 minutes. A job's cleanup that needs longer is killed. These are runner release
+2.337.0's scripts; recheck them when the pinned release changes. Before a restart, check that the runner is idle, because
+stopping it mid-`deploy-tower` cancels the deploy:
 
 ```
 pgrep -fa '<runner dir>/bin/Runner.Worker' || echo idle
@@ -737,14 +745,16 @@ runner in the incident above looked registered and was dead.
 | `systemctl` or the API can't answer: unreachable, 401 or 403, an unexpected answer, or no usable token | Deploy runner: can't tell if it is healthy |
 | Healthy again after any of these | Deploy runner recovered |
 
-It alerts when the state changes, so one outage raises one alert rather than one every 5 minutes. A short GitHub outage
-raises a "can't tell" alert and a recovery notice. If ntfy doesn't accept an alert, the check fails, keeps the old state
-and sends it again next time. The alerts run on the tower, so if the whole tower is down, or the timer isn't running,
+One outage raises one alert rather than one every 5 minutes. A short GitHub outage raises a "can't tell" alert and a
+recovery notice. If ntfy doesn't accept a notice, the check fails and sends it again next time. The state file records
+what each check observed apart from what ntfy accepted, so a refused recovery notice can't hide the next outage, and an
+outage that ends before any alert got through raises no recovery notice. The alerts run on the tower, so if the whole tower is down, or the timer isn't running,
 nothing alerts: `systemctl --user list-timers runner-health.timer` shows when it last ran.
 
 ### Applying this on the tower
 
-Workers don't change the live runner: the owner or liaison does these steps, with the runner idle.
+Workers don't change the live runner: the owner or liaison does these steps, with the runner idle, once this change is
+on the live checkout's `main`.
 
 1. **Change the runner's unit.** Copy the new runner file and edit the unit to match the one above, then check the `PATH`
    it will run with:
@@ -752,6 +762,7 @@ Workers don't change the live runner: the owner or liaison does these steps, wit
    ```
    cd <runner dir>
    install -m 0755 bin/runsvc.sh runsvc.sh
+   install -m 0755 /home/daniel/Projects/agent-harness/ops/github/runner-stop.sh runner-stop.sh
    ( PATH="$(cat .path)"; command -v pwsh gh docker )
    systemctl --user edit --full github-runner-agent-harness.service
    ```
@@ -787,7 +798,7 @@ Workers don't change the live runner: the owner or liaison does these steps, wit
    EOF
    ```
 
-5. **Install the unit and timer**, once the change is on the live checkout's `main`:
+5. **Install the unit and timer:**
 
    ```
    cd /home/daniel/Projects/agent-harness/ops/github
@@ -802,43 +813,21 @@ Workers don't change the live runner: the owner or liaison does these steps, wit
    delay means the stated interval needs changing here.
 
 7. **Change the review pool's units.** The installer writes the new stop settings for new members only. For each existing
-   member, `sudo systemctl edit <unit>` and add the lines below, then restart it while it's idle. These units already
-   run `runsvc.sh`.
+   member, from the checkout, copy the stop script in as the service user, then `sudo systemctl edit <unit>` and add the
+   lines below. Restart it while it's idle. These units already run `runsvc.sh`.
+
+   ```
+   sudo -u github-runner tee <member dir>/runner-stop.sh < ops/github/runner-stop.sh > /dev/null
+   sudo -u github-runner chmod 0755 <member dir>/runner-stop.sh
+   ```
 
    ```
    [Service]
+   ExecStop=<member dir>/runner-stop.sh
    KillMode=mixed
    KillSignal=SIGINT
+   TimeoutStopSec=6min
    ```
-
-Before the first real deployment, dry-run the script on the tower as `daniel`, against the real paths. It changes
-nothing and never stops or starts the unit; it reads the unit with `systemctl --user show`:
-
-```
-git clone --depth 1 https://github.com/dflippojr/agent-harness /tmp/ah-release
-gh repo clone dflippojr/stables /tmp/ah-stables -- --depth 1 --branch "$(jq -r .tag /tmp/ah-release/tools/stables/pin.json)"
-pwsh -NoProfile -File /tmp/ah-release/ops/harness/deploy-ci.ps1 -DryRun \
-    -Commit "$(git -C /tmp/ah-release rev-parse HEAD)" -ReleaseRoot /tmp/ah-release -StablesRelease /tmp/ah-stables
-```
-
-It prints `[deploy] agent-harness-main-daemon.service runs /home/daniel/.local/share/agent-harness/bin/run-daemon.sh`,
-then each step it would take (`[dry run] systemctl --user stop ...`, the venv and pip commands, the pointer writes,
-the fast-forward, the image tags), and fails, before any of them, on the same guards a real run checks: a missing user
-unit, a unit that runs another supervisor or checkout, a dirty or non-`main` live checkout.
-
-The live checkout must itself be on `main`; deployment intentionally fails closed on another branch or detached HEAD.
-After first confirming that the checkout has no work that must be preserved, put it on `main` and fast-forward it:
-
-```
-cd /home/daniel/Projects/agent-harness
-git status --short
-git switch main
-git fetch origin
-git merge --ff-only origin/main
-```
-
-Do this as an explicit maintenance action, not from the Actions runner. Never discard local changes to make a deploy
-pass.
 
 ## Review runner pool
 
