@@ -341,3 +341,44 @@ def test_linux_daemon_unit_working_directory_loads_in_systemd(tmp_path, name):
                                   capture_output=True, text=True, timeout=30, check=False)
         assert "WorkingDirectory" not in verified.stderr, verified.stderr
         assert verified.returncode == 0, verified.stderr
+
+
+def test_linux_daemon_unit_is_not_ordered_after_default_target(tmp_path):
+    """WantedBy=default.target already starts the daemon at login. An After=default.target line made any user unit
+    ordered after the daemon an ordering cycle, and systemd dropped that unit's start job at boot (#889)."""
+    result, unit, _ = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    after = [line for line in unit.read_text().splitlines() if line.startswith("After=")]
+    assert not any("default.target" in line for line in after), unit.read_text()
+
+
+SYSTEMD_USER_MANAGER = next((p for p in ("/usr/lib/systemd/systemd", "/lib/systemd/systemd") if Path(p).exists()), None)
+
+
+@pytest.mark.skipif(SYSTEMD_USER_MANAGER is None, reason="needs the systemd user manager binary")
+def test_linux_daemon_unit_does_not_cycle_with_a_unit_ordered_after_it(tmp_path):
+    """The case from #889: a default-dependency unit ordered After= the daemon. `systemd --user --test` builds the
+    boot transaction from default.target and prints any ordering cycle it finds, without starting a unit."""
+    result, daemon, _ = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    config_home = daemon.parents[2]  # <config>/systemd/user/<unit>
+    dependent = daemon.with_name("agent-harness-main-dependent.service")
+    dependent.write_text("[Unit]\nDescription=Unit ordered after the daemon\nAfter=agent-harness-main-daemon.service\n\n"
+                         "[Service]\nType=oneshot\nExecStart=/bin/true\n\n[Install]\nWantedBy=default.target\n")
+    # systemctl is stubbed in _install_linux_units, so link the WantedBy= entries the way `enable` would.
+    wants = config_home / "systemd/user/default.target.wants"
+    wants.mkdir(parents=True)
+    for unit in (daemon, dependent):
+        (wants / unit.name).symlink_to(unit)
+    env = {**os.environ, "HOME": str(tmp_path / "home"), "XDG_CONFIG_HOME": str(config_home)}
+    boot = subprocess.run([SYSTEMD_USER_MANAGER, "--user", "--test", "--unit=default.target"], env=env,
+                          capture_output=True, text=True, timeout=120, check=False)
+    output = boot.stdout + boot.stderr
+    assert boot.returncode == 0, output[-4000:]
+    assert daemon.name in output, "the boot transaction did not reach the daemon unit"
+    cycles = [line for line in output.splitlines() if "ordering cycle" in line]
+    assert not cycles, "\n".join(cycles)
+    if shutil.which("systemd-analyze"):
+        verified = subprocess.run(["systemd-analyze", "verify", "--user", str(daemon), str(dependent)],
+                                  capture_output=True, text=True, timeout=30, check=False)
+        assert verified.returncode == 0, verified.stderr
