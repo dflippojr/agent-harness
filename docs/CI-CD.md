@@ -747,8 +747,9 @@ runner in the incident above looked registered and was dead.
 
 One outage raises one alert rather than one every 5 minutes. A short GitHub outage raises a "can't tell" alert and a
 recovery notice. If ntfy doesn't accept a notice, the check fails and sends it again next time. The state file records
-what each check observed apart from what ntfy accepted, so a refused recovery notice can't hide the next outage, and an
-outage that ends before any alert got through raises no recovery notice. The alerts run on the tower, so if the whole tower is down, or the timer isn't running,
+what each check observed, what ntfy last accepted, and whether the current occurrence's notice is still pending, so a
+refused notice can't hide the next outage, and an outage that ends before any alert got through raises no recovery
+notice. The alerts run on the tower, so if the whole tower is down, or the timer isn't running,
 nothing alerts: `systemctl --user list-timers runner-health.timer` shows when it last ran.
 
 ### Applying this on the tower

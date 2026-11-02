@@ -9,10 +9,10 @@
 #   runner-offline    GitHub reports the runner offline, or doesn't list it
 #   cannot-tell       systemd or GitHub can't answer: a check that can't run must not read as a healthy runner
 #
-# One outage raises one alert and its end raises one notice. The state file keeps two things apart: what the last check
-# observed, saved after every check, and what ntfy last accepted a notice for, saved only on delivery. So a refused post
-# is sent again on the next check, and a refused recovery notice can't hide the next outage: the healthy check between
-# them is on record.
+# One outage raises one alert and its end raises one notice. The state file keeps three things, saved after every check:
+# what that check observed, what ntfy last accepted a notice for, and whether the current occurrence's notice is still
+# pending. A change of state starts a new occurrence, and only ntfy accepting clears its pending notice. So a refused
+# post is sent again on the next check, whatever was accepted for an earlier outage of the same kind.
 #
 # runner-health.timer runs it. Settings come from the environment (runner-health.service's EnvironmentFile):
 #
@@ -38,9 +38,11 @@ NTFY_TOKEN_FILE="${RUNNER_HEALTH_NTFY_TOKEN_FILE:-}"
 GH_TOKEN_FILE="${RUNNER_HEALTH_GH_TOKEN_FILE:-}"
 STATE_FILE="${RUNNER_HEALTH_STATE_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-harness/runner-health.state}"
 
-# What the state file holds: the last check's state, and the last state ntfy accepted a notice for.
+# What the state file holds: the last check's state, the last state ntfy accepted a notice for, and whether the notice
+# for the current occurrence is still to be accepted.
 observed=healthy
 delivered=healthy
+pending=no
 # What the current check found, and the alert for it.
 state=""
 title=""
@@ -147,19 +149,25 @@ notify() {
   [[ "$answer" =~ ^2[0-9][0-9]$ ]]
 }
 
-# Reads the state file into observed and delivered. Anything missing or unrecognised reads as healthy.
+# Reads the state file. The file is replaced whole, so one missing a field isn't ours to trust: all three then read as
+# their defaults, under which any outage is a new one and alerts.
 load_state() {
-  local key value
-  observed=healthy
-  delivered=healthy
+  local key value fields=0
   [[ -r "$STATE_FILE" ]] || return 0
   while IFS='=' read -r key value; do
-    case "$value" in healthy|service-inactive|runner-offline|cannot-tell) ;; *) continue ;; esac
-    case "$key" in
-      observed) observed="$value" ;;
-      delivered) delivered="$value" ;;
+    case "$key=$value" in
+      observed=healthy|observed=service-inactive|observed=runner-offline|observed=cannot-tell) observed="$value" ;;
+      delivered=healthy|delivered=service-inactive|delivered=runner-offline|delivered=cannot-tell) delivered="$value" ;;
+      pending=yes|pending=no) pending="$value" ;;
+      *) continue ;;
     esac
+    fields=$((fields + 1))
   done < "$STATE_FILE"
+  if [[ "$fields" -ne 3 ]]; then
+    observed=healthy
+    delivered=healthy
+    pending=no
+  fi
   return 0
 }
 
@@ -168,18 +176,19 @@ save_state() {
   dir="$(dirname -- "$STATE_FILE")"
   mkdir -p -m 0700 -- "$dir" || return 1
   partial="$(mktemp "$dir/.runner-health.XXXXXX")" || return 1
-  printf 'observed=%s\ndelivered=%s\n' "$state" "$delivered" > "$partial" && mv -f -- "$partial" "$STATE_FILE" \
+  printf 'observed=%s\ndelivered=%s\npending=%s\n' "$state" "$delivered" "$pending" > "$partial" && mv -f -- "$partial" "$STATE_FILE" \
     || { rm -f -- "$partial"; return 1; }
 }
 
-# An outage is news if it differs from the last check or from the last notice ntfy accepted. A healthy runner is news
-# only if ntfy accepted an alert whose end hasn't been announced: an outage nobody heard about has nothing to announce.
-notice_due() {
-  if [[ "$state" = healthy ]]; then
-    [[ "$delivered" != healthy ]]
-  else
-    [[ "$state" != "$observed" ]] || [[ "$state" != "$delivered" ]]
+# A change of state starts a new occurrence. An outage always owes an alert. A healthy runner owes a notice only if ntfy
+# accepted an alert whose end hasn't been announced: an outage nobody heard about has nothing to announce.
+start_occurrence() {
+  [[ "$state" != "$observed" ]] || return 0
+  pending=yes
+  if [[ "$state" = healthy ]] && [[ "$delivered" = healthy ]]; then
+    pending=no
   fi
+  return 0
 }
 
 main() {
@@ -191,9 +200,11 @@ main() {
 
   echo "runner-health: $state (was $observed; last notice: $delivered)"
   [[ "$state" != healthy ]] || priority=3
-  if notice_due; then
+  start_occurrence
+  if [[ "$pending" = yes ]]; then
     if notify; then
       delivered="$state"
+      pending=no
     else
       echo "runner-health: ntfy did not accept the alert; the next check sends it again" >&2
       rc=1
