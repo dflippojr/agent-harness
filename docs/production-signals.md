@@ -98,3 +98,44 @@ grep -nE ' (ERROR|CRITICAL) |^Traceback' ~/.local/share/agent-harness/logs/daemo
 
 On a Windows boot the log is `D:\Agents\harness\logs\daemon.log`:
 `Select-String -Path D:\Agents\harness\logs\daemon.log -Pattern ' (ERROR|CRITICAL) |^Traceback' | Select-Object -Last 50`.
+
+## Sweep configuration
+
+`ao signals` (dflippojr/agent-ops, `scripts/signal_sweep.py`) reads the block below from this page on `main`, in place
+of the seed kept in agent-ops. The sweep expands `~` in a fetch `path` for the user running it, and the paths are the
+Unix install's defaults (`install/install.sh`), so the block names no account. It doesn't follow `XDG_DATA_HOME` or
+`--data-dir`, and it doesn't cover a Windows boot of the tower: there, or on an install with its data elsewhere,
+`canary` and `daemon-errors` report a fetch error.
+`tests/test_production_signals_doc.py` checks the paths against the installer's defaults.
+
+```yaml production-signals
+signals:
+  - id: deployed-sha
+    kind: deployed_sha
+    description: Commit the deployed daemon runs (HARNESS_BUILD_COMMIT).
+    fetch: {type: http, url: "http://127.0.0.1:8100/health", field: build.commit}
+  - id: health
+    kind: health
+    description: The deployed daemon answers /health with ok true.
+    fetch: {type: http, url: "http://127.0.0.1:8100/health", field: ok}
+    expect: {equals: true}
+  - id: canary
+    kind: freshness
+    description: Last complete nightly canary result
+    max_age: 48h
+    hint: "Rows that stay blocked usually mean the GPU slot never came free; check harness_gpu_manual_hold_age_seconds on /metrics for a manual hold."
+    fetch:
+      type: sqlite
+      path: ~/.local/share/agent-harness/data/harness.sqlite3
+      query: "SELECT max(finished_at) FROM canary_results WHERE status = 'complete'"
+  - id: backup
+    kind: freshness
+    description: Last successful daily backup
+    max_age: 2d
+    fetch: {type: prometheus, url: "http://127.0.0.1:8100/metrics", metric: harness_backup_last_success_timestamp_seconds}
+  - id: daemon-errors
+    kind: errors
+    description: ERROR and CRITICAL records in the deployed daemon's log.
+    fetch: {type: log, path: ~/.local/share/agent-harness/logs/daemon.log, window: 24h}
+    public: {loggers: [asyncio]}
+```
