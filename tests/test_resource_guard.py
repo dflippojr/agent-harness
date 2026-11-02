@@ -1739,17 +1739,188 @@ def test_one_low_reading_is_no_signal_and_two_are():
     asyncio.run(body())
 
 
-def test_the_key_stays_the_same_as_the_reading_changes_so_resume_anyway_holds():
-    async def body():
-        guard, _, control, _, _ = floor_guard(100, 90, 80, floor=256, resume_after_seconds=999)
-        control.health = True
-        await _polls(guard, 2)
-        assert guard.state == PAUSED
-        control.flag = False  # the owner's "resume anyway" reloaded the model; the reading has moved since
-        guard.state = CLEAR
-        guard.override = frozenset({"vram:low"})
+async def _park_on_the_floor(guard, control, *, later_in_cooldown: bool = False) -> None:
+    await _polls(guard, 2)
+    assert guard.state == PAUSED and control.flag and control.stops == 1
+    if later_in_cooldown:  # the flag has hidden the signal, and only `reasons` still names the floor
         await guard.check()
-        assert guard.override == frozenset({"vram:low"}) and guard.state == CLEAR
+        assert guard.state == PAUSED and guard.signals == []
+
+
+async def _reloaded_after_resume_anyway(guard, control, reload: str) -> None:
+    """The real resume() and the check() that acts on it. Only the lazy-idle model needs something else to load it."""
+    guard.resume()
+    await guard.check()
+    assert guard.state == CLEAR
+    if reload == "lazy-idle":
+        assert control.flag and control.starts == 0  # stays parked until a request asks; the warmer removes the flag
+        await control.start()
+    assert not control.flag and control.starts == 1
+
+
+@pytest.mark.parametrize("reload, cfg, want", [
+    pytest.param("eager", {"lazy_load": False}, False, id="eager-reload"),
+    pytest.param("lazy-queued", {"lazy_load": True}, True, id="lazy-reload-with-work-queued"),
+    pytest.param("lazy-idle", {"lazy_load": True}, False, id="lazy-reload-on-the-next-request"),
+])
+@pytest.mark.parametrize("later", [False, True], ids=["right-after-the-park", "later-in-the-cooldown"])
+def test_resume_anyway_outlasts_the_park_and_the_debounce_after_the_reload(reload, cfg, want, later):
+    """Codex round 1: the flag hides the signal while parked, and that must not read as the trigger having gone away."""
+    async def body():
+        guard, _, control, scheduler, log = floor_guard(100, 90, 80, 70, 60, 50, floor=256, resume_after_seconds=999, **cfg)
+        guard.want_model = lambda: want
+        await _park_on_the_floor(guard, control, later_in_cooldown=later)
+        await _reloaded_after_resume_anyway(guard, control, reload)
+        keys = await _polls(guard, 4)
+        assert keys == [[], ["vram:low"], ["vram:low"], ["vram:low"]]  # the count restarts; the signal is simply ignored
+        assert guard.state == CLEAR and not scheduler.paused and control.stops == 1
+        assert [k for k, _ in log] == ["pause", "resume"]
+        assert guard.status()["override"] is True
+    asyncio.run(body())
+
+
+def test_resume_anyway_during_the_drain_holds_across_the_cancelled_pause():
+    async def body():
+        guard, _, control, scheduler, _ = floor_guard(100, 100, 100, 100, floor=256, busy=lambda: True,
+                                                      resume_after_seconds=999)
+        await _polls(guard, 2)
+        assert guard.state == PAUSING
+        guard.resume()
+        await _polls(guard, 2)
+        assert guard.state == CLEAR and control.stops == 0 and not scheduler.paused
+    asyncio.run(body())
+
+
+def test_resume_anyway_holds_when_a_ram_wait_replaced_the_floor_reason():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 100, 100, floor=256, lazy_load=True, resume_after_seconds=0,
+                                              min_available_ram_gb=4, model_ram_gb=14)
+        ram = FakeRam(9)
+        guard.memory = MemoryWatch(4, model_gb=14, read=ram, ttl=0)
+        guard.want_model = lambda: True
+        await _polls(guard, 2)
+        await guard.check()
+        assert guard.memory_hold and [r["key"] for r in guard.reasons] == ["memory_hold"]
+        guard.resume()
+        ram.available = 30 * GIB
+        await guard.check()
+        assert guard.state == CLEAR and not control.flag
+        await _polls(guard, 2)
+        assert guard.state == CLEAR and control.stops == 1
+    asyncio.run(body())
+
+
+def test_a_high_reading_before_the_model_is_back_on_the_card_is_no_recovery():
+    """The model is off the card until it has loaded, so free VRAM is high then whatever else holds the rest."""
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 4000, 100, 100, 100, floor=256, resume_after_seconds=999)
+        await _park_on_the_floor(guard, control)
+        control.health = False  # loading: /health and /props aren't answering yet
+        guard.resume()
+        await guard.check()
+        await guard.check()  # 4000 MiB free while it loads
+        assert guard.status()["override"] is True and guard.state == "resuming"
+        control.health = True
+        await _polls(guard, 3)
+        assert guard.state == CLEAR and control.stops == 1
+    asyncio.run(body())
+
+
+def test_a_measured_recovery_with_the_model_loaded_retires_it_and_the_floor_guards_again():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 4000, 100, 100, floor=256, resume_after_seconds=999)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        await guard.check()
+        assert guard.status()["override"] is False
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED and control.stops == 2
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("unknown", [None, FakeVram.NA], ids=["failed-reading", "free-vram-not-reported"])
+def test_a_reading_that_measures_nothing_does_not_retire_it(unknown):
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, unknown, 100, 100, floor=256, resume_after_seconds=999)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        await _polls(guard, 3)
+        assert guard.status()["override"] is True and guard.state == CLEAR and control.stops == 1
+    asyncio.run(body())
+
+
+def test_a_new_trigger_ends_it_and_the_floor_counts_again_after_that_pause():
+    async def body():
+        guard, detect, control, _, _ = floor_guard(100, 100, 100, 100, 100, floor=256, resume_after_seconds=0)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        await _polls(guard, 2)
+        assert guard.state == CLEAR and control.stops == 1
+        detect.signals = [GAME]
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 2 and guard.status()["override"] is False
+        assert {r["key"] for r in guard.reasons} == {"game:hades.exe", "vram:low"}
+        detect.signals = []
+        await guard.check()  # the game has gone and the eager path reloads
+        assert guard.state == CLEAR and not control.flag
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED and control.stops == 3
+    asyncio.run(body())
+
+
+def test_resuming_a_manual_hold_resets_it():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 100, 100, floor=256, resume_after_seconds=0)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        guard.pause()
+        await guard.check()  # flag written: no reading
+        assert guard.state == PAUSED
+        guard.resume(override_signals=False)  # what the route sends for a manual hold
+        assert guard.status()["override"] is False
+        await guard.check()
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED and control.stops == 3
+    asyncio.run(body())
+
+
+def test_turning_the_floor_off_resets_it():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 100, 100, floor=256, resume_after_seconds=999)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        guard.cfg.min_free_vram_mib = 0
+        await guard.check()
+        assert guard.status()["override"] is False
+        guard.cfg.min_free_vram_mib = 256
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("cause", ["game-only-pause", "no-pause-at-all"])
+def test_a_resume_that_did_not_see_the_floor_acknowledges_nothing(cause):
+    async def body():
+        guard, detect, control, _, _ = floor_guard(100, 100, floor=256, lazy_load=False, resume_after_seconds=0)
+        if cause == "game-only-pause":
+            control.flag = True  # parked already, so the floor can't be counting
+            detect.signals = [GAME]
+            await guard.check()
+            assert guard.state == PAUSED
+            detect.signals = []
+        guard.resume()
+        await guard.check()
+        control.flag = False
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED
+    asyncio.run(body())
+
+
+def test_the_key_stays_the_same_as_the_reading_changes():
+    async def body():
+        guard, _, _, _, _ = floor_guard(100, 90, 80, floor=256, busy=lambda: True)
+        assert await _polls(guard, 3) == [[], ["vram:low"], ["vram:low"]]
+        assert guard.signals[0]["detail"].startswith("free VRAM 80 MiB")
     asyncio.run(body())
 
 
@@ -1971,3 +2142,14 @@ def test_loading_a_config_with_a_negative_floor_fails_and_the_shipped_one_is_off
     shipped = yaml.safe_load((Path(__file__).parents[1] / "config" / "harness.yaml").read_text(encoding="utf-8"))
     assert shipped["gpu_guard"]["min_free_vram_mib"] == 0
     assert shipped["gpu_guard"]["vram_drain_timeout_seconds"] == 30
+
+
+@pytest.mark.parametrize("state, loaded", [(READY, True), (WAKING, False), (UNLOADED, False), ("sleeping", False)])
+def test_the_daemon_counts_a_recovery_only_with_the_model_ready_not_asleep(tmp_path, monkeypatch, state, loaded):
+    """An idle-unloaded llama-server still answers /health, with the model off the card."""
+    m = guarded_manager(tmp_path)
+
+    async def fixed(self, model):
+        return state
+    monkeypatch.setattr(ModelWarmer, "state", fixed)
+    assert asyncio.run(m.guard.model_loaded()) is loaded
