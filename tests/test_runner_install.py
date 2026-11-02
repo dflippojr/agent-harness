@@ -435,6 +435,11 @@ def tower_runner_doc() -> str:
     return text[text.index("## Tower runner"):text.index("## Review runner pool")]
 
 
+def doc_prose() -> str:
+    """The section with its line wrapping undone, so a phrase matches wherever the lines happen to break."""
+    return " ".join(tower_runner_doc().split())
+
+
 def documented_unit() -> list[str]:
     blocks = re.findall(r"```\n(.*?)```", tower_runner_doc(), flags=re.DOTALL)
     units = [block for block in blocks if "[Service]" in block and "ExecStart=<runner dir>" in block]
@@ -482,27 +487,29 @@ def test_the_documented_unit_stops_the_tree_through_the_process_that_forwards_th
     "cancels the running job",
 ])
 def test_the_doc_explains_the_stop_settings(explained):
-    assert explained in tower_runner_doc()
+    assert explained in doc_prose()
 
 
 def test_re_registration_stops_the_service_and_checks_for_a_listener_before_config_sh():
     doc = tower_runner_doc()
-    start = doc.index("### Re-registering the deploy runner")
-    steps = doc[start:]
-    steps = steps[:steps.find("\n### ", 1)] if "\n### " in steps[1:] else steps
-    stop = steps.find(f"systemctl --user stop {DEPLOY_SERVICE}")
-    check = steps.find("pgrep")
-    config = steps.find("./config.sh")
+    section = doc[doc.index("### Re-registering the deploy runner"):doc.index("### Runner health check")]
+    # The commands someone runs, not the prose around them, have to be in this order.
+    commands = "".join(re.findall(r"```\n(.*?)```", section, flags=re.DOTALL))
+    stop = commands.find(f"systemctl --user stop {DEPLOY_SERVICE}")
+    check = commands.find("pgrep")
+    config = commands.find("./config.sh")
     assert stop != -1, "the steps never stop the service"
     assert check != -1, "the steps never check for a leftover listener"
     assert config != -1, "the steps never run config.sh"
-    assert "Runner.Listener" in steps[check:config]
+    assert "Runner.Listener" in commands[check:config]
     assert stop < check < config
 
 
 def test_owner_steps_list_the_unit_the_timer_the_credential_and_the_manual_checks():
     doc = tower_runner_doc()
-    section = doc[doc.index("### Applying this on the tower"):]
+    section = " ".join(doc[doc.index("### Applying this on the tower"):].split())
+    # systemd doesn't expand specifiers in an EnvironmentFile, so a %h there would name a file that doesn't exist.
+    assert "_FILE=%h" not in section
     for needed in (
         "runner-health.timer", "enable --now", "Administration", "RUNNER_HEALTH_GH_TOKEN_FILE",
         "systemctl --user restart", "Runner.Listener", ".credentials", "Workers don't change the live runner",
@@ -517,7 +524,7 @@ def test_the_health_timer_checks_within_the_stated_interval():
     assert "AccuracySec=30s" in timer
     assert "Persistent=true" in timer
     assert "WantedBy=timers.target" in timer
-    assert "raises an ntfy alert within 10 minutes" in tower_runner_doc()
+    assert "raises an ntfy alert within 10 minutes" in doc_prose()
 
 
 def test_the_health_service_runs_the_script_without_a_token_in_its_unit():
@@ -804,11 +811,13 @@ def test_an_alert_ntfy_refused_is_sent_again_on_the_next_check(health):
     assert failed.returncode != 0
     assert "ntfy did not accept" in failed.stderr
     assert not health.state.exists()
+    refused = len(health.alerts())  # curl retried a 503 itself.
+    assert refused >= 1
     health.ntfy.status = 200
     assert health.run().returncode == 0
-    assert len(health.alerts()) == 2
+    assert len(health.alerts()) == refused + 1
     assert health.run().returncode == 0
-    assert len(health.alerts()) == 2
+    assert len(health.alerts()) == refused + 1
 
 
 def test_an_unreachable_ntfy_fails_the_check_so_systemd_shows_it(health):

@@ -20,7 +20,7 @@
 #   gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token |
 #     sudo ops/github/install-runner.sh --labels agent-harness-review --name dflippotower-review-1
 #
-# --dry-run prints the plan and changes nothing: no download, user, files or systemd unit.
+# --dry-run prints the plan, with the unit it would write, and changes nothing: no download, user, files or systemd unit.
 set -euo pipefail
 
 REPO="dflippojr/agent-harness"
@@ -140,12 +140,36 @@ if [[ -e "$dest/.runner" ]]; then
   fail "a runner is already configured in $INSTALL_DIR"
 fi
 
+# svc.sh's unit, except for how it stops (#814). KillMode=mixed sends SIGINT to runsvc.sh alone, which forwards it to the
+# listener, so the runner cancels a running job itself and the job's steps can report it; control-group would signal
+# those steps at the same moment. Whatever is left when runsvc.sh exits or the timeout passes gets SIGKILL, where
+# KillMode=process would leave it running. docs/CI-CD.md has the reasoning.
+write_unit() {
+  cat <<UNIT
+[Unit]
+Description=GitHub Actions Runner (${REPO//\//-}.$NAME)
+After=network-online.target
+
+[Service]
+ExecStart=$INSTALL_DIR/runsvc.sh
+User=$RUNNER_USER
+WorkingDirectory=$INSTALL_DIR
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "dry run: would create user $RUNNER_USER if missing (no sudo or docker group)"
   echo "dry run: would download $url and check its sha256"
   echo "dry run: would unpack into $INSTALL_DIR, owned by $RUNNER_USER"
   echo "dry run: would run config.sh --unattended as $RUNNER_USER with --labels $LABELS"
-  echo "dry run: would write, as root, the unit svc.sh install $RUNNER_USER writes ($unit) and start it"
+  echo "dry run: would write, as root, the unit svc.sh install $RUNNER_USER writes ($unit), with its stop settings changed, and start it:"
+  write_unit
   exit 0
 fi
 
@@ -200,22 +224,7 @@ ACTIONS_RUNNER_INPUT_TOKEN="$TOKEN" runuser -u "$RUNNER_USER" -- env -C "$dest" 
   --url "https://github.com/$REPO" --name "$NAME" --labels "$LABELS" --work "$WORK_DIR"
 
 # What svc.sh install does, with root writing only under /etc/systemd/system and the service user doing the rest.
-cat > "$unit_path" <<UNIT
-[Unit]
-Description=GitHub Actions Runner (${REPO//\//-}.$NAME)
-After=network-online.target
-
-[Service]
-ExecStart=$INSTALL_DIR/runsvc.sh
-User=$RUNNER_USER
-WorkingDirectory=$INSTALL_DIR
-KillMode=process
-KillSignal=SIGTERM
-TimeoutStopSec=5min
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+write_unit > "$unit_path"
 chmod 0644 "$unit_path"
 runuser -u "$RUNNER_USER" -- install -m 0755 -- "$dest/bin/runsvc.sh" "$dest/runsvc.sh"
 echo "$unit" | runuser -u "$RUNNER_USER" -- tee "$dest/.service" >/dev/null
