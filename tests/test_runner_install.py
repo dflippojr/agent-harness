@@ -833,8 +833,9 @@ OUTAGES = {
 }
 
 
+@pytest.mark.parametrize("first_alert_rejected", [False, True])
 @pytest.mark.parametrize("kind", OUTAGES)
-def test_a_rejected_recovery_notice_does_not_silence_the_next_outage(health, kind):
+def test_a_rejected_recovery_notice_does_not_silence_the_next_outage(health, kind, first_alert_rejected):
     scenario, status = OUTAGES[kind]
     health.set_runner_status(status)
     assert health.run(**scenario).returncode == 0
@@ -843,16 +844,72 @@ def test_a_rejected_recovery_notice_does_not_silence_the_next_outage(health, kin
     health.set_runner_status("online")
     health.ntfy.status = 503
     assert health.run().returncode != 0
-    health.ntfy.status = 200
-    rejected = len(health.alerts())
 
-    # The same kind of outage again, with ntfy back: it's a new outage, so it alerts, and only once.
+    # The same kind of outage again: it's a new outage, whatever was last delivered for an earlier one.
     health.set_runner_status(status)
+    if first_alert_rejected:
+        assert health.run(**scenario).returncode != 0
+    health.ntfy.status = 200
+    attempts = len(health.alerts())
     assert health.run(**scenario).returncode == 0
-    assert len(health.alerts()) == rejected + 1
+    assert len(health.alerts()) == attempts + 1, "the next outage's alert was not sent"
     assert "recovered" not in health.alerts()[-1]["title"].lower()
     assert health.run(**scenario).returncode == 0
-    assert len(health.alerts()) == rejected + 1
+    assert len(health.alerts()) == attempts + 1, "the next outage's alert was sent twice"
+
+
+@pytest.mark.parametrize(("worlds", "depth"), [
+    (("healthy", "runner-offline"), 4),
+    (("healthy", "runner-offline", "service-inactive"), 3),
+])
+def test_every_sequence_of_health_and_delivery_sends_exactly_the_notices_due(health, worlds, depth):
+    """The notice rules against the shipped script, for every path through these checks and ntfy answers.
+
+    An occurrence is one unbroken run of an outage. Until ntfy accepts its alert, every check sends it, and after that
+    none does. A healthy check sends a recovery notice while an accepted alert's end is unannounced, and only then.
+    """
+    scenarios = {"healthy": ({}, "online"), **{kind: OUTAGES[kind] for kind in worlds if kind != "healthy"}}
+
+    def check(world: str, accepted: bool) -> tuple[int, int]:
+        scenario, status = scenarios[world]
+        health.set_runner_status(status)
+        health.ntfy.status = 200 if accepted else 400  # A 400 isn't retried, so each check makes one attempt.
+        before = len(health.ntfy.requests)
+        return health.run(**scenario).returncode, len(health.ntfy.requests) - before
+
+    def walk(path: tuple, last: str, heard: bool, owed: bool) -> None:
+        if len(path) == depth:
+            return
+        saved = health.state.read_bytes() if health.state.exists() else None
+        for world in worlds:
+            for accepted in (True, False):
+                if saved is None:
+                    health.state.unlink(missing_ok=True)
+                else:
+                    health.state.write_bytes(saved)
+                steps = (*path, (world, "accepted" if accepted else "rejected"))
+                now_heard = heard and world == last
+                if world == "healthy":
+                    due, now_owed = owed, owed and not accepted
+                else:
+                    due, now_owed = not now_heard, owed or accepted
+                    now_heard = now_heard or accepted
+                returncode, attempts = check(world, accepted)
+                assert attempts == int(due), steps
+                assert (returncode == 0) == (accepted or not due), steps
+                walk(steps, world, now_heard, now_owed)
+
+    walk((), "healthy", False, False)
+
+
+def test_a_truncated_state_file_alerts_rather_than_staying_silent(health):
+    health.state.parent.mkdir(parents=True)
+    health.state.write_text("observed=runner-offline\n", encoding="utf-8")
+    health.set_runner_status("offline")
+    assert health.run().returncode == 0
+    assert len(health.alerts()) == 1
+    assert health.run().returncode == 0
+    assert len(health.alerts()) == 1
 
 
 def test_a_rejected_recovery_notice_is_sent_again_while_the_runner_stays_healthy(health):
