@@ -9,7 +9,7 @@ def _guard_metrics(m, out) -> None:
         out.metric("harness_gpu_guard_state", "gauge", "Current GPU guard state.",
                    [({"state": st}, 1 if g.state == st else 0) for st in ("clear", "pausing", "paused", "resuming")])
         out.metric("harness_gpu_guard_triggers", "gauge", "Detected GPU users by kind.",
-                   [({"kind": k}, sum(1 for s in g.signals if s["kind"] == k)) for k in ("game", "plex")])
+                   [({"kind": k}, sum(1 for s in g.signals if s["kind"] == k)) for k in ("game", "plex", "vram")])
         out.metric("harness_gpu_guard_pauses_total", "counter", "Pauses since the daemon started.", [({}, g.pauses)])
         extra = time.time() - g._paused_at if g.active and g._paused_at else 0
         out.metric("harness_gpu_guard_paused_seconds_total", "counter", "Time paused since the daemon started.",

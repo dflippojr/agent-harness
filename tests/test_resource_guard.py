@@ -1949,3 +1949,25 @@ def test_settings_registry_lists_the_floor_and_its_drain_timeout():
     assert (drain.value_type, drain.default) == ("float", 30)
     assert floor.yaml_path == ("gpu_guard", "min_free_vram_mib")
     assert drain.yaml_path == ("gpu_guard", "vram_drain_timeout_seconds")
+
+
+@pytest.mark.parametrize("value", [-1, 25.5, 65537])
+def test_settings_refuse_a_floor_that_is_negative_fractional_or_out_of_range(value):
+    from harness.settings import parse_value
+    from harness_modules.local_model.settings import specs
+    floor = next(s for s in specs() if s.key == "gpu_guard.min_free_vram_mib")
+    with pytest.raises(ValueError):
+        parse_value(floor, value)
+    assert parse_value(floor, 256) == 256 and parse_value(floor, 0) == 0
+
+
+def test_loading_a_config_with_a_negative_floor_fails_and_the_shipped_one_is_off(tmp_path):
+    import yaml
+    from harness.config import load
+    from test_config_registry import _write_loadable_config
+    cfg_dir, data_dir = _write_loadable_config(tmp_path, "gpu_guard: {min_free_vram_mib: -1}\n")
+    with pytest.raises(ValueError, match="min_free_vram_mib"):
+        load(cfg_dir, data_dir)
+    shipped = yaml.safe_load((Path(__file__).parents[1] / "config" / "harness.yaml").read_text(encoding="utf-8"))
+    assert shipped["gpu_guard"]["min_free_vram_mib"] == 0
+    assert shipped["gpu_guard"]["vram_drain_timeout_seconds"] == 30

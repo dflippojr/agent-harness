@@ -258,6 +258,10 @@ class GpuGuardConfig:
     load_now_default_minutes: int = 60    # default window for "Load local model now" (idle unload suspended)
     keepalive_seconds: float = 300        # a pinned model gets a one-token request this often; keep under the idle unload
     drain_timeout_seconds: float = 300    # longest wait for the current model turn before the server is stopped
+    # Free VRAM (nvidia-smi) under this for two polls in a row parks the model: the backstop for every VRAM estimate
+    # being wrong (docs/gpu-vram-budget.md). 0 turns it off and nvidia-smi isn't asked for it.
+    min_free_vram_mib: int = 0
+    vram_drain_timeout_seconds: float = 30  # the drain when that alone starts a pause: memory is short already
     # The model server's supervisor (ops/llama-server/run-qwen.ps1) doesn't restart the server while this file exists.
     pause_flag: str = _path_field("C:/AI/llama-server.paused", "llama-server.paused")
     # A running executable whose path contains one of these (case-insensitive) is a game ...
@@ -271,6 +275,16 @@ class GpuGuardConfig:
     plex_url: str = "http://127.0.0.1:32400"  # hardware transcodes, with the token in Plex's registry key; without
                                               # one (Linux) nvidia-smi's Plex Transcoder processes count instead
     plex: bool = True
+
+
+def validate_gpu_guard(guard: GpuGuardConfig) -> None:
+    """The fields a poll does arithmetic on, which YAML could otherwise hand it as anything."""
+    floor = guard.min_free_vram_mib
+    if not isinstance(floor, int) or isinstance(floor, bool) or floor < 0:
+        raise ValueError(f"gpu_guard.min_free_vram_mib must be a whole number of MiB, 0 or more, got {floor!r}")
+    drain = guard.vram_drain_timeout_seconds
+    if not isinstance(drain, (int, float)) or isinstance(drain, bool) or not 0 <= drain < float("inf"):
+        raise ValueError(f"gpu_guard.vram_drain_timeout_seconds must be a number of seconds, got {drain!r}")
 
 
 @dataclass
@@ -1025,6 +1039,7 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
     hub.enabled = hub.enabled and selected.hub
     notify = NotifyConfig(**(raw.get("notify") or {}))
     gpu_guard = GpuGuardConfig(**(raw.get("gpu_guard") or {}))
+    validate_gpu_guard(gpu_guard)
     backup = BackupConfig(**(raw.get("backup") or {}))
     memory_library = MemoryLibraryConfig(**(raw.get("memory_library") or {}))
     web = WebConfig(**(raw.get("web") or {}))
