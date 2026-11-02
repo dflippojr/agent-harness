@@ -686,6 +686,8 @@ def test_gpu_reading_parses_nvidia_smi_and_caches(monkeypatch):
 @pytest.mark.parametrize(("line", "free", "sessions"), [
     ("1024, 8192, 37, [N/A], 2\n", None, 2),
     ("1024, 8192, 37, 7168, [N/A]\n", 7168, None),
+    ("1024, 8192, 37, NaN, 2\n", None, 2),  # float() accepts NaN and inf; they must not escape as an exception
+    ("1024, 8192, 37, 7168, inf\n", 7168, None),
 ])
 def test_gpu_reading_drops_only_the_field_that_is_not_reported(monkeypatch, line, free, sessions):
     """#833: a [N/A] free-VRAM or session count leaves that one field out; VRAM used, total and load still read."""
@@ -697,6 +699,26 @@ def test_gpu_reading_drops_only_the_field_that_is_not_reported(monkeypatch, line
     assert reading == {"vram_used": 1024 * resources.MIB, "vram_total": 8192 * resources.MIB, "gpu_load": 37.0,
                        "vram_free": None if free is None else free * resources.MIB, "nvenc_sessions": sessions}
     assert "memory.free,encoder.stats.sessionCount" in asked[0][1]  # the query asks for both new fields
+
+
+@pytest.mark.parametrize("line", ["NaN, 8192, 37, 7168, 2\n", "1024, inf, 37, 7168, 2\n"])
+def test_gpu_reading_with_a_non_finite_core_field_is_no_reading(monkeypatch, line):
+    """#833 review: a NaN or inf in VRAM used, total or load is an unparseable reading (None), never an exception."""
+    from harness_modules.local_model import resources
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: line)
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    assert resources.gpu_reading() is None
+
+
+def test_metrics_render_survives_a_non_finite_nvidia_smi_reading(tmp_path, monkeypatch):
+    """#833 review: /metrics must still render, with no GPU series, when nvidia-smi reports NaN."""
+    from harness.metrics import render
+    from harness_modules.local_model import resources
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: "NaN, 8192, 37, 7168, 2\n")
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    text = render(guarded_manager(tmp_path))
+    assert "harness_resource_ram_available_bytes" in text
+    assert "harness_resource_vram_" not in text and "harness_resource_nvenc_sessions" not in text
 
 
 COMPUTE_APPS = ("9953, /usr/bin/sunshine, 215\n"
