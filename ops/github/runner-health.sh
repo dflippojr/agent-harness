@@ -126,16 +126,19 @@ check_github() {
 }
 
 notify() {
-  local token="" curl_config=""
+  local token="" curl_config="" answer
   if [[ -n "$NTFY_TOKEN_FILE" ]]; then
     token="$(read_token "$NTFY_TOKEN_FILE")" || return 1
     curl_config="header = \"Authorization: Bearer $token\""
   fi
-  # Every value here is a fixed string or passed validate_settings. Redirects stay off, so the token goes nowhere else.
-  printf '%s\n' "$curl_config" | timeout 60 curl --config - --silent --fail --output /dev/null --max-time 20 \
-    --retry 2 --proto '=https,http' --header 'Content-Type: application/json' --data-raw \
+  # Every value here is a fixed string or passed validate_settings. Redirects stay off, so the token goes nowhere else,
+  # and only a 2xx counts: curl --fail lets a 3xx through, and an unfollowed redirect published nothing.
+  answer="$(printf '%s\n' "$curl_config" | timeout 60 curl --config - --silent --fail --output /dev/null \
+    --write-out '%{http_code}' --max-time 20 --retry 2 --proto '=https,http' \
+    --header 'Content-Type: application/json' --data-raw \
     "{\"topic\":\"$NTFY_TOPIC\",\"title\":\"$title\",\"message\":\"$message\",\"priority\":$priority,\"tags\":[\"$tags\"]}" \
-    "$NTFY_SERVER" 2>/dev/null
+    "$NTFY_SERVER" 2>/dev/null)" || return 1
+  [[ "$answer" =~ ^2[0-9][0-9]$ ]]
 }
 
 save_state() {
