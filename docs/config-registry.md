@@ -136,7 +136,7 @@ Round-reset `files_modified` is derived at reset on tower agent sessions: the un
 | `backends.local.model` | installed local models |
 | `backends.<name>.model` / `backends.<name>.effort` | each configured hosted backend |
 
-`compaction.mask_min_chars` is file-only (`config/harness.yaml`, clamped 1–10_000_000) and is not a live admin key. So are the trim rule switches `compaction.trim.*` (`strip_noise`, `head_tail`, `head_lines`, `tail_lines`, `superseded_reads`, `dedupe`; all on by default). See [`compaction.md`](compaction.md).
+`compaction.mask_min_chars` is file-only (`config/harness.yaml`, clamped 1–10_000_000) and is not a live admin key. So are `compaction.mask_batch_at` (#855, off by default; a share of the window below `elide_at`) and the trim rule switches `compaction.trim.*` (`strip_noise`, `head_tail`, `head_lines`, `tail_lines`, `superseded_reads`, `dedupe`; all on by default). See [`compaction.md`](compaction.md).
 
 `planning.reinject` (#641, off by default) is file-only too: the per-turn plan re-injection experiment for native agent
 sessions. See [`compaction.md`](compaction.md#plan-re-injection-experiment).
@@ -157,7 +157,7 @@ the overlay.
 
 Installer/file-only metadata (value omitted): `listen.host`, `listen.port`, `paths.data_dir`, `paths.repos_dir`,
 `backup.dir`, `notify.server`, `notify.topic`, `notify.token_file`, `smart_approvals.secret_ref`,
-`smart_approvals.proxy`, `install.profile`, `modules.*`, `compaction.mask_min_chars`, `compaction.trim.*`,
+`smart_approvals.proxy`, `install.profile`, `modules.*`, `compaction.mask_min_chars`, `compaction.mask_batch_at`, `compaction.trim.*`,
 `planning.reinject`.
 
 ## App keys (v1)

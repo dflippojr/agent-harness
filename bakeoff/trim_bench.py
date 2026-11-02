@@ -13,6 +13,13 @@ docs/jev-compaction-study.md; the scripts are fixed, so this counts recurrences,
     python -m bakeoff.trim_bench            # the tables in docs/compaction.md
     python -m bakeoff.trim_bench --no-mask  # sessions where read_artifact is unavailable (no masking)
     python -m bakeoff.trim_bench --context 32768
+    python -m bakeoff.trim_bench --mask-compare  # per-turn against batched masking (#855)
+
+--mask-compare prices each arm's prompts the way llama-server reads them (docs/prefix-cache-study.md), in estimated
+tokens. A prompt that only grew reads what is new. A prompt rewritten earlier reads from the first change at best, and
+on a hybrid model from a checkpoint before it: "fallback" takes the last 516 tokens of the previous prompt when the
+change is among them and otherwise the end of the system prompt and task, what the study usually measured. A session
+built up slowly can have checkpoints in between, so the two columns bound the real cost.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from bakeoff import prefix_diff
 from harness import compaction, tools
 from harness.compaction import TrimRules
 
@@ -33,6 +41,7 @@ KEEP_RECENT = 0.20
 MASK_MIN_CHARS = 2000
 SUMMARY_CHARS = 2400        # a typical handoff note
 NEEDED_AGAIN_TURNS = 10
+END_CHECKPOINT_TOKENS = 516  # llama-server's checkpoint nearest the end of a prompt that a rewrite can land after
 OVERHEAD_CHARS = len(json.dumps(tools.tool_schemas(400)))  # tool schemas: in every prompt, not in the context list
 SUMMARY = "## Done so far\n" + "Synthetic handoff note. " * (SUMMARY_CHARS // 24)
 
@@ -52,10 +61,13 @@ class Arm:
     trim: bool
     elide_at: float = 0.55
     summarize_at: float = 0.65
+    mask_batch_at: float = 0.0
 
 
 ARMS = (Arm("baseline", False), Arm("trim", True), Arm("config-only (0.55/0.80)", False, summarize_at=0.80),
         Arm("trim + 0.55/0.80", True, summarize_at=0.80))
+MASK_ARMS = (Arm("per-turn", True), Arm("batch 0.35", True, mask_batch_at=0.35), Arm("batch 0.45", True, mask_batch_at=0.45),
+             Arm("batch 0.50", True, mask_batch_at=0.50))
 
 
 @dataclass
@@ -68,6 +80,7 @@ class Result:
     trim_chars: int = 0
     head_tail: list = field(default_factory=list)   # (turn, call signature) of each head-and-tail trimmed output
     needed_again: int = 0
+    mask_passes: int = 0
 
 
 # synthetic transcripts
@@ -166,7 +179,19 @@ def build_failures() -> list[Step]:
     return steps
 
 
+def grep_loop() -> list[Step]:
+    """The study's worst session (`log_correlation`, second run): a few small steps, then the model re-runs a command
+    returning 16.5K characters, so with per-turn masking nearly every turn rewrites the turn before."""
+    rng = random.Random(5)
+    log = "\n".join(f"2026-10-30T07:{i % 60:02d}:{rng.randint(0, 59):02d} worker-{i % 7} request {rng.randint(1000, 9999)} ok"
+                    for i in range(330))
+    steps = [Step("list_files", {"path": "."}, "app.log\nerrors.log\nreport.md"),
+             Step("read_file", {"path": "report.md"}, "# Report\n\nTODO: correlate the two logs.")]
+    return steps + [_shell("grep -n request app.log errors.log", log) for _ in range(40)]
+
+
 TRANSCRIPTS = {"test-fix loop": fix_loop, "exploration": exploration, "build failures": build_failures}
+MASK_TRANSCRIPTS = {**TRANSCRIPTS, "grep loop": grep_loop}
 
 
 # replay
@@ -181,10 +206,13 @@ def _tokens(context: list[dict]) -> int:
 
 def _compact(context: list[dict], arm: Arm, outcomes: dict, mask: bool, turn: int, sigs: dict,
              result: Result, n: int) -> list[dict]:
-    before = _tokens(context)  # the runner compares the size before masking with elide_at
-    if mask:
-        context, _, _ = compaction.mask_used_results(context, outcomes, MASK_MIN_CHARS)
-    if before < arm.elide_at * n:
+    before = _tokens(context)  # per-turn, the runner compares the size before masking with elide_at
+    if mask and compaction.mask_due(before, n, arm.mask_batch_at, arm.elide_at):
+        masked, _, saved = compaction.mask_used_results(context, outcomes, MASK_MIN_CHARS)
+        if compaction.mask_batch_worthwhile(saved / CHARS_PER_TOKEN, before, n, arm.mask_batch_at, arm.elide_at):
+            context = masked
+            result.mask_passes += saved > 0
+    if (_tokens(context) if arm.mask_batch_at else before) < arm.elide_at * n:
         return context
     result.passes += 1
     if arm.trim:
@@ -233,6 +261,39 @@ def replay(steps: list[Step], arm: Arm, mask: bool = True, n: int = CONTEXT_TOKE
     return result
 
 
+class ReadCost:
+    """An `on_prompt` that adds up the estimated tokens the server reads for each prompt (the module docstring)."""
+
+    def __init__(self) -> None:
+        self.previous: list[dict] = []
+        self.first_change = self.fallback = self.breaks = 0.0
+
+    def __call__(self, context: list[dict]) -> None:
+        def size(messages: list[dict]) -> int:
+            return sum(compaction.message_chars(m) for m in messages)
+
+        total, known = OVERHEAD_CHARS + size(context), OVERHEAD_CHARS + size(self.previous)
+        where = prefix_diff.first_message_diff(self.previous, context)
+        if not self.previous:  # cold
+            self.first_change += total / CHARS_PER_TOKEN
+            self.fallback += total / CHARS_PER_TOKEN
+        elif where is None:
+            reply = compaction.message_chars(context[len(self.previous)]) if len(context) > len(self.previous) else 0
+            self.first_change += (total - known - reply) / CHARS_PER_TOKEN  # the reply was generated, so it is cached
+            self.fallback += (total - known - reply) / CHARS_PER_TOKEN
+        else:
+            index, offset = where
+            kept = OVERHEAD_CHARS + size(context[:index])
+            if index < len(context):
+                kept += min(offset, compaction.message_chars(context[index]))
+            pinned = OVERHEAD_CHARS + size(context[:2])
+            near_end = known - END_CHECKPOINT_TOKENS * CHARS_PER_TOKEN
+            self.first_change += (total - kept) / CHARS_PER_TOKEN
+            self.fallback += (total - (near_end if kept >= near_end else min(kept, pinned))) / CHARS_PER_TOKEN
+            self.breaks += 1
+        self.previous = context
+
+
 def prompt_digests() -> dict:
     """A digest of every prompt each replay builds: what tests/test_mask_batch.py pins, so code that leaves batching
     off can be shown to send what it sent before batching existed."""
@@ -262,12 +323,26 @@ def table(mask: bool = True, n: int = CONTEXT_TOKENS) -> str:
     return "\n".join(rows)
 
 
+def mask_table(n: int = CONTEXT_TOKENS) -> str:
+    rows = ["| Transcript | Arm | Tokens read, first change | Tokens read, fallback | Breaks | Mask passes | Summary calls | "
+            "Compaction passes | Chars sent |", "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
+    for name, make in MASK_TRANSCRIPTS.items():
+        steps = make()
+        for arm in MASK_ARMS:
+            cost = ReadCost()
+            r = replay(steps, arm, n=n, on_prompt=cost)
+            rows.append(f"| {name} ({len(steps)} turns) | {arm.name} | {int(cost.first_change):,} | {int(cost.fallback):,} | "
+                        f"{int(cost.breaks)} | {r.mask_passes} | {r.summary_calls} | {r.passes} | {r.chars_sent:,} |")
+    return "\n".join(rows)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--no-mask", action="store_true", help="replay without observation masking")
     parser.add_argument("--context", type=int, default=CONTEXT_TOKENS, help="context window in tokens")
+    parser.add_argument("--mask-compare", action="store_true", help="compare per-turn and batched masking")
     args = parser.parse_args(argv)
-    print(table(mask=not args.no_mask, n=args.context))
+    print(mask_table(args.context) if args.mask_compare else table(mask=not args.no_mask, n=args.context))
 
 
 if __name__ == "__main__":
