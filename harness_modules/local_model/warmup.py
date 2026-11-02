@@ -48,6 +48,7 @@ class ModelWarmer:
         self._changed = asyncio.Event()  # set by notify(): the guard changed state, so re-check a load in progress
         self._unparking: set[asyncio.Task] = set()  # loads that may have removed the pause flag (park waits for them)
         self._parking = 0  # parks in progress: a load in flight aborts and no new one starts
+        self.transitions = 0  # loads and parks begun: a VRAM reading spanning a change isn't of the loaded model
 
     def _control_for(self, model: ModelConfig):
         return self.control() if model.name == self.managed_model else None
@@ -109,6 +110,7 @@ class ModelWarmer:
         not waited out: it puts the pause flag back and returns, then `stop` (ServerControl.stop) writes the flag again
         and stops llama-server. No new load starts until `stop` is done."""
         self._parking += 1
+        self.transitions += 1
         try:
             self.notify()
             loads = [t for t in self._unparking if not t.done()]
@@ -140,6 +142,7 @@ class ModelWarmer:
 
     def _start_wake(self, model: ModelConfig) -> asyncio.Task:
         self._wake_started[model.name] = time.monotonic()
+        self.transitions += 1
         task = asyncio.create_task(self._wake(model), name=f"warm-{model.name}")
         self._waking[model.name] = task
         return task

@@ -529,6 +529,7 @@ class GpuGuard:
         self._floor_in_pause = False  # the floor is part of this pause, though parking has hidden its signal
         # The model is on the card, so free VRAM counts as a recovery (ModelWarmer.state; /health alone can't tell).
         self.model_loaded: Callable[[], Awaitable[bool]] = lambda: self.control.healthy()
+        self.model_transitions: Callable[[], int] = lambda: 0  # loads and parks begun so far (the warmer's count)
         self.changed_at = time.time()
         self.last_check = 0.0
         self.pauses = 0
@@ -725,10 +726,12 @@ class GpuGuard:
     async def check(self, startup: bool = False) -> None:
         if self.manual and self.manual_until is not None and time.time() >= self.manual_until:
             self.resume(override_signals=False)
-        self.signals = await self.detector() + await self.vram_floor(self.control.flagged)
+        signals = await self.detector()
+        sampled_at = await self._recovery_sample_start()
+        self.signals = signals + await self.vram_floor(self.control.flagged)
         self.last_check = time.time()
         keys = frozenset(s["key"] for s in self.signals)
-        if self.vram_acknowledged and await self._floor_recovered():
+        if self.vram_acknowledged and await self._floor_recovered(sampled_at):
             self.vram_acknowledged = False
         floor_key = {VRAM_LOW_KEY} if self.vram_acknowledged else set()
         triggers = keys - (self.override or frozenset()) - floor_key
@@ -745,12 +748,22 @@ class GpuGuard:
 
         await self._release(startup, now)
 
-    async def _floor_recovered(self) -> bool:
-        """Off, or free VRAM read at or above the floor with the model loaded. Until it has loaded the model isn't on
-        the card, so a high reading says nothing about whether the two fit."""
+    async def _recovery_sample_start(self) -> int | None:
+        """The model's transition count if a reading taken now could end the acknowledgement: the model is loaded and
+        awake before the read begins. None otherwise. nvidia-smi can take seconds, and a load can finish meanwhile."""
+        if not self.vram_acknowledged or self.cfg.min_free_vram_mib <= 0 or self.control.flagged():
+            return None
+        transitions = self.model_transitions()
+        return transitions if await self.model_loaded() else None
+
+    async def _floor_recovered(self, sampled_at: int | None) -> bool:
+        """Off, or free VRAM read at or above the floor with the model loaded throughout. Until it has loaded the model
+        isn't on the card, so a high reading says nothing about whether the two fit: the model must be ready on both
+        sides of the read, with no load or park between them."""
         if self.cfg.min_free_vram_mib <= 0:
             return True
-        return self.vram_floor.recovered and await self.model_loaded()
+        return (sampled_at is not None and self.vram_floor.recovered and await self.model_loaded()
+                and self.model_transitions() == sampled_at)
 
     async def _release(self, startup: bool, now: float) -> None:
         if self._clear_since is None:

@@ -1940,6 +1940,21 @@ def test_a_reading_taken_while_the_model_slept_is_no_recovery_though_it_woke_mea
     asyncio.run(body())
 
 
+def test_a_reading_the_model_fell_asleep_during_is_no_recovery(tmp_path, monkeypatch):
+    """Ready as the read began, asleep by the time it came back; llama-server's idle sleep passes through no warmer."""
+    async def body():
+        m, vram, llama, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        llama.sleeping = True
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        llama.sleeping = False
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
 def test_a_reading_spanning_an_unload_and_reload_is_no_recovery_though_ready_both_sides(tmp_path, monkeypatch):
     """Ready before and ready after, with the model off the card in between: only the transition gives it away."""
     async def body():

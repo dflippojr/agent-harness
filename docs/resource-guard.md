@@ -52,8 +52,9 @@ this repository doesn't.
   wait that followed), it acknowledges the floor. The model can then reload and run under the floor: `vram:low` still
   shows in `signals`, but it doesn't pause anything. The park hides the signal and the count restarts after a reload,
   so neither of those ends it. It ends when:
-  - a reading is at or above the floor with the model loaded and awake. A high reading while the model is loading or
-    asleep doesn't count, because the model isn't on the card then, and neither does a failed reading;
+  - a reading is at or above the floor with the model loaded and awake both before and after the read, and no load or
+    park began between them. A high reading while the model is loading or asleep doesn't count, because the model isn't
+    on the card then, and neither does a failed reading;
   - a new trigger appears, such as a game: that pauses as usual, and the floor counts again afterwards;
   - a manual hold is resumed, the floor is set to 0, or the daemon restarts.
 
