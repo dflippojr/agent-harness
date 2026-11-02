@@ -1087,18 +1087,16 @@ while :; do sleep 0.2; done
 def systemd_command() -> tuple[tuple[str, ...], tuple[str, ...]]:
     """(systemd-run, systemctl) for a manager that can run these units: the user's, or the system's as root in CI."""
     systemd_run, systemctl = shutil.which("systemd-run"), shutil.which("systemctl")
-    if not systemd_run or not systemctl or not sys.platform.startswith("linux"):
-        pytest.skip("this needs systemd")
+    if not (systemd_run and systemctl and Path("/run/systemd/system").is_dir()):
+        pytest.skip("this host is not running systemd")
     probe = subprocess.run([systemctl, "--user", "is-system-running"], capture_output=True, text=True, check=False)
     if probe.stdout.strip() in ("running", "degraded"):
         return (systemd_run, "--user"), (systemctl, "--user")
     sudo = shutil.which("sudo")
-    in_ci = os.environ.get("CI") == "true" or bool(os.environ.get("GITHUB_ACTIONS"))
     if sudo and subprocess.run([sudo, "-n", "true"], capture_output=True, check=False).returncode == 0:
         return (sudo, "-n", systemd_run), (sudo, "-n", systemctl)
-    # CI must prove this, so only a host without systemd access may skip it.
-    assert not in_ci, "CI needs a systemd manager for the runner stop test"
-    pytest.skip("no systemd user manager or passwordless sudo")
+    # systemd is here, so a stop test that can't reach it must not read as a pass.
+    pytest.fail("systemd is running, but neither a user manager nor passwordless sudo can reach it")
 
 
 class StoppableUnit:
