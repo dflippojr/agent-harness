@@ -18,7 +18,8 @@ from harness.llm import Completion
 ROUTES = {"/models/status", "/models/warm", "/gpu", "/gpu/{action}", "/resources",
           "/resources/diagnostics", "/resources/{action}", "/api/v1/models/status", "/api/v1/models/warm"}
 KEYS = {"gpu_guard.enabled", "gpu_guard.poll_seconds", "gpu_guard.resume_after_seconds",
-        "gpu_guard.drain_timeout_seconds", "modules.gpu_guard", "modules.local_model"}
+        "gpu_guard.drain_timeout_seconds", "gpu_guard.min_free_vram_mib", "gpu_guard.vram_drain_timeout_seconds",
+        "modules.gpu_guard", "modules.local_model"}
 
 
 def manager(tmp_path, *, enabled=False, packages=None):

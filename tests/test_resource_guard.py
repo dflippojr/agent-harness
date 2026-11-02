@@ -14,7 +14,8 @@ import pytest
 
 from harness.cli_backends import ClaudeSession
 from harness.config import BackendConfig, GpuGuardConfig
-from harness_modules.local_model.service import CLEAR, GIB, PAUSED, MemoryWatch
+from harness_modules.local_model import service
+from harness_modules.local_model.service import CLEAR, GIB, PAUSED, PAUSING, MemoryWatch
 from harness_modules.local_model.service import memory_reading as real_memory_reading  # before conftest's plenty_of_ram patches it
 from harness.llm import Completion
 from harness.manager import Manager
@@ -1678,3 +1679,273 @@ def test_linux_supervisor_healthcheck_probes_the_port_the_server_listens_on(tmp_
             httpd.shutdown()
         httpd.server_close()
         _end_supervisor(proc, flag, tmp_path / "logs")
+
+
+# the free-VRAM floor (#829): gpu_guard.min_free_vram_mib, on fake readings; no GPU needed
+class FakeVram:
+    """gpu_reading on rails: each poll takes the next free-VRAM figure in MiB. None is a failed reading, NA a reading
+    whose free-VRAM field the driver reported as [N/A]."""
+    NA = "n/a"
+
+    def __init__(self, *free_mib):
+        self.free_mib = list(free_mib)
+        self.reads = 0
+
+    def __call__(self):
+        self.reads += 1
+        free = self.free_mib.pop(0)
+        if free is None:
+            return None
+        return {"vram_free": None if free == self.NA else free * service.MIB}
+
+
+def floor_guard(*free_mib, floor=256, **cfg):
+    guard, detect, control, scheduler, log = make_guard(min_free_vram_mib=floor, **cfg)
+    guard.vram_floor = service.VramFloor(guard.cfg, read=FakeVram(*free_mib))
+    return guard, detect, control, scheduler, log
+
+
+async def _polls(guard, count: int) -> list[list[str]]:
+    keys = []
+    for _ in range(count):
+        await guard.check()
+        keys.append([s["key"] for s in guard.signals])
+    return keys
+
+
+def test_a_floor_of_zero_never_asks_nvidia_smi():
+    async def body():
+        guard, _, _, scheduler, _ = floor_guard(floor=0)  # no figures: a read would raise IndexError
+        assert await _polls(guard, 3) == [[], [], []]
+        assert guard.vram_floor.read.reads == 0 and guard.state == CLEAR and not scheduler.paused
+    asyncio.run(body())
+
+
+def test_the_floor_is_off_unless_configured():
+    assert GpuGuardConfig().min_free_vram_mib == 0
+    assert GpuGuardConfig().vram_drain_timeout_seconds == 30
+
+
+def test_one_low_reading_is_no_signal_and_two_are():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 90, floor=256)
+        await guard.check()
+        assert guard.signals == [] and guard.state == CLEAR and control.stops == 0
+        await guard.check()
+        assert [(s["key"], s["kind"]) for s in guard.signals] == [("vram:low", "vram")]
+        assert "90 MiB" in guard.signals[0]["detail"] and "256 MiB" in guard.signals[0]["detail"]
+        assert guard.state == PAUSED and control.stops == 1
+        assert [r["key"] for r in guard.reasons] == ["vram:low"]
+    asyncio.run(body())
+
+
+def test_the_key_stays_the_same_as_the_reading_changes_so_resume_anyway_holds():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 90, 80, floor=256, resume_after_seconds=999)
+        control.health = True
+        await _polls(guard, 2)
+        assert guard.state == PAUSED
+        control.flag = False  # the owner's "resume anyway" reloaded the model; the reading has moved since
+        guard.state = CLEAR
+        guard.override = frozenset({"vram:low"})
+        await guard.check()
+        assert guard.override == frozenset({"vram:low"}) and guard.state == CLEAR
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("between", [
+    pytest.param(256, id="exactly-at-the-floor"),
+    pytest.param(4000, id="above-the-floor"),
+    pytest.param(None, id="failed-reading"),
+    pytest.param(FakeVram.NA, id="free-vram-not-reported"),
+])
+def test_a_reading_at_the_floor_or_a_failed_one_resets_the_count(between):
+    async def body():
+        guard, _, control, scheduler, _ = floor_guard(100, between, 100, 100, floor=256)
+        assert await _polls(guard, 3) == [[], [], []]
+        assert guard.state == CLEAR and control.stops == 0 and not scheduler.paused
+        assert await _polls(guard, 1) == [["vram:low"]]  # the fourth is the second low in a row
+    asyncio.run(body())
+
+
+def test_a_parked_model_does_not_count_low_vram_and_nvidia_smi_is_not_asked():
+    """An Images batch parks the model through the same flag, then ComfyUI fills the card: that's no reason to pause."""
+    async def body():
+        guard, _, control, scheduler, log = floor_guard(floor=256)
+        control.flag = True
+        assert await _polls(guard, 3) == [[], [], []]
+        assert guard.vram_floor.read.reads == 0
+        assert guard.state == CLEAR and not scheduler.paused and log == []
+    asyncio.run(body())
+
+
+def test_parking_resets_the_count_so_an_earlier_low_reading_does_not_carry_over():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 100, floor=256)
+        await _polls(guard, 1)
+        control.flag = True
+        await _polls(guard, 1)
+        control.flag = False
+        assert await _polls(guard, 1) == [[]]  # one low since the park, not two
+        assert await _polls(guard, 1) == [["vram:low"]]
+    asyncio.run(body())
+
+
+def test_a_park_that_lands_during_the_reading_does_not_count_it():
+    """nvidia-smi can take seconds. A batch that parks meanwhile may already hold the card when the figure comes back."""
+    async def body():
+        guard, _, control, scheduler, _ = floor_guard(floor=256)
+        figures = [100, 100]
+
+        def read():
+            if len(figures) == 1:
+                control.flag = True
+            return {"vram_free": figures.pop(0) * service.MIB}
+        guard.vram_floor = service.VramFloor(guard.cfg, read=read)
+        assert await _polls(guard, 2) == [[], []]
+        assert guard.state == CLEAR and not scheduler.paused
+    asyncio.run(body())
+
+
+def test_the_floor_reads_live_so_a_settings_write_applies_at_the_next_poll():
+    async def body():
+        guard, _, _, _, _ = floor_guard(100, 100, floor=0)
+        assert await _polls(guard, 1) == [[]]
+        guard.cfg.min_free_vram_mib = 256
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+    asyncio.run(body())
+
+
+def test_two_polls_take_two_readings_from_a_fake_nvidia_smi_not_one_cached(monkeypatch):
+    """gpu_reading(cached=True) serves /metrics for 10 s; counting that would turn a single reading into two polls."""
+    from harness_modules.local_model import resources
+    asked = []
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: asked.append(args) or "15800, 16000, 37, 100, 0\n")
+
+    async def body():
+        guard, _, control, _, _ = make_guard(min_free_vram_mib=256)
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert control.stops == 1
+    asyncio.run(body())
+    assert len(asked) == 2
+
+
+def _low_then(guard_cfg: dict, signals: list[dict]):
+    busy = {"v": True}
+    guard, detect, control, _, _ = floor_guard(100, 100, 100, 100, floor=256, busy=lambda: busy["v"], **guard_cfg)
+    detect.signals = signals
+    return guard, control
+
+
+def test_a_pause_this_signal_starts_drains_for_the_shorter_timeout():
+    async def body():
+        guard, control = _low_then({"vram_drain_timeout_seconds": 0.05, "drain_timeout_seconds": 999}, [])
+        await _polls(guard, 2)
+        assert guard.state == PAUSING and control.stops == 0  # a turn is running
+        await asyncio.sleep(0.1)
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 1
+    asyncio.run(body())
+
+
+def test_a_pause_with_another_trigger_present_keeps_the_longer_drain():
+    async def body():
+        guard, control = _low_then({"vram_drain_timeout_seconds": 0.05, "drain_timeout_seconds": 999}, [GAME])
+        await _polls(guard, 2)
+        assert {s["key"] for s in guard.signals} == {"game:hades.exe", "vram:low"}
+        await asyncio.sleep(0.1)
+        await guard.check()
+        assert guard.state == PAUSING and control.stops == 0
+    asyncio.run(body())
+
+
+def test_vram_joining_a_game_pause_already_draining_keeps_the_longer_drain():
+    async def body():
+        guard, control = _low_then({"vram_drain_timeout_seconds": 0.05, "drain_timeout_seconds": 999}, [GAME])
+        await guard.check()
+        assert guard.state == PAUSING
+        guard.detector.signals = []  # the game is gone and only the floor is left, but the game began this pause
+        await guard.check()
+        assert [s["key"] for s in guard.signals] == ["vram:low"]
+        await asyncio.sleep(0.1)
+        await guard.check()
+        assert guard.state == PAUSING and control.stops == 0
+    asyncio.run(body())
+
+
+def test_a_manual_hold_drains_as_before_even_with_the_floor_breached():
+    async def body():
+        guard, control = _low_then({"vram_drain_timeout_seconds": 0.05, "drain_timeout_seconds": 999}, [])
+        guard.pause()
+        await _polls(guard, 2)
+        assert [s["key"] for s in guard.signals] == ["vram:low"]
+        await asyncio.sleep(0.1)
+        await guard.check()
+        assert guard.state == PAUSING and control.stops == 0 and guard.manual
+    asyncio.run(body())
+
+
+def test_after_the_park_the_guard_clears_with_the_model_still_parked_and_nothing_queued():
+    async def body():
+        guard, _, control, scheduler, log = floor_guard(100, 100, floor=256, lazy_load=True, resume_after_seconds=0)
+        guard.want_model = lambda: False
+        await _polls(guard, 2)
+        assert guard.state == PAUSED and control.flag and control.stops == 1
+        await guard.check()  # flag present: nothing read, nothing to hold for, and resume_after_seconds has passed
+        assert guard.vram_floor.read.reads == 2
+        assert (guard.state, control.flag, control.starts) == (CLEAR, True, 0)
+        assert not scheduler.paused and [k for k, _ in log] == ["pause", "resume"]
+        assert guard.status()["parked"] is True
+    asyncio.run(body())
+
+
+def test_the_park_waits_out_resume_after_seconds_like_any_other_trigger():
+    async def body():
+        guard, _, control, scheduler, _ = floor_guard(100, 100, floor=256, lazy_load=True, resume_after_seconds=999)
+        await _polls(guard, 3)
+        assert guard.state == PAUSED and scheduler.paused and control.flag
+    asyncio.run(body())
+
+
+def test_work_queued_during_the_hold_reloads_the_model_as_with_any_other_trigger():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, floor=256, lazy_load=True, resume_after_seconds=0)
+        guard.want_model = lambda: True
+        await _polls(guard, 3)
+        assert control.starts == 1 and not control.flag and guard.state == CLEAR
+    asyncio.run(body())
+
+
+def test_metrics_count_the_vram_trigger(tmp_path):
+    from harness.metrics import render
+    m = guarded_manager(tmp_path)
+    m.guard.signals = [{"key": "vram:low", "kind": "vram", "detail": "x"}]
+    assert 'harness_gpu_guard_triggers{kind="vram"} 1' in render(m)
+
+
+@pytest.mark.parametrize("key, value", [
+    ("min_free_vram_mib", -1), ("min_free_vram_mib", 25.5), ("min_free_vram_mib", "256"), ("min_free_vram_mib", True),
+    ("vram_drain_timeout_seconds", -1), ("vram_drain_timeout_seconds", "soon"),
+    ("vram_drain_timeout_seconds", float("inf")),
+])
+def test_config_refuses_a_bad_floor_or_drain_timeout(key, value):
+    from harness.config import validate_gpu_guard
+    with pytest.raises(ValueError, match=key):
+        validate_gpu_guard(GpuGuardConfig(**{key: value}))
+
+
+def test_config_accepts_the_tower_floor_and_the_defaults():
+    from harness.config import validate_gpu_guard
+    validate_gpu_guard(GpuGuardConfig())
+    validate_gpu_guard(GpuGuardConfig(min_free_vram_mib=256, vram_drain_timeout_seconds=30))
+
+
+def test_settings_registry_lists_the_floor_and_its_drain_timeout():
+    from harness_modules.local_model.settings import specs
+    by_key = {s.key: s for s in specs()}
+    floor, drain = by_key["gpu_guard.min_free_vram_mib"], by_key["gpu_guard.vram_drain_timeout_seconds"]
+    assert (floor.value_type, floor.default, floor.bounds.minimum) == ("int", 0, 0)
+    assert (drain.value_type, drain.default) == ("float", 30)
+    assert floor.yaml_path == ("gpu_guard", "min_free_vram_mib")
+    assert drain.yaml_path == ("gpu_guard", "vram_drain_timeout_seconds")
