@@ -18,8 +18,10 @@ docs/jev-compaction-study.md; the scripts are fixed, so this counts recurrences,
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from harness import compaction, tools
@@ -206,7 +208,8 @@ def _compact(context: list[dict], arm: Arm, outcomes: dict, mask: bool, turn: in
     return compaction.apply_summary(context, *split, SUMMARY)
 
 
-def replay(steps: list[Step], arm: Arm, mask: bool = True, n: int = CONTEXT_TOKENS) -> Result:
+def replay(steps: list[Step], arm: Arm, mask: bool = True, n: int = CONTEXT_TOKENS,
+           on_prompt: Callable[[list[dict]], None] | None = None) -> Result:
     result = Result()
     context = [{"role": "system", "content": "You are a software agent. " * 40},
                {"role": "user", "content": "Make the test suite pass and report what you changed."}]
@@ -215,6 +218,8 @@ def replay(steps: list[Step], arm: Arm, mask: bool = True, n: int = CONTEXT_TOKE
     for turn, step in enumerate(steps):
         context = _compact(context, arm, outcomes, mask, turn, sigs, result, n)
         result.chars_sent += sum(compaction.message_chars(m) for m in context) + OVERHEAD_CHARS
+        if on_prompt:
+            on_prompt(context)
         call_id = f"call-{turn}"
         call = {"id": call_id, "type": "function", "function": {"name": step.name, "arguments": json.dumps(step.args)}}
         context = context + [{"role": "assistant", "content": step.text, "tool_calls": [call]},
@@ -226,6 +231,22 @@ def replay(steps: list[Step], arm: Arm, mask: bool = True, n: int = CONTEXT_TOKE
                               if any(sig == other and at <= turn < at + NEEDED_AGAIN_TURNS for turn, other in later))
     result.chars_sent += result.summary_request_chars
     return result
+
+
+def prompt_digests() -> dict:
+    """A digest of every prompt each replay builds: what tests/test_mask_batch.py pins, so code that leaves batching
+    off can be shown to send what it sent before batching existed."""
+    digests = {}
+    for name, make in TRANSCRIPTS.items():
+        steps = make()
+        for n in (CONTEXT_TOKENS, 32768):
+            for mask in (True, False):
+                for arm in ARMS[:2]:
+                    prompts = hashlib.sha256()
+                    replay(steps, arm, mask, n, on_prompt=lambda context, sink=prompts: sink.update(
+                        json.dumps(context, sort_keys=True).encode("utf-8")))
+                    digests[f"{name} | {n} | mask={mask} | {arm.name}"] = prompts.hexdigest()
+    return digests
 
 
 def table(mask: bool = True, n: int = CONTEXT_TOKENS) -> str:
