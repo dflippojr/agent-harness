@@ -820,6 +820,20 @@ def test_an_alert_ntfy_refused_is_sent_again_on_the_next_check(health):
     assert len(health.alerts()) == refused + 1
 
 
+@pytest.mark.parametrize("status", [301, 302, 308])
+def test_a_redirect_from_ntfy_is_not_a_delivered_alert(health, status):
+    # curl --fail only rejects 400 and up, and a redirect isn't followed, so nothing was published.
+    health.ntfy.status = status
+    health.set_runner_status("offline")
+    failed = health.run()
+    assert failed.returncode != 0
+    assert "ntfy did not accept" in failed.stderr
+    assert not health.state.exists()
+    health.ntfy.status = 200
+    assert health.run().returncode == 0
+    assert health.state.read_text(encoding="utf-8").strip() == "runner-offline"
+
+
 def test_an_unreachable_ntfy_fails_the_check_so_systemd_shows_it(health):
     health.ntfy.close()
     health.set_runner_status("offline")
