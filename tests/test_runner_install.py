@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -423,7 +424,9 @@ HEALTH_SCRIPT = ROOT / "ops" / "github" / "runner-health.sh"
 HEALTH_SERVICE = ROOT / "ops" / "github" / "runner-health.service"
 HEALTH_TIMER = ROOT / "ops" / "github" / "runner-health.timer"
 CI_CD_DOC = ROOT / "docs/CI-CD.md"
-STOP_SETTINGS = ("KillMode=mixed", "KillSignal=SIGINT", "TimeoutStopSec=5min")
+STOP_SCRIPT = ROOT / "ops" / "github" / "runner-stop.sh"
+# TimeoutStopSec sits above the 5 minutes runner-stop.sh waits, so systemd never cuts that wait short.
+STOP_SETTINGS = ("KillMode=mixed", "KillSignal=SIGINT", "TimeoutStopSec=6min")
 DEPLOY_RUNNER = "dflippotower-linux-agent-harness"
 DEPLOY_SERVICE = "github-runner-agent-harness.service"
 GH_SENTINEL = "ghp_SENTINELGITHUBTOKEN814"
@@ -470,6 +473,11 @@ def test_the_installed_unit_is_the_unit_the_dry_run_prints(tmp_path):
         assert setting in lines
     # mixed signals only the main process, so that process has to be the wrapper that forwards it to the listener.
     assert f"ExecStart={host.install_dir}/runsvc.sh" in lines
+    # That wrapper kills the listener 30 seconds after the signal, so the stop reaches the listener first another way.
+    assert f"ExecStop={host.install_dir}/runner-stop.sh" in lines
+    installed = host.dest / "runner-stop.sh"
+    assert installed.read_bytes() == STOP_SCRIPT.read_bytes()
+    assert os.access(installed, os.X_OK)
 
 
 def test_the_documented_unit_stops_the_tree_through_the_process_that_forwards_the_signal():
@@ -477,6 +485,7 @@ def test_the_documented_unit_stops_the_tree_through_the_process_that_forwards_th
     for setting in STOP_SETTINGS:
         assert setting in unit
     assert "ExecStart=<runner dir>/runsvc.sh" in unit
+    assert "ExecStop=<runner dir>/runner-stop.sh" in unit
     assert "WorkingDirectory=<runner dir>" in unit
     assert "KillMode=process" not in unit
     assert "ExecStart=<runner dir>/run.sh" not in unit
@@ -484,7 +493,7 @@ def test_the_documented_unit_stops_the_tree_through_the_process_that_forwards_th
 
 @pytest.mark.parametrize("explained", [
     "KillMode=process", "orphaned", ".credentials", "control-group", "mixed", "every process", "main process",
-    "cancels the running job",
+    "cancels the running job", "30 seconds", "runner-stop.sh",
 ])
 def test_the_doc_explains_the_stop_settings(explained):
     assert explained in doc_prose()
@@ -576,7 +585,10 @@ exec "$REAL_CURL" "$@"
 
 
 class FakeNtfy:
-    """A real loopback HTTP endpoint, so the script's real curl call and its Authorization header are exercised."""
+    """A real loopback HTTP endpoint, so the script's real curl call and its Authorization header are exercised.
+
+    A 3xx points at /elsewhere, which always answers 200, the way a redirect to a page that publishes nothing would.
+    """
 
     def __init__(self) -> None:
         self.requests: list[dict] = []
@@ -584,6 +596,13 @@ class FakeNtfy:
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                # A followed 301 or 302 turns the POST into a GET. It answers 200 like anywhere a redirect might lead.
+                owner.requests.append({"path": self.path, "authorization": self.headers.get("Authorization"), "payload": {}})
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def do_POST(self) -> None:
                 body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 owner.requests.append({
@@ -591,7 +610,10 @@ class FakeNtfy:
                     "authorization": self.headers.get("Authorization"),
                     "payload": json.loads(body),
                 })
-                self.send_response(owner.status)
+                status = 200 if self.path == "/elsewhere" else owner.status
+                self.send_response(status)
+                if 300 <= status < 400:
+                    self.send_header("Location", f"{owner.url}elsewhere")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
@@ -682,6 +704,13 @@ class HealthHost:
 
     def alerts(self) -> list[dict]:
         return [request["payload"] for request in self.ntfy.requests]
+
+    def delivered(self) -> str:
+        """The last state ntfy accepted a notice for. With no state file, nothing has been delivered yet."""
+        if not self.state.exists():
+            return "healthy"
+        fields = dict(line.split("=", 1) for line in self.state.read_text(encoding="utf-8").splitlines())
+        return fields["delivered"]
 
 
 @pytest.fixture
@@ -797,6 +826,63 @@ def test_the_same_cannot_tell_outage_does_not_repeat_when_its_reason_changes(hea
     assert len(health.alerts()) == 1
 
 
+OUTAGES = {
+    "service-inactive": ({"service": "inactive"}, "online"),
+    "runner-offline": ({}, "offline"),
+    "cannot-tell": ({"gh_mode": "unreachable"}, "online"),
+}
+
+
+@pytest.mark.parametrize("kind", OUTAGES)
+def test_a_rejected_recovery_notice_does_not_silence_the_next_outage(health, kind):
+    scenario, status = OUTAGES[kind]
+    health.set_runner_status(status)
+    assert health.run(**scenario).returncode == 0
+    assert len(health.alerts()) == 1
+
+    health.set_runner_status("online")
+    health.ntfy.status = 503
+    assert health.run().returncode != 0
+    health.ntfy.status = 200
+    rejected = len(health.alerts())
+
+    # The same kind of outage again, with ntfy back: it's a new outage, so it alerts, and only once.
+    health.set_runner_status(status)
+    assert health.run(**scenario).returncode == 0
+    assert len(health.alerts()) == rejected + 1
+    assert "recovered" not in health.alerts()[-1]["title"].lower()
+    assert health.run(**scenario).returncode == 0
+    assert len(health.alerts()) == rejected + 1
+
+
+def test_a_rejected_recovery_notice_is_sent_again_while_the_runner_stays_healthy(health):
+    health.set_runner_status("offline")
+    health.run()
+    health.set_runner_status("online")
+    health.ntfy.status = 503
+    assert health.run().returncode != 0
+    health.ntfy.status = 200
+    rejected = len(health.alerts())
+    assert health.run().returncode == 0
+    assert len(health.alerts()) == rejected + 1
+    assert "recovered" in health.alerts()[-1]["title"].lower()
+    assert health.run().returncode == 0
+    assert len(health.alerts()) == rejected + 1
+
+
+def test_an_undelivered_outage_alert_keeps_retrying_and_needs_no_recovery_if_it_ends_unheard(health):
+    health.set_runner_status("offline")
+    health.ntfy.status = 503
+    assert health.run().returncode != 0
+    assert health.run().returncode != 0
+    health.ntfy.status = 200
+    health.set_runner_status("online")
+    tried = len(health.alerts())
+    # Nobody heard about that outage, so there's nothing to announce the end of.
+    assert health.run().returncode == 0
+    assert len(health.alerts()) == tried
+
+
 def test_a_different_kind_of_outage_raises_its_own_alert(health):
     health.run(gh_mode="unreachable")
     health.run(service="inactive")
@@ -810,7 +896,7 @@ def test_an_alert_ntfy_refused_is_sent_again_on_the_next_check(health):
     failed = health.run()
     assert failed.returncode != 0
     assert "ntfy did not accept" in failed.stderr
-    assert not health.state.exists()
+    assert health.delivered() == "healthy"
     refused = len(health.alerts())  # curl retried a 503 itself.
     assert refused >= 1
     health.ntfy.status = 200
@@ -828,10 +914,10 @@ def test_a_redirect_from_ntfy_is_not_a_delivered_alert(health, status):
     failed = health.run()
     assert failed.returncode != 0
     assert "ntfy did not accept" in failed.stderr
-    assert not health.state.exists()
+    assert health.delivered() == "healthy"
     health.ntfy.status = 200
     assert health.run().returncode == 0
-    assert health.state.read_text(encoding="utf-8").strip() == "runner-offline"
+    assert health.delivered() == "runner-offline"
 
 
 def test_an_unreachable_ntfy_fails_the_check_so_systemd_shows_it(health):
@@ -840,7 +926,7 @@ def test_an_unreachable_ntfy_fails_the_check_so_systemd_shows_it(health):
     result = health.run()
     assert result.returncode != 0
     assert "ntfy did not accept" in result.stderr
-    assert not health.state.exists()
+    assert health.delivered() == "healthy"
 
 
 @pytest.mark.parametrize(("name", "value", "message"), [
@@ -867,7 +953,7 @@ def test_an_unreadable_ntfy_token_file_fails_instead_of_posting_without_the_toke
     result = health.run()
     assert result.returncode != 0
     assert health.alerts() == []
-    assert not health.state.exists()
+    assert health.delivered() == "healthy"
 
 
 def test_a_token_that_could_change_curls_config_is_refused(health):
@@ -877,6 +963,27 @@ def test_a_token_that_could_change_curls_config_is_refused(health):
     assert result.returncode != 0
     assert health.alerts() == []
     assert "attacker" not in health.log.read_text(encoding="utf-8")
+
+
+def test_a_curlrc_that_traces_cannot_log_the_ntfy_token(health):
+    trace = health.tmp / "curl-trace"
+    (health.tmp / ".curlrc").write_text(f'trace-ascii = "{trace}"\n', encoding="utf-8")
+    health.set_runner_status("offline")
+    assert health.run().returncode == 0
+    # ntfy got the token, and the user's curl settings never saw it.
+    assert health.ntfy.requests[0]["authorization"] == f"Bearer {NTFY_SENTINEL}"
+    assert not trace.exists()
+
+
+def test_a_curlrc_that_follows_redirects_cannot_make_a_redirect_look_delivered(health):
+    (health.tmp / ".curlrc").write_text("location\n", encoding="utf-8")
+    health.ntfy.status = 302
+    health.set_runner_status("offline")
+    failed = health.run()
+    assert failed.returncode != 0
+    assert "ntfy did not accept" in failed.stderr
+    assert health.delivered() == "healthy"
+    assert "/elsewhere" not in [request["path"] for request in health.ntfy.requests]
 
 
 def test_no_token_reaches_the_output_the_alerts_the_state_or_a_command_line(health):
@@ -918,3 +1025,174 @@ def test_curl_does_not_inherit_the_github_token(health, tmp_path):
     health.run()
     assert len(health.alerts()) == 1
     assert seen.read_text(encoding="utf-8") == ""
+
+
+# runner-stop.sh against real systemd. The stand-ins model runner 2.337.0: main.sh is runsvc.sh, service.sh is
+# RunnerService.js with its SIGKILL of the listener 30 seconds after a signal, and worker.sh is a job whose cancellation
+# cleanup takes longer than those 30 seconds. They run under the real KillMode=mixed.
+STAND_INS = {
+    "main.sh": """#!/bin/bash
+trap 'kill -INT $PID' TERM INT
+env --default-signal=INT ./service.sh &
+PID=$!
+wait $PID
+trap - TERM INT
+wait $PID
+""",
+    "service.sh": """#!/bin/bash
+shutdown() {
+  kill -INT "$LISTENER"
+  ( sleep 30; kill -KILL "$LISTENER" ) &
+  TIMER=$!
+}
+trap shutdown INT TERM
+env --default-signal=INT ./Runner.Listener &
+LISTENER=$!
+while kill -0 "$LISTENER" 2>/dev/null; do wait "$LISTENER"; done
+[ -z "$TIMER" ] || kill "$TIMER" 2>/dev/null
+exit 0
+""",
+    "Runner.Listener": """#!/bin/bash
+cancel() {
+  echo listener-cancelling >> log
+  kill -USR1 "$WORKER"
+  wait "$WORKER"
+  echo listener-exiting >> log
+  exit 0
+}
+trap cancel INT
+./worker.sh &
+WORKER=$!
+while :; do sleep 0.2; done
+""",
+    "worker.sh": """#!/bin/bash
+cleanup() {
+  echo cleanup-started >> log
+  sleep "$CLEANUP_SECONDS"
+  echo cleanup-finished >> log
+  exit 0
+}
+trap cleanup USR1
+sleep 600 &
+while :; do sleep 0.2; done
+""",
+}
+
+
+def systemd_command() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(systemd-run, systemctl) for a manager that can run these units: the user's, or the system's as root in CI."""
+    systemd_run, systemctl = shutil.which("systemd-run"), shutil.which("systemctl")
+    if not systemd_run or not systemctl or not sys.platform.startswith("linux"):
+        pytest.skip("this needs systemd")
+    probe = subprocess.run([systemctl, "--user", "is-system-running"], capture_output=True, text=True, check=False)
+    if probe.stdout.strip() in ("running", "degraded"):
+        return (systemd_run, "--user"), (systemctl, "--user")
+    sudo = shutil.which("sudo")
+    in_ci = os.environ.get("CI") == "true" or bool(os.environ.get("GITHUB_ACTIONS"))
+    if sudo and subprocess.run([sudo, "-n", "true"], capture_output=True, check=False).returncode == 0:
+        return (sudo, "-n", systemd_run), (sudo, "-n", systemctl)
+    # CI must prove this, so only a host without systemd access may skip it.
+    assert not in_ci, "CI needs a systemd manager for the runner stop test"
+    pytest.skip("no systemd user manager or passwordless sudo")
+
+
+class StoppableUnit:
+    """The stand-in tree as a real transient unit, with the stop settings under test."""
+
+    def __init__(self, directory: Path, cleanup_seconds: int, *properties: str):
+        self.directory = directory
+        directory.mkdir()
+        directory.chmod(0o755)
+        for name, text in STAND_INS.items():
+            (directory / name).write_text(text, encoding="utf-8")
+            (directory / name).chmod(0o755)
+        self.run_command, self.ctl = systemd_command()
+        self.name = f"ah814-test-{os.getpid()}-{directory.name}-{threading.get_ident()}.service"
+        started = subprocess.run(
+            [*self.run_command, "--quiet", "--collect", f"--unit={self.name}", f"--working-directory={directory}",
+             f"--setenv=CLEANUP_SECONDS={cleanup_seconds}", "-p", "KillMode=mixed", "-p", "KillSignal=SIGINT",
+             "-p", "TimeoutStopSec=90s", *properties, str(directory / "main.sh")],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert started.returncode == 0, started.stderr
+        deadline = time.monotonic() + 20
+        while not self.running() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert self.running(), "the stand-in tree never started"
+
+    def running(self) -> list[str]:
+        """The tree's processes still alive, by the marker in their working directory or command line."""
+        alive = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if os.readlink(entry / "cwd") == str(self.directory):
+                    alive.append(entry.name)
+            except OSError:
+                continue
+        return alive
+
+    def stop(self) -> None:
+        subprocess.run([*self.ctl, "stop", self.name], capture_output=True, timeout=150, check=False)
+
+    def log(self) -> list[str]:
+        path = self.directory / "log"
+        return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+def test_a_stop_lets_a_cleanup_longer_than_the_wrappers_30_seconds_finish_and_leaves_nothing_behind(tmp_path):
+    # Both trees stop at once, so the 30-second limit is shown beside the fix in about 35 seconds rather than 70.
+    without = StoppableUnit(tmp_path / "without", 33)
+    stopped_by_script = StoppableUnit(tmp_path / "with", 33, "-p", f"ExecStop={STOP_SCRIPT}")
+    threads = [threading.Thread(target=unit.stop) for unit in (without, stopped_by_script)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=160)
+
+    # The control: the wrapper's kill ends the cleanup. If this fails, the stand-ins stopped modelling the wrapper.
+    assert "cleanup-started" in without.log()
+    assert "cleanup-finished" not in without.log()
+    assert stopped_by_script.log() == [
+        "listener-cancelling", "cleanup-started", "cleanup-finished", "listener-exiting",
+    ]
+    assert stopped_by_script.running() == []
+    assert without.running() == []
+
+
+def test_a_listener_that_outlasts_the_grace_period_is_still_taken_down(tmp_path):
+    # The script gives up after its grace period, and the wrapper's path and KillMode=mixed finish the stop.
+    unit = StoppableUnit(
+        tmp_path / "stuck", 300, "-p", f"ExecStop={STOP_SCRIPT}", "--setenv=RUNNER_STOP_GRACE_SECONDS=2",
+    )
+    started = time.monotonic()
+    unit.stop()
+    assert time.monotonic() - started < 60
+    assert "cleanup-finished" not in unit.log()
+    assert unit.running() == []
+
+
+def run_stop_script(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
+    if not BASH or not sys.platform.startswith("linux"):
+        pytest.skip("the stop script runs on Linux")
+    return subprocess.run(
+        [BASH, str(STOP_SCRIPT)], cwd=tmp_path, env={"PATH": os.environ["PATH"], **env},
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+
+
+@pytest.mark.parametrize("env", [{}, {"MAINPID": ""}, {"MAINPID": "not-a-pid"}, {"MAINPID": "4194304"}])
+def test_the_stop_script_has_nothing_to_do_when_no_main_process_is_running(tmp_path, env):
+    # systemd runs ExecStop after a main process that already exited, and MAINPID is then empty.
+    result = run_stop_script(tmp_path, **env)
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_stop_script_has_lf_is_executable_and_parses_with_bash():
+    assert b"\r\n" not in STOP_SCRIPT.read_bytes()
+    if sys.platform.startswith("linux"):
+        assert os.access(STOP_SCRIPT, os.X_OK)
+    if BASH:
+        parsed = subprocess.run([BASH, "-n", str(STOP_SCRIPT)], capture_output=True, text=True, check=False)
+        assert parsed.returncode == 0, parsed.stderr
