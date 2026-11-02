@@ -47,6 +47,12 @@ def _resource_metrics(m, out) -> None:
         out.metric("harness_resource_vram_total_bytes", "gauge", "VRAM total (nvidia-smi).", [({}, gpu["vram_total"])])
         out.metric("harness_resource_gpu_load_percent", "gauge", "GPU utilization (nvidia-smi).",
                    [({}, gpu["gpu_load"])])
+        if gpu["vram_free"] is not None:  # a field the driver reports [N/A] is left out alone (#833)
+            out.metric("harness_resource_vram_free_bytes", "gauge", "VRAM free (nvidia-smi).",
+                       [({}, gpu["vram_free"])])
+        if gpu["nvenc_sessions"] is not None:
+            out.metric("harness_resource_nvenc_sessions", "gauge", "NVENC encoder sessions open on the GPU (nvidia-smi).",
+                       [({}, gpu["nvenc_sessions"])])
     cpu = cpu_percent_since_last()
     if cpu is not None:
         out.metric("harness_resource_cpu_load_percent", "gauge", "CPU load since the previous scrape.", [({}, cpu)])

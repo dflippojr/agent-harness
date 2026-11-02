@@ -230,6 +230,9 @@ available RAM sampled during the most recent model load, every 2 s while it wait
   `_ram_threshold_bytes`
 - `harness_resource_memory_low`, `harness_model_parked`, `harness_model_pinned_until_seconds`
 - `harness_resource_vram_used_bytes` / `_vram_total_bytes` / `_gpu_load_percent` (from nvidia-smi, cached for 10 s)
+- `harness_resource_vram_free_bytes` (nvidia-smi `memory.free`) and `harness_resource_nvenc_sessions` (nvidia-smi
+  `encoder.stats.sessionCount`, the NVENC sessions open on the GPU), read with the same cached reading (#833). If the
+  driver reports either as `[N/A]`, only that series is left out.
 - `harness_resource_cpu_load_percent`
 
 The `harness_gpu_guard_*` series are unchanged.

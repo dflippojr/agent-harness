@@ -497,6 +497,36 @@ def test_metrics_export_resources(tmp_path):
     assert "harness_model_pinned_until_seconds 0" in text
 
 
+def test_metrics_export_vram_free_and_nvenc_sessions(tmp_path, monkeypatch):
+    """#833: free VRAM and the NVENC session count are exported beside the existing VRAM series."""
+    from harness.metrics import render
+    from harness_modules.local_model import resources
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: "1024, 8192, 37, 7168, 2\n")
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    text = render(guarded_manager(tmp_path))
+    assert f"harness_resource_vram_free_bytes {float(7168 * resources.MIB):g}" in text
+    assert "harness_resource_nvenc_sessions 2" in text
+    assert f"harness_resource_vram_used_bytes {float(1024 * resources.MIB):g}" in text
+
+
+def test_metrics_leave_out_only_the_series_nvidia_smi_does_not_report(tmp_path, monkeypatch):
+    """#833: [N/A] drops that series alone; with no nvidia-smi reading at all, no GPU series is exported."""
+    from harness.metrics import render
+    from harness_modules.local_model import resources
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: "1024, 8192, 37, [N/A], [N/A]\n")
+    text = render(guarded_manager(tmp_path))
+    assert "harness_resource_vram_used_bytes" in text and "harness_resource_vram_total_bytes" in text
+    assert "harness_resource_gpu_load_percent" in text
+    assert "harness_resource_vram_free_bytes" not in text and "harness_resource_nvenc_sessions" not in text
+
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: None)  # nvidia-smi missing or failing
+    text = render(guarded_manager(tmp_path))
+    for series in ("vram_used_bytes", "vram_total_bytes", "gpu_load_percent", "vram_free_bytes", "nvenc_sessions"):
+        assert f"harness_resource_{series}" not in text
+
+
 # review round 1 (PR #342): races between Unload now, lazy loading, and model calls
 def test_refused_unload_keeps_the_pin_and_keepalive(tmp_path):
     from fastapi.testclient import TestClient
@@ -642,14 +672,53 @@ def test_load_gives_up_when_health_never_answers(tmp_path, monkeypatch):
 # diagnostics probes (harness/resources.py, gpu_guard.memory_reading, doctor): best-effort readings
 def test_gpu_reading_parses_nvidia_smi_and_caches(monkeypatch):
     from harness_modules.local_model import resources
-    outputs = ["1024, 8192, 37\n", "not, a, number\n", None]
+    outputs = ["1024, 8192, 37, 7168, 2\n", "not, a, number, x, y\n", None]
     monkeypatch.setattr(resources, "_run", lambda args, timeout=5: outputs.pop(0))
     monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
     first = resources.gpu_reading()
-    assert first == {"vram_used": 1024 * resources.MIB, "vram_total": 8192 * resources.MIB, "gpu_load": 37.0}
+    assert first == {"vram_used": 1024 * resources.MIB, "vram_total": 8192 * resources.MIB, "gpu_load": 37.0,
+                     "vram_free": 7168 * resources.MIB, "nvenc_sessions": 2}
     assert resources.gpu_reading(cached=True) == first and len(outputs) == 2  # no second nvidia-smi
     assert resources.gpu_reading() is None  # unparseable
     assert resources.gpu_reading() is None  # nvidia-smi missing
+
+
+@pytest.mark.parametrize(("line", "free", "sessions"), [
+    ("1024, 8192, 37, [N/A], 2\n", None, 2),
+    ("1024, 8192, 37, 7168, [N/A]\n", 7168, None),
+    ("1024, 8192, 37, NaN, 2\n", None, 2),  # float() accepts NaN and inf; they must not escape as an exception
+    ("1024, 8192, 37, 7168, inf\n", 7168, None),
+])
+def test_gpu_reading_drops_only_the_field_that_is_not_reported(monkeypatch, line, free, sessions):
+    """#833: a [N/A] free-VRAM or session count leaves that one field out; VRAM used, total and load still read."""
+    from harness_modules.local_model import resources
+    asked = []
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: asked.append(args) or line)
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    reading = resources.gpu_reading()
+    assert reading == {"vram_used": 1024 * resources.MIB, "vram_total": 8192 * resources.MIB, "gpu_load": 37.0,
+                       "vram_free": None if free is None else free * resources.MIB, "nvenc_sessions": sessions}
+    assert "memory.free,encoder.stats.sessionCount" in asked[0][1]  # the query asks for both new fields
+
+
+@pytest.mark.parametrize("line", ["NaN, 8192, 37, 7168, 2\n", "1024, inf, 37, 7168, 2\n", "1e308, 8192, 37, 7168, 2\n"])
+def test_gpu_reading_with_a_non_finite_core_field_is_no_reading(monkeypatch, line):
+    """#833 review: a NaN, inf or absurdly large figure in VRAM used, total or load is None, never an exception."""
+    from harness_modules.local_model import resources
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: line)
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    assert resources.gpu_reading() is None
+
+
+def test_metrics_render_survives_a_non_finite_nvidia_smi_reading(tmp_path, monkeypatch):
+    """#833 review: /metrics must still render, with no GPU series, when nvidia-smi reports NaN."""
+    from harness.metrics import render
+    from harness_modules.local_model import resources
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: "NaN, 8192, 37, 7168, 2\n")
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    text = render(guarded_manager(tmp_path))
+    assert "harness_resource_ram_available_bytes" in text
+    assert "harness_resource_vram_" not in text and "harness_resource_nvenc_sessions" not in text
 
 
 COMPUTE_APPS = ("9953, /usr/bin/sunshine, 215\n"
