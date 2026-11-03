@@ -375,6 +375,51 @@ elif ! (cd "$app_dir" && "$python" -m harness.secret_scan install --config-dir "
     info "WARNING: gitleaks is not installed; Review push and merge stay blocked until it is (the daemon retries at start)"
 fi
 
+# The `harness` command the docs and the Hub's host commands use. macOS has the Mac client's wrapper at this path
+# (macrunner/install.sh), so only Linux writes it. The marker line says which install owns it; uninstall.sh reads it.
+wrapper=
+wrapper_marker='# agent-harness install: '
+write_wrapper() {
+    local install_real tmp
+    install_real=$(CDPATH= cd -- "$install_dir" && pwd -P) &&
+        mkdir -p "$(dirname "$wrapper")" &&
+        tmp=$(mktemp "$wrapper.XXXXXX") || return 1
+    # No cd into the app: relative path arguments mean the caller's directory. -P then keeps a harness/ folder there
+    # from shadowing the app, and PYTHONPATH finds the app. .venv-path is the pointer run-daemon.sh follows.
+    cat >"$tmp" <<EOF &&
+#!/usr/bin/env bash
+# Written by install/install.sh and removed by install/uninstall.sh. Runs the CLI of this install.
+$wrapper_marker$(printf '%q' "$install_real")
+python=$(printf '%q' "$install_real/venv/bin/python")
+app_dir=$(printf '%q' "$app_dir")
+if [[ -f \$app_dir/.venv-path ]]; then
+    venv=
+    read -r venv <"\$app_dir/.venv-path" || true
+    [[ \$venv != /* ]] || python=\$venv/bin/python
+fi
+export HARNESS_CONFIG_DIR=\${HARNESS_CONFIG_DIR:-$(printf '%q' "$install_real/config")}
+export HARNESS_URL=\${HARNESS_URL:-http://127.0.0.1:$port}
+export PYTHONPATH=\$app_dir
+exec "\$python" -P -m harness.cli "\$@"
+EOF
+        chmod 0755 "$tmp" && mv -f "$tmp" "$wrapper"
+}
+if [[ $platform == linux ]]; then
+    step "harness command"
+    wrapper="$HOME/.local/bin/harness"
+    if [[ -L $wrapper ]] || { [[ -e $wrapper ]] && ! grep -q "^$wrapper_marker" "$wrapper"; }; then
+        info "kept $wrapper: this installer did not write it. For this install's CLI, run: HARNESS_CONFIG_DIR=$config_dir $python -m harness.cli (from $app_dir)"
+        wrapper=
+    elif [[ $dry_run -eq 1 ]]; then
+        info "[dry run] write $wrapper"
+    elif write_wrapper; then
+        info "wrote $wrapper"
+    else
+        info "WARNING: could not write $wrapper; run this install's CLI with HARNESS_CONFIG_DIR=$config_dir $python -m harness.cli (from $app_dir)"
+        wrapper=
+    fi
+fi
+
 safe_instance=$(printf '%s' "$instance" | tr '[:upper:]' '[:lower:]')
 if [[ $no_start -eq 0 ]]; then
     step "Per-user startup services"
@@ -503,6 +548,13 @@ else
 fi
 
 printf '\nDone.\n  Web app: http://127.0.0.1:%s\n  Config:  %s\n  Logs:    %s\n' "$port" "$config_dir" "$log_dir"
+if [[ -n $wrapper ]]; then
+    printf '  CLI:     %s\n' "$wrapper"
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) ;;
+        *) printf '  Add %s to PATH to use the harness command.\n' "$HOME/.local/bin" ;;
+    esac
+fi
 if [[ $profile == service ]]; then
     printf '  Next:    ops/backends/login.sh claude|codex|cursor\n'
 fi

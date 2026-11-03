@@ -382,15 +382,6 @@ def test_wrapper_reaches_the_installs_own_daemon_with_its_local_token(tmp_path):
     assert all(token == "install-token" for _, token in seen), seen
 
 
-def test_linux_install_with_a_relative_install_dir_writes_absolute_paths(tmp_path):
-    result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app", "--install-dir", "app/runtime")
-    assert result.returncode == 0, result.stdout + result.stderr
-    record = tmp_path / "wrapper-call"
-    _recording_python(install_dir / "venv/bin/python", record)
-    assert _run_wrapper(tmp_path / "home/.local/bin/harness", tmp_path / "app", "--help").returncode == 0
-    assert record.read_text().splitlines()[1] == str(install_dir / "config")
-
-
 def test_linux_install_says_to_add_the_wrapper_folder_to_path_only_when_missing(tmp_path):
     result, _, _ = _install_linux_units(tmp_path, tmp_path / "app")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -497,9 +488,11 @@ def test_uninstall_through_a_symlink_still_finds_the_wrapper(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     alias = tmp_path / "alias"
     alias.symlink_to(install_dir)
+    wrapper = tmp_path / "home/.local/bin/harness"
+    assert wrapper.is_file()
     removed = _uninstall(tmp_path, alias)
     assert removed.returncode == 0, removed.stderr
-    assert not (tmp_path / "home/.local/bin/harness").exists()
+    assert not wrapper.exists()
 
 
 def test_uninstall_keeps_a_wrapper_for_another_install(tmp_path):

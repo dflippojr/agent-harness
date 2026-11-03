@@ -24,6 +24,7 @@ if [[ $dry_run -eq 1 ]]; then
     echo "[dry run] check harness hub claim-status; harness hub release --confirm before removing daemon"
     echo "[dry run] remove the recorded Hub service/container and its dedicated venv/state; preserve other Hubs"
     echo "[dry run] remove daemon services; remove files: $remove_files"
+    echo "[dry run] remove $HOME/.local/bin/harness if this install wrote it"
     exit 0
 fi
 [[ -n $install_dir ]] || { echo "empty install directory" >&2; exit 64; }
@@ -69,6 +70,18 @@ case $(uname -s) in
         ;;
     *) echo "unsupported platform" >&2; exit 1 ;;
 esac
+
+# Only the wrapper install.sh wrote for this install: the path may hold the Mac client's wrapper, the owner's own
+# command or another install's wrapper. The marker carries the physical path, so a symlinked --install-dir still matches.
+wrapper="$HOME/.local/bin/harness"
+if [[ -f $wrapper && ! -L $wrapper ]]; then
+    install_real=$install_dir
+    [[ -d $install_dir ]] && install_real=$(CDPATH= cd -- "$install_dir" && pwd -P)
+    if grep -Fxq -- "# agent-harness install: $(printf '%q' "$install_real")" "$wrapper"; then
+        rm -f -- "$wrapper"
+        echo "removed $wrapper"
+    fi
+fi
 
 if [[ $remove_files -eq 1 ]]; then
     rm -rf -- "$install_dir"
