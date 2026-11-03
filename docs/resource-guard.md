@@ -52,9 +52,12 @@ this repository doesn't.
   wait that followed), it acknowledges the floor. The model can then reload and run under the floor: `vram:low` still
   shows in `signals`, but it doesn't pause anything. The park hides the signal and the count restarts after a reload,
   so neither of those ends it. It ends when:
-  - a reading is at or above the floor with the model loaded and awake both before and after the read, and no load or
-    park began between them. A high reading while the model is loading or asleep doesn't count, because the model isn't
-    on the card then, and neither does a failed reading;
+  - a reading is at or above the floor with the model loaded and awake both before and after the read, no turn holding
+    the guard's lease at either end, and no load, park or inference request begun between them. llama-server sleeps by
+    itself and a request reloads it, so being ready on both sides isn't enough. A high reading while the model is
+    loading or asleep doesn't count, because the model isn't on the card then, and neither does a failed reading. A
+    client that calls llama-server directly, past the harness, isn't seen; a reload takes about a minute and the read
+    at most 5 seconds, so it would have to finish inside one read to matter;
   - a new trigger appears, such as a game: that pauses as usual, and the floor counts again afterwards;
   - a manual hold is resumed, the floor is set to 0, or the daemon restarts.
 

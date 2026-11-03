@@ -19,6 +19,9 @@ class NoWarmer:
     async def ensure_loaded(self, model):
         pass
 
+    def note_inference(self):
+        pass
+
     def parked(self, model):
         return False
 

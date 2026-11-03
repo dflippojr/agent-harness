@@ -48,7 +48,7 @@ class ModelWarmer:
         self._changed = asyncio.Event()  # set by notify(): the guard changed state, so re-check a load in progress
         self._unparking: set[asyncio.Task] = set()  # loads that may have removed the pause flag (park waits for them)
         self._parking = 0  # parks in progress: a load in flight aborts and no new one starts
-        self.transitions = 0  # loads and parks begun: a VRAM reading spanning a change isn't of the loaded model
+        self.transitions = 0  # loads, parks and inference begun: any can move the model on or off the card
 
     def _control_for(self, model: ModelConfig):
         return self.control() if model.name == self.managed_model else None
@@ -91,11 +91,17 @@ class ModelWarmer:
         guard stops it again). A sleeping server needs nothing; the call itself wakes it."""
         if self._control_for(model) is None:
             return
+        self.note_inference()
         task = self._waking.get(model.name)
         if (task is None or task.done()) and self.parked(model) and not self.blocked():
             task = self._start_wake(model)
         if task is not None and not task.done():
             await asyncio.shield(task)
+
+    def note_inference(self) -> None:
+        """A request is about to reach llama-server. If it has gone to sleep by itself, this request reloads it, and
+        nothing else in the harness would show that the model left the card."""
+        self.transitions += 1
 
     async def load_now(self, model: ModelConfig, seconds: float) -> str:
         """Load the model and keep it loaded for `seconds`. Returns the state before loading."""
@@ -206,6 +212,7 @@ class ModelWarmer:
         payload = {"model": model.name, "messages": [{"role": "user", "content": "ok"}], "max_tokens": 1,
                    "chat_template_kwargs": {"enable_thinking": False}}
         started = time.monotonic()
+        self.note_inference()
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10)) as client:
                 resp = await client.post(f"{model.base_url}/v1/chat/completions", json=payload)

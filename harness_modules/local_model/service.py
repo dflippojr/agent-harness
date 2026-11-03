@@ -529,7 +529,7 @@ class GpuGuard:
         self._floor_in_pause = False  # the floor is part of this pause, though parking has hidden its signal
         # The model is on the card, so free VRAM counts as a recovery (ModelWarmer.state; /health alone can't tell).
         self.model_loaded: Callable[[], Awaitable[bool]] = lambda: self.control.healthy()
-        self.model_transitions: Callable[[], int] = lambda: 0  # loads and parks begun so far (the warmer's count)
+        self.model_transitions: Callable[[], int] = lambda: 0  # loads, parks and inference begun (the warmer's count)
         self.changed_at = time.time()
         self.last_check = 0.0
         self.pauses = 0
@@ -750,20 +750,23 @@ class GpuGuard:
 
     async def _recovery_sample_start(self) -> int | None:
         """The model's transition count if a reading taken now could end the acknowledgement: the model is loaded and
-        awake before the read begins. None otherwise. nvidia-smi can take seconds, and a load can finish meanwhile."""
-        if not self.vram_acknowledged or self.cfg.min_free_vram_mib <= 0 or self.control.flagged():
+        awake before the read begins, with no turn holding the lease. None otherwise. nvidia-smi can take seconds, and
+        a load can finish meanwhile."""
+        if not self.vram_acknowledged or self.cfg.min_free_vram_mib <= 0 or self.control.flagged() or self.busy():
             return None
         transitions = self.model_transitions()
         return transitions if await self.model_loaded() else None
 
     async def _floor_recovered(self, sampled_at: int | None) -> bool:
         """Off, or free VRAM read at or above the floor with the model loaded throughout. Until it has loaded the model
-        isn't on the card, so a high reading says nothing about whether the two fit: the model must be ready on both
-        sides of the read, with no load or park between them."""
+        isn't on the card, so a high reading says nothing about whether the two fit. llama-server sleeps by itself and
+        only inference wakes it, so the model stayed resident if it is ready on both sides of the read and no load,
+        park or request happened between them. A turn under the lease sends requests the warmer never sees (a CLI's,
+        through the forwarder), so a lease at either end discards the reading too."""
         if self.cfg.min_free_vram_mib <= 0:
             return True
         return (sampled_at is not None and self.vram_floor.recovered and await self.model_loaded()
-                and self.model_transitions() == sampled_at)
+                and not self.busy() and self.model_transitions() == sampled_at)
 
     async def _release(self, startup: bool, now: float) -> None:
         if self._clear_since is None:
