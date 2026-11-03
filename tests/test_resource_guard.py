@@ -1853,6 +1853,8 @@ class FakeLlama:
         from harness_modules.local_model import warmup
         llama = self
         self.sleeping = False
+        self.post_gate: asyncio.Event | None = None  # set: a request waits here before it reaches the server
+        self.arrived = asyncio.Event()
 
         class Client:
             def __init__(self, timeout=None): ...
@@ -1865,6 +1867,9 @@ class FakeLlama:
                 return httpx.Response(200, json={"is_sleeping": llama.sleeping}, request=httpx.Request("GET", url))
 
             async def post(self, url, json=None):
+                if llama.post_gate is not None:
+                    llama.arrived.set()
+                    await llama.post_gate.wait()
                 llama.sleeping = False
                 return httpx.Response(200, json={}, request=httpx.Request("POST", url))
         monkeypatch.setattr(ModelWarmer, "state", REAL_WARMER_STATE)
@@ -1986,6 +1991,56 @@ def test_a_reading_across_an_automatic_sleep_and_an_inference_reload_is_no_recov
             await m.warmer._ping(model, "kept")
         assert not llama.sleeping and await m.warmer.state(model) == READY
         assert not m.runner.generating
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("request_path", ["skill-review", "keepalive-ping", "endpoint-count-tokens"])
+def test_a_request_admitted_before_the_reading_that_reloads_the_model_during_it_is_no_recovery(
+        tmp_path, monkeypatch, request_path):
+    """Review r4 of 080c4b0: a request with no lease is admitted, then waits on its way to llama-server while the guard
+    starts its reading; the server sleeps by itself, the reading sees the card empty, and the request then reloads it."""
+    async def body():
+        m, vram, llama, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+        dispatch = llama.post_gate = asyncio.Event()
+
+        async def held_inference(*_args, **_kwargs):
+            llama.arrived.set()
+            await dispatch.wait()
+            llama.sleeping = False
+            return Completion(content="done")
+        if request_path == "skill-review":
+            m.runner.chat = held_inference
+            m.cfg.modules.skills = m.cfg.skills.enabled = True
+            skills = m.modules.get("skills")
+            skills.init()
+            request = asyncio.create_task(skills.service.reviewer.chat(model, []))
+        elif request_path == "keepalive-ping":
+            request = asyncio.create_task(m.warmer._ping(model, "kept"))
+        else:
+            from harness_modules.endpoint.service import ROUTES, _acquire_slot, _ensure_model
+            path = "/v1/messages/count_tokens"
+
+            async def count_tokens():  # as proxy() relays it: no inference-gate slot, since it only tokenizes
+                slot, err = await _acquire_slot(m, ROUTES[path], path, lambda *_a, **_k: None)
+                assert err is None and await _ensure_model(m, model, ROUTES[path], lambda *_a, **_k: None) is None
+                try:
+                    await held_inference()
+                finally:
+                    if slot:
+                        await slot.release()
+            request = asyncio.create_task(count_tokens())
+        await _until(llama.arrived.is_set)
+        assert not m.guard.busy()
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        llama.sleeping = True
+        dispatch.set()
+        await asyncio.wait_for(request, 2)
+        assert not llama.sleeping and await m.warmer.state(model) == READY
         vram.go.set()
         await asyncio.wait_for(poll, 2)
         assert m.guard.status()["override"] is True
