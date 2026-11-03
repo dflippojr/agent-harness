@@ -55,12 +55,28 @@ def configure(path: Path | str = DEFAULT_CONFIG) -> dict:
         pass
     except (OSError, ValueError) as exc:
         sys.exit(f"invalid client config {CONFIG_PATH}: {exc}")
-    BASE = str(os.environ.get("HARNESS_URL") or data.get("server") or "http://127.0.0.1:8100").rstrip("/")
+    BASE = str(os.environ.get("HARNESS_URL") or data.get("server") or _local_daemon_url()).rstrip("/")
     TOKEN = str(os.environ.get("HARNESS_TOKEN") or data.get("token") or "").strip()
     # Never sent off this machine, even when it comes from the environment.
     LOCAL_TOKEN = (str(os.environ.get("HARNESS_LOCAL_TOKEN") or "").strip() or _local_owner_token()
                    if _is_loopback(BASE) else "")
     return data
+
+
+def _local_daemon_url() -> str:
+    """The daemon on this machine. When HARNESS_CONFIG_DIR names a daemon's configuration (an install's `harness`
+    command sets it, install/install.sh), use that daemon's listen.port, which need not be 8100."""
+    default = "http://127.0.0.1:8100"
+    if not os.environ.get("HARNESS_CONFIG_DIR"):
+        return default
+    try:
+        from .config import resolve_port
+    except ImportError:  # the native bundle has no daemon config next to it
+        return default
+    try:
+        return f"http://127.0.0.1:{resolve_port()}"
+    except Exception:  # unreadable or malformed configuration: the default port, as before
+        return default
 
 
 def _is_loopback(base: str) -> bool:
