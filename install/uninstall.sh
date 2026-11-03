@@ -77,7 +77,8 @@ wrapper="$HOME/.local/bin/harness"
 if [[ -f $wrapper && ! -L $wrapper ]]; then
     install_real=$install_dir
     [[ -d $install_dir ]] && install_real=$(CDPATH= cd -- "$install_dir" && pwd -P)
-    if grep -Fxq -- "# agent-harness install: $(printf '%q' "$install_real")" "$wrapper"; then
+    # %q in the C locale, as install.sh writes it, so the locale of either run does not matter.
+    if grep -Fxq -- "# agent-harness install: $(export LC_ALL=C; printf '%q' "$install_real")" "$wrapper"; then
         rm -f -- "$wrapper"
         echo "removed $wrapper"
     fi

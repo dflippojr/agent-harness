@@ -232,7 +232,7 @@ def test_uninstall_removes_install_symlink_without_deleting_target(tmp_path, phy
 
 
 def _install_linux_units(tmp_path: Path, app_dir: Path, *installer_args: str, profile: str = "service",
-                         extra_path: str = "", started: bool = True,
+                         extra_path: str = "", started: bool = True, locale: str = "",
                          ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     """Run install.sh for real from a copy at `app_dir`, with every tool and service call stubbed (#810)."""
     if not BASH or os.name == "nt":
@@ -257,7 +257,7 @@ def _install_linux_units(tmp_path: Path, app_dir: Path, *installer_args: str, pr
     home = tmp_path / "home"
     path = f"{stubs}:/usr/bin:/bin" + (f":{extra_path}" if extra_path else "")
     env = {"PATH": path, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
-           "HARNESS_INSTALLER_OS": "Linux", "HARNESS_INSTALLER_ARCH": "x86_64"}
+           "HARNESS_INSTALLER_OS": "Linux", "HARNESS_INSTALLER_ARCH": "x86_64", **({"LC_ALL": locale} if locale else {})}
     result = subprocess.run(
         [BASH, str(app_dir / "install/install.sh"), "--install-dir", str(install_dir), "--profile", profile,
          "--no-hub", *installer_args], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60, check=False)
@@ -292,7 +292,7 @@ def _run_wrapper(wrapper: Path, cwd: Path, *args: str, **env: str) -> subprocess
 @pytest.mark.parametrize("name", ["app", "my app", "o'brien $HOME"])
 def test_linux_install_writes_a_harness_wrapper_for_this_install(tmp_path, name):
     app_dir = tmp_path / name
-    result, _, install_dir = _install_linux_units(tmp_path, app_dir, "--port", "8123")
+    result, _, install_dir = _install_linux_units(tmp_path, app_dir)
     assert result.returncode == 0, result.stdout + result.stderr
     wrapper = tmp_path / "home/.local/bin/harness"
     assert wrapper.is_file() and os.access(wrapper, os.X_OK), result.stdout
@@ -303,9 +303,30 @@ def test_linux_install_writes_a_harness_wrapper_for_this_install(tmp_path, name)
     called = _run_wrapper(wrapper, elsewhere, "--help")
     assert called.returncode == 0, called.stderr
     # The caller's directory stays, for relative path arguments; -P keeps a harness/ folder in it from shadowing the app.
+    # No URL: the CLI reads the port from the config dir (test_cli_targets_the_port_in_harness_config_dir).
     assert record.read_text().splitlines() == [
-        str(elsewhere), str(install_dir / "config"), "http://127.0.0.1:8123", str(app_dir),
-        "-P", "-m", "harness.cli", "--help"]
+        str(elsewhere), str(install_dir / "config"), "", str(app_dir), "-P", "-m", "harness.cli", "--help"]
+
+
+def test_cli_targets_the_port_in_harness_config_dir(tmp_path, monkeypatch):
+    from harness import cli
+    for name in ("BASE", "TOKEN", "LOCAL_TOKEN", "CONFIG_PATH"):
+        monkeypatch.setattr(cli, name, getattr(cli, name))
+    (tmp_path / "harness.yaml").write_text("listen:\n  port: 8123\n")
+    monkeypatch.delenv("HARNESS_URL", raising=False)
+    monkeypatch.setenv("HARNESS_CONFIG_DIR", str(tmp_path))
+    cli.configure(tmp_path / "no-client.json")
+    assert cli.BASE == "http://127.0.0.1:8123"
+    monkeypatch.setenv("HARNESS_URL", "http://127.0.0.1:9000")
+    cli.configure(tmp_path / "no-client.json")
+    assert cli.BASE == "http://127.0.0.1:9000"
+    monkeypatch.delenv("HARNESS_URL")
+    (tmp_path / "harness.yaml").unlink()
+    cli.configure(tmp_path / "no-client.json")
+    assert cli.BASE == "http://127.0.0.1:8100"
+    monkeypatch.delenv("HARNESS_CONFIG_DIR")
+    cli.configure(tmp_path / "no-client.json")
+    assert cli.BASE == "http://127.0.0.1:8100"
 
 
 def test_wrapper_lets_the_caller_choose_the_daemon(tmp_path):
@@ -317,6 +338,18 @@ def test_wrapper_lets_the_caller_choose_the_daemon(tmp_path):
                           HARNESS_CONFIG_DIR="/other/config")
     assert called.returncode == 0, called.stderr
     assert record.read_text().splitlines()[1:3] == ["/other/config", "http://other:1"]
+
+
+@pytest.mark.parametrize("install_locale,uninstall_locale", [("C.UTF-8", "C"), ("C", "C.UTF-8")])
+def test_uninstall_finds_a_non_ascii_install_whatever_the_locale(tmp_path, install_locale, uninstall_locale):
+    """bash's %q spells a non-ASCII path differently in a UTF-8 locale and in C; the two runs may differ."""
+    result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "café", locale=install_locale)
+    assert result.returncode == 0, result.stdout + result.stderr
+    wrapper = tmp_path / "home/.local/bin/harness"
+    assert wrapper.is_file()
+    removed = _uninstall(tmp_path, install_dir, "--remove-files", LC_ALL=uninstall_locale)
+    assert removed.returncode == 0, removed.stderr
+    assert not wrapper.exists()
 
 
 def test_wrapper_follows_a_ci_deployment_venv_pointer(tmp_path):
@@ -345,7 +378,8 @@ def test_wrapper_runs_the_real_cli_and_ignores_a_harness_folder_in_the_callers_d
 
 
 def test_wrapper_reaches_the_installs_own_daemon_with_its_local_token(tmp_path):
-    """The whole point of the wrapper: a non-default port and data_dir, found with no environment from the caller."""
+    """The whole point of the wrapper: a non-default port and data_dir, found with no environment from the caller. The
+    port comes from the install's config, so a rerun without --port, which keeps the configured port, still works."""
     seen: list[tuple[str, str | None]] = []
 
     class Daemon(BaseHTTPRequestHandler):
@@ -365,14 +399,15 @@ def test_wrapper_reaches_the_installs_own_daemon_with_its_local_token(tmp_path):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app", "--port", str(server.server_port))
+        result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app")
         assert result.returncode == 0, result.stdout + result.stderr
         _real_cli(tmp_path / "app", install_dir)
         data_dir = tmp_path / "elsewhere-data"
         data_dir.mkdir()
         (data_dir / "local-owner.token").write_text("install-token\n")
         (install_dir / "config").mkdir(exist_ok=True)
-        (install_dir / "config/harness.yaml").write_text(f"data_dir: {json.dumps(str(data_dir))}\n")
+        (install_dir / "config/harness.yaml").write_text(
+            f"data_dir: {json.dumps(str(data_dir))}\nlisten:\n  port: {server.server_port}\n")
         called = _run_wrapper(tmp_path / "home/.local/bin/harness", tmp_path, "list")
     finally:
         server.shutdown()
@@ -433,12 +468,12 @@ def test_linux_install_finishes_when_the_wrapper_cannot_be_written(tmp_path):
 
 
 def test_dry_run_names_the_wrapper_and_writes_nothing(tmp_path):
+    if not BASH or os.name == "nt":
+        pytest.skip("needs bash on a POSIX host")
     home = tmp_path / "home"
     home.mkdir()
     env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "HARNESS_INSTALLER_OS": "Linux",
            "HARNESS_INSTALLER_ARCH": "x86_64"}
-    if not BASH:
-        pytest.skip("bash is not installed")
     result = subprocess.run([BASH, "install/install.sh", "--install-dir", str(tmp_path / "install"), "--dry-run",
                              "--profile", "service"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=30,
                             check=False)
@@ -454,8 +489,10 @@ def test_macos_install_leaves_the_mac_clients_wrapper_alone(tmp_path):
     assert "use the harness command" not in result.stdout
 
 
-def _uninstall(tmp_path: Path, install_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _uninstall(tmp_path: Path, install_dir: Path, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
     """Run uninstall.sh with a stubbed service manager, and without a venv so the Hub step is skipped."""
+    if not BASH or os.name == "nt":
+        pytest.skip("needs bash on a POSIX host")
     python = install_dir / "venv/bin/python"
     if python.exists():
         python.unlink()
@@ -468,7 +505,7 @@ def _uninstall(tmp_path: Path, install_dir: Path, *args: str) -> subprocess.Comp
     (stubs / "uname").chmod(0o755)
     return subprocess.run(
         [BASH, str(ROOT / "install/uninstall.sh"), "--install-dir", str(install_dir), *args], cwd=tmp_path,
-        env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")},
+        env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), **env},
         capture_output=True, text=True, timeout=60, check=False)
 
 

@@ -379,26 +379,28 @@ fi
 # (macrunner/install.sh), so only Linux writes it. The marker line says which install owns it; uninstall.sh reads it.
 wrapper=
 wrapper_marker='# agent-harness install: '
+# %q in the C locale: the same text whatever locale install.sh and uninstall.sh run in, for non-ASCII paths too.
+quote() { (export LC_ALL=C; printf '%q' "$1"); }
 write_wrapper() {
     local install_real tmp
     install_real=$(CDPATH= cd -- "$install_dir" && pwd -P) &&
         mkdir -p "$(dirname "$wrapper")" &&
         tmp=$(mktemp "$wrapper.XXXXXX") || return 1
     # No cd into the app: relative path arguments mean the caller's directory. -P then keeps a harness/ folder there
-    # from shadowing the app, and PYTHONPATH finds the app. .venv-path is the pointer run-daemon.sh follows.
+    # from shadowing the app, and PYTHONPATH finds the app. .venv-path is the pointer run-daemon.sh follows. The CLI
+    # reads the daemon's port from HARNESS_CONFIG_DIR, so a later port change needs no new wrapper.
     cat >"$tmp" <<EOF &&
 #!/usr/bin/env bash
 # Written by install/install.sh and removed by install/uninstall.sh. Runs the CLI of this install.
-$wrapper_marker$(printf '%q' "$install_real")
-python=$(printf '%q' "$install_real/venv/bin/python")
-app_dir=$(printf '%q' "$app_dir")
+$wrapper_marker$(quote "$install_real")
+python=$(quote "$install_real/venv/bin/python")
+app_dir=$(quote "$app_dir")
 if [[ -f \$app_dir/.venv-path ]]; then
     venv=
     read -r venv <"\$app_dir/.venv-path" || true
     [[ \$venv != /* ]] || python=\$venv/bin/python
 fi
-export HARNESS_CONFIG_DIR=\${HARNESS_CONFIG_DIR:-$(printf '%q' "$install_real/config")}
-export HARNESS_URL=\${HARNESS_URL:-http://127.0.0.1:$port}
+export HARNESS_CONFIG_DIR=\${HARNESS_CONFIG_DIR:-$(quote "$install_real/config")}
 export PYTHONPATH=\$app_dir
 exec "\$python" -P -m harness.cli "\$@"
 EOF
