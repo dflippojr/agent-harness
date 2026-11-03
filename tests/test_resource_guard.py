@@ -1873,7 +1873,9 @@ class FakeLlama:
                 llama.sleeping = False
                 return httpx.Response(200, json={}, request=httpx.Request("POST", url))
         monkeypatch.setattr(ModelWarmer, "state", REAL_WARMER_STATE)
-        monkeypatch.setattr(warmup.httpx, "AsyncClient", Client)
+        # The warmer's httpx only: the endpoint's own client must stay real.
+        monkeypatch.setattr(warmup, "httpx", SimpleNamespace(AsyncClient=Client, HTTPError=httpx.HTTPError,
+                                                             Timeout=httpx.Timeout))
 
 
 async def _acknowledged_and_parked(tmp_path, monkeypatch, *free_mib):
@@ -1899,10 +1901,11 @@ async def _poll_with_the_read_held(guard, vram):
 
 
 async def _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m):
+    stops = m.guard.control.stops
     await m.guard.check()
     assert m.guard.status()["override"] is False
     assert await _polls(m.guard, 2) == [[], ["vram:low"]]
-    assert m.guard.state == PAUSED and m.guard.control.stops == 2
+    assert m.guard.state == PAUSED and m.guard.control.stops == stops + 1
 
 
 def test_a_reading_taken_before_a_lazy_reload_finished_is_no_recovery(tmp_path, monkeypatch):
@@ -2044,6 +2047,67 @@ def test_a_request_admitted_before_the_reading_that_reloads_the_model_during_it_
         vram.go.set()
         await asyncio.wait_for(poll, 2)
         assert m.guard.status()["override"] is True
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+def _count_tokens_request(m, model):
+    """A real Starlette request for the endpoint's tokenizer route, as an editor sends it."""
+    import json
+    from starlette.requests import Request
+    _, secret = m.db.create_api_key("editor")
+    body = json.dumps({"model": model.name, "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+    path = "/v1/messages/count_tokens"
+    return Request({"type": "http", "method": "POST", "path": path, "raw_path": path.encode(), "query_string": b"",
+                    "headers": [(b"authorization", f"Bearer {secret}".encode()), (b"content-type", b"application/json")]},
+                   receive), path
+
+
+@pytest.mark.parametrize("cancelled_during", ["admission", "dispatch"])
+def test_a_cancelled_tokenizer_request_releases_its_hold_and_recovery_still_retires_it(
+        tmp_path, monkeypatch, cancelled_during):
+    """Review r5 of 5a29687: an editor gives up on count_tokens while the model loads or before llama-server answers.
+    Its outstanding-request count must go back to zero, or no reading could ever end Resume anyway again."""
+    import httpx
+    import harness_modules.local_model.warmup as warmup
+    from harness_modules.endpoint.service import proxy
+    monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)
+
+    async def body():
+        m, vram, _, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 100, 100)
+        control = m.guard.control
+        await m.warmer.ensure_loaded(model)
+        m.cfg.endpoint.enabled = True
+        sent = asyncio.Event()
+
+        async def llama_never_answers(request):
+            sent.set()
+            await asyncio.Event().wait()
+        m.endpoint_transport = httpx.MockTransport(llama_never_answers)
+        if cancelled_during == "admission":  # parked again, and the load the request starts doesn't finish
+            assert await m.guard.unload()
+            control.health = False
+        request, path = _count_tokens_request(m, model)
+        call = asyncio.create_task(proxy(m, request, path))
+        if cancelled_during == "admission":
+            await _until(lambda: call.done() or control.starts == 2 and m.warmer.waking_for(model) is not None)
+            assert not call.done(), (call.result().status_code, call.result().body)
+        else:
+            await _until(lambda: call.done() or sent.is_set())
+            assert not call.done(), (call.result().status_code, call.result().body)
+        assert m.warmer.requests == 1
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        assert m.warmer.requests == 0
+        if cancelled_during == "admission":  # the load itself carries on and finishes
+            control.health = True
+            m.warmer.notify()
+            await asyncio.wait_for(m.warmer.ensure_loaded(model), 2)
+        assert await m.warmer.state(model) == READY and not m.guard.busy()
         await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
     asyncio.run(body())
 
