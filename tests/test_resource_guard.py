@@ -6,6 +6,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +15,8 @@ import pytest
 
 from harness.cli_backends import ClaudeSession
 from harness.config import BackendConfig, GpuGuardConfig
-from harness_modules.local_model.service import CLEAR, GIB, PAUSED, MemoryWatch
+from harness_modules.local_model import service
+from harness_modules.local_model.service import CLEAR, GIB, PAUSED, PAUSING, MemoryWatch
 from harness_modules.local_model.service import memory_reading as real_memory_reading  # before conftest's plenty_of_ram patches it
 from harness.llm import Completion
 from harness.manager import Manager
@@ -24,6 +26,8 @@ from test_daemon import Script, events, make_cfg, wait_status
 from test_phase5 import GAME, FakeControl, FakeDetect, make_guard
 from test_phase8 import FAKE_CLAUDE
 from waits import scaled
+
+REAL_WARMER_STATE = ModelWarmer.state  # at import, before the autouse fixtures replace it
 
 
 @pytest.fixture(autouse=True)
@@ -1678,3 +1682,792 @@ def test_linux_supervisor_healthcheck_probes_the_port_the_server_listens_on(tmp_
             httpd.shutdown()
         httpd.server_close()
         _end_supervisor(proc, flag, tmp_path / "logs")
+
+
+# the free-VRAM floor (#829): gpu_guard.min_free_vram_mib, on fake readings; no GPU needed
+class FakeVram:
+    """gpu_reading on rails: each poll takes the next free-VRAM figure in MiB. None is a failed reading, NA a reading
+    whose free-VRAM field the driver reported as [N/A]."""
+    NA = "n/a"
+
+    def __init__(self, *free_mib):
+        self.free_mib = list(free_mib)
+        self.reads = 0
+
+    def __call__(self):
+        self.reads += 1
+        free = self.free_mib.pop(0)
+        if free is None:
+            return None
+        return {"vram_free": None if free == self.NA else free * service.MIB}
+
+
+def floor_guard(*free_mib, floor=256, **cfg):
+    guard, detect, control, scheduler, log = make_guard(min_free_vram_mib=floor, **cfg)
+    guard.vram_floor = service.VramFloor(guard.cfg, read=FakeVram(*free_mib))
+    return guard, detect, control, scheduler, log
+
+
+async def _polls(guard, count: int) -> list[list[str]]:
+    keys = []
+    for _ in range(count):
+        await guard.check()
+        keys.append([s["key"] for s in guard.signals])
+    return keys
+
+
+def test_a_floor_of_zero_never_asks_nvidia_smi():
+    async def body():
+        guard, _, _, scheduler, _ = floor_guard(floor=0)  # no figures: a read would raise IndexError
+        assert await _polls(guard, 3) == [[], [], []]
+        assert guard.vram_floor.read.reads == 0 and guard.state == CLEAR and not scheduler.paused
+    asyncio.run(body())
+
+
+def test_the_floor_is_off_unless_configured():
+    assert GpuGuardConfig().min_free_vram_mib == 0
+    assert GpuGuardConfig().vram_drain_timeout_seconds == 30
+
+
+def test_one_low_reading_is_no_signal_and_two_are():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 90, floor=256)
+        await guard.check()
+        assert guard.signals == [] and guard.state == CLEAR and control.stops == 0
+        await guard.check()
+        assert [(s["key"], s["kind"]) for s in guard.signals] == [("vram:low", "vram")]
+        assert "90 MiB" in guard.signals[0]["detail"] and "256 MiB" in guard.signals[0]["detail"]
+        assert guard.state == PAUSED and control.stops == 1
+        assert [r["key"] for r in guard.reasons] == ["vram:low"]
+    asyncio.run(body())
+
+
+async def _park_on_the_floor(guard, control, *, later_in_cooldown: bool = False) -> None:
+    await _polls(guard, 2)
+    assert guard.state == PAUSED and control.flag and control.stops == 1
+    if later_in_cooldown:  # the flag has hidden the signal, and only `reasons` still names the floor
+        await guard.check()
+        assert guard.state == PAUSED and guard.signals == []
+
+
+async def _reloaded_after_resume_anyway(guard, control, reload: str) -> None:
+    """The real resume() and the check() that acts on it. Only the lazy-idle model needs something else to load it."""
+    guard.resume()
+    await guard.check()
+    assert guard.state == CLEAR
+    if reload == "lazy-idle":
+        assert control.flag and control.starts == 0  # stays parked until a request asks; the warmer removes the flag
+        await control.start()
+    assert not control.flag and control.starts == 1
+
+
+@pytest.mark.parametrize("reload, cfg, want", [
+    pytest.param("eager", {"lazy_load": False}, False, id="eager-reload"),
+    pytest.param("lazy-queued", {"lazy_load": True}, True, id="lazy-reload-with-work-queued"),
+    pytest.param("lazy-idle", {"lazy_load": True}, False, id="lazy-reload-on-the-next-request"),
+])
+@pytest.mark.parametrize("later", [False, True], ids=["right-after-the-park", "later-in-the-cooldown"])
+def test_resume_anyway_outlasts_the_park_and_the_debounce_after_the_reload(reload, cfg, want, later):
+    """Codex round 1: the flag hides the signal while parked, and that must not read as the trigger having gone away."""
+    async def body():
+        guard, _, control, scheduler, log = floor_guard(100, 90, 80, 70, 60, 50, floor=256, resume_after_seconds=999, **cfg)
+        guard.want_model = lambda: want
+        await _park_on_the_floor(guard, control, later_in_cooldown=later)
+        await _reloaded_after_resume_anyway(guard, control, reload)
+        keys = await _polls(guard, 4)
+        assert keys == [[], ["vram:low"], ["vram:low"], ["vram:low"]]  # the count restarts; the signal is simply ignored
+        assert guard.state == CLEAR and not scheduler.paused and control.stops == 1
+        assert [k for k, _ in log] == ["pause", "resume"]
+        assert guard.status()["override"] is True
+    asyncio.run(body())
+
+
+def test_resume_anyway_during_the_drain_holds_across_the_cancelled_pause():
+    async def body():
+        guard, _, control, scheduler, _ = floor_guard(100, 100, 100, 100, floor=256, busy=lambda: True,
+                                                      resume_after_seconds=999)
+        await _polls(guard, 2)
+        assert guard.state == PAUSING
+        guard.resume()
+        await _polls(guard, 2)
+        assert guard.state == CLEAR and control.stops == 0 and not scheduler.paused
+    asyncio.run(body())
+
+
+def test_resume_anyway_holds_when_a_ram_wait_replaced_the_floor_reason():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 100, 100, floor=256, lazy_load=True, resume_after_seconds=0,
+                                              min_available_ram_gb=4, model_ram_gb=14)
+        ram = FakeRam(9)
+        guard.memory = MemoryWatch(4, model_gb=14, read=ram, ttl=0)
+        guard.want_model = lambda: True
+        await _polls(guard, 2)
+        await guard.check()
+        assert guard.memory_hold and [r["key"] for r in guard.reasons] == ["memory_hold"]
+        guard.resume()
+        ram.available = 30 * GIB
+        await guard.check()
+        assert guard.state == CLEAR and not control.flag
+        await _polls(guard, 2)
+        assert guard.state == CLEAR and control.stops == 1
+    asyncio.run(body())
+
+
+def test_a_high_reading_before_the_model_is_back_on_the_card_is_no_recovery():
+    """The model is off the card until it has loaded, so free VRAM is high then whatever else holds the rest."""
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 4000, 100, 100, 100, floor=256, resume_after_seconds=999)
+        await _park_on_the_floor(guard, control)
+        control.health = False  # loading: /health and /props aren't answering yet
+        guard.resume()
+        await guard.check()
+        await guard.check()  # 4000 MiB free while it loads
+        assert guard.status()["override"] is True and guard.state == "resuming"
+        control.health = True
+        await _polls(guard, 3)
+        assert guard.state == CLEAR and control.stops == 1
+    asyncio.run(body())
+
+
+class GatedVram(FakeVram):
+    """FakeVram whose next read can be held open, as a slow nvidia-smi is, while the model changes state around it."""
+
+    def __init__(self, *free_mib):
+        super().__init__(*free_mib)
+        self.hold_next = False
+        self.entered, self.go = threading.Event(), threading.Event()
+
+    def __call__(self):
+        if self.hold_next:
+            self.hold_next = False
+            self.entered.set()
+            assert self.go.wait(10)
+        return super().__call__()
+
+
+class FakeLlama:
+    """The far edge of the real ModelWarmer: llama-server's /props and chat route, on FakeControl's health."""
+
+    def __init__(self, monkeypatch, control):
+        import httpx
+        from harness_modules.local_model import warmup
+        llama = self
+        self.sleeping = False
+        self.post_gate: asyncio.Event | None = None  # set: a request waits here before it reaches the server
+        self.arrived = asyncio.Event()
+
+        class Client:
+            def __init__(self, timeout=None): ...
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return False
+
+            async def get(self, url):
+                if not control.health:
+                    raise httpx.ConnectError("still loading")
+                return httpx.Response(200, json={"is_sleeping": llama.sleeping}, request=httpx.Request("GET", url))
+
+            async def post(self, url, json=None):
+                if llama.post_gate is not None:
+                    llama.arrived.set()
+                    await llama.post_gate.wait()
+                llama.sleeping = False
+                return httpx.Response(200, json={}, request=httpx.Request("POST", url))
+        monkeypatch.setattr(ModelWarmer, "state", REAL_WARMER_STATE)
+        # The warmer's httpx only: the endpoint's own client must stay real.
+        monkeypatch.setattr(warmup, "httpx", SimpleNamespace(AsyncClient=Client, HTTPError=httpx.HTTPError,
+                                                             Timeout=httpx.Timeout))
+
+
+async def _acknowledged_and_parked(tmp_path, monkeypatch, *free_mib):
+    """A real manager's guard and warmer, parked on the floor with Resume anyway pressed: lazy, so the next request
+    loads it. Fakes only at the edges: nvidia-smi, the control's flag and health, and llama-server's HTTP."""
+    m = guarded_manager(tmp_path, min_free_vram_mib=256, lazy_load=True)
+    m.guard.cfg.resume_after_seconds = 999
+    vram = GatedVram(100, 100, *free_mib)
+    m.guard.vram_floor = service.VramFloor(m.guard.cfg, read=vram)
+    llama = FakeLlama(monkeypatch, m.guard.control)
+    await _park_on_the_floor(m.guard, m.guard.control)
+    m.guard.resume()
+    await m.guard.check()
+    assert m.guard.state == CLEAR and m.guard.control.flag and m.guard.status()["override"] is True
+    return m, vram, llama, m.cfg.models[m.cfg.default_model]
+
+
+async def _poll_with_the_read_held(guard, vram):
+    vram.hold_next = True
+    poll = asyncio.create_task(guard.check())
+    await _until(vram.entered.is_set)
+    return poll
+
+
+async def _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m):
+    stops = m.guard.control.stops
+    await m.guard.check()
+    assert m.guard.status()["override"] is False
+    assert await _polls(m.guard, 2) == [[], ["vram:low"]]
+    assert m.guard.state == PAUSED and m.guard.control.stops == stops + 1
+
+
+def test_a_reading_taken_before_a_lazy_reload_finished_is_no_recovery(tmp_path, monkeypatch):
+    """Independent review of b48cc4a: the load finishes between the sample and the readiness check."""
+    import harness_modules.local_model.warmup as warmup
+    monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)
+
+    async def body():
+        m, vram, _, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        control = m.guard.control
+        control.health = False
+        load = asyncio.create_task(m.warmer.ensure_loaded(model))
+        await _until(lambda: control.starts == 1 and not control.flag)
+        assert await m.warmer.state(model) == WAKING
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        control.health = True
+        m.warmer.notify()
+        await asyncio.wait_for(load, 2)
+        assert await m.warmer.state(model) == READY  # loaded by the time the reading comes back
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True and m.guard.state == CLEAR
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+def test_a_reading_taken_while_the_model_slept_is_no_recovery_though_it_woke_meanwhile(tmp_path, monkeypatch):
+    async def body():
+        m, vram, llama, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+        llama.sleeping = True
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        await m.warmer.warm(model)
+        await asyncio.wait_for(m.warmer.ensure_loaded(model), 2)
+        assert not llama.sleeping and await m.warmer.state(model) == READY
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+def test_a_reading_the_model_fell_asleep_during_is_no_recovery(tmp_path, monkeypatch):
+    """Ready as the read began, asleep by the time it came back; llama-server's idle sleep passes through no warmer."""
+    async def body():
+        m, vram, llama, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        llama.sleeping = True
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        llama.sleeping = False
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("request_path", ["agent-turn", "endpoint-request", "skill-review", "keepalive-ping"])
+def test_a_reading_across_an_automatic_sleep_and_an_inference_reload_is_no_recovery(tmp_path, monkeypatch, request_path):
+    """Review r3 of 8f703a2: ready, llama-server sleeps by itself, the reading sees the card empty, an ordinary request
+    reloads the model, ready. The model is ready on both sides and no warmer load or park happened."""
+    async def body():
+        m, vram, llama, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+
+        async def inference_wakes_it(*_args, **_kwargs):
+            llama.sleeping = False
+            return Completion(content="done")
+        m.runner.chat = inference_wakes_it
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        llama.sleeping = True  # no warmer call: its own idle timer
+        assert await m.warmer.state(model) == "sleeping"
+        if request_path == "agent-turn":
+            await m.runner._model_call("session", model, [])
+        elif request_path == "endpoint-request":
+            from harness_modules.endpoint.service import _ensure_model
+            assert await _ensure_model(m, model, "openai", lambda *_a, **_k: None) is None
+            await inference_wakes_it()
+        elif request_path == "skill-review":
+            m.cfg.modules.skills = m.cfg.skills.enabled = True
+            skills = m.modules.get("skills")
+            skills.init()
+            await skills.service.reviewer.chat(model, [])  # as a local skill review runs: no lease, no admission
+            llama.sleeping = False
+        else:
+            await m.warmer._ping(model, "kept")
+        assert not llama.sleeping and await m.warmer.state(model) == READY
+        assert not m.runner.generating
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("request_path", ["skill-review", "keepalive-ping", "endpoint-count-tokens"])
+def test_a_request_admitted_before_the_reading_that_reloads_the_model_during_it_is_no_recovery(
+        tmp_path, monkeypatch, request_path):
+    """Review r4 of 080c4b0: a request with no lease is admitted, then waits on its way to llama-server while the guard
+    starts its reading; the server sleeps by itself, the reading sees the card empty, and the request then reloads it."""
+    async def body():
+        m, vram, llama, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+        dispatch = llama.post_gate = asyncio.Event()
+
+        async def held_inference(*_args, **_kwargs):
+            llama.arrived.set()
+            await dispatch.wait()
+            llama.sleeping = False
+            return Completion(content="done")
+        if request_path == "skill-review":
+            m.runner.chat = held_inference
+            m.cfg.modules.skills = m.cfg.skills.enabled = True
+            skills = m.modules.get("skills")
+            skills.init()
+            request = asyncio.create_task(skills.service.reviewer.chat(model, []))
+        elif request_path == "keepalive-ping":
+            request = asyncio.create_task(m.warmer._ping(model, "kept"))
+        else:
+            from harness_modules.endpoint.service import ROUTES, _acquire_slot, _ensure_model
+            path = "/v1/messages/count_tokens"
+
+            async def count_tokens():  # as proxy() relays it: no inference-gate slot, since it only tokenizes
+                slot, err = await _acquire_slot(m, ROUTES[path], path, lambda *_a, **_k: None)
+                assert err is None and await _ensure_model(m, model, ROUTES[path], lambda *_a, **_k: None) is None
+                try:
+                    await held_inference()
+                finally:
+                    if slot:
+                        await slot.release()
+            request = asyncio.create_task(count_tokens())
+        await _until(llama.arrived.is_set)
+        assert not m.guard.busy()
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        llama.sleeping = True
+        dispatch.set()
+        await asyncio.wait_for(request, 2)
+        assert not llama.sleeping and await m.warmer.state(model) == READY
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+def _count_tokens_request(m, model):
+    """A real Starlette request for the endpoint's tokenizer route, as an editor sends it."""
+    import json
+    from starlette.requests import Request
+    _, secret = m.db.create_api_key("editor")
+    body = json.dumps({"model": model.name, "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+    path = "/v1/messages/count_tokens"
+    return Request({"type": "http", "method": "POST", "path": path, "raw_path": path.encode(), "query_string": b"",
+                    "headers": [(b"authorization", f"Bearer {secret}".encode()), (b"content-type", b"application/json")]},
+                   receive), path
+
+
+@pytest.mark.parametrize("cancelled_during", ["admission", "dispatch"])
+def test_a_cancelled_tokenizer_request_releases_its_hold_and_recovery_still_retires_it(
+        tmp_path, monkeypatch, cancelled_during):
+    """Review r5 of 5a29687: an editor gives up on count_tokens while the model loads or before llama-server answers.
+    Its outstanding-request count must go back to zero, or no reading could ever end Resume anyway again."""
+    import httpx
+    import harness_modules.local_model.warmup as warmup
+    from harness_modules.endpoint.service import proxy
+    monkeypatch.setattr(warmup, "HEALTH_POLL_SECONDS", 3600)
+
+    async def body():
+        m, vram, _, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 100, 100)
+        control = m.guard.control
+        await m.warmer.ensure_loaded(model)
+        m.cfg.endpoint.enabled = True
+        sent = asyncio.Event()
+
+        async def llama_never_answers(request):
+            sent.set()
+            await asyncio.Event().wait()
+        m.endpoint_transport = httpx.MockTransport(llama_never_answers)
+        if cancelled_during == "admission":  # parked again, and the load the request starts doesn't finish
+            assert await m.guard.unload()
+            control.health = False
+        request, path = _count_tokens_request(m, model)
+        call = asyncio.create_task(proxy(m, request, path))
+        if cancelled_during == "admission":
+            await _until(lambda: call.done() or control.starts == 2 and m.warmer.waking_for(model) is not None)
+            assert not call.done(), (call.result().status_code, call.result().body)
+        else:
+            await _until(lambda: call.done() or sent.is_set())
+            assert not call.done(), (call.result().status_code, call.result().body)
+        assert m.warmer.requests == 1
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        assert m.warmer.requests == 0
+        if cancelled_during == "admission":  # the load itself carries on and finishes
+            control.health = True
+            m.warmer.notify()
+            await asyncio.wait_for(m.warmer.ensure_loaded(model), 2)
+        assert await m.warmer.state(model) == READY and not m.guard.busy()
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+def test_a_reading_taken_under_a_running_turns_lease_is_no_recovery(tmp_path, monkeypatch):
+    """A CLI turn holds the lease and sends its requests with no further admission, so nothing else marks the reload."""
+    async def body():
+        m, vram, _, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+        m.runner.generating.add("cli-turn")
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        m.runner.generating.discard("cli-turn")  # its requests went through the forwarder; the warmer saw none of them
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+def test_a_reading_spanning_an_unload_and_reload_is_no_recovery_though_ready_both_sides(tmp_path, monkeypatch):
+    """Ready before and ready after, with the model off the card in between: only the transition gives it away."""
+    async def body():
+        m, vram, _, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        assert await m.guard.unload()
+        await m.warmer.ensure_loaded(model)
+        assert m.guard.control.stops == 2 and await m.warmer.state(model) == READY
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        await m.guard.check()
+        assert m.guard.status()["override"] is False
+    asyncio.run(body())
+
+
+def test_a_measured_recovery_with_the_model_loaded_retires_it_and_the_floor_guards_again():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 4000, 100, 100, floor=256, resume_after_seconds=999)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        await guard.check()
+        assert guard.status()["override"] is False
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED and control.stops == 2
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("unknown", [None, FakeVram.NA], ids=["failed-reading", "free-vram-not-reported"])
+def test_a_reading_that_measures_nothing_does_not_retire_it(unknown):
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, unknown, 100, 100, floor=256, resume_after_seconds=999)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        await _polls(guard, 3)
+        assert guard.status()["override"] is True and guard.state == CLEAR and control.stops == 1
+    asyncio.run(body())
+
+
+def test_a_new_trigger_ends_it_and_the_floor_counts_again_after_that_pause():
+    async def body():
+        guard, detect, control, _, _ = floor_guard(100, 100, 100, 100, 100, 100, 100, floor=256, resume_after_seconds=0)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        await _polls(guard, 2)
+        assert guard.state == CLEAR and control.stops == 1
+        detect.signals = [GAME]
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 2 and guard.status()["override"] is False
+        assert {r["key"] for r in guard.reasons} == {"game:hades.exe", "vram:low"}
+        detect.signals = []
+        await guard.check()  # the game has gone and the eager path reloads
+        assert guard.state == CLEAR and not control.flag
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED and control.stops == 3
+    asyncio.run(body())
+
+
+def test_resuming_a_manual_hold_resets_it():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 100, 100, 100, floor=256, resume_after_seconds=0)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        guard.pause()
+        await guard.check()
+        assert guard.state == PAUSED
+        guard.resume(override_signals=False)  # what the route sends for a manual hold
+        assert guard.status()["override"] is False
+        await guard.check()
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED and control.stops == 3
+    asyncio.run(body())
+
+
+def test_turning_the_floor_off_resets_it():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 100, 100, floor=256, resume_after_seconds=999)
+        await _park_on_the_floor(guard, control)
+        await _reloaded_after_resume_anyway(guard, control, "eager")
+        guard.cfg.min_free_vram_mib = 0
+        await guard.check()
+        assert guard.status()["override"] is False
+        guard.cfg.min_free_vram_mib = 256
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("cause", ["game-only-pause", "no-pause-at-all"])
+def test_a_resume_that_did_not_see_the_floor_acknowledges_nothing(cause):
+    async def body():
+        guard, detect, control, _, _ = floor_guard(100, 100, floor=256, lazy_load=False, resume_after_seconds=0)
+        control.flag = True  # parked already, so the floor can't be counting
+        if cause == "game-only-pause":
+            detect.signals = [GAME]
+            await guard.check()
+            assert guard.state == PAUSED
+            detect.signals = []
+        guard.resume()
+        await guard.check()
+        control.flag = False
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert guard.state == PAUSED
+    asyncio.run(body())
+
+
+def test_the_key_stays_the_same_as_the_reading_changes():
+    async def body():
+        guard, _, _, _, _ = floor_guard(100, 90, 80, floor=256, busy=lambda: True)
+        assert await _polls(guard, 3) == [[], ["vram:low"], ["vram:low"]]
+        assert guard.signals[0]["detail"].startswith("free VRAM 80 MiB")
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("between", [
+    pytest.param(256, id="exactly-at-the-floor"),
+    pytest.param(4000, id="above-the-floor"),
+    pytest.param(None, id="failed-reading"),
+    pytest.param(FakeVram.NA, id="free-vram-not-reported"),
+])
+def test_a_reading_at_the_floor_or_a_failed_one_resets_the_count(between):
+    async def body():
+        guard, _, control, scheduler, _ = floor_guard(100, between, 100, 100, floor=256)
+        assert await _polls(guard, 3) == [[], [], []]
+        assert guard.state == CLEAR and control.stops == 0 and not scheduler.paused
+        assert await _polls(guard, 1) == [["vram:low"]]  # the fourth is the second low in a row
+    asyncio.run(body())
+
+
+def test_a_parked_model_does_not_count_low_vram_and_nvidia_smi_is_not_asked():
+    """An Images batch parks the model through the same flag, then ComfyUI fills the card: that's no reason to pause."""
+    async def body():
+        guard, _, control, scheduler, log = floor_guard(floor=256)
+        control.flag = True
+        assert await _polls(guard, 3) == [[], [], []]
+        assert guard.vram_floor.read.reads == 0
+        assert guard.state == CLEAR and not scheduler.paused and log == []
+    asyncio.run(body())
+
+
+def test_parking_resets_the_count_so_an_earlier_low_reading_does_not_carry_over():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, 100, floor=256)
+        await _polls(guard, 1)
+        control.flag = True
+        await _polls(guard, 1)
+        control.flag = False
+        assert await _polls(guard, 1) == [[]]  # one low since the park, not two
+        assert await _polls(guard, 1) == [["vram:low"]]
+    asyncio.run(body())
+
+
+def test_a_park_that_lands_during_the_reading_does_not_count_it():
+    """nvidia-smi can take seconds. A batch that parks meanwhile may already hold the card when the figure comes back."""
+    async def body():
+        guard, _, control, scheduler, _ = floor_guard(floor=256)
+        figures = [100, 100]
+
+        def read():
+            if len(figures) == 1:
+                control.flag = True
+            return {"vram_free": figures.pop(0) * service.MIB}
+        guard.vram_floor = service.VramFloor(guard.cfg, read=read)
+        assert await _polls(guard, 2) == [[], []]
+        assert guard.state == CLEAR and not scheduler.paused
+    asyncio.run(body())
+
+
+def test_the_floor_reads_live_so_a_settings_write_applies_at_the_next_poll():
+    async def body():
+        guard, _, _, _, _ = floor_guard(100, 100, floor=0)
+        assert await _polls(guard, 1) == [[]]
+        guard.cfg.min_free_vram_mib = 256
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+    asyncio.run(body())
+
+
+def test_two_polls_take_two_readings_from_a_fake_nvidia_smi_not_one_cached(monkeypatch):
+    """gpu_reading(cached=True) serves /metrics for 10 s; counting that would turn a single reading into two polls."""
+    from harness_modules.local_model import resources
+    asked = []
+    monkeypatch.setattr(resources, "_gpu_cache", (-1e9, None))
+    monkeypatch.setattr(resources, "_run", lambda args, timeout=5: asked.append(args) or "15800, 16000, 37, 100, 0\n")
+
+    async def body():
+        guard, _, control, _, _ = make_guard(min_free_vram_mib=256)
+        assert await _polls(guard, 2) == [[], ["vram:low"]]
+        assert control.stops == 1
+    asyncio.run(body())
+    assert len(asked) == 2
+
+
+def _low_then(guard_cfg: dict, signals: list[dict]):
+    busy = {"v": True}
+    guard, detect, control, _, _ = floor_guard(100, 100, 100, 100, floor=256, busy=lambda: busy["v"], **guard_cfg)
+    detect.signals = signals
+    return guard, control
+
+
+def test_a_pause_this_signal_starts_drains_for_the_shorter_timeout():
+    async def body():
+        guard, control = _low_then({"vram_drain_timeout_seconds": 0.05, "drain_timeout_seconds": 999}, [])
+        await _polls(guard, 2)
+        assert guard.state == PAUSING and control.stops == 0  # a turn is running
+        await asyncio.sleep(0.1)
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 1
+    asyncio.run(body())
+
+
+def test_a_pause_with_another_trigger_present_keeps_the_longer_drain():
+    async def body():
+        guard, control = _low_then({"vram_drain_timeout_seconds": 0.05, "drain_timeout_seconds": 999}, [GAME])
+        await _polls(guard, 2)
+        assert {s["key"] for s in guard.signals} == {"game:hades.exe", "vram:low"}
+        await asyncio.sleep(0.1)
+        await guard.check()
+        assert guard.state == PAUSING and control.stops == 0
+    asyncio.run(body())
+
+
+def test_vram_joining_a_game_pause_already_draining_keeps_the_longer_drain():
+    async def body():
+        guard, control = _low_then({"vram_drain_timeout_seconds": 0.05, "drain_timeout_seconds": 999}, [GAME])
+        await guard.check()
+        assert guard.state == PAUSING
+        guard.detector.signals = []  # the game is gone and only the floor is left, but the game began this pause
+        await guard.check()
+        assert [s["key"] for s in guard.signals] == ["vram:low"]
+        await asyncio.sleep(0.1)
+        await guard.check()
+        assert guard.state == PAUSING and control.stops == 0
+    asyncio.run(body())
+
+
+def test_a_manual_hold_drains_as_before_even_with_the_floor_breached():
+    async def body():
+        guard, control = _low_then({"vram_drain_timeout_seconds": 0.05, "drain_timeout_seconds": 999}, [])
+        guard.pause()
+        await _polls(guard, 2)
+        assert [s["key"] for s in guard.signals] == ["vram:low"]
+        await asyncio.sleep(0.1)
+        await guard.check()
+        assert guard.state == PAUSING and control.stops == 0 and guard.manual
+    asyncio.run(body())
+
+
+def test_after_the_park_the_guard_clears_with_the_model_still_parked_and_nothing_queued():
+    async def body():
+        guard, _, control, scheduler, log = floor_guard(100, 100, floor=256, lazy_load=True, resume_after_seconds=0)
+        guard.want_model = lambda: False
+        await _polls(guard, 2)
+        assert guard.state == PAUSED and control.flag and control.stops == 1
+        await guard.check()  # flag present: nothing read, nothing to hold for, and resume_after_seconds has passed
+        assert guard.vram_floor.read.reads == 2
+        assert (guard.state, control.flag, control.starts) == (CLEAR, True, 0)
+        assert not scheduler.paused and [k for k, _ in log] == ["pause", "resume"]
+        assert guard.status()["parked"] is True
+    asyncio.run(body())
+
+
+def test_the_park_waits_out_resume_after_seconds_like_any_other_trigger():
+    async def body():
+        guard, _, control, scheduler, _ = floor_guard(100, 100, floor=256, lazy_load=True, resume_after_seconds=999)
+        await _polls(guard, 3)
+        assert guard.state == PAUSED and scheduler.paused and control.flag
+    asyncio.run(body())
+
+
+def test_work_queued_during_the_hold_reloads_the_model_as_with_any_other_trigger():
+    async def body():
+        guard, _, control, _, _ = floor_guard(100, 100, floor=256, lazy_load=True, resume_after_seconds=0)
+        guard.want_model = lambda: True
+        await _polls(guard, 3)
+        assert control.starts == 1 and not control.flag and guard.state == CLEAR
+    asyncio.run(body())
+
+
+def test_metrics_count_the_vram_trigger(tmp_path):
+    from harness.metrics import render
+    m = guarded_manager(tmp_path)
+    m.guard.signals = [{"key": "vram:low", "kind": "vram", "detail": "x"}]
+    assert 'harness_gpu_guard_triggers{kind="vram"} 1' in render(m)
+
+
+@pytest.mark.parametrize("key, value", [
+    ("min_free_vram_mib", -1), ("min_free_vram_mib", 25.5), ("min_free_vram_mib", "256"), ("min_free_vram_mib", True),
+    ("vram_drain_timeout_seconds", -1), ("vram_drain_timeout_seconds", "soon"),
+    ("vram_drain_timeout_seconds", float("inf")),
+])
+def test_config_refuses_a_bad_floor_or_drain_timeout(key, value):
+    from harness.config import validate_gpu_guard
+    with pytest.raises(ValueError, match=key):
+        validate_gpu_guard(GpuGuardConfig(**{key: value}))
+
+
+def test_config_accepts_the_tower_floor_and_the_defaults():
+    from harness.config import validate_gpu_guard
+    validate_gpu_guard(GpuGuardConfig())
+    validate_gpu_guard(GpuGuardConfig(min_free_vram_mib=256, vram_drain_timeout_seconds=30))
+
+
+def test_settings_registry_lists_the_floor_and_its_drain_timeout():
+    from harness_modules.local_model.settings import specs
+    by_key = {s.key: s for s in specs()}
+    floor, drain = by_key["gpu_guard.min_free_vram_mib"], by_key["gpu_guard.vram_drain_timeout_seconds"]
+    assert (floor.value_type, floor.default, floor.bounds.minimum) == ("int", 0, 0)
+    assert (drain.value_type, drain.default) == ("float", 30)
+    assert floor.yaml_path == ("gpu_guard", "min_free_vram_mib")
+    assert drain.yaml_path == ("gpu_guard", "vram_drain_timeout_seconds")
+
+
+@pytest.mark.parametrize("value", [-1, 25.5, 65537])
+def test_settings_refuse_a_floor_that_is_negative_fractional_or_out_of_range(value):
+    from harness.settings import parse_value
+    from harness_modules.local_model.settings import specs
+    floor = next(s for s in specs() if s.key == "gpu_guard.min_free_vram_mib")
+    with pytest.raises(ValueError):
+        parse_value(floor, value)
+    assert parse_value(floor, 256) == 256 and parse_value(floor, 0) == 0
+
+
+def test_loading_a_config_with_a_negative_floor_fails_and_the_shipped_one_is_off(tmp_path):
+    import yaml
+    from harness.config import load
+    from test_config_registry import _write_loadable_config
+    cfg_dir, data_dir = _write_loadable_config(tmp_path, "gpu_guard: {min_free_vram_mib: -1}\n")
+    with pytest.raises(ValueError, match="min_free_vram_mib"):
+        load(cfg_dir, data_dir)
+    shipped = yaml.safe_load((Path(__file__).parents[1] / "config" / "harness.yaml").read_text(encoding="utf-8"))
+    assert shipped["gpu_guard"]["min_free_vram_mib"] == 0
+    assert shipped["gpu_guard"]["vram_drain_timeout_seconds"] == 30
+
+
+@pytest.mark.parametrize("state, loaded", [(READY, True), (WAKING, False), (UNLOADED, False), ("sleeping", False)])
+def test_the_daemon_counts_a_recovery_only_with_the_model_ready_not_asleep(tmp_path, monkeypatch, state, loaded):
+    """An idle-unloaded llama-server still answers /health, with the model off the card."""
+    m = guarded_manager(tmp_path)
+
+    async def fixed(self, model):
+        return state
+    monkeypatch.setattr(ModelWarmer, "state", fixed)
+    assert asyncio.run(m.guard.model_loaded()) is loaded

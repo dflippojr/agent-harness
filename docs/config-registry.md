@@ -129,7 +129,7 @@ Round-reset `files_modified` is derived at reset on tower agent sessions: the un
 | `endpoint.max_waiting` / `endpoint.agent_fair_seconds` / `endpoint.request_timeout_seconds` | endpoint module |
 | `images.start_timeout_seconds` / `images.job_timeout_seconds` | images module |
 | `images.edit_enabled` / `images.max_upload_bytes` / `images.max_pixels` | opt-in image_edit module. `max_pixels` is the decoded-pixel cap for uploads and gallery edits; gallery sources over 1664 px on the long side or over `max_pixels` are rejected (uploads downscale to 1664) |
-| `gpu_guard.poll_seconds` / `gpu_guard.resume_after_seconds` / `gpu_guard.drain_timeout_seconds` | gpu_guard module |
+| `gpu_guard.poll_seconds` / `gpu_guard.resume_after_seconds` / `gpu_guard.drain_timeout_seconds` / `gpu_guard.min_free_vram_mib` / `gpu_guard.vram_drain_timeout_seconds` | gpu_guard module |
 | `jobs.poll_seconds` | jobs module |
 | `backup.at` (`HH:MM`) / `backup.keep_days` | backup module |
 | `smart_approvals.enabled` / `smart_approvals.mode` / `smart_approvals.provider` / `smart_approvals.model` / `smart_approvals.timeout_seconds` / `smart_approvals.min_confidence` | hosted reviewer; `secret_ref` stays file-only. `mode` last-writer: this setting and `PUT /smart-approvals` share one SQLite overlay; `off` means no reviewer calls |
@@ -213,8 +213,10 @@ Every key of the registry with all modules present, read from `harness/settings_
 | `endpoint.request_timeout_seconds` | float | `1800` | admin | Give up on a hung inference request after this long. |
 | `gpu_guard.drain_timeout_seconds` | float | `300` | admin | Longest wait for the current model turn before the server is stopped. |
 | `gpu_guard.enabled` | bool | `false` | admin | Runtime enable for pausing the model while a game or Plex transcode needs the GPU. |
+| `gpu_guard.min_free_vram_mib` | int | `0` | admin | Free VRAM under this for two polls in a row parks the model. 0 turns the check off. |
 | `gpu_guard.poll_seconds` | float | `10` | admin | How often the GPU guard looks for games or Plex transcodes. |
 | `gpu_guard.resume_after_seconds` | float | `180` | admin | The GPU must stay clear this long before the model is reloaded. |
+| `gpu_guard.vram_drain_timeout_seconds` | float | `30` | admin | Longest wait for the current model turn when low free VRAM alone starts the pause. |
 | `hub.enabled` | bool | `true` | admin | Read-only inventory for the standalone Hub app. |
 | `images.edit_enabled` | bool | `false` | admin | Runtime enable for the installed Qwen-Image-Edit component. Does not download model weights. |
 | `images.enabled` | bool | `false` | admin | Runtime enable for local image generation. |

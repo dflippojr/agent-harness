@@ -3,7 +3,7 @@
 The tower has 31.8 GB of RAM and a 16 GB GPU, shared with Docker, Plex, games, several Claude/Codex sessions and a
 browser. The local model (Qwen3.6-35B-A3B, a MoE whose expert tensors stay in system RAM) costs about 14 GB of RAM when
 loaded. The resource guard (formerly the GPU guard, `harness_modules/local_model/service.py`) makes the harness share that better. It
-covers the VRAM triggers (games, Plex transcodes), a free-memory threshold, the manual hold, and manual load/unload in
+covers the VRAM triggers (games, Plex transcodes, a free-VRAM floor), a free-memory threshold, the manual hold, and manual load/unload in
 one place: **Actions → Resources**.
 
 On Linux, how the model's VRAM can share the card with one Plex transcode and a Sunshine stream, and which guard
@@ -24,6 +24,46 @@ together. Whether an NVENC-only transcode appears in that query has not been che
 
 Game detection is Windows-only: on Linux `process_paths()` and `window_titles()` return nothing, so a game or a
 Big Picture window doesn't trigger the guard there (`docs/gpu-vram-budget.md`, follow-up 5).
+
+## Free-VRAM floor (#829)
+
+Every VRAM figure in `docs/gpu-vram-budget.md` is an estimate. `gpu_guard.min_free_vram_mib` is the backstop for one
+being wrong: a second stream, a 4K source, an unknown CUDA app. The shipped default is `0`, which turns it off, and then
+`nvidia-smi` isn't asked for it. The tower's intended value is **256**; the owner or liaison sets that on the tower, and
+this repository doesn't.
+
+- **When it fires.** Each poll takes a fresh `nvidia-smi` reading, never the 10 s one `/metrics` caches. Free VRAM under
+  the floor on two polls in a row raises one signal: key `vram:low`, kind `vram`, and a detail with both figures in MiB.
+  The key holds no reading, so a changing figure can't look like a new trigger.
+- **What resets the count.** A reading at or above the floor, a failed reading, or a reading whose free-VRAM field the
+  driver reports as `[N/A]`. A failed reading raises no signal.
+- **Only while the model's server is meant to be up.** With the pause flag there, the count resets and `nvidia-smi`
+  isn't asked: low VRAM then belongs to something else, an Images batch included, and parking would free nothing. A
+  flag that appears while the reading runs discards that reading too.
+- **Its drain.** When this signal alone starts a pause, the current turn gets `gpu_guard.vram_drain_timeout_seconds`
+  (default 30) instead of `drain_timeout_seconds`, because something is already short of memory. A pause with any other
+  trigger present, and a manual hold, keep `drain_timeout_seconds`. *Decision:* the drain is chosen when the pause
+  starts, so a trigger that arrives during a drain doesn't move its deadline.
+- **After the park.** The flag stops the count, so the signal clears, and `resume_after_seconds` and `lazy_load` apply
+  as for any trigger. With nothing queued, the guard goes back to clear and the model stays parked. If something keeps
+  VRAM low and a turn is waiting, or a new one asks for the model, the load's memory goes back on the card and the floor
+  can park it again, after two polls: the floor doesn't look at what else holds VRAM.
+- ***Resume anyway*.** Pressed any time during a pause the floor was part of (the drain, the parked cooldown, or a RAM
+  wait that followed), it acknowledges the floor. The model can then reload and run under the floor: `vram:low` still
+  shows in `signals`, but it doesn't pause anything. The park hides the signal and the count restarts after a reload,
+  so neither of those ends it. It ends when:
+  - a reading is at or above the floor with the model loaded and awake both before and after the read, no turn holding
+    the guard's lease or an unleased request (a skill review, keepalive ping or tokenizer call) still outstanding at
+    either end, and no load, park or inference request begun or ended between them. llama-server sleeps by
+    itself and a request reloads it, so being ready on both sides isn't enough. A high reading while the model is
+    loading or asleep doesn't count, because the model isn't on the card then, and neither does a failed reading. A
+    client that calls llama-server directly, past the harness, isn't seen; a reload takes about a minute and the read
+    at most 5 seconds, so it would have to finish inside one read to matter;
+  - a new trigger appears, such as a game: that pauses as usual, and the floor counts again afterwards;
+  - a manual hold is resumed, the floor is set to 0, or the daemon restarts.
+
+`harness_gpu_guard_triggers{kind="vram"}` counts it, and `reasons` in `GET /resources` shows its detail. A floor above
+what the card can ever have free would park every load. #832 adds the warning for that.
 
 ## When the model loads
 

@@ -12,13 +12,18 @@ class SkillsRuntime(ModuleRuntime):
         cfg, m = self.cfg, self.manager
         reviewer = SkillReviewer(cfg.skills, m.db, idle=self.idle,
             model=cfg.models.get(cfg.default_model) if cfg.modules.local_model else None,
-            chat=m.runner.chat,
+            chat=self.review_chat,
             hosted_chat=self.hosted_review if cfg.skills.reviewer_base_url else None,
             local_review=cfg.skills.local_review and cfg.profile == "full" and cfg.modules.local_model)
         self.service = SkillStore(cfg.skills, m.db, cfg.data_dir, cfg.sandbox.image, reviewer=reviewer)
 
     def toolkit(self):
         return self.service
+
+    async def review_chat(self, *args, **kwargs):
+        """A local review calls the model with no lease, so the warmer tracks it until the answer is in."""
+        async with self.manager.warmer.request():
+            return await self.manager.runner.chat(*args, **kwargs)
 
     def start(self):
         if self.service is not None:

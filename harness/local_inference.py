@@ -19,8 +19,25 @@ class NoWarmer:
     async def ensure_loaded(self, model):
         pass
 
+    def note_inference(self):
+        pass
+
+    def request(self):
+        return _NoRequest()
+
     def parked(self, model):
         return False
 
     def waking_for(self, model):
         return None
+
+
+class _NoRequest:
+    async def release(self):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        pass

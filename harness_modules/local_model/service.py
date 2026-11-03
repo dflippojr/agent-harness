@@ -17,7 +17,8 @@ Windows doesn't report VRAM per process, so the triggers are what's running, not
 under a game library folder, a Steam Big Picture window (Sunshine's Big Picture app), or a Plex transcode with
 hardware encoding or decoding. Plex is asked through its API when the registry holds a token; without one (Linux) a
 `Plex Transcoder` process in nvidia-smi's compute apps counts, with no credential. Desktop streaming with nothing
-else running doesn't pause anything.
+else running doesn't pause anything. The one memory number is a backstop for all of those being wrong:
+`min_free_vram_mib` (VramFloor), off by default.
 
 Sessions hear about it through `gpu_paused` / `gpu_resumed` events (see Runner.note_gpu_pause), which also notify
 the phone. From the app the user can pause by hand, or resume anyway while a trigger is still present; that
@@ -57,6 +58,9 @@ def _memory_reason(status: dict) -> dict:
 
 
 GIB = 1024 ** 3
+MIB = 1024 ** 2
+VRAM_LOW_KEY = "vram:low"  # never holds the reading: a Resume anyway override compares keys across polls
+VRAM_LOW_POLLS = 2  # consecutive polls under the floor before it counts
 MEMORY_POLL_SECONDS = 5  # how often work waiting for memory looks again
 HEALTH_TIMEOUT_SECONDS = 300  # reopen the queue anyway after this; model calls then report their own errors
 MANUAL_HOLD_FILE = "gpu-guard-hold.json"  # survives a daemon restart; the pause_flag file alone does not
@@ -235,6 +239,43 @@ class Detector:
             return []
         self.plex_error = ""
         return plex_transcoders(processes)
+
+
+class VramFloor:
+    """The free-VRAM backstop (#829): a signal once nvidia-smi's free VRAM has stayed under `min_free_vram_mib` for
+    VRAM_LOW_POLLS polls in a row. It counts only while the model's server is meant to be up: with the pause flag there,
+    low VRAM belongs to something else (an Images batch, say) and parking again would free nothing."""
+
+    def __init__(self, cfg: GpuGuardConfig, read: Callable[[], dict | None] | None = None):
+        self.cfg = cfg
+        self.read = read
+        self.low_polls = 0
+        self.recovered = False  # the last poll measured free VRAM at or above the floor
+
+    def _reading(self) -> dict | None:
+        if self.read is not None:
+            return self.read()
+        from . import resources  # it imports this module
+        # Never the cached reading: /metrics refreshes it, and one figure seen by two polls would count as two.
+        return resources.gpu_reading()
+
+    async def __call__(self, parked: Callable[[], bool]) -> list[dict]:
+        self.recovered = False
+        floor = self.cfg.min_free_vram_mib  # each poll: a Settings write applies live
+        if floor <= 0 or parked():
+            self.low_polls = 0
+            return []
+        reading = await asyncio.to_thread(self._reading)
+        free = reading.get("vram_free") if reading else None
+        # nvidia-smi can take seconds: a park that landed meanwhile may already have handed the card over.
+        if free is None or free >= floor * MIB or parked():
+            self.low_polls = 0
+            self.recovered = free is not None and free >= floor * MIB and not parked()
+            return []
+        self.low_polls += 1
+        if self.low_polls < VRAM_LOW_POLLS:
+            return []
+        return [{"key": VRAM_LOW_KEY, "kind": "vram", "detail": f"free VRAM {free // MIB} MiB, floor {floor} MiB"}]
 
 
 # ---------- memory ----------
@@ -462,6 +503,7 @@ class GpuGuard:
         self.scheduler = scheduler
         self.busy = busy
         self.detector = detect or Detector(cfg)
+        self.vram_floor = VramFloor(cfg)
         self.control = control or ServerControl(cfg, model)
         self.on_pause = on_pause
         self.on_resume = on_resume
@@ -481,6 +523,14 @@ class GpuGuard:
         self.manual_since: float | None = None  # epoch seconds the current manual hold began
         self.reminded_at: float | None = None   # the last indefinite-hold reminder (#732)
         self.override: frozenset | None = None  # triggers the user chose to ignore
+        # Resume anyway on the free-VRAM floor. Not in `override`: that ends when no trigger shows, and a park hides
+        # this one, as does the debounce after a reload. It ends on a measured recovery, a new trigger or a reset.
+        self.vram_acknowledged = False
+        self._floor_in_pause = False  # the floor is part of this pause, though parking has hidden its signal
+        # The model is on the card, so free VRAM counts as a recovery (ModelWarmer.state; /health alone can't tell).
+        self.model_loaded: Callable[[], Awaitable[bool]] = lambda: self.control.healthy()
+        self.model_transitions: Callable[[], int] = lambda: 0  # loads, parks and inference begun or ended (the warmer's)
+        self.model_requests: Callable[[], int] = lambda: 0  # unleased requests outstanding (the warmer's)
         self.changed_at = time.time()
         self.last_check = 0.0
         self.pauses = 0
@@ -503,7 +553,7 @@ class GpuGuard:
         remaining = (max(0, round(self.manual_until - time.time()))
                      if self.manual and self.manual_until is not None else None)
         return {"enabled": self.cfg.enabled, "state": self.state, "signals": self.signals, "reasons": self.reasons,
-                "manual": self.manual, "override": bool(self.override), "since": self.changed_at,
+                "manual": self.manual, "override": bool(self.override) or self.vram_acknowledged, "since": self.changed_at,
                 "manual_until": self.manual_until, "manual_remaining_seconds": remaining,
                 "manual_duration_seconds": self.manual_duration_seconds, "manual_since": self.manual_since,
                 "last_check": self.last_check, "resume_after_seconds": self.cfg.resume_after_seconds,
@@ -641,7 +691,9 @@ class GpuGuard:
         self.manual_since = self.reminded_at = None
         self._clear_persisted_hold()
         keys = frozenset(s["key"] for s in self.signals)
-        self.override = (keys or None) if override_signals else None
+        self.override = ((keys - {VRAM_LOW_KEY}) or None) if override_signals else None
+        self.vram_acknowledged = override_signals and (self.vram_acknowledged or VRAM_LOW_KEY in keys
+                                                       or self._floor_in_pause)
         self._resume_now = True
         self._wake.set()
 
@@ -675,12 +727,20 @@ class GpuGuard:
     async def check(self, startup: bool = False) -> None:
         if self.manual and self.manual_until is not None and time.time() >= self.manual_until:
             self.resume(override_signals=False)
-        self.signals = await self.detector()
+        signals = await self.detector()
+        sampled_at = await self._recovery_sample_start()
+        self.signals = signals + await self.vram_floor(self.control.flagged)
         self.last_check = time.time()
         keys = frozenset(s["key"] for s in self.signals)
-        if self.override is not None and (not keys or not keys <= self.override):
+        if self.vram_acknowledged and await self._floor_recovered(sampled_at):
+            self.vram_acknowledged = False
+        floor_key = {VRAM_LOW_KEY} if self.vram_acknowledged else set()
+        triggers = keys - (self.override or frozenset()) - floor_key
+        if triggers:  # a new trigger ends both
+            self.override, self.vram_acknowledged = None, False
+        elif not keys - floor_key:
             self.override = None
-        want = self.manual or (bool(keys) and self.override is None)
+        want = self.manual or bool(triggers)
         now = time.monotonic()
 
         if want:
@@ -688,6 +748,31 @@ class GpuGuard:
             return
 
         await self._release(startup, now)
+
+    async def _recovery_sample_start(self) -> int | None:
+        """The model's transition count if a reading taken now could end the acknowledgement: the model is loaded and
+        awake before the read begins, with no turn holding the lease. None otherwise. nvidia-smi can take seconds, and
+        a load can finish meanwhile."""
+        if not self.vram_acknowledged or self.cfg.min_free_vram_mib <= 0 or self.control.flagged() or self._requests_out():
+            return None
+        transitions = self.model_transitions()
+        return transitions if await self.model_loaded() else None
+
+    async def _floor_recovered(self, sampled_at: int | None) -> bool:
+        """Off, or free VRAM read at or above the floor with the model loaded throughout. Until it has loaded the model
+        isn't on the card, so a high reading says nothing about whether the two fit. llama-server sleeps by itself and
+        only inference wakes it, so the model stayed resident if it is ready on both sides of the read and no load,
+        park or request happened between them. A request already on its way when the read began can land during it, so
+        a turn holding the lease (a CLI's requests pass the warmer unseen) or an outstanding unleased request at either
+        end discards the reading too, and one that ends during the read changes the count."""
+        if self.cfg.min_free_vram_mib <= 0:
+            return True
+        return (sampled_at is not None and self.vram_floor.recovered and await self.model_loaded()
+                and not self._requests_out() and self.model_transitions() == sampled_at)
+
+    def _requests_out(self) -> bool:
+        """A request may still reach llama-server: a turn holds the lease, or an unleased one is outstanding."""
+        return bool(self.busy() or self.model_requests())
 
     async def _release(self, startup: bool, now: float) -> None:
         if self._clear_since is None:
@@ -719,6 +804,7 @@ class GpuGuard:
             self._finish_resume()
 
     async def _hold(self, now: float) -> None:
+        self._floor_in_pause = self._floor_in_pause or any(s["key"] == VRAM_LOW_KEY for s in self.signals)
         self._clear_since = None
         self._resume_now = False
         if self.state == PAUSED and self.manual and self.memory_hold:
@@ -731,7 +817,7 @@ class GpuGuard:
             was_clear = self.state == CLEAR
             self._set(PAUSING)
             self.scheduler.set_paused(True)
-            self._drain_deadline = now + self.cfg.drain_timeout_seconds
+            self._drain_deadline = now + self._drain_seconds()
             if was_clear:
                 self._paused_at = time.time()
                 self.pauses += 1
@@ -740,6 +826,12 @@ class GpuGuard:
         if self.state == PAUSING and (not self.busy() or now >= self._drain_deadline):
             await self.park(self.control.stop)
             self._set(PAUSED)
+
+    def _drain_seconds(self) -> float:
+        """How long a pause starting now waits for the current turn. Short only when the free-VRAM floor alone began
+        it, since something is already short of memory; a trigger joining later doesn't change the deadline."""
+        vram_only = not self.manual and self.signals and all(s["key"] == VRAM_LOW_KEY for s in self.signals)
+        return self.cfg.vram_drain_timeout_seconds if vram_only else self.cfg.drain_timeout_seconds
 
     async def unload(self, before_stop: Callable[[], None] | None = None) -> bool:
         """Unload the model now (park it) without holding the queue. False while a model turn is running or about to
@@ -757,6 +849,7 @@ class GpuGuard:
         seconds = time.time() - self._paused_at if self._paused_at else 0.0
         self.paused_seconds_total += seconds
         self.reasons = []
+        self._floor_in_pause = False
         self._set(CLEAR)
         if self.on_resume:
             self.on_resume(seconds)

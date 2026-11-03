@@ -117,10 +117,21 @@ def flavor_of(request: Request) -> str:
 
 
 async def _close(upstream, client, slot) -> None:
-    await upstream.aclose()
-    await client.aclose()
-    if slot:
-        await slot.release()
+    try:
+        await upstream.aclose()
+    finally:
+        await _release(client, slot)
+
+
+async def _release(client, slot) -> None:
+    """Close the client and give back the slot (or the tokenizer route's hold), the slot even if closing fails: a hold
+    left outstanding would stop the GPU guard from ever counting a recovery again."""
+    try:
+        if client is not None:
+            await client.aclose()
+    finally:
+        if slot:
+            await slot.release()
 
 
 async def _parse_body(request: Request, flavor: str) -> tuple[dict | None, JSONResponse | None]:
@@ -138,9 +149,10 @@ async def _parse_body(request: Request, flavor: str) -> tuple[dict | None, JSONR
 
 
 async def _acquire_slot(m, flavor: str, path: str, finish) -> tuple[object | None, JSONResponse | None]:
-    """An InferenceGate slot for GPU-bound routes, or the 429/503 to send instead."""
+    """An InferenceGate slot for GPU-bound routes, or the 429/503 to send instead. A tokenizer route takes no slot, but
+    llama-server still answers it, waking a sleeping model, so the warmer tracks it as an unleased request instead."""
     if path in NO_GPU:
-        return None, None
+        return m.warmer.request(), None
     if m.guard is not None and m.guard.active:
         finish(503)
         return None, error(flavor, 503, "overloaded_error", "the GPU is in use by a game or a Plex transcode; the "
@@ -248,27 +260,28 @@ async def proxy(m, request: Request, path: str) -> Response:
     slot, err = await _acquire_slot(m, flavor, path, finish)
     if err is not None:
         return err
-    err = await _ensure_model(m, model, flavor, finish)  # every route is relayed to llama-server, count_tokens too
-    if err is not None:
-        if slot:
-            await slot.release()
-        return err
-    wait_ms = int((time.monotonic() - started) * 1000)
-    client = httpx.AsyncClient(timeout=httpx.Timeout(ecfg.request_timeout_seconds, connect=10), trust_env=False,
-                               transport=getattr(m, "endpoint_transport", None))  # tests inject a fake server
-    try:
-        upstream = await client.send(client.build_request(
-            "POST", f"{model.base_url.rstrip('/')}{path}", content=json.dumps(body).encode(),
-            headers={"content-type": JSON_MEDIA_TYPE,
-                     "accept": SSE_MEDIA_TYPE if stream else JSON_MEDIA_TYPE}), stream=True)
-    except httpx.HTTPError as e:
-        await client.aclose()
-        if slot:
-            await slot.release()
-        finish(502, wait_ms=wait_ms)
-        return error(flavor, 502, "api_error", f"model server unreachable: {type(e).__name__}")
-
-    return await _relay_upstream(upstream, client, slot, stream, finish, wait_ms, flavor)
+    client = None
+    try:  # from here this call owns the slot until _relay_upstream takes it, on every exit, cancellation included
+        err = await _ensure_model(m, model, flavor, finish)  # every route is relayed to llama-server, count_tokens too
+        if err is not None:
+            return err
+        wait_ms = int((time.monotonic() - started) * 1000)
+        client = httpx.AsyncClient(timeout=httpx.Timeout(ecfg.request_timeout_seconds, connect=10), trust_env=False,
+                                   transport=getattr(m, "endpoint_transport", None))  # tests inject a fake server
+        try:
+            upstream = await client.send(client.build_request(
+                "POST", f"{model.base_url.rstrip('/')}{path}", content=json.dumps(body).encode(),
+                headers={"content-type": JSON_MEDIA_TYPE,
+                         "accept": SSE_MEDIA_TYPE if stream else JSON_MEDIA_TYPE}), stream=True)
+        except httpx.HTTPError as e:
+            finish(502, wait_ms=wait_ms)
+            return error(flavor, 502, "api_error", f"model server unreachable: {type(e).__name__}")
+        relay = _relay_upstream(upstream, client, slot, stream, finish, wait_ms, flavor)
+        client = slot = None  # the relay owns them now and closes them when the response ends
+        return await relay
+    finally:
+        if client is not None or slot:
+            await asyncio.shield(_release(client, slot))
 
 
 def _models_payload(m) -> dict:
