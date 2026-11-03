@@ -23,7 +23,7 @@ git branch for you to review and merge.
 
 | Stack | Scale | Quality gates |
 | --- | --- | --- |
-| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~50K lines · 1,700+ tests in 148 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
+| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~60K lines · 5,300+ tests in 196 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
 
 ---
 
@@ -121,7 +121,7 @@ stateDiagram-v2
 
 ```mermaid
 flowchart LR
-    PR["Pull request"] --> CI["CI<br/>full test suite,<br/>8 parallel workers"]
+    PR["Pull request"] --> CI["CI<br/>full test suite,<br/>4 parallel workers"]
     PR --> SONAR["SonarCloud<br/>coverage gate"]
     PR --> REV["AI code review<br/>Codex / Claude / Cursor"]
     PR -. "optional" .-> STG["Staging slot<br/>isolated DB and tokens"]
@@ -306,7 +306,7 @@ Diagnose an install with `python -m harness.doctor`. The full guide is [`docs/IN
 python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
 .\.venv\Scripts\python -m harness                  # daemon on 127.0.0.1:8100
 .\.venv\Scripts\python -m harness.cli new "Clone local:invoice-tools, fix the failing test, and report back"
-.\.venv\Scripts\python -m pytest tests -q -n 8 --dist loadfile
+.\.venv\Scripts\python -m pytest tests -q -n 4 --dist loadfile
 ```
 
 ### Driving it from code
