@@ -1955,6 +1955,59 @@ def test_a_reading_the_model_fell_asleep_during_is_no_recovery(tmp_path, monkeyp
     asyncio.run(body())
 
 
+@pytest.mark.parametrize("request_path", ["agent-turn", "endpoint-request", "skill-review", "keepalive-ping"])
+def test_a_reading_across_an_automatic_sleep_and_an_inference_reload_is_no_recovery(tmp_path, monkeypatch, request_path):
+    """Review r3 of 8f703a2: ready, llama-server sleeps by itself, the reading sees the card empty, an ordinary request
+    reloads the model, ready. The model is ready on both sides and no warmer load or park happened."""
+    async def body():
+        m, vram, llama, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+
+        async def inference_wakes_it(*_args, **_kwargs):
+            llama.sleeping = False
+            return Completion(content="done")
+        m.runner.chat = inference_wakes_it
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        llama.sleeping = True  # no warmer call: its own idle timer
+        assert await m.warmer.state(model) == "sleeping"
+        if request_path == "agent-turn":
+            await m.runner._model_call("session", model, [])
+        elif request_path == "endpoint-request":
+            from harness_modules.endpoint.service import _ensure_model
+            assert await _ensure_model(m, model, "openai", lambda *_a, **_k: None) is None
+            await inference_wakes_it()
+        elif request_path == "skill-review":
+            m.cfg.modules.skills = m.cfg.skills.enabled = True
+            skills = m.modules.get("skills")
+            skills.init()
+            await skills.service.reviewer.chat(model, [])  # as a local skill review runs: no lease, no admission
+            llama.sleeping = False
+        else:
+            await m.warmer._ping(model, "kept")
+        assert not llama.sleeping and await m.warmer.state(model) == READY
+        assert not m.runner.generating
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
+def test_a_reading_taken_under_a_running_turns_lease_is_no_recovery(tmp_path, monkeypatch):
+    """A CLI turn holds the lease and sends its requests with no further admission, so nothing else marks the reload."""
+    async def body():
+        m, vram, _, model = await _acknowledged_and_parked(tmp_path, monkeypatch, 4000, 4000, 100, 100)
+        await m.warmer.ensure_loaded(model)
+        m.runner.generating.add("cli-turn")
+        poll = await _poll_with_the_read_held(m.guard, vram)
+        m.runner.generating.discard("cli-turn")  # its requests went through the forwarder; the warmer saw none of them
+        vram.go.set()
+        await asyncio.wait_for(poll, 2)
+        assert m.guard.status()["override"] is True
+        await _then_a_loaded_high_reading_retires_it_and_the_floor_guards_again(m)
+    asyncio.run(body())
+
+
 def test_a_reading_spanning_an_unload_and_reload_is_no_recovery_though_ready_both_sides(tmp_path, monkeypatch):
     """Ready before and ready after, with the model off the card in between: only the transition gives it away."""
     async def body():
