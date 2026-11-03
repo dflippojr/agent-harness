@@ -309,6 +309,15 @@ python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
 .\.venv\Scripts\python -m pytest tests -q -n 4 --dist loadfile
 ```
 
+```bash
+# Linux or macOS
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt pytest-xdist
+.venv/bin/python -m harness                        # daemon on 127.0.0.1:8100
+.venv/bin/python -m harness.cli new "Clone local:invoice-tools, fix the failing test, and report back"
+.venv/bin/python -m pytest tests -q -n 4 --dist loadfile
+```
+
 ### Driving it from code
 
 ```python
