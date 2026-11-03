@@ -20,7 +20,7 @@
 #   gh api -X POST repos/dflippojr/agent-harness/actions/runners/registration-token --jq .token |
 #     sudo ops/github/install-runner.sh --labels agent-harness-review --name dflippotower-review-1
 #
-# --dry-run prints the plan and changes nothing: no download, user, files or systemd unit.
+# --dry-run prints the plan, with the unit it would write, and changes nothing: no download, user, files or systemd unit.
 set -euo pipefail
 
 REPO="dflippojr/agent-harness"
@@ -136,16 +136,45 @@ echo "service user: $RUNNER_USER"
 echo "install directory: $INSTALL_DIR (work: $WORK_DIR)"
 echo "runner release: $VERSION ($archive, sha256 $SHA256)"
 
+# Installed beside runsvc.sh, from the checkout this script runs from.
+stop_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/runner-stop.sh"
+[[ -f "$stop_script" ]] || fail "$stop_script is missing: run this installer from its checkout"
+
 if [[ -e "$dest/.runner" ]]; then
   fail "a runner is already configured in $INSTALL_DIR"
 fi
+
+# svc.sh's unit, except for how it stops (#814). runner-stop.sh signals the listener first and waits, so the runner can
+# finish cancelling a job: runsvc.sh's own path kills the listener after 30 seconds. KillMode=mixed then sends SIGINT to
+# runsvc.sh alone, and SIGKILL to anything left, where KillMode=process would leave it running and control-group would
+# signal a job's steps directly. TimeoutStopSec stays above runner-stop.sh's 5 minutes. docs/CI-CD.md has the reasoning.
+write_unit() {
+  cat <<UNIT
+[Unit]
+Description=GitHub Actions Runner (${REPO//\//-}.$NAME)
+After=network-online.target
+
+[Service]
+ExecStart=$INSTALL_DIR/runsvc.sh
+ExecStop=$INSTALL_DIR/runner-stop.sh
+User=$RUNNER_USER
+WorkingDirectory=$INSTALL_DIR
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=6min
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "dry run: would create user $RUNNER_USER if missing (no sudo or docker group)"
   echo "dry run: would download $url and check its sha256"
   echo "dry run: would unpack into $INSTALL_DIR, owned by $RUNNER_USER"
   echo "dry run: would run config.sh --unattended as $RUNNER_USER with --labels $LABELS"
-  echo "dry run: would write, as root, the unit svc.sh install $RUNNER_USER writes ($unit) and start it"
+  echo "dry run: would write, as root, the unit svc.sh install $RUNNER_USER writes ($unit), with its stop settings changed, and start it:"
+  write_unit
   exit 0
 fi
 
@@ -200,24 +229,12 @@ ACTIONS_RUNNER_INPUT_TOKEN="$TOKEN" runuser -u "$RUNNER_USER" -- env -C "$dest" 
   --url "https://github.com/$REPO" --name "$NAME" --labels "$LABELS" --work "$WORK_DIR"
 
 # What svc.sh install does, with root writing only under /etc/systemd/system and the service user doing the rest.
-cat > "$unit_path" <<UNIT
-[Unit]
-Description=GitHub Actions Runner (${REPO//\//-}.$NAME)
-After=network-online.target
-
-[Service]
-ExecStart=$INSTALL_DIR/runsvc.sh
-User=$RUNNER_USER
-WorkingDirectory=$INSTALL_DIR
-KillMode=process
-KillSignal=SIGTERM
-TimeoutStopSec=5min
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+write_unit > "$unit_path"
 chmod 0644 "$unit_path"
 runuser -u "$RUNNER_USER" -- install -m 0755 -- "$dest/bin/runsvc.sh" "$dest/runsvc.sh"
+# Root reads the checkout's copy and the service user writes its own, as with the archive above.
+runuser -u "$RUNNER_USER" -- tee "$dest/runner-stop.sh" < "$stop_script" >/dev/null
+runuser -u "$RUNNER_USER" -- chmod 0755 -- "$dest/runner-stop.sh"
 echo "$unit" | runuser -u "$RUNNER_USER" -- tee "$dest/.service" >/dev/null
 systemctl daemon-reload
 systemctl enable "$unit"

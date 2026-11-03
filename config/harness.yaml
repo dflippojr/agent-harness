@@ -194,6 +194,7 @@ budgets:
 
 compaction:
   mask_min_chars: 2000  # replace used successful tool results with recoverable receipts
+  mask_batch_at: 0      # off: mask one turn after use. A share of context_tokens below elide_at (0.45): mask in batches
   elide_at: 0.55       # fraction of context_tokens: shorten old tool outputs
   reset_at: 0.60       # fraction of context_tokens: round-reset when valid state is saved
   summarize_at: 0.65   # still above this after eliding: summarize older turns

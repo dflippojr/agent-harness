@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 import os
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
+import sys
+import threading
 
 import pytest
 
@@ -227,8 +231,9 @@ def test_uninstall_removes_install_symlink_without_deleting_target(tmp_path, phy
     assert (tmp_path / "real-install/models").read_text().strip() == "keep"
 
 
-def _install_linux_units(tmp_path: Path, app_dir: Path, *installer_args: str,
-                         profile: str = "service") -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+def _install_linux_units(tmp_path: Path, app_dir: Path, *installer_args: str, profile: str = "service",
+                         extra_path: str = "", started: bool = True, locale: str = "",
+                         ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     """Run install.sh for real from a copy at `app_dir`, with every tool and service call stubbed (#810)."""
     if not BASH or os.name == "nt":
         pytest.skip("needs bash on a POSIX host")
@@ -250,15 +255,314 @@ def _install_linux_units(tmp_path: Path, app_dir: Path, *installer_args: str,
     for stub in [*stubs.iterdir(), install_dir / "bin/uv", install_dir / "venv/bin/python"]:
         stub.chmod(0o755)
     home = tmp_path / "home"
-    env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
-           "HARNESS_INSTALLER_OS": "Linux", "HARNESS_INSTALLER_ARCH": "x86_64"}
+    path = f"{stubs}:/usr/bin:/bin" + (f":{extra_path}" if extra_path else "")
+    env = {"PATH": path, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+           "HARNESS_INSTALLER_OS": "Linux", "HARNESS_INSTALLER_ARCH": "x86_64", **({"LC_ALL": locale} if locale else {})}
     result = subprocess.run(
         [BASH, str(app_dir / "install/install.sh"), "--install-dir", str(install_dir), "--profile", profile,
          "--no-hub", *installer_args], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60, check=False)
     enabled = ("agent-harness-main-llama.service " if profile == "full" else "") + "agent-harness-main-daemon.service"
-    assert calls.exists() and f"systemctl --user enable --now {enabled}" in calls.read_text(), (
-        result.stdout + result.stderr)
+    if started:
+        assert calls.exists() and f"systemctl --user enable --now {enabled}" in calls.read_text(), (
+            result.stdout + result.stderr)
     return result, home / ".config/systemd/user/agent-harness-main-daemon.service", install_dir
+
+
+def _recording_python(path: Path, record: Path) -> None:
+    """Replace the install's stub python with one that records how the wrapper called it."""
+    path.write_text('#!/bin/sh\n{ pwd; printf "%s\\n" "$HARNESS_CONFIG_DIR" "$HARNESS_URL" "$PYTHONPATH" "$@"; } > '
+                    + shlex.quote(str(record)) + "\n")
+    path.chmod(0o755)
+
+
+def _real_cli(app_dir: Path, install_dir: Path) -> None:
+    """Make the scratch install run this checkout's CLI. Only after install.sh, whose own setup and doctor steps would
+    otherwise run for real."""
+    (app_dir / "harness").symlink_to(ROOT / "harness")
+    python = install_dir / "venv/bin/python"
+    python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o755)
+
+
+def _run_wrapper(wrapper: Path, cwd: Path, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([str(wrapper), *args], cwd=cwd, capture_output=True, text=True, timeout=60, check=False,
+                          env={"PATH": "/usr/bin:/bin", "HOME": str(wrapper.parents[2]), **env})
+
+
+@pytest.mark.parametrize("name", ["app", "my app", "o'brien $HOME"])
+def test_linux_install_writes_a_harness_wrapper_for_this_install(tmp_path, name):
+    app_dir = tmp_path / name
+    result, _, install_dir = _install_linux_units(tmp_path, app_dir)
+    assert result.returncode == 0, result.stdout + result.stderr
+    wrapper = tmp_path / "home/.local/bin/harness"
+    assert wrapper.is_file() and os.access(wrapper, os.X_OK), result.stdout
+    record = tmp_path / "wrapper-call"
+    _recording_python(install_dir / "venv/bin/python", record)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    called = _run_wrapper(wrapper, elsewhere, "--help")
+    assert called.returncode == 0, called.stderr
+    # The caller's directory stays, for relative path arguments; -P keeps a harness/ folder in it from shadowing the app.
+    # No URL: the CLI reads the port from the config dir (test_cli_targets_the_port_in_harness_config_dir).
+    assert record.read_text().splitlines() == [
+        str(elsewhere), str(install_dir / "config"), "", str(app_dir), "-P", "-m", "harness.cli", "--help"]
+
+
+def test_cli_targets_the_port_in_harness_config_dir(tmp_path, monkeypatch):
+    from harness import cli
+    for name in ("BASE", "TOKEN", "LOCAL_TOKEN", "CONFIG_PATH"):
+        monkeypatch.setattr(cli, name, getattr(cli, name))
+    (tmp_path / "harness.yaml").write_text("listen:\n  port: 8123\n")
+    monkeypatch.delenv("HARNESS_URL", raising=False)
+    monkeypatch.setenv("HARNESS_CONFIG_DIR", str(tmp_path))
+    cli.configure(tmp_path / "no-client.json")
+    assert cli.BASE == "http://127.0.0.1:8123"
+    monkeypatch.setenv("HARNESS_URL", "http://127.0.0.1:9000")
+    cli.configure(tmp_path / "no-client.json")
+    assert cli.BASE == "http://127.0.0.1:9000"
+    monkeypatch.delenv("HARNESS_URL")
+    (tmp_path / "harness.yaml").unlink()
+    cli.configure(tmp_path / "no-client.json")
+    assert cli.BASE == "http://127.0.0.1:8100"
+    monkeypatch.delenv("HARNESS_CONFIG_DIR")
+    cli.configure(tmp_path / "no-client.json")
+    assert cli.BASE == "http://127.0.0.1:8100"
+
+
+def test_wrapper_lets_the_caller_choose_the_daemon(tmp_path):
+    result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    record = tmp_path / "wrapper-call"
+    _recording_python(install_dir / "venv/bin/python", record)
+    called = _run_wrapper(tmp_path / "home/.local/bin/harness", tmp_path, "list", HARNESS_URL="http://other:1",
+                          HARNESS_CONFIG_DIR="/other/config")
+    assert called.returncode == 0, called.stderr
+    assert record.read_text().splitlines()[1:3] == ["/other/config", "http://other:1"]
+
+
+@pytest.mark.parametrize("install_locale,uninstall_locale", [("C.UTF-8", "C"), ("C", "C.UTF-8")])
+def test_uninstall_finds_a_non_ascii_install_whatever_the_locale(tmp_path, install_locale, uninstall_locale):
+    """bash's %q spells a non-ASCII path differently in a UTF-8 locale and in C; the two runs may differ."""
+    result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "café", locale=install_locale)
+    assert result.returncode == 0, result.stdout + result.stderr
+    wrapper = tmp_path / "home/.local/bin/harness"
+    assert wrapper.is_file()
+    removed = _uninstall(tmp_path, install_dir, "--remove-files", LC_ALL=uninstall_locale)
+    assert removed.returncode == 0, removed.stderr
+    assert not wrapper.exists()
+
+
+def test_wrapper_follows_a_ci_deployment_venv_pointer(tmp_path):
+    result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    deployed = tmp_path / "deployed-venv/bin/python"
+    deployed.parent.mkdir(parents=True)
+    record = tmp_path / "wrapper-call"
+    _recording_python(deployed, record)
+    (tmp_path / "app/.venv-path").write_text(f"{tmp_path / 'deployed-venv'}\n")
+    called = _run_wrapper(tmp_path / "home/.local/bin/harness", tmp_path, "--help")
+    assert called.returncode == 0, called.stderr
+    assert record.exists()
+
+
+def test_wrapper_runs_the_real_cli_and_ignores_a_harness_folder_in_the_callers_directory(tmp_path):
+    result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    _real_cli(tmp_path / "app", install_dir)
+    project = tmp_path / "project"
+    (project / "harness").mkdir(parents=True)
+    (project / "harness/__init__.py").write_text("raise SystemExit('imported the folder in the working directory')\n")
+    called = _run_wrapper(tmp_path / "home/.local/bin/harness", project, "--help")
+    assert called.returncode == 0, called.stdout + called.stderr
+    assert "usage:" in called.stdout and "hub" in called.stdout
+
+
+def test_wrapper_reaches_the_installs_own_daemon_with_its_local_token(tmp_path):
+    """The whole point of the wrapper: a non-default port and data_dir, found with no environment from the caller. The
+    port comes from the install's config, so a rerun without --port, which keeps the configured port, still works."""
+    seen: list[tuple[str, str | None]] = []
+
+    class Daemon(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("X-Agent-Harness-Local-Token")))
+            body = b"[]"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Daemon)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app")
+        assert result.returncode == 0, result.stdout + result.stderr
+        _real_cli(tmp_path / "app", install_dir)
+        data_dir = tmp_path / "elsewhere-data"
+        data_dir.mkdir()
+        (data_dir / "local-owner.token").write_text("install-token\n")
+        (install_dir / "config").mkdir(exist_ok=True)
+        (install_dir / "config/harness.yaml").write_text(
+            f"data_dir: {json.dumps(str(data_dir))}\nlisten:\n  port: {server.server_port}\n")
+        called = _run_wrapper(tmp_path / "home/.local/bin/harness", tmp_path, "list")
+    finally:
+        server.shutdown()
+        thread.join(timeout=10)
+        server.server_close()
+    assert seen, called.stdout + called.stderr
+    assert all(token == "install-token" for _, token in seen), seen
+
+
+def test_linux_install_says_to_add_the_wrapper_folder_to_path_only_when_missing(tmp_path):
+    result, _, _ = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    folder = tmp_path / "home/.local/bin"
+    assert f"Add {folder} to PATH to use the harness command." in result.stdout
+
+    on_path = tmp_path / "on-path"
+    on_path.mkdir()
+    result, _, _ = _install_linux_units(on_path, on_path / "app",
+                                        extra_path=str(on_path / "home/.local/bin"))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "to PATH to use the harness command" not in result.stdout
+
+
+def test_linux_install_with_no_start_still_writes_the_wrapper(tmp_path):
+    result, _, _ = _install_linux_units(tmp_path, tmp_path / "app", "--no-start", started=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "home/.local/bin/harness").is_file()
+
+
+def test_linux_install_keeps_a_harness_command_it_did_not_write(tmp_path):
+    wrapper = tmp_path / "home/.local/bin/harness"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("#!/bin/sh\necho mine\n")
+    result, _, _ = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert wrapper.read_text() == "#!/bin/sh\necho mine\n"
+    assert "kept" in result.stdout and str(wrapper) in result.stdout
+    assert "to PATH to use the harness command" not in result.stdout
+
+
+def test_linux_install_does_not_write_through_a_symlink_at_the_wrapper_path(tmp_path):
+    target = tmp_path / "someone-elses-tool"
+    target.write_text("keep\n")
+    wrapper = tmp_path / "home/.local/bin/harness"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.symlink_to(target)
+    result, _, _ = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert wrapper.is_symlink() and target.read_text() == "keep\n"
+
+
+def test_linux_install_finishes_when_the_wrapper_cannot_be_written(tmp_path):
+    (tmp_path / "home/.local").mkdir(parents=True)
+    (tmp_path / "home/.local/bin").write_text("a file, not a folder\n")
+    result, _, _ = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "WARNING: could not write" in result.stdout
+
+
+def test_dry_run_names_the_wrapper_and_writes_nothing(tmp_path):
+    if not BASH or os.name == "nt":
+        pytest.skip("needs bash on a POSIX host")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "HARNESS_INSTALLER_OS": "Linux",
+           "HARNESS_INSTALLER_ARCH": "x86_64"}
+    result = subprocess.run([BASH, "install/install.sh", "--install-dir", str(tmp_path / "install"), "--dry-run",
+                             "--profile", "service"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=30,
+                            check=False)
+    assert result.returncode == 0, result.stderr
+    assert f"[dry run] write {home}/.local/bin/harness" in result.stdout
+    assert not (home / ".local").exists()
+
+
+def test_macos_install_leaves_the_mac_clients_wrapper_alone(tmp_path):
+    result = run_installer(tmp_path, "Darwin", "arm64", "--profile", "service")
+    assert result.returncode == 0, result.stderr
+    assert ".local/bin/harness" not in result.stdout
+    assert "use the harness command" not in result.stdout
+
+
+def _uninstall(tmp_path: Path, install_dir: Path, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """Run uninstall.sh with a stubbed service manager, and without a venv so the Hub step is skipped."""
+    if not BASH or os.name == "nt":
+        pytest.skip("needs bash on a POSIX host")
+    python = install_dir / "venv/bin/python"
+    if python.exists():
+        python.unlink()
+    home = tmp_path / "home"
+    stubs = tmp_path / "uninstall-stubs"
+    stubs.mkdir()
+    (stubs / "systemctl").write_text("#!/bin/sh\nexit 0\n")
+    (stubs / "systemctl").chmod(0o755)
+    (stubs / "uname").write_text("#!/bin/sh\necho Linux\n")
+    (stubs / "uname").chmod(0o755)
+    return subprocess.run(
+        [BASH, str(ROOT / "install/uninstall.sh"), "--install-dir", str(install_dir), *args], cwd=tmp_path,
+        env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), **env},
+        capture_output=True, text=True, timeout=60, check=False)
+
+
+@pytest.mark.parametrize("args", [(), ("--remove-files",)], ids=["keep-files", "remove-files"])
+def test_uninstall_removes_this_installs_wrapper(tmp_path, args):
+    result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    wrapper = tmp_path / "home/.local/bin/harness"
+    assert wrapper.is_file()
+    removed = _uninstall(tmp_path, install_dir, *args)
+    assert removed.returncode == 0, removed.stderr
+    assert not wrapper.exists()
+
+
+def test_uninstall_through_a_symlink_still_finds_the_wrapper(tmp_path):
+    result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    alias = tmp_path / "alias"
+    alias.symlink_to(install_dir)
+    wrapper = tmp_path / "home/.local/bin/harness"
+    assert wrapper.is_file()
+    removed = _uninstall(tmp_path, alias)
+    assert removed.returncode == 0, removed.stderr
+    assert not wrapper.exists()
+
+
+def test_uninstall_keeps_a_wrapper_for_another_install(tmp_path):
+    result, _, _ = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    wrapper = tmp_path / "home/.local/bin/harness"
+    other = tmp_path / "other-install"
+    other.mkdir()
+    removed = _uninstall(tmp_path, other)
+    assert removed.returncode == 0, removed.stderr
+    assert wrapper.is_file()
+
+
+def test_uninstall_keeps_a_harness_command_it_did_not_write(tmp_path):
+    """On a Mac this path is the Mac client's wrapper (docs/mac-client.md); the daemon's uninstall must leave it."""
+    wrapper = tmp_path / "home/.local/bin/harness"
+    wrapper.parent.mkdir(parents=True)
+    mac_wrapper = '#!/bin/sh\nexec "$HOME/.agent-harness/venv/bin/python" "$HOME/.agent-harness/client/harness_cli.py" "$@"\n'
+    wrapper.write_text(mac_wrapper)
+    install_dir = tmp_path / "runtime"
+    install_dir.mkdir()
+    removed = _uninstall(tmp_path, install_dir)
+    assert removed.returncode == 0, removed.stderr
+    assert wrapper.read_text() == mac_wrapper
+
+
+def test_uninstall_dry_run_names_the_wrapper_and_keeps_it(tmp_path):
+    result, _, install_dir = _install_linux_units(tmp_path, tmp_path / "app")
+    assert result.returncode == 0, result.stdout + result.stderr
+    removed = _uninstall(tmp_path, install_dir, "--dry-run")
+    assert removed.returncode == 0, removed.stderr
+    assert ".local/bin/harness" in removed.stdout
+    assert (tmp_path / "home/.local/bin/harness").is_file()
 
 
 def _llama_unit_args(tmp_path: Path, name: str, *installer_args: str) -> list[str]:

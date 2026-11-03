@@ -21,6 +21,12 @@ decide without prompting. With redirected stdin, the default is no Hub. Every Hu
 `harness --help`; see [management-parity.md](management-parity.md). Add the Hub later by rerunning the daemon installer
 with `--with-hub` / `-WithHub`. Web and other Apps keep their normal App pairing flow and never make this offer.
 
+On Linux, `install/install.sh` writes the `harness` command to `~/.local/bin/harness`, and says to add that folder to
+`PATH` if it is missing. The command runs the CLI with the install's venv, app directory, configuration and port; set
+`HARNESS_URL` or `HARNESS_CONFIG_DIR` to point one call elsewhere. With several installs, it runs the last one
+installed. The installer keeps an existing `~/.local/bin/harness` it did not write and says so. On macOS the
+[Mac client](mac-client.md) provides this command instead.
+
 The Hub distribution is pending #546. Until a release exists, set `HARNESS_HUB_PACKAGE` to the released pip
 distribution or `HARNESS_HUB_IMAGE` to the released image; there is no default placeholder package or image.
 Use `--hub-package` / `--hub-image` (PowerShell: `-HubPackage` / `-HubImage`) to override those settings.
@@ -448,9 +454,11 @@ powershell -ExecutionPolicy Bypass -File install\uninstall.ps1 -RemoveFiles # al
 Linux/macOS equivalents:
 
 ```bash
-install/uninstall.sh                 # remove per-user services; keep data
+install/uninstall.sh                 # remove per-user services and the harness command; keep data
 install/uninstall.sh --remove-files  # also remove the install directory
 ```
+
+Uninstall removes `~/.local/bin/harness` only when this install wrote it.
 
 ## Security model, briefly
 

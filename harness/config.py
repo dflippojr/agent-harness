@@ -660,6 +660,7 @@ class Config:
     keep_recent: float = 0.20
     reset_at: float = 0.60
     mask_min_chars: int = 2000
+    mask_batch_at: float = 0.0  # off: mask each result one turn after it is used (#855, docs/compaction.md)
     state_max_chars: int = 8000
     trim: TrimRules = field(default_factory=TrimRules)
     repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
@@ -1203,6 +1204,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
                            float(compaction.get("elide_at", 0.55)),
                            float(compaction.get("summarize_at", 0.65))),
         mask_min_chars=_mask_min_chars(compaction.get("mask_min_chars", 2000)),
+        mask_batch_at=_mask_batch_at(compaction.get("mask_batch_at"), float(compaction.get("elide_at", 0.55))),
         state_max_chars=_state_max_chars(compaction.get("state_max_chars", 8000)),
         trim=_trim_rules(compaction.get("trim")),
         tool_output=_tool_output(raw.get("tool_output")),
@@ -1308,6 +1310,17 @@ def _mask_min_chars(value) -> int:
     except (TypeError, ValueError, OverflowError):
         return 2000
     return parsed if 1 <= parsed <= 10_000_000 else 2000
+
+
+def _mask_batch_at(value, elide: float = 0.55) -> float:
+    """A share of the window below `elide_at`, where trim and elide start; anything else leaves batching off (0)."""
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return parsed if 0 < parsed < elide else 0.0
 
 
 def _reset_at(value, elide: float = 0.55, summarize: float = 0.65) -> float:

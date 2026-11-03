@@ -15,7 +15,8 @@ SHA-256 of that string). After the model has used that result, the next
 compaction pass replaces the message in the model's context with a short
 receipt. The receipt names the tool, a truncated argument preview, the
 character length, the digest, and tells the model to recover the text with
-`read_artifact`.
+`read_artifact`. With [`compaction.mask_batch_at`](#batched-masking) set, that
+replacement waits for a batch instead of the next pass.
 
 `read_artifact` reads a character range of that stored string: `start` is
 inclusive, `end` is exclusive, and each call returns at most 20,000
@@ -83,6 +84,123 @@ File configuration only, in `config/harness.yaml` under `compaction:` (not a
 live admin setting, not in the typed registry). Values are clamped to 1
 through 10,000,000; anything outside that range falls back to 2000. Do not
 treat this page as a tuning guide.
+
+## Batched masking
+
+Masking rewrites a result in place, behind the newest turn. On the Qwen3.6
+hybrid model llama-server can't cut back to the rewrite, so it falls back to an
+older checkpoint and re-reads the rest
+([`prefix-cache-study.md`](prefix-cache-study.md): 35 of 36 prefix breaks, and a
+session at 38% reuse). `compaction.mask_batch_at` (#855) masks in batches
+instead, so that between batches a prompt only grows and is reused whole.
+
+It is off by default (`0`, or absent), and off nothing changes: each result is
+masked on the pass after the model used it. It is file configuration only, in
+`config/harness.yaml` under `compaction:`. Set, it is a share of the context
+window, greater than 0 and below `elide_at`. Anything else leaves batching off,
+because at `elide_at` or above trim and elide would reach the results first.
+
+With it on, a pass before a model call works like this:
+
+1. **Under the threshold** (the context estimate below `mask_batch_at` of the
+   window), nothing is rewritten.
+2. **At the threshold**, every eligible result is masked at once and there is
+   one `mask` event, but only if that frees at least 10% of the window. A smaller
+   batch waits. Without this minimum, results masking can't touch (short ones,
+   the tool calls' own arguments) can hold the context above the threshold, and
+   every later turn would mask its one new result, as it does with the setting
+   off.
+3. **At `elide_at`**, every eligible result is masked whatever it frees, so that
+   masking still goes ahead of trim, elide and a summary. A session that stays
+   there masks on each turn, as it does with the setting off.
+4. **The size after masking** decides whether to round-reset, elide or summarize.
+   With the setting off these use the size before masking, which is close to it,
+   since only one new result is ever unmasked. A batch can be most of the
+   context, and freeing it is no reason to reset the conversation.
+5. **A prompt the server rejects as too long** masks everything eligible before
+   the forced summary, so the summary and the retry don't carry whole results a
+   batch had not reached. It still summarizes, as
+   [overflow compaction](#overflow-compaction) always does.
+
+`python -m bakeoff.trim_bench --mask-compare` replays the transcripts from the
+[benchmark](#benchmark) below, plus a `grep` loop modelled on the study's worst
+session (a 16.5K-character command re-run 40 times), with trim on as it ships. It
+prices each prompt as the server reads it, in estimated tokens at 3 characters a
+token. **First change** is the cheapest a server could do: a prompt that only
+grew reads what is new, and a rewritten one reads from the first change.
+**Fallback** is what the study usually saw: a change within the last 516 tokens
+of the previous prompt reads from there, and any earlier one reads from the end of
+the system prompt and task. A session built up slowly can have checkpoints in
+between, so the real cost is between the two. Both columns include summary
+requests, which are read whole. **Breaks** counts agent prompts that changed
+something already sent.
+
+The production window (65,536 tokens):
+
+| Transcript | Arm | Tokens read, first change | Tokens read, fallback | Breaks | Mask passes | Summary calls | Compaction passes | Chars sent |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| test-fix loop (202 turns) | per-turn | 416,409 | 1,577,026 | 121 | 121 | 0 | 0 | 8,390,926 |
+| test-fix loop (202 turns) | batch 0.35 | 422,105 | 775,351 | 34 | 34 | 0 | 0 | 11,780,369 |
+| test-fix loop (202 turns) | batch 0.45 | 422,157 | 726,437 | 27 | 27 | 0 | 0 | 13,373,449 |
+| test-fix loop (202 turns) | batch 0.50 | 422,456 | 697,656 | 24 | 24 | 0 | 0 | 14,261,742 |
+| exploration (170 turns) | per-turn | 122,741 | 1,377,831 | 80 | 80 | 0 | 1 | 9,596,093 |
+| exploration (170 turns) | batch 0.35 | 123,757 | 350,507 | 11 | 11 | 0 | 0 | 11,538,580 |
+| exploration (170 turns) | batch 0.45 | 124,567 | 344,283 | 10 | 10 | 0 | 0 | 12,182,543 |
+| exploration (170 turns) | batch 0.50 | 125,084 | 355,739 | 10 | 10 | 0 | 0 | 12,574,107 |
+| build failures (150 turns) | per-turn | 295,983 | 993,002 | 99 | 99 | 0 | 0 | 5,028,257 |
+| build failures (150 turns) | batch 0.35 | 298,560 | 485,971 | 24 | 24 | 0 | 0 | 7,631,917 |
+| build failures (150 turns) | batch 0.45 | 298,737 | 418,944 | 16 | 16 | 0 | 0 | 8,998,488 |
+| build failures (150 turns) | batch 0.50 | 298,794 | 393,412 | 13 | 13 | 0 | 0 | 9,789,877 |
+| grep loop (42 turns) | per-turn | 199,930 | 295,998 | 38 | 38 | 0 | 0 | 1,162,095 |
+| grep loop (42 turns) | batch 0.35 | 200,413 | 230,358 | 12 | 12 | 0 | 0 | 1,773,531 |
+| grep loop (42 turns) | batch 0.45 | 200,226 | 218,617 | 8 | 8 | 0 | 0 | 2,137,481 |
+| grep loop (42 turns) | batch 0.50 | 200,245 | 215,518 | 7 | 7 | 0 | 0 | 2,297,619 |
+
+A 32,768-token window (`--context 32768`):
+
+| Transcript | Arm | Tokens read, first change | Tokens read, fallback | Breaks | Mask passes | Summary calls | Compaction passes | Chars sent |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| test-fix loop (202 turns) | per-turn | 431,806 | 1,199,781 | 122 | 121 | 1 | 26 | 6,467,314 |
+| test-fix loop (202 turns) | batch 0.35 | 435,100 | 985,255 | 77 | 76 | 1 | 12 | 7,349,745 |
+| test-fix loop (202 turns) | batch 0.45 | 435,988 | 977,849 | 74 | 73 | 1 | 12 | 7,883,201 |
+| test-fix loop (202 turns) | batch 0.50 | 436,357 | 945,377 | 67 | 66 | 1 | 12 | 8,280,545 |
+| exploration (170 turns) | per-turn | 170,995 | 1,081,224 | 87 | 80 | 0 | 36 | 7,007,982 |
+| exploration (170 turns) | batch 0.35 | 178,559 | 799,853 | 50 | 41 | 0 | 31 | 7,544,369 |
+| exploration (170 turns) | batch 0.45 | 178,577 | 793,862 | 49 | 40 | 0 | 31 | 7,661,357 |
+| exploration (170 turns) | batch 0.50 | 179,886 | 799,381 | 49 | 40 | 0 | 31 | 7,816,303 |
+| build failures (150 turns) | per-turn | 295,983 | 993,002 | 99 | 99 | 0 | 23 | 5,028,257 |
+| build failures (150 turns) | batch 0.35 | 297,959 | 815,481 | 64 | 64 | 0 | 9 | 5,625,150 |
+| build failures (150 turns) | batch 0.45 | 298,033 | 812,007 | 60 | 60 | 0 | 9 | 5,964,574 |
+| build failures (150 turns) | batch 0.50 | 298,089 | 803,482 | 57 | 57 | 0 | 9 | 6,241,255 |
+| grep loop (42 turns) | per-turn | 199,930 | 295,998 | 38 | 38 | 0 | 0 | 1,162,095 |
+| grep loop (42 turns) | batch 0.35 | 199,930 | 295,998 | 38 | 38 | 0 | 0 | 1,162,095 |
+| grep loop (42 turns) | batch 0.45 | 200,115 | 282,038 | 28 | 28 | 0 | 0 | 1,307,675 |
+| grep loop (42 turns) | batch 0.50 | 200,227 | 261,086 | 22 | 22 | 0 | 0 | 1,395,023 |
+
+What the numbers say (2026-11-02):
+
+- **Batching brings back no summary calls.** At both windows every batched arm
+  makes the same number as per-turn masking (none at the production window, one
+  on the test-fix loop at 32,768), and no more compaction passes.
+- **At the production window it breaks the prefix far less.** At 0.45: 121 to 27,
+  80 to 10, 99 to 16 and 38 to 8 breaks. Fallback tokens read fall by 26-75%.
+- **The whole gain is in the fallback.** First-change tokens rise by up to 1.5%,
+  since the first batch re-reads from its earliest rewrite and results stay longer.
+  On a server that could cut back to the first change, batching would gain nothing.
+- **Prompts are larger, by design.** At 0.45 the characters sent rise by 27-84% at
+  the production window, since unmasked results stay in the prompt. Those are
+  mostly cached rather than read, but they take window space and cache memory.
+- **A small window gains less.** At 32,768 tokens a single large result can cross
+  the threshold and `elide_at` is close, so sessions mask on most turns. The `grep`
+  loop at 0.35 is the same as per-turn: each 5,500-token result is over the 10%
+  minimum on its own.
+
+The transcripts are synthetic and these are estimates: this does not measure
+prefill time or pass rate, and it doesn't model a saved state's round reset. The
+measurement on the real server is #898, with `python -m bakeoff.canary
+--mask-batch-at 0.45`; the canary builds its own configuration, so
+`harness.yaml` doesn't reach it. 0.45 is the value to try first: it leaves room
+below `elide_at` for one large result. The default stays off until #898 decides.
 
 ## The `mask` event
 

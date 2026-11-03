@@ -358,6 +358,12 @@ function Get-ReviewRedactionRules {
     $tokenValue = '(?=[A-Za-z0-9._~+/=-]*[0-9])[A-Za-z0-9._~+/=-]{6,}|[A-Za-z0-9._~+/=-]{20,}'
     # A quoted literal is a value unless it is empty or a reference ($VAR, ${{ }}, %VAR%, {x}, <x>).
     $quotedValue = '"(?![$%{<])[^"\s][^"]*"|''(?![$%{<])[^''\s][^'']*'''
+    # A run of 40+ token characters, unless it reads as an identifier: only letters, slashes, underscores
+    # and hyphens, at least one underscore or hyphen, and digits only as up to four that end a lowercase
+    # word (test_strips_c1_controls, sha256_digest, Verb-NounLikeThis). Random tokens of this length almost
+    # always have digits elsewhere.
+    $longTokenStart = '(?<![A-Za-z0-9+/=_-])'
+    $longTokenRest = '(?!(?=[A-Za-z0-9/]*[_-])(?:[A-Za-z/_-]|(?<=[a-z][0-9]{0,3})[0-9](?![A-Za-z]))+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'
     return @(
         [pscustomobject]@{
             Name = 'bearer'
@@ -379,13 +385,12 @@ function Get-ReviewRedactionRules {
             Replacement = '[REDACTED]'
             Maskable = $false
         }
-        # A long run of token characters is rejected unless it reads as an identifier: only letters,
-        # slashes, underscores and hyphens, at least one underscore or hyphen, and digits only as up to
-        # four that end a lowercase word (test_strips_c1_controls, sha256_digest, Verb-NounLikeThis).
-        # Random tokens of this length almost always have digits elsewhere.
+        # A review body may also name a code identifier of letters alone, up to 64 (a long camelCase test
+        # name, #800). Every other shape stays matched, bare hexadecimal included.
         [pscustomobject]@{
             Name = 'long-token'
-            Pattern = '(?<![A-Za-z0-9+/=_-])(?!(?=[A-Za-z0-9/]*[_-])(?:[A-Za-z/_-]|(?<=[a-z][0-9]{0,3})[0-9](?![A-Za-z]))+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'
+            Pattern = $longTokenStart + $longTokenRest
+            PublishPattern = $longTokenStart + '(?![A-Za-z]{40,64}(?![A-Za-z0-9+/=_-]))' + $longTokenRest
             Replacement = '[REDACTED]'
             Maskable = $true
         }
@@ -1046,6 +1051,16 @@ function Invoke-ReviewMarkdownRender {
     }
 }
 
+function Get-ReviewCharacterClasses {
+    param([string]$Value)
+
+    # The classes a value's characters fall in, for a log line. It names no character, not even punctuation.
+    $classes = foreach ($class in @(@('lowercase', '[a-z]'), @('uppercase', '[A-Z]'), @('digit', '[0-9]'), @('other', '[^A-Za-z0-9]'))) {
+        if ([regex]::IsMatch($Value, $class[1])) { $class[0] }
+    }
+    return @($classes) -join '+'
+}
+
 function Get-ReviewRuleHits {
     param(
         [AllowEmptyString()][string]$Text,
@@ -1058,7 +1073,8 @@ function Get-ReviewRuleHits {
     )
 
     # The credential, absolute-root, profile-segment and long-token rules over each scan form of $Text,
-    # as one log line per hit: rule, form and offset, never the matched text or its surroundings.
+    # as one log line per hit: rule, form, offset and length, never the matched text or its surroundings.
+    # A long token's line adds its character classes, so a false positive can be told from a real token.
     $rules = @(Get-ReviewRedactionRules)
     $credentialRules = @($rules | Where-Object { -not $_.Maskable })
     $maskableRules = @($rules | Where-Object { $_.Maskable })
@@ -1067,7 +1083,10 @@ function Get-ReviewRuleHits {
         param([string]$RuleName, [string]$FormName, [string]$FormText, [string]$Pattern)
         $match = [regex]::Match($FormText, $Pattern)
         if ($FormPrefix) { $FormName = if ($FormName -eq 'raw') { $FormPrefix } else { "$FormPrefix-$FormName" } }
-        if ($match.Success) { "rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length))" }
+        if ($match.Success) {
+            $classes = if ($RuleName -eq 'long-token') { ", classes $(Get-ReviewCharacterClasses -Value $match.Value)" } else { '' }
+            "rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length)$classes)"
+        }
     }
     # Absolute roots and credential patterns always scan the unmasked text.
     foreach ($form in (& $forms $Text)) {

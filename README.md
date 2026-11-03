@@ -23,7 +23,7 @@ git branch for you to review and merge.
 
 | Stack | Scale | Quality gates |
 | --- | --- | --- |
-| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~50K lines · 1,700+ tests in 148 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
+| Python 3.12 · FastAPI · SQLite · Docker · llama.cpp · vanilla JS PWA | ~60K lines · 5,300+ tests in 196 files | CI on every PR · SonarCloud coverage gate · AI code review · fail-closed deploys |
 
 ---
 
@@ -121,7 +121,7 @@ stateDiagram-v2
 
 ```mermaid
 flowchart LR
-    PR["Pull request"] --> CI["CI<br/>full test suite,<br/>8 parallel workers"]
+    PR["Pull request"] --> CI["CI<br/>full test suite,<br/>4 parallel workers"]
     PR --> SONAR["SonarCloud<br/>coverage gate"]
     PR --> REV["AI code review<br/>Codex / Claude / Cursor"]
     PR -. "optional" .-> STG["Staging slot<br/>isolated DB and tokens"]
@@ -246,7 +246,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | **One suite for everything** ([`tests/`](tests)) | The CI and deploy workflows, the installers, and the docs' product naming have their own tests. Stables, in its own repository, runs its Node harnesses there; this repository runs its Playwright journeys against the pinned release ([`tools/stables`](tools/stables)). |
 | **Fail-closed deployment** ([`ci-cd.yml`](.github/workflows/ci-cd.yml), [docs](docs/CI-CD.md)) | Deployment triggers from `workflow_run` on the exact tested SHA and pulls immutable `sha-` images. It builds a new venv side by side and switches a pointer, so rollback is instant, then waits for `/health`. |
 | **Trusted-code staging slot** ([`resolve_staging_ref.py`](scripts/resolve_staging_ref.py)) | A GitHub-hosted job resolves a branch or PR to one commit and rejects fork refs before anything reaches the server. Staging gets its own database and freshly minted tokens, never production credentials. |
-| **Multi-provider AI code review** ([`review.yml`](.github/workflows/review.yml)) | Pull requests are reviewed by Codex, Claude, or Cursor on a self-hosted runner pool, with incremental re-review when a prior review marker makes that safe. The `Automated Code Review` check fails when the review has findings, and other projects call the same workflow through a thin caller pinned to `review-v1`. |
+| **Multi-provider AI code review** ([`review.yml`](.github/workflows/review.yml)) | Pull requests are reviewed by Codex, Claude, or Cursor on a self-hosted runner pool, with incremental re-review when a prior review marker makes that safe. The `Automated Code Review` check fails when the review has findings, and other projects call the same workflow through a thin caller pinned to `review-v4`. |
 
 ---
 
@@ -306,7 +306,7 @@ Diagnose an install with `python -m harness.doctor`. The full guide is [`docs/IN
 python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
 .\.venv\Scripts\python -m harness                  # daemon on 127.0.0.1:8100
 .\.venv\Scripts\python -m harness.cli new "Clone local:invoice-tools, fix the failing test, and report back"
-.\.venv\Scripts\python -m pytest tests -q -n 8 --dist loadfile
+.\.venv\Scripts\python -m pytest tests -q -n 4 --dist loadfile
 ```
 
 ### Driving it from code
