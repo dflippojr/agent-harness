@@ -43,6 +43,7 @@ class LocalModelRuntime(ModuleRuntime):
             return await warmer.state(cfg.models[cfg.default_model]) == READY
         guard.model_loaded = model_loaded
         guard.model_transitions = lambda: warmer.transitions
+        guard.model_requests = lambda: warmer.requests
         guard.want_model = lambda: warmer.pinned() or m.runner.gpu_paused_waiting()
         m.runner.ram = guard.memory
         m.modules.wire_resources(guard, warmer)

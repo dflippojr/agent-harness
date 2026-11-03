@@ -53,7 +53,8 @@ this repository doesn't.
   shows in `signals`, but it doesn't pause anything. The park hides the signal and the count restarts after a reload,
   so neither of those ends it. It ends when:
   - a reading is at or above the floor with the model loaded and awake both before and after the read, no turn holding
-    the guard's lease at either end, and no load, park or inference request begun between them. llama-server sleeps by
+    the guard's lease or an unleased request (a skill review, keepalive ping or tokenizer call) still outstanding at
+    either end, and no load, park or inference request begun or ended between them. llama-server sleeps by
     itself and a request reloads it, so being ready on both sides isn't enough. A high reading while the model is
     loading or asleep doesn't count, because the model isn't on the card then, and neither does a failed reading. A
     client that calls llama-server directly, past the harness, isn't seen; a reload takes about a minute and the read

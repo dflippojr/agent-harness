@@ -21,9 +21,9 @@ class SkillsRuntime(ModuleRuntime):
         return self.service
 
     async def review_chat(self, *args, **kwargs):
-        """A local review calls the model with no lease or admission, so the warmer has to be told."""
-        self.manager.warmer.note_inference()
-        return await self.manager.runner.chat(*args, **kwargs)
+        """A local review calls the model with no lease, so the warmer tracks it until the answer is in."""
+        async with self.manager.warmer.request():
+            return await self.manager.runner.chat(*args, **kwargs)
 
     def start(self):
         if self.service is not None:

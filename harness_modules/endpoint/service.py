@@ -138,9 +138,10 @@ async def _parse_body(request: Request, flavor: str) -> tuple[dict | None, JSONR
 
 
 async def _acquire_slot(m, flavor: str, path: str, finish) -> tuple[object | None, JSONResponse | None]:
-    """An InferenceGate slot for GPU-bound routes, or the 429/503 to send instead."""
+    """An InferenceGate slot for GPU-bound routes, or the 429/503 to send instead. A tokenizer route takes no slot, but
+    llama-server still answers it, waking a sleeping model, so the warmer tracks it as an unleased request instead."""
     if path in NO_GPU:
-        return None, None
+        return m.warmer.request(), None
     if m.guard is not None and m.guard.active:
         finish(503)
         return None, error(flavor, 503, "overloaded_error", "the GPU is in use by a game or a Plex transcode; the "
