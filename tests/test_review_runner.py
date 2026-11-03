@@ -2321,8 +2321,7 @@ def test_backend_process_reaps_every_descendant_when_the_job_is_cancelled(tmp_pa
             time.sleep(0.1)
         recorded = _recorded_pids(pids)
         assert set(recorded) == {*SANDBOX_PID_NAMES, SANDBOX_HANG_PID}, recorded
-        # The watchdog remembers the tree once a second; an orphan in a session of its own is found only that way.
-        time.sleep(1.5)
+        # Signalled at once, before the watchdog's first look at the tree: the detached orphan is found by its marker.
         process.send_signal(getattr(signal, stop_signal))
         process.wait(timeout=30)
         assert _survivors(recorded, wait_seconds=10) == {}
@@ -2353,7 +2352,7 @@ def test_session_leader_never_starts_the_command_once_pwsh_is_gone(tmp_path):
     leader = tmp_path / "leader"
     result = subprocess.run(
         ["sh", str(helper), "lead", str(leader), str(tmp_path / "out"), str(tmp_path / "err"), gone_pid, "1",
-         "touch", str(marker)],
+         "mark", "touch", str(marker)],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 125
@@ -2364,8 +2363,62 @@ def test_session_leader_never_starts_the_command_once_pwsh_is_gone(tmp_path):
     own_start = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
     started = subprocess.run(
         ["sh", str(helper), "lead", str(leader), str(tmp_path / "out"), str(tmp_path / "err"), str(os.getpid()),
-         own_start, "touch", str(marker)],
+         own_start, "mark", "touch", str(marker)],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert started.returncode == 0, started.stderr
     assert marker.exists()
+
+
+def test_watchdog_finishes_the_cleanup_when_pwsh_is_killed_during_it(tmp_path):
+    """#910: a descendant that ignores TERM keeps the cleanup in its one-second grace period; if pwsh is killed then,
+    the watchdog (which the cleanup spares) still sends KILL."""
+    _require_linux_session_tools()
+    pids = tmp_path / "pids"
+    pids.mkdir()
+    backend = tmp_path / "stubborn-backend.sh"
+    backend.write_text(
+        "#!/bin/sh\n"
+        "sh -c 'trap \"\" TERM; setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > \"$1/stubborn\"' sh \"$1\"\n"
+        "cat > /dev/null\n"
+        "while [ ! -s \"$1/stubborn\" ]; do sleep 0.1; done\n"
+        ": > \"$1/exiting\"\n",
+        encoding="utf-8",
+    )
+    body = f"""
+$command = [pscustomobject]@{{
+    Backend = 'fake'
+    FilePath = '/bin/sh'
+    Arguments = @('{_ps(backend)}', '{_ps(pids)}')
+    WorkingDirectory = '{_ps(tmp_path)}'
+    InputText = 'the prompt'
+    ResultPath = $null
+    Model = 'fake-model'
+}}
+Invoke-ReviewBackendProcess -Command $command -ScratchDirectory '{_ps(tmp_path / "scratch")}' | Out-Null
+Start-Sleep -Seconds 30
+"""
+    wrapper = tmp_path / "review-test.ps1"
+    wrapper.write_text(f"{PLAIN_ERRORS}\n. '{_ps(SCRIPT)}'\n{RENDER_STUB}\n{body}\n", encoding="utf-8")
+    recorded: dict[str, int] = {}
+    process = subprocess.Popen(
+        [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while not (pids / "exiting").exists() and time.monotonic() < deadline:
+            assert process.poll() is None, "pwsh exited before the backend finished"
+            time.sleep(0.02)
+        stubborn = pids / "stubborn"
+        recorded = {"stubborn": int(stubborn.read_text(encoding="utf-8").strip())}
+        # The cleanup has sent TERM, which the stubborn process ignores, and is waiting out its grace period.
+        time.sleep(0.4)
+        process.kill()
+        process.wait(timeout=30)
+        assert _survivors(recorded, wait_seconds=10) == {}
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=30)
+        _kill_recorded(recorded)

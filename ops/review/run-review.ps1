@@ -1549,10 +1549,11 @@ function Get-ReviewBackendCommand {
 # or when the job is cancelled or times out, used to be orphaned on the runner (#910). On Linux, pwsh makes itself
 # a child subreaper, so an orphaned descendant re-parents to pwsh instead of PID 1, and each backend command runs as
 # the leader of a session of its own, writing its output to files rather than to pipes that pwsh would wait on.
-# When the command returns, every process in that session, every orphan re-parented to pwsh and all of their
-# descendants are killed; a descendant that calls setsid itself is caught through its parent or through pwsh. A
-# detached watchdog does the same if pwsh is stopped before its finally block runs (the runner signals the step and
-# then kills it), using the tree it last saw, at most a second old.
+# The leader also tags the command's environment with a per-command marker that its descendants inherit. When the
+# command returns, every process in that session, every orphan re-parented to pwsh, every process carrying the
+# marker, and all of their descendants are killed; a descendant that calls setsid itself is caught through its
+# parent, pwsh or the marker. A detached watchdog does the same if pwsh is stopped before its finally block runs (the
+# runner signals the step and then kills it), adding the tree it last saw, at most a second old.
 $script:ReviewSessionHelperScript = @'
 #!/bin/sh
 # Written by run-review.ps1 (#910): runs a review backend command in a session of its own and reaps what it leaves.
@@ -1571,18 +1572,30 @@ leader_sid() {
     printf '%s\n' "$sid"
 }
 
-# targets SID ROOT SKIP: live processes in session SID, the children of ROOT, and all their descendants, except
-# SKIP and its own descendants (the shell doing the reaping and its ps and awk). 0 disables SID or ROOT.
+# marked MARK: processes this user can read whose environment carries the command's marker.
+marked() {
+    grep -l -a -F "AGENT_HARNESS_REVIEW_RUN=$1" /proc/[0-9]*/environ 2>/dev/null | sed -n 's|^/proc/\([0-9]*\)/environ$|\1|p' | tr '\n' ' '
+}
+
+# targets SID ROOT MARK SKIP...: live processes in session SID, the children of ROOT, the processes carrying MARK,
+# and all their descendants, except each SKIP and its own descendants (the shell doing the reaping and its ps and
+# awk, and the watchdog). 0 disables SID or ROOT.
 targets() {
-    ps -e -o pid= -o ppid= -o sid= -o stat= 2>/dev/null | awk -v sid="$1" -v root="$2" -v skip="$3" '
+    sid=$1
+    root=$2
+    tagged=$(marked "$3")
+    shift 3
+    ps -e -o pid= -o ppid= -o sid= -o stat= 2>/dev/null | awk -v sid="$sid" -v root="$root" -v skip="$*" -v tagged="$tagged" '
         $4 !~ /^Z/ { n++; pid[n] = $1; ppid[n] = $2; session[n] = $3 }
         END {
-            ex[skip] = 1; ex[1] = 1; ex[root] = 1
+            split(skip, skips, " "); for (k in skips) ex[skips[k]] = 1
+            split(tagged, tags, " "); for (k in tags) mark[tags[k]] = 1
+            ex[1] = 1; ex[root] = 1
             for (changed = 1; changed;) {
                 changed = 0
                 for (i = 1; i <= n; i++) if (!(pid[i] in ex) && (ppid[i] in ex) && ppid[i] != 1 && ppid[i] != root) { ex[pid[i]] = 1; changed = 1 }
             }
-            for (i = 1; i <= n; i++) if (!(pid[i] in ex) && ((sid > 1 && session[i] == sid) || (root > 1 && ppid[i] == root))) hit[pid[i]] = 1
+            for (i = 1; i <= n; i++) if (!(pid[i] in ex) && ((sid > 1 && session[i] == sid) || (root > 1 && ppid[i] == root) || (pid[i] in mark))) hit[pid[i]] = 1
             for (changed = 1; changed;) {
                 changed = 0
                 for (i = 1; i <= n; i++) if (!(pid[i] in hit) && !(pid[i] in ex) && (ppid[i] in hit)) { hit[pid[i]] = 1; changed = 1 }
@@ -1591,16 +1604,17 @@ targets() {
         }'
 }
 
-# reap LEADER ROOT SKIP [PID:START ...]: TERM, then KILL after up to a second, every target and every listed
-# process that still has the same start time.
+# reap LEADER ROOT MARK SKIP [PID:START ...]: TERM, then KILL after up to a second, every target and every listed
+# process that still has the same start time. SKIP is a space-separated list.
 reap() {
     leader=$1
     root=$2
-    skip=$3
-    shift 3
+    mark=$3
+    skip=$4
+    shift 4
     sid=$(leader_sid "$leader")
     for signal in TERM KILL; do
-        list=$(targets "$sid" "$root" "$skip")
+        list=$(targets "$sid" "$root" "$mark" $skip)
         for entry in "$@"; do
             if [ "$(start_time "${entry%%:*}")" = "${entry#*:}" ]; then list="$list ${entry%%:*}"; fi
         done
@@ -1608,7 +1622,7 @@ reap() {
         if [ -n "${list# }" ]; then kill "-$signal" $list 2>/dev/null; fi
         if [ "$signal" = TERM ] && [ -n "${list# }" ]; then
             tries=0
-            while [ "$tries" -lt 10 ] && [ -n "$(targets "$sid" "$root" "$skip")" ]; do
+            while [ "$tries" -lt 10 ] && [ -n "$(targets "$sid" "$root" "$mark" $skip)" ]; do
                 sleep 0.1
                 tries=$((tries + 1))
             done
@@ -1621,37 +1635,44 @@ command=$1
 shift
 case $command in
     lead)
-        # lead LEADER STDOUT STDERR PARENT PARENT_START COMMAND...: setsid made this shell the session leader, so
-        # its pid names the session, and exec keeps it for the backend. The leader file is written before pwsh is
-        # checked, so a watchdog that saw pwsh exit reads it; a command whose pwsh is already gone never starts.
+        # lead LEADER STDOUT STDERR PARENT PARENT_START MARK COMMAND...: setsid made this shell the session leader,
+        # so its pid names the session, and exec keeps it for the backend. The leader file is written before pwsh
+        # is checked, so a watchdog that saw pwsh exit reads it; a command whose pwsh is already gone never starts.
         printf '%s\n' "$$" > "$1"
         exec > "$2" 2> "$3"
         if [ "$(start_time "$4")" != "$5" ]; then exit 125; fi
-        shift 5
+        AGENT_HARNESS_REVIEW_RUN=$6
+        export AGENT_HARNESS_REVIEW_RUN
+        shift 6
         exec "$@"
         ;;
     spawn-watch)
-        # spawn-watch PARENT LEADER DONE
+        # spawn-watch PARENT LEADER DONE MARK: the watchdog's pid goes to LEADER.watch, so finish spares it.
         parent_start=$(start_time "$1") || exit 0
-        setsid /bin/sh "$0" watch "$1" "$parent_start" "$2" "$3" < /dev/null > /dev/null 2>&1 &
+        setsid /bin/sh "$0" watch "$1" "$parent_start" "$2" "$3" "$4" < /dev/null > /dev/null 2>&1 &
+        printf '%s\n' "$!" > "$2.watch"
         ;;
     watch)
-        # watch PARENT PARENT_START LEADER DONE: while pwsh runs, remember the processes the command has started;
-        # if pwsh exits before it writes DONE, reap the session and everything remembered.
+        # watch PARENT PARENT_START LEADER DONE MARK: while pwsh runs, remember the processes the command has
+        # started; if pwsh exits before it writes DONE, reap the session, the marked processes and everything
+        # remembered.
         seen=''
         while [ ! -e "$4" ] && [ "$(start_time "$1")" = "$2" ]; do
             seen=''
-            for pid in $(targets "$(leader_sid "$3")" "$1" "$$"); do
+            for pid in $(targets "$(leader_sid "$3")" "$1" "$5" "$$"); do
                 started=$(start_time "$pid") && seen="$seen $pid:$started"
             done
             sleep 1
         done
-        if [ ! -e "$4" ]; then reap "$3" 0 "$$" $seen; fi
-        rm -f "$3" "$4"
+        if [ ! -e "$4" ]; then reap "$3" 0 "$5" "$$" $seen; fi
+        rm -f "$3" "$3.watch" "$4"
         ;;
     finish)
-        # finish LEADER DONE ROOT
-        reap "$1" "$3" "$$"
+        # finish LEADER DONE ROOT MARK: spares the watchdog, which pwsh adopted as subreaper, until DONE is written,
+        # so it can still finish the job if pwsh is killed meanwhile.
+        watchdog=$(cat "$1.watch" 2>/dev/null) || watchdog=''
+        case $watchdog in '' | *[!0-9]*) watchdog='' ;; esac
+        reap "$1" "$3" "$4" "$$ $watchdog"
         : > "$2"
         ;;
 esac
@@ -1696,6 +1717,7 @@ function Start-ReviewProcessSession {
     [System.IO.File]::WriteAllText($helper, $script:ReviewSessionHelperScript.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
     $id = [guid]::NewGuid().ToString('N')
     $session = [pscustomobject]@{
+        Mark = $id
         Setsid = $setsid.Source
         Helper = $helper
         LeaderFile = Join-Path $ScratchDirectory "review-session-$id.leader"
@@ -1706,7 +1728,7 @@ function Start-ReviewProcessSession {
     }
     $stat = [System.IO.File]::ReadAllText("/proc/$PID/stat")
     $session.ParentStart = ($stat.Substring($stat.LastIndexOf(')') + 2) -split ' ')[19]
-    & /bin/sh $helper spawn-watch $PID $session.LeaderFile $session.DoneFile 2> $null | Out-Null
+    & /bin/sh $helper spawn-watch $PID $session.LeaderFile $session.DoneFile $session.Mark 2> $null | Out-Null
     return $session
 }
 
@@ -1725,7 +1747,7 @@ function Get-ReviewSessionCommandLine {
         FilePath = $Session.Setsid
         Arguments = @(
             '--wait', '/bin/sh', $Session.Helper, 'lead', $Session.LeaderFile, $StdoutPath, $StderrPath,
-            [string]$PID, $Session.ParentStart, $FilePath
+            [string]$PID, $Session.ParentStart, $Session.Mark, $FilePath
         ) + @($Arguments)
     }
 }
@@ -1735,7 +1757,7 @@ function Stop-ReviewProcessSession {
     param($Session)
 
     if ($null -eq $Session) { return }
-    & /bin/sh $Session.Helper finish $Session.LeaderFile $Session.DoneFile $PID 2> $null | Out-Null
+    & /bin/sh $Session.Helper finish $Session.LeaderFile $Session.DoneFile $PID $Session.Mark 2> $null | Out-Null
 }
 
 function Invoke-ReviewBackendProcess {
