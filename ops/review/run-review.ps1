@@ -1546,14 +1546,16 @@ function Get-ReviewBackendCommand {
 }
 
 # The Codex CLI runs each tool command under codex-linux-sandbox, and a sandbox still running when the review ends,
-# or when the job is cancelled or times out, used to be orphaned on the runner (#910). On Linux each backend command
-# therefore runs as the leader of a session of its own, and every process left in that session is killed when the
-# command returns. A detached watchdog, outside the job's process tree, does the same if pwsh itself is stopped
-# before its finally block runs (the runner signals the step and then kills it). A descendant that calls setsid itself
-# leaves the session and escapes both.
+# or when the job is cancelled or times out, used to be orphaned on the runner (#910). On Linux, pwsh makes itself
+# a child subreaper, so an orphaned descendant re-parents to pwsh instead of PID 1, and each backend command runs as
+# the leader of a session of its own, writing its output to files rather than to pipes that pwsh would wait on.
+# When the command returns, every process in that session, every orphan re-parented to pwsh and all of their
+# descendants are killed; a descendant that calls setsid itself is caught through its parent or through pwsh. A
+# detached watchdog does the same if pwsh is stopped before its finally block runs (the runner signals the step and
+# then kills it), using the tree it last saw, at most a second old.
 $script:ReviewSessionHelperScript = @'
 #!/bin/sh
-# Written by run-review.ps1 (#910): runs a review backend command in a session of its own and reaps that session.
+# Written by run-review.ps1 (#910): runs a review backend command in a session of its own and reaps what it leaves.
 set -u
 
 start_time() {
@@ -1563,56 +1565,122 @@ start_time() {
     printf '%s\n' "${20}"
 }
 
-session_members() {
-    ps -e -o pid= -o sid= -o stat= 2>/dev/null | awk -v sid="$1" '$2 == sid && $3 !~ /^Z/ { print $1 }'
+leader_sid() {
+    sid=$(cat "$1" 2>/dev/null) || sid=0
+    case $sid in '' | *[!0-9]*) sid=0 ;; esac
+    printf '%s\n' "$sid"
 }
 
-signal_session() {
-    kill "-$2" -- "-$1" 2>/dev/null
-    members=$(session_members "$1")
-    if [ -n "$members" ]; then kill "-$2" $members 2>/dev/null; fi
-    return 0
+# targets SID ROOT SKIP: live processes in session SID, the children of ROOT, and all their descendants, except
+# SKIP and its own descendants (the shell doing the reaping and its ps and awk). 0 disables SID or ROOT.
+targets() {
+    ps -e -o pid= -o ppid= -o sid= -o stat= 2>/dev/null | awk -v sid="$1" -v root="$2" -v skip="$3" '
+        $4 !~ /^Z/ { n++; pid[n] = $1; ppid[n] = $2; session[n] = $3 }
+        END {
+            ex[skip] = 1; ex[1] = 1; ex[root] = 1
+            for (changed = 1; changed;) {
+                changed = 0
+                for (i = 1; i <= n; i++) if (!(pid[i] in ex) && (ppid[i] in ex) && ppid[i] != 1 && ppid[i] != root) { ex[pid[i]] = 1; changed = 1 }
+            }
+            for (i = 1; i <= n; i++) if (!(pid[i] in ex) && ((sid > 1 && session[i] == sid) || (root > 1 && ppid[i] == root))) hit[pid[i]] = 1
+            for (changed = 1; changed;) {
+                changed = 0
+                for (i = 1; i <= n; i++) if (!(pid[i] in hit) && !(pid[i] in ex) && (ppid[i] in hit)) { hit[pid[i]] = 1; changed = 1 }
+            }
+            for (p in hit) print p
+        }'
 }
 
+# reap LEADER ROOT SKIP [PID:START ...]: TERM, then KILL after up to a second, every target and every listed
+# process that still has the same start time.
 reap() {
-    [ -s "$1" ] || return 0
-    sid=$(cat "$1")
-    case $sid in '' | *[!0-9]*) return 0 ;; esac
-    [ "$sid" -gt 1 ] || return 0
-    signal_session "$sid" TERM
-    tries=0
-    while [ "$tries" -lt 10 ] && [ -n "$(session_members "$sid")" ]; do
-        sleep 0.1
-        tries=$((tries + 1))
+    leader=$1
+    root=$2
+    skip=$3
+    shift 3
+    sid=$(leader_sid "$leader")
+    for signal in TERM KILL; do
+        list=$(targets "$sid" "$root" "$skip")
+        for entry in "$@"; do
+            if [ "$(start_time "${entry%%:*}")" = "${entry#*:}" ]; then list="$list ${entry%%:*}"; fi
+        done
+        if [ "$sid" -gt 1 ]; then kill "-$signal" -- "-$sid" 2>/dev/null; fi
+        if [ -n "${list# }" ]; then kill "-$signal" $list 2>/dev/null; fi
+        if [ "$signal" = TERM ] && [ -n "${list# }" ]; then
+            tries=0
+            while [ "$tries" -lt 10 ] && [ -n "$(targets "$sid" "$root" "$skip")" ]; do
+                sleep 0.1
+                tries=$((tries + 1))
+            done
+        fi
     done
-    signal_session "$sid" KILL
+    return 0
 }
 
 command=$1
 shift
 case $command in
     lead)
-        # setsid made this shell the session leader, so its pid names the session; exec keeps it for the backend.
+        # lead LEADER STDOUT STDERR PARENT PARENT_START COMMAND...: setsid made this shell the session leader, so
+        # its pid names the session, and exec keeps it for the backend. The leader file is written before pwsh is
+        # checked, so a watchdog that saw pwsh exit reads it; a command whose pwsh is already gone never starts.
         printf '%s\n' "$$" > "$1"
-        shift
+        exec > "$2" 2> "$3"
+        if [ "$(start_time "$4")" != "$5" ]; then exit 125; fi
+        shift 5
         exec "$@"
         ;;
     spawn-watch)
+        # spawn-watch PARENT LEADER DONE
         parent_start=$(start_time "$1") || exit 0
         setsid /bin/sh "$0" watch "$1" "$parent_start" "$2" "$3" < /dev/null > /dev/null 2>&1 &
         ;;
     watch)
-        while [ ! -e "$4" ] && [ "$(start_time "$1")" = "$2" ]; do sleep 1; done
-        if [ ! -e "$4" ]; then reap "$3"; fi
+        # watch PARENT PARENT_START LEADER DONE: while pwsh runs, remember the processes the command has started;
+        # if pwsh exits before it writes DONE, reap the session and everything remembered.
+        seen=''
+        while [ ! -e "$4" ] && [ "$(start_time "$1")" = "$2" ]; do
+            seen=''
+            for pid in $(targets "$(leader_sid "$3")" "$1" "$$"); do
+                started=$(start_time "$pid") && seen="$seen $pid:$started"
+            done
+            sleep 1
+        done
+        if [ ! -e "$4" ]; then reap "$3" 0 "$$" $seen; fi
         rm -f "$3" "$4"
         ;;
     finish)
-        reap "$1"
+        # finish LEADER DONE ROOT
+        reap "$1" "$3" "$$"
         : > "$2"
         ;;
 esac
 exit 0
 '@
+
+function Enable-ReviewChildSubreaper {
+    [CmdletBinding()]
+    param()
+
+    # PR_SET_CHILD_SUBREAPER (36): orphaned descendants re-parent to pwsh, not PID 1, so the cleanup can find them.
+    if ($script:ReviewChildSubreaperTried) { return }
+    $script:ReviewChildSubreaperTried = $true
+    try {
+        if (-not ('ReviewProcessNative' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class ReviewProcessNative {
+    [DllImport("libc", SetLastError = true)]
+    public static extern int prctl(int option, ulong arg2, ulong arg3, ulong arg4, ulong arg5);
+}
+'@
+        }
+        [void][ReviewProcessNative]::prctl(36, 1, 0, 0, 0)
+    } catch {
+        Write-Verbose "could not make pwsh a child subreaper: $($_.Exception.Message)"
+    }
+}
+$script:ReviewChildSubreaperTried = $false
 
 function Start-ReviewProcessSession {
     [CmdletBinding()]
@@ -1622,6 +1690,7 @@ function Start-ReviewProcessSession {
     if (-not [bool](Get-Variable -Name IsLinux -ValueOnly -ErrorAction SilentlyContinue)) { return $null }
     $setsid = Get-Command -Name setsid -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $setsid -or -not (Test-Path -LiteralPath '/bin/sh')) { return $null }
+    Enable-ReviewChildSubreaper
 
     $helper = Join-Path $ScratchDirectory 'review-session.sh'
     [System.IO.File]::WriteAllText($helper, $script:ReviewSessionHelperScript.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
@@ -1631,7 +1700,12 @@ function Start-ReviewProcessSession {
         Helper = $helper
         LeaderFile = Join-Path $ScratchDirectory "review-session-$id.leader"
         DoneFile = Join-Path $ScratchDirectory "review-session-$id.done"
+        WrapperOutputFile = Join-Path $ScratchDirectory "review-session-$id.out"
+        WrapperErrorFile = Join-Path $ScratchDirectory "review-session-$id.err"
+        ParentStart = ''
     }
+    $stat = [System.IO.File]::ReadAllText("/proc/$PID/stat")
+    $session.ParentStart = ($stat.Substring($stat.LastIndexOf(')') + 2) -split ' ')[19]
     & /bin/sh $helper spawn-watch $PID $session.LeaderFile $session.DoneFile 2> $null | Out-Null
     return $session
 }
@@ -1641,13 +1715,18 @@ function Get-ReviewSessionCommandLine {
     param(
         $Session,
         [Parameter(Mandatory = $true)][string]$FilePath,
-        [object[]]$Arguments = @()
+        [object[]]$Arguments = @(),
+        [Parameter(Mandatory = $true)][string]$StdoutPath,
+        [Parameter(Mandatory = $true)][string]$StderrPath
     )
 
     if ($null -eq $Session) { return [pscustomobject]@{ FilePath = $FilePath; Arguments = @($Arguments) } }
     return [pscustomobject]@{
         FilePath = $Session.Setsid
-        Arguments = @('--wait', '/bin/sh', $Session.Helper, 'lead', $Session.LeaderFile, $FilePath) + @($Arguments)
+        Arguments = @(
+            '--wait', '/bin/sh', $Session.Helper, 'lead', $Session.LeaderFile, $StdoutPath, $StderrPath,
+            [string]$PID, $Session.ParentStart, $FilePath
+        ) + @($Arguments)
     }
 }
 
@@ -1656,7 +1735,7 @@ function Stop-ReviewProcessSession {
     param($Session)
 
     if ($null -eq $Session) { return }
-    & /bin/sh $Session.Helper finish $Session.LeaderFile $Session.DoneFile 2> $null | Out-Null
+    & /bin/sh $Session.Helper finish $Session.LeaderFile $Session.DoneFile $PID 2> $null | Out-Null
 }
 
 function Invoke-ReviewBackendProcess {
@@ -1680,7 +1759,11 @@ function Invoke-ReviewBackendProcess {
         Push-Location -LiteralPath $Command.WorkingDirectory
         try {
             $session = Start-ReviewProcessSession -ScratchDirectory $ScratchDirectory
-            $commandLine = Get-ReviewSessionCommandLine -Session $session -FilePath $Command.FilePath -Arguments @($Command.Arguments)
+            $commandLine = Get-ReviewSessionCommandLine -Session $session -FilePath $Command.FilePath -Arguments @($Command.Arguments) -StdoutPath $stdoutPath -StderrPath $stderrPath
+            # In a session the leader writes the command's output to the files itself, so no descendant holds a pipe
+            # that pwsh waits on; pwsh keeps only setsid's own messages.
+            $outPath = $(if ($null -ne $session) { $session.WrapperOutputFile } else { $stdoutPath })
+            $errPath = $(if ($null -ne $session) { $session.WrapperErrorFile } else { $stderrPath })
             $filePath = $commandLine.FilePath
             $arguments = @($commandLine.Arguments)
             $previousErrorActionPreference = $ErrorActionPreference
@@ -1705,9 +1788,9 @@ function Invoke-ReviewBackendProcess {
                     Set-ProcessEnvironmentSnapshot -Environment $Command.Environment
                 }
                 if ($null -ne $Command.InputText) {
-                    $Command.InputText | & $filePath @arguments 1> $stdoutPath 2> $stderrPath
+                    $Command.InputText | & $filePath @arguments 1> $outPath 2> $errPath
                 } else {
-                    & $filePath @arguments 1> $stdoutPath 2> $stderrPath
+                    & $filePath @arguments 1> $outPath 2> $errPath
                 }
             } finally {
                 $ErrorActionPreference = $previousErrorActionPreference
@@ -1726,8 +1809,16 @@ function Invoke-ReviewBackendProcess {
     } catch {
         $_ | Out-String | Out-File -LiteralPath $stderrPath -Append -Encoding utf8
     } finally {
-        # Kill whatever the command left running in its session (#910), whether it exited, failed or was stopped.
+        # Kill whatever the command left running (#910), whether it exited, failed or was stopped.
         Stop-ReviewProcessSession -Session $session
+        if ($null -ne $session) {
+            foreach ($wrapperPath in @($session.WrapperOutputFile, $session.WrapperErrorFile)) {
+                if (-not (Test-Path -LiteralPath $wrapperPath)) { continue }
+                $wrapperText = [string](Get-Content -Raw -LiteralPath $wrapperPath)
+                if ($wrapperText) { $wrapperText | Out-File -LiteralPath $stderrPath -Append -Encoding utf8 -NoNewline }
+                Remove-Item -LiteralPath $wrapperPath -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     $stdout = ''

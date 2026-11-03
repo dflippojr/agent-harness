@@ -454,14 +454,17 @@ accepts deployments from `main` only.
 
 **Process cleanup on Linux (#910).** Codex starts each tool command under `codex-linux-sandbox`, and a sandbox still
 running when the review ended (or when the job was cancelled or timed out) used to be left on the runner, re-parented
-to PID 1. On Linux, `run-review.ps1` now starts every backend, `gh` and `git` command through `setsid --wait`, so the
-command leads a session of its own. When the command returns (success, failure or exception), the script sends `TERM`,
-then `KILL` after up to a second, to every process left in that session. A cancel or timeout can stop `pwsh` before it
-reaches that cleanup, so each command also gets a small watchdog, detached into its own session outside the job's
-process tree, that polls `pwsh` once a second and reaps the session if `pwsh` exits first. A descendant that calls
-`setsid` itself leaves the session and escapes both; if orphans reappear, compare their session id
-(`ps -o pid,sid,args`) with the review's. The cleanup never changes the review output or verdict. Without `setsid`
-(Windows, macOS) commands run as before.
+to PID 1. On Linux, `run-review.ps1` now makes `pwsh` a child subreaper (`PR_SET_CHILD_SUBREAPER`), so an orphaned
+descendant re-parents to `pwsh` instead, and starts every backend, `gh` and `git` command through `setsid --wait`, so
+the command leads a session of its own. The session leader writes the command's stdout and stderr to files, so a
+descendant that keeps them open cannot hold `pwsh` waiting. When the command returns (success, failure or exception),
+the script sends `TERM`, then `KILL` after up to a second, to every process in that session, every orphan re-parented
+to `pwsh`, and all their descendants, which also catches a descendant that called `setsid` itself. A cancel or
+timeout can stop `pwsh` before that cleanup runs, so each command also gets a small watchdog, detached into its own
+session, that records the command's process tree once a second and reaps the session and that tree if `pwsh` exits
+first. A command whose `pwsh` is already gone never starts. Only a process started and orphaned in its own session in
+the last second before `pwsh` is killed can escape. The cleanup never changes the review output or verdict. Without
+`setsid` (Windows, macOS) commands run as before.
 
 ### Adopting the review workflow
 

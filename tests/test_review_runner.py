@@ -2186,7 +2186,8 @@ def test_review_script_without_spec_mode_keeps_the_review_v2_contract(tmp_path, 
 
 # A fake review backend that leaves long-lived descendants behind, as the Codex CLI does with codex-linux-sandbox
 # (#910): a plain child, a grandchild whose parent exits first (re-parented to PID 1, like the orphans on the
-# tower) and a child in its own process group. Each records its pid; none holds the backend's stdout or stderr.
+# tower), an orphaned grandchild in a session of its own, a child in its own process group, and a child that keeps
+# the backend's stderr open. Each records its pid.
 FAKE_SANDBOX_BACKEND = r"""#!/bin/sh
 pids=$1
 mode=$2
@@ -2194,6 +2195,9 @@ python=$3
 sleep 60 </dev/null >/dev/null 2>&1 &
 echo $! > "$pids/child"
 sh -c 'sleep 60 </dev/null >/dev/null 2>&1 & echo $! > "$1/grandchild"' sh "$pids"
+sh -c 'setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > "$1/detached"' sh "$pids"
+sleep 60 </dev/null >/dev/null &
+echo $! > "$pids/holder"
 "$python" -c 'import os, sys, time; os.setpgid(0, 0); open(sys.argv[1] + "/grouped", "w").write(str(os.getpid())); time.sleep(60)' "$pids" </dev/null >/dev/null 2>&1 &
 cat > /dev/null
 while [ ! -s "$pids/grouped" ]; do sleep 0.1; done
@@ -2207,7 +2211,7 @@ if [ "$mode" = hang ]; then
 fi
 exit 3
 """
-SANDBOX_PID_NAMES = ("backend", "child", "grandchild", "grouped")
+SANDBOX_PID_NAMES = ("backend", "child", "grandchild", "detached", "grouped", "holder")
 # The hanging backend's own sleep, recorded so a failing run can clean it up.
 SANDBOX_HANG_PID = "hang"
 
@@ -2282,7 +2286,8 @@ def test_backend_process_reaps_every_descendant_when_the_backend_exits(tmp_path)
     pids, body = _sandbox_backend_body(tmp_path, "exit")
     recorded: dict[str, int] = {}
     try:
-        result = run_powershell(tmp_path, body, timeout=60)
+        # The holder keeps stderr open for 60 s; the review must not wait for it.
+        result = run_powershell(tmp_path, body, timeout=30)
         recorded = _recorded_pids(pids)
         assert result.returncode == 0, output(result)
         assert set(recorded) == set(SANDBOX_PID_NAMES), recorded
@@ -2296,7 +2301,7 @@ def test_backend_process_reaps_every_descendant_when_the_backend_exits(tmp_path)
         _kill_recorded(recorded or _recorded_pids(pids))
 
 
-@pytest.mark.parametrize("stop_signal", [signal.SIGTERM, signal.SIGKILL], ids=["sigterm", "sigkill"])
+@pytest.mark.parametrize("stop_signal", ["SIGTERM", "SIGKILL"])
 def test_backend_process_reaps_every_descendant_when_the_job_is_cancelled(tmp_path, stop_signal):
     """#910: a cancelled or timed-out job stops pwsh mid-review (the runner signals it, then kills it); the backend
     and all its descendants still go, even though pwsh never reaches its finally block after SIGKILL."""
@@ -2316,7 +2321,9 @@ def test_backend_process_reaps_every_descendant_when_the_job_is_cancelled(tmp_pa
             time.sleep(0.1)
         recorded = _recorded_pids(pids)
         assert set(recorded) == {*SANDBOX_PID_NAMES, SANDBOX_HANG_PID}, recorded
-        process.send_signal(stop_signal)
+        # The watchdog remembers the tree once a second; an orphan in a session of its own is found only that way.
+        time.sleep(1.5)
+        process.send_signal(getattr(signal, stop_signal))
         process.wait(timeout=30)
         assert _survivors(recorded, wait_seconds=10) == {}
     finally:
@@ -2324,3 +2331,41 @@ def test_backend_process_reaps_every_descendant_when_the_job_is_cancelled(tmp_pa
             process.kill()
             process.wait(timeout=30)
         _kill_recorded(recorded or _recorded_pids(pids))
+
+
+def _session_helper(tmp_path: Path) -> Path:
+    """The sh helper run-review.ps1 embeds and writes to the scratch directory."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index("$script:ReviewSessionHelperScript = @'\n") + len("$script:ReviewSessionHelperScript = @'\n")
+    helper = tmp_path / "review-session.sh"
+    helper.write_text(text[start:text.index("\n'@", start)] + "\n", encoding="utf-8")
+    return helper
+
+
+def test_session_leader_never_starts_the_command_once_pwsh_is_gone(tmp_path):
+    """#910: if pwsh is stopped while the session leader is still starting, the watchdog may already have looked for
+    the leader file and left; the leader then records itself and exits instead of starting an unreaped backend."""
+    _require_linux_session_tools()
+    helper = _session_helper(tmp_path)
+    gone = subprocess.run(["sh", "-c", "echo $$"], capture_output=True, text=True, check=True)
+    gone_pid = gone.stdout.strip()
+    marker = tmp_path / "started"
+    leader = tmp_path / "leader"
+    result = subprocess.run(
+        ["sh", str(helper), "lead", str(leader), str(tmp_path / "out"), str(tmp_path / "err"), gone_pid, "1",
+         "touch", str(marker)],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 125
+    assert leader.read_text(encoding="utf-8").strip().isdigit()
+    assert not marker.exists()
+
+    # With its pwsh alive (here, this test process with its real start time), the same command runs.
+    own_start = Path(f"/proc/{os.getpid()}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
+    started = subprocess.run(
+        ["sh", str(helper), "lead", str(leader), str(tmp_path / "out"), str(tmp_path / "err"), str(os.getpid()),
+         own_start, "touch", str(marker)],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert started.returncode == 0, started.stderr
+    assert marker.exists()
