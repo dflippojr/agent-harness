@@ -1545,6 +1545,120 @@ function Get-ReviewBackendCommand {
     }
 }
 
+# The Codex CLI runs each tool command under codex-linux-sandbox, and a sandbox still running when the review ends,
+# or when the job is cancelled or times out, used to be orphaned on the runner (#910). On Linux each backend command
+# therefore runs as the leader of a session of its own, and every process left in that session is killed when the
+# command returns. A detached watchdog, outside the job's process tree, does the same if pwsh itself is stopped
+# before its finally block runs (the runner signals the step and then kills it). A descendant that calls setsid itself
+# leaves the session and escapes both.
+$script:ReviewSessionHelperScript = @'
+#!/bin/sh
+# Written by run-review.ps1 (#910): runs a review backend command in a session of its own and reaps that session.
+set -u
+
+start_time() {
+    stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    # Field 22 (start time); the command name in parentheses may hold spaces, so split after its closing one.
+    set -- ${stat##*) }
+    printf '%s\n' "${20}"
+}
+
+session_members() {
+    ps -e -o pid= -o sid= -o stat= 2>/dev/null | awk -v sid="$1" '$2 == sid && $3 !~ /^Z/ { print $1 }'
+}
+
+signal_session() {
+    kill "-$2" -- "-$1" 2>/dev/null
+    members=$(session_members "$1")
+    if [ -n "$members" ]; then kill "-$2" $members 2>/dev/null; fi
+    return 0
+}
+
+reap() {
+    [ -s "$1" ] || return 0
+    sid=$(cat "$1")
+    case $sid in '' | *[!0-9]*) return 0 ;; esac
+    [ "$sid" -gt 1 ] || return 0
+    signal_session "$sid" TERM
+    tries=0
+    while [ "$tries" -lt 10 ] && [ -n "$(session_members "$sid")" ]; do
+        sleep 0.1
+        tries=$((tries + 1))
+    done
+    signal_session "$sid" KILL
+}
+
+command=$1
+shift
+case $command in
+    lead)
+        # setsid made this shell the session leader, so its pid names the session; exec keeps it for the backend.
+        printf '%s\n' "$$" > "$1"
+        shift
+        exec "$@"
+        ;;
+    spawn-watch)
+        parent_start=$(start_time "$1") || exit 0
+        setsid /bin/sh "$0" watch "$1" "$parent_start" "$2" "$3" < /dev/null > /dev/null 2>&1 &
+        ;;
+    watch)
+        while [ ! -e "$4" ] && [ "$(start_time "$1")" = "$2" ]; do sleep 1; done
+        if [ ! -e "$4" ]; then reap "$3"; fi
+        rm -f "$3" "$4"
+        ;;
+    finish)
+        reap "$1"
+        : > "$2"
+        ;;
+esac
+exit 0
+'@
+
+function Start-ReviewProcessSession {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$ScratchDirectory)
+
+    # $IsLinux is undefined in Windows PowerShell 5.1, and strict mode refuses an undefined variable.
+    if (-not [bool](Get-Variable -Name IsLinux -ValueOnly -ErrorAction SilentlyContinue)) { return $null }
+    $setsid = Get-Command -Name setsid -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $setsid -or -not (Test-Path -LiteralPath '/bin/sh')) { return $null }
+
+    $helper = Join-Path $ScratchDirectory 'review-session.sh'
+    [System.IO.File]::WriteAllText($helper, $script:ReviewSessionHelperScript.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    $id = [guid]::NewGuid().ToString('N')
+    $session = [pscustomobject]@{
+        Setsid = $setsid.Source
+        Helper = $helper
+        LeaderFile = Join-Path $ScratchDirectory "review-session-$id.leader"
+        DoneFile = Join-Path $ScratchDirectory "review-session-$id.done"
+    }
+    & /bin/sh $helper spawn-watch $PID $session.LeaderFile $session.DoneFile 2> $null | Out-Null
+    return $session
+}
+
+function Get-ReviewSessionCommandLine {
+    [CmdletBinding()]
+    param(
+        $Session,
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [object[]]$Arguments = @()
+    )
+
+    if ($null -eq $Session) { return [pscustomobject]@{ FilePath = $FilePath; Arguments = @($Arguments) } }
+    return [pscustomobject]@{
+        FilePath = $Session.Setsid
+        Arguments = @('--wait', '/bin/sh', $Session.Helper, 'lead', $Session.LeaderFile, $FilePath) + @($Arguments)
+    }
+}
+
+function Stop-ReviewProcessSession {
+    [CmdletBinding()]
+    param($Session)
+
+    if ($null -eq $Session) { return }
+    & /bin/sh $Session.Helper finish $Session.LeaderFile $Session.DoneFile 2> $null | Out-Null
+}
+
 function Invoke-ReviewBackendProcess {
     [CmdletBinding()]
     param(
@@ -1561,10 +1675,14 @@ function Invoke-ReviewBackendProcess {
     }
 
     $exitCode = -1
+    $session = $null
     try {
         Push-Location -LiteralPath $Command.WorkingDirectory
         try {
-            $arguments = @($Command.Arguments)
+            $session = Start-ReviewProcessSession -ScratchDirectory $ScratchDirectory
+            $commandLine = Get-ReviewSessionCommandLine -Session $session -FilePath $Command.FilePath -Arguments @($Command.Arguments)
+            $filePath = $commandLine.FilePath
+            $arguments = @($commandLine.Arguments)
             $previousErrorActionPreference = $ErrorActionPreference
             # Native pipeline encoding is read from the global preference in
             # Windows PowerShell 5.1; a function-local assignment is ignored.
@@ -1587,9 +1705,9 @@ function Invoke-ReviewBackendProcess {
                     Set-ProcessEnvironmentSnapshot -Environment $Command.Environment
                 }
                 if ($null -ne $Command.InputText) {
-                    $Command.InputText | & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
+                    $Command.InputText | & $filePath @arguments 1> $stdoutPath 2> $stderrPath
                 } else {
-                    & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
+                    & $filePath @arguments 1> $stdoutPath 2> $stderrPath
                 }
             } finally {
                 $ErrorActionPreference = $previousErrorActionPreference
@@ -1607,6 +1725,9 @@ function Invoke-ReviewBackendProcess {
         }
     } catch {
         $_ | Out-String | Out-File -LiteralPath $stderrPath -Append -Encoding utf8
+    } finally {
+        # Kill whatever the command left running in its session (#910), whether it exited, failed or was stopped.
+        Stop-ReviewProcessSession -Session $session
     }
 
     $stdout = ''

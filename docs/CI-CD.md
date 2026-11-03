@@ -452,6 +452,17 @@ reported `head_sha`; they never check out or execute pull-request code. Third-pa
 commits, main deployments serialize rather than being canceled midway, and the GitHub `tower-production` environment
 accepts deployments from `main` only.
 
+**Process cleanup on Linux (#910).** Codex starts each tool command under `codex-linux-sandbox`, and a sandbox still
+running when the review ended (or when the job was cancelled or timed out) used to be left on the runner, re-parented
+to PID 1. On Linux, `run-review.ps1` now starts every backend, `gh` and `git` command through `setsid --wait`, so the
+command leads a session of its own. When the command returns (success, failure or exception), the script sends `TERM`,
+then `KILL` after up to a second, to every process left in that session. A cancel or timeout can stop `pwsh` before it
+reaches that cleanup, so each command also gets a small watchdog, detached into its own session outside the job's
+process tree, that polls `pwsh` once a second and reaps the session if `pwsh` exits first. A descendant that calls
+`setsid` itself leaves the session and escapes both; if orphans reappear, compare their session id
+(`ps -o pid,sid,args`) with the review's. The cleanup never changes the review output or verdict. Without `setsid`
+(Windows, macOS) commands run as before.
+
 ### Adopting the review workflow
 
 Other projects call this repository's `review.yml` as a reusable workflow (`on: workflow_call`) instead of carrying a
