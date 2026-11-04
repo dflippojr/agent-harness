@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+import uuid
 
 import pytest
 
@@ -2187,26 +2188,28 @@ def test_review_script_without_spec_mode_keeps_the_review_v2_contract(tmp_path, 
 # A fake review backend that leaves long-lived descendants behind, as the Codex CLI does with codex-linux-sandbox
 # (#910): a plain child, a grandchild whose parent exits first (re-parented to PID 1, like the orphans on the
 # tower), an orphaned grandchild in a session of its own, a child in its own process group, and a child that keeps
-# the backend's stderr open. Each records its pid.
+# the backend's stderr open. Each records its pid as /proc shows it: on the namespace path (#912) the backend runs in
+# a PID namespace of its own, where $$ and $! are namespace pids, but a shell's own read of /proc/self/stat is not.
 FAKE_SANDBOX_BACKEND = r"""#!/bin/sh
 pids=$1
 mode=$2
 python=$3
-sleep 60 </dev/null >/dev/null 2>&1 &
-echo $! > "$pids/child"
-sh -c 'sleep 60 </dev/null >/dev/null 2>&1 & echo $! > "$1/grandchild"' sh "$pids"
-sh -c 'setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > "$1/detached"' sh "$pids"
-sleep 60 </dev/null >/dev/null &
-echo $! > "$pids/holder"
-"$python" -c 'import os, sys, time; os.setpgid(0, 0); open(sys.argv[1] + "/grouped", "w").write(str(os.getpid())); time.sleep(60)' "$pids" </dev/null >/dev/null 2>&1 &
+sleeper='read -r pid _ < /proc/self/stat; echo "$pid" > "$1/$2"; exec sleep 60'
+sh -c "$sleeper" sh "$pids" child </dev/null >/dev/null 2>&1 &
+sh -c 'sh -c "$2" sh "$1" grandchild </dev/null >/dev/null 2>&1 &' sh "$pids" "$sleeper"
+sh -c 'setsid sh -c "$2" sh "$1" detached </dev/null >/dev/null 2>&1 &' sh "$pids" "$sleeper"
+sh -c "$sleeper" sh "$pids" holder </dev/null >/dev/null &
+"$python" -c 'import os, sys, time; os.setpgid(0, 0); open(sys.argv[1] + "/grouped", "w").write(os.readlink("/proc/self")); time.sleep(60)' "$pids" </dev/null >/dev/null 2>&1 &
 cat > /dev/null
-while [ ! -s "$pids/grouped" ]; do sleep 0.1; done
-echo $$ > "$pids/backend"
+for name in child grandchild detached holder grouped; do
+    while [ ! -s "$pids/$name" ]; do sleep 0.1; done
+done
+read -r pid _ < /proc/self/stat
+echo "$pid" > "$pids/backend"
 echo "review text"
 echo "backend note" >&2
 if [ "$mode" = hang ]; then
-    sleep 60 </dev/null >/dev/null 2>&1 &
-    echo $! > "$pids/hang"
+    sh -c "$sleeper" sh "$pids" hang </dev/null >/dev/null 2>&1 &
     wait $!
 fi
 exit 3
@@ -2214,20 +2217,61 @@ exit 3
 SANDBOX_PID_NAMES = ("backend", "child", "grandchild", "detached", "grouped", "holder")
 # The hanging backend's own sleep, recorded so a failing run can clean it up.
 SANDBOX_HANG_PID = "hang"
+# The namespace flags run-review.ps1 starts each command with (#912), probed here independently of the script, so a
+# host without unprivileged user namespaces skips the namespace cases rather than failing them.
+NAMESPACE_PROBE = ["--user", "--pid", "--fork", "--kill-child", "--map-current-user", "--", "/bin/sh", "-c", "test $$ -eq 1"]
+CONTAINMENTS = ("namespace", "session-marker")
 
 
-def _require_linux_session_tools() -> None:
-    require_powershell()
+def _require_linux_setsid() -> None:
     if not sys.platform.startswith("linux") or not shutil.which("setsid"):
         pytest.skip("the review backend runs in its own session only on Linux with setsid")
 
 
-def _sandbox_backend_body(tmp_path: Path, mode: str) -> tuple[Path, str]:
+def _require_linux_session_tools() -> None:
+    require_powershell()
+    _require_linux_setsid()
+
+
+def _namespaces_available() -> bool:
+    unshare = shutil.which("unshare")
+    if unshare is None:
+        return False
+    try:
+        probe = subprocess.run([unshare, *NAMESPACE_PROBE], capture_output=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
+
+
+def _require_containment(containment: str) -> None:
+    if containment == "namespace" and not _namespaces_available():
+        pytest.skip("unprivileged user and PID namespaces are not available here (unshare failed)")
+
+
+def _failing_unshare(tmp_path: Path) -> Path:
+    """A directory holding an unshare that always fails, as on a host without unprivileged user namespaces."""
+    stub = tmp_path / "failing-unshare"
+    stub.mkdir()
+    script = stub / "unshare"
+    script.write_text("#!/bin/sh\necho 'unshare: unshare failed: Operation not permitted' >&2\nexit 1\n", encoding="utf-8")
+    script.chmod(0o755)
+    return stub
+
+
+def _containment_prelude(tmp_path: Path, containment: str) -> str:
+    """PowerShell that makes the session-marker path run by putting a failing unshare first on PATH (#912)."""
+    if containment == "namespace":
+        return ""
+    return f"$env:PATH = '{_ps(_failing_unshare(tmp_path))}' + [System.IO.Path]::PathSeparator + $env:PATH\n"
+
+
+def _sandbox_backend_body(tmp_path: Path, mode: str, containment: str = "namespace") -> tuple[Path, str]:
     pids = tmp_path / "pids"
     pids.mkdir()
     backend = tmp_path / "fake-backend.sh"
     backend.write_text(FAKE_SANDBOX_BACKEND, encoding="utf-8")
-    body = f"""
+    body = _containment_prelude(tmp_path, containment) + f"""
 $command = [pscustomobject]@{{
     Backend = 'fake'
     FilePath = '/bin/sh'
@@ -2280,10 +2324,13 @@ def _kill_recorded(recorded: dict[str, int]) -> None:
                 pass
 
 
-def test_backend_process_reaps_every_descendant_when_the_backend_exits(tmp_path):
-    """#910: once the backend exits, none of its descendants survive, and its output and exit code are unchanged."""
+@pytest.mark.parametrize("containment", CONTAINMENTS)
+def test_backend_process_reaps_every_descendant_when_the_backend_exits(tmp_path, containment):
+    """#910: once the backend exits, none of its descendants survive, and its output and exit code are unchanged.
+    #912: on both paths, the namespace one and the session-marker fallback, and the run log names the path."""
     _require_linux_session_tools()
-    pids, body = _sandbox_backend_body(tmp_path, "exit")
+    _require_containment(containment)
+    pids, body = _sandbox_backend_body(tmp_path, "exit", containment)
     recorded: dict[str, int] = {}
     try:
         # The holder keeps stderr open for 60 s; the review must not wait for it.
@@ -2297,16 +2344,19 @@ def test_backend_process_reaps_every_descendant_when_the_backend_exits(tmp_path)
         assert attempt["Stderr"] == "backend note\n"
         assert attempt["Model"] == "fake-model"
         assert _survivors(recorded, wait_seconds=2) == {}
+        assert f"Review process containment: {containment}" in result.stdout, output(result)
     finally:
         _kill_recorded(recorded or _recorded_pids(pids))
 
 
+@pytest.mark.parametrize("containment", CONTAINMENTS)
 @pytest.mark.parametrize("stop_signal", ["SIGTERM", "SIGKILL"])
-def test_backend_process_reaps_every_descendant_when_the_job_is_cancelled(tmp_path, stop_signal):
+def test_backend_process_reaps_every_descendant_when_the_job_is_cancelled(tmp_path, stop_signal, containment):
     """#910: a cancelled or timed-out job stops pwsh mid-review (the runner signals it, then kills it); the backend
     and all its descendants still go, even though pwsh never reaches its finally block after SIGKILL."""
     _require_linux_session_tools()
-    pids, body = _sandbox_backend_body(tmp_path, "hang")
+    _require_containment(containment)
+    pids, body = _sandbox_backend_body(tmp_path, "hang", containment)
     wrapper = tmp_path / "review-test.ps1"
     wrapper.write_text(f"{PLAIN_ERRORS}\n. '{_ps(SCRIPT)}'\n{RENDER_STUB}\n{body}\n", encoding="utf-8")
     recorded: dict[str, int] = {}
@@ -2372,20 +2422,22 @@ def test_session_leader_never_starts_the_command_once_pwsh_is_gone(tmp_path):
 
 def test_watchdog_finishes_the_cleanup_when_pwsh_is_killed_during_it(tmp_path):
     """#910: a descendant that ignores TERM keeps the cleanup in its one-second grace period; if pwsh is killed then,
-    the watchdog (which the cleanup spares) still sends KILL."""
+    the watchdog (which the cleanup spares) still sends KILL. This is the session-marker path's grace period (#912):
+    on the namespace path the stubborn process dies with the backend, so a failing unshare forces the fallback."""
     _require_linux_session_tools()
     pids = tmp_path / "pids"
     pids.mkdir()
     backend = tmp_path / "stubborn-backend.sh"
     backend.write_text(
         "#!/bin/sh\n"
-        "sh -c 'trap \"\" TERM; setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > \"$1/stubborn\"' sh \"$1\"\n"
+        "sh -c 'trap \"\" TERM; setsid sh -c \"read -r pid _ < /proc/self/stat; echo \\$pid > \\$1/stubborn;"
+        " exec sleep 60\" sh \"$1\" </dev/null >/dev/null 2>&1 &' sh \"$1\"\n"
         "cat > /dev/null\n"
         "while [ ! -s \"$1/stubborn\" ]; do sleep 0.1; done\n"
         ": > \"$1/exiting\"\n",
         encoding="utf-8",
     )
-    body = f"""
+    body = _containment_prelude(tmp_path, "session-marker") + f"""
 $command = [pscustomobject]@{{
     Backend = 'fake'
     FilePath = '/bin/sh'
@@ -2422,3 +2474,287 @@ Start-Sleep -Seconds 30
             process.kill()
             process.wait(timeout=30)
         _kill_recorded(recorded)
+
+
+# #912: a backend whose descendant waits until the watchdog has just looked at the tree and gone back to sleep, then
+# clears its marker, starts a session of its own and is orphaned, inside the watchdog's one-second poll gap. If pwsh
+# is then killed, #911's session and marker cleanup has nothing left to find it by; the namespace path still kills it.
+# The descendant and the backend record pids as /proc shows them (see FAKE_SANDBOX_BACKEND).
+FAKE_ESCAPING_BACKEND = r"""#!/bin/sh
+pids=$1
+scratch=$2
+sleeper='read -r pid _ < /proc/self/stat; echo "$pid" > "$1/$2"; exec sleep 60'
+cat > /dev/null
+read -r pid _ < /proc/self/stat
+echo "$pid" > "$pids/backend"
+watch=''
+tries=0
+while [ "$tries" -lt 200 ]; do
+    for file in "$scratch"/review-session-*.leader.watch; do
+        if [ -s "$file" ]; then watch=$(cat "$file"); fi
+    done
+    if [ -n "$watch" ] && ps -o comm= --ppid "$watch" 2>/dev/null | grep -qx sleep; then break; fi
+    sleep 0.02
+    tries=$((tries + 1))
+done
+env -u AGENT_HARNESS_REVIEW_RUN sh -c 'setsid sh -c "$2" sh "$1" escaped </dev/null >/dev/null 2>&1 &' sh "$pids" "$sleeper"
+while [ ! -s "$pids/escaped" ]; do sleep 0.01; done
+sh -c "$sleeper" sh "$pids" hang </dev/null >/dev/null 2>&1 &
+wait $!
+"""
+ESCAPING_PID_NAMES = ("backend", "escaped", "hang")
+
+# #912, the tower's orphans: codex-linux-sandbox -> bash -> jshell --execution local outlived their review jobs by
+# hours, re-parented to init, one jshell holding 2.7 GB. This backend starts a "sandbox" through a parent that exits
+# at once, so the sandbox is re-parented, and the sandbox runs a "jshell" that reads its stdin to EOF, keeps running
+# anyway, and ignores HUP, INT and TERM. In "exit" mode the backend then returns; in "hang" mode it waits until pwsh
+# is killed.
+FAKE_JSHELL_BACKEND = r"""#!/bin/sh
+pids=$1
+mode=$2
+jshell='trap "" HUP INT TERM; read -r pid _ < /proc/self/stat; echo "$pid" > "$1/jshell"; cat > /dev/null; while :; do sleep 1; done'
+sandbox='read -r pid _ < /proc/self/stat; echo "$pid" > "$1/sandbox"; : | sh -c "$2" sh "$1"'
+cat > /dev/null
+sh -c 'sh -c "$2" sh "$1" "$3" </dev/null >/dev/null 2>&1 &' sh "$pids" "$sandbox" "$jshell"
+for name in sandbox jshell; do
+    while [ ! -s "$pids/$name" ]; do sleep 0.05; done
+done
+read -r pid _ < /proc/self/stat
+echo "$pid" > "$pids/backend"
+echo "review text"
+if [ "$mode" = hang ]; then
+    while :; do sleep 1; done
+fi
+exit 0
+"""
+JSHELL_PID_NAMES = ("backend", "sandbox", "jshell")
+
+
+def _recorded(pids: Path, names: tuple[str, ...]) -> dict[str, int]:
+    recorded = {}
+    for name in names:
+        path = pids / name
+        text = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+        if text.isdigit():
+            recorded[name] = int(text)
+    return recorded
+
+
+def _wait_for_recorded(pids: Path, names: tuple[str, ...], process: subprocess.Popen, seconds: float) -> dict[str, int]:
+    deadline = time.monotonic() + seconds
+    while len(_recorded(pids, names)) < len(names) and time.monotonic() < deadline:
+        assert process.poll() is None, "the review process exited before the backend started its descendants"
+        time.sleep(0.01)
+    return _recorded(pids, names)
+
+
+def _review_command_body(tmp_path: Path, backend: Path, arguments: list[str], containment: str, tail: str) -> str:
+    quoted = ", ".join(f"'{_ps(argument)}'" for argument in [backend, *arguments])
+    return _containment_prelude(tmp_path, containment) + f"""
+$command = [pscustomobject]@{{
+    Backend = 'fake'
+    FilePath = '/bin/sh'
+    Arguments = @({quoted})
+    WorkingDirectory = '{_ps(tmp_path)}'
+    InputText = 'the prompt'
+    ResultPath = $null
+    Model = 'fake-model'
+}}
+$result = Invoke-ReviewBackendProcess -Command $command -ScratchDirectory '{_ps(tmp_path / "scratch")}'
+{tail}
+"""
+
+
+def _start_powershell(tmp_path: Path, body: str) -> subprocess.Popen:
+    wrapper = tmp_path / "review-test.ps1"
+    wrapper.write_text(f"{PLAIN_ERRORS}\n. '{_ps(SCRIPT)}'\n{RENDER_STUB}\n{body}\n", encoding="utf-8")
+    return subprocess.Popen(
+        [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _stop(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.kill()
+    process.wait(timeout=30)
+
+
+def test_namespace_kills_a_descendant_that_clears_its_marker_and_calls_setsid_in_the_poll_gap(tmp_path):
+    """#912: the residual gap #911 left. A descendant clears its marker, calls setsid and is orphaned just after the
+    watchdog's poll, and pwsh is killed before its own cleanup runs. On the namespace path it dies with the
+    namespace when the watchdog kills the command's unshare."""
+    _require_linux_session_tools()
+    _require_containment("namespace")
+    pids = tmp_path / "pids"
+    pids.mkdir()
+    backend = tmp_path / "escaping-backend.sh"
+    backend.write_text(FAKE_ESCAPING_BACKEND, encoding="utf-8")
+    body = _review_command_body(tmp_path, backend, [str(pids), str(tmp_path / "scratch")], "namespace", "")
+    process = _start_powershell(tmp_path, body)
+    recorded: dict[str, int] = {}
+    try:
+        recorded = _wait_for_recorded(pids, ESCAPING_PID_NAMES, process, seconds=30)
+        assert set(recorded) == set(ESCAPING_PID_NAMES), recorded
+        # Killed at once, well inside the watchdog's poll gap: the escaped descendant is in no tree it remembers.
+        process.kill()
+        process.wait(timeout=30)
+        assert _survivors(recorded, wait_seconds=10) == {}
+    finally:
+        _stop(process)
+        _kill_recorded(recorded or _recorded(pids, ESCAPING_PID_NAMES))
+
+
+@pytest.mark.parametrize("containment", CONTAINMENTS)
+@pytest.mark.parametrize("ending", ["backend-exits", "pwsh-killed"])
+def test_orphaned_sandbox_child_that_ignores_stdin_eof_dies_with_the_review(tmp_path, ending, containment):
+    """#912, the tower's orphans: a sandbox re-parented away from the backend runs a jshell-like child that reads
+    stdin to EOF and keeps running, ignoring HUP, INT and TERM. Whether the backend returns or pwsh is killed
+    mid-review, the child, its sandbox and the backend are gone afterwards."""
+    _require_linux_session_tools()
+    _require_containment(containment)
+    pids = tmp_path / "pids"
+    pids.mkdir()
+    backend = tmp_path / "jshell-backend.sh"
+    backend.write_text(FAKE_JSHELL_BACKEND, encoding="utf-8")
+    mode = "exit" if ending == "backend-exits" else "hang"
+    tail = "$result | ConvertTo-Json -Compress | Set-Content -LiteralPath '{}'".format(_ps(tmp_path / "result.json"))
+    body = _review_command_body(tmp_path, backend, [str(pids), mode], containment, tail + "\nStart-Sleep -Seconds 30")
+    process = _start_powershell(tmp_path, body)
+    recorded: dict[str, int] = {}
+    try:
+        recorded = _wait_for_recorded(pids, JSHELL_PID_NAMES, process, seconds=30)
+        assert set(recorded) == set(JSHELL_PID_NAMES), recorded
+        if ending == "backend-exits":
+            deadline = time.monotonic() + 30
+            while not (tmp_path / "result.json").exists() and time.monotonic() < deadline:
+                assert process.poll() is None, "pwsh exited before the review command returned"
+                time.sleep(0.05)
+            attempt = json.loads((tmp_path / "result.json").read_text(encoding="utf-8-sig"))
+            assert attempt["ExitCode"] == 0
+            assert attempt["Stdout"] == "review text\n"
+        else:
+            process.kill()
+            process.wait(timeout=30)
+        assert _survivors(recorded, wait_seconds=10) == {}
+    finally:
+        _stop(process)
+        _kill_recorded(recorded or _recorded(pids, JSHELL_PID_NAMES))
+
+
+def _contain_report(helper: Path, path: str) -> str:
+    environment = {**os.environ, "PATH": path}
+    result = subprocess.run(["/bin/sh", str(helper), "contain"], capture_output=True, text=True, env=environment,
+                            timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_session_helper_reports_which_containment_path_runs(tmp_path):
+    """#912: the helper's probe picks the namespace path only when unshare can start a command as PID 1 of a new
+    user and PID namespace, and otherwise names the session-marker fallback and why."""
+    _require_linux_setsid()
+    helper = _session_helper(tmp_path)
+    failing = _contain_report(helper, f"{_failing_unshare(tmp_path)}{os.pathsep}{os.environ['PATH']}")
+    assert failing.startswith("session-marker "), failing
+    assert "Operation not permitted" in failing
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+    assert _contain_report(helper, str(empty)) == "session-marker unshare is not on PATH"
+    if _namespaces_available():
+        assert _contain_report(helper, os.environ["PATH"]) == f"namespace {shutil.which('unshare')}"
+
+
+def _start_time(pid: int) -> str:
+    return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
+
+
+@pytest.mark.parametrize("backend_name", ["escaping", "jshell"])
+def test_session_helper_namespace_outlives_no_descendant_when_its_pwsh_is_killed(tmp_path, backend_name):
+    """#912, without pwsh: a stand-in process plays pwsh's part (the watchdog watches it, the leader checks it), the
+    command runs through the helper's lead-namespace, and the stand-in is killed mid-review. The watchdog's cleanup
+    kills the command's unshare, and with it every process in the namespace: the descendant that escaped the
+    session and its marker in the poll gap, or the jshell-like child that ignores stdin EOF and TERM."""
+    _require_linux_setsid()
+    _require_containment("namespace")
+    helper = _session_helper(tmp_path)
+    report = _contain_report(helper, os.environ["PATH"])
+    assert report.startswith("namespace "), report
+    unshare = report.split(" ", 1)[1]
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    pids = tmp_path / "pids"
+    pids.mkdir()
+    if backend_name == "escaping":
+        backend_text, arguments, names = FAKE_ESCAPING_BACKEND, [str(pids), str(scratch)], ESCAPING_PID_NAMES
+    else:
+        backend_text, arguments, names = FAKE_JSHELL_BACKEND, [str(pids), "hang"], JSHELL_PID_NAMES
+    backend = tmp_path / "backend.sh"
+    backend.write_text(backend_text, encoding="utf-8")
+    leader = scratch / "review-session-test.leader"
+    done = scratch / "review-session-test.done"
+    # A marker of this case's own: the watchdog kills every process carrying it, so a shared one could reach another
+    # test's processes.
+    mark = f"test-{uuid.uuid4().hex}"
+    stand_in = subprocess.Popen(["sleep", "60"], stdin=subprocess.DEVNULL)
+    command = None
+    recorded: dict[str, int] = {}
+    try:
+        stand_in_start = _start_time(stand_in.pid)
+        subprocess.run(["/bin/sh", str(helper), "spawn-watch", str(stand_in.pid), str(leader), str(done), mark],
+                       capture_output=True, timeout=30, check=True)
+        command = subprocess.Popen(
+            [shutil.which("setsid"), "--wait", "/bin/sh", str(helper), "lead-namespace", str(leader),
+             str(tmp_path / "out"), str(tmp_path / "err"), str(stand_in.pid), stand_in_start, mark, unshare,
+             "/bin/sh", str(backend), *arguments],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        recorded = _wait_for_recorded(pids, names, command, seconds=30)
+        assert set(recorded) == set(names), recorded
+        stand_in.kill()
+        stand_in.wait(timeout=30)
+        assert _survivors(recorded, wait_seconds=10) == {}
+        command.wait(timeout=30)
+    finally:
+        _stop(stand_in)
+        if command is not None:
+            _stop(command)
+        _kill_recorded(recorded or _recorded(pids, names))
+
+
+# Stands in for unshare where the host refuses unprivileged user namespaces (CI's ubuntu-latest): it records each
+# argument list, answers the probe as a working unshare would, and runs the command after "--" without a namespace.
+RECORDING_UNSHARE = r"""#!/bin/sh
+log=$(dirname "$0")/calls
+printf '%s\n' "$*" >> "$log"
+case "$*" in *'test $$ -eq 1'*) exit 0 ;; esac
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+shift
+exec "$@"
+"""
+
+
+def test_namespace_path_starts_the_command_through_unshare_with_the_namespace_flags(tmp_path):
+    """#912: where the probe succeeds, pwsh logs the namespace path and starts the command through that unshare with
+    --user --pid --fork --kill-child --map-current-user; output and exit code are unchanged. A recording unshare
+    stands in, so this runs on hosts that refuse unprivileged user namespaces too."""
+    _require_linux_session_tools()
+    stub = tmp_path / "recording-unshare"
+    stub.mkdir()
+    (stub / "unshare").write_text(RECORDING_UNSHARE, encoding="utf-8")
+    (stub / "unshare").chmod(0o755)
+    backend = tmp_path / "backend.sh"
+    backend.write_text("#!/bin/sh\ncat > /dev/null\necho \"review text\"\necho \"backend note\" >&2\nexit 3\n",
+                       encoding="utf-8")
+    prelude = f"$env:PATH = '{_ps(stub)}' + [System.IO.Path]::PathSeparator + $env:PATH\n"
+    body = prelude + _review_command_body(tmp_path, backend, [], "namespace", "$result | ConvertTo-Json -Compress")
+    result = run_powershell(tmp_path, body, timeout=60)
+    assert result.returncode == 0, output(result)
+    assert "Review process containment: namespace" in result.stdout, output(result)
+    attempt = json.loads(result.stdout.strip().splitlines()[-1])
+    assert attempt["ExitCode"] == 3
+    assert attempt["Stdout"] == "review text\n"
+    assert attempt["Stderr"] == "backend note\n"
+    flags = "--user --pid --fork --kill-child --map-current-user --"
+    calls = (stub / "calls").read_text(encoding="utf-8").splitlines()
+    assert calls == [f"{flags} /bin/sh -c test $$ -eq 1", f"{flags} /bin/sh {backend}"], calls

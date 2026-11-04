@@ -465,10 +465,25 @@ every orphan re-parented to `pwsh`, every process carrying the marker, and all t
 a descendant that called `setsid` itself. A cancel or timeout can stop `pwsh` before or during that cleanup, so each
 command also gets a small watchdog, detached into its own session and spared by the cleanup until it finishes. The
 watchdog records the command's process tree once a second and, if `pwsh` exits first, reaps the session, the marked
-processes and that tree. A command whose `pwsh` is already gone never starts. Only a process that drops the marker
-from its environment, starts a session of its own and is orphaned in the last second before `pwsh` is killed can
-escape. The cleanup never changes the review output or verdict. Without
-`setsid` (Windows, macOS) commands run as before.
+processes and that tree. A command whose `pwsh` is already gone never starts. The cleanup never changes the review
+output or verdict. Without `setsid` (Windows, macOS) commands run as before.
+
+**PID namespace per review command (#912).** The session and marker cleanup samples the process tree, so a process
+that drops the marker from its environment, starts a session of its own and is orphaned in the second between two
+watchdog polls, just before `pwsh` is killed, could still escape it. On the tower that kind of leak left
+`codex-linux-sandbox` -> `bash` -> `jshell` trees running for hours after their jobs, re-parented to init and holding
+about 4 GB. So where unprivileged user namespaces work, the session leader starts each command through
+`unshare --user --pid --fork --kill-child --map-current-user`, which makes the command PID 1 of a PID namespace of
+its own (inside a user namespace that maps the runner's own uid, so a sandbox can still start namespaces of its own).
+Every descendant stays in that namespace whatever it does to its session, environment or parent. When the command
+exits, the kernel kills the rest of the namespace, and when the cleanup or the watchdog kills `unshare` (the session
+leader), `--kill-child` kills the command and the kernel kills the rest. The runner needs no reinstall, cgroup
+delegation or user linger. `run-review.ps1` checks once per run that `unshare` can start a command as PID 1 of such a
+namespace and logs `Review process containment: namespace`. If `unshare` is missing or fails (for example where
+AppArmor restricts unprivileged user namespaces), it logs `Review process containment: session-marker (<reason>)`
+and the session and marker cleanup above is the fallback. The session and marker cleanup also runs on the namespace
+path. On the namespace path, a descendant outlives the review only if `pwsh` and its watchdog are both killed while
+the command itself keeps running.
 
 ### Adopting the review workflow
 
