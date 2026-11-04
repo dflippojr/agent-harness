@@ -460,6 +460,26 @@ def test_dry_run_shows_the_stop_settings_that_take_down_the_whole_tree():
     assert "KillSignal=SIGTERM" not in lines
 
 
+# Issue #916: each review runner's memory is capped and a failed runner restarts (agent-ops#442).
+MEMORY_AND_RESTART = ("MemoryHigh=3G", "MemoryMax=4G", "Restart=on-failure", "RestartSec=30")
+
+
+def service_section(unit_text: str) -> list[str]:
+    lines = unit_text.splitlines()
+    return lines[lines.index("[Service]") + 1:lines.index("[Install]")]
+
+
+def test_dry_run_caps_memory_and_restarts_a_failed_runner_in_the_service_section():
+    result = run_install("--name", "tower-review-1", "--dry-run")
+    assert result.returncode == 0, result.stderr
+    service = service_section(result.stdout)
+    for setting in MEMORY_AND_RESTART:
+        assert setting in service
+    # The stop settings from #814 are still there, unchanged.
+    for setting in STOP_SETTINGS:
+        assert setting in service
+
+
 def test_the_installed_unit_is_the_unit_the_dry_run_prints(tmp_path):
     host = FakeHost(tmp_path)
     planned = host.install("--dry-run")
@@ -497,6 +517,14 @@ def test_the_documented_unit_stops_the_tree_through_the_process_that_forwards_th
 ])
 def test_the_doc_explains_the_stop_settings(explained):
     assert explained in doc_prose()
+
+
+def test_the_review_pool_doc_lists_the_memory_caps_and_restart_policy_with_a_link():
+    text = CI_CD_DOC.read_text(encoding="utf-8")
+    section = text[text.index("### Linux (the tower"):text.index("### Windows (fallback boot)")]
+    for setting in MEMORY_AND_RESTART:
+        assert setting in section
+    assert "https://github.com/dflippojr/agent-ops/issues/442" in section
 
 
 def test_re_registration_stops_the_service_and_checks_for_a_listener_before_config_sh():
