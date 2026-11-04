@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+import uuid
 
 import pytest
 
@@ -2692,16 +2693,19 @@ def test_session_helper_namespace_outlives_no_descendant_when_its_pwsh_is_killed
     backend.write_text(backend_text, encoding="utf-8")
     leader = scratch / "review-session-test.leader"
     done = scratch / "review-session-test.done"
+    # A marker of this case's own: the watchdog kills every process carrying it, so a shared one could reach another
+    # test's processes.
+    mark = f"test-{uuid.uuid4().hex}"
     stand_in = subprocess.Popen(["sleep", "60"], stdin=subprocess.DEVNULL)
     command = None
     recorded: dict[str, int] = {}
     try:
         stand_in_start = _start_time(stand_in.pid)
-        subprocess.run(["/bin/sh", str(helper), "spawn-watch", str(stand_in.pid), str(leader), str(done), "mark"],
+        subprocess.run(["/bin/sh", str(helper), "spawn-watch", str(stand_in.pid), str(leader), str(done), mark],
                        capture_output=True, timeout=30, check=True)
         command = subprocess.Popen(
             [shutil.which("setsid"), "--wait", "/bin/sh", str(helper), "lead-namespace", str(leader),
-             str(tmp_path / "out"), str(tmp_path / "err"), str(stand_in.pid), stand_in_start, "mark", unshare,
+             str(tmp_path / "out"), str(tmp_path / "err"), str(stand_in.pid), stand_in_start, mark, unshare,
              "/bin/sh", str(backend), *arguments],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -2716,3 +2720,41 @@ def test_session_helper_namespace_outlives_no_descendant_when_its_pwsh_is_killed
         if command is not None:
             _stop(command)
         _kill_recorded(recorded or _recorded(pids, names))
+
+
+# Stands in for unshare where the host refuses unprivileged user namespaces (CI's ubuntu-latest): it records each
+# argument list, answers the probe as a working unshare would, and runs the command after "--" without a namespace.
+RECORDING_UNSHARE = r"""#!/bin/sh
+log=$(dirname "$0")/calls
+printf '%s\n' "$*" >> "$log"
+case "$*" in *'test $$ -eq 1'*) exit 0 ;; esac
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+shift
+exec "$@"
+"""
+
+
+def test_namespace_path_starts_the_command_through_unshare_with_the_namespace_flags(tmp_path):
+    """#912: where the probe succeeds, pwsh logs the namespace path and starts the command through that unshare with
+    --user --pid --fork --kill-child --map-current-user; output and exit code are unchanged. A recording unshare
+    stands in, so this runs on hosts that refuse unprivileged user namespaces too."""
+    _require_linux_session_tools()
+    stub = tmp_path / "recording-unshare"
+    stub.mkdir()
+    (stub / "unshare").write_text(RECORDING_UNSHARE, encoding="utf-8")
+    (stub / "unshare").chmod(0o755)
+    backend = tmp_path / "backend.sh"
+    backend.write_text("#!/bin/sh\ncat > /dev/null\necho \"review text\"\necho \"backend note\" >&2\nexit 3\n",
+                       encoding="utf-8")
+    prelude = f"$env:PATH = '{_ps(stub)}' + [System.IO.Path]::PathSeparator + $env:PATH\n"
+    body = prelude + _review_command_body(tmp_path, backend, [], "namespace", "$result | ConvertTo-Json -Compress")
+    result = run_powershell(tmp_path, body, timeout=60)
+    assert result.returncode == 0, output(result)
+    assert "Review process containment: namespace" in result.stdout, output(result)
+    attempt = json.loads(result.stdout.strip().splitlines()[-1])
+    assert attempt["ExitCode"] == 3
+    assert attempt["Stdout"] == "review text\n"
+    assert attempt["Stderr"] == "backend note\n"
+    flags = "--user --pid --fork --kill-child --map-current-user --"
+    calls = (stub / "calls").read_text(encoding="utf-8").splitlines()
+    assert calls == [f"{flags} /bin/sh -c test $$ -eq 1", f"{flags} /bin/sh {backend}"], calls
