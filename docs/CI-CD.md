@@ -452,6 +452,24 @@ reported `head_sha`; they never check out or execute pull-request code. Third-pa
 commits, main deployments serialize rather than being canceled midway, and the GitHub `tower-production` environment
 accepts deployments from `main` only.
 
+**Process cleanup on Linux (#910).** Codex starts each tool command under `codex-linux-sandbox`, and a sandbox still
+running when the review ended (or when the job was cancelled or timed out) used to be left on the runner, re-parented
+to PID 1. On Linux, `run-review.ps1` now makes `pwsh` a child subreaper (`PR_SET_CHILD_SUBREAPER`), so an orphaned
+descendant re-parents to `pwsh` instead, and starts every backend, `gh` and `git` command through `setsid --wait`, so
+the command leads a session of its own. The session leader writes the command's stdout and stderr to files, so a
+descendant that keeps them open cannot hold `pwsh` waiting, and tags the command's environment with a per-command
+`AGENT_HARNESS_REVIEW_RUN` marker that descendants inherit (Codex's default environment policy passes it to its tool
+commands, since only names containing `KEY`, `SECRET` or `TOKEN` are dropped). When the command returns (success,
+failure or exception), the script sends `TERM`, then `KILL` after up to a second, to every process in that session,
+every orphan re-parented to `pwsh`, every process carrying the marker, and all their descendants, which also catches
+a descendant that called `setsid` itself. A cancel or timeout can stop `pwsh` before or during that cleanup, so each
+command also gets a small watchdog, detached into its own session and spared by the cleanup until it finishes. The
+watchdog records the command's process tree once a second and, if `pwsh` exits first, reaps the session, the marked
+processes and that tree. A command whose `pwsh` is already gone never starts. Only a process that drops the marker
+from its environment, starts a session of its own and is orphaned in the last second before `pwsh` is killed can
+escape. The cleanup never changes the review output or verdict. Without
+`setsid` (Windows, macOS) commands run as before.
+
 ### Adopting the review workflow
 
 Other projects call this repository's `review.yml` as a reusable workflow (`on: workflow_call`) instead of carrying a
