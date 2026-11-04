@@ -148,6 +148,9 @@ fi
 # finish cancelling a job: runsvc.sh's own path kills the listener after 30 seconds. KillMode=mixed then sends SIGINT to
 # runsvc.sh alone, and SIGKILL to anything left, where KillMode=process would leave it running and control-group would
 # signal a job's steps directly. TimeoutStopSec stays above runner-stop.sh's 5 minutes. docs/CI-CD.md has the reasoning.
+# MemoryHigh=3G, MemoryMax=4G, Restart=on-failure and RestartSec=30 are the memory caps and restart policy from
+# agent-ops#442: memory above 3 GB is throttled, the kernel kills the runner above 4 GB, and a failed runner restarts
+# 30 seconds later.
 write_unit() {
   cat <<UNIT
 [Unit]
@@ -162,6 +165,10 @@ WorkingDirectory=$INSTALL_DIR
 KillMode=mixed
 KillSignal=SIGINT
 TimeoutStopSec=6min
+MemoryHigh=3G
+MemoryMax=4G
+Restart=on-failure
+RestartSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -173,7 +180,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "dry run: would download $url and check its sha256"
   echo "dry run: would unpack into $INSTALL_DIR, owned by $RUNNER_USER"
   echo "dry run: would run config.sh --unattended as $RUNNER_USER with --labels $LABELS"
-  echo "dry run: would write, as root, the unit svc.sh install $RUNNER_USER writes ($unit), with its stop settings changed, and start it:"
+  echo "dry run: would write, as root, the unit svc.sh install $RUNNER_USER writes ($unit), with its stop, memory and restart settings changed, and start it:"
   write_unit
   exit 0
 fi
