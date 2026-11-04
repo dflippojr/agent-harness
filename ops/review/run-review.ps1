@@ -1554,6 +1554,10 @@ function Get-ReviewBackendCommand {
 # marker, and all of their descendants are killed; a descendant that calls setsid itself is caught through its
 # parent, pwsh or the marker. A detached watchdog does the same if pwsh is stopped before its finally block runs (the
 # runner signals the step and then kills it), adding the tree it last saw, at most a second old.
+# Where unprivileged user namespaces work (#912), the leader also starts the command through unshare as PID 1 of a
+# user and PID namespace of its own, so every descendant dies with it, however it left the session, the marker or
+# the tree: when the command exits the kernel kills the namespace, and when the cleanup or the watchdog kills unshare,
+# --kill-child kills the command and the kernel the rest. Elsewhere the session and marker cleanup is the fallback.
 $script:ReviewSessionHelperScript = @'
 #!/bin/sh
 # Written by run-review.ps1 (#910): runs a review backend command in a session of its own and reaps what it leaves.
@@ -1571,6 +1575,11 @@ leader_sid() {
     case $sid in '' | *[!0-9]*) sid=0 ;; esac
     printf '%s\n' "$sid"
 }
+
+# The command runs as PID 1 of a new PID namespace inside a new user namespace (#912); --kill-child kills it when
+# unshare dies, and --map-current-user keeps the runner's own uid, so tools that start namespaces of their own
+# (sandboxes) still can. Without a mapping the command would run as the overflow uid.
+namespace_flags='--user --pid --fork --kill-child --map-current-user'
 
 # marked MARK: processes this user can read whose environment carries the command's marker.
 marked() {
@@ -1634,16 +1643,40 @@ reap() {
 command=$1
 shift
 case $command in
-    lead)
+    contain)
+        # contain: prints "namespace UNSHARE" when the unshare on PATH starts a command as PID 1 of a new user and
+        # PID namespace here, else "session-marker REASON" (#912).
+        unshare=$(command -v unshare) || unshare=''
+        case $unshare in
+            /*) ;;
+            *) echo 'session-marker unshare is not on PATH'; exit 0 ;;
+        esac
+        # shellcheck disable=SC2086 # namespace_flags is a list of flags.
+        if reason=$("$unshare" $namespace_flags -- /bin/sh -c 'test $$ -eq 1' 2>&1 < /dev/null); then
+            printf 'namespace %s\n' "$unshare"
+        else
+            reason=$(printf '%s\n' "$reason" | sed -n '1p' | tr -cd '[:print:]' | cut -c1-200)
+            printf 'session-marker unshare failed: %s\n' "${reason:-no message}"
+        fi
+        ;;
+    lead | lead-namespace)
         # lead LEADER STDOUT STDERR PARENT PARENT_START MARK COMMAND...: setsid made this shell the session leader,
         # so its pid names the session, and exec keeps it for the backend. The leader file is written before pwsh
         # is checked, so a watchdog that saw pwsh exit reads it; a command whose pwsh is already gone never starts.
+        # lead-namespace LEADER STDOUT STDERR PARENT PARENT_START MARK UNSHARE COMMAND... does the same, but execs
+        # UNSHARE, which stays the session leader and starts the command as PID 1 of its own namespace (#912).
         printf '%s\n' "$$" > "$1"
         exec > "$2" 2> "$3"
         if [ "$(start_time "$4")" != "$5" ]; then exit 125; fi
         AGENT_HARNESS_REVIEW_RUN=$6
         export AGENT_HARNESS_REVIEW_RUN
         shift 6
+        if [ "$command" = lead-namespace ]; then
+            unshare=$1
+            shift
+            # shellcheck disable=SC2086 # namespace_flags is a list of flags.
+            exec "$unshare" $namespace_flags -- "$@"
+        fi
         exec "$@"
         ;;
     spawn-watch)
@@ -1703,6 +1736,34 @@ public static class ReviewProcessNative {
 }
 $script:ReviewChildSubreaperTried = $false
 
+function Get-ReviewProcessContainment {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Helper)
+
+    # Probed once per run (#912), and the run log says which path runs: namespace, or the session-marker fallback
+    # where unshare is missing or unprivileged user namespaces are not allowed.
+    if ($null -ne $script:ReviewProcessContainment) { return $script:ReviewProcessContainment }
+    $report = ''
+    try {
+        $report = [string](& /bin/sh $Helper contain 2> $null | Select-Object -First 1)
+    } catch {
+        $report = "session-marker the probe failed: $($_.Exception.Message)"
+    }
+    $mode, $detail = $report.Trim() -split ' ', 2
+    $containment = [pscustomobject]@{ Mode = 'session-marker'; Unshare = $null }
+    if ($mode -eq 'namespace' -and $detail -and $detail.StartsWith('/')) {
+        $containment.Mode = 'namespace'
+        $containment.Unshare = $detail
+        Write-Host "Review process containment: namespace (each command runs as PID 1 of its own user and PID namespace)"
+    } else {
+        if (-not $detail) { $detail = 'the probe gave no answer' }
+        Write-Host "Review process containment: session-marker ($detail)"
+    }
+    $script:ReviewProcessContainment = $containment
+    return $containment
+}
+$script:ReviewProcessContainment = $null
+
 function Start-ReviewProcessSession {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string]$ScratchDirectory)
@@ -1715,11 +1776,13 @@ function Start-ReviewProcessSession {
 
     $helper = Join-Path $ScratchDirectory 'review-session.sh'
     [System.IO.File]::WriteAllText($helper, $script:ReviewSessionHelperScript.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    $containment = Get-ReviewProcessContainment -Helper $helper
     $id = [guid]::NewGuid().ToString('N')
     $session = [pscustomobject]@{
         Mark = $id
         Setsid = $setsid.Source
         Helper = $helper
+        Unshare = $containment.Unshare
         LeaderFile = Join-Path $ScratchDirectory "review-session-$id.leader"
         DoneFile = Join-Path $ScratchDirectory "review-session-$id.done"
         WrapperOutputFile = Join-Path $ScratchDirectory "review-session-$id.out"
@@ -1743,12 +1806,13 @@ function Get-ReviewSessionCommandLine {
     )
 
     if ($null -eq $Session) { return [pscustomobject]@{ FilePath = $FilePath; Arguments = @($Arguments) } }
+    $leader = @($Session.LeaderFile, $StdoutPath, $StderrPath, [string]$PID, $Session.ParentStart, $Session.Mark)
+    # On the namespace path (#912) the leader execs unshare, which starts the command as PID 1 of its own namespace.
+    $lead = @('lead') + $leader
+    if ($Session.Unshare) { $lead = @('lead-namespace') + $leader + @($Session.Unshare) }
     return [pscustomobject]@{
         FilePath = $Session.Setsid
-        Arguments = @(
-            '--wait', '/bin/sh', $Session.Helper, 'lead', $Session.LeaderFile, $StdoutPath, $StderrPath,
-            [string]$PID, $Session.ParentStart, $Session.Mark, $FilePath
-        ) + @($Arguments)
+        Arguments = @('--wait', '/bin/sh', $Session.Helper) + $lead + @($FilePath) + @($Arguments)
     }
 }
 
