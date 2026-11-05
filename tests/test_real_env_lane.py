@@ -252,7 +252,8 @@ def test_junit_counts(tmp_path):
 
 
 def test_pytest_run_ok_and_line():
-    assert lane.PytestRun(0, passed=3).ok and lane.PytestRun(5).ok  # 5: nothing selected
+    assert lane.PytestRun(0, passed=3).ok
+    assert not lane.PytestRun(5).ok and not lane.PytestRun(0, skipped=4).ok  # nothing ran is not a pass
     assert not lane.PytestRun(1, failed=1).ok and not lane.PytestRun(0, errors=1).ok
     assert lane.PytestRun(0, 1, 2, 3, 4).line("x") == "x: 1 passed, 2 failed, 3 errors, 4 skipped"
 
@@ -556,9 +557,19 @@ def test_sandbox_suite_fails_on_a_failing_test_or_a_leaked_secret(tmp_path, idle
     assert result.state == lane.FAILED and "#370 class" in result.summary
 
 
-def test_sandbox_suite_notes_when_no_docker_test_ran(tmp_path, idle):
-    result = lane.sandbox_suite(FakeLane(tmp_path, tests=lane.PytestRun(5)))
-    assert result.state == lane.PASSED and "no docker-marked test ran" in result.summary
+def test_sandbox_suite_fails_when_no_docker_test_ran(tmp_path, idle):
+    result = lane.sandbox_suite(FakeLane(tmp_path, tests=lane.PytestRun(0, skipped=6)))
+    assert result.state == lane.FAILED and "at least one must run" in result.summary
+
+
+def test_without_the_commits_cli_image_the_cli_tests_skip_instead_of_using_the_installed_one(tmp_path, idle):
+    class NoCli(FakeLane):
+        def image(self, kind, dockerfile, build):
+            return "" if kind == "cli" else super().image(kind, dockerfile, build)
+    run = NoCli(tmp_path)
+    lane.sandbox_suite(run)
+    env = run.markers[0][1]
+    assert env["HARNESS_TEST_CLI_IMAGE"] == lane.MISSING_IMAGE and env["HARNESS_TEST_SANDBOX_PROXY"] == lane.NO_PROXY
 
 
 def test_gpu_suite_runs_the_marked_tests_and_a_session_on_the_live_model(tmp_path, idle):
@@ -637,22 +648,42 @@ def test_hosted_suite_runs_one_session_per_logged_in_backend_and_records_the_wee
     assert lane.read_ledger(tmp_path) == {"last_run_at": 5_000_000.0, "sha": SHA}
 
 
+def timed_run(start: float, end: float) -> lane.SessionRun:
+    return lane.SessionRun("s", "done", events=[{"type": "status", "status": "running", "ts": start},
+                                                {"type": "assistant", "content": lane.OK_WORD},
+                                                {"type": "run_finished", "status": "done", "ts": end}])
+
+
+def test_overlap_needs_both_windows():
+    assert lane.overlapped(timed_run(0, 10), timed_run(5, 15))
+    assert not lane.overlapped(timed_run(0, 10), timed_run(10, 20)) and not lane.overlapped(timed_run(0, 10),
+                                                                                          lane.SessionRun("s", "done"))
+
+
 def test_hosted_suite_pair_replaces_claudes_session_and_checks_the_login_after(tmp_path, idle, monkeypatch):
     sessions: list[str | None] = []
 
     def drive(inst, prompt, backend=None, timeout=0, client=None):
         sessions.append(backend)
-        return lane.SessionRun("s", "done", events=[{"type": "assistant", "content": lane.OK_WORD}])
+        return timed_run(10.0 + len(sessions), 30.0)   # both pair sessions run between 12 and 30: they overlap
     monkeypatch.setattr(lane, "drive_session", drive)
-    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), pair=True, force_hosted=True,
-                                        live=hosted_live(tmp_path), hosted_opt_in=("codex",)))
+    run = FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), pair=True, force_hosted=True,
+                   live=hosted_live(tmp_path), hosted_opt_in=("codex",))
+    result = lane.hosted_suite(run)
     assert result.state == lane.PASSED and sorted(sessions) == ["claude", "claude", "codex"]
     assert result.details["pair"] == "claude"
+    assert run.instance_spec["backends"]["claude"]["max_sessions"] == 2  # room for both at once
+
+    one_after_the_other = iter([timed_run(0, 10), timed_run(0, 10), timed_run(20, 30)])
+    monkeypatch.setattr(lane, "drive_session", lambda *a, **k: next(one_after_the_other))
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), pair=True, force_hosted=True,
+                                        live=hosted_live(tmp_path), hosted_opt_in=("codex",)))
+    assert result.state == lane.FAILED and "did not run at the same time" in result.summary
 
 
     def rotating(inst, prompt, backend=None, timeout=0, client=None):  # a session rewrites the shared credential
         (tmp_path / "claude-oauth-token").write_text("")
-        return lane.SessionRun("s", "done", events=[{"type": "assistant", "content": lane.OK_WORD}])
+        return timed_run(0, 10)
     monkeypatch.setattr(lane, "drive_session", rotating)
     result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), pair=True, force_hosted=True,
                                         live=hosted_live(tmp_path)))
@@ -767,7 +798,12 @@ def test_pytest_runs_the_marker_from_the_tree_with_capped_workers(tmp_path, monk
 
 def test_instance_starts_the_daemon_in_its_own_session_and_removes_only_its_leftovers(tmp_path, monkeypatch):
     removed: list[list[str]] = []
-    monkeypatch.setattr(lane, "_run", lambda args, **_k: removed.append(args) or subprocess.CompletedProcess(args, 0))
+    listing = "harness-abc\n/harness-abc-claude\nharness-abc-mcp\nharness-abcdef\nharness-abcdef-codex\n"
+
+    def run(args, **_k):
+        removed.append(args)
+        return subprocess.CompletedProcess(args, 0, listing if args[:2] == ["docker", "ps"] else "", "")
+    monkeypatch.setattr(lane, "_run", run)
     started = {}
 
     class FakePopen:
@@ -800,9 +836,12 @@ def test_instance_starts_the_daemon_in_its_own_session_and_removes_only_its_left
     assert json.loads(started["env"][lane.SPEC_ENV]) == {"backends": {"claude": {"enabled": True}}}
     assert "--spec" not in args and not any("live-spec" in a for a in args)
     assert killed == [(4242, lane.signal.SIGTERM)]
-    assert ["docker", "rm", "-f", "harness-abc"] in removed
+    gone = sorted(a[3] for a in removed if a[:3] == ["docker", "rm", "-f"])
+    # Its own session's sandbox, CLI and relay containers; never another session's, even one whose id starts the same.
+    assert gone == ["harness-abc", "harness-abc-claude", "harness-abc-mcp"]
     assert ["docker", "network", "rm", "real-env-r1-sbx"] in removed
-    assert all(a[:2] != ["docker", "ps"] for a in removed)  # never a sweep by label or name pattern
+    assert [a for a in removed if a[:2] == ["docker", "ps"]] == [
+        ["docker", "ps", "-a", "--filter", "name=harness-abc", "--format", "{{.Names}}"]]  # only its own ids
 
 
 def test_instance_that_never_starts_is_an_error_with_its_log(tmp_path, monkeypatch):
@@ -901,3 +940,39 @@ def test_run_refuses_malformed_arguments_before_running_anything(tmp_path):
         with pytest.raises(SystemExit, match=message):
             lane.main(base + extra)
     assert not (tmp_path / "base" / "runs").exists()
+
+
+def test_gpu_suite_yields_to_a_live_session_that_arrives_during_the_checks(tmp_path, idle, monkeypatch):
+    readings = iter([metrics(), metrics(**{'harness_sessions{status="running"}': 1})])
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(readings))
+    run = FakeLane(tmp_path)
+    run.instance = lambda *a, **k: pytest.fail("no session after a live one started")
+    result = lane.gpu_suite(run)
+    assert result.state == lane.SKIPPED and result.summary.startswith("busy: 1 live session(s) started")
+    assert "session not run" in result.summary
+
+
+def test_gpu_suite_fails_when_no_gpu_check_ran(tmp_path, idle):
+    events = [{"type": "tool_result", "name": "write_file", "ok": True, "output": "wrote lane.txt"}]
+    result = lane.gpu_suite(FakeLane(tmp_path, tests=lane.PytestRun(5), client=FakeClient(events=events)))
+    assert result.state == lane.FAILED and "at least one must run" in result.summary
+
+
+def test_docker_marked_tests_never_start_maintenance():
+    """Maintenance removes session containers its own database doesn't know. On the deploy host the lane runs the
+    docker-marked tests beside the live instance, so none of them may start a Manager with maintenance on (#731)."""
+    import ast
+    offenders = []
+    for path in sorted(Path(__file__).parent.glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or not any(
+                    "docker" in ast.unparse(d) for d in fn.decorator_list):
+                continue
+            for call in ast.walk(fn):
+                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "start"
+                        and isinstance(call.func.value, ast.Name) and call.func.value.id in ("m", "manager")
+                        and not any(k.arg == "maintenance" and isinstance(k.value, ast.Constant)
+                                    and k.value.value is False for k in call.keywords)):
+                    offenders.append(f"{path.name}:{call.lineno} {fn.name}")
+    assert offenders == []

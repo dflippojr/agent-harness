@@ -21,9 +21,9 @@ against `origin/main`, and reports on the commit it tested.
 
 | Suite | When | What it runs | Passes when |
 | --- | --- | --- | --- |
-| `sandbox` | Nightly | 1. `pytest -m docker` from the tree, with `HARNESS_TEST_SANDBOX_IMAGE` and `HARNESS_TEST_CLI_IMAGE` set to the commit's images and `HARNESS_LIVE_DOCKER=1`. <br>2. One scripted session in the real sandbox: `git_clone local:lane-fixture`, `run_shell` of the fixture, `verify` (the fixture's unittest), then three reads of a host file outside `/workspace` (a `../` path, its absolute host path, and a symlink committed in the fixture repo), and a `run_shell` `cat` of all three. | No marked test fails. The session ends `done`. The clone, the shell run and `verify` succeed. The host file's random contents appear nowhere in the session's events or transcript (#370 class). |
-| `gpu` | Nightly | 1. A gate, which reads the live daemon's `/metrics`. It skips as `gpu-held: ...` unless the GPU guard is `clear`, there's no manual hold, the model isn't parked and RAM isn't low. <br>2. `pytest -m gpu tests/real_env/gpu_checks.py` (a text reply and a tool call through `harness.llm`; outside default collection, so CI never sees it). <br>3. One short session on the real llama-server that must call `write_file`. | The marked tests pass. The session ends `done` with a successful `write_file`. |
-| `hosted-cli` | Weekly | 1. One minimal print-mode session ("reply with exactly `real-env-ok`") per backend that is safe to run (see [Hosted credentials](#hosted-credentials)), available and logged in. <br>2. With `--pair` (the weekly unit passes it), Claude's session is replaced by two concurrent sessions sharing its one token (#390 class). | Every session ends `done` with `real-env-ok` in the assistant's answer (not just anywhere in the transcript, which holds the prompt too), and Claude's token file is unchanged after the pair. |
+| `sandbox` | Nightly | 1. `pytest -m docker` from the tree, with `HARNESS_TEST_SANDBOX_IMAGE` and `HARNESS_TEST_CLI_IMAGE` set to the commit's images (a name no image has when the commit's CLI image isn't available, so those tests skip rather than use the installed one), `HARNESS_TEST_SANDBOX_PROXY` set to a loopback discard port (so the daemon test's network command fails closed instead of attaching the live egress proxy) and `HARNESS_LIVE_DOCKER=1`. <br>2. One scripted session in the real sandbox: `git_clone local:lane-fixture`, `run_shell` of the fixture, `verify` (the fixture's unittest), then three reads of a host file outside `/workspace` (a `../` path, its absolute host path, and a symlink committed in the fixture repo), and a `run_shell` `cat` of all three. | At least one marked test runs and none fails. The session ends `done`. The clone, the shell run and `verify` succeed. The host file's random contents appear nowhere in the session's events or transcript (#370 class). |
+| `gpu` | Nightly | 1. A gate, which reads the live daemon's `/metrics`. It skips as `gpu-held: ...` unless the GPU guard is `clear`, there's no manual hold, the model isn't parked and RAM isn't low. <br>2. `pytest -m gpu tests/real_env/gpu_checks.py` (a text reply and a tool call through `harness.llm`; outside default collection, so CI never sees it). <br>3. One short session on the real llama-server that must call `write_file`. | At least one check runs and none fails. The gate is read again before the session, and a live session or hold that arrived meanwhile turns the suite into a skip. The session ends `done` with a successful `write_file`. |
+| `hosted-cli` | Weekly | 1. One minimal print-mode session ("reply with exactly `real-env-ok`") per backend that is safe to run (see [Hosted credentials](#hosted-credentials)), available and logged in. <br>2. With `--pair` (the weekly unit passes it), Claude's session is replaced by two concurrent sessions sharing its one token (#390 class), with the disposable daemon given room for both at once. | Every session ends `done` with `real-env-ok` in the assistant's answer (not just anywhere in the transcript, which holds the prompt too), the two pair sessions' runs overlap in time (from their events' timestamps), and Claude's token file is unchanged after the pair. |
 
 The lane never approves anything. A session that asks for an approval is denied, and the denial is listed in the
 summary.
@@ -82,8 +82,12 @@ The disposable daemon:
 - Has a sandbox proxy that doesn't exist, so a network command fails closed instead of going through the live
   egress proxy.
 
-When the run ends, the lane removes its own session containers by name (`harness-<its session id>`) and its own
-networks. It never sweeps by label or pattern.
+When the run ends, the lane removes its own session containers by name: `harness-<its session id>` and
+`harness-<its session id>-<suffix>` (the CLI and relay containers), matched in full against each of its own session
+ids. It also removes its own networks. It never sweeps by label or by any wider pattern.
+
+The `docker`-marked tests run in a separate pytest process on the same engine. None of them may start a Manager with
+maintenance on: `test_docker_marked_tests_never_start_maintenance` fails if one does.
 
 ### Hosted credentials
 

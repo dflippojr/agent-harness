@@ -66,7 +66,8 @@ OK_WORD = "real-env-ok"
 FIXTURE_REPO = "lane-fixture"
 PROJECT = "lane"
 NO_PROXY = "http://127.0.0.1:9"   # discard port: nothing answers, so a sandbox network command fails closed
-SPEC_ENV = "REAL_ENV_LANE_SPEC"   # serve's spec (JSON) comes through the environment, never a path on its command line
+SPEC_ENV = "REAL_ENV_LANE_SPEC"
+MISSING_IMAGE = "real-env-lane-no-such-image:missing"  # a name no image has: tests that need it skip   # serve's spec (JSON) comes through the environment, never a path on its command line
 GPU_CHECKS = "tests/real_env/gpu_checks.py"
 
 DEFAULT_BASE = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "agent-harness-real-env"
@@ -350,7 +351,8 @@ class PytestRun:
 
     @property
     def ok(self) -> bool:
-        return self.code in (0, 5) and not self.failed and not self.errors   # 5: nothing selected
+        """At least one marked test ran and none failed. Nothing selected or everything skipped is not a pass."""
+        return self.code == 0 and self.passed > 0 and not self.failed and not self.errors
 
     def line(self, label: str) -> str:
         return f"{label}: {self.passed} passed, {self.failed} failed, {self.errors} errors, {self.skipped} skipped"
@@ -513,7 +515,13 @@ class Lane:
         """This instance's session containers (named by its own session ids) and its networks; nothing else."""
         sessions = root / "sessions.txt"
         for sid in sessions.read_text(encoding="utf-8").split() if sessions.is_file() else ():
-            _run(["docker", "rm", "-f", f"harness-{sid}"], timeout=60)
+            # harness-<sid> (sandbox) and harness-<sid>-<claude|codex|cursor|mcp|...> (CLI and relay containers)
+            mine = re.compile(rf"harness-{re.escape(sid)}(-[a-z0-9_.-]+)?")
+            listed = _run(["docker", "ps", "-a", "--filter", f"name=harness-{sid}", "--format", "{{.Names}}"],
+                          timeout=60)
+            names = {n.strip().lstrip("/") for n in (listed.stdout or "").splitlines()} | {f"harness-{sid}"}
+            for name in sorted(n for n in names if mine.fullmatch(n)):
+                _run(["docker", "rm", "-f", name], timeout=60)
         for net in ("sbx", "egress", "proxy"):
             _run(["docker", "network", "rm", f"real-env-{self.tag}-{net}"], timeout=60)
 
@@ -611,6 +619,18 @@ def drive_session(inst: Instance, prompt: str, *, backend: str | None = None, ti
             client.close()
 
 
+def run_window(run: SessionRun) -> tuple[float, float] | None:
+    """(started, finished) of the session's run, from its events' timestamps."""
+    starts = [e["ts"] for e in run.events if e.get("type") == "status" and e.get("status") == "running" and "ts" in e]
+    ends = [e["ts"] for e in run.events if e.get("type") in ("run_finished",) and "ts" in e]
+    return (min(starts), max(ends)) if starts and ends else None
+
+
+def overlapped(a: SessionRun, b: SessionRun) -> bool:
+    wa, wb = run_window(a), run_window(b)
+    return bool(wa and wb and wa[0] < wb[1] and wb[0] < wa[1])
+
+
 def describe(run: SessionRun) -> str:
     lines = [f"session {run.sid}: {run.status}" + (f" ({run.stop_reason})" if run.stop_reason else "")]
     for e in run.events:
@@ -656,20 +676,22 @@ def sandbox_suite(lane: Lane) -> SuiteResult:
         return SuiteResult("sandbox", SKIPPED, f"busy: the live daemon kept {busy} session(s) running")
     lane.sandbox_image = lane.image("sandbox", "Dockerfile", build=True)
     lane.cli_image = lane.image("cli", "cli.Dockerfile", build=False)
+    # Without the commit's CLI image the CLI container tests must skip, not fall back to whatever image is installed.
     env = lane.env(HARNESS_TEST_SANDBOX_IMAGE=lane.sandbox_image, HARNESS_LIVE_DOCKER="1",
-                   **({"HARNESS_TEST_CLI_IMAGE": lane.cli_image} if lane.cli_image else {}))
+                   HARNESS_TEST_CLI_IMAGE=lane.cli_image or MISSING_IMAGE,
+                   HARNESS_TEST_SANDBOX_PROXY=NO_PROXY)
     tests = lane.pytest("docker", env)
     with lane.instance("sandbox") as inst:
         run = drive_session(inst, "real-env lane: sandbox journey", timeout=900)
         secret = (inst.root / "outside" / "secret.txt").read_text(encoding="utf-8").strip()
-    problems = ([] if tests.ok else [tests.line("docker-marked tests")]) + sandbox_checks(run, secret)
+    problems = ([] if tests.ok else [tests.line("docker-marked tests (none may fail, at least one must run)")])
+    problems += sandbox_checks(run, secret)
     details = {"image": lane.sandbox_image, "cli_image": lane.cli_image or "(none: CLI container tests skip)",
                "pytest": asdict(tests) | {"output": ""}, "session": run.sid, "denied_approvals": run.denied}
     log = tests.output[-6000:] + "\n" + describe(run)
     if problems:
         return SuiteResult("sandbox", FAILED, "; ".join(problems)[:500], log, details)
-    note = "" if tests.passed else " (no docker-marked test ran)"
-    return SuiteResult("sandbox", PASSED, f"{tests.line('docker tests')}; sandbox session passed{note}", log, details)
+    return SuiteResult("sandbox", PASSED, f"{tests.line('docker tests')}; sandbox session passed", log, details)
 
 
 def gpu_suite(lane: Lane) -> SuiteResult:
@@ -682,10 +704,17 @@ def gpu_suite(lane: Lane) -> SuiteResult:
     model = live_model(live_raw(lane.live_config), lane.live_config)
     env = lane.env(HARNESS_REAL_MODEL_URL=model["base_url"], HARNESS_REAL_MODEL_NAME=model["name"])
     tests = lane.pytest("gpu", env, timeout=1800, paths=(GPU_CHECKS,))  # outside default collection: by path
+    # Yield again before the session: a live session or a GPU hold that arrived during the checks goes first.
+    now = fetch_metrics(lane.metrics_url)
+    late = (f"busy: {live_busy(now)} live session(s) started during the GPU checks" if live_busy(now)
+            else gpu_hold_reason(now))
+    if late:
+        return SuiteResult("gpu", SKIPPED, f"{late}; {tests.line('gpu tests')}, session not run", tests.output[-6000:],
+                           {"model": model["name"], "pytest": asdict(tests) | {"output": ""}})
     with lane.instance("gpu", spec={"model": model}) as inst:
         run = drive_session(inst, f"Use the write_file tool to create lane.txt containing exactly {OK_WORD}. "
                                   "Then reply with the single word done.", timeout=900)
-    problems = [] if tests.ok else [tests.line("gpu-marked tests")]
+    problems = [] if tests.ok else [tests.line("gpu-marked checks (none may fail, at least one must run)")]
     if run.status != "done":
         problems.append(f"the session ended {run.status}: {run.stop_reason}")
     elif not [e for e in run.tool_results("write_file") if e.get("ok")]:
@@ -766,7 +795,9 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
         return SuiteResult("hosted-cli", SKIPPED, f"busy: the live daemon kept {busy} session(s) running")
     runs: dict[str, SessionRun] = {}
     problems, log = [], []
-    spec = {"backends": {name: backends[name] for name in eligible}}  # only what hosted_plan cleared
+    spec = {"backends": {name: dict(backends[name]) for name in eligible}}  # only what hosted_plan cleared
+    if lane.pair and "claude" in spec["backends"]:  # room for both, or the daemon would queue the second
+        spec["backends"]["claude"]["max_sessions"] = max(2, int(spec["backends"]["claude"].get("max_sessions") or 1))
     token = token_digest(backends.get("claude") or {}) if "claude" in eligible else ""
     with lane.instance("hosted", spec) as inst, inst.client() as client:
         listed = client.get("/api/v1/backends").json()
@@ -789,6 +820,8 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 both = list(pool.map(lambda _: drive_session(inst, prompt, backend=pair, timeout=300), range(2)))
             runs[f"{pair} (pair 1)"], runs[f"{pair} (pair 2)"] = both
+            if not overlapped(*both):
+                problems.append(f"#390 class: the two {pair} sessions did not run at the same time")
             if token_digest(backends.get(pair) or {}) != token:
                 problems.append(f"#390 class: {pair}'s token changed or vanished during two concurrent sessions")
     for name, run in runs.items():

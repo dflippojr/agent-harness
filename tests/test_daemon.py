@@ -15,6 +15,7 @@ import pytest
 
 from harness import compaction
 from harness.config import Config, ModelConfig, Project, SandboxConfig
+from harness.sandbox import proxy_container
 from harness.db import Database
 from harness.llm import Completion, LLMError
 from harness.manager import Manager
@@ -26,6 +27,9 @@ from waits import scaled
 
 # The real-environment lane (#731, scripts/real_env_lane.py) points this at the image built from the tested commit.
 SANDBOX_IMAGE = os.environ.get("HARNESS_TEST_SANDBOX_IMAGE") or "agent-harness-sandbox:py312"
+# The lane also gives a proxy nothing answers on, so network commands fail closed rather than attach the live egress
+# proxy to a test network on the deploy host.
+SANDBOX_PROXY = os.environ.get("HARNESS_TEST_SANDBOX_PROXY") or SandboxConfig.proxy
 
 
 def make_cfg(tmp: Path, context_tokens: int = 65536, rules: list | None = None) -> Config:
@@ -35,7 +39,7 @@ def make_cfg(tmp: Path, context_tokens: int = 65536, rules: list | None = None) 
     return Config(
         host="127.0.0.1", port=0, data_dir=tmp / "data", repos_dir=tmp / "repos", default_model="fake",
         models={"fake": ModelConfig(name="fake", base_url="http://unused", context_tokens=context_tokens)},
-        sandbox=SandboxConfig(image=SANDBOX_IMAGE, network=f"harness-test-sbx-{token}",
+        sandbox=SandboxConfig(image=SANDBOX_IMAGE, proxy=SANDBOX_PROXY, network=f"harness-test-sbx-{token}",
                               egress_network=f"harness-test-egress-{token}"),
         projects={"scratch": Project(name="scratch"), "guarded": Project(name="guarded", rules=rules or [])},
     )
@@ -715,12 +719,13 @@ def test_sandbox_shell_local_clone_and_network_gate(tmp_path):
         assert "hi" in outputs[1]
         assert outputs[1].rstrip().endswith("1")
         assert "no-dns" in outputs[2]
-        proxy = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", "harness-egress-sandbox"],
+        proxy_name = proxy_container(cfg.sandbox)
+        proxy = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", proxy_name],
                                capture_output=True, text=True).stdout.strip()
         if proxy == "true":
             assert "online" in outputs[3]
         else:  # fails closed: no direct route instead
-            assert s["status"] == "failed" and "harness-egress-sandbox is not running" in s["stop_reason"]
+            assert s["status"] == "failed" and f"{proxy_name} is not running" in s["stop_reason"]
         await asyncio.gather(*m.tasks.values())  # "done" is committed before the container is stopped
         state = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", f"harness-{s['id']}"],
                                capture_output=True, text=True).stdout.strip()
