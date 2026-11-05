@@ -73,7 +73,6 @@ def _telemetry_metrics(out: _Out) -> None:
 def _core_rows(db) -> dict:
     """The aggregate queries behind `_core_metrics`: whole-table scans of sessions, events and approvals."""
     with db.lock:
-        by_status = dict(db.conn.execute("SELECT status, COUNT(*) FROM sessions GROUP BY status").fetchall())
         tokens = db.conn.execute(
             "SELECT model, COALESCE(SUM(json_extract(totals, '$.prompt_tokens')), 0), "
             "COALESCE(SUM(json_extract(totals, '$.completion_tokens')), 0), "
@@ -121,7 +120,7 @@ def _core_rows(db) -> dict:
         finished = db.conn.execute(
             "SELECT status, stop_reason, COUNT(*) FROM sessions WHERE status IN ('done', 'failed', 'cancelled') "
             "GROUP BY 1, 2").fetchall()
-    return {"by_status": by_status, "tokens": tokens, "tools": tools, "kinds": kinds, "round_resets": round_resets,
+    return {"tokens": tokens, "tools": tools, "kinds": kinds, "round_resets": round_resets,
             "dead_end": dead_end, "correlated": correlated, "cache_row": cache_row, "activity": activity,
             "approvals": approvals, "finished": finished}
 
@@ -136,9 +135,18 @@ def _cached_core_rows(db) -> dict:
     return hit[1]
 
 
+def _session_counts(db) -> dict[str, int]:
+    """Sessions by status, read on every scrape rather than cached: the real-environment lane reads them right before
+    it starts work and must see a session that started a moment ago (#731). The `sessions_status` index keeps it
+    cheap."""
+    with db.lock:
+        return dict(db.conn.execute("SELECT status, COUNT(*) FROM sessions GROUP BY status").fetchall())
+
+
 def _core_metrics(m: Manager, out: _Out, db) -> dict:
     rows = _cached_core_rows(db)
-    by_status, tokens, tools, kinds = rows["by_status"], rows["tokens"], rows["tools"], rows["kinds"]
+    by_status = _session_counts(db)
+    tokens, tools, kinds = rows["tokens"], rows["tools"], rows["kinds"]
     round_resets, dead_end, correlated = rows["round_resets"], rows["dead_end"], rows["correlated"]
     cache_row, approvals, finished = rows["cache_row"], rows["approvals"], rows["finished"]
     edit_mismatches, elide_only = rows["activity"]
