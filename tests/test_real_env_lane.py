@@ -1604,3 +1604,30 @@ def test_the_run_removes_its_cache_volumes_and_no_live_one(tmp_path, monkeypatch
     lane_.cleanup()   # the end of every run: the Docker tests' volumes are made outside any instance
     removed = sorted(a[3] for a in calls if a[:3] == ["docker", "volume", "rm"])
     assert removed == [f"{prefix}cache-npm-scratch", f"{prefix}cache-pip-scratch", f"{prefix}cache-uabc-pip-scratch"]
+
+
+# --- review of 8a00f8bb: an empty /metrics reply is not idle, and a run that never used Docker leaves it alone --------
+def test_an_empty_or_unparseable_metrics_reply_is_not_idle():
+    """A 200 with no samples (an empty body, an HTML page, a proxy's error page) shows no sessions at all, so they are
+    unknown: the lane defers, as it does when /metrics doesn't answer."""
+    for reading in ({}, lane.parse_metrics(""), lane.parse_metrics("<html>502 Bad Gateway</html>\n")):
+        reason = lane.busy_reason(reading)
+        assert reason.startswith("busy:") and "unknown" in reason, (reading, reason)
+
+
+def test_a_run_whose_suites_never_touch_docker_makes_no_docker_call(tmp_path, monkeypatch):
+    sha = git_repo(tmp_path / "repo")
+    calls: list[list[str]] = []
+    real_run = lane._run   # noqa: SLF001 - git still runs for real; docker calls are recorded, never made
+
+    def run(args, **kwargs):
+        if args and args[0] == "docker":
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return real_run(args, **kwargs)
+    monkeypatch.setattr(lane, "_run", run)
+    monkeypatch.setattr(lane, "sandbox_suite", lambda l: lane.SuiteResult("sandbox", lane.SKIPPED, "busy: x"))
+    monkeypatch.setattr(lane, "gpu_suite", lambda l: lane.SuiteResult("gpu", lane.SKIPPED, "gpu-held: x"))
+    assert lane.main(["run", "--sha", sha, "--repo", str(tmp_path / "repo"), "--base", str(tmp_path / "base"),
+                      "--no-report"]) == 0
+    assert not [c for c in calls if c and c[0] == "docker"], calls
