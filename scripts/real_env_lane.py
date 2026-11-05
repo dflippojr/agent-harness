@@ -447,7 +447,7 @@ class Lane:
     pair: bool = False
     force_hosted: bool = False
     images: dict = field(default_factory=dict)   # kind -> image given on the command line (a PR SHA has none in CI)
-    hosted_opt_in: tuple[str, ...] = ()          # non-Claude backends the owner accepts the shared-login risk for
+    hosted_opt_in: tuple[str, ...] = ()          # non-Claude backends the owner opts in (on a disposable login)
     tree: Path = field(init=False)
     sandbox_image: str = ""
     cli_image: str = ""
@@ -568,6 +568,13 @@ class Lane:
                 _run(["docker", "rm", "-f", name], timeout=60)
         for net in ("sbx", "egress", "proxy"):
             _run(["docker", "network", "rm", f"real-env-{self.tag}-{net}"], timeout=60)
+        # The run's disposable CLI volumes (state and login, `lane_volume`), after the containers that held them.
+        prefix = lane_volume(self.tag, "")
+        listed = _run(["docker", "volume", "ls", "--filter", f"name={prefix}", "--format", "{{.Name}}"], timeout=60)
+        mine = re.compile(rf"{re.escape(prefix)}[a-z0-9][a-z0-9_.-]*")
+        for name in sorted({n.strip() for n in (listed.stdout or "").splitlines()}):
+            if mine.fullmatch(name):
+                _run(["docker", "volume", "rm", name], timeout=60)
 
     def cleanup(self) -> None:
         for tag in self.built_images:
@@ -812,7 +819,9 @@ def hosted_plan(backends: dict, opt_in: tuple[str, ...] = ()) -> tuple[list[str]
     A hosted CLI's login is shared with the owner's own sessions and its OAuth refresh token rotates: a session whose
     refresh fails overwrites the shared credential with an empty one (#390), which logged the tower's Claude out on
     the lane's first proof run. So Claude runs only on the long-lived token (`oauth_token_file`, no login volume, no
-    refresh); every other backend runs only when the owner names it with --hosted-backend."""
+    refresh); every other backend runs only when the owner names it with --hosted-backend. Whatever runs gets a
+    disposable state and login volume per run (`hosted_suite`), never a live one, so an opted-in backend signs in only
+    with a key of its own."""
     eligible, notes = [], []
     for name, spec in sorted(backends.items()):
         spec = spec or {}
@@ -863,8 +872,14 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
     if not cli_image:
         return SuiteResult("hosted-cli", SKIPPED, f"the commit's CLI image (ghcr.io/dflippojr/agent-harness-cli:sha-"
                            f"{lane.sha}) is not available and --cli-image was not given", "\n".join(notes))
-    for backend in spec["backends"].values():
+    for name, backend in spec["backends"].items():
         backend["image"] = cli_image
+        # A disposable state volume per backend, set even where the live config names none (the daemon's default is
+        # Claude's live `harness-auth-claude`). Not a `harness-auth-`/`harness-state-` name, so the login the daemon
+        # derives from it is `<volume>-login` too, never the shared `harness-login-<backend>`: no session, domain
+        # preparation (cli_domains.prepare_command) or probe mounts or chowns a live login or state volume. They are
+        # removed with the instance (`_remove_docker_leftovers`).
+        backend["volume"] = lane_volume(lane.tag, name)
     if "claude" in spec["backends"]:
         # Token auth only: no API key to fall back on, so the session gets CLAUDE_CODE_OAUTH_TOKEN and no login volume.
         claude = spec["backends"]["claude"]
@@ -977,6 +992,11 @@ def lane_config(root: Path, port: int, mode: str, tag: str, image: str, spec: di
     if mode == "hosted":
         config["backends"] = dict(spec.get("backends") or {})
     return config
+
+
+def lane_volume(tag: str, backend: str) -> str:
+    """The run's disposable state volume for `backend` (its login is `<this>-login`); with "" the run's prefix."""
+    return f"real-env-{tag}-{backend}"
 
 
 def token_digest(backend: dict) -> str:
@@ -1244,8 +1264,9 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--pair", action="store_true", help="hosted-cli: two concurrent Claude sessions (#390 class)")
     r.add_argument("--force-hosted", action="store_true", help="hosted-cli: ignore the weekly cap")
     r.add_argument("--hosted-backend", action="append", default=[], metavar="NAME",
-                   help="hosted-cli: also run this non-Claude backend, whose login is shared and refreshes (#390); "
-                        "the owner's decision")
+                   help="hosted-cli: also run this non-Claude backend (the owner's decision). Its session gets a "
+                        "disposable state and login volume, never the shared login, so it needs a key of its own "
+                        "(api_key_file) to sign in")
     r.add_argument("--sandbox-image", default="", help="use this sandbox image instead of the commit's own")
     r.add_argument("--cli-image", default="", help="use this CLI image instead of the commit's own")
     r.add_argument("--keep", action="store_true", help="keep the extracted tree and pytest temp dirs")

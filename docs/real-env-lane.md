@@ -109,9 +109,10 @@ damage:
   `CLAUDE_CODE_OAUTH_TOKEN` and no login volume. Nothing refreshes, so two concurrent sessions can't race. That is
   also the configuration in which the `--pair` check means something.
 - **Every other hosted backend** (Codex, Cursor and others) runs only when the owner names it with
-  `--hosted-backend NAME`. Its login sits in a writable shared volume and refreshes, so the lane can break it the
-  same way. Opting in is the owner's decision. To opt in on the schedule, add the flag to the hosted unit's
-  `ExecStart`.
+  `--hosted-backend NAME`. Its live login sits in a writable shared volume and refreshes, so the lane never mounts
+  it: an opted-in backend runs on an empty disposable login (below) and signs in only with a key of its own
+  (`api_key_file`). Without one its session fails to sign in. Opting in is the owner's decision. To opt in on the
+  schedule, add the flag to the hosted unit's `ExecStart`.
 - **`kind: cli` backends** run on the local model, so they are not hosted and the lane leaves them out.
 
 The lane decides all of this from one snapshot of the live config, read through the daemon's own loader (so a
@@ -119,8 +120,14 @@ The lane decides all of this from one snapshot of the live config, read through 
 to `instance-hosted/live-spec.json`, and the disposable daemon reads only that file, never the live config. Claude's
 readiness is its token file, not `/backends`' `logged_in`, which probes the shared login instead. Each cleared backend runs on the tested commit's CLI image (CI's `agent-harness-cli:sha-<sha>`, or `--cli-image`), never the deployed one the live config names; without it the suite skips. Only the cleared
 backends are copied into the disposable daemon's config, so nothing else in the live config can
-reach a shared login. A cleared backend still uses its configured state volume, so each run adds one tiny
-conversation to that backend's history.
+reach a shared login.
+
+Each copied backend gets a disposable state volume for the run, `real-env-<run>-<backend>`, in place of the live one
+(set even where the live config names none, since the daemon's default is Claude's live `harness-auth-claude`). Its
+login volume follows from it, `real-env-<run>-<backend>-login`, so no session, probe or domain preparation
+(`cli_domains.prepare_command`, which creates and `chown`s the state and login directories) mounts, `chown`s or
+writes a live `harness-auth-*`, `harness-state-*` or `harness-login-*` volume. The lane removes the run's volumes
+with its containers when the instance stops.
 
 Python: the lane runs from its own clone and venv (`run-lane.sh`), never the deployed checkout or its venv.
 
@@ -131,16 +138,13 @@ manual run and the timer can't overlap (and so can't both pass the weekly hosted
 
 ### Known limits
 
-Two behaviours of the core harness, not the lane, remain. Both are follow-ups for the owner:
+One behaviour of the core harness, not the lane, remains. It is a follow-up for the owner:
 
 - **The live instance's maintenance can remove the lane's containers.** It sweeps every `cleanup.interval_minutes`
   (60) and removes containers labelled `agent-harness.session` whose session isn't in its own database, which
   includes a disposable daemon's. That is no danger to the live instance. A sweep during a lane session (about a
   minute long) fails that suite, and the failure shows in the log as a container that vanished. The fix is an
   instance label that maintenance respects, in `harness/maintenance.py` and the code that starts containers.
-- **Preparing a Claude session's domain still mounts the shared login volume, even on token auth.** It does so
-  only to create and `chown` its directory, and the session itself gets the token and no login volume
-  (`harness/cli_domains.py` `prepare_command`). The lane no longer runs the sign-in probe (`/backends?auth=skip`).
 
 ## Scheduling (the owner enables it)
 
