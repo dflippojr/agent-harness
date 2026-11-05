@@ -23,7 +23,7 @@ against `origin/main`, and reports on the commit it tested.
 | --- | --- | --- | --- |
 | `sandbox` | Nightly | 1. `pytest -m docker` from the tree, with `HARNESS_TEST_SANDBOX_IMAGE` and `HARNESS_TEST_CLI_IMAGE` set to the commit's images and `HARNESS_LIVE_DOCKER=1`. <br>2. One scripted session in the real sandbox: `git_clone local:lane-fixture`, `run_shell` of the fixture, `verify` (the fixture's unittest), then three reads of a host file outside `/workspace` (a `../` path, its absolute host path, and a symlink committed in the fixture repo), and a `run_shell` `cat` of all three. | No marked test fails. The session ends `done`. The clone, the shell run and `verify` succeed. The host file's random contents appear nowhere in the session's events or transcript (#370 class). |
 | `gpu` | Nightly | 1. A gate, which reads the live daemon's `/metrics`. It skips as `gpu-held: ...` unless the GPU guard is `clear`, there's no manual hold, the model isn't parked and RAM isn't low. <br>2. `pytest -m gpu` (`tests/test_real_model.py`: a text reply and a tool call through `harness.llm`). <br>3. One short session on the real llama-server that must call `write_file`. | The marked tests pass. The session ends `done` with a successful `write_file`. |
-| `hosted-cli` | Weekly | 1. One minimal print-mode session ("reply with exactly `real-env-ok`") per configured backend that is available and logged in. <br>2. With `--pair` (the weekly unit passes it), Claude's session is replaced by two concurrent sessions sharing its one credential, followed by a login check (#390 class). | Every session ends `done` with `real-env-ok` in its transcript, and Claude is still logged in after the pair. |
+| `hosted-cli` | Weekly | 1. One minimal print-mode session ("reply with exactly `real-env-ok`") per backend that is safe to run (see [Hosted credentials](#hosted-credentials)), available and logged in. <br>2. With `--pair` (the weekly unit passes it), Claude's session is replaced by two concurrent sessions sharing its one token, followed by a login check (#390 class). | Every session ends `done` with `real-env-ok` in its transcript, and Claude is still logged in after the pair. |
 
 The lane never approves anything. A session that asks for an approval is denied, and the denial is listed in the
 summary.
@@ -36,7 +36,7 @@ A suite can be skipped for one of these reasons:
 - `busy: ...`: the live daemon still had sessions running or queued after `--yield-seconds` (default 30 min), so
   the lane yielded to real work.
 - `weekly cap: ...`: a hosted run happened within the last 6.5 days. `hosted-ledger.json` records it.
-- No hosted backend is logged in.
+- No hosted backend is safe to run, or none of those is logged in.
 
 GitHub has no skipped state, so a skipped suite posts `success` with a description starting `skipped:`. The summary
 keeps `"state": "skipped"`.
@@ -85,9 +85,27 @@ The disposable daemon:
 When the run ends, the lane removes its own session containers by name (`harness-<its session id>`) and its own
 networks. It never sweeps by label or pattern.
 
-The hosted suite does use the real credentials, as the owner's own sessions do. It mounts the backend's
-configured login and state volumes, so each run adds one tiny conversation to that history. It stays inside the
-weekly cap.
+### Hosted credentials
+
+A hosted CLI's login is shared with the owner's own sessions, and its OAuth refresh token rotates. A session whose
+refresh fails overwrites the shared credential with an empty one (#390). The lane's first proof run did exactly that:
+on 2026-11-05, one Claude session found an expired access token and left `harness-login-claude` empty, which logged
+the tower's Claude out (see #731). So the hosted suite only runs a backend whose credential a lane session can't
+damage:
+
+- **Claude** runs only on the long-lived token: `backends.claude.oauth_token_file` set in the live config, with the
+  file present and non-empty (`ops/backends/login.sh claude --token`). Its sessions then get
+  `CLAUDE_CODE_OAUTH_TOKEN` and no login volume. Nothing refreshes, so two concurrent sessions can't race. That is
+  also the configuration in which the `--pair` check means something.
+- **Every other hosted backend** (Codex, Cursor and others) runs only when the owner names it with
+  `--hosted-backend NAME`. Its login sits in a writable shared volume and refreshes, so the lane can break it the
+  same way. Opting in is the owner's decision. To opt in on the schedule, add the flag to the hosted unit's
+  `ExecStart`.
+- **`kind: cli` backends** run on the local model, so they are not hosted and the lane leaves them out.
+
+Only the cleared backends are copied into the disposable daemon's config, so nothing else in the live config can
+reach a shared login. A cleared backend still uses its configured state volume, so each run adds one tiny
+conversation to that backend's history.
 
 Python: the lane runs from its own clone and venv (`run-lane.sh`), never the deployed checkout or its venv.
 
@@ -132,7 +150,7 @@ python scripts/real_env_lane.py run --sha <PR head SHA> --suite sandbox --suite 
   tree. Pass `--sandbox-image` and `--cli-image` to reuse an image instead when the PR leaves `sandbox/` alone, for
   example main's `ghcr.io/dflippojr/agent-harness-sandbox:sha-<main sha>`.
 - **Hosted suite.** `--suite hosted-cli` respects the weekly cap. `--force-hosted` ignores it, so use it sparingly:
-  each backend costs one session.
+  each backend costs one session. Read [Hosted credentials](#hosted-credentials) before adding `--hosted-backend`.
 - **Disk.** `--base` puts runs somewhere other than `~/.local/share/agent-harness-real-env`. Each run keeps its
   `runs/<id>/instance-*/` directory (the disposable daemon's log, database and session workspaces) for a post-mortem.
   `--keep` also keeps the extracted tree and the pytest temp dirs. Only the newest 14 run directories are kept

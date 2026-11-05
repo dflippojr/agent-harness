@@ -1,6 +1,8 @@
-# Real-environment lane (#731), weekly: the hosted CLI suite, one tiny print-mode session per logged-in backend, with
-# Claude's session replaced by the #390 pair (two concurrent sessions on one credential). The lane's ledger refuses a
-# second hosted run within 6.5 days. Install as agent-harness-real-env.service says (docs/real-env-lane.md).
+# Real-environment lane (#731), weekly: the hosted CLI suite, one tiny print-mode session per backend that is safe to
+# run, with Claude's session replaced by the #390 pair (two concurrent sessions on one token). Claude runs only on its
+# long-lived token (backends.claude.oauth_token_file); any other backend only with `--hosted-backend NAME` added below,
+# which is the owner's decision (docs/real-env-lane.md, Hosted credentials). The lane's ledger refuses a second hosted
+# run within 6.5 days. Install as agent-harness-real-env.service says.
 [Unit]
 Description=Agent harness real-environment lane (hosted CLI) against origin/main
 After=network-online.target

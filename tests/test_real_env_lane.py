@@ -225,7 +225,7 @@ def test_the_lane_yields_to_live_sessions_then_gives_up():
 
 def test_a_busy_live_daemon_skips_each_suite(tmp_path, monkeypatch):
     monkeypatch.setattr(lane, "wait_for_idle", lambda *a, **k: 2)
-    run = lane.Lane(tmp_path, SHA, tmp_path / "run", tmp_path, force_hosted=True)
+    run = lane.Lane(tmp_path, SHA, tmp_path / "run", tmp_path, force_hosted=True, live_config=hosted_live(tmp_path))
     for suite in (lane.sandbox_suite, lane.gpu_suite, lane.hosted_suite):
         result = suite(run)
         assert result.state == lane.SKIPPED and result.summary.startswith("busy:")
@@ -337,9 +337,10 @@ def test_the_gpu_instance_uses_the_live_model_address(tmp_path):
     assert cfg["data_dir"] != "/live/data"
 
 
-def test_the_hosted_instance_copies_only_the_live_backends(tmp_path):
-    cfg = lane.lane_config(tmp_path / "i", 1, "hosted", "t", "", live_config(tmp_path))
+def test_the_hosted_instance_copies_only_the_cleared_live_backends(tmp_path):
+    cfg = lane.lane_config(tmp_path / "i", 1, "hosted", "t", "", live_config(tmp_path), ("claude",))
     assert cfg["backends"] == {"claude": {"enabled": True, "image": "agent-harness-cli:1"}}
+    assert lane.lane_config(tmp_path / "i", 1, "hosted", "t", "", live_config(tmp_path))["backends"] == {}
     assert cfg["data_dir"] == (tmp_path / "i" / "data").as_posix()
 
 
@@ -397,7 +398,8 @@ def test_gh_cli_errors_are_redacted():
 
 def test_the_command_line_parses_the_scheduled_invocations():
     args = lane.parser().parse_args(["run", "--suite", "hosted-cli", "--pair"])
-    assert args.suite == ["hosted-cli"] and args.pair and not args.no_report
+    assert args.suite == ["hosted-cli"] and args.pair and not args.no_report and args.hosted_backend == []
+    assert lane.parser().parse_args(["run", "--hosted-backend", "codex"]).hosted_backend == ["codex"]
     args = lane.parser().parse_args(["run"])
     assert args.suite is None and args.workers == 2 and Path(args.base).name == "agent-harness-real-env"
 
@@ -493,7 +495,8 @@ class FakeLane(lane.Lane):
         self.markers.append((marker, env))
         return self.tests
 
-    def instance(self, mode):
+    def instance(self, mode, backends=()):
+        self.instance_backends = backends
         root = self.run_dir / f"instance-{mode}"
         (root / "outside").mkdir(parents=True, exist_ok=True)
         (root / "outside" / "secret.txt").write_text("real-env-secret-1\n")
@@ -553,6 +556,43 @@ BACKENDS = [{"name": "local", "available": True, "logged_in": True},
             {"name": "gemini", "available": False, "logged_in": False}]
 
 
+def hosted_live(tmp_path: Path, token: bool = True) -> Path:
+    cfg = tmp_path / "hosted-live"
+    cfg.mkdir(parents=True, exist_ok=True)
+    secret = tmp_path / "claude-oauth-token"
+    secret.write_text("not-a-real-token\n")
+    claude = {"enabled": True, **({"oauth_token_file": str(secret)} if token else {})}
+    (cfg / "harness.yaml").write_text(yaml.safe_dump({
+        "default_model": "qwen", "models": {"qwen": {"base_url": "http://127.0.0.1:8090"}},
+        "backends": {"claude": claude, "codex": {"enabled": True}, "cursor": {"enabled": True},
+                     "gemini": {"enabled": False}, "opencode": {"enabled": True, "kind": "cli"}}}))
+    return cfg
+
+
+def test_hosted_plan_runs_claude_only_on_the_token_and_the_rest_only_when_opted_in(tmp_path):
+    backends = lane.live_backends(hosted_live(tmp_path))
+    eligible, notes = lane.hosted_plan(backends)
+    assert eligible == ["claude"]
+    assert any(n.startswith("codex: opt-in only") for n in notes) and any(n.startswith("cursor:") for n in notes)
+    assert any(n.startswith("opencode: a print-mode CLI on the local model") for n in notes)
+    assert not any(n.startswith("gemini") for n in notes)  # disabled: not configured at all
+    assert lane.hosted_plan(backends, ("codex",))[0] == ["claude", "codex"]
+    eligible, notes = lane.hosted_plan(lane.live_backends(hosted_live(tmp_path / "x", token=False)), ("claude",))
+    assert eligible == [] and any("shared refresh-token login (#390)" in n for n in notes)
+    empty = tmp_path / "empty-token"
+    empty.write_text("")
+    assert lane.hosted_plan({"claude": {"enabled": True, "oauth_token_file": str(empty)}})[0] == []
+    assert lane.hosted_plan({"claude": {"enabled": True, "oauth_token_file": str(tmp_path / "nope")}})[0] == []
+
+
+def test_hosted_suite_skips_when_nothing_is_safe_to_run(tmp_path, idle):
+    (tmp_path / "x").mkdir()
+    run = FakeLane(tmp_path, live=hosted_live(tmp_path / "x", token=False), force_hosted=True)
+    result = lane.hosted_suite(run)
+    assert result.state == lane.SKIPPED and result.summary.startswith("no hosted backend is safe to run")
+    assert "#390" in result.summary and not lane.read_ledger(tmp_path)
+
+
 def test_hosted_suite_runs_one_session_per_logged_in_backend_and_records_the_week(tmp_path, idle, monkeypatch):
     sessions: list[str | None] = []
 
@@ -560,10 +600,13 @@ def test_hosted_suite_runs_one_session_per_logged_in_backend_and_records_the_wee
         sessions.append(backend)
         return lane.SessionRun(f"s{len(sessions)}", "done", transcript=f"assistant: {lane.OK_WORD}")
     monkeypatch.setattr(lane, "drive_session", drive)
-    run = FakeLane(tmp_path, client=FakeClient(backends=BACKENDS))
+    run = FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), live=hosted_live(tmp_path),
+                   hosted_opt_in=("codex",))
     result = lane.hosted_suite(run, clock=lambda: 5_000_000.0)
     assert result.state == lane.PASSED and sessions == ["claude", "codex"]
-    assert "cursor: not logged in, not run" in result.details["notes"] and result.details["pair"] == "off"
+    assert run.instance_backends == ("claude", "codex")  # cursor's login never reaches the instance
+    assert any(n.startswith("cursor: opt-in only") for n in result.details["notes"])
+    assert result.details["pair"] == "off"
     assert lane.read_ledger(tmp_path) == {"last_run_at": 5_000_000.0, "sha": SHA}
 
 
@@ -574,7 +617,8 @@ def test_hosted_suite_pair_replaces_claudes_session_and_checks_the_login_after(t
         sessions.append(backend)
         return lane.SessionRun("s", "done", transcript=lane.OK_WORD)
     monkeypatch.setattr(lane, "drive_session", drive)
-    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), pair=True, force_hosted=True))
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), pair=True, force_hosted=True,
+                                        live=hosted_live(tmp_path), hosted_opt_in=("codex",)))
     assert result.state == lane.PASSED and sorted(sessions) == ["claude", "claude", "codex"]
     assert result.details["pair"] == "claude"
 
@@ -587,17 +631,20 @@ def test_hosted_suite_pair_replaces_claudes_session_and_checks_the_login_after(t
                 return FakeResponse(200, BACKENDS if self.calls == 1 else
                                     [{**b, "logged_in": b["name"] != "claude"} for b in BACKENDS])
             return super().get(path, params)
-    result = lane.hosted_suite(FakeLane(tmp_path, client=LoggedOutAfter(), pair=True, force_hosted=True))
+    result = lane.hosted_suite(FakeLane(tmp_path, client=LoggedOutAfter(), pair=True, force_hosted=True,
+                                        live=hosted_live(tmp_path)))
     assert result.state == lane.FAILED and "#390 class" in result.summary
 
 
 def test_hosted_suite_fails_a_backend_that_does_not_answer_and_skips_with_no_login(tmp_path, idle, monkeypatch):
     monkeypatch.setattr(lane, "drive_session",
                         lambda inst, prompt, backend=None, timeout=0, client=None: lane.SessionRun("s", "failed", "401"))
-    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True))
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
+                                        live=hosted_live(tmp_path)))
     assert result.state == lane.FAILED and "claude: failed 401" in result.summary
     nobody = [{**b, "logged_in": False} for b in BACKENDS]
-    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=nobody), force_hosted=True))
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=nobody), force_hosted=True,
+                                        live=hosted_live(tmp_path)))
     assert result.state == lane.SKIPPED and "logged in" in result.summary
 
 

@@ -25,8 +25,10 @@ files (the hosted backends and the local model's address). The suites:
   (#370 class) that must never return its contents.
 - **gpu**: skipped as ``gpu-held`` unless the live GPU guard is clear and the model is loaded; then the ``gpu``-marked
   tests and one short session on the real llama-server. The lane never loads, parks or restarts the model.
-- **hosted-cli**: at most once a week (a ledger enforces it): one minimal print-mode session per configured, logged-in
-  backend; with ``--pair``, two concurrent sessions sharing one credential (#390 class) and a login check after.
+- **hosted-cli**: at most once a week (a ledger enforces it): one minimal print-mode session per hosted backend whose
+  credential a session can't damage (Claude on its long-lived token only; any other backend only when the owner opts it
+  in, see ``hosted_plan``); with ``--pair``, two concurrent Claude sessions on one token (#390 class) and a login
+  check after.
 """
 
 from __future__ import annotations
@@ -396,6 +398,7 @@ class Lane:
     pair: bool = False
     force_hosted: bool = False
     images: dict = field(default_factory=dict)   # kind -> image given on the command line (a PR SHA has none in CI)
+    hosted_opt_in: tuple[str, ...] = ()          # non-Claude backends the owner accepts the shared-login risk for
     tree: Path = field(init=False)
     sandbox_image: str = ""
     cli_image: str = ""
@@ -462,7 +465,7 @@ class Lane:
         return PytestRun(code, *junit_counts(report), output=output)
 
     @contextlib.contextmanager
-    def instance(self, mode: str) -> Iterator["Instance"]:
+    def instance(self, mode: str, backends: tuple[str, ...] = ()) -> Iterator["Instance"]:
         """The disposable daemon (`serve`), from the commit's tree, until the block ends."""
         root = self.run_dir / f"instance-{mode}"
         root.mkdir(parents=True, exist_ok=True)
@@ -473,6 +476,8 @@ class Lane:
             args += ["--image", self.sandbox_image]
         if self.broken_fixture:
             args.append("--broken-fixture")
+        for name in backends:
+            args += ["--backend", name]
         log = (root / "daemon.log").open("w", encoding="utf-8")
         proc = subprocess.Popen(args, cwd=self.tree, env=self.env(), stdout=log, stderr=subprocess.STDOUT,  # noqa: S603
                                 start_new_session=True)
@@ -675,6 +680,56 @@ def gpu_suite(lane: Lane) -> SuiteResult:
     return SuiteResult("gpu", PASSED, f"{tests.line('gpu tests')}; session on {model['name']} passed", log, details)
 
 
+def _merged_yaml(live_config: Path) -> dict:
+    """harness.yaml then harness.local.yaml, with `models` and `backends` merged per entry (read-only)."""
+    import yaml
+    raw: dict = {}
+    for name in ("harness.yaml", "harness.local.yaml"):
+        f = Path(live_config) / name
+        if not f.is_file():
+            continue
+        data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        merged = {key: {**(raw.get(key) or {})} for key in ("models", "backends")}
+        for key in merged:
+            for entry, spec in (data.get(key) or {}).items():
+                merged[key][entry] = {**(merged[key].get(entry) or {}), **(spec or {})}
+        raw.update(data)
+        raw.update(merged)
+    return raw
+
+
+def live_backends(live_config: Path) -> dict:
+    return _merged_yaml(live_config).get("backends") or {}
+
+
+def hosted_plan(backends: dict, opt_in: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
+    """Which configured hosted backends the lane may run, and why each other one is left out.
+
+    A hosted CLI's login is shared with the owner's own sessions and its OAuth refresh token rotates: a session whose
+    refresh fails overwrites the shared credential with an empty one (#390), which logged the tower's Claude out on
+    the lane's first proof run. So Claude runs only on the long-lived token (`oauth_token_file`, no login volume, no
+    refresh); every other backend runs only when the owner names it with --hosted-backend."""
+    eligible, notes = [], []
+    for name, spec in sorted(backends.items()):
+        spec = spec or {}
+        if not spec.get("enabled"):
+            continue
+        if spec.get("kind") == "cli":
+            notes.append(f"{name}: a print-mode CLI on the local model, not a hosted backend")
+        elif name == "claude":
+            token = str(spec.get("oauth_token_file") or "")
+            if token and Path(token).expanduser().is_file() and Path(token).expanduser().stat().st_size > 0:
+                eligible.append(name)
+            else:
+                notes.append("claude: shared refresh-token login (#390); set backends.claude.oauth_token_file "
+                             "(ops/backends/login.sh claude --token)")
+        elif name in opt_in:
+            eligible.append(name)
+        else:
+            notes.append(f"{name}: opt-in only, its login is shared and refreshes (#390); --hosted-backend {name}")
+    return eligible, notes
+
+
 def read_ledger(base: Path) -> dict:
     try:
         return json.loads((base / "hosted-ledger.json").read_text(encoding="utf-8"))
@@ -687,14 +742,18 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
     if not lane.force_hosted and clock() - last < HOSTED_INTERVAL:
         when = datetime.fromtimestamp(last, timezone.utc).isoformat(timespec="minutes")
         return SuiteResult("hosted-cli", SKIPPED, f"weekly cap: the last hosted run was at {when}")
+    eligible, notes = hosted_plan(live_backends(lane.live_config), lane.hosted_opt_in)
+    if not eligible:
+        return SuiteResult("hosted-cli", SKIPPED, "no hosted backend is safe to run: " + "; ".join(notes)[:300],
+                           "\n".join(notes), {"notes": notes})
     busy = wait_for_idle(lane.metrics_url, lane.yield_seconds)
     if busy:
         return SuiteResult("hosted-cli", SKIPPED, f"busy: the live daemon kept {busy} session(s) running")
     runs: dict[str, SessionRun] = {}
-    problems, notes, log = [], [], []
-    with lane.instance("hosted") as inst, inst.client() as client:
+    problems, log = [], []
+    with lane.instance("hosted", tuple(eligible)) as inst, inst.client() as client:
         listed = client.get("/api/v1/backends").json()
-        hosted = [b for b in listed if b.get("name") != "local" and b.get("available")]
+        hosted = [b for b in listed if b.get("name") in eligible and b.get("available")]
         ready = [b["name"] for b in hosted if b.get("logged_in")]
         notes += [f"{b['name']}: not logged in, not run" for b in hosted if not b.get("logged_in")]
         if not ready:
@@ -735,15 +794,7 @@ def live_raw(live_config: Path) -> dict:
 
 
 def live_model(live_config: Path) -> dict:
-    import yaml
-    files = [Path(live_config) / "harness.yaml", Path(live_config) / "harness.local.yaml"]
-    raw: dict = {}
-    for f in files:
-        if f.is_file():
-            data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-            models = {**(raw.get("models") or {}), **(data.get("models") or {})}
-            raw.update(data)
-            raw["models"] = models
+    raw = _merged_yaml(live_config)
     name = raw.get("default_model") or ""
     spec = (raw.get("models") or {}).get(name) or {}
     if not spec.get("base_url"):
@@ -768,7 +819,8 @@ def write_fixture_repo(repos: Path, broken: bool, outside: Path) -> None:
         subprocess.run([*git, *args], check=True, capture_output=True)  # noqa: S603
 
 
-def lane_config(root: Path, port: int, mode: str, tag: str, image: str, live_config: Path) -> dict:
+def lane_config(root: Path, port: int, mode: str, tag: str, image: str, live_config: Path,
+                backends: tuple[str, ...] = ()) -> dict:
     data = root / "data"
     config: dict = {
         "listen": {"host": "127.0.0.1", "port": port},
@@ -794,7 +846,9 @@ def lane_config(root: Path, port: int, mode: str, tag: str, image: str, live_con
         config["default_model"] = model["name"]
         config["models"] = {model["name"]: {k: v for k, v in model.items() if k != "name"}}
     if mode == "hosted":
-        config["backends"] = live_raw(live_config).get("backends") or {}
+        # Only the backends hosted_plan cleared: nothing else in the live config can reach a shared login.
+        config["backends"] = {name: spec for name, spec in (live_raw(live_config).get("backends") or {}).items()
+                              if name in backends}
     return config
 
 
@@ -853,7 +907,8 @@ def serve(args) -> int:
         chat = ScriptedSandboxModel(secret)
     config_dir = root / "config"
     config_dir.mkdir(exist_ok=True)
-    cfg_raw = lane_config(root, args.port, args.mode, args.tag, args.image, Path(args.live_config))
+    cfg_raw = lane_config(root, args.port, args.mode, args.tag, args.image, Path(args.live_config),
+                          tuple(args.backend or ()))
     (config_dir / "harness.yaml").write_text(yaml.safe_dump(cfg_raw, sort_keys=False), encoding="utf-8")
     checks = [{"name": "fixture", "command": f"cd {FIXTURE_REPO} && python -m unittest -v", "timeout": 120}]
     projects = {"projects": {PROJECT: {"description": "real-env lane (#731): synthetic workspace",
@@ -934,7 +989,7 @@ def run(args) -> int:
     lane = Lane(repo, sha, run_dir, base, python=args.python, metrics_url=args.metrics_url,
                 live_config=Path(args.live_config).expanduser(), yield_seconds=args.yield_seconds,
                 workers=args.workers, broken_fixture=args.broken_fixture, pair=args.pair,
-                force_hosted=args.force_hosted, images={"sandbox": args.sandbox_image, "cli": args.cli_image})
+                force_hosted=args.force_hosted, hosted_opt_in=tuple(args.hosted_backend), images={"sandbox": args.sandbox_image, "cli": args.cli_image})
     suites = args.suite or list(NIGHTLY_SUITES)
     runners = {"sandbox": lambda: sandbox_suite(lane), "gpu": lambda: gpu_suite(lane),
                "hosted-cli": lambda: hosted_suite(lane)}
@@ -972,6 +1027,9 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--broken-fixture", action="store_true", help="self-test: the fixture's verify check fails")
     r.add_argument("--pair", action="store_true", help="hosted-cli: two concurrent Claude sessions (#390 class)")
     r.add_argument("--force-hosted", action="store_true", help="hosted-cli: ignore the weekly cap")
+    r.add_argument("--hosted-backend", action="append", default=[], metavar="NAME",
+                   help="hosted-cli: also run this non-Claude backend, whose login is shared and refreshes (#390); "
+                        "the owner's decision")
     r.add_argument("--sandbox-image", default="", help="use this sandbox image instead of the commit's own")
     r.add_argument("--cli-image", default="", help="use this CLI image instead of the commit's own")
     r.add_argument("--keep", action="store_true", help="keep the extracted tree and pytest temp dirs")
@@ -985,6 +1043,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--image", default="")
     s.add_argument("--live-config", default=str(LIVE_CONFIG))
     s.add_argument("--broken-fixture", action="store_true")
+    s.add_argument("--backend", action="append", help="a hosted backend hosted_plan cleared (repeatable)")
     return ap
 
 
