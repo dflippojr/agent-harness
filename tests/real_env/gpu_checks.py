@@ -1,8 +1,9 @@
 """The real local model (#731): llama-server answers the harness's own client, in text and with a tool call.
 
-Marked `gpu` and skipped unless HARNESS_REAL_MODEL_URL names a running server: CI has none, and the suite never loads
-or wakes a model. The real-environment lane (scripts/real_env_lane.py, docs/real-env-lane.md) sets the variable after
-checking that the live GPU guard is clear and the model is loaded, then runs `pytest -m gpu`.
+Not part of the CI suite: the file name keeps pytest's default collection away from it (CI has no GPU), so it is
+never a skipped test there either. The real-environment lane (scripts/real_env_lane.py, docs/real-env-lane.md) runs
+it by path, `pytest -m gpu tests/real_env/gpu_checks.py`, after checking that the live GPU guard is clear and the
+model is loaded, with HARNESS_REAL_MODEL_URL naming the server. Without that variable every check fails.
 """
 
 from __future__ import annotations
@@ -17,11 +18,11 @@ from harness import llm
 from harness.config import ModelConfig
 
 URL = os.environ.get("HARNESS_REAL_MODEL_URL", "")
-pytestmark = [pytest.mark.gpu,
-              pytest.mark.skipif(not URL, reason="needs HARNESS_REAL_MODEL_URL (the real-environment lane sets it)")]
+pytestmark = pytest.mark.gpu
 
 
 def model() -> ModelConfig:
+    assert URL, "HARNESS_REAL_MODEL_URL must name the real llama-server (the real-environment lane sets it)"
     return ModelConfig(name=os.environ.get("HARNESS_REAL_MODEL_NAME") or "local", base_url=URL.rstrip("/"),
                        context_tokens=8192, max_tokens=2048)
 

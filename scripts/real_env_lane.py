@@ -65,6 +65,7 @@ CLIENT = {"X-Agent-Harness-Client": "cli/2"}
 OK_WORD = "real-env-ok"
 FIXTURE_REPO = "lane-fixture"
 PROJECT = "lane"
+GPU_CHECKS = "tests/real_env/gpu_checks.py"
 
 DEFAULT_BASE = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "agent-harness-real-env"
 LIVE_CONFIG = Path.home() / ".local" / "share" / "agent-harness" / "config"
@@ -87,7 +88,7 @@ class SuiteResult:
 def status_for(result: SuiteResult) -> tuple[str, str]:
     """The commit status (state, description) for one suite. GitHub has no skipped state: a skip is `success` whose
     description starts with `skipped:`, so it never reads as a plain pass."""
-    description = f"{result.state}: {result.summary}".strip().rstrip(":")
+    description = redact(f"{result.state}: {result.summary}".strip().rstrip(":"))
     if len(description) > STATUS_DESCRIPTION_MAX:
         description = description[:STATUS_DESCRIPTION_MAX - 3] + "..."
     return STATUS_STATE[result.state], description
@@ -451,9 +452,13 @@ class Lane:
         env.update(extra)
         return env
 
-    def pytest(self, marker: str, env: dict[str, str], timeout: float = 3600) -> PytestRun:
+    def pytest(self, marker: str, env: dict[str, str], timeout: float = 3600, paths: tuple[str, ...] = ("tests",)
+               ) -> PytestRun:
+        present = [p for p in paths if (self.tree / p).exists()]
+        if not present:
+            return PytestRun(5, output=f"none of {', '.join(paths)} is in this commit")
         report = self.run_dir / f"pytest-{marker}.xml"
-        args = [self.python, "-m", "pytest", "tests", "-m", marker, "-q", "-rs", "-p", "no:cacheprovider",
+        args = [self.python, "-m", "pytest", *present, "-m", marker, "-q", "-rs", "-p", "no:cacheprovider",
                 f"--basetemp={self.run_dir / f'pytest-{marker}'}", f"--junitxml={report}"]
         if self.workers > 1:
             args += ["-n", str(min(self.workers, 4)), "--dist", "loadfile"]
@@ -465,19 +470,20 @@ class Lane:
         return PytestRun(code, *junit_counts(report), output=output)
 
     @contextlib.contextmanager
-    def instance(self, mode: str, backends: tuple[str, ...] = ()) -> Iterator["Instance"]:
+    def instance(self, mode: str, spec: dict | None = None) -> Iterator["Instance"]:
         """The disposable daemon (`serve`), from the commit's tree, until the block ends."""
         root = self.run_dir / f"instance-{mode}"
         root.mkdir(parents=True, exist_ok=True)
         port = free_port()
+        spec_file = root / "live-spec.json"   # what the lane decided from the live config; the daemon reads only this
+        _write_json(spec_file, spec or {})
+        os.chmod(spec_file, 0o600)
         args = [self.python, str(Path(__file__).resolve()), "serve", "--tree", str(self.tree), "--dir", str(root),
-                "--mode", mode, "--port", str(port), "--tag", self.tag, "--live-config", str(self.live_config)]
+                "--mode", mode, "--port", str(port), "--tag", self.tag, "--spec", str(spec_file)]
         if mode == "sandbox":
             args += ["--image", self.sandbox_image]
         if self.broken_fixture:
             args.append("--broken-fixture")
-        for name in backends:
-            args += ["--backend", name]
         log = (root / "daemon.log").open("w", encoding="utf-8")
         proc = subprocess.Popen(args, cwd=self.tree, env=self.env(), stdout=log, stderr=subprocess.STDOUT,  # noqa: S603
                                 start_new_session=True)
@@ -540,6 +546,11 @@ class SessionRun:
     transcript: str = ""
     events: list[dict] = field(default_factory=list)
     denied: list[str] = field(default_factory=list)
+
+    @property
+    def answer(self) -> str:
+        """What the assistant said: its messages only, never the user's prompt."""
+        return "\n".join(str(e.get("content") or "") for e in self.events if e.get("type") == "assistant")
 
     def tool_results(self, name: str | None = None) -> list[dict]:
         return [e for e in self.events if e.get("type") == "tool_result" and (name is None or e.get("name") == name)]
@@ -628,6 +639,11 @@ def sandbox_checks(run: SessionRun, secret: str) -> list[str]:
     verify = outputs.get("verify", [])
     if not any(o.startswith("verify: all checks passed") for o in verify):
         problems.append(f"verify did not pass: {verify}")
+    reads = outputs.get("read_file", [])
+    if len(reads) < 3 or any(e.get("ok") for e in run.tool_results("read_file")):
+        problems.append(f"#370 class: expected three refused reads outside /workspace, got {reads}")
+    if not any("shell-done" in o for o in outputs.get("run_shell", [])):
+        problems.append("#370 class: the shell read outside /workspace never ran")
     if secret in run.transcript or any(secret in json.dumps(e) for e in run.events):
         problems.append("#370 class: a read outside /workspace returned the host file's contents")
     return problems
@@ -662,10 +678,10 @@ def gpu_suite(lane: Lane) -> SuiteResult:
     reason = gpu_hold_reason(fetch_metrics(lane.metrics_url))
     if reason:
         return SuiteResult("gpu", SKIPPED, reason)
-    model = live_model(lane.live_config)
+    model = live_model(live_raw(lane.live_config), lane.live_config)
     env = lane.env(HARNESS_REAL_MODEL_URL=model["base_url"], HARNESS_REAL_MODEL_NAME=model["name"])
-    tests = lane.pytest("gpu", env, timeout=1800)
-    with lane.instance("gpu") as inst:
+    tests = lane.pytest("gpu", env, timeout=1800, paths=(GPU_CHECKS,))  # outside default collection: by path
+    with lane.instance("gpu", spec={"model": model}) as inst:
         run = drive_session(inst, f"Use the write_file tool to create lane.txt containing exactly {OK_WORD}. "
                                   "Then reply with the single word done.", timeout=900)
     problems = [] if tests.ok else [tests.line("gpu-marked tests")]
@@ -680,26 +696,22 @@ def gpu_suite(lane: Lane) -> SuiteResult:
     return SuiteResult("gpu", PASSED, f"{tests.line('gpu tests')}; session on {model['name']} passed", log, details)
 
 
-def _merged_yaml(live_config: Path) -> dict:
-    """harness.yaml then harness.local.yaml, with `models` and `backends` merged per entry (read-only)."""
-    import yaml
-    raw: dict = {}
-    for name in ("harness.yaml", "harness.local.yaml"):
-        f = Path(live_config) / name
-        if not f.is_file():
-            continue
-        data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-        merged = {key: {**(raw.get(key) or {})} for key in ("models", "backends")}
-        for key in merged:
-            for entry, spec in (data.get(key) or {}).items():
-                merged[key][entry] = {**(merged[key].get(entry) or {}), **(spec or {})}
-        raw.update(data)
-        raw.update(merged)
-    return raw
+def live_raw(live_config: Path) -> dict:
+    """The live config as the daemon merges it (harness.yaml, harness.local.yaml, profile.yaml), read-only, through the
+    loader of the checkout the lane runs from. Every decision about the live config is made from this one snapshot,
+    and the disposable daemon gets exactly what it decided (`spec`), never the files themselves."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from harness import config as config_mod
+    return config_mod._read_raw_config(Path(live_config))  # noqa: SLF001 - the loader's merge, not a copy of it
 
 
-def live_backends(live_config: Path) -> dict:
-    return _merged_yaml(live_config).get("backends") or {}
+def live_model(raw: dict, where: Path | str = "") -> dict:
+    name = raw.get("default_model") or ""
+    spec = (raw.get("models") or {}).get(name) or {}
+    if not spec.get("base_url"):
+        raise RuntimeError(f"the live config {where} names no local model with a base_url")
+    return {"name": name, **spec}
 
 
 def hosted_plan(backends: dict, opt_in: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
@@ -742,7 +754,9 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
     if not lane.force_hosted and clock() - last < HOSTED_INTERVAL:
         when = datetime.fromtimestamp(last, timezone.utc).isoformat(timespec="minutes")
         return SuiteResult("hosted-cli", SKIPPED, f"weekly cap: the last hosted run was at {when}")
-    eligible, notes = hosted_plan(live_backends(lane.live_config), lane.hosted_opt_in)
+    raw = live_raw(lane.live_config)
+    backends = raw.get("backends") or {}
+    eligible, notes = hosted_plan(backends, lane.hosted_opt_in)
     if not eligible:
         return SuiteResult("hosted-cli", SKIPPED, "no hosted backend is safe to run: " + "; ".join(notes)[:300],
                            "\n".join(notes), {"notes": notes})
@@ -751,11 +765,14 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
         return SuiteResult("hosted-cli", SKIPPED, f"busy: the live daemon kept {busy} session(s) running")
     runs: dict[str, SessionRun] = {}
     problems, log = [], []
-    with lane.instance("hosted", tuple(eligible)) as inst, inst.client() as client:
+    spec = {"backends": {name: backends[name] for name in eligible}}  # only what hosted_plan cleared
+    token = token_digest(backends.get("claude") or {}) if "claude" in eligible else ""
+    with lane.instance("hosted", spec) as inst, inst.client() as client:
         listed = client.get("/api/v1/backends").json()
         hosted = [b for b in listed if b.get("name") in eligible and b.get("available")]
-        ready = [b["name"] for b in hosted if b.get("logged_in")]
-        notes += [f"{b['name']}: not logged in, not run" for b in hosted if not b.get("logged_in")]
+        # Claude runs on its token, which /backends doesn't probe (it checks the shared login): the token is its login.
+        ready = [b["name"] for b in hosted if b["name"] == "claude" or b.get("logged_in")]
+        notes += [f"{b['name']}: not logged in, not run" for b in hosted if b["name"] not in ready]
         if not ready:
             return SuiteResult("hosted-cli", SKIPPED, "no configured hosted backend is logged in",
                                "\n".join(notes), {"backends": [b.get("name") for b in listed]})
@@ -771,12 +788,11 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 both = list(pool.map(lambda _: drive_session(inst, prompt, backend=pair, timeout=300), range(2)))
             runs[f"{pair} (pair 1)"], runs[f"{pair} (pair 2)"] = both
-            after = {b["name"]: b for b in client.get("/api/v1/backends").json()}
-            if not after.get(pair, {}).get("logged_in"):
-                problems.append(f"#390 class: {pair} is logged out after two concurrent sessions")
+            if token_digest(backends.get(pair) or {}) != token:
+                problems.append(f"#390 class: {pair}'s token changed or vanished during two concurrent sessions")
     for name, run in runs.items():
         log.append(f"[{name}]\n{describe(run)}")
-        if run.status != "done" or OK_WORD not in run.transcript:
+        if run.status != "done" or OK_WORD not in run.answer:
             problems.append(f"{name}: {run.status} {run.stop_reason}".strip())
     details = {"sessions": {n: r.status for n, r in runs.items()}, "notes": notes, "pair": pair or "off"}
     if problems:
@@ -786,21 +802,6 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
 
 
 # --- the disposable daemon (`serve`) -------------------------------------------------------------------------------
-
-def live_raw(live_config: Path) -> dict:
-    """The live config as the daemon merges it (read-only), through the tested tree's own loader."""
-    from harness import config as config_mod
-    return config_mod._read_raw_config(Path(live_config))  # noqa: SLF001 - the loader's merge, not a copy of it
-
-
-def live_model(live_config: Path) -> dict:
-    raw = _merged_yaml(live_config)
-    name = raw.get("default_model") or ""
-    spec = (raw.get("models") or {}).get(name) or {}
-    if not spec.get("base_url"):
-        raise RuntimeError(f"the live config at {live_config} names no local model with a base_url")
-    return {"name": name, **spec}
-
 
 def write_fixture_repo(repos: Path, broken: bool, outside: Path) -> None:
     """A tiny git repo the session clones with `git_clone local:lane-fixture`. It carries a symlink to the host file
@@ -813,14 +814,16 @@ def write_fixture_repo(repos: Path, broken: bool, outside: Path) -> None:
         "import subprocess, sys, unittest\n\n\nclass App(unittest.TestCase):\n    def test_prints(self):\n"
         "        out = subprocess.run([sys.executable, 'app.py'], capture_output=True, text=True).stdout.strip()\n"
         f"        self.assertEqual(out, {expected})\n", encoding="utf-8")
-    (repo / "escape").symlink_to(outside)
+    (repo / "escape").symlink_to(outside / "secret.txt")  # the secret file itself, by its absolute host path
     git = ["git", "-C", str(repo), "-c", "user.name=real-env lane", "-c", "user.email=lane@localhost"]
     for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "fixture"]):
         subprocess.run([*git, *args], check=True, capture_output=True)  # noqa: S603
 
 
-def lane_config(root: Path, port: int, mode: str, tag: str, image: str, live_config: Path,
-                backends: tuple[str, ...] = ()) -> dict:
+def lane_config(root: Path, port: int, mode: str, tag: str, image: str, spec: dict | None = None) -> dict:
+    """The disposable daemon's config. `spec` is what the lane decided from the live config: the local model for the
+    gpu mode, the cleared backends for the hosted mode. Nothing else from the live config reaches it."""
+    spec = spec or {}
     data = root / "data"
     config: dict = {
         "listen": {"host": "127.0.0.1", "port": port},
@@ -837,19 +840,29 @@ def lane_config(root: Path, port: int, mode: str, tag: str, image: str, live_con
                     # No proxy of its own: a network command fails closed instead of using the live one.
                     "proxy": f"http://real-env-{tag}-no-proxy:8888", "idle_stop_seconds": 0},
         "budgets": {"approval_timeout_seconds": 3600},
+        # A local model nothing calls (the sandbox journey is scripted; hosted sessions run on their CLIs).
+        "default_model": "lane-scripted",
+        "models": {"lane-scripted": {"base_url": "http://127.0.0.1:9", "context_tokens": 32768}},
     }
-    if mode == "sandbox":
-        config["default_model"] = "lane-scripted"
-        config["models"] = {"lane-scripted": {"base_url": "http://127.0.0.1:9", "context_tokens": 32768}}
-    else:
-        model = live_model(live_config)
+    if mode == "gpu":
+        model = spec.get("model") or {}
+        if not model.get("base_url"):
+            raise RuntimeError("the gpu instance needs the live model's base_url")
         config["default_model"] = model["name"]
         config["models"] = {model["name"]: {k: v for k, v in model.items() if k != "name"}}
     if mode == "hosted":
-        # Only the backends hosted_plan cleared: nothing else in the live config can reach a shared login.
-        config["backends"] = {name: spec for name, spec in (live_raw(live_config).get("backends") or {}).items()
-                              if name in backends}
+        config["backends"] = dict(spec.get("backends") or {})
     return config
+
+
+def token_digest(backend: dict) -> str:
+    """A digest of the backend's long-lived token file ("" when there is none), to tell whether sessions changed it."""
+    import hashlib
+    path = Path(str(backend.get("oauth_token_file") or "")).expanduser()
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() if str(path) not in ("", ".") else ""
+    except OSError:
+        return ""
 
 
 class ScriptedSandboxModel:
@@ -857,15 +870,16 @@ class ScriptedSandboxModel:
 
     def __init__(self, secret_path: Path):
         outside = secret_path.as_posix()
+        # The workspace is <root>/data/workspaces/<session id>, so this relative path names the real host file.
+        upward = os.path.relpath(secret_path, secret_path.parent.parent / "data" / "workspaces" / "session")
         self.steps: list[tuple[str, dict]] = [
             ("git_clone", {"url": f"local:{FIXTURE_REPO}"}),
             ("run_shell", {"command": f"cd {FIXTURE_REPO} && python app.py && git log --oneline | wc -l"}),
             ("verify", {}),
-            ("read_file", {"path": "../outside/secret.txt"}),
+            ("read_file", {"path": upward}),
             ("read_file", {"path": outside}),
             ("read_file", {"path": f"{FIXTURE_REPO}/escape"}),
-            ("run_shell", {"command": f"cat {outside} {FIXTURE_REPO}/escape ../outside/secret.txt 2>&1; "
-                                      "echo shell-done"}),
+            ("run_shell", {"command": f"cat {outside} {FIXTURE_REPO}/escape {upward} 2>&1; echo shell-done"}),
         ]
 
     async def __call__(self, model, messages, tools=None, on_delta=None, max_tokens=None, extra=None, timeout=0,
@@ -907,8 +921,8 @@ def serve(args) -> int:
         chat = ScriptedSandboxModel(secret)
     config_dir = root / "config"
     config_dir.mkdir(exist_ok=True)
-    cfg_raw = lane_config(root, args.port, args.mode, args.tag, args.image, Path(args.live_config),
-                          tuple(args.backend or ()))
+    spec = json.loads(Path(args.spec).read_text(encoding="utf-8")) if args.spec else {}
+    cfg_raw = lane_config(root, args.port, args.mode, args.tag, args.image, spec)
     (config_dir / "harness.yaml").write_text(yaml.safe_dump(cfg_raw, sort_keys=False), encoding="utf-8")
     checks = [{"name": "fixture", "command": f"cd {FIXTURE_REPO} && python -m unittest -v", "timeout": 120}]
     projects = {"projects": {PROJECT: {"description": "real-env lane (#731): synthetic workspace",
@@ -1041,9 +1055,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, required=True)
     s.add_argument("--tag", required=True)
     s.add_argument("--image", default="")
-    s.add_argument("--live-config", default=str(LIVE_CONFIG))
+    s.add_argument("--spec", default="", help="what the lane decided from the live config (JSON)")
     s.add_argument("--broken-fixture", action="store_true")
-    s.add_argument("--backend", action="append", help="a hosted backend hosted_plan cleared (repeatable)")
     return ap
 
 

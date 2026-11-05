@@ -257,9 +257,7 @@ def test_erase_session_and_erase_app_remove_cli_history_and_volumes(tmp_path, mo
 IMAGE = os.environ.get("HARNESS_TEST_CLI_IMAGE") or "agent-harness-cli:1"
 docker_ok = bool(shutil.which("docker")) and subprocess.run(
     ["docker", "image", "inspect", IMAGE], capture_output=True).returncode == 0
-def needs_docker(test):
-    """Skips without Docker and the image; `-m docker` (the real-environment lane) selects it."""
-    return pytest.mark.docker(pytest.mark.skipif(not docker_ok, reason=f"needs Docker and the {IMAGE} image")(test))
+needs_docker = pytest.mark.skipif(not docker_ok, reason=f"needs Docker and the {IMAGE} image")
 
 
 def _fake_cli(backend: str, cfg: BackendConfig, app_id: str, workspace: Path, script: str) -> str:
@@ -276,6 +274,7 @@ def _remove_volumes(*names: str) -> None:
     subprocess.run(["docker", "volume", "rm", "-f", *names], capture_output=True)
 
 
+@pytest.mark.docker
 @needs_docker
 @pytest.mark.parametrize("backend", ["claude", "codex", "cursor"])
 def test_domains_cannot_read_each_others_history_or_plant_config(tmp_path, backend):
@@ -305,6 +304,7 @@ def test_domains_cannot_read_each_others_history_or_plant_config(tmp_path, backe
         _remove_volumes(*volumes)
 
 
+@pytest.mark.docker
 @needs_docker
 def test_erase_and_app_drop_reach_the_volumes(tmp_path):
     cfg = BackendConfig(enabled=True, image=IMAGE, network="none", volume=f"t371-{uuid.uuid4().hex[:10]}")
@@ -377,6 +377,7 @@ def test_managed_settings_are_mounted_read_only_for_claude():
         assert "/etc/claude-code" not in " ".join(cli_domains.docker_args(backend, _standard(backend)))
 
 
+@pytest.mark.docker
 @needs_docker
 def test_workspace_hooks_do_not_run_and_the_workspace_claude_md_still_loads(tmp_path):
     hook = ('{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"id -u > /workspace/%s"}]}]}}')
@@ -399,6 +400,7 @@ def test_workspace_hooks_do_not_run_and_the_workspace_claude_md_still_loads(tmp_
     assert int(names[-1]) >= 1, out  # CLAUDE.md reached the model's prompt
 
 
+@pytest.mark.docker
 @needs_docker
 def test_a_session_cannot_change_or_delete_the_managed_settings(tmp_path):
     out = _claude_session_script(tmp_path, (
@@ -490,6 +492,7 @@ def test_managed_requirements_are_mounted_read_only_for_codex():
         assert "/etc/codex" not in " ".join(cli_domains.docker_args(backend, _standard(backend)))
 
 
+@pytest.mark.docker
 @needs_docker
 def test_workspace_codex_config_does_not_run_and_the_workspace_agents_md_still_loads(tmp_path):
     def marker(name):
@@ -531,6 +534,7 @@ args = ["-c", "{marker('ran-mcp')}; sleep 30"]
     assert int(out.split("---")[-1]) >= 1, out  # AGENTS.md reached the model's prompt, through the stub endpoint
 
 
+@pytest.mark.docker
 @needs_docker
 def test_a_session_cannot_change_or_delete_the_codex_managed_requirements(tmp_path):
     out = _codex_session_script(tmp_path, (

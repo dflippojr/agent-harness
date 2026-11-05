@@ -444,9 +444,8 @@ def _have(image: str) -> bool:
 
 def live(language: str):
     image = LANGUAGES[language].image
-    skip = pytest.mark.skipif(not _have(image), reason=f"needs Docker and {LANGUAGES[language].tag} pinned image "
+    return pytest.mark.skipif(not _have(image), reason=f"needs Docker and {LANGUAGES[language].tag} pinned image "
                                                       "(python -m harness.snippets pull)")
-    return lambda test: pytest.mark.docker(skip(test))
 
 
 def run_live(language: str, source: str, timeout: float = 30, output_bytes: int = snippets.OUTPUT_BYTES,
@@ -510,6 +509,7 @@ def test_live_compile_failure_is_separate_from_runtime(language):
     assert bad["compile"]["output"].strip()
 
 
+@pytest.mark.docker
 @live("python")
 def test_live_no_network_mounts_secrets_or_privileges(monkeypatch):
     monkeypatch.setenv("HARNESS_SNIPPET_CANARY", "canary-secret-value")
@@ -543,6 +543,7 @@ except OSError: print("root read-only")
         assert line in out, out
 
 
+@pytest.mark.docker
 @live("python")
 def test_live_timeout_kills_the_process_tree():
     src = "import subprocess, time\nsubprocess.Popen(['sleep', '300'])\ntime.sleep(300)"
@@ -553,6 +554,7 @@ def test_live_timeout_kills_the_process_tree():
     assert time.monotonic() - t0 < 25
 
 
+@pytest.mark.docker
 @live("python")
 def test_live_detached_children_die_with_the_sandbox():
     src = ("import subprocess\nsubprocess.Popen(['sleep', '300'], stdout=subprocess.DEVNULL, "
@@ -562,6 +564,7 @@ def test_live_detached_children_die_with_the_sandbox():
     assert r["run"]["stdout"] == "spawned\n"
 
 
+@pytest.mark.docker
 @live("python")
 def test_live_memory_pids_and_temp_limits():
     mem = run_live("python", "b = []\nwhile True: b.append(bytearray(64 * 1024 * 1024))")
@@ -578,6 +581,7 @@ def test_live_memory_pids_and_temp_limits():
     assert tmp["run"]["stdout"].strip() == "28"  # ENOSPC
 
 
+@pytest.mark.docker
 @live("python")
 def test_live_restart_removes_the_orphaned_container_only():
     lang = LANGUAGES["python"]
@@ -593,6 +597,7 @@ def test_live_restart_removes_the_orphaned_container_only():
         subprocess.run(["docker", "rm", "-f", f"harness-snippet-{ids[1]}"], capture_output=True)
 
 
+@pytest.mark.docker
 @live("python")
 def test_live_output_limit_truncates_explicitly():
     r = run_live("python", "import sys\nwhile True: sys.stdout.write('y' * 65536); sys.stderr.write('z' * 100)")
@@ -602,6 +607,7 @@ def test_live_output_limit_truncates_explicitly():
     assert len(r["run"]["stdout"].encode()) + len(r["run"]["stderr"].encode()) == snippets.OUTPUT_BYTES
 
 
+@pytest.mark.docker
 @live("python")
 def test_live_cancel_and_no_files_survive_between_runs():
     r = run_live("python", "import time\nprint('x', flush=True)\ntime.sleep(60)", cancel_after=2)

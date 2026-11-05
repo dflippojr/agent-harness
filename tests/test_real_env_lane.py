@@ -270,7 +270,9 @@ def result_event(name: str, output: str, ok: bool = True) -> dict:
 
 GOOD_EVENTS = [result_event("git_clone", "cloned lane-fixture"), result_event("run_shell", "fixture-ok\n1\n"),
                result_event("verify", "verify: all checks passed (1 checks)"),
-               result_event("read_file", "path is outside the workspace", ok=False),
+               result_event("read_file", "Error: path escapes the workspace: ../../../outside/secret.txt", ok=False),
+               result_event("read_file", "Error: no such file: /host/outside/secret.txt", ok=False),
+               result_event("read_file", "Error: path escapes the workspace: lane-fixture/escape", ok=False),
                result_event("run_shell", "cat: /x: No such file or directory\nshell-done")]
 
 
@@ -287,6 +289,10 @@ def test_sandbox_checks_pass_on_the_journey():
     ({"events": GOOD_EVENTS[:2] + [result_event("verify", "verify: 1 failed (1 checks)", ok=False)]}, "verify"),
     ({"events": GOOD_EVENTS + [result_event("read_file", "real-env-secret-1")]}, "#370 class"),
     ({"transcript": "tool said real-env-secret-1"}, "#370 class"),
+    ({"events": GOOD_EVENTS[:4] + GOOD_EVENTS[6:]}, "expected three refused reads"),
+    ({"events": GOOD_EVENTS[:5] + [result_event("read_file", "symlinked contents")] + GOOD_EVENTS[6:]},
+     "expected three refused reads"),
+    ({"events": GOOD_EVENTS[:6]}, "shell read outside /workspace never ran"),
 ])
 def test_sandbox_checks_catch_each_failure(change, problem):
     run = lane.SessionRun(**{"sid": "s1", "status": "done", "events": GOOD_EVENTS, "transcript": "", **change})
@@ -317,7 +323,7 @@ def live_config(tmp_path: Path) -> Path:
 
 def test_the_disposable_instance_never_shares_the_live_networks_proxy_or_pause_flag(tmp_path):
     root = tmp_path / "instance"
-    cfg = lane.lane_config(root, 18123, "sandbox", "run1", "img:sha", live_config(tmp_path))
+    cfg = lane.lane_config(root, 18123, "sandbox", "run1", "img:sha")
     assert cfg["listen"] == {"host": "127.0.0.1", "port": 18123}
     assert cfg["data_dir"] == (root / "data").as_posix() and cfg["repos_dir"] == (root / "repos").as_posix()
     sandbox = cfg["sandbox"]
@@ -331,23 +337,41 @@ def test_the_disposable_instance_never_shares_the_live_networks_proxy_or_pause_f
 
 
 def test_the_gpu_instance_uses_the_live_model_address(tmp_path):
-    cfg = lane.lane_config(tmp_path / "i", 1, "gpu", "t", "", live_config(tmp_path))
+    model = lane.live_model(lane.live_raw(live_config(tmp_path)))
+    cfg = lane.lane_config(tmp_path / "i", 1, "gpu", "t", "", {"model": model})
     assert cfg["default_model"] == "qwen"
     assert cfg["models"] == {"qwen": {"base_url": "http://127.0.0.1:8091", "context_tokens": 4096}}
     assert cfg["data_dir"] != "/live/data"
 
 
 def test_the_hosted_instance_copies_only_the_cleared_live_backends(tmp_path):
-    cfg = lane.lane_config(tmp_path / "i", 1, "hosted", "t", "", live_config(tmp_path), ("claude",))
-    assert cfg["backends"] == {"claude": {"enabled": True, "image": "agent-harness-cli:1"}}
-    assert lane.lane_config(tmp_path / "i", 1, "hosted", "t", "", live_config(tmp_path))["backends"] == {}
+    spec = {"backends": {"claude": {"enabled": True, "image": "agent-harness-cli:1"}}}
+    cfg = lane.lane_config(tmp_path / "i", 1, "hosted", "t", "", spec)
+    assert cfg["backends"] == spec["backends"] and cfg["default_model"] == "lane-scripted"
+    assert lane.lane_config(tmp_path / "i", 1, "hosted", "t", "")["backends"] == {}
+    with pytest.raises(RuntimeError, match="base_url"):
+        lane.lane_config(tmp_path / "i", 1, "gpu", "t", "", {})
     assert cfg["data_dir"] == (tmp_path / "i" / "data").as_posix()
 
 
-def test_live_model_needs_a_base_url(tmp_path):
-    (tmp_path / "harness.yaml").write_text("default_model: x\n")
+def test_live_model_needs_a_base_url():
     with pytest.raises(RuntimeError, match="no local model"):
-        lane.live_model(tmp_path)
+        lane.live_model({"default_model": "x"})
+
+
+def test_the_plan_and_the_daemon_read_the_same_merge_of_the_live_config(tmp_path):
+    """The daemon's loader merges harness.local.yaml one level deep: a local `claude:` entry replaces the base one. A
+    base token with a local entry that drops it must not count as token auth (review of #919)."""
+    cfg = tmp_path / "live"
+    cfg.mkdir()
+    token = tmp_path / "token"
+    token.write_text("t\n")
+    (cfg / "harness.yaml").write_text(yaml.safe_dump({"backends": {"claude": {"enabled": True,
+                                                                              "oauth_token_file": str(token)}}}))
+    (cfg / "harness.local.yaml").write_text(yaml.safe_dump({"backends": {"claude": {"enabled": True}}}))
+    raw = lane.live_raw(cfg)
+    assert raw["backends"]["claude"] == {"enabled": True}
+    assert lane.hosted_plan(raw["backends"])[0] == []
 
 
 def test_fixture_repo_and_scripted_model(tmp_path):
@@ -491,12 +515,13 @@ class FakeLane(lane.Lane):
     def image(self, kind, dockerfile, build):
         return f"ghcr.io/x/{kind}:sha-{SHA}"
 
-    def pytest(self, marker, env, timeout=3600):
+    def pytest(self, marker, env, timeout=3600, paths=("tests",)):
         self.markers.append((marker, env))
+        self.paths = paths
         return self.tests
 
-    def instance(self, mode, backends=()):
-        self.instance_backends = backends
+    def instance(self, mode, spec=None):
+        self.instance_spec = spec or {}
         root = self.run_dir / f"instance-{mode}"
         (root / "outside").mkdir(parents=True, exist_ok=True)
         (root / "outside" / "secret.txt").write_text("real-env-secret-1\n")
@@ -526,7 +551,8 @@ def test_sandbox_suite_fails_on_a_failing_test_or_a_leaked_secret(tmp_path, idle
     result = lane.sandbox_suite(FakeLane(tmp_path, tests=lane.PytestRun(1, passed=3, failed=1, output="FAILED x")))
     assert result.state == lane.FAILED and "1 failed" in result.summary and "FAILED x" in result.log
     leaked = FakeClient(events=GOOD_EVENTS + [result_event("run_shell", "real-env-secret-1")])
-    result = lane.sandbox_suite(FakeLane(tmp_path / "b", client=leaked) if (tmp_path / "b").mkdir() is None else None)
+    (tmp_path / "b").mkdir()
+    result = lane.sandbox_suite(FakeLane(tmp_path / "b", client=leaked))
     assert result.state == lane.FAILED and "#370 class" in result.summary
 
 
@@ -543,6 +569,7 @@ def test_gpu_suite_runs_the_marked_tests_and_a_session_on_the_live_model(tmp_pat
     marker, env = run.markers[0]
     assert marker == "gpu" and env["HARNESS_REAL_MODEL_URL"] == "http://127.0.0.1:8091"
     assert env["HARNESS_REAL_MODEL_NAME"] == "qwen"
+    assert run.paths == (lane.GPU_CHECKS,)
     no_write = lane.gpu_suite(FakeLane(tmp_path, client=FakeClient(events=[])))
     assert no_write.state == lane.FAILED and "never wrote" in no_write.summary
     failed = lane.gpu_suite(FakeLane(tmp_path, client=FakeClient(final="failed", events=[])))
@@ -570,14 +597,14 @@ def hosted_live(tmp_path: Path, token: bool = True) -> Path:
 
 
 def test_hosted_plan_runs_claude_only_on_the_token_and_the_rest_only_when_opted_in(tmp_path):
-    backends = lane.live_backends(hosted_live(tmp_path))
+    backends = lane.live_raw(hosted_live(tmp_path))["backends"]
     eligible, notes = lane.hosted_plan(backends)
     assert eligible == ["claude"]
     assert any(n.startswith("codex: opt-in only") for n in notes) and any(n.startswith("cursor:") for n in notes)
     assert any(n.startswith("opencode: a print-mode CLI on the local model") for n in notes)
     assert not any(n.startswith("gemini") for n in notes)  # disabled: not configured at all
     assert lane.hosted_plan(backends, ("codex",))[0] == ["claude", "codex"]
-    eligible, notes = lane.hosted_plan(lane.live_backends(hosted_live(tmp_path / "x", token=False)), ("claude",))
+    eligible, notes = lane.hosted_plan(lane.live_raw(hosted_live(tmp_path / "x", token=False))["backends"], ("claude",))
     assert eligible == [] and any("shared refresh-token login (#390)" in n for n in notes)
     empty = tmp_path / "empty-token"
     empty.write_text("")
@@ -598,13 +625,13 @@ def test_hosted_suite_runs_one_session_per_logged_in_backend_and_records_the_wee
 
     def drive(inst, prompt, backend=None, timeout=0, client=None):
         sessions.append(backend)
-        return lane.SessionRun(f"s{len(sessions)}", "done", transcript=f"assistant: {lane.OK_WORD}")
+        return lane.SessionRun(f"s{len(sessions)}", "done", events=[{"type": "assistant", "content": lane.OK_WORD}])
     monkeypatch.setattr(lane, "drive_session", drive)
     run = FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), live=hosted_live(tmp_path),
                    hosted_opt_in=("codex",))
     result = lane.hosted_suite(run, clock=lambda: 5_000_000.0)
     assert result.state == lane.PASSED and sessions == ["claude", "codex"]
-    assert run.instance_backends == ("claude", "codex")  # cursor's login never reaches the instance
+    assert sorted(run.instance_spec["backends"]) == ["claude", "codex"]  # cursor's login never reaches the instance
     assert any(n.startswith("cursor: opt-in only") for n in result.details["notes"])
     assert result.details["pair"] == "off"
     assert lane.read_ledger(tmp_path) == {"last_run_at": 5_000_000.0, "sha": SHA}
@@ -615,25 +642,39 @@ def test_hosted_suite_pair_replaces_claudes_session_and_checks_the_login_after(t
 
     def drive(inst, prompt, backend=None, timeout=0, client=None):
         sessions.append(backend)
-        return lane.SessionRun("s", "done", transcript=lane.OK_WORD)
+        return lane.SessionRun("s", "done", events=[{"type": "assistant", "content": lane.OK_WORD}])
     monkeypatch.setattr(lane, "drive_session", drive)
     result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), pair=True, force_hosted=True,
                                         live=hosted_live(tmp_path), hosted_opt_in=("codex",)))
     assert result.state == lane.PASSED and sorted(sessions) == ["claude", "claude", "codex"]
     assert result.details["pair"] == "claude"
 
-    class LoggedOutAfter(FakeClient):
-        calls = 0
 
-        def get(self, path, params=None):
-            if path == "/api/v1/backends":
-                self.calls += 1
-                return FakeResponse(200, BACKENDS if self.calls == 1 else
-                                    [{**b, "logged_in": b["name"] != "claude"} for b in BACKENDS])
-            return super().get(path, params)
-    result = lane.hosted_suite(FakeLane(tmp_path, client=LoggedOutAfter(), pair=True, force_hosted=True,
+    def rotating(inst, prompt, backend=None, timeout=0, client=None):  # a session rewrites the shared credential
+        (tmp_path / "claude-oauth-token").write_text("")
+        return lane.SessionRun("s", "done", events=[{"type": "assistant", "content": lane.OK_WORD}])
+    monkeypatch.setattr(lane, "drive_session", rotating)
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), pair=True, force_hosted=True,
                                         live=hosted_live(tmp_path)))
     assert result.state == lane.FAILED and "#390 class" in result.summary
+
+
+def test_hosted_answer_comes_from_the_assistant_not_the_prompt(tmp_path, idle, monkeypatch):
+    wrong = lane.SessionRun("s", "done", transcript=f"user: Reply with exactly {lane.OK_WORD}\nassistant: sure",
+                            events=[{"type": "user_message", "content": f"Reply with exactly {lane.OK_WORD}"},
+                                    {"type": "assistant", "content": "sure"}])
+    assert lane.OK_WORD not in wrong.answer
+    monkeypatch.setattr(lane, "drive_session", lambda *a, **k: wrong)
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
+                                        live=hosted_live(tmp_path)))
+    assert result.state == lane.FAILED and "claude: done" in result.summary
+
+
+def test_token_digest(tmp_path):
+    token = tmp_path / "t"
+    token.write_text("a")
+    assert len(lane.token_digest({"oauth_token_file": str(token)})) == 64
+    assert lane.token_digest({}) == "" and lane.token_digest({"oauth_token_file": str(tmp_path / "gone")}) == ""
 
 
 def test_hosted_suite_fails_a_backend_that_does_not_answer_and_skips_with_no_login(tmp_path, idle, monkeypatch):
@@ -643,8 +684,9 @@ def test_hosted_suite_fails_a_backend_that_does_not_answer_and_skips_with_no_log
                                         live=hosted_live(tmp_path)))
     assert result.state == lane.FAILED and "claude: failed 401" in result.summary
     nobody = [{**b, "logged_in": False} for b in BACKENDS]
+    (tmp_path / "y").mkdir()
     result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=nobody), force_hosted=True,
-                                        live=hosted_live(tmp_path)))
+                                        live=hosted_live(tmp_path / "y", token=False), hosted_opt_in=("codex",)))
     assert result.state == lane.SKIPPED and "logged in" in result.summary
 
 
@@ -709,6 +751,8 @@ def test_pytest_runs_the_marker_from_the_tree_with_capped_workers(tmp_path, monk
     monkeypatch.setattr(lane, "_run", run)
     lane_ = lane.Lane(tmp_path, SHA, tmp_path / "run", tmp_path, workers=9)
     lane_.run_dir.mkdir(parents=True)
+    (lane_.tree / "tests").mkdir(parents=True)
+    assert lane_.pytest("gpu", {}, paths=(lane.GPU_CHECKS,)).code == 5  # an older commit without the checks
     result = lane_.pytest("docker", lane_.env(EXTRA="1"))
     assert (result.passed, result.failed, result.skipped, result.ok) == (1, 1, 1, False)
     assert seen["cwd"] == lane_.tree and seen["args"][seen["args"].index("-n") + 1] == "4"
@@ -743,7 +787,7 @@ def test_instance_starts_the_daemon_in_its_own_session_and_removes_only_its_left
             return 0
     killed: list[tuple[int, int]] = []
     monkeypatch.setattr(lane.subprocess, "Popen", FakePopen)
-    monkeypatch.setattr(lane.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(lane.os, "killpg", lambda pid, sig: killed.append((pid, sig)), raising=False)  # POSIX only
     lane_ = lane.Lane(tmp_path, SHA, tmp_path / "runs" / "R1", tmp_path, broken_fixture=True)
     lane_.sandbox_image = "img"
     with lane_.instance("sandbox") as inst:

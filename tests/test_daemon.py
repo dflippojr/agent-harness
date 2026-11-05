@@ -702,7 +702,9 @@ def test_sandbox_shell_local_clone_and_network_gate(tmp_path):
 
     async def body():
         m = Manager(cfg, chat=script)
-        await m.start()
+        # No maintenance: on a shared Docker engine it would remove other instances' session containers as orphans
+        # (the real-environment lane runs this test on the deploy host, #731).
+        await m.start(maintenance=False)
         s = m.create("clone and run")
         s = await wait_status(m, s["id"], "waiting_approval", "done", "failed", timeout=120)
         assert s["status"] == "waiting_approval", s["stop_reason"]
