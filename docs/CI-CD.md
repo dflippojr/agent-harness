@@ -657,8 +657,9 @@ The tower runs Ubuntu since 2026-10-26. Production runs there from the live chec
 `/home/daniel/Projects/agent-harness` as systemd user units of `daniel` (`~/.config/systemd/user/`, lingering on, so they start whenever the tower boots
 into Ubuntu; until the owner does step 11, the boot-order change, a reboot lands in Windows instead):
 `agent-harness-main-daemon.service`, whose `ExecStart` runs `~/.local/share/agent-harness/bin/run-daemon.sh`,
-`agent-harness-main-llama.service` and `agent-harness-hub.service`. `harness-metrics-proxy.service` is a system unit,
-and the deployment leaves it alone. The Windows runner
+`agent-harness-main-llama.service` and `agent-harness-hub.service`. `harness-metrics-proxy.service` and
+`harness-app-api-proxy.service` ([App API for containers](#app-api-for-containers)) are system units, and the
+deployment leaves them alone. The Windows runner
 `dflippotower-agent-harness` (label `agent-harness-tower`) is retired; `deploy-tower` runs on a Linux runner
 registered only to `dflippojr/agent-harness` with the custom label `agent-harness-tower-linux` (#812). The runner
 runs as `daniel`, the user that owns the daemon's unit: `systemctl --user` reaches only its own user's manager. That
@@ -866,6 +867,98 @@ on the live checkout's `main`.
    KillSignal=SIGINT
    TimeoutStopSec=6min
    ```
+
+## App API for containers
+
+The daemon listens on `127.0.0.1:8100` only. On the tower, `172.17.0.1:8100` (docker0, where `host.docker.internal`
+points) is `harness-metrics-proxy`, which forwards `GET /metrics` and nothing else. Containers that need the App API
+reach it through `harness-app-api-proxy` (#909):
+
+| | |
+| --- | --- |
+| **URL** | `http://192.168.240.1:8100`, the gateway of the Docker network `harness-app-api` (`192.168.240.0/29`, bridge `harness-api0`) |
+| **Who** | Containers attached to `harness-app-api`: the Financial Planner's `app` and `background`, and nothing else |
+| **What** | `/api/v1` and `/api/v1/...`, except `/api/v1/pair/...`. No admin API (`/api/admin/v1`), Web UI, `/keys`, `/v1` inference or runner routes |
+| **As whom** | A remote App client. Every route but the discovery document needs the App's own token |
+
+Why only those containers: on this tower, containers using host-gateway reach every host address, so the bind address
+is no boundary. The proxy enforces it in two ways:
+
+- Its socket is bound to the `harness-api0` device (`SO_BINDTODEVICE`), so the kernel refuses a connection to
+  `192.168.240.1:8100` that arrived on docker0 or any other bridge.
+- It admits only source addresses inside `192.168.240.0/29` other than the gateway.
+
+Only a container attached to that network has such an address. The network is `--internal`, so joining it gives a
+container no new route out.
+
+What the daemon sees: the proxy forwards an allowlist of App request headers (`Authorization`, `Content-Type`, `Accept`,
+`Idempotency-Key`, `X-Agent-Harness-Client`, `Last-Event-ID` and `User-Agent`). It rewrites `Host` to `127.0.0.1:8100`
+and drops every other header: `Tailscale-*`, the local owner token, the Hub approval secret, cookies, `Origin` and
+`X-Forwarded-*`. This matters here because the tower sets `listen.trust_unverified_identity_headers: true`: a
+`Tailscale-User-Login` that reached the daemon would make the caller the owner.
+
+The daemon therefore sees a loopback request with no Tailscale identity and no local owner token, and admits it only
+with a token its route checks, or for `GET /api/v1`, which answers without one ([INSTALL.md](INSTALL.md)). Never point a
+container at the tailnet name instead: `tailscale serve` adds an identity header, and on this tower that makes the
+caller the owner.
+
+The unit runs as a `DynamicUser` with `ProtectHome`, so it can't read the daemon's `data_dir`. Its source is
+`ops/app-api/` and its tests are `tests/test_app_api_proxy.py`.
+
+### Installing it
+
+The owner does this once, with sudo. The network keeps its subnet and bridge name across Docker restarts, and the unit
+retries every 10 seconds until the bridge exists:
+
+```
+docker network create --internal --subnet 192.168.240.0/29 --gateway 192.168.240.1 \
+    -o com.docker.network.bridge.name=harness-api0 harness-app-api
+cd /home/daniel/Projects/agent-harness/ops/app-api
+sudo install -m 0755 harness_app_api_proxy.py /usr/local/sbin/harness-app-api-proxy
+sudo install -m 0644 harness-app-api-proxy.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now harness-app-api-proxy.service
+journalctl -u harness-app-api-proxy.service -n 5    # "App API proxy on 192.168.240.1:8100 (harness-api0, ...)"
+```
+
+If `192.168.240.0/29` is ever taken, choose another `/29` and change it in three places: the `docker network create`
+command, the unit's `ExecStart` and its `IPAddressAllow`.
+
+### The Financial Planner's settings
+
+These belong in `/srv/docker/financial-planner`, the dflippojr/financial-planner deployment, not here. On the tower, a
+compose override (not in git, like its ntfy override) attaches both services to the network:
+
+```yaml
+services:
+  app:
+    networks: [default, ntfy, harness-app-api]
+  background:
+    networks: [default, ntfy, harness-app-api]
+networks:
+  harness-app-api:
+    external: true
+    name: harness-app-api
+```
+
+Set `AGENT_HARNESS_ALLOWED_ORIGINS=http://192.168.240.1:8100` in its environment file, and save
+`http://192.168.240.1:8100` as the connection's base URL in the planner's Agent Harness settings, with an App token.
+Then recreate both containers with `docker compose up -d app background`. The planner's default,
+`http://host.docker.internal:8100`, reaches only the metrics proxy.
+
+### Checking it
+
+```
+# The planner gets the API: discovery, then backends with its App token
+docker exec financial-planner-app-1 python -c "import urllib.request as u; print(u.urlopen('http://192.168.240.1:8100/api/v1').status)"   # 200
+# Nothing else does: from the default bridge, connection refused; through docker0, 404
+docker run --rm --network bridge --add-host host.docker.internal:host-gateway curlimages/curl \
+    -sS -o /dev/null -w '%{http_code}\n' http://192.168.240.1:8100/api/v1               # curl: (7) ... Connection refused
+docker run --rm --network bridge --add-host host.docker.internal:host-gateway curlimages/curl \
+    -sS -o /dev/null -w '%{http_code}\n' http://host.docker.internal:8100/api/v1        # 404
+# Prometheus still scrapes 8100 and 8090 through harness-metrics-proxy
+curl -s http://127.0.0.1:9090/api/v1/targets | grep -oE '"scrapeUrl":"[^"]*:(8100|8090)/metrics"[^}]*"health":"[a-z]*"'
+```
 
 ## Review runner pool
 
