@@ -895,11 +895,23 @@ Each member unpacks the pinned runner release (SHA-256 checked) into
 `/home/github-runner/runners/<name>`, registers it as the `github-runner` service user (created if missing, with no
 sudo or docker group), and installs the systemd unit `svc.sh install github-runner` would
 (`actions.runner.<owner>-<repo>.<name>.service`, `User=github-runner`), except for its
-[stop settings](#how-the-runner-stops), so it starts at boot into Ubuntu (every boot only after step 11; until then a reboot lands in
-Windows) and jobs never run as root.
+[stop settings](#how-the-runner-stops) and the memory caps and restart policy below, so it starts at boot into Ubuntu
+(every boot only after step 11; until then a reboot lands in Windows) and jobs never run as root.
 The service user owns that tree, so root acts on nothing in it. The installer refuses a destination with a symlink in
 it, or under a `/` or `/home` that is not root's alone. The service user creates the directory and unpacks the runner,
 with root feeding it the checked archive on stdin. Root writes the unit itself rather than run the runner's `svc.sh`.
+
+**Memory caps and restarts.** Each member's unit adds four settings to the `[Service]` section, so no member can use
+more than 4 GB:
+
+- `MemoryHigh=3G` throttles the unit's processes once they use more than 3 GB.
+- `MemoryMax=4G` is the hard limit: the kernel kills the unit's processes above 4 GB.
+- `Restart=on-failure` with `RestartSec=30` restarts a member 30 seconds after it fails.
+
+These come from [dflippojr/agent-ops#442](https://github.com/dflippojr/agent-ops/issues/442). A review job left Codex
+sandbox children behind, one unit peaked at 13.3 GB, and the tower ran out of memory.
+Members installed before this change get the same caps from the `install-review-guards.sh` drop-in in
+[dflippojr/agent-ops#444](https://github.com/dflippojr/agent-ops/pull/444), not from this installer.
 
 `--user` and `--install-dir` choose another user or directory. The directory must stay under `/home`, because the
 publication scan rejects home-directory paths and so cannot post a leaked runner path. A consumer repository's runner
