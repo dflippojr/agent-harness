@@ -1479,3 +1479,98 @@ def test_a_manual_run_refuses_while_the_timer_wrapper_prepares_or_runs(tmp_path,
         out, err = wrapper.communicate(timeout=60)
     assert wrapper.returncode == 0, (out, err)            # the wrapper's own run never locks itself out
     assert rig.manual(monkeypatch) == [str(rig.base)]     # and the lock is free once it ends
+
+
+# --- review of 177a5089, real_env_lane.py:743: lane sessions never mount the live pip/npm cache volumes ---------------
+# A sandbox session with a project mounts `<cache prefix>-pip-<project>` and `-npm-<project>` read-write. The live
+# owner's are `harness-cache-pip-scratch` and `harness-cache-npm-scratch`; the lane's sessions and the Docker daemon
+# tests it runs get the run's own, which its cleanup removes.
+LIVE_CACHE = "harness-cache-"
+
+
+def _cache_sources(sandbox_cfg, project: str = "scratch") -> list[str]:
+    from harness.sandbox import Sandbox
+    sources = []
+    for user in ("owner", "member-1"):
+        mounts = Sandbox("s1", Path("."), sandbox_cfg, project=project, user_id=user)._cache_mounts()  # noqa: SLF001
+        sources += [m.split("source=", 1)[1].split(",", 1)[0] for m in mounts if "source=" in m]
+    assert len(sources) == 4, sources
+    return sources
+
+
+def test_the_lane_config_gives_sandbox_sessions_the_runs_own_cache_volumes(tmp_path):
+    from harness import config as config_mod
+    tag = "20261105t140000z-0123abcd"
+    root = tmp_path / "instance-sandbox"
+    (root / "config").mkdir(parents=True)
+    raw = lane.lane_config(root, 1, "sandbox", tag, "ghcr.io/x/sandbox:sha-1")
+    (root / "config" / "harness.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+    cfg = config_mod.load(root / "config", root / "data")
+    for source in _cache_sources(cfg.sandbox):
+        assert source.startswith(lane.lane_volume(tag, "")), source
+        assert not source.startswith(LIVE_CACHE), source
+
+
+DAEMON_TEST_MOUNTS = (
+    "import json, sys\n"
+    "sys.path[:0] = ['.', 'tests']\n"
+    "from test_daemon import make_cfg\n"
+    "from harness.sandbox import Sandbox\n"
+    "from pathlib import Path\n"
+    "cfg = make_cfg(Path(sys.argv[1]))\n"
+    "out = []\n"
+    "for project in cfg.projects:\n"
+    "    for user in ('owner', 'member-1'):\n"
+    "        out += Sandbox('s1', Path('.'), cfg.sandbox, project=project, user_id=user)._cache_mounts()\n"
+    "print(json.dumps(out))\n")
+
+
+def _daemon_test_cache_sources(tmp_path: Path, env: dict[str, str]) -> list[str]:
+    proc = subprocess.run([sys.executable, "-c", DAEMON_TEST_MOUNTS, str(tmp_path)], cwd=Path(__file__).parents[1],
+                          env=env, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    mounts = json.loads(proc.stdout.strip().splitlines()[-1])
+    sources = [m.split("source=", 1)[1].split(",", 1)[0] for m in mounts if "source=" in m]
+    assert sources, mounts
+    return sources
+
+
+def test_the_docker_daemon_tests_the_lane_runs_mount_the_runs_own_cache_volumes(tmp_path, idle):
+    run = FakeLane(tmp_path)
+    lane.sandbox_suite(run)
+    marker, env = run.markers[0]
+    assert marker == "docker"
+    for source in _daemon_test_cache_sources(tmp_path, env):
+        assert source.startswith(lane.lane_volume(run.tag, "")), source
+        assert not source.startswith(LIVE_CACHE), source
+
+
+def test_the_docker_daemon_tests_never_mount_a_live_cache_volume_outside_the_lane(tmp_path):
+    import os
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HARNESS_TEST_")}
+    for source in _daemon_test_cache_sources(tmp_path, env):
+        assert not source.startswith(LIVE_CACHE), source
+
+
+def test_a_projects_sandbox_override_cannot_move_its_cache_volumes(tmp_path):
+    from harness.config import SandboxConfig, sandbox_for_project
+    base = SandboxConfig(cache_volume_prefix="real-env-x-cache")
+    assert sandbox_for_project(base, {"cache_volume_prefix": "harness-cache", "memory": "1g"}).cache_volume_prefix \
+        == "real-env-x-cache"
+    assert SandboxConfig().cache_volume_prefix == "harness-cache"   # the live install's names stay as they were
+
+
+def test_the_run_removes_its_cache_volumes_and_no_live_one(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+    lane_ = lane.Lane(tmp_path, SHA, tmp_path / "runs" / "R1", tmp_path)
+    prefix = lane.lane_volume(lane_.tag, "")
+    listing = (f"{prefix}cache-pip-scratch\n{prefix}cache-npm-scratch\n{prefix}cache-uabc-pip-scratch\n"
+               "harness-cache-pip-scratch\nharness-cache-npm-scratch\nharness-test-cache-pip-scratch\n")
+
+    def run(args, **_k):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, listing if args[:3] == ["docker", "volume", "ls"] else "", "")
+    monkeypatch.setattr(lane, "_run", run)
+    lane_.cleanup()   # the end of every run: the Docker tests' volumes are made outside any instance
+    removed = sorted(a[3] for a in calls if a[:3] == ["docker", "volume", "rm"])
+    assert removed == [f"{prefix}cache-npm-scratch", f"{prefix}cache-pip-scratch", f"{prefix}cache-uabc-pip-scratch"]
