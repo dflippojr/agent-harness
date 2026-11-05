@@ -134,6 +134,16 @@ def test_everything_else_is_refused(target):
     assert not proxy.path_allowed(target)
 
 
+@pytest.mark.parametrize("target", [
+    "/api/v1/runner-pair", "/api/v1/runner-pair/", "/api/v1/runner-pair/x", "/api/v1/runner-pair?code=1",
+    # Encoded letters still spell native runner pairing once the daemon decodes the path.
+    "/api/v1/%72unner-pair", "/api/v1/runner%2Dpair", "/api/v1/runner-p%61ir", "/api/v1/%72%75%6e%6e%65%72-pair",
+])
+def test_native_runner_pairing_is_refused(target):
+    """Codex round 1: `/api/v1/runner-pair` redeems an owner-approved Mac code for an owner_token."""
+    assert not proxy.path_allowed(target)
+
+
 def test_peers_are_the_network_without_its_gateway_and_edges():
     peers = proxy.Peers(ipaddress.IPv4Network("192.168.240.0/29"), ipaddress.IPv4Address("192.168.240.1"))
     assert peers.admits("192.168.240.2") and peers.admits("192.168.240.6") and peers.admits("::ffff:192.168.240.3")
@@ -246,6 +256,76 @@ def test_peers_off_the_network_and_the_gateway_are_cut_off_before_a_request_is_r
     assert request(port, "GET", "/api/v1")[0] == 200
 
 
+def test_runner_pairing_never_reaches_the_daemon_even_with_an_app_token(chain):
+    upstream, port = chain
+    app = {"Authorization": "Bearer ha-app", "Content-Type": "application/json"}
+    for target in ("/api/v1/runner-pair", "/api/v1/%72unner-pair", "/api/v1/runner-p%61ir"):
+        status, _, body = request(port, "POST", target, headers=app, body=b'{"code":"ah909-unknown-code"}')
+        assert (status, body) == (404, b'{"detail":"not available through the App API proxy"}'), target
+    assert upstream.requests == []
+
+
+def test_a_repeated_content_length_or_forwarded_header_is_refused(chain):
+    """Two values for one header could be read differently by the proxy and the daemon: refuse them all."""
+    upstream, port = chain
+    for name, values in (("Content-Length", ("2", "2")), ("Content-Length", ("2", "3")),
+                         ("Authorization", ("Bearer ha-app", "Bearer ha-other")),
+                         ("Content-Type", ("application/json", "text/plain"))):
+        conn = http.client.HTTPConnection(str(GATEWAY), port, timeout=10, source_address=(MEMBER, 0))
+        try:
+            conn.putrequest("POST", "/api/v1/sessions")
+            for value in values:
+                conn.putheader(name, value)
+            if name != "Content-Length":
+                conn.putheader("Content-Length", "2")
+            conn.endheaders(b"{}")
+            assert conn.getresponse().status == 400, (name, values)
+        finally:
+            conn.close()
+    assert upstream.requests == []
+
+
+def test_handler_slots_are_released_after_every_kind_of_request(monkeypatch):
+    """With one slot, a held connection turns the next one away. Once it closes, and after each forwarded, refused,
+    malformed or failed request, the slot is free again."""
+    from waits import scaled
+
+    upstream = Upstream()
+    monkeypatch.setattr(proxy, "MAX_CONNECTIONS", 1)
+    server = start_proxy(upstream.port)
+    port = server.server_address[1]
+
+    def free_slots(expected):
+        deadline = time.monotonic() + scaled(10)
+        while server.slots._value != expected and time.monotonic() < deadline:  # noqa: SLF001 - the slot count
+            time.sleep(0.01)
+        return server.slots._value  # noqa: SLF001
+
+    try:
+        held = socket.create_connection((str(GATEWAY), port), timeout=10, source_address=(MEMBER, 0))
+        held.sendall(b"GET /api/v1 HTTP/1.0\r\n")  # the handler waits for the rest of the request in its slot
+        assert free_slots(0) == 0
+        with pytest.raises((http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError,
+                            BrokenPipeError)):
+            request(port, "GET", "/api/v1")
+        held.close()
+        assert free_slots(1) == 1
+        for method, target, headers, expected in (
+                ("GET", "/api/v1", {}, 200), ("GET", "/api/v1/backends", {}, 200), ("GET", "/keys", {}, 404),
+                ("OPTIONS", "/api/v1", {}, 405), ("POST", "/api/v1/sessions", {"Content-Length": "x"}, 400),
+                ("POST", "/api/v1/pair/requests", {}, 404)):
+            assert request(port, method, target, headers=headers)[0] == expected, (method, target)
+            assert free_slots(1) == 1, (method, target)
+        upstream.close()  # the daemon goes away: a 502 frees its slot too
+        assert request(port, "GET", "/api/v1")[0] == 502
+        assert free_slots(1) == 1
+        # The held request line goes upstream once its client closes (end of headers); refusals never do.
+        assert [r["path"] for r in upstream.requests] == ["/api/v1", "/api/v1", "/api/v1/backends"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_a_daemon_that_is_down_is_a_502():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -342,3 +422,38 @@ def test_the_owner_admin_token_reaches_no_owner_route_through_the_proxy(daemon):
     assert httpx.get(f"{daemon['direct']}/api/admin/v1/keys", headers=admin, timeout=10).status_code == 200
     for target in ("/api/admin/v1/keys", "/keys", "/me", "/settings"):
         assert request(daemon["port"], "GET", target, headers=admin)[0] == 404, target
+
+
+def test_native_runner_pairing_is_reached_directly_but_never_through_the_proxy(daemon):
+    """Directly, the daemon answers `/api/v1/runner-pair` (400 for a code it doesn't know). Through the proxy, with
+    the App's own token, it is the proxy's 404 for every spelling."""
+    import httpx
+
+    app = {"Authorization": f"Bearer {daemon['app']}", "Content-Type": "application/json"}
+    direct = httpx.post(f"{daemon['direct']}/api/v1/runner-pair", headers=app, json={"code": "ah909-unknown-code"},
+                        timeout=10)
+    assert (direct.status_code, direct.json()["detail"]) == (400, "invalid runner pairing code")
+    for target in ("/api/v1/runner-pair", "/api/v1/%72unner-pair", "/api/v1/runner-p%61ir"):
+        status, _, body = request(daemon["port"], "POST", target, headers=app, body=b'{"code":"ah909-unknown-code"}')
+        assert (status, body) == (404, b'{"detail":"not available through the App API proxy"}'), target
+
+
+def test_no_pairing_or_runner_route_of_the_daemon_passes_the_proxy(tmp_path):
+    """The class, not one route: every route the daemon registers whose path names pairing or runners is refused,
+    as written and with its first letter percent-encoded. A new one under /api/v1 fails here until it is refused."""
+    import re
+
+    from harness.api import create_app
+    from harness.llm import Completion
+    from harness.manager import Manager
+
+    from test_daemon import Script, make_cfg
+
+    app = create_app(Manager(make_cfg(tmp_path), chat=Script([Completion(content="hi")])))
+    paths = sorted({re.sub(r"\{[^}]+\}", "x1", route.path) for route in app.routes
+                    if re.search("pair|runner", getattr(route, "path", ""))})
+    assert "/api/v1/runner-pair" in paths and "/api/v1/pair/requests/x1/token" in paths
+    for path in paths:
+        assert not proxy.path_allowed(path), path
+        head, _, tail = path.rpartition("/")
+        assert not proxy.path_allowed(f"{head}/%{ord(tail[0]):02x}{tail[1:]}"), path
