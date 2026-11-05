@@ -30,6 +30,9 @@ SANDBOX_IMAGE = os.environ.get("HARNESS_TEST_SANDBOX_IMAGE") or "agent-harness-s
 # The lane also gives a proxy nothing answers on, so network commands fail closed rather than attach the live egress
 # proxy to a test network on the deploy host.
 SANDBOX_PROXY = os.environ.get("HARNESS_TEST_SANDBOX_PROXY") or SandboxConfig.proxy
+# Sessions with a project mount pip and npm cache volumes. The tests' own are never the live instance's
+# (`harness-cache-*`), and the lane gives the run's, which it removes afterwards.
+SANDBOX_CACHE_PREFIX = os.environ.get("HARNESS_TEST_SANDBOX_CACHE_PREFIX") or "harness-test-cache"
 
 
 def make_cfg(tmp: Path, context_tokens: int = 65536, rules: list | None = None) -> Config:
@@ -39,7 +42,8 @@ def make_cfg(tmp: Path, context_tokens: int = 65536, rules: list | None = None) 
     return Config(
         host="127.0.0.1", port=0, data_dir=tmp / "data", repos_dir=tmp / "repos", default_model="fake",
         models={"fake": ModelConfig(name="fake", base_url="http://unused", context_tokens=context_tokens)},
-        sandbox=SandboxConfig(image=SANDBOX_IMAGE, proxy=SANDBOX_PROXY, network=f"harness-test-sbx-{token}",
+        sandbox=SandboxConfig(image=SANDBOX_IMAGE, proxy=SANDBOX_PROXY, cache_volume_prefix=SANDBOX_CACHE_PREFIX,
+                              network=f"harness-test-sbx-{token}",
                               egress_network=f"harness-test-egress-{token}"),
         projects={"scratch": Project(name="scratch"), "guarded": Project(name="guarded", rules=rules or [])},
     )

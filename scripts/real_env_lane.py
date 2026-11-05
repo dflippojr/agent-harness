@@ -494,7 +494,9 @@ class Lane:
     def env(self, **extra: str) -> dict[str, str]:
         tmp = self.base / "tmp"   # outside the run dir, so the pinned gitleaks the tests fetch is kept between runs
         tmp.mkdir(parents=True, exist_ok=True)
-        env = {**os.environ, "TMPDIR": str(tmp), "PYTHONDONTWRITEBYTECODE": "1"}
+        env = {**os.environ, "TMPDIR": str(tmp), "PYTHONDONTWRITEBYTECODE": "1",
+               # The Docker tests' sessions mount the run's pip/npm cache volumes, never the live instance's.
+               "HARNESS_TEST_SANDBOX_CACHE_PREFIX": lane_volume(self.tag, "cache")}
         env.pop("HARNESS_CONFIG_DIR", None)
         env.pop("HARNESS_DATA_DIR", None)
         env.update(extra)
@@ -568,7 +570,11 @@ class Lane:
                 _run(["docker", "rm", "-f", name], timeout=60)
         for net in ("sbx", "egress", "proxy"):
             _run(["docker", "network", "rm", f"real-env-{self.tag}-{net}"], timeout=60)
-        # The run's disposable CLI volumes (state and login, `lane_volume`), after the containers that held them.
+        self._remove_run_volumes()   # after the containers that held them
+
+    def _remove_run_volumes(self) -> None:
+        """The run's disposable volumes, `lane_volume` names: the CLI state and login volumes and the pip/npm caches
+        of its sessions and its Docker tests. Nothing outside the run's prefix."""
         prefix = lane_volume(self.tag, "")
         listed = _run(["docker", "volume", "ls", "--filter", f"name={prefix}", "--format", "{{.Name}}"], timeout=60)
         mine = re.compile(rf"{re.escape(prefix)}[a-z0-9][a-z0-9_.-]*")
@@ -577,6 +583,7 @@ class Lane:
                 _run(["docker", "volume", "rm", name], timeout=60)
 
     def cleanup(self) -> None:
+        self._remove_run_volumes()   # the Docker tests make cache volumes outside any instance
         for tag in self.built_images:
             _run(["docker", "image", "rm", tag], timeout=120)
 
@@ -977,7 +984,9 @@ def lane_config(root: Path, port: int, mode: str, tag: str, image: str, spec: di
                     "egress_network": f"real-env-{tag}-egress", "proxy_network": f"real-env-{tag}-proxy",
                     # Not the live proxy: a loopback discard port with no proxy container behind it, so a network
                     # command fails closed instead of going out through the live instance's egress proxy.
-                    "proxy": NO_PROXY, "idle_stop_seconds": 0},
+                    "proxy": NO_PROXY, "idle_stop_seconds": 0,
+                    # The run's own pip/npm caches, removed with it: never the live `harness-cache-*` volumes.
+                    "cache_volume_prefix": lane_volume(tag, "cache")},
         "budgets": {"approval_timeout_seconds": 3600},
         # A local model nothing calls (the sandbox journey is scripted; hosted sessions run on their CLIs).
         "default_model": "lane-scripted",

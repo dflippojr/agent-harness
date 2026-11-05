@@ -21,7 +21,7 @@ against `origin/main`, and reports on the commit it tested.
 
 | Suite | When | What it runs | Passes when |
 | --- | --- | --- | --- |
-| `sandbox` | Nightly | 1. `pytest -m docker` from the tree, with `HARNESS_TEST_SANDBOX_IMAGE` and `HARNESS_TEST_CLI_IMAGE` set to the commit's images (a name no image has when the commit's CLI image isn't available, so those tests skip rather than use the installed one), `HARNESS_TEST_SANDBOX_PROXY` set to a loopback discard port (so the daemon test's network command fails closed instead of attaching the live egress proxy) and `HARNESS_LIVE_DOCKER=1`. <br>2. One scripted session in the real sandbox: `git_clone local:lane-fixture`, `run_shell` of the fixture, `verify` (the fixture's unittest), then three reads of a host file outside `/workspace` (a `../` path, its absolute host path, and a symlink committed in the fixture repo), and a `run_shell` `cat` of all three. | At least one marked test runs and none fails. The session ends `done`. The clone, the shell run and `verify` succeed. The host file's random contents appear nowhere in the session's events or transcript (#370 class). |
+| `sandbox` | Nightly | 1. `pytest -m docker` from the tree, with `HARNESS_TEST_SANDBOX_IMAGE` and `HARNESS_TEST_CLI_IMAGE` set to the commit's images (a name no image has when the commit's CLI image isn't available, so those tests skip rather than use the installed one), `HARNESS_TEST_SANDBOX_PROXY` set to a loopback discard port (so the daemon test's network command fails closed instead of attaching the live egress proxy), `HARNESS_TEST_SANDBOX_CACHE_PREFIX` set to the run's cache prefix (so the daemon tests' sessions mount the run's pip/npm caches, which the run removes; outside the lane they use `harness-test-cache-*`, never the live `harness-cache-*`) and `HARNESS_LIVE_DOCKER=1`. <br>2. One scripted session in the real sandbox: `git_clone local:lane-fixture`, `run_shell` of the fixture, `verify` (the fixture's unittest), then three reads of a host file outside `/workspace` (a `../` path, its absolute host path, and a symlink committed in the fixture repo), and a `run_shell` `cat` of all three. | At least one marked test runs and none fails. The session ends `done`. The clone, the shell run and `verify` succeed. The host file's random contents appear nowhere in the session's events or transcript (#370 class). |
 | `gpu` | Nightly | 1. A gate, which reads the live daemon's `/metrics`. It skips as `gpu-held: ...` unless the GPU guard is `clear`, there's no manual hold, the model isn't parked and RAM isn't low. It also asks llama-server's `/props`, which answers without waking it, and skips when the model is asleep or the server doesn't answer. So the suite runs only when the model is already awake; on a night when llama-server has gone idle, it reads `skipped: gpu-held: the model is asleep`. That is deliberate: the lane never loads or wakes the model, and the owner can move the timer closer to the model's busy hours. <br>2. `pytest -m gpu tests/real_env/gpu_checks.py` (a text reply and a tool call through `harness.llm`; outside default collection, so CI never sees it). <br>3. One short session on the real llama-server that must call `write_file`. | At least one check runs and none fails. The gate is read again before the session, and a live session or hold that arrived meanwhile turns the suite into a skip. The session ends `done` with a successful `write_file`. |
 | `hosted-cli` | Weekly | 1. One minimal print-mode session ("reply with exactly `real-env-ok`") per backend that is safe to run (see [Hosted credentials](#hosted-credentials)), available and logged in. <br>2. With `--pair` (the weekly unit passes it), Claude's session is replaced by two concurrent sessions sharing its one token (#390 class), with the disposable daemon given room for both at once. | Every session ends `done` with `real-env-ok` in the assistant's answer (not just anywhere in the transcript, which holds the prompt too), the two pair sessions' runs overlap in time (from their events' timestamps), and Claude's token file is unchanged after the pair. |
 
@@ -86,6 +86,8 @@ The disposable daemon:
 - Runs **without the local-model supervision module**, as fake model mode does. So nothing in it can stop, park or
   start llama-server, and it never writes the live pause flag.
 - Has its own Docker networks, `real-env-<run>-{sbx,egress,proxy}`.
+- Has its own pip and npm cache volumes, `real-env-<run>-cache-{pip,npm}-<project>` (the sandbox's
+  `cache_volume_prefix`), never the live `harness-cache-*` ones. A project's `sandbox:` override can't change it.
 - Has a sandbox proxy that doesn't exist, so a network command fails closed instead of going through the live
   egress proxy.
 
@@ -127,7 +129,8 @@ Each copied backend gets a disposable state volume for the run, `real-env-<run>-
 login volume follows from it, `real-env-<run>-<backend>-login`, so no session, probe or domain preparation
 (`cli_domains.prepare_command`, which creates and `chown`s the state and login directories) mounts, `chown`s or
 writes a live `harness-auth-*`, `harness-state-*` or `harness-login-*` volume. The lane removes the run's volumes
-with its containers when the instance stops.
+with its containers when the instance stops, and once more at the end of the run, which also catches the cache
+volumes the Docker tests made outside any instance. It removes only names under `real-env-<run>-`.
 
 Python: the lane runs from its own clone and venv (`run-lane.sh`), never the deployed checkout or its venv.
 

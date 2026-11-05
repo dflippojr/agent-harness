@@ -339,7 +339,7 @@ class Sandbox:
         prefix = "" if self.user_id == OWNER_USER_ID else f"{self._cache_key()}-"
         out: list[str] = []
         for name, target in (("pip", "/root/.cache/pip"), ("npm", "/root/.npm")):
-            out += ["--mount", f"type=volume,source=harness-cache-{prefix}{name}-{self.project},target={target}"]
+            out += ["--mount", f"type=volume,source={self.cfg.cache_volume_prefix}-{prefix}{name}-{self.project},target={target}"]
         return out
 
     def _proxy_env(self) -> list[str]:
