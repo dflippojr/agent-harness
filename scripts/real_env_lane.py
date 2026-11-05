@@ -335,11 +335,25 @@ def gpu_hold_reason(metrics: dict[str, float] | None) -> str:
     return ""
 
 
+def model_awake(base_url: str) -> str:
+    """"" when llama-server is up with its model awake; otherwise why the GPU suite must not run. `/props` reports
+    `is_sleeping` without waking the server (harness_modules/local_model/warmup.py), so asking loads nothing."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{base_url.rstrip('/')}/props", timeout=10) as resp:  # noqa: S310 - config URL
+            props = json.loads(resp.read().decode("utf-8", "replace"))
+    except (OSError, ValueError):
+        return "gpu-held: llama-server did not answer /props (the lane never starts it)"
+    return "gpu-held: the model is asleep (the lane never wakes it)" if props.get("is_sleeping") else ""
+
+
 def wait_for_idle(metrics_url: str, max_wait: float, poll: float = 60,
-                  fetch: Callable[[str], dict | None] = fetch_metrics, sleep: Callable[[float], None] = time.sleep,
-                  clock: Callable[[], float] = time.monotonic) -> str:
+                  fetch: Callable[[str], dict | None] | None = None, sleep: Callable[[float], None] | None = None,
+                  clock: Callable[[], float] | None = None) -> str:
     """Yield to real sessions: wait while the live daemon is busy (or its state is unknown), up to `max_wait`.
     Returns the reason it is still busy at the end ("": go ahead)."""
+    # Looked up at call time, not bound as defaults, so a replaced fetch_metrics (tests, a wrapper) is the one used.
+    fetch, sleep, clock = fetch or fetch_metrics, sleep or time.sleep, clock or time.monotonic
     deadline = clock() + max_wait
     while True:
         busy = busy_reason(fetch(metrics_url))
@@ -627,7 +641,13 @@ def drive_session(inst: Instance, prompt: str, *, backend: str | None = None, ti
         else:
             client.post(f"/api/v1/sessions/{sid}/cancel")
             status = f"timeout ({status})"
-        events = parse_sse(client.get(f"/api/v1/sessions/{sid}/events", params={"follow": "false"}).text)
+        # The terminal status is saved just before run_finished: wait briefly for it, so the evidence is complete.
+        events: list[dict] = []
+        for _ in range(10):
+            events = parse_sse(client.get(f"/api/v1/sessions/{sid}/events", params={"follow": "false"}).text)
+            if any(e.get("type") == "run_finished" for e in events) or status not in ("done", "failed", "cancelled"):
+                break
+            time.sleep(1)
         transcript = client.get(f"/api/v1/sessions/{sid}/transcript").text
         return SessionRun(sid, status, reason, transcript, events, denied)
     finally:
@@ -723,11 +743,14 @@ def gpu_suite(lane: Lane) -> SuiteResult:
     if reason:
         return SuiteResult("gpu", SKIPPED, reason)
     model = live_model(live_raw(lane.live_config), lane.live_config)
+    asleep = model_awake(model["base_url"])
+    if asleep:
+        return SuiteResult("gpu", SKIPPED, asleep)
     env = lane.env(HARNESS_REAL_MODEL_URL=model["base_url"], HARNESS_REAL_MODEL_NAME=model["name"])
     tests = lane.pytest("gpu", env, timeout=1800, paths=(GPU_CHECKS,))  # outside default collection: by path
     # Yield again before the session: a live session or a GPU hold that arrived during the checks goes first.
     now = fetch_metrics(lane.metrics_url)
-    late = busy_reason(now) or gpu_hold_reason(now)
+    late = busy_reason(now) or gpu_hold_reason(now) or model_awake(model["base_url"])
     if late:   # a check that already failed stays a failure; only the session is given up
         state = FAILED if tests.broken else SKIPPED
         return SuiteResult("gpu", state, f"{late}; {tests.line('gpu tests')}, session not run", tests.output[-6000:],

@@ -554,6 +554,7 @@ def idle(monkeypatch):
     monkeypatch.setattr(lane, "wait_for_idle", lambda *a, **k: "")
     monkeypatch.setattr(lane.time, "sleep", lambda _s: None)
     monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: metrics())
+    monkeypatch.setattr(lane, "model_awake", lambda base_url: "")
 
 
 def test_sandbox_suite_passes_on_the_journey_and_points_the_tests_at_the_commits_images(tmp_path, idle):
@@ -1074,3 +1075,50 @@ def test_a_timed_out_check_is_not_hidden_by_a_yield(tmp_path, idle, monkeypatch)
     busy = metrics(**{'harness_sessions{status="running"}': 1})
     monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: busy)
     assert lane.sandbox_suite(FakeLane(tmp_path, tests=timed_out)).state == lane.FAILED
+
+
+def test_the_gpu_gate_never_wakes_a_sleeping_model(monkeypatch, tmp_path):
+    import io
+    import urllib.request
+    answers = {"http://m/props": b'{"is_sleeping": true}', "http://n/props": b'{"is_sleeping": false}'}
+
+    def urlopen(url, timeout=0):
+        if url not in answers:
+            raise OSError("refused")
+        return contextlib.nullcontext(io.BytesIO(answers[url]))
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    assert lane.model_awake("http://m/") == "gpu-held: the model is asleep (the lane never wakes it)"
+    assert lane.model_awake("http://n") == ""
+    assert lane.model_awake("http://down").startswith("gpu-held: llama-server did not answer")
+    monkeypatch.setattr(lane, "wait_for_idle", lambda *a, **k: "")
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: metrics())
+    run = FakeLane(tmp_path)
+    run.pytest = lambda *a, **k: pytest.fail("no GPU check against a sleeping model")
+    run.live_config = live_config(tmp_path)
+    monkeypatch.setattr(lane, "model_awake", lambda base_url: "gpu-held: the model is asleep (the lane never wakes it)")
+    result = lane.gpu_suite(run)
+    assert result.state == lane.SKIPPED and "asleep" in result.summary
+
+
+def test_wait_for_idle_uses_the_current_fetch_metrics(monkeypatch):
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: metrics())
+    assert lane.wait_for_idle("u", 0) == ""   # the replacement, not a binding taken at import
+
+
+def test_the_evidence_waits_for_run_finished(tmp_path, monkeypatch):
+    monkeypatch.setattr(lane.time, "sleep", lambda _s: None)
+    inst = lane.Instance("http://127.0.0.1:1", "tok", tmp_path, {})
+
+    class LateFinish(FakeClient):
+        reads = 0
+
+        def get(self, path, params=None):
+            if path.endswith("/events"):
+                self.reads += 1
+                events = [{"type": "status", "status": "running", "ts": 1}]
+                if self.reads > 1:
+                    events.append({"type": "run_finished", "status": "done", "ts": 2})
+                return FakeResponse(200, text="".join(f"data: {json.dumps(e)}\n\n" for e in events))
+            return super().get(path, params)
+    run = lane.drive_session(inst, "go", client=LateFinish(events=[]))
+    assert lane.run_window(run) == (1, 2)
