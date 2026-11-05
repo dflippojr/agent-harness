@@ -1353,11 +1353,20 @@ def test_the_lanes_own_volumes_are_removed_after_its_instance_and_nothing_else(t
 # --- review of 1db82048, run-lane.sh:34: the timer's wrapper and a manual run share one lock --------------------------
 # The wrapper (ops/real-env/run-lane.sh) is driven for real, with its outside work stubbed: a `git` on PATH and the
 # lane venv's `python` only log their calls (and can hold inside `git fetch`), and the clone's real_env_lane.py runs the
-# real lock code around a stubbed run. The manual entry point is `real_env_lane.py run` in this process.
+# real lock code around a stubbed run. The manual entry point is `real_env_lane.py run` in this process. They run
+# wherever the suite does: on Windows under Git Bash, as the installer tests do, with the same Python lock.
 WRAPPER = Path(__file__).parents[1] / "ops" / "real-env" / "run-lane.sh"
-needs_flock = pytest.mark.skipif(
-    sys.platform == "win32" or not all(__import__("shutil").which(t) for t in ("bash", "flock")),
-    reason="the scheduled lane runs on the Linux host (bash, flock)")
+
+
+def _bash() -> str:
+    from tests.installer_support import BASH
+    assert BASH, "the real-environment lane wrapper tests need bash (Git Bash on Windows)"
+    return BASH
+
+
+def _sh(path) -> str:
+    import shlex
+    return shlex.quote(Path(path).as_posix())
 
 
 def _wait_for(predicate, timeout: float = 20.0) -> bool:
@@ -1398,7 +1407,7 @@ class WrapperRig:
         git = shims / "git"
         git.write_text(
             "#!/usr/bin/env bash\n"
-            f"echo \"git $*\" >> {str(self.log)!r}\n"
+            f"echo \"git $*\" >> {_sh(self.log)}\n"
             "if [[ \"$*\" == *fetch* && -n \"${HOLD_FETCH:-}\" ]]; then\n"
             "  touch \"$HOLD_FETCH.reached\"\n"
             "  for _ in $(seq 600); do [[ -e \"$HOLD_FETCH\" ]] && break; sleep 0.05; done\n"
@@ -1407,20 +1416,23 @@ class WrapperRig:
         venv_python.parent.mkdir(parents=True)
         venv_python.write_text(
             "#!/usr/bin/env bash\n"
-            f"if [[ \"$1\" == -m ]]; then echo \"pip $*\" >> {str(self.log)!r}; exit 0; fi\n"
-            f"exec {sys.executable!r} \"$@\"\n", encoding="utf-8")
+            f"if [[ \"$1\" == -m ]]; then echo \"pip $*\" >> {_sh(self.log)}; exit 0; fi\n"
+            f"exec {_sh(sys.executable)} \"$@\"\n", encoding="utf-8")
         for path in (git, venv_python):
             path.chmod(0o755)
         import os
         self.env = {k: v for k, v in os.environ.items()
-                    if k not in ("REAL_ENV_HANDED_OVER", "REAL_ENV_LOCK_FD", "REAL_ENV_LOCK_WAIT", "HOLD_FETCH")}
-        self.env.update(REAL_ENV_BASE=str(self.base), PATH=f"{shims}{os.pathsep}{os.environ['PATH']}")
+                    if k not in ("REAL_ENV_HANDED_OVER", "REAL_ENV_LOCK_FD", "REAL_ENV_LOCK_TOKEN", "REAL_ENV_LOCK_WAIT",
+                                 "HOLD_FETCH")}
+        self.env.update(REAL_ENV_BASE=self.base.as_posix(), REAL_ENV_PYTHON=Path(sys.executable).as_posix(),
+                        PATH=f"{shims}{os.pathsep}{os.environ['PATH']}")
+        self.shims = shims
 
     def calls(self) -> list[str]:
         return self.log.read_text().splitlines() if self.log.exists() else []
 
     def start(self, **env) -> subprocess.Popen:
-        return subprocess.Popen(["bash", str(WRAPPER), "--no-report"], env={**self.env, **env},
+        return subprocess.Popen([_bash(), WRAPPER.as_posix(), "--no-report"], env={**self.env, **env},
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def manual(self, monkeypatch, on_run=lambda: None) -> list[str]:
@@ -1436,7 +1448,6 @@ class WrapperRig:
         return ran
 
 
-@needs_flock
 def test_a_manual_run_keeps_the_timer_wrapper_from_preparing_until_it_ends(tmp_path, monkeypatch):
     import threading
     rig = WrapperRig(tmp_path)
@@ -1461,7 +1472,6 @@ def test_a_manual_run_keeps_the_timer_wrapper_from_preparing_until_it_ends(tmp_p
     assert rig.calls()[-1] == "ran"   # then ran, under the lock it took before preparing
 
 
-@needs_flock
 def test_a_manual_run_refuses_while_the_timer_wrapper_prepares_or_runs(tmp_path, monkeypatch):
     rig = WrapperRig(tmp_path)
     wrapper = rig.start(HOLD_FETCH=str(rig.hold_fetch))
@@ -1479,6 +1489,20 @@ def test_a_manual_run_refuses_while_the_timer_wrapper_prepares_or_runs(tmp_path,
         out, err = wrapper.communicate(timeout=60)
     assert wrapper.returncode == 0, (out, err)            # the wrapper's own run never locks itself out
     assert rig.manual(monkeypatch) == [str(rig.base)]     # and the lock is free once it ends
+
+
+def test_the_wrapper_takes_its_lock_without_a_flock_command(tmp_path):
+    """The lock is the lane's own, taken in Python, so the wrapper needs no util-linux `flock` (Git Bash has none)."""
+    rig = WrapperRig(tmp_path)
+    flock = rig.shims / "flock"
+    flock.write_text(f"#!/usr/bin/env bash\necho \"flock $*\" >> {_sh(rig.log)}\nexit 1\n", encoding="utf-8")
+    flock.chmod(0o755)
+    rig.release_run.touch()
+    wrapper = rig.start()
+    out, err = wrapper.communicate(timeout=60)
+    assert not any(c.startswith("flock") for c in rig.calls()), rig.calls()
+    assert wrapper.returncode == 0, (wrapper.returncode, out, err)
+    assert rig.calls()[0].startswith("git ") and rig.calls()[-1] == "ran", rig.calls()
 
 
 # --- review of 177a5089, real_env_lane.py:743: lane sessions never mount the live pip/npm cache volumes ---------------
