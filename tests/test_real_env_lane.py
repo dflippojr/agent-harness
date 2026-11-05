@@ -1262,3 +1262,89 @@ def test_no_app_session_lets_each_suite_run(tmp_path, live_app_session, monkeypa
     hosted = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
                                         live=hosted_live(tmp_path), hosted_opt_in=("codex",), yield_seconds=0))
     assert hosted.state == lane.PASSED and sessions == ["claude", "codex"], hosted.summary
+
+
+# --- hosted sessions never touch a live login or state volume (#731, review of b39a004b) ---------------------------
+
+LIVE_VOLUME_PREFIXES = ("harness-auth-", "harness-login-", "harness-state-", "harness-cli-", "harness-eu-")
+
+
+def hosted_live_with_volumes(tmp_path: Path) -> Path:
+    """The live config as the tower writes it: Claude and Cursor name their live state volumes, Codex names none (the
+    daemon's default is then Claude's live state volume, `harness-auth-claude`)."""
+    cfg = tmp_path / "hosted-volumes"
+    cfg.mkdir(parents=True, exist_ok=True)
+    secret = tmp_path / "claude-oauth-token"
+    secret.write_text("not-a-real-token\n")
+    (cfg / "harness.yaml").write_text(yaml.safe_dump({
+        "default_model": "qwen", "models": {"qwen": {"base_url": "http://127.0.0.1:8090"}},
+        "backends": {"claude": {"enabled": True, "volume": "harness-auth-claude", "oauth_token_file": str(secret)},
+                     "codex": {"enabled": True},
+                     "cursor": {"enabled": True, "volume": "harness-auth-cursor"}}}))
+    return cfg
+
+
+def hosted_lane_config(tmp_path: Path, monkeypatch) -> tuple[FakeLane, object]:
+    """The disposable daemon's config exactly as `serve` loads it, from the spec a hosted run hands its instance."""
+    from harness import config as config_mod
+    monkeypatch.setattr(lane, "drive_session", lambda inst, prompt, backend=None, **k: lane.SessionRun(
+        "s", "done", events=[{"type": "assistant", "content": lane.OK_WORD}]))
+    listed = [dict(b, available=True) for b in BACKENDS if b["name"] in ("claude", "codex", "cursor")]
+    run = FakeLane(tmp_path, client=FakeClient(backends=listed), live=hosted_live_with_volumes(tmp_path),
+                   hosted_opt_in=("codex", "cursor"), force_hosted=True)
+    result = lane.hosted_suite(run)
+    assert result.state == lane.PASSED, result.summary
+    assert sorted(run.instance_spec["backends"]) == ["claude", "codex", "cursor"]
+    root = tmp_path / "instance-hosted"
+    config_dir = root / "config"
+    config_dir.mkdir(parents=True)
+    raw = lane.lane_config(root, 1, "hosted", run.tag, "", run.instance_spec)
+    (config_dir / "harness.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+    return run, config_mod.load(config_dir, root / "data")
+
+
+def test_the_hosted_lane_config_holds_no_live_volume_for_any_backend(tmp_path, idle, monkeypatch):
+    from harness import cli_domains
+    run, cfg = hosted_lane_config(tmp_path, monkeypatch)
+    for name in ("claude", "codex", "cursor"):
+        backend = cfg.backends[name]
+        names = {backend.volume, cli_domains.state_volume(name, backend), cli_domains.login_volume(name, backend)}
+        for volume in names:
+            assert volume.startswith(f"real-env-{run.tag}-{name}"), (name, volume)
+            assert not volume.startswith(LIVE_VOLUME_PREFIXES), (name, volume)
+
+
+def test_domain_preparation_in_the_lane_never_touches_the_shared_login(tmp_path, idle, monkeypatch):
+    from harness import cli_domains
+    run, cfg = hosted_lane_config(tmp_path, monkeypatch)
+    for name in ("claude", "codex", "cursor"):
+        backend = cfg.backends[name]
+        for args in (cli_domains.prepare_command(name, backend),
+                     cli_domains.docker_args(name, backend, token=name == "claude"),
+                     cli_domains.probe_args(name, backend)):
+            mounted = [args[i + 1].split(":", 1)[0] for i, a in enumerate(args) if a == "-v"]
+            assert mounted, (name, args)
+            for volume in mounted:
+                assert volume.startswith(f"real-env-{run.tag}-{name}"), (name, volume, args)
+            assert not any(live in a for a in args for live in LIVE_VOLUME_PREFIXES), (name, args)
+
+
+def test_the_lanes_own_volumes_are_removed_after_its_instance_and_nothing_else(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+    lane_ = lane.Lane(tmp_path, SHA, tmp_path / "runs" / "R1", tmp_path)
+    listing = (f"real-env-{lane_.tag}-claude\nreal-env-{lane_.tag}-claude-login\nreal-env-{lane_.tag}-codex\n"
+               f"real-env-{lane_.tag}x-claude\nreal-env-other-claude\nharness-auth-claude\nharness-login-claude\n")
+
+    def run(args, **_k):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, listing if args[:3] == ["docker", "volume", "ls"] else "", "")
+    monkeypatch.setattr(lane, "_run", run)
+    root = lane_.run_dir / "instance-hosted"
+    root.mkdir(parents=True)
+    (root / "sessions.txt").write_text("abc\n")
+    lane_._remove_docker_leftovers(root)  # noqa: SLF001 - the instance's own cleanup step
+    removed = sorted(a[3] for a in calls if a[:3] == ["docker", "volume", "rm"])
+    assert removed == [f"real-env-{lane_.tag}-claude", f"real-env-{lane_.tag}-claude-login",
+                       f"real-env-{lane_.tag}-codex"]
+    first_volume = min(i for i, a in enumerate(calls) if a[:3] == ["docker", "volume", "rm"])
+    assert all(i < first_volume for i, a in enumerate(calls) if a[:3] == ["docker", "rm", "-f"])  # containers first
