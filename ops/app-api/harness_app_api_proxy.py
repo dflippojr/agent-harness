@@ -49,7 +49,11 @@ API_PATH = re.compile(re.escape(API) + rf"(?:/{SEGMENT})*")
 QUERY = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*")
 # Encoded '.', '/', '\' and NUL: a decoded path must keep the shape that was checked.
 ENCODED = re.compile(r"%(?:2e|2f|5c|00)", re.IGNORECASE)
-REFUSED_PREFIXES = (API + "/pair",)  # loopback pairing assumes an App on the host; the planner never pairs
+# Pairing routes under /api/v1, checked on the decoded path. `/pair/...` is App pairing (it assumes an App on the
+# host), `/runner-pair` redeems an owner-approved Mac code for an owner token. The planner never pairs. The other
+# pairing and runner routes (`/pairing-codes`, `/runner-pairing-codes`, `/runners/...`, the admin pairing requests)
+# are outside /api/v1, so the path pattern already refuses them.
+REFUSED_PREFIXES = (API + "/pair", API + "/runner-pair")
 MAX_BODY = 16 * 1024 * 1024
 MAX_CONNECTIONS = 32
 CLIENT_TIMEOUT = 30.0

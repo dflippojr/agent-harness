@@ -878,7 +878,7 @@ reach it through `harness-app-api-proxy` (#909):
 | --- | --- |
 | **URL** | `http://192.168.240.1:8100`, the gateway of the Docker network `harness-app-api` (`192.168.240.0/29`, bridge `harness-api0`) |
 | **Who** | Containers attached to `harness-app-api`: the Financial Planner's `app` and `background`, and nothing else |
-| **What** | `/api/v1` and `/api/v1/...`, except `/api/v1/pair/...`. No admin API (`/api/admin/v1`), Web UI, `/keys`, `/v1` inference or runner routes |
+| **What** | `/api/v1` and `/api/v1/...`, except the pairing routes `/api/v1/pair/...` and `/api/v1/runner-pair` (also when spelled with encoded letters). No admin API (`/api/admin/v1`), Web UI, `/keys`, `/v1` inference or runner routes |
 | **As whom** | A remote App client. Every route but the discovery document needs the App's own token |
 
 Why only those containers: on this tower, containers using host-gateway reach every host address, so the bind address
