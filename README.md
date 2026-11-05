@@ -354,6 +354,7 @@ gives up the GPU.
 | Native mobile client study (Swift, Flutter or PWA only) | [native-mobile-client-study](docs/native-mobile-client-study.md) |
 | Mac client and version compatibility | [mac-client](docs/mac-client.md) · [compatibility](docs/compatibility.md) |
 | CI/CD and trust boundaries | [CI-CD](docs/CI-CD.md) |
+| Real-environment lane (sandbox, GPU, hosted CLI) | [real-env-lane](docs/real-env-lane.md) |
 <!-- generated:end readme-docs-index -->
 
 <details>

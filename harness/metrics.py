@@ -73,7 +73,6 @@ def _telemetry_metrics(out: _Out) -> None:
 def _core_rows(db) -> dict:
     """The aggregate queries behind `_core_metrics`: whole-table scans of sessions, events and approvals."""
     with db.lock:
-        by_status = dict(db.conn.execute("SELECT status, COUNT(*) FROM sessions GROUP BY status").fetchall())
         tokens = db.conn.execute(
             "SELECT model, COALESCE(SUM(json_extract(totals, '$.prompt_tokens')), 0), "
             "COALESCE(SUM(json_extract(totals, '$.completion_tokens')), 0), "
@@ -121,7 +120,7 @@ def _core_rows(db) -> dict:
         finished = db.conn.execute(
             "SELECT status, stop_reason, COUNT(*) FROM sessions WHERE status IN ('done', 'failed', 'cancelled') "
             "GROUP BY 1, 2").fetchall()
-    return {"by_status": by_status, "tokens": tokens, "tools": tools, "kinds": kinds, "round_resets": round_resets,
+    return {"tokens": tokens, "tools": tools, "kinds": kinds, "round_resets": round_resets,
             "dead_end": dead_end, "correlated": correlated, "cache_row": cache_row, "activity": activity,
             "approvals": approvals, "finished": finished}
 
@@ -136,9 +135,18 @@ def _cached_core_rows(db) -> dict:
     return hit[1]
 
 
+def _session_counts(db) -> dict[str, int]:
+    """Sessions by status, read on every scrape rather than cached: the real-environment lane reads them right before
+    it starts work and must see a session that started a moment ago (#731). The `sessions_status` index keeps it
+    cheap."""
+    with db.lock:
+        return dict(db.conn.execute("SELECT status, COUNT(*) FROM sessions GROUP BY status").fetchall())
+
+
 def _core_metrics(m: Manager, out: _Out, db) -> dict:
     rows = _cached_core_rows(db)
-    by_status, tokens, tools, kinds = rows["by_status"], rows["tokens"], rows["tools"], rows["kinds"]
+    by_status = _session_counts(db)
+    tokens, tools, kinds = rows["tokens"], rows["tools"], rows["kinds"]
     round_resets, dead_end, correlated = rows["round_resets"], rows["dead_end"], rows["correlated"]
     cache_row, approvals, finished = rows["cache_row"], rows["approvals"], rows["finished"]
     edit_mismatches, elide_only = rows["activity"]
@@ -284,6 +292,15 @@ def _maintenance_metrics(m: Manager, out: _Out) -> None:
         pass
 
 
+def _app_session_metrics(out: _Out, db) -> None:
+    """Every App's sessions by status, in total and from the index (no App store is read, no App is named): the
+    real-environment lane must see a live hosted App session to yield to it (#731). A lone Database has no App stores:
+    `harness_sessions` already counts all its sessions."""
+    counts = db.app_session_counts() if hasattr(type(db), "app_session_counts") else {}
+    out.metric("harness_app_sessions", "gauge", "Sessions of every App, by current status (Web's are harness_sessions).",
+               [({"status": s}, counts.get(s, 0)) for s in STATUSES])
+
+
 def _skill_metrics(out: _Out, db, by_status) -> None:
     active = sum(by_status.get(s, 0) for s in ACTIVE)
     out.metric("harness_sessions_active", "gauge", "Sessions not yet finished.", [({}, active)])
@@ -293,7 +310,7 @@ def _skill_metrics(out: _Out, db, by_status) -> None:
 def render(m: Manager) -> str:
     """Blocking (SQLite on a pooled read connection): the endpoint runs it in a worker thread. Sessions and their
     rows are counted in Web's store, which holds the owner's and members' (#330 decision 4); everything else in the
-    main store. App sessions are counted in each App's metadata instead."""
+    main store. App sessions are counted in each App's metadata, and in total by status (`harness_app_sessions`)."""
     db, out = m.db, _Out()
     web = db.for_app("")
     with db.reading(), web.reading():
@@ -305,5 +322,6 @@ def render(m: Manager) -> str:
         _canary_metrics(m, out)
         _maintenance_metrics(m, out)
         _skill_metrics(out, db, by_status)
+        _app_session_metrics(out, db)
     _telemetry_metrics(out)
     return "\n".join(out.lines) + "\n"

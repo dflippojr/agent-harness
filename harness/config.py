@@ -105,17 +105,22 @@ class SandboxConfig:
     proxy: str = "http://harness-egress-sandbox:8888"  # network commands go out only through this proxy (#671)
     proxy_network: str = "harness-sandbox-egress"     # each network command's own network is `<this>-<session id>`
     idle_stop_seconds: float = 900  # stop the container after this long without a command (0 = never, #428, #524)
+    # The pip and npm cache volumes are `<this>-pip-<project>` and `<this>-npm-<project>` (#429). A disposable instance
+    # (the real-environment lane, #731) names its own, so its sessions never share the live instance's caches.
+    cache_volume_prefix: str = "harness-cache"
 
 
 # Install-level only (#671): a project's `sandbox:` override cannot move network commands off the egress proxy.
 SANDBOX_EGRESS_KEYS = frozenset({"egress_network", "proxy", "proxy_network"})
+# Nor can it point its caches at another project's or principal's volumes (#529, #731).
+SANDBOX_INSTALL_KEYS = SANDBOX_EGRESS_KEYS | {"cache_volume_prefix"}
 
 
 def sandbox_for_project(base: SandboxConfig, overrides: dict) -> SandboxConfig:
     """The install's sandbox settings with a project's `sandbox:` overrides, except the egress ones."""
     if not overrides:
         return base
-    return type(base)(**{**base.__dict__, **{k: v for k, v in overrides.items() if k not in SANDBOX_EGRESS_KEYS}})
+    return type(base)(**{**base.__dict__, **{k: v for k, v in overrides.items() if k not in SANDBOX_INSTALL_KEYS}})
 
 TOOL_MODES = ("builtin", "split")
 

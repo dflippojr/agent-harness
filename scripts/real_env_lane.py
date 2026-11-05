@@ -1,0 +1,1355 @@
+"""Real-environment lane (#731): run the Docker sandbox, the local model and the hosted CLIs against one commit.
+
+    python scripts/real_env_lane.py run [--sha SHA] [--suite sandbox --suite gpu --suite hosted-cli] [--no-report]
+    python scripts/real_env_lane.py serve ...      (internal: the disposable daemon a suite drives)
+
+CI never runs these paths (the hosted runner has no sandbox image, no GPU and no CLI login), and self-hosted Actions
+runners are off for this public repository. So the lane runs from a scheduled task on the deploy host instead
+(ops/real-env/, docs/real-env-lane.md), and reports where the owner and the box's sweep can see it:
+
+- a commit status ``real-env/<suite>`` on the tested SHA. A skipped suite posts ``success`` with a description that
+  starts ``skipped:``, never a plain pass;
+- on a failure, a ``bug`` issue with the SHA, the suite and a redacted log excerpt, or a comment on the open issue
+  for that suite (de-duplicated by a hidden marker in the body);
+- ``latest.json`` (and ``runs/<id>/summary.json``) under the lane's base directory, outside the live data dir.
+
+Every run works on a copy of the commit's tree (``git archive``), a fresh data dir and a free loopback port. It never
+reads or writes the live instance's data, sessions or containers: the disposable daemon runs with maintenance off (it
+would otherwise remove session containers it doesn't know), without the local-model supervision module (it would
+otherwise stop or start llama-server) and with its own Docker network names. Reads of the live daemon are limited to
+its ``/metrics`` (the GPU guard's state and its running sessions, so the lane yields to real work) and its config
+files (the hosted backends and the local model's address). The suites:
+
+- **sandbox**: the ``docker``-marked tests, then one session in the real sandbox image built from the commit:
+  ``git_clone`` of a local fixture repo, ``run_shell``, ``verify``, and reads of a host file outside ``/workspace``
+  (#370 class) that must never return its contents.
+- **gpu**: skipped as ``gpu-held`` unless the live GPU guard is clear and the model is loaded; then the ``gpu``-marked
+  tests and one short session on the real llama-server. The lane never loads, parks or restarts the model.
+- **hosted-cli**: at most once a week (a ledger enforces it): one minimal print-mode session per hosted backend whose
+  credential a session can't damage (Claude on its long-lived token only; any other backend only when the owner opts it
+  in, see ``hosted_plan``); with ``--pair``, two concurrent Claude sessions on one token (#390 class) and a login
+  check after.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import uuid
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Iterator, Protocol
+
+ROOT = Path(__file__).resolve().parent.parent
+REPO = "dflippojr/agent-harness"
+SUITES = ("sandbox", "gpu", "hosted-cli")
+NIGHTLY_SUITES = ("sandbox", "gpu")
+PASSED, FAILED, SKIPPED, ERROR = "passed", "failed", "skipped", "error"
+STATUS_STATE = {PASSED: "success", SKIPPED: "success", FAILED: "failure", ERROR: "error"}
+STATUS_DESCRIPTION_MAX = 140   # GitHub truncates nothing; it refuses a longer description
+ISSUE_LABEL = "bug"
+EXCERPT_LINES = 60
+HOSTED_INTERVAL = 6.5 * 86400  # the weekly cap: a hosted run within this long of the last one is skipped
+CLIENT = {"X-Agent-Harness-Client": "cli/2"}
+OK_WORD = "real-env-ok"
+FIXTURE_REPO = "lane-fixture"
+PROJECT = "lane"
+NO_PROXY = "http://127.0.0.1:9"   # discard port: nothing answers, so a sandbox network command fails closed
+SPEC_ENV = "REAL_ENV_LANE_SPEC"
+MISSING_IMAGE = "real-env-lane-no-such-image:missing"  # a name no image has: tests that need it skip   # serve's spec (JSON) comes through the environment, never a path on its command line
+GPU_CHECKS = "tests/real_env/gpu_checks.py"
+
+DEFAULT_BASE = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "agent-harness-real-env"
+LIVE_CONFIG = Path.home() / ".local" / "share" / "agent-harness" / "config"
+LIVE_METRICS = "http://127.0.0.1:8100/metrics"
+
+
+# --- results -------------------------------------------------------------------------------------------------------
+
+@dataclass
+class SuiteResult:
+    suite: str
+    state: str                       # passed | failed | skipped | error
+    summary: str = ""                # one line: what ran, or why it didn't
+    log: str = ""                    # the evidence; redacted before it leaves the box
+    details: dict = field(default_factory=dict)
+    started_at: float = 0.0
+    finished_at: float = 0.0
+
+
+def status_for(result: SuiteResult) -> tuple[str, str]:
+    """The commit status (state, description) for one suite. GitHub has no skipped state: a skip is `success` whose
+    description starts with `skipped:`, so it never reads as a plain pass."""
+    description = redact(f"{result.state}: {result.summary}".strip().rstrip(":"))
+    if len(description) > STATUS_DESCRIPTION_MAX:
+        description = description[:STATUS_DESCRIPTION_MAX - 3] + "..."
+    return STATUS_STATE[result.state], description
+
+
+# (pattern, keeps its first group): a labelled value keeps the label and loses the value; a bare token goes whole.
+_SECRETS = (
+    (re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"), False),
+    (re.compile(r"\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}"), False),
+    (re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}"), False),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), False),  # JWTs, OAuth tokens
+    (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}"), True),
+    (re.compile(r"(?i)((?:token|secret|password|api[_-]?key|authorization)[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]{6,}"),
+     True),
+)
+
+
+def redact(text: str) -> str:
+    """Mask anything shaped like a credential before a log excerpt goes into an issue or the summary."""
+    for pattern, keeps_label in _SECRETS:
+        text = pattern.sub((lambda m: m.group(1) + "[redacted]") if keeps_label else "[redacted]", text)
+    return text
+
+
+def excerpt(log: str, lines: int = EXCERPT_LINES) -> str:
+    kept = log.strip().splitlines()[-lines:]
+    return redact("\n".join(kept))
+
+
+# --- reporting -----------------------------------------------------------------------------------------------------
+
+class GitHubError(RuntimeError):
+    pass
+
+
+class GitHub(Protocol):
+    def post_status(self, sha: str, context: str, state: str, description: str) -> None: ...
+    def open_issues(self, label: str) -> list[dict]: ...
+    def create_issue(self, title: str, body: str, labels: list[str]) -> int: ...
+    def comment(self, number: int, body: str) -> None: ...
+
+
+class GhCli:
+    """GitHub through the `gh` CLI, as whoever the scheduled task's `gh` is logged in as (statuses and issues write)."""
+
+    def __init__(self, repo: str = REPO, run: Callable[..., subprocess.CompletedProcess] = subprocess.run):
+        self.repo = repo
+        self._run = run
+
+    def _gh(self, args: list[str], stdin: str | None = None) -> str:
+        proc = self._run(["gh", *args], input=stdin, capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            raise GitHubError(redact((proc.stderr or proc.stdout or "").strip())[:300] or f"gh exited {proc.returncode}")
+        return proc.stdout
+
+    def post_status(self, sha: str, context: str, state: str, description: str) -> None:
+        self._gh(["api", f"repos/{self.repo}/statuses/{sha}", "-f", f"state={state}", "-f", f"context={context}",
+                  "-f", f"description={description}"])
+
+    def open_issues(self, label: str) -> list[dict]:
+        """Every open issue with the label, all pages (pull requests left out), so an old suite issue is still found."""
+        out = self._gh(["api", "--paginate", f"repos/{self.repo}/issues?state=open&labels={label}&per_page=100",
+                        "--jq", '.[] | select(.pull_request | not) | {number, title, body}'])
+        return [json.loads(line) for line in (out or "").splitlines() if line.strip()]
+
+    def create_issue(self, title: str, body: str, labels: list[str]) -> int:
+        args = ["issue", "create", "-R", self.repo, "--title", title, "--body-file", "-"]
+        for label in labels:
+            args += ["--label", label]
+        url = self._gh(args, stdin=body).strip().splitlines()[-1]
+        return int(url.rstrip("/").rsplit("/", 1)[-1])
+
+    def comment(self, number: int, body: str) -> None:
+        self._gh(["issue", "comment", str(number), "-R", self.repo, "--body-file", "-"], stdin=body)
+
+
+def issue_marker(suite: str) -> str:
+    return f"<!-- real-env-lane suite={suite} -->"
+
+
+def failure_text(result: SuiteResult, sha: str, run_id: str) -> str:
+    return "\n".join([
+        f"The real-environment lane's `{result.suite}` suite **{result.state}** on {sha} (run `{run_id}`).",
+        "",
+        f"- Suite: `real-env/{result.suite}`",
+        f"- Commit: https://github.com/{REPO}/commit/{sha}",
+        f"- Summary: {redact(result.summary)}",
+        "",
+        "<details><summary>Log excerpt (redacted)</summary>",
+        "",
+        "```text",
+        excerpt(result.log) or "(no output)",
+        "```",
+        "",
+        "</details>",
+        "",
+        "Reproduce on the deploy host: `python scripts/real_env_lane.py run --sha "
+        f"{sha} --suite {result.suite} --no-report` (docs/real-env-lane.md).",
+    ])
+
+
+def file_failure(gh: GitHub, result: SuiteResult, sha: str, run_id: str) -> dict:
+    """One open issue per suite: comment on it when it exists, otherwise open it."""
+    marker = issue_marker(result.suite)
+    text = failure_text(result, sha, run_id)
+    for issue in gh.open_issues(ISSUE_LABEL):
+        if marker in (issue.get("body") or ""):
+            gh.comment(issue["number"], text)
+            return {"action": "commented", "number": issue["number"]}
+    number = gh.create_issue(f"real-env/{result.suite} {result.state} on {sha[:8]}", f"{marker}\n{text}",
+                             [ISSUE_LABEL])
+    return {"action": "created", "number": number}
+
+
+def report(results: list[SuiteResult], sha: str, run_id: str, gh: GitHub | None) -> dict:
+    """Post each suite's status and file its failure. A GitHub error is recorded, never raised: the summary still
+    gets written, and the next run tries again."""
+    out: dict[str, dict] = {}
+    for result in results:
+        entry: dict = {}
+        out[result.suite] = entry
+        if gh is None:
+            entry["posted"] = "no (--no-report)"
+            continue
+        state, description = status_for(result)
+        try:
+            gh.post_status(sha, f"real-env/{result.suite}", state, description)
+            entry["posted"] = f"posted {state}"
+        except (GitHubError, OSError, subprocess.SubprocessError) as e:
+            entry["posted"] = f"error: {e}"
+        if result.state in (FAILED, ERROR):
+            try:
+                entry["issue"] = file_failure(gh, result, sha, run_id)
+            except (GitHubError, OSError, subprocess.SubprocessError, ValueError) as e:
+                entry["issue"] = {"action": "error", "error": str(e)}
+    return out
+
+
+def _write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def summary_doc(sha: str, run_id: str, started_at: float, finished_at: float, results: list[SuiteResult],
+                reports: dict) -> dict:
+    def iso(t: float) -> str:
+        return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds")
+    return {
+        "schema": 1, "sha": sha, "run_id": run_id, "started_at": iso(started_at), "finished_at": iso(finished_at),
+        "ok": all(r.state in (PASSED, SKIPPED) for r in results),
+        "suites": {r.suite: {"state": r.state, "summary": redact(r.summary),
+                             "status": status_for(r)[0], "description": status_for(r)[1],
+                             "seconds": round(r.finished_at - r.started_at, 1), "details": r.details,
+                             "excerpt": excerpt(r.log, 20) if r.state in (FAILED, ERROR) else "",
+                             **reports.get(r.suite, {})}
+                   for r in results},
+    }
+
+
+def run_lane(sha: str, suites: list[str], runners: dict[str, Callable[[], SuiteResult]], gh: GitHub | None,
+             base: Path, run_id: str, clock: Callable[[], float] = time.time) -> dict:
+    """Run each suite, report, and write the summary. A suite that raises is an `error`, not a crash."""
+    started = clock()
+    results = []
+    for suite in suites:
+        begin = clock()
+        try:
+            result = runners[suite]()
+        except Exception as e:  # noqa: BLE001 - the lane reports a broken suite instead of dying with it
+            result = SuiteResult(suite, ERROR, f"the lane could not run the suite: {type(e).__name__}: {e}",
+                                 log=f"{type(e).__name__}: {e}")
+        result.started_at = result.started_at or begin
+        result.finished_at = result.finished_at or clock()
+        results.append(result)
+    reports = report(results, sha, run_id, gh)
+    doc = summary_doc(sha, run_id, started, clock(), results, reports)
+    _write_json(base / "runs" / run_id / "summary.json", doc)
+    _write_json(base / "latest.json", doc)
+    return doc
+
+
+# --- live instance signals (read-only) -----------------------------------------------------------------------------
+
+def parse_metrics(text: str) -> dict[str, float]:
+    """`name{labels}` -> value for each sample line of a Prometheus text exposition."""
+    out: dict[str, float] = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.rpartition(" ")
+        try:
+            out[key] = float(value)
+        except ValueError:
+            continue
+    return out
+
+
+def fetch_metrics(url: str = LIVE_METRICS) -> dict[str, float] | None:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310 - a fixed loopback URL
+            return parse_metrics(resp.read().decode("utf-8", "replace"))
+    except OSError:
+        return None
+
+
+# App sessions that are live work: running, queued, or waiting on the App's own tool call (it resumes as soon as the App
+# answers, harness/apps.py). Web's sessions count running and queued, as before.
+APP_BUSY = ("running", "queued", "waiting_app")
+
+
+def live_busy(metrics: dict[str, float] | None) -> int:
+    """Live work running or about to run (0 for no reading: busy_reason handles that). `harness_sessions` counts Web's
+    store only and `harness_app_sessions` every App's store, hosted App sessions included; the two are disjoint, so
+    they add. The GPU scheduler's slot and queue gauges cover every local-model session from either, so the larger of
+    the sum and the scheduler is the count."""
+    if not metrics:
+        return 0
+    web = sum(metrics.get(f'harness_sessions{{status="{s}"}}', 0) for s in ("running", "queued"))
+    apps = sum(metrics.get(f'harness_app_sessions{{status="{s}"}}', 0) for s in APP_BUSY)
+    scheduler = metrics.get("harness_gpu_slot_busy", 0) + metrics.get("harness_queue_depth", 0)
+    return int(max(web + apps, scheduler))
+
+
+def busy_reason(metrics: dict[str, float] | None) -> str:
+    """"" when the live daemon reports nothing running or queued; otherwise why the lane must not start work now. No
+    reading (a timeout, an error, the daemon down) is not idle: its sessions are unknown, so the lane defers. Nor is a
+    daemon's reading (`harness_up`) without `harness_app_sessions`: a build that old can't show a hosted App session."""
+    if metrics is None:
+        return "busy: the live daemon's /metrics did not answer, so its sessions are unknown"
+    if not any(k.startswith("harness_sessions{") for k in metrics):   # an empty or foreign 200 shows no sessions
+        return "busy: the live daemon's /metrics reports no sessions (harness_sessions), so they are unknown"
+    if "harness_up" in metrics and not any(k.startswith("harness_app_sessions{") for k in metrics):
+        return "busy: the live daemon does not report App sessions (harness_app_sessions), so they are unknown"
+    busy = live_busy(metrics)
+    return f"busy: {busy} live session(s) running or queued" if busy else ""
+
+
+def gpu_hold_reason(metrics: dict[str, float] | None) -> str:
+    """Why the GPU suite must not run now, or "" when the guard is clear and the model is loaded."""
+    if metrics is None:
+        return "gpu-held: the live daemon's /metrics did not answer, so the GPU guard's state is unknown"
+    if "harness_gpu_guard_state{state=\"clear\"}" not in metrics:
+        return "gpu-held: the live daemon reports no GPU guard"
+    if metrics.get("harness_gpu_guard_state{state=\"clear\"}") != 1:
+        state = next((k.split('"')[1] for k, v in metrics.items() if k.startswith("harness_gpu_guard_state") and v),
+                     "unknown")
+        return f"gpu-held: the GPU guard is {state}"
+    if metrics.get("harness_gpu_manual_hold_age_seconds", 0) > 0:
+        return "gpu-held: a manual GPU hold is on"
+    if metrics.get("harness_model_parked", 0) == 1:
+        return "gpu-held: the local model is parked (the lane never loads it)"
+    if metrics.get("harness_resource_memory_low", 0) == 1:
+        return "gpu-held: the resource guard reports low memory"
+    return ""
+
+
+def model_awake(base_url: str) -> str:
+    """"" when llama-server is up with its model awake; otherwise why the GPU suite must not run. `/props` reports
+    `is_sleeping` without waking the server (harness_modules/local_model/warmup.py), so asking loads nothing."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{base_url.rstrip('/')}/props", timeout=10) as resp:  # noqa: S310 - config URL
+            props = json.loads(resp.read().decode("utf-8", "replace"))
+    except (OSError, ValueError):
+        return "gpu-held: llama-server did not answer /props (the lane never starts it)"
+    return "gpu-held: the model is asleep (the lane never wakes it)" if props.get("is_sleeping") else ""
+
+
+def wait_for_idle(metrics_url: str, max_wait: float, poll: float = 60,
+                  fetch: Callable[[str], dict | None] | None = None, sleep: Callable[[float], None] | None = None,
+                  clock: Callable[[], float] | None = None) -> str:
+    """Yield to real sessions: wait while the live daemon is busy (or its state is unknown), up to `max_wait`.
+    Returns the reason it is still busy at the end ("": go ahead)."""
+    # Looked up at call time, not bound as defaults, so a replaced fetch_metrics (tests, a wrapper) is the one used.
+    fetch, sleep, clock = fetch or fetch_metrics, sleep or time.sleep, clock or time.monotonic
+    deadline = clock() + max_wait
+    while True:
+        busy = busy_reason(fetch(metrics_url))
+        if not busy or clock() >= deadline:
+            return busy
+        sleep(min(poll, max(0.0, deadline - clock())))
+
+
+# --- pytest --------------------------------------------------------------------------------------------------------
+
+@dataclass
+class PytestRun:
+    code: int
+    passed: int = 0
+    failed: int = 0
+    errors: int = 0
+    skipped: int = 0
+    output: str = ""
+
+    @property
+    def ok(self) -> bool:
+        """At least one marked test ran and none failed. Nothing selected or everything skipped is not a pass."""
+        return self.code == 0 and self.passed > 0 and not self.failed and not self.errors
+
+    @property
+    def broken(self) -> bool:
+        """Something went wrong that a later yield must not hide: a failure, an error, or a run that didn't finish
+        (a timeout, a crash) rather than ending normally or selecting nothing."""
+        return bool(self.failed or self.errors or self.code not in (0, 5))
+
+    def line(self, label: str) -> str:
+        return f"{label}: {self.passed} passed, {self.failed} failed, {self.errors} errors, {self.skipped} skipped"
+
+
+def junit_counts(path: Path) -> tuple[int, int, int, int]:
+    """(passed, failed, errors, skipped) from a pytest JUnit XML report; zeros when there is none."""
+    if not path.is_file():
+        return 0, 0, 0, 0
+    root = ET.parse(path).getroot()  # noqa: S314 - our own pytest's report
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    total = failed = errors = skipped = 0
+    for s in suites:
+        total += int(s.get("tests", 0))
+        failed += int(s.get("failures", 0))
+        errors += int(s.get("errors", 0))
+        skipped += int(s.get("skipped", 0))
+    return total - failed - errors - skipped, failed, errors, skipped
+
+
+# --- the real environment ------------------------------------------------------------------------------------------
+
+def _run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    return subprocess.run(args, **kwargs)  # noqa: S603 - fixed argument lists
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@dataclass
+class Lane:
+    """Everything a real suite needs: the commit's tree, its images and the run's scratch space."""
+    repo: Path
+    sha: str
+    run_dir: Path
+    base: Path
+    python: str = sys.executable
+    metrics_url: str = LIVE_METRICS
+    live_config: Path = LIVE_CONFIG
+    yield_seconds: float = 1800
+    workers: int = 2
+    broken_fixture: bool = False
+    pair: bool = False
+    force_hosted: bool = False
+    images: dict = field(default_factory=dict)   # kind -> image given on the command line (a PR SHA has none in CI)
+    hosted_opt_in: tuple[str, ...] = ()          # non-Claude backends the owner opts in (on a disposable login)
+    tree: Path = field(init=False)
+    sandbox_image: str = ""
+    cli_image: str = ""
+    built_images: list[str] = field(default_factory=list)
+    used_docker: bool = False   # a Docker test or a disposable daemon ran, so the run may have Docker volumes to remove
+
+    def __post_init__(self) -> None:
+        self.tree = self.run_dir / "tree"
+
+    @property
+    def tag(self) -> str:
+        return self.run_dir.name.lower()[-24:].strip("-_.")
+
+    def extract(self) -> None:
+        """The commit's files, without a worktree: `git archive` into run_dir/tree."""
+        self.tree.mkdir(parents=True, exist_ok=True)
+        archive = _run(["git", "-C", str(self.repo), "archive", "--format=tar", self.sha], capture_output=True,
+                       text=False)
+        if archive.returncode != 0:
+            raise RuntimeError(f"git archive {self.sha} failed: {archive.stderr.decode('utf-8', 'replace')[:300]}")
+        unpack = subprocess.run(["tar", "-x", "-C", str(self.tree)], input=archive.stdout, capture_output=True)
+        if unpack.returncode != 0:
+            raise RuntimeError(f"tar failed: {unpack.stderr.decode('utf-8', 'replace')[:300]}")
+
+    def image(self, kind: str, dockerfile: str, build: bool) -> str:
+        """The commit's image: CI's `ghcr.io/dflippojr/agent-harness-<kind>:sha-<sha>` if it is here or can be pulled,
+        else (when `build`) one built from the tree under a lane tag, removed after the run."""
+        if self.images.get(kind):
+            return self.images[kind]
+        published = f"ghcr.io/dflippojr/agent-harness-{kind}:sha-{self.sha}"
+        if _run(["docker", "image", "inspect", published]).returncode == 0:
+            return published
+        if _run(["docker", "pull", "-q", published], timeout=900).returncode == 0:
+            return published
+        if not build:
+            return ""
+        tag = f"real-env-lane-{kind}:{self.sha[:12]}"
+        proc = _run(["docker", "build", "-q", "-t", tag, "-f", str(self.tree / "sandbox" / dockerfile),
+                     str(self.tree / "sandbox")], timeout=1800)
+        if proc.returncode != 0:
+            raise RuntimeError(f"building the {kind} image failed: {(proc.stderr or proc.stdout)[-500:]}")
+        self.built_images.append(tag)
+        return tag
+
+    def env(self, **extra: str) -> dict[str, str]:
+        tmp = self.base / "tmp"   # outside the run dir, so the pinned gitleaks the tests fetch is kept between runs
+        tmp.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "TMPDIR": str(tmp), "PYTHONDONTWRITEBYTECODE": "1",
+               # The Docker tests' sessions mount the run's pip/npm cache volumes, never the live instance's.
+               "HARNESS_TEST_SANDBOX_CACHE_PREFIX": lane_volume(self.tag, "cache")}
+        env.pop("HARNESS_CONFIG_DIR", None)
+        env.pop("HARNESS_DATA_DIR", None)
+        env.update(extra)
+        return env
+
+    def pytest(self, marker: str, env: dict[str, str], timeout: float = 3600, paths: tuple[str, ...] = ("tests",)
+               ) -> PytestRun:
+        self.used_docker = True
+        present = [p for p in paths if (self.tree / p).exists()]
+        if not present:
+            return PytestRun(5, output=f"none of {', '.join(paths)} is in this commit")
+        report = self.run_dir / f"pytest-{marker}.xml"
+        args = [self.python, "-m", "pytest", *present, "-m", marker, "-q", "-rs", "-p", "no:cacheprovider",
+                f"--basetemp={self.run_dir / f'pytest-{marker}'}", f"--junitxml={report}"]
+        if self.workers > 1:
+            args += ["-n", str(min(self.workers, 4)), "--dist", "loadfile"]
+        try:
+            proc = _run(args, cwd=self.tree, env=env, timeout=timeout)
+            code, output = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+        except subprocess.TimeoutExpired as e:
+            code, output = -1, f"pytest -m {marker} timed out after {timeout:.0f}s\n{e.stdout or ''}"
+        return PytestRun(code, *junit_counts(report), output=output)
+
+    @contextlib.contextmanager
+    def instance(self, mode: str, spec: dict | None = None) -> Iterator["Instance"]:
+        """The disposable daemon (`serve`), from the commit's tree, until the block ends."""
+        self.used_docker = True
+        root = self.run_dir / f"instance-{mode}"
+        root.mkdir(parents=True, exist_ok=True)
+        port = free_port()
+        _write_json(root / "live-spec.json", spec or {})   # a record of what the lane decided from the live config
+        args = [self.python, str(Path(__file__).resolve()), "serve", "--tree", str(self.tree), "--dir", str(root),
+                "--mode", mode, "--port", str(port), "--tag", self.tag]
+        if mode == "sandbox":
+            args += ["--image", self.sandbox_image]
+        if self.broken_fixture:
+            args.append("--broken-fixture")
+        log = (root / "daemon.log").open("w", encoding="utf-8")
+        env = {**self.env(), SPEC_ENV: json.dumps(spec or {})}   # the only thing serve learns about the live config
+        proc = subprocess.Popen(args, cwd=self.tree, env=env, stdout=log, stderr=subprocess.STDOUT,  # noqa: S603
+                                start_new_session=True)
+        try:
+            handle = root / "instance.json"
+            deadline = time.monotonic() + 120
+            while not handle.is_file():
+                if proc.poll() is not None or time.monotonic() > deadline:
+                    raise RuntimeError(f"the disposable daemon did not start (exit {proc.poll()}):\n"
+                                       + (root / "daemon.log").read_text(encoding="utf-8", errors="replace")[-2000:])
+                time.sleep(0.5)
+            info = json.loads(handle.read_text(encoding="utf-8"))
+            yield Instance(info["server"], info["token"], root, info)
+        finally:
+            if proc.poll() is None:
+                os.killpg(proc.pid, signal.SIGTERM)  # its own session: the daemon and nothing else
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=10)
+            log.close()
+            self._remove_docker_leftovers(root)
+
+    def _remove_docker_leftovers(self, root: Path) -> None:
+        """This instance's session containers (named by its own session ids) and its networks; nothing else."""
+        sessions = root / "sessions.txt"
+        for sid in sessions.read_text(encoding="utf-8").split() if sessions.is_file() else ():
+            # harness-<sid> (sandbox) and harness-<sid>-<claude|codex|cursor|mcp|...> (CLI and relay containers)
+            mine = re.compile(rf"harness-{re.escape(sid)}(-[a-z0-9_.-]+)?")
+            listed = _run(["docker", "ps", "-a", "--filter", f"name=harness-{sid}", "--format", "{{.Names}}"],
+                          timeout=60)
+            names = {n.strip().lstrip("/") for n in (listed.stdout or "").splitlines()} | {f"harness-{sid}"}
+            for name in sorted(n for n in names if mine.fullmatch(n)):
+                _run(["docker", "rm", "-f", name], timeout=60)
+        for net in ("sbx", "egress", "proxy"):
+            _run(["docker", "network", "rm", f"real-env-{self.tag}-{net}"], timeout=60)
+        self._remove_run_volumes()   # after the containers that held them
+
+    def _remove_run_volumes(self) -> None:
+        """The run's disposable volumes, `lane_volume` names: the CLI state and login volumes and the pip/npm caches
+        of its sessions and its Docker tests. Nothing outside the run's prefix."""
+        prefix = lane_volume(self.tag, "")
+        listed = _run(["docker", "volume", "ls", "--filter", f"name={prefix}", "--format", "{{.Name}}"], timeout=60)
+        mine = re.compile(rf"{re.escape(prefix)}[a-z0-9][a-z0-9_.-]*")
+        for name in sorted({n.strip() for n in (listed.stdout or "").splitlines()}):
+            if mine.fullmatch(name):
+                _run(["docker", "volume", "rm", name], timeout=60)
+
+    def cleanup(self) -> None:
+        if self.used_docker:   # the Docker tests make cache volumes outside any instance
+            self._remove_run_volumes()
+        for tag in self.built_images:
+            _run(["docker", "image", "rm", tag], timeout=120)
+
+
+@dataclass
+class Instance:
+    server: str
+    token: str
+    root: Path
+    info: dict
+
+    def client(self):
+        import httpx
+        return httpx.Client(base_url=self.server, timeout=60, trust_env=False,
+                            headers={"Authorization": f"Bearer {self.token}", **CLIENT})
+
+    def record(self, sid: str) -> None:
+        with (self.root / "sessions.txt").open("a", encoding="utf-8") as f:
+            f.write(sid + "\n")
+
+
+@dataclass
+class SessionRun:
+    sid: str
+    status: str
+    stop_reason: str = ""
+    transcript: str = ""
+    events: list[dict] = field(default_factory=list)
+    denied: list[str] = field(default_factory=list)
+
+    @property
+    def answer(self) -> str:
+        """What the assistant said: its messages only, never the user's prompt."""
+        return "\n".join(str(e.get("content") or "") for e in self.events if e.get("type") == "assistant")
+
+    def tool_results(self, name: str | None = None) -> list[dict]:
+        return [e for e in self.events if e.get("type") == "tool_result" and (name is None or e.get("name") == name)]
+
+
+def parse_sse(text: str) -> list[dict]:
+    out = []
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            try:
+                item = json.loads(line[5:].strip())
+            except ValueError:
+                continue
+            if isinstance(item, dict):
+                out.append({**(item.get("data") or {}), **{k: v for k, v in item.items() if k != "data"}}
+                           if isinstance(item.get("data"), dict) else item)
+    return out
+
+
+def drive_session(inst: Instance, prompt: str, *, backend: str | None = None, timeout: float = 600,
+                  client=None) -> SessionRun:
+    """Start a session through the real API and wait for it to end. Every approval it asks for is denied: the lane
+    never lets a session do more than its default policy allows."""
+    own = client is None
+    client = client or inst.client()
+    try:
+        body: dict = {"prompt": prompt, "project": PROJECT, "title": f"real-env lane: {prompt[:40]}"}
+        if backend:
+            body["backend"] = backend
+        r = client.post("/api/v1/sessions", json=body)
+        if r.status_code != 201:
+            return SessionRun("", "refused", f"HTTP {r.status_code}: {r.text[:300]}")
+        sid = r.json()["id"]
+        inst.record(sid)
+        denied: list[str] = []
+        deadline = time.monotonic() + timeout
+        status, reason = "", ""
+        while time.monotonic() < deadline:
+            s = client.get(f"/api/v1/sessions/{sid}").json()
+            status, reason = s.get("status", ""), s.get("stop_reason") or ""
+            if status == "waiting_approval":
+                for a in client.get(f"/api/v1/sessions/{sid}/approvals").json():
+                    denied.append(str(a.get("reason") or a.get("tool") or a.get("id")))
+                    client.post(f"/api/v1/sessions/{sid}/approvals/{a['id']}",
+                                json={"decision": "deny", "note": "real-env lane: never approves"})
+            elif status in ("done", "failed", "cancelled"):
+                break
+            time.sleep(1)
+        else:
+            client.post(f"/api/v1/sessions/{sid}/cancel")
+            status = f"timeout ({status})"
+        # The terminal status is saved just before run_finished: wait briefly for it, so the evidence is complete.
+        events: list[dict] = []
+        for _ in range(10):
+            events = parse_sse(client.get(f"/api/v1/sessions/{sid}/events", params={"follow": "false"}).text)
+            if any(e.get("type") == "run_finished" for e in events) or status not in ("done", "failed", "cancelled"):
+                break
+            time.sleep(1)
+        transcript = client.get(f"/api/v1/sessions/{sid}/transcript").text
+        return SessionRun(sid, status, reason, transcript, events, denied)
+    finally:
+        if own:
+            client.close()
+
+
+def run_window(run: SessionRun) -> tuple[float, float] | None:
+    """(started, finished) of the session's run, from its events' timestamps."""
+    starts = [e["ts"] for e in run.events if e.get("type") == "status" and e.get("status") == "running" and "ts" in e]
+    ends = [e["ts"] for e in run.events if e.get("type") in ("run_finished",) and "ts" in e]
+    return (min(starts), max(ends)) if starts and ends else None
+
+
+def overlapped(a: SessionRun, b: SessionRun) -> bool:
+    wa, wb = run_window(a), run_window(b)
+    return bool(wa and wb and wa[0] < wb[1] and wb[0] < wa[1])
+
+
+def describe(run: SessionRun) -> str:
+    lines = [f"session {run.sid}: {run.status}" + (f" ({run.stop_reason})" if run.stop_reason else "")]
+    for e in run.events:
+        if e.get("type") in ("tool_call", "tool_result", "error"):
+            text = json.dumps({k: e.get(k) for k in ("type", "name", "args", "output", "error", "message")
+                               if e.get(k) is not None}, ensure_ascii=False)
+            lines.append(text[:600])
+    if run.denied:
+        lines.append(f"denied approvals: {run.denied}")
+    return "\n".join(lines)
+
+
+# --- suites --------------------------------------------------------------------------------------------------------
+
+def sandbox_checks(run: SessionRun, secret: str) -> list[str]:
+    """What the scripted sandbox session must show. Empty: it passed."""
+    problems = []
+    if run.status != "done":
+        problems.append(f"the session ended {run.status}: {run.stop_reason}")
+    outputs = {}
+    for e in run.tool_results():
+        outputs.setdefault(e.get("name"), []).append(str(e.get("output") or e.get("error") or ""))
+    if not any(o.startswith("cloned") for o in outputs.get("git_clone", [])):
+        problems.append(f"git_clone of local:{FIXTURE_REPO} did not clone: {outputs.get('git_clone')}")
+    if not any("fixture-ok" in o for o in outputs.get("run_shell", [])):
+        problems.append(f"run_shell did not run the fixture in the sandbox: {outputs.get('run_shell')}")
+    verify = outputs.get("verify", [])
+    if not any(o.startswith("verify: all checks passed") for o in verify):
+        problems.append(f"verify did not pass: {verify}")
+    reads = outputs.get("read_file", [])
+    if len(reads) < 3 or any(e.get("ok") for e in run.tool_results("read_file")):
+        problems.append(f"#370 class: expected three refused reads outside /workspace, got {reads}")
+    if not any("shell-done" in o for o in outputs.get("run_shell", [])):
+        problems.append("#370 class: the shell read outside /workspace never ran")
+    if secret in run.transcript or any(secret in json.dumps(e) for e in run.events):
+        problems.append("#370 class: a read outside /workspace returned the host file's contents")
+    return problems
+
+
+def sandbox_suite(lane: Lane) -> SuiteResult:
+    busy = wait_for_idle(lane.metrics_url, lane.yield_seconds)
+    if busy:
+        return SuiteResult("sandbox", SKIPPED, busy)
+    lane.sandbox_image = lane.image("sandbox", "Dockerfile", build=True)
+    lane.cli_image = lane.image("cli", "cli.Dockerfile", build=False)
+    late = busy_reason(fetch_metrics(lane.metrics_url))   # pulls or a build take a while: look again before pytest
+    if late:
+        return SuiteResult("sandbox", SKIPPED, f"{late}; nothing run")
+    # Without the commit's CLI image the CLI container tests must skip, not fall back to whatever image is installed.
+    env = lane.env(HARNESS_TEST_SANDBOX_IMAGE=lane.sandbox_image, HARNESS_LIVE_DOCKER="1",
+                   HARNESS_TEST_CLI_IMAGE=lane.cli_image or MISSING_IMAGE,
+                   HARNESS_TEST_SANDBOX_PROXY=NO_PROXY)
+    tests = lane.pytest("docker", env)
+    late = busy_reason(fetch_metrics(lane.metrics_url))   # image pulls and pytest take a while: yield before the next workload
+    if late:
+        state = FAILED if tests.broken else SKIPPED
+        return SuiteResult("sandbox", state, f"{late}; {tests.line('docker tests')}, session not run",
+                           tests.output[-6000:], {"pytest": asdict(tests) | {"output": ""}})
+    with lane.instance("sandbox") as inst:
+        run = drive_session(inst, "real-env lane: sandbox journey", timeout=900)
+        secret = (inst.root / "outside" / "secret.txt").read_text(encoding="utf-8").strip()
+    problems = ([] if tests.ok else [tests.line("docker-marked tests (none may fail, at least one must run)")])
+    problems += sandbox_checks(run, secret)
+    details = {"image": lane.sandbox_image, "cli_image": lane.cli_image or "(none: CLI container tests skip)",
+               "pytest": asdict(tests) | {"output": ""}, "session": run.sid, "denied_approvals": run.denied}
+    log = tests.output[-6000:] + "\n" + describe(run)
+    if problems:
+        return SuiteResult("sandbox", FAILED, "; ".join(problems)[:500], log, details)
+    return SuiteResult("sandbox", PASSED, f"{tests.line('docker tests')}; sandbox session passed", log, details)
+
+
+def gpu_suite(lane: Lane) -> SuiteResult:
+    busy = wait_for_idle(lane.metrics_url, lane.yield_seconds)
+    if busy:
+        return SuiteResult("gpu", SKIPPED, busy)
+    reason = gpu_hold_reason(fetch_metrics(lane.metrics_url))
+    if reason:
+        return SuiteResult("gpu", SKIPPED, reason)
+    model = live_model(live_raw(lane.live_config), lane.live_config)
+    asleep = model_awake(model["base_url"])
+    if asleep:
+        return SuiteResult("gpu", SKIPPED, asleep)
+    env = lane.env(HARNESS_REAL_MODEL_URL=model["base_url"], HARNESS_REAL_MODEL_NAME=model["name"])
+    tests = lane.pytest("gpu", env, timeout=1800, paths=(GPU_CHECKS,))  # outside default collection: by path
+    # Yield again before the session: a live session or a GPU hold that arrived during the checks goes first.
+    now = fetch_metrics(lane.metrics_url)
+    late = busy_reason(now) or gpu_hold_reason(now) or model_awake(model["base_url"])
+    if late:   # a check that already failed stays a failure; only the session is given up
+        state = FAILED if tests.broken else SKIPPED
+        return SuiteResult("gpu", state, f"{late}; {tests.line('gpu tests')}, session not run", tests.output[-6000:],
+                           {"model": model["name"], "pytest": asdict(tests) | {"output": ""}})
+    with lane.instance("gpu", spec={"model": model}) as inst:
+        run = drive_session(inst, f"Use the write_file tool to create lane.txt containing exactly {OK_WORD}. "
+                                  "Then reply with the single word done.", timeout=900)
+    problems = [] if tests.ok else [tests.line("gpu-marked checks (none may fail, at least one must run)")]
+    if run.status != "done":
+        problems.append(f"the session ended {run.status}: {run.stop_reason}")
+    elif not [e for e in run.tool_results("write_file") if e.get("ok")]:
+        problems.append("the model never wrote lane.txt with write_file")
+    log = tests.output[-6000:] + "\n" + describe(run)
+    details = {"model": model["name"], "pytest": asdict(tests) | {"output": ""}, "session": run.sid}
+    if problems:
+        return SuiteResult("gpu", FAILED, "; ".join(problems)[:500], log, details)
+    return SuiteResult("gpu", PASSED, f"{tests.line('gpu tests')}; session on {model['name']} passed", log, details)
+
+
+def live_raw(live_config: Path) -> dict:
+    """The live config as the daemon merges it (harness.yaml, harness.local.yaml, profile.yaml), read-only, through the
+    loader of the checkout the lane runs from. Every decision about the live config is made from this one snapshot,
+    and the disposable daemon gets exactly what it decided (`spec`), never the files themselves."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from harness import config as config_mod
+    return config_mod._read_raw_config(Path(live_config))  # noqa: SLF001 - the loader's merge, not a copy of it
+
+
+def live_model(raw: dict, where: Path | str = "") -> dict:
+    # As harness/config.py load(): no default_model means the first configured model.
+    name = raw.get("default_model") or next(iter(raw.get("models") or {}), "")
+    spec = (raw.get("models") or {}).get(name) or {}
+    if not spec.get("base_url"):
+        raise RuntimeError(f"the live config {where} names no local model with a base_url")
+    return {"name": name, **spec}
+
+
+def hosted_plan(backends: dict, opt_in: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
+    """Which configured hosted backends the lane may run, and why each other one is left out.
+
+    A hosted CLI's login is shared with the owner's own sessions and its OAuth refresh token rotates: a session whose
+    refresh fails overwrites the shared credential with an empty one (#390), which logged the tower's Claude out on
+    the lane's first proof run. So Claude runs only on the long-lived token (`oauth_token_file`, no login volume, no
+    refresh); every other backend runs only when the owner names it with --hosted-backend. Whatever runs gets a
+    disposable state and login volume per run (`hosted_suite`), never a live one, so an opted-in backend signs in only
+    with a key of its own."""
+    eligible, notes = [], []
+    for name, spec in sorted(backends.items()):
+        spec = spec or {}
+        if not spec.get("enabled"):
+            continue
+        if spec.get("kind") == "cli":
+            notes.append(f"{name}: a print-mode CLI on the local model, not a hosted backend")
+        elif name == "claude":
+            token = str(spec.get("oauth_token_file") or "")
+            if token and Path(token).expanduser().is_file() and Path(token).expanduser().stat().st_size > 0:
+                eligible.append(name)
+            else:
+                notes.append("claude: shared refresh-token login (#390); set backends.claude.oauth_token_file "
+                             "(ops/backends/login.sh claude --token)")
+        elif name in opt_in:
+            eligible.append(name)
+        else:
+            notes.append(f"{name}: opt-in only, its login is shared and refreshes (#390); --hosted-backend {name}")
+    return eligible, notes
+
+
+def read_ledger(base: Path) -> dict:
+    try:
+        return json.loads((base / "hosted-ledger.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteResult:
+    last = read_ledger(lane.base).get("last_run_at", 0)
+    if not lane.force_hosted and clock() - last < HOSTED_INTERVAL:
+        when = datetime.fromtimestamp(last, timezone.utc).isoformat(timespec="minutes")
+        return SuiteResult("hosted-cli", SKIPPED, f"weekly cap: the last hosted run was at {when}")
+    raw = live_raw(lane.live_config)
+    backends = raw.get("backends") or {}
+    eligible, notes = hosted_plan(backends, lane.hosted_opt_in)
+    if not eligible:
+        return SuiteResult("hosted-cli", SKIPPED, "no hosted backend is safe to run: " + "; ".join(notes)[:300],
+                           "\n".join(notes), {"notes": notes})
+    busy = wait_for_idle(lane.metrics_url, lane.yield_seconds)
+    if busy:
+        return SuiteResult("hosted-cli", SKIPPED, busy)
+    runs: dict[str, SessionRun] = {}
+    problems, log = [], []
+    spec = {"backends": {name: dict(backends[name]) for name in eligible}}  # only what hosted_plan cleared
+    # The tested commit's CLI image, never the one the live config names (the deployed one).
+    cli_image = lane.image("cli", "cli.Dockerfile", build=False)
+    if not cli_image:
+        return SuiteResult("hosted-cli", SKIPPED, f"the commit's CLI image (ghcr.io/dflippojr/agent-harness-cli:sha-"
+                           f"{lane.sha}) is not available and --cli-image was not given", "\n".join(notes))
+    for name, backend in spec["backends"].items():
+        backend["image"] = cli_image
+        # A disposable state volume per backend, set even where the live config names none (the daemon's default is
+        # Claude's live `harness-auth-claude`). Not a `harness-auth-`/`harness-state-` name, so the login the daemon
+        # derives from it is `<volume>-login` too, never the shared `harness-login-<backend>`: no session, domain
+        # preparation (cli_domains.prepare_command) or probe mounts or chowns a live login or state volume. They are
+        # removed with the instance (`_remove_docker_leftovers`).
+        backend["volume"] = lane_volume(lane.tag, name)
+    if "claude" in spec["backends"]:
+        # Token auth only: no API key to fall back on, so the session gets CLAUDE_CODE_OAUTH_TOKEN and no login volume.
+        claude = spec["backends"]["claude"]
+        claude["auth"] = "subscription"
+        for key in ("api_key_file", "api_key", "api_key_env"):
+            claude.pop(key, None)
+    if lane.pair and "claude" in spec["backends"]:  # room for both, or the daemon would queue the second
+        spec["backends"]["claude"]["max_sessions"] = max(2, int(spec["backends"]["claude"].get("max_sessions") or 1))
+    token = token_digest(backends.get("claude") or {}) if "claude" in eligible else ""
+    with lane.instance("hosted", spec) as inst, inst.client() as client:
+        # auth=skip: the sign-in probe mounts each CLI's shared login volume, which is what the lane must not touch.
+        # Claude's login is its token (checked by hosted_plan); an opted-in backend's login shows in its session.
+        listed = client.get("/api/v1/backends", params={"auth": "skip"}).json()
+        ready = [b["name"] for b in listed if b.get("name") in eligible and b.get("available")]
+        notes += [f"{name}: not available in the disposable daemon, not run" for name in eligible if name not in ready]
+        if not ready:
+            return SuiteResult("hosted-cli", SKIPPED, "no cleared hosted backend is available",
+                               "\n".join(notes), {"backends": [b.get("name") for b in listed]})
+        def reserve_week() -> None:   # recorded just before a session is requested, not when the run begins
+            _write_json(lane.base / "hosted-ledger.json", {"last_run_at": clock(), "sha": lane.sha})
+        prompt = f"Reply with exactly {OK_WORD} and nothing else. Do not use any tools."
+        pair = "claude" if lane.pair and "claude" in ready else ""
+        for name in ready:
+            if name == pair:
+                continue   # its weekly session is the pair below
+            if busy_reason(fetch_metrics(lane.metrics_url)):
+                notes.append(f"{name}: not run, a live session started")
+                continue
+            reserve_week()
+            runs[name] = drive_session(inst, prompt, backend=name, timeout=300, client=client)
+        if pair and busy_reason(fetch_metrics(lane.metrics_url)):
+            notes.append(f"{pair} pair: not run, a live session started")
+            pair = ""
+        if pair:
+            reserve_week()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                both = list(pool.map(lambda _: drive_session(inst, prompt, backend=pair, timeout=300), range(2)))
+            runs[f"{pair} (pair 1)"], runs[f"{pair} (pair 2)"] = both
+            if not overlapped(*both):
+                problems.append(f"#390 class: the two {pair} sessions did not run at the same time")
+            if token_digest(backends.get(pair) or {}) != token:
+                problems.append(f"#390 class: {pair}'s token changed or vanished during two concurrent sessions")
+    for name, run in runs.items():
+        log.append(f"[{name}]\n{describe(run)}")
+        if run.status != "done" or OK_WORD not in run.answer:
+            problems.append(f"{name}: {run.status} {run.stop_reason}".strip())
+    details = {"sessions": {n: r.status for n, r in runs.items()}, "notes": notes, "pair": pair or "off"}
+    yielded = [n for n in notes if "not run, a live session started" in n]
+    if not problems and yielded:   # partial coverage is a skip, never a pass
+        ran = f"{len(runs)} passed ({', '.join(runs)}); " if runs else ""
+        return SuiteResult("hosted-cli", SKIPPED, f"busy: {ran}{len(yielded)} not run, a live session started",
+                           "\n".join(log + notes), details)
+    if problems:
+        return SuiteResult("hosted-cli", FAILED, "; ".join(problems)[:500], "\n".join(log + notes), details)
+    return SuiteResult("hosted-cli", PASSED, f"{len(runs)} print-mode session(s) passed: {', '.join(runs)}",
+                       "\n".join(log + notes), details)
+
+
+# --- the disposable daemon (`serve`) -------------------------------------------------------------------------------
+
+def write_fixture_repo(repos: Path, broken: bool, outside: Path) -> None:
+    """A tiny git repo the session clones with `git_clone local:lane-fixture`. It carries a symlink to the host file
+    outside /workspace, which must not let a read reach it (#370 class)."""
+    repo = repos / FIXTURE_REPO
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "app.py").write_text("print('fixture-ok')\n", encoding="utf-8")
+    expected = "'never'" if broken else "'fixture-ok'"
+    (repo / "test_app.py").write_text(
+        "import subprocess, sys, unittest\n\n\nclass App(unittest.TestCase):\n    def test_prints(self):\n"
+        "        out = subprocess.run([sys.executable, 'app.py'], capture_output=True, text=True).stdout.strip()\n"
+        f"        self.assertEqual(out, {expected})\n", encoding="utf-8")
+    (repo / "escape").symlink_to(outside / "secret.txt")  # the secret file itself, by its absolute host path
+    git = ["git", "-C", str(repo), "-c", "user.name=real-env lane", "-c", "user.email=lane@localhost"]
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "fixture"]):
+        subprocess.run([*git, *args], check=True, capture_output=True)  # noqa: S603
+
+
+def lane_config(root: Path, port: int, mode: str, tag: str, image: str, spec: dict | None = None) -> dict:
+    """The disposable daemon's config. `spec` is what the lane decided from the live config: the local model for the
+    gpu mode, the cleared backends for the hosted mode. Nothing else from the live config reaches it."""
+    spec = spec or {}
+    data = root / "data"
+    config: dict = {
+        "listen": {"host": "127.0.0.1", "port": port},
+        "data_dir": data.as_posix(),
+        "repos_dir": (root / "repos").as_posix(),
+        "modules": {"homelab": False, "memory_library": False, "images": False, "image_edit": False,
+                    "gpu_guard": False, "endpoint": False, "web": False, "notifications": False,
+                    "backup": False, "remote_control": False, "hub": False, "jobs": False, "runners": False,
+                    "mcp_client": False},
+        "gpu_guard": {"enabled": False, "pause_flag": (root / "llama-server.paused").as_posix()},
+        "canary": {"enabled": False},
+        "sandbox": {"image": image or "agent-harness-sandbox:py312", "network": f"real-env-{tag}-sbx",
+                    "egress_network": f"real-env-{tag}-egress", "proxy_network": f"real-env-{tag}-proxy",
+                    # Not the live proxy: a loopback discard port with no proxy container behind it, so a network
+                    # command fails closed instead of going out through the live instance's egress proxy.
+                    "proxy": NO_PROXY, "idle_stop_seconds": 0,
+                    # The run's own pip/npm caches, removed with it: never the live `harness-cache-*` volumes.
+                    "cache_volume_prefix": lane_volume(tag, "cache")},
+        "budgets": {"approval_timeout_seconds": 3600},
+        # A local model nothing calls (the sandbox journey is scripted; hosted sessions run on their CLIs).
+        "default_model": "lane-scripted",
+        "models": {"lane-scripted": {"base_url": "http://127.0.0.1:9", "context_tokens": 32768}},
+    }
+    if mode == "gpu":
+        model = spec.get("model") or {}
+        if not model.get("base_url"):
+            raise RuntimeError("the gpu instance needs the live model's base_url")
+        config["default_model"] = model["name"]
+        config["models"] = {model["name"]: {k: v for k, v in model.items() if k != "name"}}
+    if mode == "hosted":
+        config["backends"] = dict(spec.get("backends") or {})
+    return config
+
+
+def lane_volume(tag: str, backend: str) -> str:
+    """The run's disposable state volume for `backend` (its login is `<this>-login`); with "" the run's prefix."""
+    return f"real-env-{tag}-{backend}"
+
+
+def token_digest(backend: dict) -> str:
+    """A digest of the backend's long-lived token file ("" when there is none), to tell whether sessions changed it."""
+    import hashlib
+    path = Path(str(backend.get("oauth_token_file") or "")).expanduser()
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() if str(path) not in ("", ".") else ""
+    except OSError:
+        return ""
+
+
+class ScriptedSandboxModel:
+    """The sandbox journey's model: turn N of the session answers with step N, whatever the messages say."""
+
+    def __init__(self, secret_path: Path):
+        outside = secret_path.as_posix()
+        # The workspace is <root>/data/workspaces/<session id>, so this relative path names the real host file.
+        upward = os.path.relpath(secret_path, secret_path.parent.parent / "data" / "workspaces" / "session")
+        self.steps: list[tuple[str, dict]] = [
+            ("git_clone", {"url": f"local:{FIXTURE_REPO}"}),
+            ("run_shell", {"command": f"cd {FIXTURE_REPO} && python -B app.py && git log --oneline | wc -l"}),
+            ("verify", {}),
+            ("read_file", {"path": upward}),
+            ("read_file", {"path": outside}),
+            ("read_file", {"path": f"{FIXTURE_REPO}/escape"}),
+            ("run_shell", {"command": f"cat {outside} {FIXTURE_REPO}/escape {upward} 2>&1; echo shell-done"}),
+        ]
+
+    async def __call__(self, model, messages, tools=None, on_delta=None, max_tokens=None, extra=None, timeout=0,
+                       on_progress=None, **_kwargs):
+        from harness.llm import Completion
+        if tools is None:  # a compaction summary or a title: never the journey
+            return Completion(content="real-env lane journey", prompt_tokens=10, completion_tokens=5)
+        turn = sum(1 for m in messages if m.get("role") == "assistant")
+        if turn >= len(self.steps):
+            return Completion(content="done", finish_reason="stop", prompt_tokens=100, completion_tokens=1)
+        name, args = self.steps[turn]
+        call = {"id": f"lane-{turn}-{name}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args)}}
+        return Completion(tool_calls=[call], finish_reason="tool_calls", prompt_tokens=100, completion_tokens=10)
+
+
+def serve(args) -> int:
+    """The disposable daemon: the tested tree's harness on a loopback port, maintenance off, no GPU modules."""
+    sys.path.insert(0, str(Path(args.tree).resolve()))
+    import asyncio
+
+    import uvicorn
+    import yaml
+
+    from harness import config as config_mod, fake_model
+    from harness.api import create_app
+    from harness.manager import Manager
+    from harness.modules import namespace_packages
+
+    root = Path(args.dir).resolve()
+    (root / "repos").mkdir(parents=True, exist_ok=True)
+    outside = root / "outside"
+    outside.mkdir(exist_ok=True)
+    secret = outside / "secret.txt"
+    secret.write_text(f"real-env-secret-{uuid.uuid4().hex}\n", encoding="utf-8")
+    chat = None
+    if args.mode == "sandbox":
+        write_fixture_repo(root / "repos", args.broken_fixture, outside)
+        chat = ScriptedSandboxModel(secret)
+    config_dir = root / "config"
+    config_dir.mkdir(exist_ok=True)
+    spec = json.loads(os.environ.get(SPEC_ENV) or "{}")
+    cfg_raw = lane_config(root, args.port, args.mode, args.tag, args.image, spec)
+    (config_dir / "harness.yaml").write_text(yaml.safe_dump(cfg_raw, sort_keys=False), encoding="utf-8")
+    checks = [{"name": "fixture", "command": f"cd {FIXTURE_REPO} && python -B -m unittest -v", "timeout": 120}]
+    projects = {"projects": {PROJECT: {"description": "real-env lane (#731): synthetic workspace",
+                                       **({"verify": checks} if args.mode == "sandbox" else {})}}}
+    (config_dir / "projects.yaml").write_text(yaml.safe_dump(projects, sort_keys=False), encoding="utf-8")
+    cfg = config_mod.load(config_dir, root / "data")
+    # As fake model mode does: no local-model supervision, so nothing here can stop or start the live llama-server.
+    for name in fake_model.GPU_SWITCHES:
+        setattr(cfg.modules, name, False)
+        setattr(cfg.installed, name, False)
+    cfg.gpu_guard.enabled = False
+    packages = cfg.module_packages if cfg.module_packages is not None else namespace_packages()
+    cfg.module_packages = tuple(p for p in packages if p not in fake_model.GPU_PACKAGES)
+    manager = Manager(cfg, chat=chat) if chat is not None else Manager(cfg)
+    real_start = manager.start
+
+    async def start_without_maintenance(maintenance: bool = True) -> None:
+        # Maintenance removes session containers its own database doesn't know: on a shared Docker engine those are
+        # the live instance's.
+        await real_start(maintenance=False)
+    manager.start = start_without_maintenance  # type: ignore[method-assign]
+    _key, token = manager.db.main.create_api_key("real-env-lane", "admin", "owner")
+    class Server(uvicorn.Server):
+        """Sets `ready` once it listens, so the handle is written only then."""
+        ready: asyncio.Event
+
+        async def startup(self, sockets=None) -> None:
+            await super().startup(sockets=sockets)
+            if self.started:
+                self.ready.set()
+
+    server = Server(uvicorn.Config(create_app(manager), host="127.0.0.1", port=args.port, log_level="warning",
+                                   proxy_headers=False, timeout_graceful_shutdown=5))
+
+    async def main() -> None:
+        server.ready = asyncio.Event()
+        task = asyncio.create_task(server.serve())
+        waiter = asyncio.create_task(server.ready.wait())
+        await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if not server.ready.is_set():   # it stopped before it listened (the port was taken, say)
+            waiter.cancel()
+            await task
+            return
+        handle = root / "instance.json"
+        tmp = root / ".instance.json.tmp"
+        tmp.write_text(json.dumps({"server": f"http://127.0.0.1:{args.port}", "token": token, "pid": os.getpid()}),
+                       encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, handle)
+        await task
+    try:
+        asyncio.run(main())
+    finally:
+        manager.db.close()
+    return 0
+
+
+# --- command line --------------------------------------------------------------------------------------------------
+
+REV_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@~^-]{0,199}")
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,199}(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[0-9a-f]{64})?")
+GITHUB_REPO_RE = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}")
+
+
+def checked(value: str, pattern: re.Pattern, what: str) -> str:
+    """An operator-supplied value that reaches a command: the whole of it must match `pattern` (so it can't start
+    with `-` and be read as an option), or the run stops before anything runs."""
+    if not pattern.fullmatch(value):
+        raise SystemExit(f"{what} {value!r} is not well-formed")
+    return value
+
+
+def checked_python(value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+        raise SystemExit(f"--python {value!r} must be the absolute path of an executable Python")
+    return str(path)
+
+
+def checked_repo(value: str) -> Path:
+    path = Path(value).expanduser().resolve()
+    if not (path / ".git").exists():
+        raise SystemExit(f"--repo {value!r} is not a git checkout")
+    return path
+
+
+def resolve_sha(repo: Path, sha: str) -> str:
+    if not sha:
+        _run(["git", "-C", str(repo), "fetch", "-q", "origin", "main"], timeout=300)
+        sha = "origin/main"
+    rev = checked(sha, REV_RE, "--sha")
+    proc = _run(["git", "-C", str(repo), "rev-parse", "--verify", "--end-of-options", f"{rev}^{{commit}}"])
+    if proc.returncode != 0:
+        raise SystemExit(f"unknown commit {sha!r}: {proc.stderr.strip()}")
+    return checked(proc.stdout.strip(), SHA_RE, "the resolved commit")
+
+
+KEEP_RUNS = 14
+
+
+def prune_runs(base: Path, keep: int = KEEP_RUNS) -> list[str]:
+    """Drop all but the newest `keep` run directories (their ids sort by time). latest.json is never touched."""
+    runs = sorted(p for p in (base / "runs").glob("*") if p.is_dir())
+    gone = runs[:-keep] if keep > 0 else runs
+    for path in gone:
+        shutil.rmtree(path, ignore_errors=True)
+    return [p.name for p in gone]
+
+
+LOCK_TOKEN_ENV = "REAL_ENV_LOCK_TOKEN"   # set by run-lane.sh's lock holder for the run it hands over to
+
+
+@contextlib.contextmanager
+def one_run_at_a_time(base: Path, wait: float = 0, poll: float = 30) -> Iterator[None]:
+    """An exclusive lock on <base>/lane.lock for the whole run: a manual run and the timer never overlap, so two of
+    them can't both pass the hosted ledger and spend a second session. run-lane.sh's holder takes the same lock before
+    it prepares, and the run it hands over to goes ahead under it."""
+    base.mkdir(parents=True, exist_ok=True)
+    handed_over = _handed_over(base)
+    with (base / "lane.lock").open("a+b") as handle:
+        taken = _try_lock(handle)
+        if not taken and handed_over:   # this run's own wrapper holds it, from before it prepared
+            yield
+            return
+        deadline = time.monotonic() + wait   # the weekly run waits out a long nightly run instead of being lost
+        while not taken:
+            if time.monotonic() >= deadline:
+                raise SystemExit(f"another real-environment lane run holds {base / 'lane.lock'}")
+            time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
+            taken = _try_lock(handle)
+        # A token no wrapper's run carries: a run handed over by a wrapper that has since died can't pass as ours.
+        (base / "lane.lock.owner").write_text(uuid.uuid4().hex, encoding="utf-8")
+        try:
+            yield
+        finally:
+            _unlock(handle)
+
+
+def _handed_over(base: Path) -> bool:
+    """True when REAL_ENV_LOCK_TOKEN is the token run-lane.sh's holder wrote to lane.lock.owner when it took the lock:
+    this run is the one it hands over to. Every lock owner writes a fresh token, so a stale one never matches. The
+    variable is dropped so the lane's subprocesses never see it."""
+    token = os.environ.pop(LOCK_TOKEN_ENV, "")
+    try:
+        return bool(token) and (base / "lane.lock.owner").read_text(encoding="utf-8").strip() == token
+    except OSError:
+        return False
+
+
+def _try_lock(handle) -> bool:
+    """One try at the exclusive lock: fcntl.flock on the Linux host; on Windows, where the suite runs run-lane.sh's
+    tests under Git Bash, a lock on the file's first byte, as the wrapper's holder takes it."""
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+        except OSError:
+            return False
+        return True
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(handle) -> None:
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+    else:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def run(args) -> int:
+    with one_run_at_a_time(Path(args.base).expanduser().resolve(), wait=args.wait_for_lock):
+        return _run_locked(args)
+
+
+def _run_locked(args) -> int:
+    repo = checked_repo(args.repo)
+    sha = resolve_sha(repo, args.sha)
+    args.python = checked_python(args.python)
+    args.github_repo = checked(args.github_repo, GITHUB_REPO_RE, "--github-repo")
+    for flag in ("sandbox_image", "cli_image"):
+        if getattr(args, flag):
+            setattr(args, flag, checked(getattr(args, flag), IMAGE_RE, f"--{flag.replace('_', '-')}"))
+    if args.workers < 1:
+        raise SystemExit("--workers must be at least 1")
+    base = Path(args.base).expanduser().resolve()
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{sha[:8]}"
+    run_dir = base / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    lane = Lane(repo, sha, run_dir, base, python=args.python, metrics_url=args.metrics_url,
+                live_config=Path(args.live_config).expanduser(), yield_seconds=args.yield_seconds,
+                workers=args.workers, broken_fixture=args.broken_fixture, pair=args.pair,
+                force_hosted=args.force_hosted, hosted_opt_in=tuple(args.hosted_backend), images={"sandbox": args.sandbox_image, "cli": args.cli_image})
+    suites = args.suite or list(NIGHTLY_SUITES)
+    runners = {"sandbox": lambda: sandbox_suite(lane), "gpu": lambda: gpu_suite(lane),
+               "hosted-cli": lambda: hosted_suite(lane)}
+    try:
+        lane.extract()
+        doc = run_lane(sha, suites, runners, None if args.no_report else GhCli(args.github_repo), base, run_id)
+    finally:
+        lane.cleanup()
+        if not args.keep:
+            shutil.rmtree(lane.tree, ignore_errors=True)
+            for leftover in run_dir.glob("pytest-*"):
+                if leftover.is_dir():
+                    shutil.rmtree(leftover, ignore_errors=True)
+    prune_runs(base, args.keep_runs)
+    print(json.dumps(doc, indent=2, sort_keys=True))
+    return 0 if doc["ok"] else 1
+
+
+def parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="command", required=True)
+    r = sub.add_parser("run", help="run the lane against one commit and report")
+    r.add_argument("--sha", default="", help="commit to test (default: origin/main after a fetch)")
+    r.add_argument("--suite", action="append", choices=SUITES,
+                   help=f"repeatable; default: {' '.join(NIGHTLY_SUITES)} (hosted-cli is the weekly run)")
+    r.add_argument("--repo", default=str(ROOT), help="the git checkout to take the commit from")
+    r.add_argument("--base", default=str(DEFAULT_BASE), help="where runs, latest.json and the ledger go")
+    r.add_argument("--python", default=sys.executable, help="Python with requirements.txt installed")
+    r.add_argument("--metrics-url", default=LIVE_METRICS, help="the live daemon's /metrics (read-only)")
+    r.add_argument("--live-config", default=str(LIVE_CONFIG), help="the live config dir (read-only)")
+    r.add_argument("--yield-seconds", type=float, default=1800, help="how long to wait for live sessions to end")
+    r.add_argument("--workers", type=int, default=2, help="pytest workers (at most 4)")
+    r.add_argument("--github-repo", default=REPO)
+    r.add_argument("--no-report", action="store_true", help="no statuses or issues; still writes the summary")
+    r.add_argument("--broken-fixture", action="store_true", help="self-test: the fixture's verify check fails")
+    r.add_argument("--pair", action="store_true", help="hosted-cli: two concurrent Claude sessions (#390 class)")
+    r.add_argument("--force-hosted", action="store_true", help="hosted-cli: ignore the weekly cap")
+    r.add_argument("--hosted-backend", action="append", default=[], metavar="NAME",
+                   help="hosted-cli: also run this non-Claude backend (the owner's decision). Its session gets a "
+                        "disposable state and login volume, never the shared login, so it needs a key of its own "
+                        "(api_key_file) to sign in")
+    r.add_argument("--sandbox-image", default="", help="use this sandbox image instead of the commit's own")
+    r.add_argument("--cli-image", default="", help="use this CLI image instead of the commit's own")
+    r.add_argument("--keep", action="store_true", help="keep the extracted tree and pytest temp dirs")
+    r.add_argument("--wait-for-lock", type=float, default=0, metavar="SECONDS",
+                   help="wait this long for another lane run to finish instead of exiting (the weekly unit waits)")
+    r.add_argument("--keep-runs", type=int, default=KEEP_RUNS, help="run directories to keep (logs, instance data)")
+    s = sub.add_parser("serve", help=argparse.SUPPRESS)
+    s.add_argument("--tree", required=True)
+    s.add_argument("--dir", required=True)
+    s.add_argument("--mode", choices=("sandbox", "gpu", "hosted"), required=True)
+    s.add_argument("--port", type=int, required=True)
+    s.add_argument("--tag", required=True)
+    s.add_argument("--image", default="")
+    s.add_argument("--broken-fixture", action="store_true")
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parser().parse_args(argv)
+    if args.command == "serve":
+        return serve(args)
+    return run(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

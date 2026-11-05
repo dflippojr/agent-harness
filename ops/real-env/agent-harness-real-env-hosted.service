@@ -1,0 +1,19 @@
+# Real-environment lane (#731), weekly: the hosted CLI suite, one tiny print-mode session per backend that is safe to
+# run, with Claude's session replaced by the #390 pair (two concurrent sessions on one token). Claude runs only on its
+# long-lived token (backends.claude.oauth_token_file); any other backend only with `--hosted-backend NAME` added below,
+# which is the owner's decision (docs/real-env-lane.md, Hosted credentials). The lane's ledger refuses a second hosted
+# run within 6.5 days. Install as agent-harness-real-env.service says.
+[Unit]
+Description=Agent harness real-environment lane (hosted CLI) against origin/main
+After=network-online.target
+
+[Service]
+Type=oneshot
+# REAL_ENV_LOCK_WAIT: if that night's sandbox and GPU run (or a manual run) is still going, run-lane.sh waits for the
+# lane's lock (up to 4 h) before it prepares, instead of losing the week.
+Environment=REAL_ENV_LOCK_WAIT=14400
+ExecStart=/bin/bash %h/.local/share/agent-harness-real-env/run-lane.sh --suite hosted-cli --pair
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+TimeoutStartSec=5h

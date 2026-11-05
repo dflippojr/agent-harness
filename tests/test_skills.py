@@ -28,7 +28,7 @@ from harness_modules.skills.skill_validate import (
     validate_dir,
 )
 from harness_modules.skills.service import SkillError, SkillStore, in_process_sandbox, session_eligible, skill_instructions, _safe_join
-from test_daemon import Script, call, make_cfg, wait_status
+from test_daemon import SANDBOX_IMAGE, Script, call, make_cfg, wait_status
 from waits import scaled
 
 SKILL_MD = "# Commit messages\nWrite conventional commits: `type: summary`.\nKeep the first line under 72 characters.\n"
@@ -59,10 +59,10 @@ def bundle(**overrides):
     return data
 
 
-def store_for(tmp: Path, cfg=None) -> SkillStore:
+def store_for(tmp: Path, cfg=None, image: str = "agent-harness-sandbox:py312") -> SkillStore:
     db = Database(tmp / "harness.sqlite3")
     skills_cfg = cfg or SkillsConfig(enabled=True, local_review=False)
-    return SkillStore(skills_cfg, db, tmp, "agent-harness-sandbox:py312", run_sandbox=in_process_sandbox)
+    return SkillStore(skills_cfg, db, tmp, image, run_sandbox=in_process_sandbox)
 
 
 def enable_skills(cfg):
@@ -1268,6 +1268,7 @@ def test_skill_instructions_cannot_override_system():
     assert "hash abcd1234" in text
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(os.environ.get("HARNESS_LIVE_DOCKER") != "1", reason="optional live docker isolation check")
 def test_live_docker_validator_isolation(tmp_path):
     root = tmp_path / "proposal"
@@ -1278,6 +1279,12 @@ def test_live_docker_validator_isolation(tmp_path):
         "purpose": "Keep git commit messages conventional and short.",
         "examples": EXAMPLES,
     }), encoding="utf-8")
-    store = store_for(tmp_path)
+    # The selected image (the real-environment lane points HARNESS_TEST_SANDBOX_IMAGE at the commit's own), and a
+    # validation that really ran in it: Docker errors also come back as {"ok": False, "findings": [...]}, but without
+    # the validator's own fields, so the container's answer must equal the same validator run in-process.
+    store = store_for(tmp_path, image=SANDBOX_IMAGE)
+    assert SANDBOX_IMAGE in store.sandbox_argv(root)
+    expected = validate_dir(root)
+    assert expected["ok"] and expected["content_hash"], expected   # a valid proposal: only the container can fail it
     result = store._docker_validate(root)
-    assert "findings" in result
+    assert result == expected, result

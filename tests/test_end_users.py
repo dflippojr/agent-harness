@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -582,7 +583,8 @@ def test_usage_is_tallied_per_end_user(tmp_path):
 
 # --- Docker: temporary volumes, a network-less container ---------------------------------------------------------
 
-IMAGE = "agent-harness-cli:1"
+# The real-environment lane (#731) points this at the CLI image built from the tested commit.
+IMAGE = os.environ.get("HARNESS_TEST_CLI_IMAGE") or "agent-harness-cli:1"
 docker_ok = bool(shutil.which("docker")) and subprocess.run(
     ["docker", "image", "inspect", IMAGE], capture_output=True).returncode == 0
 needs_docker = pytest.mark.skipif(not docker_ok, reason=f"needs Docker and the {IMAGE} image")
@@ -599,6 +601,7 @@ def _in_session(backend: str, cfg: BackendConfig, app_id: str, end_user: str, wo
     return result.stdout
 
 
+@pytest.mark.docker
 @needs_docker
 @pytest.mark.parametrize("backend", ["claude", "codex"])
 def test_end_users_cannot_read_each_others_login_or_state_and_the_app_login_is_not_mounted(tmp_path, backend):
@@ -626,6 +629,7 @@ def test_end_users_cannot_read_each_others_login_or_state_and_the_app_login_is_n
         subprocess.run(["docker", "volume", "rm", "-f", *volumes], capture_output=True)
 
 
+@pytest.mark.docker
 @needs_docker
 def test_unlink_deletes_the_volume_with_the_real_cli_logout(tmp_path):
     app = f"t365-{uuid.uuid4().hex[:10]}"
@@ -644,6 +648,7 @@ def test_unlink_deletes_the_volume_with_the_real_cli_logout(tmp_path):
         subprocess.run(["docker", "volume", "rm", "-f", volume], capture_output=True)
 
 
+@pytest.mark.docker
 @needs_docker
 def test_the_pinned_claude_binary_takes_the_pasted_code_on_stdin(tmp_path):
     """The real `claude auth login` in a network-less throwaway container: URL out, a canary code in once. No

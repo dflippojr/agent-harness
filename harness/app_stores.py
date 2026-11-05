@@ -262,7 +262,7 @@ class SessionStores:
     only the index for App sessions; it reaches every App unless `with_app` narrows it, since the daemon resolves its
     own full ids with it. The daemon's sweeps (sessions_with_status, sessions_with_run_flag, count_sessions) cover
     every store. Group, job and chat lists, the metrics and the smart-review stats read Web's store only (`_ON_WEB`):
-    App sessions are counted in `app_metadata` instead.
+    App sessions are counted in `app_metadata` instead, and in total by status from the index (`app_session_counts`).
     """
 
     def __init__(self, main: Database, apps_dir: Path, idle_seconds: float = APP_STORE_IDLE_SECONDS):
@@ -524,6 +524,14 @@ class SessionStores:
         error = json.loads(self.main.get_meta(_APP_ERROR + app_id) or "{}")
         return {"sessions": sessions, "usage": self.main.app_usage(app_id), "errors": int(error.get("errors") or 0),
                 "last_error": error.get("last_error") or "", "last_error_at": error.get("last_error_at")}
+
+    def app_session_counts(self) -> dict[str, int]:
+        """Every App's sessions counted by status, from the index: totals only, with no App named, and nothing read
+        from an App store. `/metrics` exports them, since `harness_sessions` counts Web's store alone (#731)."""
+        counts: dict[str, int] = {}
+        for _, e in self._indexed(lambda e: True):
+            counts[e["status"]] = counts.get(e["status"], 0) + 1
+        return counts
 
     def list_api_keys(self) -> list[dict]:
         """The key list (Settings → Apps), each App's and device's with its store's metadata."""

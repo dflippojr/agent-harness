@@ -581,3 +581,48 @@ def test_a_session_id_prefix_is_matched_literally_not_as_a_like_pattern(tmp_path
     assert sorted(stores.find_session_ids("x_")) == ["x_y1", "x_y2"]
     assert stores.web.find_session_ids("x_y") == ["x_y1"]
     assert sorted(stores.find_session_ids("ab")) == ["abc1", "abd2"]
+
+
+def test_metrics_count_live_app_sessions_across_every_app_store(tmp_path):
+    """The real-environment lane yields to live work, hosted App sessions included (#731). Their sessions live in the
+    App stores, which `harness_sessions` (Web's store) never counts, so `/metrics` totals them from the index across
+    every App, with no App label and without opening an App store."""
+    from harness.metrics import render
+
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    for sid, app_id, status in (("own1", "", "done"), ("a1", "k-aaaa", "running"), ("a2", "k-aaaa", "done"),
+                                ("b1", "k-bbbb", "queued"), ("b2", "k-bbbb", "waiting_app")):
+        m.db.insert_session(_session(sid, app_id, status=status))
+    text = render(m)
+    for status, count in (("running", 1), ("queued", 1), ("waiting_app", 1), ("done", 1), ("failed", 0)):
+        assert f'harness_app_sessions{{status="{status}"}} {count}' in text
+    assert 'harness_sessions{status="running"} 0' in text and 'harness_sessions{status="done"} 1' in text
+    assert "k-aaaa" not in text and "k-bbbb" not in text
+    m.db.close()
+
+
+def test_metrics_report_no_app_sessions_as_zeros(tmp_path):
+    from harness.metrics import render
+
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    m.db.insert_session(_session("own1", "", status="running"))
+    text = render(m)
+    assert 'harness_app_sessions{status="running"} 0' in text and 'harness_app_sessions{status="queued"} 0' in text
+    m.db.close()
+
+
+def test_metrics_session_counts_are_fresh_on_every_scrape(tmp_path, monkeypatch):
+    """The lane reads `/metrics` right before it starts work (#731), so a session that started a moment ago must show
+    even while the costly aggregates are served from their cache."""
+    from harness import metrics
+    from harness.metrics import render
+
+    monkeypatch.setattr(metrics, "CORE_CACHE_SECONDS", 10.0)
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    assert 'harness_sessions{status="running"} 0' in render(m)   # an idle scrape fills the cache
+    m.db.insert_session(_session("own1", "", status="running"))
+    m.db.insert_session(_session("a1", "k-aaaa", status="queued"))
+    text = render(m)
+    assert 'harness_sessions{status="running"} 1' in text and 'harness_app_sessions{status="queued"} 1' in text
+    assert 'harness_sessions_active 1' in text
+    m.db.close()
