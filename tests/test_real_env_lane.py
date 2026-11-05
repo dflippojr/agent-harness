@@ -400,12 +400,13 @@ def test_gh_cli_commands():
 
     def run(args, input=None, **_kwargs):
         calls.append((args, input))
-        out = {"list": json.dumps([{"number": 1, "title": "t", "body": "b"}]),
+        out = {"--paginate": '{"number": 1, "title": "t", "body": "b"}\n{"number": 2, "title": "u", "body": "c"}\n',
                "create": "https://github.com/dflippojr/agent-harness/issues/77\n"}.get(args[2], "")
         return subprocess.CompletedProcess(args, 0, out, "")
     gh = lane.GhCli("o/r", run=run)
     gh.post_status(SHA, "real-env/gpu", "success", "skipped: gpu-held")
-    assert gh.open_issues("bug") == [{"number": 1, "title": "t", "body": "b"}]
+    assert gh.open_issues("bug") == [{"number": 1, "title": "t", "body": "b"}, {"number": 2, "title": "u", "body": "c"}]
+    assert calls[1][0][:4] == ["gh", "api", "--paginate", "repos/o/r/issues?state=open&labels=bug&per_page=100"]
     assert gh.create_issue("title", "body", ["bug"]) == 77
     gh.comment(77, "again")
     assert calls[0][0][:3] == ["gh", "api", f"repos/o/r/statuses/{SHA}"] and "context=real-env/gpu" in calls[0][0]
@@ -714,11 +715,11 @@ def test_hosted_suite_fails_a_backend_that_does_not_answer_and_skips_with_no_log
     result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
                                         live=hosted_live(tmp_path)))
     assert result.state == lane.FAILED and "claude: failed 401" in result.summary
-    nobody = [{**b, "logged_in": False} for b in BACKENDS]
+    unavailable = [{**b, "available": b["name"] != "codex"} for b in BACKENDS]
     (tmp_path / "y").mkdir()
-    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=nobody), force_hosted=True,
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=unavailable), force_hosted=True,
                                         live=hosted_live(tmp_path / "y", token=False), hosted_opt_in=("codex",)))
-    assert result.state == lane.SKIPPED and "logged in" in result.summary
+    assert result.state == lane.SKIPPED and "no cleared hosted backend is available" in result.summary
 
 
 # --- the real Lane's edges: git archive, images, pytest, the daemon process ----------------------------------------
@@ -976,3 +977,62 @@ def test_docker_marked_tests_never_start_maintenance():
                                     and k.value.value is False for k in call.keywords)):
                     offenders.append(f"{path.name}:{call.lineno} {fn.name}")
     assert offenders == []
+
+
+def test_hosted_suite_never_probes_the_shared_logins(tmp_path, idle, monkeypatch):
+    seen = []
+
+    class Recording(FakeClient):
+        def get(self, path, params=None):
+            if path == "/api/v1/backends":
+                seen.append(params)
+            return super().get(path, params)
+    monkeypatch.setattr(lane, "drive_session", lambda *a, **k: timed_run(0, 1))
+    lane.hosted_suite(FakeLane(tmp_path, client=Recording(backends=BACKENDS), force_hosted=True,
+                               live=hosted_live(tmp_path)))
+    assert seen and all(p == {"auth": "skip"} for p in seen)
+
+
+def test_a_failed_gpu_check_stays_failed_when_the_lane_yields(tmp_path, idle, monkeypatch):
+    readings = iter([metrics(), metrics(harness_gpu_manual_hold_age_seconds=3)])
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(readings))
+    result = lane.gpu_suite(FakeLane(tmp_path, tests=lane.PytestRun(1, passed=1, failed=1)))
+    assert result.state == lane.FAILED and "session not run" in result.summary
+
+
+def test_sandbox_suite_yields_before_its_session(tmp_path, idle, monkeypatch):
+    busy = metrics(**{'harness_sessions{status="queued"}': 1})
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: busy)
+    run = FakeLane(tmp_path)
+    run.instance = lambda *a, **k: pytest.fail("no session after a live one arrived")
+    result = lane.sandbox_suite(run)
+    assert result.state == lane.SKIPPED and result.summary.startswith("busy: 1 live session(s)")
+    result = lane.sandbox_suite(FakeLane(tmp_path, tests=lane.PytestRun(1, passed=2, failed=1)))
+    assert result.state == lane.FAILED   # a failure found before yielding still counts
+
+
+def test_hosted_suite_yields_between_sessions(tmp_path, idle, monkeypatch):
+    readings = iter([metrics(), metrics(**{'harness_sessions{status="running"}': 1})] + [metrics()] * 5)
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(readings))
+    sessions = []
+    monkeypatch.setattr(lane, "drive_session", lambda inst, prompt, backend=None, **k: sessions.append(backend)
+                        or timed_run(0, 1))
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
+                                        live=hosted_live(tmp_path), hosted_opt_in=("codex",)))
+    assert sessions == ["claude"] and "codex: not run, a live session started" in result.details["notes"]
+    every_one = iter([metrics(**{'harness_sessions{status="running"}': 1})] * 5)
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(every_one))
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
+                                        live=hosted_live(tmp_path)))
+    assert result.state == lane.SKIPPED and result.summary.startswith("busy:")
+
+
+def test_only_one_lane_run_at_a_time(tmp_path):
+    import importlib.util
+    with lane.one_run_at_a_time(tmp_path):
+        if importlib.util.find_spec("fcntl") is not None:   # POSIX, where the lane runs; Windows has no flock
+            with pytest.raises(SystemExit, match="another real-environment lane run"):
+                with lane.one_run_at_a_time(tmp_path):
+                    pass
+    with lane.one_run_at_a_time(tmp_path):  # released after the run
+        pass

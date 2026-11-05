@@ -152,9 +152,10 @@ class GhCli:
                   "-f", f"description={description}"])
 
     def open_issues(self, label: str) -> list[dict]:
-        out = self._gh(["issue", "list", "-R", self.repo, "--state", "open", "--label", label, "--limit", "200",
-                        "--json", "number,title,body"])
-        return json.loads(out or "[]")
+        """Every open issue with the label, all pages (pull requests left out), so an old suite issue is still found."""
+        out = self._gh(["api", "--paginate", f"repos/{self.repo}/issues?state=open&labels={label}&per_page=100",
+                        "--jq", '.[] | select(.pull_request | not) | {number, title, body}'])
+        return [json.loads(line) for line in (out or "").splitlines() if line.strip()]
 
     def create_issue(self, title: str, body: str, labels: list[str]) -> int:
         args = ["issue", "create", "-R", self.repo, "--title", title, "--body-file", "-"]
@@ -304,6 +305,12 @@ def live_busy(metrics: dict[str, float] | None) -> int:
     if not metrics:
         return 0
     return int(sum(metrics.get(f'harness_sessions{{status="{s}"}}', 0) for s in ("running", "queued")))
+
+
+def still_idle(metrics_url: str) -> str:
+    """"" when the live daemon has nothing running or queued; otherwise why the lane must not start more work now."""
+    busy = live_busy(fetch_metrics(metrics_url))
+    return f"busy: {busy} live session(s) started while the lane ran" if busy else ""
 
 
 def gpu_hold_reason(metrics: dict[str, float] | None) -> str:
@@ -681,6 +688,11 @@ def sandbox_suite(lane: Lane) -> SuiteResult:
                    HARNESS_TEST_CLI_IMAGE=lane.cli_image or MISSING_IMAGE,
                    HARNESS_TEST_SANDBOX_PROXY=NO_PROXY)
     tests = lane.pytest("docker", env)
+    late = still_idle(lane.metrics_url)   # image pulls and pytest take a while: yield before the next workload
+    if late:
+        state = FAILED if tests.failed or tests.errors else SKIPPED
+        return SuiteResult("sandbox", state, f"{late}; {tests.line('docker tests')}, session not run",
+                           tests.output[-6000:], {"pytest": asdict(tests) | {"output": ""}})
     with lane.instance("sandbox") as inst:
         run = drive_session(inst, "real-env lane: sandbox journey", timeout=900)
         secret = (inst.root / "outside" / "secret.txt").read_text(encoding="utf-8").strip()
@@ -708,8 +720,9 @@ def gpu_suite(lane: Lane) -> SuiteResult:
     now = fetch_metrics(lane.metrics_url)
     late = (f"busy: {live_busy(now)} live session(s) started during the GPU checks" if live_busy(now)
             else gpu_hold_reason(now))
-    if late:
-        return SuiteResult("gpu", SKIPPED, f"{late}; {tests.line('gpu tests')}, session not run", tests.output[-6000:],
+    if late:   # a check that already failed stays a failure; only the session is given up
+        state = FAILED if tests.failed or tests.errors else SKIPPED
+        return SuiteResult("gpu", state, f"{late}; {tests.line('gpu tests')}, session not run", tests.output[-6000:],
                            {"model": model["name"], "pytest": asdict(tests) | {"output": ""}})
     with lane.instance("gpu", spec={"model": model}) as inst:
         run = drive_session(inst, f"Use the write_file tool to create lane.txt containing exactly {OK_WORD}. "
@@ -800,13 +813,13 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
         spec["backends"]["claude"]["max_sessions"] = max(2, int(spec["backends"]["claude"].get("max_sessions") or 1))
     token = token_digest(backends.get("claude") or {}) if "claude" in eligible else ""
     with lane.instance("hosted", spec) as inst, inst.client() as client:
-        listed = client.get("/api/v1/backends").json()
-        hosted = [b for b in listed if b.get("name") in eligible and b.get("available")]
-        # Claude runs on its token, which /backends doesn't probe (it checks the shared login): the token is its login.
-        ready = [b["name"] for b in hosted if b["name"] == "claude" or b.get("logged_in")]
-        notes += [f"{b['name']}: not logged in, not run" for b in hosted if b["name"] not in ready]
+        # auth=skip: the sign-in probe mounts each CLI's shared login volume, which is what the lane must not touch.
+        # Claude's login is its token (checked by hosted_plan); an opted-in backend's login shows in its session.
+        listed = client.get("/api/v1/backends", params={"auth": "skip"}).json()
+        ready = [b["name"] for b in listed if b.get("name") in eligible and b.get("available")]
+        notes += [f"{name}: not available in the disposable daemon, not run" for name in eligible if name not in ready]
         if not ready:
-            return SuiteResult("hosted-cli", SKIPPED, "no configured hosted backend is logged in",
+            return SuiteResult("hosted-cli", SKIPPED, "no cleared hosted backend is available",
                                "\n".join(notes), {"backends": [b.get("name") for b in listed]})
         _write_json(lane.base / "hosted-ledger.json", {"last_run_at": clock(), "sha": lane.sha})
         prompt = f"Reply with exactly {OK_WORD} and nothing else. Do not use any tools."
@@ -814,7 +827,13 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
         for name in ready:
             if name == pair:
                 continue   # its weekly session is the pair below
+            if still_idle(lane.metrics_url):
+                notes.append(f"{name}: not run, a live session started")
+                continue
             runs[name] = drive_session(inst, prompt, backend=name, timeout=300, client=client)
+        if pair and still_idle(lane.metrics_url):
+            notes.append(f"{pair} pair: not run, a live session started")
+            pair = ""
         if pair:
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
@@ -829,6 +848,9 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
         if run.status != "done" or OK_WORD not in run.answer:
             problems.append(f"{name}: {run.status} {run.stop_reason}".strip())
     details = {"sessions": {n: r.status for n, r in runs.items()}, "notes": notes, "pair": pair or "off"}
+    if not runs and not problems:
+        return SuiteResult("hosted-cli", SKIPPED, "busy: live sessions kept every hosted session from starting",
+                           "\n".join(notes), details)
     if problems:
         return SuiteResult("hosted-cli", FAILED, "; ".join(problems)[:500], "\n".join(log + notes), details)
     return SuiteResult("hosted-cli", PASSED, f"{len(runs)} print-mode session(s) passed: {', '.join(runs)}",
@@ -1068,7 +1090,33 @@ def prune_runs(base: Path, keep: int = KEEP_RUNS) -> list[str]:
     return [p.name for p in gone]
 
 
+@contextlib.contextmanager
+def one_run_at_a_time(base: Path) -> Iterator[None]:
+    """An exclusive lock on <base>/lane.lock for the whole run: a manual run and the timer never overlap, so two of
+    them can't both pass the hosted ledger and spend a second session (POSIX; the lane runs on the Linux host)."""
+    try:
+        import fcntl
+    except ImportError:   # not POSIX: nothing to lock with, and nothing schedules the lane there
+        yield
+        return
+    base.mkdir(parents=True, exist_ok=True)
+    with (base / "lane.lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise SystemExit(f"another real-environment lane run holds {base / 'lane.lock'}") from None
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def run(args) -> int:
+    with one_run_at_a_time(Path(args.base).expanduser().resolve()):
+        return _run_locked(args)
+
+
+def _run_locked(args) -> int:
     repo = checked_repo(args.repo)
     sha = resolve_sha(repo, args.sha)
     args.python = checked_python(args.python)

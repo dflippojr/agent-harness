@@ -34,7 +34,9 @@ A suite can be skipped for one of these reasons:
 
 - `gpu-held: <why>`: the GPU gate above.
 - `busy: ...`: the live daemon still had sessions running or queued after `--yield-seconds` (default 30 min), so
-  the lane yielded to real work.
+  the lane yielded to real work. The lane also looks again before each new workload (the sandbox session after the
+  Docker tests, the GPU session after its checks, each hosted session) and gives up the rest of the suite when a
+  live session has arrived. A test that already failed still reports `failed`.
 - `weekly cap: ...`: a hosted run happened within the last 6.5 days. `hosted-ledger.json` records it.
 - No hosted backend is safe to run, or none of those is logged in.
 
@@ -51,7 +53,8 @@ keeps `"state": "skipped"`.
   - `error` posts `error`. That means the lane itself couldn't run the suite, for example because Docker was missing.
 - **An issue labelled `bug`** on a `failed` or `error` suite. It carries the SHA, the suite, the summary and the last
   60 log lines, with anything shaped like a credential redacted.
-  - Each suite has at most one open issue, found by the hidden marker `<!-- real-env-lane suite=<suite> -->` in its body.
+  - Each suite has at most one open issue, found by the hidden marker `<!-- real-env-lane suite=<suite> -->` in its body
+    (every page of open `bug` issues is searched).
   - A later failure comments on that issue instead of opening another.
   - Closing the issue lets the next failure open a new one.
 - **The summary**, at `~/.local/share/agent-harness-real-env/latest.json`, outside the live data dir. Each run's
@@ -118,6 +121,22 @@ conversation to that backend's history.
 Python: the lane runs from its own clone and venv (`run-lane.sh`), never the deployed checkout or its venv.
 
 pytest: at most 4 workers (`--workers`, default 2). The units run at the lowest CPU and I/O priority.
+
+Only one lane run happens at a time: each holds an exclusive lock on `lane.lock` in the base directory, so a
+manual run and the timer can't overlap (and so can't both pass the weekly hosted ledger).
+
+### Known limits
+
+Two behaviours of the core harness, not the lane, remain. Both are follow-ups for the owner:
+
+- **The live instance's maintenance can remove the lane's containers.** It sweeps every `cleanup.interval_minutes`
+  (60) and removes containers labelled `agent-harness.session` whose session isn't in its own database, which
+  includes a disposable daemon's. That is no danger to the live instance. A sweep during a lane session (about a
+  minute long) fails that suite, and the failure shows in the log as a container that vanished. The fix is an
+  instance label that maintenance respects, in `harness/maintenance.py` and the code that starts containers.
+- **Preparing a Claude session's domain still mounts the shared login volume, even on token auth.** It does so
+  only to create and `chown` its directory, and the session itself gets the token and no login volume
+  (`harness/cli_domains.py` `prepare_command`). The lane no longer runs the sign-in probe (`/backends?auth=skip`).
 
 ## Scheduling (the owner enables it)
 
