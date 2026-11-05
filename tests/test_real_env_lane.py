@@ -203,6 +203,18 @@ def test_live_busy_counts_running_and_queued_sessions():
     assert lane.live_busy(metrics(**{'harness_sessions{status="running"}': 1,
                                      'harness_sessions{status="queued"}': 2})) == 3
     assert lane.live_busy(None) == 0
+    assert lane.busy_reason(metrics()) == ""
+    assert lane.busy_reason(metrics(**{'harness_sessions{status="queued"}': 2})) == "busy: 2 live session(s) running or queued"
+    assert "unknown" in lane.busy_reason(None)  # no reading is not idle: the lane defers
+
+
+def test_the_lane_defers_while_the_live_daemon_does_not_answer():
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+    reason = lane.wait_for_idle("u", 120, poll=60, fetch=lambda _u: None, sleep=sleep, clock=lambda: now[0])
+    assert reason.startswith("busy:") and "did not answer" in reason and now[0] == 120
 
 
 def test_the_lane_yields_to_live_sessions_then_gives_up():
@@ -216,15 +228,15 @@ def test_the_lane_yields_to_live_sessions_then_gives_up():
     def sleep(seconds):
         slept.append(seconds)
         now[0] += seconds
-    assert lane.wait_for_idle("u", 600, poll=60, fetch=fetch, sleep=sleep, clock=lambda: now[0]) == 0
+    assert lane.wait_for_idle("u", 600, poll=60, fetch=fetch, sleep=sleep, clock=lambda: now[0]) == ""
     assert slept == [60, 60]
     busy = lane.wait_for_idle("u", 90, poll=60, fetch=lambda _u: metrics(**{'harness_sessions{status="running"}': 1}),
                               sleep=sleep, clock=lambda: now[0])
-    assert busy == 1
+    assert busy == "busy: 1 live session(s) running or queued"
 
 
 def test_a_busy_live_daemon_skips_each_suite(tmp_path, monkeypatch):
-    monkeypatch.setattr(lane, "wait_for_idle", lambda *a, **k: 2)
+    monkeypatch.setattr(lane, "wait_for_idle", lambda *a, **k: "busy: 2 live session(s) running or queued")
     run = lane.Lane(tmp_path, SHA, tmp_path / "run", tmp_path, force_hosted=True, live_config=hosted_live(tmp_path))
     for suite in (lane.sandbox_suite, lane.gpu_suite, lane.hosted_suite):
         result = suite(run)
@@ -353,6 +365,11 @@ def test_the_hosted_instance_copies_only_the_cleared_live_backends(tmp_path):
     with pytest.raises(RuntimeError, match="base_url"):
         lane.lane_config(tmp_path / "i", 1, "gpu", "t", "", {})
     assert cfg["data_dir"] == (tmp_path / "i" / "data").as_posix()
+
+
+def test_live_model_falls_back_to_the_first_model_as_the_daemon_does():
+    raw = {"models": {"qwen": {"base_url": "http://127.0.0.1:8090"}, "other": {"base_url": "http://x"}}}
+    assert lane.live_model(raw) == {"name": "qwen", "base_url": "http://127.0.0.1:8090"}
 
 
 def test_live_model_needs_a_base_url():
@@ -534,7 +551,7 @@ class FakeLane(lane.Lane):
 
 @pytest.fixture
 def idle(monkeypatch):
-    monkeypatch.setattr(lane, "wait_for_idle", lambda *a, **k: 0)
+    monkeypatch.setattr(lane, "wait_for_idle", lambda *a, **k: "")
     monkeypatch.setattr(lane.time, "sleep", lambda _s: None)
     monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: metrics())
 
@@ -949,7 +966,7 @@ def test_gpu_suite_yields_to_a_live_session_that_arrives_during_the_checks(tmp_p
     run = FakeLane(tmp_path)
     run.instance = lambda *a, **k: pytest.fail("no session after a live one started")
     result = lane.gpu_suite(run)
-    assert result.state == lane.SKIPPED and result.summary.startswith("busy: 1 live session(s) started")
+    assert result.state == lane.SKIPPED and result.summary.startswith("busy: 1 live session(s) running or queued")
     assert "session not run" in result.summary
 
 

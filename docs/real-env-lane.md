@@ -34,7 +34,8 @@ A suite can be skipped for one of these reasons:
 
 - `gpu-held: <why>`: the GPU gate above.
 - `busy: ...`: the live daemon still had sessions running or queued after `--yield-seconds` (default 30 min), so
-  the lane yielded to real work. The lane also looks again before each new workload (the sandbox session after the
+  the lane yielded to real work. No answer from `/metrics` counts as busy too: the live sessions are unknown, so the
+  lane defers rather than assume they are idle. The lane also looks again before each new workload (the sandbox session after the
   Docker tests, the GPU session after its checks, each hosted session) and gives up the rest of the suite when a
   live session has arrived. A test that already failed still reports `failed`.
 - `weekly cap: ...`: a hosted run happened within the last 6.5 days. `hosted-ledger.json` records it.

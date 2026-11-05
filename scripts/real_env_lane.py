@@ -301,16 +301,19 @@ def fetch_metrics(url: str = LIVE_METRICS) -> dict[str, float] | None:
 
 
 def live_busy(metrics: dict[str, float] | None) -> int:
-    """Sessions the live daemon is running or about to run. Unknown (no answer) counts as idle: the daemon is down."""
+    """Sessions the live daemon is running or about to run (0 for no reading: busy_reason handles that)."""
     if not metrics:
         return 0
     return int(sum(metrics.get(f'harness_sessions{{status="{s}"}}', 0) for s in ("running", "queued")))
 
 
-def still_idle(metrics_url: str) -> str:
-    """"" when the live daemon has nothing running or queued; otherwise why the lane must not start more work now."""
-    busy = live_busy(fetch_metrics(metrics_url))
-    return f"busy: {busy} live session(s) started while the lane ran" if busy else ""
+def busy_reason(metrics: dict[str, float] | None) -> str:
+    """"" when the live daemon reports nothing running or queued; otherwise why the lane must not start work now. No
+    reading (a timeout, an error, the daemon down) is not idle: its sessions are unknown, so the lane defers."""
+    if metrics is None:
+        return "busy: the live daemon's /metrics did not answer, so its sessions are unknown"
+    busy = live_busy(metrics)
+    return f"busy: {busy} live session(s) running or queued" if busy else ""
 
 
 def gpu_hold_reason(metrics: dict[str, float] | None) -> str:
@@ -334,12 +337,12 @@ def gpu_hold_reason(metrics: dict[str, float] | None) -> str:
 
 def wait_for_idle(metrics_url: str, max_wait: float, poll: float = 60,
                   fetch: Callable[[str], dict | None] = fetch_metrics, sleep: Callable[[float], None] = time.sleep,
-                  clock: Callable[[], float] = time.monotonic) -> int:
-    """Yield to real sessions: wait while the live daemon is busy, up to `max_wait`. Returns the busy count at the
-    end (0: go ahead)."""
+                  clock: Callable[[], float] = time.monotonic) -> str:
+    """Yield to real sessions: wait while the live daemon is busy (or its state is unknown), up to `max_wait`.
+    Returns the reason it is still busy at the end ("": go ahead)."""
     deadline = clock() + max_wait
     while True:
-        busy = live_busy(fetch(metrics_url))
+        busy = busy_reason(fetch(metrics_url))
         if not busy or clock() >= deadline:
             return busy
         sleep(min(poll, max(0.0, deadline - clock())))
@@ -686,7 +689,7 @@ def sandbox_checks(run: SessionRun, secret: str) -> list[str]:
 def sandbox_suite(lane: Lane) -> SuiteResult:
     busy = wait_for_idle(lane.metrics_url, lane.yield_seconds)
     if busy:
-        return SuiteResult("sandbox", SKIPPED, f"busy: the live daemon kept {busy} session(s) running")
+        return SuiteResult("sandbox", SKIPPED, busy)
     lane.sandbox_image = lane.image("sandbox", "Dockerfile", build=True)
     lane.cli_image = lane.image("cli", "cli.Dockerfile", build=False)
     # Without the commit's CLI image the CLI container tests must skip, not fall back to whatever image is installed.
@@ -694,7 +697,7 @@ def sandbox_suite(lane: Lane) -> SuiteResult:
                    HARNESS_TEST_CLI_IMAGE=lane.cli_image or MISSING_IMAGE,
                    HARNESS_TEST_SANDBOX_PROXY=NO_PROXY)
     tests = lane.pytest("docker", env)
-    late = still_idle(lane.metrics_url)   # image pulls and pytest take a while: yield before the next workload
+    late = busy_reason(fetch_metrics(lane.metrics_url))   # image pulls and pytest take a while: yield before the next workload
     if late:
         state = FAILED if tests.broken else SKIPPED
         return SuiteResult("sandbox", state, f"{late}; {tests.line('docker tests')}, session not run",
@@ -715,7 +718,7 @@ def sandbox_suite(lane: Lane) -> SuiteResult:
 def gpu_suite(lane: Lane) -> SuiteResult:
     busy = wait_for_idle(lane.metrics_url, lane.yield_seconds)
     if busy:
-        return SuiteResult("gpu", SKIPPED, f"busy: the live daemon kept {busy} session(s) running")
+        return SuiteResult("gpu", SKIPPED, busy)
     reason = gpu_hold_reason(fetch_metrics(lane.metrics_url))
     if reason:
         return SuiteResult("gpu", SKIPPED, reason)
@@ -724,8 +727,7 @@ def gpu_suite(lane: Lane) -> SuiteResult:
     tests = lane.pytest("gpu", env, timeout=1800, paths=(GPU_CHECKS,))  # outside default collection: by path
     # Yield again before the session: a live session or a GPU hold that arrived during the checks goes first.
     now = fetch_metrics(lane.metrics_url)
-    late = (f"busy: {live_busy(now)} live session(s) started during the GPU checks" if live_busy(now)
-            else gpu_hold_reason(now))
+    late = busy_reason(now) or gpu_hold_reason(now)
     if late:   # a check that already failed stays a failure; only the session is given up
         state = FAILED if tests.broken else SKIPPED
         return SuiteResult("gpu", state, f"{late}; {tests.line('gpu tests')}, session not run", tests.output[-6000:],
@@ -756,7 +758,8 @@ def live_raw(live_config: Path) -> dict:
 
 
 def live_model(raw: dict, where: Path | str = "") -> dict:
-    name = raw.get("default_model") or ""
+    # As harness/config.py load(): no default_model means the first configured model.
+    name = raw.get("default_model") or next(iter(raw.get("models") or {}), "")
     spec = (raw.get("models") or {}).get(name) or {}
     if not spec.get("base_url"):
         raise RuntimeError(f"the live config {where} names no local model with a base_url")
@@ -811,7 +814,7 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
                            "\n".join(notes), {"notes": notes})
     busy = wait_for_idle(lane.metrics_url, lane.yield_seconds)
     if busy:
-        return SuiteResult("hosted-cli", SKIPPED, f"busy: the live daemon kept {busy} session(s) running")
+        return SuiteResult("hosted-cli", SKIPPED, busy)
     runs: dict[str, SessionRun] = {}
     problems, log = [], []
     spec = {"backends": {name: dict(backends[name]) for name in eligible}}  # only what hosted_plan cleared
@@ -834,12 +837,12 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
         for name in ready:
             if name == pair:
                 continue   # its weekly session is the pair below
-            if still_idle(lane.metrics_url):
+            if busy_reason(fetch_metrics(lane.metrics_url)):
                 notes.append(f"{name}: not run, a live session started")
                 continue
             spend()
             runs[name] = drive_session(inst, prompt, backend=name, timeout=300, client=client)
-        if pair and still_idle(lane.metrics_url):
+        if pair and busy_reason(fetch_metrics(lane.metrics_url)):
             notes.append(f"{pair} pair: not run, a live session started")
             pair = ""
         if pair:
