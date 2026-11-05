@@ -114,7 +114,7 @@ damage:
 The lane decides all of this from one snapshot of the live config, read through the daemon's own loader (so a
 `claude:` entry in `harness.local.yaml` replaces the base entry, as it does for the daemon). It writes what it decided
 to `instance-hosted/live-spec.json`, and the disposable daemon reads only that file, never the live config. Claude's
-readiness is its token file, not `/backends`' `logged_in`, which probes the shared login instead. Only the cleared
+readiness is its token file, not `/backends`' `logged_in`, which probes the shared login instead. Each cleared backend runs on the tested commit's CLI image (CI's `agent-harness-cli:sha-<sha>`, or `--cli-image`), never the deployed one the live config names; without it the suite skips. Only the cleared
 backends are copied into the disposable daemon's config, so nothing else in the live config can
 reach a shared login. A cleared backend still uses its configured state volume, so each run adds one tiny
 conversation to that backend's history.

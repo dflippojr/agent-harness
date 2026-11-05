@@ -848,6 +848,13 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
     runs: dict[str, SessionRun] = {}
     problems, log = [], []
     spec = {"backends": {name: dict(backends[name]) for name in eligible}}  # only what hosted_plan cleared
+    # The tested commit's CLI image, never the one the live config names (the deployed one).
+    cli_image = lane.image("cli", "cli.Dockerfile", build=False)
+    if not cli_image:
+        return SuiteResult("hosted-cli", SKIPPED, f"the commit's CLI image (ghcr.io/dflippojr/agent-harness-cli:sha-"
+                           f"{lane.sha}) is not available and --cli-image was not given", "\n".join(notes))
+    for backend in spec["backends"].values():
+        backend["image"] = cli_image
     if "claude" in spec["backends"]:
         # Token auth only: no API key to fall back on, so the session gets CLAUDE_CODE_OAUTH_TOKEN and no login volume.
         claude = spec["backends"]["claude"]

@@ -698,6 +698,7 @@ def test_hosted_suite_pair_replaces_claudes_session_and_checks_the_login_after(t
     assert run.instance_spec["backends"]["claude"]["max_sessions"] == 2  # room for both at once
     claude = run.instance_spec["backends"]["claude"]
     assert claude["auth"] == "subscription" and "api_key_file" not in claude  # the token, never an API key
+    assert {b["image"] for b in run.instance_spec["backends"].values()} == {f"ghcr.io/x/cli:sha-{SHA}"}
 
     one_after_the_other = iter([timed_run(0, 10), timed_run(0, 10), timed_run(20, 30)])
     monkeypatch.setattr(lane, "drive_session", lambda *a, **k: next(one_after_the_other))
@@ -1155,3 +1156,13 @@ def test_sandbox_suite_yields_after_image_preparation(tmp_path, idle, monkeypatc
     run.pytest = lambda *a, **k: pytest.fail("no Docker tests after a live session arrived")
     result = lane.sandbox_suite(run)
     assert result.state == lane.SKIPPED and result.summary.endswith("nothing run")
+
+
+def test_hosted_suite_needs_the_commits_cli_image(tmp_path, idle, monkeypatch):
+    class NoCli(FakeLane):
+        def image(self, kind, dockerfile, build):
+            return ""
+    monkeypatch.setattr(lane, "drive_session", lambda *a, **k: pytest.fail("no session on another image"))
+    result = lane.hosted_suite(NoCli(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
+                                     live=hosted_live(tmp_path)))
+    assert result.state == lane.SKIPPED and "CLI image" in result.summary and lane.read_ledger(tmp_path) == {}
