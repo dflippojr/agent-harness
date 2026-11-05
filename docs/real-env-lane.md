@@ -124,7 +124,7 @@ Python: the lane runs from its own clone and venv (`run-lane.sh`), never the dep
 pytest: at most 4 workers (`--workers`, default 2). The units run at the lowest CPU and I/O priority.
 
 Only one lane run happens at a time: each holds an exclusive lock on `lane.lock` in the base directory, so a
-manual run and the timer can't overlap (and so can't both pass the weekly hosted ledger).
+manual run and the timer can't overlap (and so can't both pass the weekly hosted ledger). A run that finds the lock taken exits, unless it was started with `--wait-for-lock SECONDS`: the weekly hosted unit waits up to 4 h for that night's run to finish rather than lose the week.
 
 ### Known limits
 

@@ -9,8 +9,10 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash %h/.local/share/agent-harness-real-env/run-lane.sh --suite hosted-cli --pair
+# --wait-for-lock: if that night's sandbox and GPU run is still going, wait for it (up to 4 h) instead of losing
+# the week.
+ExecStart=/bin/bash %h/.local/share/agent-harness-real-env/run-lane.sh --suite hosted-cli --pair --wait-for-lock 14400
 Nice=15
 IOSchedulingClass=idle
 CPUWeight=20
-TimeoutStartSec=1h
+TimeoutStartSec=5h

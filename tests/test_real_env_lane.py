@@ -1061,6 +1061,22 @@ def test_only_one_lane_run_at_a_time(tmp_path):
                     pass
     with lane.one_run_at_a_time(tmp_path):  # released after the run
         pass
+    if importlib.util.find_spec("fcntl") is not None:
+        import threading
+        holder = threading.Event()
+        done = threading.Event()
+
+        def hold():
+            with lane.one_run_at_a_time(tmp_path):
+                holder.set()
+                done.wait(5)
+        thread = threading.Thread(target=hold)
+        thread.start()
+        holder.wait(5)
+        threading.Timer(0.3, done.set).start()
+        with lane.one_run_at_a_time(tmp_path, wait=10, poll=0.05):   # waits for the other run, then goes ahead
+            assert done.is_set()
+        thread.join(5)
 
 
 def test_the_weekly_allowance_is_spent_only_when_a_session_starts(tmp_path, idle, monkeypatch):

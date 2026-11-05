@@ -863,7 +863,7 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
         if not ready:
             return SuiteResult("hosted-cli", SKIPPED, "no cleared hosted backend is available",
                                "\n".join(notes), {"backends": [b.get("name") for b in listed]})
-        def spend() -> None:   # the weekly allowance is used when a session actually starts, not before
+        def reserve_week() -> None:   # recorded just before a session is requested, not when the run begins
             _write_json(lane.base / "hosted-ledger.json", {"last_run_at": clock(), "sha": lane.sha})
         prompt = f"Reply with exactly {OK_WORD} and nothing else. Do not use any tools."
         pair = "claude" if lane.pair and "claude" in ready else ""
@@ -873,13 +873,13 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
             if busy_reason(fetch_metrics(lane.metrics_url)):
                 notes.append(f"{name}: not run, a live session started")
                 continue
-            spend()
+            reserve_week()
             runs[name] = drive_session(inst, prompt, backend=name, timeout=300, client=client)
         if pair and busy_reason(fetch_metrics(lane.metrics_url)):
             notes.append(f"{pair} pair: not run, a live session started")
             pair = ""
         if pair:
-            spend()
+            reserve_week()
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 both = list(pool.map(lambda _: drive_session(inst, prompt, backend=pair, timeout=300), range(2)))
@@ -1138,7 +1138,7 @@ def prune_runs(base: Path, keep: int = KEEP_RUNS) -> list[str]:
 
 
 @contextlib.contextmanager
-def one_run_at_a_time(base: Path) -> Iterator[None]:
+def one_run_at_a_time(base: Path, wait: float = 0, poll: float = 30) -> Iterator[None]:
     """An exclusive lock on <base>/lane.lock for the whole run: a manual run and the timer never overlap, so two of
     them can't both pass the hosted ledger and spend a second session (POSIX; the lane runs on the Linux host)."""
     try:
@@ -1148,10 +1148,15 @@ def one_run_at_a_time(base: Path) -> Iterator[None]:
         return
     base.mkdir(parents=True, exist_ok=True)
     with (base / "lane.lock").open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise SystemExit(f"another real-environment lane run holds {base / 'lane.lock'}") from None
+        deadline = time.monotonic() + wait   # the weekly run waits out a long nightly run instead of being lost
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise SystemExit(f"another real-environment lane run holds {base / 'lane.lock'}") from None
+                time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
         try:
             yield
         finally:
@@ -1159,7 +1164,7 @@ def one_run_at_a_time(base: Path) -> Iterator[None]:
 
 
 def run(args) -> int:
-    with one_run_at_a_time(Path(args.base).expanduser().resolve()):
+    with one_run_at_a_time(Path(args.base).expanduser().resolve(), wait=args.wait_for_lock):
         return _run_locked(args)
 
 
@@ -1224,6 +1229,8 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--sandbox-image", default="", help="use this sandbox image instead of the commit's own")
     r.add_argument("--cli-image", default="", help="use this CLI image instead of the commit's own")
     r.add_argument("--keep", action="store_true", help="keep the extracted tree and pytest temp dirs")
+    r.add_argument("--wait-for-lock", type=float, default=0, metavar="SECONDS",
+                   help="wait this long for another lane run to finish instead of exiting (the weekly unit waits)")
     r.add_argument("--keep-runs", type=int, default=KEEP_RUNS, help="run directories to keep (logs, instance data)")
     s = sub.add_parser("serve", help=argparse.SUPPRESS)
     s.add_argument("--tree", required=True)
