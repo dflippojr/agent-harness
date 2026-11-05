@@ -609,3 +609,20 @@ def test_metrics_report_no_app_sessions_as_zeros(tmp_path):
     text = render(m)
     assert 'harness_app_sessions{status="running"} 0' in text and 'harness_app_sessions{status="queued"} 0' in text
     m.db.close()
+
+
+def test_metrics_session_counts_are_fresh_on_every_scrape(tmp_path, monkeypatch):
+    """The lane reads `/metrics` right before it starts work (#731), so a session that started a moment ago must show
+    even while the costly aggregates are served from their cache."""
+    from harness import metrics
+    from harness.metrics import render
+
+    monkeypatch.setattr(metrics, "CORE_CACHE_SECONDS", 10.0)
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    assert 'harness_sessions{status="running"} 0' in render(m)   # an idle scrape fills the cache
+    m.db.insert_session(_session("own1", "", status="running"))
+    m.db.insert_session(_session("a1", "k-aaaa", status="queued"))
+    text = render(m)
+    assert 'harness_sessions{status="running"} 1' in text and 'harness_app_sessions{status="queued"} 1' in text
+    assert 'harness_sessions_active 1' in text
+    m.db.close()
