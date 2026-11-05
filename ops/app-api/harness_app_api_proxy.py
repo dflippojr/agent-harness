@@ -30,6 +30,7 @@ import re
 import socket
 import sys
 import threading
+from urllib.parse import unquote
 
 API = "/api/v1"
 UPSTREAM_HOST = "127.0.0.1"
@@ -65,7 +66,10 @@ def path_allowed(target: str) -> bool:
         return False
     if any(segment in (".", "..") for segment in path.split("/")):
         return False
-    return not any(path == prefix or path.startswith(prefix + "/") for prefix in REFUSED_PREFIXES)
+    # The daemon routes on the decoded path, so `/api/v1/%70air` is `/api/v1/pair`. Decoding can't add a '/', '.'
+    # segment or '\\' here: those encodings were refused above.
+    decoded = unquote(path)
+    return not any(decoded == prefix or decoded.startswith(prefix + "/") for prefix in REFUSED_PREFIXES)
 
 
 class Peers:
@@ -185,8 +189,11 @@ class Server(http.server.ThreadingHTTPServer):
 
     def server_bind(self):
         if self.device:
+            option = getattr(socket, "SO_BINDTODEVICE", None)
+            if option is None:
+                raise OSError("binding to a network device (SO_BINDTODEVICE) needs Linux")
             # Only connections that arrived on this interface reach the socket (unprivileged since Linux 5.7).
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, self.device.encode())
+            self.socket.setsockopt(socket.SOL_SOCKET, option, self.device.encode())
         super().server_bind()
 
     def verify_request(self, request, client_address):

@@ -1,7 +1,9 @@
 """#909: the App API proxy lets one dedicated Docker network reach the loopback daemon's /api/v1, and nothing else.
 
-Loopback stands in for the Docker bridge: the proxy listens on 127.0.0.1 (the "gateway") bound to the `lo` device,
-admits peers in 127.0.0.0/29, and the client picks its source address (127.0.0.2 is on the network, 127.0.0.9 is not).
+Loopback stands in for the Docker bridge: the proxy listens on 127.0.0.1 (the "gateway"), admits peers in
+127.0.0.0/29, and the client picks its source address (127.0.0.2 is on the network, 127.0.0.9 is not). Linux and
+Windows both route all of 127.0.0.0/8 to loopback. On Linux the listener is also bound to the `lo` device, as it is
+bound to the bridge on the tower; elsewhere SO_BINDTODEVICE doesn't exist and the proxy refuses a device.
 The last tests put the real daemon behind the proxy with `trust_unverified_identity_headers` on, as on the tower."""
 
 from __future__ import annotations
@@ -11,14 +13,11 @@ import http.server
 import importlib.util
 import ipaddress
 import socket
-import sys
 import threading
 import time
 from pathlib import Path
 
 import pytest
-
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="127.0.0.2 and SO_BINDTODEVICE are Linux behaviour")
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("harness_app_api_proxy", ROOT / "ops" / "app-api" / "harness_app_api_proxy.py")
@@ -29,6 +28,7 @@ NETWORK = ipaddress.IPv4Network("127.0.0.0/29")
 GATEWAY = ipaddress.IPv4Address("127.0.0.1")
 MEMBER = "127.0.0.2"
 OUTSIDER = "127.0.0.9"
+DEVICE = "lo" if hasattr(socket, "SO_BINDTODEVICE") else None
 FORGED = {"Tailscale-User-Login": "owner@example.com", "Tailscale-User-Name": "Owner",
           "X-Agent-Harness-Local-Token": "stolen", "X-Agent-Harness-Hub-Approval": "stolen",
           "X-Forwarded-For": "100.64.0.2", "Forwarded": "for=100.64.0.2", "Cookie": "harness_session=x",
@@ -85,7 +85,7 @@ class Upstream:
         self.server.server_close()
 
 
-def start_proxy(upstream_port: int, device: str | None = "lo"):
+def start_proxy(upstream_port: int, device: str | None = DEVICE):
     server = proxy.Server(str(GATEWAY), 0, proxy.Peers(NETWORK, GATEWAY), upstream_port, device)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
@@ -127,6 +127,8 @@ def test_app_api_paths_are_forwarded(target):
     "/api/v1/sessions%2f..%2f..%2fkeys", "/api/v1/a%5cb", "/api/v1/a%00", "/api/v1/a\\b",
     "http://127.0.0.1:8100/api/v1", "127.0.0.1:8100", "*", "/api/v1#x", "/api/v1/backends?x=<script>",
     "/api/v1/pair", "/api/v1/pair/requests", "/api/v1/pair/requests/r1/token",
+    # The daemon decodes the path before routing: encoded letters still spell the pairing routes.
+    "/api/v1/%70air/requests", "/api/v1/p%61ir", "/api/v1/%70%61%69%72", "/api/v1/%70%61ir/requests/r1/token",
 ])
 def test_everything_else_is_refused(target):
     assert not proxy.path_allowed(target)
@@ -157,12 +159,18 @@ def test_the_command_line_must_name_one_dedicated_network():
 
 
 def test_the_listener_is_bound_to_the_bridge_device():
+    """A device that doesn't exist, or a platform without SO_BINDTODEVICE, is a failure to start, never an open
+    listener."""
     with pytest.raises(OSError):
         proxy.Server(str(GATEWAY), 0, proxy.Peers(NETWORK, GATEWAY), 1, "no-such-dev0")
-    server = proxy.Server(str(GATEWAY), 0, proxy.Peers(NETWORK, GATEWAY), 1, "lo")
+    if DEVICE is None:
+        with pytest.raises(OSError, match="needs Linux"):
+            proxy.Server(str(GATEWAY), 0, proxy.Peers(NETWORK, GATEWAY), 1, "lo")
+        return
+    server = proxy.Server(str(GATEWAY), 0, proxy.Peers(NETWORK, GATEWAY), 1, DEVICE)
     try:
         bound = server.socket.getsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, 16).rstrip(b"\0")
-        assert bound == b"lo"
+        assert bound == DEVICE.encode()
     finally:
         server.server_close()
 
@@ -232,7 +240,7 @@ def test_a_streamed_response_passes_through(chain):
 def test_peers_off_the_network_and_the_gateway_are_cut_off_before_a_request_is_read(chain):
     upstream, port = chain
     for source in (OUTSIDER, str(GATEWAY)):
-        with pytest.raises((http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError)):
+        with pytest.raises((http.client.RemoteDisconnected, ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
             request(port, "GET", "/api/v1", source=source)
     assert upstream.requests == []
     assert request(port, "GET", "/api/v1")[0] == 200
