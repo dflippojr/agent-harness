@@ -124,7 +124,7 @@ Python: the lane runs from its own clone and venv (`run-lane.sh`), never the dep
 pytest: at most 4 workers (`--workers`, default 2). The units run at the lowest CPU and I/O priority.
 
 Only one lane run happens at a time: each holds an exclusive lock on `lane.lock` in the base directory, so a
-manual run and the timer can't overlap (and so can't both pass the weekly hosted ledger). A run that finds the lock taken exits, unless it was started with `--wait-for-lock SECONDS`: the weekly hosted unit waits up to 4 h for that night's run to finish rather than lose the week.
+manual run and the timer can't overlap (and so can't both pass the weekly hosted ledger). A run that finds the lock taken exits, unless it was started with `--wait-for-lock SECONDS`: the weekly hosted unit waits up to 4 h for that night's run to finish rather than lose the week. `run-lane.sh` takes its own lock (`wrapper.lock`, waiting `REAL_ENV_LOCK_WAIT` seconds) before it updates the clone or the venv, so it never changes the code under a run in progress.
 
 ### Known limits
 
@@ -135,6 +135,9 @@ Two behaviours of the core harness, not the lane, remain. Both are follow-ups fo
   includes a disposable daemon's. That is no danger to the live instance. A sweep during a lane session (about a
   minute long) fails that suite, and the failure shows in the log as a container that vanished. The fix is an
   instance label that maintenance respects, in `harness/maintenance.py` and the code that starts containers.
+- **Hosted App sessions are invisible to the busy check.** The lane yields to the main store's sessions and to any
+  local-model work (the GPU scheduler's gauges), but `/metrics` has no gauge for an App's hosted CLI session. Those
+  sessions don't share the GPU, so the lane may run beside one.
 - **Preparing a Claude session's domain still mounts the shared login volume, even on token auth.** It does so
   only to create and `chown` its directory, and the session itself gets the token and no login volume
   (`harness/cli_domains.py` `prepare_command`). The lane no longer runs the sign-in probe (`/backends?auth=skip`).

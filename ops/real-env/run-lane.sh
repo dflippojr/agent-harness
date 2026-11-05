@@ -17,6 +17,17 @@ python="${REAL_ENV_PYTHON:-python3}"
 mkdir -p "$base/tmp"
 export TMPDIR="$base/tmp"
 
+# One run at a time, preparation included: updating the clone or the venv under a run in progress would change the code
+# its later subprocesses load. The lock is held on fd 9 through the hand-over and the final exec, so for the whole run.
+# REAL_ENV_LOCK_WAIT (seconds) waits for a run in progress instead of exiting; the weekly hosted unit sets it.
+if [[ -z "${REAL_ENV_HANDED_OVER:-}" ]]; then
+    exec 9>>"$base/wrapper.lock"
+    if ! flock -w "${REAL_ENV_LOCK_WAIT:-0}" 9; then
+        echo "another real-environment lane run holds $base/wrapper.lock" >&2
+        exit 75
+    fi
+fi
+
 if [[ ! -d "$repo/.git" ]]; then
     git clone -q https://github.com/dflippojr/agent-harness.git "$repo"
 fi
