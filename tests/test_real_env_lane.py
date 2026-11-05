@@ -1166,3 +1166,98 @@ def test_hosted_suite_needs_the_commits_cli_image(tmp_path, idle, monkeypatch):
     result = lane.hosted_suite(NoCli(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
                                      live=hosted_live(tmp_path)))
     assert result.state == lane.SKIPPED and "CLI image" in result.summary and lane.read_ledger(tmp_path) == {}
+
+
+# --- hosted App sessions count as live work (#731, review finding b) -----------------------------------------------
+
+APP_STATUSES = ("queued", "running", "waiting_approval", "waiting_target", "waiting_app", "waiting_limit", "done",
+                "failed", "cancelled")
+
+
+def daemon_reading(**app_sessions: float) -> dict[str, float]:
+    """An idle reading as a daemon that reports App sessions gives it, with `app_sessions` (status -> count) set."""
+    m = metrics(harness_up=1)
+    m.update({f'harness_app_sessions{{status="{s}"}}': 0 for s in APP_STATUSES})
+    m.update({f'harness_app_sessions{{status="{s}"}}': n for s, n in app_sessions.items()})
+    return m
+
+
+def test_live_busy_counts_hosted_app_sessions():
+    assert lane.live_busy(daemon_reading()) == 0 and lane.busy_reason(daemon_reading()) == ""
+    assert lane.live_busy(daemon_reading(running=1)) == 1
+    assert lane.live_busy(daemon_reading(queued=2, waiting_app=1)) == 3   # waiting_app: the App holds a tool call
+    assert lane.live_busy(daemon_reading(done=7, failed=2, waiting_approval=1)) == 0
+    both = daemon_reading(running=2)
+    both['harness_sessions{status="running"}'] = 1                       # Web's store and the App stores are disjoint
+    assert lane.live_busy(both) == 3
+    local_app = daemon_reading(running=1)
+    local_app["harness_gpu_slot_busy"] = 1                                # the same App session, on the GPU slot
+    assert lane.live_busy(local_app) == 1
+    assert lane.busy_reason(daemon_reading(running=1)) == "busy: 1 live session(s) running or queued"
+
+
+def test_a_daemon_that_does_not_report_app_sessions_is_not_idle():
+    """A live daemon too old to export the App gauge can't show a hosted App session, so the lane defers."""
+    reason = lane.busy_reason(metrics(harness_up=1))
+    assert reason.startswith("busy:") and "App sessions" in reason
+
+
+@pytest.fixture
+def live_app_session(monkeypatch):
+    """The live daemon runs one hosted App session and nothing else: no Web session, no GPU slot, no queue."""
+    monkeypatch.setattr(lane.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(lane, "model_awake", lambda base_url: "")
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: daemon_reading(running=1))
+
+
+def test_an_active_hosted_app_session_makes_each_suite_yield(tmp_path, live_app_session, monkeypatch):
+    monkeypatch.setattr(lane, "drive_session", lambda *a, **k: pytest.fail("no hosted session beside an App's"))
+    for suite, kwargs in ((lane.sandbox_suite, {}), (lane.gpu_suite, {}),
+                          (lane.hosted_suite, {"client": FakeClient(backends=BACKENDS), "force_hosted": True,
+                                               "live": hosted_live(tmp_path), "hosted_opt_in": ("codex",)})):
+        run = FakeLane(tmp_path, yield_seconds=0, **kwargs)
+        run.instance = lambda *a, **k: pytest.fail("no disposable session beside a live App session")
+        result = suite(run)
+        assert result.state == lane.SKIPPED, (suite.__name__, result.summary)
+        assert result.summary.startswith("busy: 1 live session(s) running or queued"), result.summary
+        assert run.markers == [], suite.__name__   # no pytest run either
+
+
+def test_hosted_suite_yields_to_an_app_session_that_starts_between_sessions(tmp_path, live_app_session, monkeypatch):
+    readings = iter([daemon_reading(), daemon_reading(running=1)] + [daemon_reading()] * 5)
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(readings))
+    sessions = []
+    monkeypatch.setattr(lane, "drive_session", lambda inst, prompt, backend=None, **k: sessions.append(backend)
+                        or timed_run(0, 1))
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
+                                        live=hosted_live(tmp_path), hosted_opt_in=("codex",), yield_seconds=0))
+    assert sessions == ["claude"] and "codex: not run, a live session started" in result.details["notes"]
+    assert result.state == lane.SKIPPED and result.summary == "busy: 1 passed (claude); 1 not run, a live session started"
+
+
+def test_sandbox_and_gpu_suites_yield_to_an_app_session_that_starts_during_their_checks(tmp_path, live_app_session,
+                                                                                        monkeypatch):
+    for suite in (lane.sandbox_suite, lane.gpu_suite):
+        readings = iter([daemon_reading()] * 2 + [daemon_reading(queued=1)] * 5)   # idle until pytest has run
+        monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS, it=readings: next(it))
+        run = FakeLane(tmp_path, yield_seconds=0)
+        run.instance = lambda *a, **k: pytest.fail("no session after a live App session arrived")
+        result = suite(run)
+        assert result.state == lane.SKIPPED and result.summary.startswith("busy: 1 live session(s)"), result.summary
+        assert run.markers, suite.__name__   # its checks ran before the App session arrived
+
+
+def test_no_app_session_lets_each_suite_run(tmp_path, live_app_session, monkeypatch):
+    monkeypatch.setattr(lane, "fetch_metrics",
+                        lambda url=lane.LIVE_METRICS: daemon_reading(done=40, failed=3, cancelled=1))
+    sandbox = lane.sandbox_suite(FakeLane(tmp_path, yield_seconds=0))
+    assert sandbox.state == lane.PASSED, sandbox.summary
+    events = [{"type": "tool_result", "name": "write_file", "ok": True, "output": "wrote lane.txt"}]
+    gpu = lane.gpu_suite(FakeLane(tmp_path, client=FakeClient(events=events), yield_seconds=0))
+    assert gpu.state == lane.PASSED, gpu.summary
+    sessions: list[str | None] = []
+    monkeypatch.setattr(lane, "drive_session", lambda inst, prompt, backend=None, **k: sessions.append(backend)
+                        or timed_run(0, 1))
+    hosted = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
+                                        live=hosted_live(tmp_path), hosted_opt_in=("codex",), yield_seconds=0))
+    assert hosted.state == lane.PASSED and sessions == ["claude", "codex"], hosted.summary
