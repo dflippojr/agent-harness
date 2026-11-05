@@ -132,11 +132,23 @@ def test_workspace_already_over_quota_may_shrink_but_not_grow(monkeypatch, tmp_p
     assert fake.written < 10                                  # still over quota at 20 MB: no growth
 
 
-def test_member_growth_is_capped_by_the_account_quota(monkeypatch, tmp_path):
+def _slow_watch(monkeypatch, fake: FakeDocker, slow: str, seconds: float = 0.2) -> None:
+    """Make each free-space read ("poll") or each workspace walk ("scan") take `seconds`, as a loaded runner can
+    (#906). Both run in threads, so the command keeps writing meanwhile."""
+    if slow == "poll":
+        monkeypatch.setattr(disk_watch.DiskWatch, "_free", lambda self: (time.sleep(seconds), fake.free())[1])
+    elif slow == "scan":
+        walk = disk_watch.dir_size
+        monkeypatch.setattr(disk_watch, "dir_size", lambda root: (time.sleep(seconds), walk(root))[1])
+
+
+@pytest.mark.parametrize("slow", ["", "poll", "scan"])
+def test_member_growth_is_capped_by_the_account_quota(monkeypatch, tmp_path, slow):
     def usage() -> int:
         return 95 * MB + sum(p.stat().st_size for p in tmp_path.iterdir())
     limits = disk_watch.DiskLimits(500 * MB, 100 * MB, disk_watch.AccountLimit(100 * MB, usage))
     box, fake, _ = make(monkeypatch, tmp_path, limits, chunks=200)
+    _slow_watch(monkeypatch, fake, slow)
     with pytest.raises(disk_watch.DiskLimitExceeded, match="past its 100 MB disk quota"):
         asyncio.run(box.exec("make huge"))
     assert fake.written < 15

@@ -608,11 +608,26 @@ def test_a_session_waiting_on_its_cap_does_not_block_a_parked_one_coming_back(tm
     asyncio.run(body())
 
 
-def test_a_hosted_session_waiting_for_a_backend_slot_holds_its_apps_running_cap(tmp_path):
+def _slow_app_setup(m, hosted: float = 1.5, local: float = 0.7) -> None:
+    """Hold the App's sessions in their setup, before admission: its hosted session for `hosted` seconds and its local
+    one for `local`, the time a loaded runner can take there (#906). Both read as `queued` meanwhile."""
+    prepare = m.runner._prepare_repo
+
+    async def wrapped(s):
+        if s.get("app_id"):
+            await asyncio.sleep(hosted if s.get("backend") == "claude" else local)
+        await prepare(s)
+    m.runner._prepare_repo = wrapped
+
+
+@pytest.mark.parametrize("slow", ["", "setup"])
+def test_a_hosted_session_waiting_for_a_backend_slot_holds_its_apps_running_cap(tmp_path, slow):
     """The App's hosted session passed its cap and waits for the busy backend: the App's local session must not
     start meanwhile, or both would run once the backend frees up."""
     async def body():
         m, modes, key = _mixed_manager(tmp_path)
+        if slow:
+            _slow_app_setup(m)
         await m.start()
         busy = m.create("the owner's", backend="claude")["id"]
         modes[busy] = "cancel"
