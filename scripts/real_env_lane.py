@@ -1186,51 +1186,75 @@ def prune_runs(base: Path, keep: int = KEEP_RUNS) -> list[str]:
     return [p.name for p in gone]
 
 
+LOCK_TOKEN_ENV = "REAL_ENV_LOCK_TOKEN"   # set by run-lane.sh's lock holder for the run it hands over to
+
+
 @contextlib.contextmanager
 def one_run_at_a_time(base: Path, wait: float = 0, poll: float = 30) -> Iterator[None]:
     """An exclusive lock on <base>/lane.lock for the whole run: a manual run and the timer never overlap, so two of
-    them can't both pass the hosted ledger and spend a second session (POSIX; the lane runs on the Linux host)."""
-    try:
-        import fcntl
-    except ImportError:   # not POSIX: nothing to lock with, and nothing schedules the lane there
-        yield
-        return
+    them can't both pass the hosted ledger and spend a second session. run-lane.sh's holder takes the same lock before
+    it prepares, and the run it hands over to goes ahead under it."""
     base.mkdir(parents=True, exist_ok=True)
-    if _holds_inherited_lock(base, fcntl):   # run-lane.sh took this lock before preparing and handed it over
-        yield
-        return
-    with (base / "lane.lock").open("a") as handle:
+    handed_over = _handed_over(base)
+    with (base / "lane.lock").open("a+b") as handle:
+        taken = _try_lock(handle)
+        if not taken and handed_over:   # this run's own wrapper holds it, from before it prepared
+            yield
+            return
         deadline = time.monotonic() + wait   # the weekly run waits out a long nightly run instead of being lost
-        while True:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise SystemExit(f"another real-environment lane run holds {base / 'lane.lock'}") from None
-                time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
+        while not taken:
+            if time.monotonic() >= deadline:
+                raise SystemExit(f"another real-environment lane run holds {base / 'lane.lock'}")
+            time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
+            taken = _try_lock(handle)
+        # A token no wrapper's run carries: a run handed over by a wrapper that has since died can't pass as ours.
+        (base / "lane.lock.owner").write_text(uuid.uuid4().hex, encoding="utf-8")
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            _unlock(handle)
 
 
-def _holds_inherited_lock(base: Path, fcntl) -> bool:
-    """True when REAL_ENV_LOCK_FD names a descriptor, inherited from run-lane.sh, on this base's lane.lock that holds
-    its lock. flock locks belong to the open file, so locking that descriptor again succeeds at once, while a fresh
-    open of lane.lock would conflict with it. The variable is dropped so the lane's subprocesses never see it."""
-    raw = os.environ.pop("REAL_ENV_LOCK_FD", "")
-    if not raw.isdigit():
-        return False
-    fd = int(raw)
+def _handed_over(base: Path) -> bool:
+    """True when REAL_ENV_LOCK_TOKEN is the token run-lane.sh's holder wrote to lane.lock.owner when it took the lock:
+    this run is the one it hands over to. Every lock owner writes a fresh token, so a stale one never matches. The
+    variable is dropped so the lane's subprocesses never see it."""
+    token = os.environ.pop(LOCK_TOKEN_ENV, "")
     try:
-        held, here = os.fstat(fd), (base / "lane.lock").stat()
-        if (held.st_dev, held.st_ino) != (here.st_dev, here.st_ino):
+        return bool(token) and (base / "lane.lock.owner").read_text(encoding="utf-8").strip() == token
+    except OSError:
+        return False
+
+
+def _try_lock(handle) -> bool:
+    """One try at the exclusive lock: fcntl.flock on the Linux host; on Windows, where the suite runs run-lane.sh's
+    tests under Git Bash, a lock on the file's first byte, as the wrapper's holder takes it."""
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+        except OSError:
             return False
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return False
     return True
+
+
+def _unlock(handle) -> None:
+    try:
+        import fcntl
+    except ImportError:
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+    else:
+        fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def run(args) -> int:
