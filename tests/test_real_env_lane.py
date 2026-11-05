@@ -1020,6 +1020,7 @@ def test_hosted_suite_yields_between_sessions(tmp_path, idle, monkeypatch):
     result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
                                         live=hosted_live(tmp_path), hosted_opt_in=("codex",)))
     assert sessions == ["claude"] and "codex: not run, a live session started" in result.details["notes"]
+    assert result.state == lane.SKIPPED and result.summary == "busy: 1 passed (claude); 1 not run, a live session started"
     every_one = iter([metrics(**{'harness_sessions{status="running"}': 1})] * 5)
     monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(every_one))
     result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
@@ -1036,3 +1037,23 @@ def test_only_one_lane_run_at_a_time(tmp_path):
                     pass
     with lane.one_run_at_a_time(tmp_path):  # released after the run
         pass
+
+
+def test_the_weekly_allowance_is_spent_only_when_a_session_starts(tmp_path, idle, monkeypatch):
+    monkeypatch.setattr(lane, "fetch_metrics",
+                        lambda url=lane.LIVE_METRICS: metrics(**{'harness_sessions{status="running"}': 1}))
+    monkeypatch.setattr(lane, "drive_session", lambda *a, **k: pytest.fail("no session while live work runs"))
+    result = lane.hosted_suite(FakeLane(tmp_path, client=FakeClient(backends=BACKENDS), force_hosted=True,
+                                        live=hosted_live(tmp_path)))
+    assert result.state == lane.SKIPPED and lane.read_ledger(tmp_path) == {}
+
+
+def test_a_timed_out_check_is_not_hidden_by_a_yield(tmp_path, idle, monkeypatch):
+    timed_out = lane.PytestRun(-1, output="pytest -m gpu timed out after 1800s")
+    assert timed_out.broken and not lane.PytestRun(5).broken and not lane.PytestRun(0, passed=1).broken
+    readings = iter([metrics(), metrics(harness_model_parked=1)])
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(readings))
+    assert lane.gpu_suite(FakeLane(tmp_path, tests=timed_out)).state == lane.FAILED
+    busy = metrics(**{'harness_sessions{status="running"}': 1})
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: busy)
+    assert lane.sandbox_suite(FakeLane(tmp_path, tests=timed_out)).state == lane.FAILED

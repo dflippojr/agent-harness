@@ -361,6 +361,12 @@ class PytestRun:
         """At least one marked test ran and none failed. Nothing selected or everything skipped is not a pass."""
         return self.code == 0 and self.passed > 0 and not self.failed and not self.errors
 
+    @property
+    def broken(self) -> bool:
+        """Something went wrong that a later yield must not hide: a failure, an error, or a run that didn't finish
+        (a timeout, a crash) rather than ending normally or selecting nothing."""
+        return bool(self.failed or self.errors or self.code not in (0, 5))
+
     def line(self, label: str) -> str:
         return f"{label}: {self.passed} passed, {self.failed} failed, {self.errors} errors, {self.skipped} skipped"
 
@@ -690,7 +696,7 @@ def sandbox_suite(lane: Lane) -> SuiteResult:
     tests = lane.pytest("docker", env)
     late = still_idle(lane.metrics_url)   # image pulls and pytest take a while: yield before the next workload
     if late:
-        state = FAILED if tests.failed or tests.errors else SKIPPED
+        state = FAILED if tests.broken else SKIPPED
         return SuiteResult("sandbox", state, f"{late}; {tests.line('docker tests')}, session not run",
                            tests.output[-6000:], {"pytest": asdict(tests) | {"output": ""}})
     with lane.instance("sandbox") as inst:
@@ -721,7 +727,7 @@ def gpu_suite(lane: Lane) -> SuiteResult:
     late = (f"busy: {live_busy(now)} live session(s) started during the GPU checks" if live_busy(now)
             else gpu_hold_reason(now))
     if late:   # a check that already failed stays a failure; only the session is given up
-        state = FAILED if tests.failed or tests.errors else SKIPPED
+        state = FAILED if tests.broken else SKIPPED
         return SuiteResult("gpu", state, f"{late}; {tests.line('gpu tests')}, session not run", tests.output[-6000:],
                            {"model": model["name"], "pytest": asdict(tests) | {"output": ""}})
     with lane.instance("gpu", spec={"model": model}) as inst:
@@ -821,7 +827,8 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
         if not ready:
             return SuiteResult("hosted-cli", SKIPPED, "no cleared hosted backend is available",
                                "\n".join(notes), {"backends": [b.get("name") for b in listed]})
-        _write_json(lane.base / "hosted-ledger.json", {"last_run_at": clock(), "sha": lane.sha})
+        def spend() -> None:   # the weekly allowance is used when a session actually starts, not before
+            _write_json(lane.base / "hosted-ledger.json", {"last_run_at": clock(), "sha": lane.sha})
         prompt = f"Reply with exactly {OK_WORD} and nothing else. Do not use any tools."
         pair = "claude" if lane.pair and "claude" in ready else ""
         for name in ready:
@@ -830,11 +837,13 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
             if still_idle(lane.metrics_url):
                 notes.append(f"{name}: not run, a live session started")
                 continue
+            spend()
             runs[name] = drive_session(inst, prompt, backend=name, timeout=300, client=client)
         if pair and still_idle(lane.metrics_url):
             notes.append(f"{pair} pair: not run, a live session started")
             pair = ""
         if pair:
+            spend()
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(2) as pool:
                 both = list(pool.map(lambda _: drive_session(inst, prompt, backend=pair, timeout=300), range(2)))
@@ -848,9 +857,11 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
         if run.status != "done" or OK_WORD not in run.answer:
             problems.append(f"{name}: {run.status} {run.stop_reason}".strip())
     details = {"sessions": {n: r.status for n, r in runs.items()}, "notes": notes, "pair": pair or "off"}
-    if not runs and not problems:
-        return SuiteResult("hosted-cli", SKIPPED, "busy: live sessions kept every hosted session from starting",
-                           "\n".join(notes), details)
+    yielded = [n for n in notes if "not run, a live session started" in n]
+    if not problems and yielded:   # partial coverage is a skip, never a pass
+        ran = f"{len(runs)} passed ({', '.join(runs)}); " if runs else ""
+        return SuiteResult("hosted-cli", SKIPPED, f"busy: {ran}{len(yielded)} not run, a live session started",
+                           "\n".join(log + notes), details)
     if problems:
         return SuiteResult("hosted-cli", FAILED, "; ".join(problems)[:500], "\n".join(log + notes), details)
     return SuiteResult("hosted-cli", PASSED, f"{len(runs)} print-mode session(s) passed: {', '.join(runs)}",
