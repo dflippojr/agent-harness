@@ -988,7 +988,7 @@ class ScriptedSandboxModel:
         upward = os.path.relpath(secret_path, secret_path.parent.parent / "data" / "workspaces" / "session")
         self.steps: list[tuple[str, dict]] = [
             ("git_clone", {"url": f"local:{FIXTURE_REPO}"}),
-            ("run_shell", {"command": f"cd {FIXTURE_REPO} && python app.py && git log --oneline | wc -l"}),
+            ("run_shell", {"command": f"cd {FIXTURE_REPO} && python -B app.py && git log --oneline | wc -l"}),
             ("verify", {}),
             ("read_file", {"path": upward}),
             ("read_file", {"path": outside}),
@@ -1038,7 +1038,7 @@ def serve(args) -> int:
     spec = json.loads(os.environ.get(SPEC_ENV) or "{}")
     cfg_raw = lane_config(root, args.port, args.mode, args.tag, args.image, spec)
     (config_dir / "harness.yaml").write_text(yaml.safe_dump(cfg_raw, sort_keys=False), encoding="utf-8")
-    checks = [{"name": "fixture", "command": f"cd {FIXTURE_REPO} && python -m unittest -v", "timeout": 120}]
+    checks = [{"name": "fixture", "command": f"cd {FIXTURE_REPO} && python -B -m unittest -v", "timeout": 120}]
     projects = {"projects": {PROJECT: {"description": "real-env lane (#731): synthetic workspace",
                                        **({"verify": checks} if args.mode == "sandbox" else {})}}}
     (config_dir / "projects.yaml").write_text(yaml.safe_dump(projects, sort_keys=False), encoding="utf-8")
