@@ -619,15 +619,29 @@ def test_the_summary_marks_the_seeded_failure_as_expected(tmp_path):
     run = verify.Run(tmp_path / "evidence")
     (run.evidence / "logs").mkdir(parents=True)
     (run.evidence / "logs" / "server.log").write_text(
-        "ERROR harness.runner: session x crashed\nTraceback (most recent call last):\n"
-        f"harness.llm.LLMError: HTTP 400: {verify.SEEDED_FAILURE}\n", encoding="utf-8")
+        f"WARNING harness.runner: session x model call failed: HTTP 400: {verify.SEEDED_FAILURE}\n", encoding="utf-8")
     run.doctor_lines = ["PASS ready: stand-in"]
     for name in verify.STEPS:
         run.step(name, True, "a | b")
     summary = run.summary(["task"]).read_text(encoding="utf-8")
     assert "# Verify: PASS" in summary and "smoke, task" in summary and "| launch | PASS | a / b |" in summary
     assert "- PASS ready: stand-in" in summary and "expected: the seeded Failed run" in summary
+    assert "unexpected" not in summary
     assert "head `" in summary or "head unknown" in summary
+
+
+def test_the_summary_marks_a_crash_as_unexpected(tmp_path):
+    """#915: a model failure logs a warning, so a `crashed` traceback is a daemon bug, even on the seeded Failed run."""
+    run = verify.Run(tmp_path / "evidence")
+    (run.evidence / "logs").mkdir(parents=True)
+    (run.evidence / "logs" / "server.log").write_text(
+        "ERROR harness.runner: session x crashed\nTraceback (most recent call last):\n"
+        f"harness.llm.LLMError: HTTP 400: {verify.SEEDED_FAILURE}\n", encoding="utf-8")
+    run.doctor_lines = ["PASS ready: stand-in"]
+    for name in verify.STEPS:
+        run.step(name, True, "a | b")
+    summary = run.summary([]).read_text(encoding="utf-8")
+    assert "unexpected: 1 `crashed` line(s)" in summary
 
 
 # POSIX containment --------------------------------------------------------------------------------------------------
