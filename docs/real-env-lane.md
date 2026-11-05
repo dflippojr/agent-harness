@@ -34,7 +34,7 @@ A suite can be skipped for one of these reasons:
 
 - `gpu-held: <why>`: the GPU gate above.
 - `busy: ...`: the live daemon still had sessions running or queued after `--yield-seconds` (default 30 min), so
-  the lane yielded to real work. No answer from `/metrics` counts as busy too: the live sessions are unknown, so the
+  the lane yielded to real work. Busy counts the main store's running and queued sessions and, for Apps' local-model sessions, the GPU scheduler's slot and queue gauges. No answer from `/metrics` counts as busy too: the live sessions are unknown, so the
   lane defers rather than assume they are idle. The lane also looks again before each new workload (the sandbox session after the
   Docker tests, the GPU session after its checks, each hosted session) and gives up the rest of the suite when a
   live session has arrived. A test that already failed still reports `failed`.
@@ -102,7 +102,7 @@ the tower's Claude out (see #731). So the hosted suite only runs a backend whose
 damage:
 
 - **Claude** runs only on the long-lived token: `backends.claude.oauth_token_file` set in the live config, with the
-  file present and non-empty (`ops/backends/login.sh claude --token`). Its sessions then get
+  file present and non-empty (`ops/backends/login.sh claude --token`). The disposable daemon's copy is forced to token auth (`auth: subscription`, no API key to fall back on). Its sessions then get
   `CLAUDE_CODE_OAUTH_TOKEN` and no login volume. Nothing refreshes, so two concurrent sessions can't race. That is
   also the configuration in which the `--pair` check means something.
 - **Every other hosted backend** (Codex, Cursor and others) runs only when the owner names it with

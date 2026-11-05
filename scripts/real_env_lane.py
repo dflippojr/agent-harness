@@ -301,10 +301,14 @@ def fetch_metrics(url: str = LIVE_METRICS) -> dict[str, float] | None:
 
 
 def live_busy(metrics: dict[str, float] | None) -> int:
-    """Sessions the live daemon is running or about to run (0 for no reading: busy_reason handles that)."""
+    """Live work running or about to run (0 for no reading: busy_reason handles that). `harness_sessions` counts the
+    main store's sessions only; the GPU scheduler's slot and queue gauges cover every local-model session, Apps'
+    included, so the larger of the two is the count."""
     if not metrics:
         return 0
-    return int(sum(metrics.get(f'harness_sessions{{status="{s}"}}', 0) for s in ("running", "queued")))
+    web = sum(metrics.get(f'harness_sessions{{status="{s}"}}', 0) for s in ("running", "queued"))
+    scheduler = metrics.get("harness_gpu_slot_busy", 0) + metrics.get("harness_queue_depth", 0)
+    return int(max(web, scheduler))
 
 
 def busy_reason(metrics: dict[str, float] | None) -> str:
@@ -841,6 +845,12 @@ def hosted_suite(lane: Lane, clock: Callable[[], float] = time.time) -> SuiteRes
     runs: dict[str, SessionRun] = {}
     problems, log = [], []
     spec = {"backends": {name: dict(backends[name]) for name in eligible}}  # only what hosted_plan cleared
+    if "claude" in spec["backends"]:
+        # Token auth only: no API key to fall back on, so the session gets CLAUDE_CODE_OAUTH_TOKEN and no login volume.
+        claude = spec["backends"]["claude"]
+        claude["auth"] = "subscription"
+        for key in ("api_key_file", "api_key", "api_key_env"):
+            claude.pop(key, None)
     if lane.pair and "claude" in spec["backends"]:  # room for both, or the daemon would queue the second
         spec["backends"]["claude"]["max_sessions"] = max(2, int(spec["backends"]["claude"].get("max_sessions") or 1))
     token = token_digest(backends.get("claude") or {}) if "claude" in eligible else ""

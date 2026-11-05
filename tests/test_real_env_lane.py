@@ -203,6 +203,9 @@ def test_live_busy_counts_running_and_queued_sessions():
     assert lane.live_busy(metrics(**{'harness_sessions{status="running"}': 1,
                                      'harness_sessions{status="queued"}': 2})) == 3
     assert lane.live_busy(None) == 0
+    # App sessions on the local model show only in the scheduler's gauges.
+    assert lane.live_busy(metrics(harness_gpu_slot_busy=1, harness_queue_depth=2)) == 3
+    assert lane.busy_reason(metrics(harness_gpu_slot_busy=1)).startswith("busy: 1")
     assert lane.busy_reason(metrics()) == ""
     assert lane.busy_reason(metrics(**{'harness_sessions{status="queued"}': 2})) == "busy: 2 live session(s) running or queued"
     assert "unknown" in lane.busy_reason(None)  # no reading is not idle: the lane defers
@@ -618,7 +621,8 @@ def hosted_live(tmp_path: Path, token: bool = True) -> Path:
     cfg.mkdir(parents=True, exist_ok=True)
     secret = tmp_path / "claude-oauth-token"
     secret.write_text("not-a-real-token\n")
-    claude = {"enabled": True, **({"oauth_token_file": str(secret)} if token else {})}
+    claude = {"enabled": True, "auth": "api_key", "api_key_file": "/never/used",
+              **({"oauth_token_file": str(secret)} if token else {})}
     (cfg / "harness.yaml").write_text(yaml.safe_dump({
         "default_model": "qwen", "models": {"qwen": {"base_url": "http://127.0.0.1:8090"}},
         "backends": {"claude": claude, "codex": {"enabled": True}, "cursor": {"enabled": True},
@@ -692,6 +696,8 @@ def test_hosted_suite_pair_replaces_claudes_session_and_checks_the_login_after(t
     assert result.state == lane.PASSED and sorted(sessions) == ["claude", "claude", "codex"]
     assert result.details["pair"] == "claude"
     assert run.instance_spec["backends"]["claude"]["max_sessions"] == 2  # room for both at once
+    claude = run.instance_spec["backends"]["claude"]
+    assert claude["auth"] == "subscription" and "api_key_file" not in claude  # the token, never an API key
 
     one_after_the_other = iter([timed_run(0, 10), timed_run(0, 10), timed_run(20, 30)])
     monkeypatch.setattr(lane, "drive_session", lambda *a, **k: next(one_after_the_other))
