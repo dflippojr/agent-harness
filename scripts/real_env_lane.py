@@ -65,6 +65,8 @@ CLIENT = {"X-Agent-Harness-Client": "cli/2"}
 OK_WORD = "real-env-ok"
 FIXTURE_REPO = "lane-fixture"
 PROJECT = "lane"
+NO_PROXY = "http://127.0.0.1:9"   # discard port: nothing answers, so a sandbox network command fails closed
+SPEC_ENV = "REAL_ENV_LANE_SPEC"   # serve's spec (JSON) comes through the environment, never a path on its command line
 GPU_CHECKS = "tests/real_env/gpu_checks.py"
 
 DEFAULT_BASE = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "agent-harness-real-env"
@@ -475,17 +477,16 @@ class Lane:
         root = self.run_dir / f"instance-{mode}"
         root.mkdir(parents=True, exist_ok=True)
         port = free_port()
-        spec_file = root / "live-spec.json"   # what the lane decided from the live config; the daemon reads only this
-        _write_json(spec_file, spec or {})
-        os.chmod(spec_file, 0o600)
+        _write_json(root / "live-spec.json", spec or {})   # a record of what the lane decided from the live config
         args = [self.python, str(Path(__file__).resolve()), "serve", "--tree", str(self.tree), "--dir", str(root),
-                "--mode", mode, "--port", str(port), "--tag", self.tag, "--spec", str(spec_file)]
+                "--mode", mode, "--port", str(port), "--tag", self.tag]
         if mode == "sandbox":
             args += ["--image", self.sandbox_image]
         if self.broken_fixture:
             args.append("--broken-fixture")
         log = (root / "daemon.log").open("w", encoding="utf-8")
-        proc = subprocess.Popen(args, cwd=self.tree, env=self.env(), stdout=log, stderr=subprocess.STDOUT,  # noqa: S603
+        env = {**self.env(), SPEC_ENV: json.dumps(spec or {})}   # the only thing serve learns about the live config
+        proc = subprocess.Popen(args, cwd=self.tree, env=env, stdout=log, stderr=subprocess.STDOUT,  # noqa: S603
                                 start_new_session=True)
         try:
             handle = root / "instance.json"
@@ -837,8 +838,9 @@ def lane_config(root: Path, port: int, mode: str, tag: str, image: str, spec: di
         "canary": {"enabled": False},
         "sandbox": {"image": image or "agent-harness-sandbox:py312", "network": f"real-env-{tag}-sbx",
                     "egress_network": f"real-env-{tag}-egress", "proxy_network": f"real-env-{tag}-proxy",
-                    # No proxy of its own: a network command fails closed instead of using the live one.
-                    "proxy": f"http://real-env-{tag}-no-proxy:8888", "idle_stop_seconds": 0},
+                    # Not the live proxy: a loopback discard port with no proxy container behind it, so a network
+                    # command fails closed instead of going out through the live instance's egress proxy.
+                    "proxy": NO_PROXY, "idle_stop_seconds": 0},
         "budgets": {"approval_timeout_seconds": 3600},
         # A local model nothing calls (the sandbox journey is scripted; hosted sessions run on their CLIs).
         "default_model": "lane-scripted",
@@ -921,7 +923,7 @@ def serve(args) -> int:
         chat = ScriptedSandboxModel(secret)
     config_dir = root / "config"
     config_dir.mkdir(exist_ok=True)
-    spec = json.loads(Path(args.spec).read_text(encoding="utf-8")) if args.spec else {}
+    spec = json.loads(os.environ.get(SPEC_ENV) or "{}")
     cfg_raw = lane_config(root, args.port, args.mode, args.tag, args.image, spec)
     (config_dir / "harness.yaml").write_text(yaml.safe_dump(cfg_raw, sort_keys=False), encoding="utf-8")
     checks = [{"name": "fixture", "command": f"cd {FIXTURE_REPO} && python -m unittest -v", "timeout": 120}]
@@ -945,16 +947,27 @@ def serve(args) -> int:
         await real_start(maintenance=False)
     manager.start = start_without_maintenance  # type: ignore[method-assign]
     _key, token = manager.db.main.create_api_key("real-env-lane", "admin", "owner")
-    server = uvicorn.Server(uvicorn.Config(create_app(manager), host="127.0.0.1", port=args.port, log_level="warning",
-                                           proxy_headers=False, timeout_graceful_shutdown=5))
+    class Server(uvicorn.Server):
+        """Sets `ready` once it listens, so the handle is written only then."""
+        ready: asyncio.Event
+
+        async def startup(self, sockets=None) -> None:
+            await super().startup(sockets=sockets)
+            if self.started:
+                self.ready.set()
+
+    server = Server(uvicorn.Config(create_app(manager), host="127.0.0.1", port=args.port, log_level="warning",
+                                   proxy_headers=False, timeout_graceful_shutdown=5))
 
     async def main() -> None:
+        server.ready = asyncio.Event()
         task = asyncio.create_task(server.serve())
-        while not server.started:
-            if task.done():
-                await task
-                return
-            await asyncio.sleep(0.1)
+        waiter = asyncio.create_task(server.ready.wait())
+        await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if not server.ready.is_set():   # it stopped before it listened (the port was taken, say)
+            waiter.cancel()
+            await task
+            return
         handle = root / "instance.json"
         tmp = root / ".instance.json.tmp"
         tmp.write_text(json.dumps({"server": f"http://127.0.0.1:{args.port}", "token": token, "pid": os.getpid()}),
@@ -971,14 +984,43 @@ def serve(args) -> int:
 
 # --- command line --------------------------------------------------------------------------------------------------
 
+REV_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@~^-]{0,199}")
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,199}(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[0-9a-f]{64})?")
+GITHUB_REPO_RE = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}")
+
+
+def checked(value: str, pattern: re.Pattern, what: str) -> str:
+    """An operator-supplied value that reaches a command: the whole of it must match `pattern` (so it can't start
+    with `-` and be read as an option), or the run stops before anything runs."""
+    if not pattern.fullmatch(value):
+        raise SystemExit(f"{what} {value!r} is not well-formed")
+    return value
+
+
+def checked_python(value: str) -> str:
+    path = Path(value).expanduser()
+    if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+        raise SystemExit(f"--python {value!r} must be the absolute path of an executable Python")
+    return str(path)
+
+
+def checked_repo(value: str) -> Path:
+    path = Path(value).expanduser().resolve()
+    if not (path / ".git").exists():
+        raise SystemExit(f"--repo {value!r} is not a git checkout")
+    return path
+
+
 def resolve_sha(repo: Path, sha: str) -> str:
     if not sha:
         _run(["git", "-C", str(repo), "fetch", "-q", "origin", "main"], timeout=300)
         sha = "origin/main"
-    proc = _run(["git", "-C", str(repo), "rev-parse", "--verify", f"{sha}^{{commit}}"])
+    rev = checked(sha, REV_RE, "--sha")
+    proc = _run(["git", "-C", str(repo), "rev-parse", "--verify", "--end-of-options", f"{rev}^{{commit}}"])
     if proc.returncode != 0:
         raise SystemExit(f"unknown commit {sha!r}: {proc.stderr.strip()}")
-    return proc.stdout.strip()
+    return checked(proc.stdout.strip(), SHA_RE, "the resolved commit")
 
 
 KEEP_RUNS = 14
@@ -994,8 +1036,15 @@ def prune_runs(base: Path, keep: int = KEEP_RUNS) -> list[str]:
 
 
 def run(args) -> int:
-    repo = Path(args.repo).resolve()
+    repo = checked_repo(args.repo)
     sha = resolve_sha(repo, args.sha)
+    args.python = checked_python(args.python)
+    args.github_repo = checked(args.github_repo, GITHUB_REPO_RE, "--github-repo")
+    for flag in ("sandbox_image", "cli_image"):
+        if getattr(args, flag):
+            setattr(args, flag, checked(getattr(args, flag), IMAGE_RE, f"--{flag.replace('_', '-')}"))
+    if args.workers < 1:
+        raise SystemExit("--workers must be at least 1")
     base = Path(args.base).expanduser().resolve()
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + f"-{sha[:8]}"
     run_dir = base / "runs" / run_id
@@ -1055,7 +1104,6 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, required=True)
     s.add_argument("--tag", required=True)
     s.add_argument("--image", default="")
-    s.add_argument("--spec", default="", help="what the lane decided from the live config (JSON)")
     s.add_argument("--broken-fixture", action="store_true")
     return ap
 

@@ -330,7 +330,7 @@ def test_the_disposable_instance_never_shares_the_live_networks_proxy_or_pause_f
     assert sandbox["image"] == "img:sha"
     for key in ("network", "egress_network", "proxy_network"):
         assert sandbox[key].startswith("real-env-run1-")
-    assert "harness-egress-sandbox" not in sandbox["proxy"]
+    assert "harness-egress-sandbox" not in sandbox["proxy"] and sandbox["proxy"] == lane.NO_PROXY
     assert cfg["gpu_guard"]["enabled"] is False and cfg["gpu_guard"]["pause_flag"].startswith(root.as_posix())
     assert cfg["modules"]["gpu_guard"] is False and cfg["canary"] == {"enabled": False}
     assert cfg["default_model"] == "lane-scripted" and "backends" not in cfg
@@ -774,7 +774,7 @@ def test_instance_starts_the_daemon_in_its_own_session_and_removes_only_its_left
         pid = 4242
 
         def __init__(self, args, cwd=None, env=None, stdout=None, stderr=None, start_new_session=False):
-            started.update(args=args, cwd=cwd, session=start_new_session)
+            started.update(args=args, cwd=cwd, session=start_new_session, env=env)
             root = Path(args[args.index("--dir") + 1])
             (root / "instance.json").write_text(json.dumps({"server": "http://127.0.0.1:9", "token": "t"}))
             self.alive = True
@@ -790,12 +790,15 @@ def test_instance_starts_the_daemon_in_its_own_session_and_removes_only_its_left
     monkeypatch.setattr(lane.os, "killpg", lambda pid, sig: killed.append((pid, sig)), raising=False)  # POSIX only
     lane_ = lane.Lane(tmp_path, SHA, tmp_path / "runs" / "R1", tmp_path, broken_fixture=True)
     lane_.sandbox_image = "img"
-    with lane_.instance("sandbox") as inst:
+    with lane_.instance("sandbox", spec={"backends": {"claude": {"enabled": True}}}) as inst:
         assert inst.server == "http://127.0.0.1:9" and inst.token == "t"
         inst.record("abc")
     args = started["args"]
     assert started["session"] and started["cwd"] == lane_.tree and args[2] == "serve"
     assert args[args.index("--image") + 1] == "img" and "--broken-fixture" in args
+    # The spec reaches the daemon through its environment, never as a path on its command line.
+    assert json.loads(started["env"][lane.SPEC_ENV]) == {"backends": {"claude": {"enabled": True}}}
+    assert "--spec" not in args and not any("live-spec" in a for a in args)
     assert killed == [(4242, lane.signal.SIGTERM)]
     assert ["docker", "rm", "-f", "harness-abc"] in removed
     assert ["docker", "network", "rm", "real-env-r1-sbx"] in removed
@@ -859,3 +862,42 @@ def test_old_run_directories_are_pruned(tmp_path):
     assert lane.prune_runs(tmp_path, keep=2) == ["20261101T000000Z-a"]
     assert sorted(p.name for p in (tmp_path / "runs").iterdir()) == ["20261102T000000Z-b", "20261103T000000Z-c"]
     assert (tmp_path / "latest.json").is_file() and lane.prune_runs(tmp_path / "none") == []
+
+
+@pytest.mark.parametrize("value,pattern", [
+    ("origin/main", lane.REV_RE), ("v1.2^", lane.REV_RE), (SHA, lane.SHA_RE),
+    (f"ghcr.io/dflippojr/agent-harness-sandbox:sha-{SHA}", lane.IMAGE_RE), ("agent-harness-cli:1", lane.IMAGE_RE),
+    ("dflippojr/agent-harness", lane.GITHUB_REPO_RE),
+])
+def test_well_formed_operator_arguments_pass(value, pattern):
+    assert lane.checked(value, pattern, "x") == value
+
+
+@pytest.mark.parametrize("value,pattern", [
+    ("--upload-pack=evil", lane.REV_RE), ("main; rm -rf ~", lane.REV_RE), ("", lane.REV_RE),
+    ("abc", lane.SHA_RE), ("-v /:/host", lane.IMAGE_RE), ("img name", lane.IMAGE_RE),
+    ("owner/repo --jq x", lane.GITHUB_REPO_RE),
+])
+def test_an_operator_argument_that_could_be_an_option_stops_the_run(value, pattern):
+    with pytest.raises(SystemExit, match="not well-formed"):
+        lane.checked(value, pattern, "--flag")
+
+
+def test_python_and_repo_must_be_what_they_claim(tmp_path):
+    assert lane.checked_python(sys.executable) == str(Path(sys.executable))
+    for bad in ("python3", str(tmp_path / "missing"), str(tmp_path)):
+        with pytest.raises(SystemExit, match="--python"):
+            lane.checked_python(bad)
+    with pytest.raises(SystemExit, match="not a git checkout"):
+        lane.checked_repo(str(tmp_path))
+
+
+def test_run_refuses_malformed_arguments_before_running_anything(tmp_path):
+    sha = git_repo(tmp_path / "repo")
+    base = ["run", "--repo", str(tmp_path / "repo"), "--base", str(tmp_path / "base"), "--no-report"]
+    for extra, message in ((["--sha=--output=/etc/x"], "--sha"), (["--sha", sha, "--workers", "0"], "--workers"),
+                           (["--sha", sha, "--sandbox-image=-v/:/h"], "--sandbox-image"),
+                           (["--sha", sha, "--github-repo", "a/b c"], "--github-repo")):
+        with pytest.raises(SystemExit, match=message):
+            lane.main(base + extra)
+    assert not (tmp_path / "base" / "runs").exists()
