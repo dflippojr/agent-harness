@@ -1031,6 +1031,13 @@ class Runner:
         except (projects.GitError, RunnerError) as e:
             self._record_failure(sid, "workspace_error", str(e), False, f"workspace_error: {e}")
             await self._end_run(sid)
+        except llm.LLMError as e:
+            # The model call failed after its retries (#915): the model's failure, not a daemon bug, so no traceback.
+            if await self._take_pending_cancel(sid):
+                return
+            log.warning("session %s model call failed: %s", sid, str(e)[:200])
+            self._record_failure(sid, "model_error", str(e), e.retryable, f"model_error: {e}")
+            await self._end_run(sid)
         except Exception as e:  # noqa: BLE001 - a crash must not leave the session looking active
             if await self._take_pending_cancel(sid):
                 return

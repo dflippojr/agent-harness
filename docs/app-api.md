@@ -775,8 +775,10 @@ List (newest first, `?limit=`) or read. Statuses: `queued`, `running`, `waiting_
 Every provider uses the same session totals (`turns`, `prompt_tokens`, `completion_tokens`, `total_cost_usd`). A
 failed session has `failure: {code, provider, message, retryable}`. Provider startup/transport failures use
 `provider_unavailable`, missing provider credentials use `provider_auth_required`, and a rejected provider turn uses
-`provider_error`. Local model, workspace, quota, and internal failures use the same object with their corresponding
-codes. The original `stop_reason` remains for compatibility. `rate_limit`, `billing_warning`, and `error` events use
+`provider_error`. A local model call that still fails after its retries (or fails with an error that isn't
+retryable) uses `model_error`, with `retryable` taken from that last error and the model server's error text in
+`message`. Workspace, quota, and internal failures use the same object with their corresponding codes; `internal_error`
+is a daemon bug. The original `stop_reason` remains for compatibility. `rate_limit`, `billing_warning`, and `error` events use
 provider-neutral envelopes; provider-specific raw limit fields may be included additively in `data`.
 
 ### `GET /api/v1/sessions/{id}/events?after=0&follow=true`
