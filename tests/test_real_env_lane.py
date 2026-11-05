@@ -1224,7 +1224,8 @@ def test_an_active_hosted_app_session_makes_each_suite_yield(tmp_path, live_app_
 
 
 def test_hosted_suite_yields_to_an_app_session_that_starts_between_sessions(tmp_path, live_app_session, monkeypatch):
-    readings = iter([daemon_reading(), daemon_reading(running=1)] + [daemon_reading()] * 5)
+    # The suite's first look, then one before each session: idle for claude's, an App session before codex's.
+    readings = iter([daemon_reading(), daemon_reading(), daemon_reading(running=1)] + [daemon_reading()] * 5)
     monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(readings))
     sessions = []
     monkeypatch.setattr(lane, "drive_session", lambda inst, prompt, backend=None, **k: sessions.append(backend)

@@ -300,22 +300,32 @@ def fetch_metrics(url: str = LIVE_METRICS) -> dict[str, float] | None:
         return None
 
 
+# App sessions that are live work: running, queued, or waiting on the App's own tool call (it resumes as soon as the App
+# answers, harness/apps.py). Web's sessions count running and queued, as before.
+APP_BUSY = ("running", "queued", "waiting_app")
+
+
 def live_busy(metrics: dict[str, float] | None) -> int:
-    """Live work running or about to run (0 for no reading: busy_reason handles that). `harness_sessions` counts the
-    main store's sessions only; the GPU scheduler's slot and queue gauges cover every local-model session, Apps'
-    included, so the larger of the two is the count."""
+    """Live work running or about to run (0 for no reading: busy_reason handles that). `harness_sessions` counts Web's
+    store only and `harness_app_sessions` every App's store, hosted App sessions included; the two are disjoint, so
+    they add. The GPU scheduler's slot and queue gauges cover every local-model session from either, so the larger of
+    the sum and the scheduler is the count."""
     if not metrics:
         return 0
     web = sum(metrics.get(f'harness_sessions{{status="{s}"}}', 0) for s in ("running", "queued"))
+    apps = sum(metrics.get(f'harness_app_sessions{{status="{s}"}}', 0) for s in APP_BUSY)
     scheduler = metrics.get("harness_gpu_slot_busy", 0) + metrics.get("harness_queue_depth", 0)
-    return int(max(web, scheduler))
+    return int(max(web + apps, scheduler))
 
 
 def busy_reason(metrics: dict[str, float] | None) -> str:
     """"" when the live daemon reports nothing running or queued; otherwise why the lane must not start work now. No
-    reading (a timeout, an error, the daemon down) is not idle: its sessions are unknown, so the lane defers."""
+    reading (a timeout, an error, the daemon down) is not idle: its sessions are unknown, so the lane defers. Nor is a
+    daemon's reading (`harness_up`) without `harness_app_sessions`: a build that old can't show a hosted App session."""
     if metrics is None:
         return "busy: the live daemon's /metrics did not answer, so its sessions are unknown"
+    if "harness_up" in metrics and not any(k.startswith("harness_app_sessions{") for k in metrics):
+        return "busy: the live daemon does not report App sessions (harness_app_sessions), so they are unknown"
     busy = live_busy(metrics)
     return f"busy: {busy} live session(s) running or queued" if busy else ""
 

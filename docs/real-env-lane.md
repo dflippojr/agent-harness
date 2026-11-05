@@ -34,8 +34,11 @@ A suite can be skipped for one of these reasons:
 
 - `gpu-held: <why>`: the GPU gate above.
 - `busy: ...`: the live daemon still had sessions running or queued after `--yield-seconds` (default 30 min), so
-  the lane yielded to real work. Busy counts the main store's running and queued sessions and, for Apps' local-model sessions, the GPU scheduler's slot and queue gauges. No answer from `/metrics` counts as busy too: the live sessions are unknown, so the
-  lane defers rather than assume they are idle. The lane also looks again before each new workload (the sandbox session after the
+  the lane yielded to real work. Busy counts Web's running and queued sessions (`harness_sessions`) plus every
+  App's running, queued and `waiting_app` sessions (`harness_app_sessions`, hosted App sessions included), or the GPU
+  scheduler's slot and queue gauges when those are higher. No answer from `/metrics` counts as busy too: the live
+  sessions are unknown, so the lane defers rather than assume they are idle. So does a live daemon too old to export
+  `harness_app_sessions`: deploy a build that has it before enabling the timers. The lane also looks again before each new workload (the sandbox session after the
   Docker tests, the GPU session after its checks, each hosted session) and gives up the rest of the suite when a
   live session has arrived. A test that already failed still reports `failed`.
 - `weekly cap: ...`: a hosted run happened within the last 6.5 days. `hosted-ledger.json` records it.
@@ -135,9 +138,6 @@ Two behaviours of the core harness, not the lane, remain. Both are follow-ups fo
   includes a disposable daemon's. That is no danger to the live instance. A sweep during a lane session (about a
   minute long) fails that suite, and the failure shows in the log as a container that vanished. The fix is an
   instance label that maintenance respects, in `harness/maintenance.py` and the code that starts containers.
-- **Hosted App sessions are invisible to the busy check.** The lane yields to the main store's sessions and to any
-  local-model work (the GPU scheduler's gauges), but `/metrics` has no gauge for an App's hosted CLI session. Those
-  sessions don't share the GPU, so the lane may run beside one.
 - **Preparing a Claude session's domain still mounts the shared login volume, even on token auth.** It does so
   only to create and `chown` its directory, and the session itself gets the token and no login volume
   (`harness/cli_domains.py` `prepare_command`). The lane no longer runs the sign-in probe (`/backends?auth=skip`).

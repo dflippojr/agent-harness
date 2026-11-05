@@ -284,6 +284,15 @@ def _maintenance_metrics(m: Manager, out: _Out) -> None:
         pass
 
 
+def _app_session_metrics(out: _Out, db) -> None:
+    """Every App's sessions by status, in total and from the index (no App store is read, no App is named): the
+    real-environment lane must see a live hosted App session to yield to it (#731). A lone Database has no App stores:
+    `harness_sessions` already counts all its sessions."""
+    counts = db.app_session_counts() if hasattr(type(db), "app_session_counts") else {}
+    out.metric("harness_app_sessions", "gauge", "Sessions of every App, by current status (Web's are harness_sessions).",
+               [({"status": s}, counts.get(s, 0)) for s in STATUSES])
+
+
 def _skill_metrics(out: _Out, db, by_status) -> None:
     active = sum(by_status.get(s, 0) for s in ACTIVE)
     out.metric("harness_sessions_active", "gauge", "Sessions not yet finished.", [({}, active)])
@@ -293,7 +302,7 @@ def _skill_metrics(out: _Out, db, by_status) -> None:
 def render(m: Manager) -> str:
     """Blocking (SQLite on a pooled read connection): the endpoint runs it in a worker thread. Sessions and their
     rows are counted in Web's store, which holds the owner's and members' (#330 decision 4); everything else in the
-    main store. App sessions are counted in each App's metadata instead."""
+    main store. App sessions are counted in each App's metadata, and in total by status (`harness_app_sessions`)."""
     db, out = m.db, _Out()
     web = db.for_app("")
     with db.reading(), web.reading():
@@ -305,5 +314,6 @@ def render(m: Manager) -> str:
         _canary_metrics(m, out)
         _maintenance_metrics(m, out)
         _skill_metrics(out, db, by_status)
+        _app_session_metrics(out, db)
     _telemetry_metrics(out)
     return "\n".join(out.lines) + "\n"
