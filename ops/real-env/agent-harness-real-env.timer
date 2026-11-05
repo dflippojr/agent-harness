@@ -1,0 +1,11 @@
+# Nightly at 04:30 tower-local, after the canary's 03:00 slot has usually finished (docs/canary-evals.md).
+[Unit]
+Description=Nightly real-environment lane (#731)
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+# Weekly, Sunday 05:30 tower-local: after that night's sandbox and GPU run.
+[Unit]
+Description=Weekly hosted CLI real-environment lane (#731)
+
+[Timer]
+OnCalendar=Sun *-*-* 05:30:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

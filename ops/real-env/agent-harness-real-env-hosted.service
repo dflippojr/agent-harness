@@ -1,0 +1,14 @@
+# Real-environment lane (#731), weekly: the hosted CLI suite, one tiny print-mode session per logged-in backend, with
+# Claude's session replaced by the #390 pair (two concurrent sessions on one credential). The lane's ledger refuses a
+# second hosted run within 6.5 days. Install as agent-harness-real-env.service says (docs/real-env-lane.md).
+[Unit]
+Description=Agent harness real-environment lane (hosted CLI) against origin/main
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/.local/share/agent-harness-real-env/run-lane.sh --suite hosted-cli --pair
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+TimeoutStartSec=1h

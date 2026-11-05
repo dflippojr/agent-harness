@@ -912,6 +912,18 @@ def resolve_sha(repo: Path, sha: str) -> str:
     return proc.stdout.strip()
 
 
+KEEP_RUNS = 14
+
+
+def prune_runs(base: Path, keep: int = KEEP_RUNS) -> list[str]:
+    """Drop all but the newest `keep` run directories (their ids sort by time). latest.json is never touched."""
+    runs = sorted(p for p in (base / "runs").glob("*") if p.is_dir())
+    gone = runs[:-keep] if keep > 0 else runs
+    for path in gone:
+        shutil.rmtree(path, ignore_errors=True)
+    return [p.name for p in gone]
+
+
 def run(args) -> int:
     repo = Path(args.repo).resolve()
     sha = resolve_sha(repo, args.sha)
@@ -936,6 +948,7 @@ def run(args) -> int:
             for leftover in run_dir.glob("pytest-*"):
                 if leftover.is_dir():
                     shutil.rmtree(leftover, ignore_errors=True)
+    prune_runs(base, args.keep_runs)
     print(json.dumps(doc, indent=2, sort_keys=True))
     return 0 if doc["ok"] else 1
 
@@ -962,6 +975,7 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--sandbox-image", default="", help="use this sandbox image instead of the commit's own")
     r.add_argument("--cli-image", default="", help="use this CLI image instead of the commit's own")
     r.add_argument("--keep", action="store_true", help="keep the extracted tree and pytest temp dirs")
+    r.add_argument("--keep-runs", type=int, default=KEEP_RUNS, help="run directories to keep (logs, instance data)")
     s = sub.add_parser("serve", help=argparse.SUPPRESS)
     s.add_argument("--tree", required=True)
     s.add_argument("--dir", required=True)

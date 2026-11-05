@@ -18,7 +18,7 @@ Commands are bash on the tower unless they say otherwise. On a Windows boot of t
 | Metrics | `curl -s http://127.0.0.1:8100/metrics` | Live per scrape. Session and event counters are cached for 10 s; the gauges below are read on every scrape. |
 | Canary silence | `curl -s http://127.0.0.1:8100/metrics \| grep -E '^harness_(canary_last_complete_age_seconds\|canary_consecutive_unrun_slots\|gpu_manual_hold_age_seconds)'` | See [The silence gauges](#the-silence-gauges). |
 | Canary results | The query under [Canary tables](#canary-tables) | One `canary_slots` row a night, written when the slot at `canary.at` (03:00 tower-local) finishes: usually within an hour of it (up to 10 min waiting for the GPU, a 45 min run cap, then any confirmation rerun). The newest row older than 26 h means the nightly loop isn't running (canary off, or the daemon down at 03:00). |
-| Real-environment lane (#731) | `gh api repos/dflippojr/agent-harness/commits/<sha>/statuses --jq '.[] \| select(.context \| startswith("real-env/")) \| [.context, .state, .updated_at] \| @tsv'` (from any machine with `gh`), and the lane's `latest.json` on the tower (path below) | Nightly against `origin/main` once #731 lands: a status `real-env/<suite>` on that night's main HEAD, and `latest.json` rewritten after each run. Until #731 merges, neither exists. |
+| Real-environment lane (#731) | `gh api repos/dflippojr/agent-harness/commits/<sha>/statuses --jq '.[] \| select(.context \| startswith("real-env/")) \| [.context, .state, .description, .updated_at] \| @tsv'` (from any machine with `gh`), and `jq '{sha, finished_at, ok, suites: (.suites \| map_values(.state))}' ~/.local/share/agent-harness-real-env/latest.json` on the tower | Nightly against `origin/main` once the owner enables the lane's timers ([real-env-lane.md](real-env-lane.md#scheduling-the-owner-enables-it)): a status `real-env/<suite>` on that night's main HEAD, and `latest.json` rewritten after each run. The `hosted-cli` suite runs weekly. Until the timers are enabled, neither exists. |
 | Daemon log | `tail -n 200 ~/.local/share/agent-harness/logs/daemon.log` | Written continuously while the daemon runs; at 20 MB it moves to `daemon.log.prev`. `daemon-supervisor.log` next to it records each start and exit (`supervisor.log` on Windows). |
 | Daemon errors | The error scan under [Daemon log](#daemon-log) | Live. Any line is worth a look; a traceback repeated at every slot or poll is a defect. |
 
@@ -75,17 +75,21 @@ trigger, a busy queue, a missing fixture, a commit already skipped).
 
 ## Real-environment lane
 
-#731 adds a nightly lane that runs the Docker sandbox, local model and hosted CLI suites against `origin/main`. Its
-results are to be read from two places, and #731 writes them there:
+[real-env-lane.md](real-env-lane.md) runs the Docker sandbox, local model and hosted CLI suites against
+`origin/main` from a scheduled task on the tower. It writes its results to two places:
 
-- **Commit statuses** `real-env/<suite>` on the tested SHA, one per suite. A skipped suite (the GPU held, say)
-  must read as skipped in its description, never as a plain pass.
-- **`latest.json`** on the tower, outside the live data directory: the last run's summary. The Windows plan put it
-  at `D:\Agents\real-env\latest.json`; #731 is still open and names no Ubuntu path yet. The summary has
-  at least the tested `sha`, `finished_at` and each suite's state.
+- **Commit statuses** `real-env/<suite>` (`sandbox`, `gpu`, `hosted-cli`) on the tested SHA, one per suite. A
+  skipped suite (the GPU held, the live daemon busy, the weekly hosted cap) posts `success` with a description that
+  starts `skipped:`, never a plain pass. A failure also opens a `bug` issue, or comments on the open one for that
+  suite.
+- **`latest.json`** at `~/.local/share/agent-harness-real-env/latest.json`, outside the live data directory: the
+  last run's summary. It has the tested `sha`, `run_id`, `started_at` and `finished_at` (UTC ISO 8601), `ok`, and
+  under `suites` each suite's `state` (`passed`, `failed`, `skipped`, `error`), `summary` and `description`. Each
+  run's own copy is `runs/<run_id>/summary.json` next to it.
 
 Freshness: one run a night. A `latest.json` whose `finished_at` is more than 26 h old means the lane's scheduled
-task has stopped.
+task has stopped (`systemctl --user list-timers 'agent-harness-real-env*'`). A suite that reads `skipped` night
+after night (`gpu-held`, `busy`) is a finding too: the real path isn't being judged.
 
 ## Daemon log
 

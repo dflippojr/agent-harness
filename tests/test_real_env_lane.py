@@ -759,3 +759,12 @@ def test_metrics_fetch_reads_prometheus_text_and_survives_no_answer(monkeypatch)
         raise OSError("refused")
     monkeypatch.setattr(urllib.request, "urlopen", down)
     assert lane.fetch_metrics("http://x") is None
+
+
+def test_old_run_directories_are_pruned(tmp_path):
+    for name in ("20261101T000000Z-a", "20261102T000000Z-b", "20261103T000000Z-c"):
+        (tmp_path / "runs" / name).mkdir(parents=True)
+    (tmp_path / "latest.json").write_text("{}")
+    assert lane.prune_runs(tmp_path, keep=2) == ["20261101T000000Z-a"]
+    assert sorted(p.name for p in (tmp_path / "runs").iterdir()) == ["20261102T000000Z-b", "20261103T000000Z-c"]
+    assert (tmp_path / "latest.json").is_file() and lane.prune_runs(tmp_path / "none") == []
