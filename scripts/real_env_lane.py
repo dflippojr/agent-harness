@@ -395,6 +395,7 @@ class Lane:
     broken_fixture: bool = False
     pair: bool = False
     force_hosted: bool = False
+    images: dict = field(default_factory=dict)   # kind -> image given on the command line (a PR SHA has none in CI)
     tree: Path = field(init=False)
     sandbox_image: str = ""
     cli_image: str = ""
@@ -421,6 +422,8 @@ class Lane:
     def image(self, kind: str, dockerfile: str, build: bool) -> str:
         """The commit's image: CI's `ghcr.io/dflippojr/agent-harness-<kind>:sha-<sha>` if it is here or can be pulled,
         else (when `build`) one built from the tree under a lane tag, removed after the run."""
+        if self.images.get(kind):
+            return self.images[kind]
         published = f"ghcr.io/dflippojr/agent-harness-{kind}:sha-{self.sha}"
         if _run(["docker", "image", "inspect", published]).returncode == 0:
             return published
@@ -919,7 +922,7 @@ def run(args) -> int:
     lane = Lane(repo, sha, run_dir, base, python=args.python, metrics_url=args.metrics_url,
                 live_config=Path(args.live_config).expanduser(), yield_seconds=args.yield_seconds,
                 workers=args.workers, broken_fixture=args.broken_fixture, pair=args.pair,
-                force_hosted=args.force_hosted)
+                force_hosted=args.force_hosted, images={"sandbox": args.sandbox_image, "cli": args.cli_image})
     suites = args.suite or list(NIGHTLY_SUITES)
     runners = {"sandbox": lambda: sandbox_suite(lane), "gpu": lambda: gpu_suite(lane),
                "hosted-cli": lambda: hosted_suite(lane)}
@@ -956,6 +959,8 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--broken-fixture", action="store_true", help="self-test: the fixture's verify check fails")
     r.add_argument("--pair", action="store_true", help="hosted-cli: two concurrent Claude sessions (#390 class)")
     r.add_argument("--force-hosted", action="store_true", help="hosted-cli: ignore the weekly cap")
+    r.add_argument("--sandbox-image", default="", help="use this sandbox image instead of the commit's own")
+    r.add_argument("--cli-image", default="", help="use this CLI image instead of the commit's own")
     r.add_argument("--keep", action="store_true", help="keep the extracted tree and pytest temp dirs")
     s = sub.add_parser("serve", help=argparse.SUPPRESS)
     s.add_argument("--tree", required=True)

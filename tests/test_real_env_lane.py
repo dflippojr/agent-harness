@@ -647,6 +647,8 @@ def test_image_prefers_ci_published_then_pull_then_build(tmp_path, monkeypatch):
     answers.update(build=1)
     with pytest.raises(RuntimeError, match="building the sandbox image failed"):
         lane_.image("sandbox", "Dockerfile", build=True)
+    lane_.images = {"sandbox": "given:1"}
+    assert lane_.image("sandbox", "Dockerfile", build=True) == "given:1"
 
 
 def test_pytest_runs_the_marker_from_the_tree_with_capped_workers(tmp_path, monkeypatch):
