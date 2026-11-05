@@ -716,6 +716,9 @@ def sandbox_suite(lane: Lane) -> SuiteResult:
         return SuiteResult("sandbox", SKIPPED, busy)
     lane.sandbox_image = lane.image("sandbox", "Dockerfile", build=True)
     lane.cli_image = lane.image("cli", "cli.Dockerfile", build=False)
+    late = busy_reason(fetch_metrics(lane.metrics_url))   # pulls or a build take a while: look again before pytest
+    if late:
+        return SuiteResult("sandbox", SKIPPED, f"{late}; nothing run")
     # Without the commit's CLI image the CLI container tests must skip, not fall back to whatever image is installed.
     env = lane.env(HARNESS_TEST_SANDBOX_IMAGE=lane.sandbox_image, HARNESS_LIVE_DOCKER="1",
                    HARNESS_TEST_CLI_IMAGE=lane.cli_image or MISSING_IMAGE,

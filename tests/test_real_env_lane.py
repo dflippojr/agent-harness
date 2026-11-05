@@ -1026,7 +1026,8 @@ def test_a_failed_gpu_check_stays_failed_when_the_lane_yields(tmp_path, idle, mo
 
 def test_sandbox_suite_yields_before_its_session(tmp_path, idle, monkeypatch):
     busy = metrics(**{'harness_sessions{status="queued"}': 1})
-    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: busy)
+    readings = iter([metrics(), busy, metrics(), busy])   # idle before pytest, busy after it
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(readings))
     run = FakeLane(tmp_path)
     run.instance = lambda *a, **k: pytest.fail("no session after a live one arrived")
     result = lane.sandbox_suite(run)
@@ -1095,7 +1096,8 @@ def test_a_timed_out_check_is_not_hidden_by_a_yield(tmp_path, idle, monkeypatch)
     monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(readings))
     assert lane.gpu_suite(FakeLane(tmp_path, tests=timed_out)).state == lane.FAILED
     busy = metrics(**{'harness_sessions{status="running"}': 1})
-    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: busy)
+    after_pytest = iter([metrics(), busy])
+    monkeypatch.setattr(lane, "fetch_metrics", lambda url=lane.LIVE_METRICS: next(after_pytest))
     assert lane.sandbox_suite(FakeLane(tmp_path, tests=timed_out)).state == lane.FAILED
 
 
@@ -1144,3 +1146,12 @@ def test_the_evidence_waits_for_run_finished(tmp_path, monkeypatch):
             return super().get(path, params)
     run = lane.drive_session(inst, "go", client=LateFinish(events=[]))
     assert lane.run_window(run) == (1, 2)
+
+
+def test_sandbox_suite_yields_after_image_preparation(tmp_path, idle, monkeypatch):
+    monkeypatch.setattr(lane, "fetch_metrics",
+                        lambda url=lane.LIVE_METRICS: metrics(**{'harness_sessions{status="running"}': 1}))
+    run = FakeLane(tmp_path)
+    run.pytest = lambda *a, **k: pytest.fail("no Docker tests after a live session arrived")
+    result = lane.sandbox_suite(run)
+    assert result.state == lane.SKIPPED and result.summary.endswith("nothing run")
