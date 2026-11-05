@@ -113,6 +113,43 @@ def test_missing_or_broken_scanner_is_reported(tmp_path):
     assert not broken._cache  # errors are not cached
 
 
+@pytest.mark.parametrize("content_format", ["binary", "-diff", "nul"])
+@pytest.mark.parametrize("source", ["worktree", "staged", "untracked", "commit"])
+@pytest.mark.parametrize("strict", [False, True])
+def test_diff_reads_content_as_text(gitleaks_tools, tmp_path, content_format, source, strict):
+    repo = make_repo(tmp_path / "ws")
+    path = repo / "settings.dat"
+    prefix = b"format = \x00\n" if content_format == "nul" else b""
+    if content_format != "nul":
+        (repo / ".gitattributes").write_text(f"settings.dat {content_format}\n", encoding="utf-8")
+    if source != "untracked":
+        path.write_bytes(prefix + b"enabled = True\n")
+    sh(repo, "add", ".")
+    sh(repo, "commit", "--allow-empty", "-qm", "initial content")
+    base = sh(repo, "rev-parse", "HEAD")
+
+    added = f"AWS_ACCESS_KEY_ID = '{KEY}'"
+    path.write_bytes(prefix + b"enabled = True\n" + added.encode("utf-8") + b"\n")
+    if source in {"staged", "commit"}:
+        sh(repo, "add", "settings.dat")
+    if source == "commit":
+        sh(repo, "commit", "-qm", "update content")
+        changed_commit = sh(repo, "rev-parse", "HEAD")
+        path.write_bytes(prefix + b"enabled = True\n")
+        sh(repo, "add", "settings.dat")
+        sh(repo, "commit", "-qm", "restore content")
+
+    diffs = repo_diffs(repo, base, strict=strict)
+    diff = diffs[0]["diff"]
+    if source == "commit":
+        assert added not in diff
+        diff = next(c["diff"] for c in diffs[0]["commits"] if c["sha"] == changed_commit)
+    assert f"+{added}\n" in diff
+    result = scanner(gitleaks_tools).scan(diffs, "text-content")
+    assert result["status"] == "ok"
+    assert [(f["file"], f["rule"]) for f in result["findings"]] == [("settings.dat", "aws-access-token")]
+
+
 def test_install_rejects_a_bad_checksum_and_doctor_warns(tmp_path, monkeypatch, capsys):
     s = scanner(tmp_path / "tools")
     problem = s.install(fetch=lambda url: b"not the release")
