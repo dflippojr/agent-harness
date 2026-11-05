@@ -1187,6 +1187,9 @@ def one_run_at_a_time(base: Path, wait: float = 0, poll: float = 30) -> Iterator
         yield
         return
     base.mkdir(parents=True, exist_ok=True)
+    if _holds_inherited_lock(base, fcntl):   # run-lane.sh took this lock before preparing and handed it over
+        yield
+        return
     with (base / "lane.lock").open("a") as handle:
         deadline = time.monotonic() + wait   # the weekly run waits out a long nightly run instead of being lost
         while True:
@@ -1201,6 +1204,24 @@ def one_run_at_a_time(base: Path, wait: float = 0, poll: float = 30) -> Iterator
             yield
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _holds_inherited_lock(base: Path, fcntl) -> bool:
+    """True when REAL_ENV_LOCK_FD names a descriptor, inherited from run-lane.sh, on this base's lane.lock that holds
+    its lock. flock locks belong to the open file, so locking that descriptor again succeeds at once, while a fresh
+    open of lane.lock would conflict with it. The variable is dropped so the lane's subprocesses never see it."""
+    raw = os.environ.pop("REAL_ENV_LOCK_FD", "")
+    if not raw.isdigit():
+        return False
+    fd = int(raw)
+    try:
+        held, here = os.fstat(fd), (base / "lane.lock").stat()
+        if (held.st_dev, held.st_ino) != (here.st_dev, here.st_ino):
+            return False
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
 
 
 def run(args) -> int:

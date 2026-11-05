@@ -18,14 +18,17 @@ mkdir -p "$base/tmp"
 export TMPDIR="$base/tmp"
 
 # One run at a time, preparation included: updating the clone or the venv under a run in progress would change the code
-# its later subprocesses load. The lock is held on fd 9 through the hand-over and the final exec, so for the whole run.
-# REAL_ENV_LOCK_WAIT (seconds) waits for a run in progress instead of exiting; the weekly hosted unit sets it.
-if [[ -z "${REAL_ENV_HANDED_OVER:-}" ]]; then
-    exec 9>>"$base/wrapper.lock"
+# its later subprocesses load. This is the lane's own lock, <base>/lane.lock, the one a manual `real_env_lane.py run`
+# takes, so a timer run and a manual run never overlap in either order. It's held on fd 9 through the hand-over and the
+# final exec, and REAL_ENV_LOCK_FD tells the lane run it already holds it. REAL_ENV_LOCK_WAIT (seconds) waits for a run
+# in progress instead of exiting; the weekly hosted unit sets it.
+if [[ -z "${REAL_ENV_LOCK_FD:-}" ]]; then
+    exec 9>>"$base/lane.lock"
     if ! flock -w "${REAL_ENV_LOCK_WAIT:-0}" 9; then
-        echo "another real-environment lane run holds $base/wrapper.lock" >&2
+        echo "another real-environment lane run holds $base/lane.lock" >&2
         exit 75
     fi
+    export REAL_ENV_LOCK_FD=9
 fi
 
 if [[ ! -d "$repo/.git" ]]; then
