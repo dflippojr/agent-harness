@@ -59,10 +59,10 @@ def _base_commit(repo: Path, workspace: Path, base_commit: str | None) -> str:
 
 
 def _repo_diff(repo: Path, base: str, untracked: list[str], strict: bool = False) -> str:
-    diff = _git(repo, "diff", base, "--no-color", "--no-ext-diff", "--no-textconv", strict=strict) if base else ""
+    diff = _git(repo, "diff", base, "--text", "--no-color", "--no-ext-diff", "--no-textconv", strict=strict) if base else ""
     for path in untracked:
         # Git for Windows maps /dev/null for --no-index too.
-        result = git(repo, "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv",
+        result = git(repo, "diff", "--no-index", "--text", "--no-color", "--no-ext-diff", "--no-textconv",
                      "--", "/dev/null", path, timeout=60, check=False)
         if strict and result.code not in (0, 1):
             raise GitError("could not read an untracked file for the secret scan")
@@ -75,7 +75,7 @@ def commit_diffs(repo: Path, base: str, strict: bool = False) -> list[dict]:
     out = []
     for sha in _git(repo, "rev-list", "--reverse", f"{base}..HEAD", strict=strict).split() if base else ():
         parent = _git(repo, "rev-parse", "--verify", "-q", f"{sha}^").strip() or EMPTY_TREE
-        out.append({"sha": sha, "diff": _git(repo, "diff", parent, sha, "--no-color", "--no-ext-diff",
+        out.append({"sha": sha, "diff": _git(repo, "diff", parent, sha, "--text", "--no-color", "--no-ext-diff",
                                              "--no-textconv", strict=strict)})
     return out
 
