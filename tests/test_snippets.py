@@ -444,8 +444,9 @@ def _have(image: str) -> bool:
 
 def live(language: str):
     image = LANGUAGES[language].image
-    return pytest.mark.skipif(not _have(image), reason=f"needs Docker and {LANGUAGES[language].tag} pinned image "
+    skip = pytest.mark.skipif(not _have(image), reason=f"needs Docker and {LANGUAGES[language].tag} pinned image "
                                                       "(python -m harness.snippets pull)")
+    return lambda test: pytest.mark.docker(skip(test))
 
 
 def run_live(language: str, source: str, timeout: float = 30, output_bytes: int = snippets.OUTPUT_BYTES,
@@ -479,6 +480,7 @@ HELLO = {
 BROKEN = {"java": "public class Bad { void main( }", "csharp": "Console.WriteLine(\"x\"", "cpp": "int main() { return 0 }"}
 
 
+@pytest.mark.docker
 @pytest.mark.parametrize("language", list(HELLO))
 def test_live_hello_world_and_runtime_failure(language):
     if not _have(LANGUAGES[language].image):
@@ -496,6 +498,7 @@ def test_live_hello_world_and_runtime_failure(language):
     assert "boom" in bad["run"]["stderr"]
 
 
+@pytest.mark.docker
 @pytest.mark.parametrize("language", list(BROKEN))
 def test_live_compile_failure_is_separate_from_runtime(language):
     if not _have(LANGUAGES[language].image):

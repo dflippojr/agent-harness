@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -582,10 +583,13 @@ def test_usage_is_tallied_per_end_user(tmp_path):
 
 # --- Docker: temporary volumes, a network-less container ---------------------------------------------------------
 
-IMAGE = "agent-harness-cli:1"
+# The real-environment lane (#731) points this at the CLI image built from the tested commit.
+IMAGE = os.environ.get("HARNESS_TEST_CLI_IMAGE") or "agent-harness-cli:1"
 docker_ok = bool(shutil.which("docker")) and subprocess.run(
     ["docker", "image", "inspect", IMAGE], capture_output=True).returncode == 0
-needs_docker = pytest.mark.skipif(not docker_ok, reason=f"needs Docker and the {IMAGE} image")
+def needs_docker(test):
+    """Skips without Docker and the image; `-m docker` (the real-environment lane) selects it."""
+    return pytest.mark.docker(pytest.mark.skipif(not docker_ok, reason=f"needs Docker and the {IMAGE} image")(test))
 
 
 def _in_session(backend: str, cfg: BackendConfig, app_id: str, end_user: str, workspace: Path, script: str) -> str:

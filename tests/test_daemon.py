@@ -24,6 +24,10 @@ from harness.scheduler import GpuScheduler
 from waits import scaled
 
 
+# The real-environment lane (#731, scripts/real_env_lane.py) points this at the image built from the tested commit.
+SANDBOX_IMAGE = os.environ.get("HARNESS_TEST_SANDBOX_IMAGE") or "agent-harness-sandbox:py312"
+
+
 def make_cfg(tmp: Path, context_tokens: int = 65536, rules: list | None = None) -> Config:
     # Per-process unique names so concurrent CI jobs on one Docker engine do not
     # share or `docker network rm` each other's test networks.
@@ -31,7 +35,7 @@ def make_cfg(tmp: Path, context_tokens: int = 65536, rules: list | None = None) 
     return Config(
         host="127.0.0.1", port=0, data_dir=tmp / "data", repos_dir=tmp / "repos", default_model="fake",
         models={"fake": ModelConfig(name="fake", base_url="http://unused", context_tokens=context_tokens)},
-        sandbox=SandboxConfig(image="agent-harness-sandbox:py312", network=f"harness-test-sbx-{token}",
+        sandbox=SandboxConfig(image=SANDBOX_IMAGE, network=f"harness-test-sbx-{token}",
                               egress_network=f"harness-test-egress-{token}"),
         projects={"scratch": Project(name="scratch"), "guarded": Project(name="guarded", rules=rules or [])},
     )
@@ -670,9 +674,10 @@ def test_compaction_summarizes_long_context(tmp_path):
 
 # Docker
 docker_ok = shutil.which("docker") and subprocess.run(
-    ["docker", "image", "inspect", "agent-harness-sandbox:py312"], capture_output=True).returncode == 0
+    ["docker", "image", "inspect", SANDBOX_IMAGE], capture_output=True).returncode == 0
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(not docker_ok, reason="needs Docker and the sandbox image")
 def test_sandbox_shell_local_clone_and_network_gate(tmp_path):
     repos = tmp_path / "repos"

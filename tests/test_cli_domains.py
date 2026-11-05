@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -252,10 +253,13 @@ def test_erase_session_and_erase_app_remove_cli_history_and_volumes(tmp_path, mo
 
 
 # Container level: fake CLIs in the real image, with the mounts the sessions use.
-IMAGE = "agent-harness-cli:1"
+# The real-environment lane (#731) points this at the CLI image built from the tested commit.
+IMAGE = os.environ.get("HARNESS_TEST_CLI_IMAGE") or "agent-harness-cli:1"
 docker_ok = bool(shutil.which("docker")) and subprocess.run(
     ["docker", "image", "inspect", IMAGE], capture_output=True).returncode == 0
-needs_docker = pytest.mark.skipif(not docker_ok, reason=f"needs Docker and the {IMAGE} image")
+def needs_docker(test):
+    """Skips without Docker and the image; `-m docker` (the real-environment lane) selects it."""
+    return pytest.mark.docker(pytest.mark.skipif(not docker_ok, reason=f"needs Docker and the {IMAGE} image")(test))
 
 
 def _fake_cli(backend: str, cfg: BackendConfig, app_id: str, workspace: Path, script: str) -> str:

@@ -1268,6 +1268,7 @@ def test_skill_instructions_cannot_override_system():
     assert "hash abcd1234" in text
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(os.environ.get("HARNESS_LIVE_DOCKER") != "1", reason="optional live docker isolation check")
 def test_live_docker_validator_isolation(tmp_path):
     root = tmp_path / "proposal"
