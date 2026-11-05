@@ -116,3 +116,35 @@ def test_cancel_racing_a_model_error_ends_cancelled(tmp_path, caplog):
     assert s["run"].get("failure") is None
     assert r["error_events"] == []
     assert not [rec for rec in _runner_records(caplog) if rec.levelno >= logging.ERROR]
+
+
+def test_full_stack_fake_model_failure_fixture_is_a_model_failure(monkeypatch, caplog, tmp_path):
+    """The shipped `model-failure` fixture, behind the "Failed run" journey: a model failure whose message is the
+    model's error text, and no `crashed` traceback in the daemon log."""
+    from fastapi.testclient import TestClient
+
+    from harness import config as config_mod, fake_instance, fake_model, sandbox
+    from harness.api import create_app
+    from test_fake_model import fail_on_docker, wait_session
+
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(sandbox, "run_cmd", fail_on_docker)
+    config_dir, data_dir = fake_instance.write_instance(tmp_path / "instance", 0)
+    monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
+    m = Manager(config_mod.load(config_dir, data_dir))
+    try:
+        _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+        headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
+        with TestClient(create_app(m)) as client:
+            made = client.post("/api/v1/sessions", headers=headers,
+                               json={"prompt": "Simulate a failure.", "project": fake_instance.PROJECT})
+            assert made.status_code == 201, made.text
+            sid = made.json()["id"]
+            s = wait_session(client, sid, headers, "done", "failed")
+        assert s["status"] == "failed", s
+        assert s["failure"] == {"code": "model_error", "provider": "local", "retryable": False,
+                                "message": "HTTP 400: simulated fatal model error (fake model mode)"}
+        assert s["stop_reason"] == "model_error: HTTP 400: simulated fatal model error (fake model mode)"
+        assert not [rec for rec in _runner_records(caplog) if rec.levelno >= logging.ERROR or "crashed" in rec.getMessage()]
+    finally:
+        m.db.close()
