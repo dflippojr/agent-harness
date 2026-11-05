@@ -1348,3 +1348,134 @@ def test_the_lanes_own_volumes_are_removed_after_its_instance_and_nothing_else(t
                        f"real-env-{lane_.tag}-codex"]
     first_volume = min(i for i, a in enumerate(calls) if a[:3] == ["docker", "volume", "rm"])
     assert all(i < first_volume for i, a in enumerate(calls) if a[:3] == ["docker", "rm", "-f"])  # containers first
+
+
+# --- review of 1db82048, run-lane.sh:34: the timer's wrapper and a manual run share one lock --------------------------
+# The wrapper (ops/real-env/run-lane.sh) is driven for real, with its outside work stubbed: a `git` on PATH and the
+# lane venv's `python` only log their calls (and can hold inside `git fetch`), and the clone's real_env_lane.py runs the
+# real lock code around a stubbed run. The manual entry point is `real_env_lane.py run` in this process.
+WRAPPER = Path(__file__).parents[1] / "ops" / "real-env" / "run-lane.sh"
+needs_flock = pytest.mark.skipif(
+    sys.platform == "win32" or not all(__import__("shutil").which(t) for t in ("bash", "flock")),
+    reason="the scheduled lane runs on the Linux host (bash, flock)")
+
+
+def _wait_for(predicate, timeout: float = 20.0) -> bool:
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
+class WrapperRig:
+    def __init__(self, tmp: Path):
+        self.base = tmp / "lane-base"
+        self.log = tmp / "calls.log"
+        self.hold_fetch = tmp / "release-fetch"     # git fetch waits for this file when holding is on
+        self.release_run = tmp / "release-run"      # the stubbed lane run waits for this file
+        repo = self.base / "repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "ops" / "real-env").mkdir(parents=True)
+        (repo / "ops" / "real-env" / "run-lane.sh").write_bytes(WRAPPER.read_bytes())  # no hand-over
+        (repo / "scripts").mkdir()
+        (repo / "scripts" / "real_env_lane.py").write_text(
+            "import pathlib, sys, time\n"
+            f"sys.path.insert(0, {str(Path(__file__).parents[1])!r})\n"
+            "from scripts import real_env_lane as lane\n"
+            "def stubbed(args):\n"
+            f"    with open({str(self.log)!r}, 'a') as f: f.write('ran\\n')\n"
+            "    end = time.monotonic() + 30\n"
+            f"    while not pathlib.Path({str(self.release_run)!r}).exists() and time.monotonic() < end:\n"
+            "        time.sleep(0.05)\n"
+            "    return 0\n"
+            "lane._run_locked = stubbed\n"
+            "raise SystemExit(lane.main(sys.argv[1:]))\n", encoding="utf-8")
+        shims = tmp / "shims"
+        shims.mkdir()
+        git = shims / "git"
+        git.write_text(
+            "#!/usr/bin/env bash\n"
+            f"echo \"git $*\" >> {str(self.log)!r}\n"
+            "if [[ \"$*\" == *fetch* && -n \"${HOLD_FETCH:-}\" ]]; then\n"
+            "  touch \"$HOLD_FETCH.reached\"\n"
+            "  for _ in $(seq 600); do [[ -e \"$HOLD_FETCH\" ]] && break; sleep 0.05; done\n"
+            "fi\n", encoding="utf-8")
+        venv_python = self.base / "venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text(
+            "#!/usr/bin/env bash\n"
+            f"if [[ \"$1\" == -m ]]; then echo \"pip $*\" >> {str(self.log)!r}; exit 0; fi\n"
+            f"exec {sys.executable!r} \"$@\"\n", encoding="utf-8")
+        for path in (git, venv_python):
+            path.chmod(0o755)
+        import os
+        self.env = {k: v for k, v in os.environ.items()
+                    if k not in ("REAL_ENV_HANDED_OVER", "REAL_ENV_LOCK_FD", "REAL_ENV_LOCK_WAIT", "HOLD_FETCH")}
+        self.env.update(REAL_ENV_BASE=str(self.base), PATH=f"{shims}{os.pathsep}{os.environ['PATH']}")
+
+    def calls(self) -> list[str]:
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def start(self, **env) -> subprocess.Popen:
+        return subprocess.Popen(["bash", str(WRAPPER), "--no-report"], env={**self.env, **env},
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def manual(self, monkeypatch, on_run=lambda: None) -> list[str]:
+        """The manual entry point, `real_env_lane.py run --base <base>`, with its work stubbed."""
+        ran: list[str] = []
+
+        def stubbed(args):
+            ran.append(args.base)
+            on_run()
+            return 0
+        monkeypatch.setattr(lane, "_run_locked", stubbed)
+        lane.main(["run", "--base", str(self.base), "--no-report"])
+        return ran
+
+
+@needs_flock
+def test_a_manual_run_keeps_the_timer_wrapper_from_preparing_until_it_ends(tmp_path, monkeypatch):
+    import threading
+    rig = WrapperRig(tmp_path)
+    holding, release = threading.Event(), threading.Event()
+    thread = threading.Thread(target=rig.manual, args=(monkeypatch, lambda: (holding.set(), release.wait(30))))
+    thread.start()
+    try:
+        assert holding.wait(10)
+        refused = rig.start()   # the nightly unit: no wait
+        out, err = refused.communicate(timeout=30)
+        assert refused.returncode == 75, (refused.returncode, out, err)
+        assert rig.calls() == [], "the wrapper updated the clone or the venv under a manual run"
+        waiting = rig.start(REAL_ENV_LOCK_WAIT="30")   # the weekly unit waits for the run in progress
+        assert not _wait_for(lambda: rig.calls(), timeout=1.0), rig.calls()
+    finally:
+        release.set()
+        thread.join(10)
+    rig.release_run.touch()
+    out, err = waiting.communicate(timeout=60)
+    assert waiting.returncode == 0, (out, err)
+    assert rig.calls()[0].startswith("git ") and any(c.startswith("pip ") for c in rig.calls())
+    assert rig.calls()[-1] == "ran"   # then ran, under the lock it took before preparing
+
+
+@needs_flock
+def test_a_manual_run_refuses_while_the_timer_wrapper_prepares_or_runs(tmp_path, monkeypatch):
+    rig = WrapperRig(tmp_path)
+    wrapper = rig.start(HOLD_FETCH=str(rig.hold_fetch))
+    try:
+        assert _wait_for(lambda: Path(f"{rig.hold_fetch}.reached").exists()), wrapper.stderr
+        with pytest.raises(SystemExit, match="another real-environment lane run"):
+            rig.manual(monkeypatch)                        # during preparation (git fetch)
+        rig.hold_fetch.touch()
+        assert _wait_for(lambda: "ran" in rig.calls()), rig.calls()
+        with pytest.raises(SystemExit, match="another real-environment lane run"):
+            rig.manual(monkeypatch)                        # during the run the wrapper handed its lock to
+    finally:
+        rig.hold_fetch.touch()
+        rig.release_run.touch()
+        out, err = wrapper.communicate(timeout=60)
+    assert wrapper.returncode == 0, (out, err)            # the wrapper's own run never locks itself out
+    assert rig.manual(monkeypatch) == [str(rig.base)]     # and the lock is free once it ends
