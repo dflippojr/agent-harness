@@ -541,6 +541,13 @@ def _parked_on_a_cap(m) -> bool:
     return any(not waiter.done() for waiter in m.runner.scheduler._eligibility_waiters)
 
 
+def _parked_on_the_gpu_cap(m, sid: str) -> bool:
+    """Local session `sid` is in the GPU queue with the slot free, turned away by its running cap. (`_parked_on_a_cap`
+    sees hosted sessions only: a local one waits in the scheduler's queue, not on `wait_eligible`.)"""
+    scheduler = m.runner.scheduler
+    return sid in scheduler._waiters and scheduler.holder is None and not scheduler.eligible(sid)
+
+
 def _slow_first_factory(m, kind: str, seconds: float = 0.8) -> None:
     """Hold the first `kind` session ("owner" or "app") for `seconds` once its `running` has committed, before its
     factory call: the gap a slow writer stretches (#867). Status alone doesn't say the factory has run."""
@@ -633,13 +640,16 @@ def test_a_hosted_session_waiting_for_a_backend_slot_holds_its_apps_running_cap(
         modes[busy] = "cancel"
         await wait_status(m, busy, "running")
         hosted = m.create("hosted", backend="claude", app=key)["id"]
-        await asyncio.sleep(0.5)
+        # `queued` also reads before admission, when the local session may still take the cap first (#906): wait
+        # for the hosted session to pass it.
+        await _until(lambda: hosted in m.runner.admitted)
         local = m.create("local", app=key)["id"]
-        await asyncio.sleep(0.5)
+        await _until(lambda: _parked_on_the_gpu_cap(m, local))
         assert (m.get(hosted)["status"], m.get(local)["status"]) == ("queued", "queued")
         await m.cancel(busy)
         await wait_status(m, hosted, "waiting_approval")
-        assert m.get(local)["status"] == "queued"  # parked, the hosted session still holds the App's slot
+        assert _parked_on_the_gpu_cap(m, local)  # the hosted session still holds the App's slot
+        assert m.get(local)["status"] == "queued"
         m.decide(hosted, None, approve=True)
         await wait_status(m, hosted, "done")
         await wait_status(m, local, "done")
