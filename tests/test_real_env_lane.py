@@ -1411,21 +1411,26 @@ class WrapperRig:
             "if [[ \"$*\" == *fetch* && -n \"${HOLD_FETCH:-}\" ]]; then\n"
             "  touch \"$HOLD_FETCH.reached\"\n"
             "  for _ in $(seq 600); do [[ -e \"$HOLD_FETCH\" ]] && break; sleep 0.05; done\n"
-            "fi\n", encoding="utf-8")
+            "fi\n", encoding="utf-8", newline="\n")   # LF on Windows too: these run under bash
         venv_python = self.base / "venv" / "bin" / "python"
         venv_python.parent.mkdir(parents=True)
         venv_python.write_text(
             "#!/usr/bin/env bash\n"
             f"if [[ \"$1\" == -m ]]; then echo \"pip $*\" >> {_sh(self.log)}; exit 0; fi\n"
-            f"exec {_sh(sys.executable)} \"$@\"\n", encoding="utf-8")
+            f"exec {_sh(sys.executable)} \"$@\"\n", encoding="utf-8", newline="\n")
         for path in (git, venv_python):
             path.chmod(0o755)
         import os
         self.env = {k: v for k, v in os.environ.items()
                     if k not in ("REAL_ENV_HANDED_OVER", "REAL_ENV_LOCK_FD", "REAL_ENV_LOCK_TOKEN", "REAL_ENV_LOCK_WAIT",
                                  "HOLD_FETCH")}
+        # Git for Windows' bash launcher puts its own git ahead of PATH, so every bash also puts the shims first itself.
+        bash_env = tmp / "bash-env.sh"
+        bash_env.write_text(f"shims={_sh(shims)}\n"
+                            "command -v cygpath >/dev/null 2>&1 && shims=\"$(cygpath -u \"$shims\")\"\n"
+                            "PATH=\"$shims:$PATH\"\n", encoding="utf-8", newline="\n")
         self.env.update(REAL_ENV_BASE=self.base.as_posix(), REAL_ENV_PYTHON=Path(sys.executable).as_posix(),
-                        PATH=f"{shims}{os.pathsep}{os.environ['PATH']}")
+                        PATH=f"{shims}{os.pathsep}{os.environ['PATH']}", BASH_ENV=bash_env.as_posix())
         self.shims = shims
 
     def calls(self) -> list[str]:
@@ -1495,7 +1500,8 @@ def test_the_wrapper_takes_its_lock_without_a_flock_command(tmp_path):
     """The lock is the lane's own, taken in Python, so the wrapper needs no util-linux `flock` (Git Bash has none)."""
     rig = WrapperRig(tmp_path)
     flock = rig.shims / "flock"
-    flock.write_text(f"#!/usr/bin/env bash\necho \"flock $*\" >> {_sh(rig.log)}\nexit 1\n", encoding="utf-8")
+    flock.write_text(f"#!/usr/bin/env bash\necho \"flock $*\" >> {_sh(rig.log)}\nexit 1\n", encoding="utf-8",
+                     newline="\n")
     flock.chmod(0o755)
     rig.release_run.touch()
     wrapper = rig.start()
