@@ -1601,6 +1601,7 @@ def test_the_run_removes_its_cache_volumes_and_no_live_one(tmp_path, monkeypatch
         calls.append(args)
         return subprocess.CompletedProcess(args, 0, listing if args[:3] == ["docker", "volume", "ls"] else "", "")
     monkeypatch.setattr(lane, "_run", run)
+    lane_.used_docker = True   # the run's Docker tests ran
     lane_.cleanup()   # the end of every run: the Docker tests' volumes are made outside any instance
     removed = sorted(a[3] for a in calls if a[:3] == ["docker", "volume", "rm"])
     assert removed == [f"{prefix}cache-npm-scratch", f"{prefix}cache-pip-scratch", f"{prefix}cache-uabc-pip-scratch"]

@@ -36,7 +36,7 @@ A suite can be skipped for one of these reasons:
 - `busy: ...`: the live daemon still had sessions running or queued after `--yield-seconds` (default 30 min), so
   the lane yielded to real work. Busy counts Web's running and queued sessions (`harness_sessions`) plus every
   App's running, queued and `waiting_app` sessions (`harness_app_sessions`, hosted App sessions included), or the GPU
-  scheduler's slot and queue gauges when those are higher. No answer from `/metrics` counts as busy too: the live
+  scheduler's slot and queue gauges when those are higher. No answer from `/metrics`, or an answer without the session gauges (an empty body or a proxy's error page), counts as busy too: the live
   sessions are unknown, so the lane defers rather than assume they are idle. So does a live daemon too old to export
   `harness_app_sessions`: deploy a build that has it before enabling the timers. The lane also looks again before each new workload (the sandbox session after the
   Docker tests, the GPU session after its checks, each hosted session) and gives up the rest of the suite when a

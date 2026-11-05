@@ -324,6 +324,8 @@ def busy_reason(metrics: dict[str, float] | None) -> str:
     daemon's reading (`harness_up`) without `harness_app_sessions`: a build that old can't show a hosted App session."""
     if metrics is None:
         return "busy: the live daemon's /metrics did not answer, so its sessions are unknown"
+    if not any(k.startswith("harness_sessions{") for k in metrics):   # an empty or foreign 200 shows no sessions
+        return "busy: the live daemon's /metrics reports no sessions (harness_sessions), so they are unknown"
     if "harness_up" in metrics and not any(k.startswith("harness_app_sessions{") for k in metrics):
         return "busy: the live daemon does not report App sessions (harness_app_sessions), so they are unknown"
     busy = live_busy(metrics)
@@ -452,6 +454,7 @@ class Lane:
     sandbox_image: str = ""
     cli_image: str = ""
     built_images: list[str] = field(default_factory=list)
+    used_docker: bool = False   # a Docker test or a disposable daemon ran, so the run may have Docker volumes to remove
 
     def __post_init__(self) -> None:
         self.tree = self.run_dir / "tree"
@@ -504,6 +507,7 @@ class Lane:
 
     def pytest(self, marker: str, env: dict[str, str], timeout: float = 3600, paths: tuple[str, ...] = ("tests",)
                ) -> PytestRun:
+        self.used_docker = True
         present = [p for p in paths if (self.tree / p).exists()]
         if not present:
             return PytestRun(5, output=f"none of {', '.join(paths)} is in this commit")
@@ -522,6 +526,7 @@ class Lane:
     @contextlib.contextmanager
     def instance(self, mode: str, spec: dict | None = None) -> Iterator["Instance"]:
         """The disposable daemon (`serve`), from the commit's tree, until the block ends."""
+        self.used_docker = True
         root = self.run_dir / f"instance-{mode}"
         root.mkdir(parents=True, exist_ok=True)
         port = free_port()
@@ -583,7 +588,8 @@ class Lane:
                 _run(["docker", "volume", "rm", name], timeout=60)
 
     def cleanup(self) -> None:
-        self._remove_run_volumes()   # the Docker tests make cache volumes outside any instance
+        if self.used_docker:   # the Docker tests make cache volumes outside any instance
+            self._remove_run_volumes()
         for tag in self.built_images:
             _run(["docker", "image", "rm", tag], timeout=120)
 
