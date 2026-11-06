@@ -19,11 +19,11 @@ TOTAL = 1000 * MB   # the simulated data drive
 
 class FakeDocker:
     """A running container whose exec writes `chunks` 1 MB files into the workspace, one every `pace` seconds, until
-    it finishes or the container is restarted. `paced` holds each next chunk until a watchdog check has seen the last
-    one under its limits (`clear`), so what it writes depends on the watchdog's checks, not on the clock (#906)."""
+    it finishes or the container is restarted. Once `paced` (`_pace_by_the_watch`), it holds each next chunk until a
+    watchdog check has seen the last one under its limits (`clear`), so what it writes depends on the watchdog's
+    checks, not on the clock (#906)."""
 
-    def __init__(self, workspace: Path, chunks: int = 0, pace: float = 0.01, fail: tuple = (), stuck: bool = False,
-                 paced: bool = False):
+    def __init__(self, workspace: Path, chunks: int = 0, pace: float = 0.01, fail: tuple = (), stuck: bool = False):
         self.workspace = workspace
         self.chunks = chunks
         self.pace = pace
@@ -35,9 +35,10 @@ class FakeDocker:
         self.written = 0
         self.other = 0          # bytes something else used on the drive
         self.drain = 0
-        self.paced = paced
+        self.paced = False
         self.cleared = 0        # chunks a watchdog check has seen and found under the limits
         self._checked = asyncio.Event()
+        self.unchecked = False  # a paced chunk went unchecked: no watchdog check cleared it or stopped the command
 
     def clear(self, seen: int) -> None:
         """A watchdog check saw `seen` chunks and found the workspace under its limits."""
@@ -45,12 +46,17 @@ class FakeDocker:
         self._checked.set()
 
     async def _wait_cleared(self) -> None:
-        """Until a check has cleared every chunk written so far; a watchdog that stops checking fails the command
-        rather than hanging the test."""
+        """Until a check has cleared every chunk written so far. A watchdog that neither clears the last chunk nor stops
+        the command within 10 s fails the command rather than hanging the test, and marks `unchecked`: the end-of-run
+        scan would still report the quota then, so the test must look at this too."""
         deadline = time.monotonic() + 10
-        while self.cleared < self.written:
-            self._checked.clear()
-            await asyncio.wait_for(self._checked.wait(), max(0, deadline - time.monotonic()))
+        try:
+            while self.cleared < self.written:
+                self._checked.clear()
+                await asyncio.wait_for(self._checked.wait(), max(0, deadline - time.monotonic()))
+        except TimeoutError:
+            self.unchecked = True
+            raise
 
     async def __call__(self, args, timeout=60, input_=None, env=None, drain=0, finished=None):
         if args[1] != "exec":
@@ -166,6 +172,7 @@ def _pace_by_the_watch(monkeypatch, fake: FakeDocker) -> None:
     """Let `fake` write its next chunk only once one of the watchdog's free-space checks has seen the last one and
     found no limit possibly passed. The workspace holds nothing but its chunks, so the free space a check read says
     how many it saw."""
+    fake.paced = True
     may_be_over = disk_watch.DiskWatch._may_be_over
 
     def checked(self, free: int):
@@ -184,12 +191,13 @@ def test_member_growth_is_capped_by_the_account_quota(monkeypatch, tmp_path, slo
     def usage() -> int:
         return 95 * MB + sum(p.stat().st_size for p in tmp_path.iterdir())
     limits = disk_watch.DiskLimits(500 * MB, 100 * MB, disk_watch.AccountLimit(100 * MB, usage))
-    box, fake, _ = make(monkeypatch, tmp_path, limits, chunks=200, paced=True)
+    box, fake, _ = make(monkeypatch, tmp_path, limits, chunks=200)
     _slow_watch(monkeypatch, fake, slow)
     _pace_by_the_watch(monkeypatch, fake)
     with pytest.raises(disk_watch.DiskLimitExceeded, match="past its 100 MB disk quota"):
         asyncio.run(box.exec("make huge"))
     assert fake.written == 6
+    assert not fake.unchecked  # the watchdog stopped the command while it ran, not the end-of-run scan after it
 
 
 def test_concurrent_member_commands_share_the_account_quota(monkeypatch, tmp_path):
