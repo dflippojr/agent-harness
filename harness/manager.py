@@ -2297,15 +2297,19 @@ class Manager:
             return False
         if holds_place(s) or sid in self.runner.admitted:
             return True  # it counts against the cap already, and coming back adds nothing (even over a lowered cap)
+        if account is None and not capped_app(self.db, s.get("app_id") or ""):
+            return True
+        # About to run first, then what holds a place: separate reads, and the writer commits between them. A session
+        # only moves from about to run to holding its place, so this order counts one whose `running` lands in
+        # between twice (until the recheck that commit brings) rather than not at all (#906).
+        about = self._about_to_run(sid, admission_key(self.db, s))
         if account is not None:
             occupied = self.db.count_stored_sessions(user_id, *ACTIVE, holding=True)
             cap = int(account["max_running"])
-        elif capped_app(self.db, s.get("app_id") or ""):
+        else:
             occupied = self.db.count_stored_app_sessions(s["app_id"], *ACTIVE, holding=True)
             cap = self.app_limits(s["app_id"])["max_running"]
-        else:
-            return True
-        return occupied + self._about_to_run(sid, admission_key(self.db, s)) < cap
+        return occupied + about < cap
 
     def _about_to_run(self, sid: str, key: str) -> int:
         """Sessions of admission `key` (other than `sid`) let past its running cap that do not hold their place yet:
