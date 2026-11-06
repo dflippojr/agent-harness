@@ -4,7 +4,8 @@
 the connection's peer (harness/tailscale_peer.py). A request without that identity reached the loopback listener some
 other way, so it must say who it is: it carries the local owner token (a random secret the daemon keeps in data_dir),
 or a credential its route checks itself (an API token, an inference key, a runner token, or a stream ticket). Only the
-health and metrics endpoints answer without one.
+health and metrics endpoints and the App discovery document (`GET /api/v1`, which holds no credentials and lists no
+projects; docs/app-api.md) answer without one.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ from .atomic_io import owner_only_acl, write_atomic
 TOKEN_FILE = "local-owner.token"
 HEADER = "X-Agent-Harness-Local-Token"
 OPEN_PATHS = frozenset({"/health", "/metrics"})
+# An App reads the discovery document before it sends its token (#909). Exact path and read methods only.
+DISCOVERY_PATH = "/api/v1"
 API_PREFIXES = ("/api/v1", "/api/admin/v1")  # routes that check a bearer token's kind and scopes themselves
 # Zero-touch pairing (#519): an App has no token yet; the owner's approval and its PKCE verifier decide.
 PAIRING_REQUESTS = re.compile(r"/api/v1/pair/requests(/[^/]+/(claim|token))?")
@@ -77,6 +80,8 @@ def _bearer(request) -> str:
 def admitted(request, m, path: str) -> bool:
     """Whether a request that carries no Tailscale identity may continue to its route."""
     if path in OPEN_PATHS:
+        return True
+    if path == DISCOVERY_PATH and request.method in ("GET", "HEAD"):
         return True
     api = path.startswith(API_PREFIXES)
     if (request.method == "OPTIONS" and api and request.headers.get("origin")
