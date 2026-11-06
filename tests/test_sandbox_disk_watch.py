@@ -19,7 +19,9 @@ TOTAL = 1000 * MB   # the simulated data drive
 
 class FakeDocker:
     """A running container whose exec writes `chunks` 1 MB files into the workspace, one every `pace` seconds, until
-    it finishes or the container is restarted."""
+    it finishes or the container is restarted. Once `paced` (`_pace_by_the_watch`), it holds each next chunk until a
+    watchdog check has seen the last one under its limits (`clear`), so what it writes depends on the watchdog's
+    checks, not on the clock (#906)."""
 
     def __init__(self, workspace: Path, chunks: int = 0, pace: float = 0.01, fail: tuple = (), stuck: bool = False):
         self.workspace = workspace
@@ -33,6 +35,28 @@ class FakeDocker:
         self.written = 0
         self.other = 0          # bytes something else used on the drive
         self.drain = 0
+        self.paced = False
+        self.cleared = 0        # chunks a watchdog check has seen and found under the limits
+        self._checked = asyncio.Event()
+        self.unchecked = False  # a paced chunk went unchecked: no watchdog check cleared it or stopped the command
+
+    def clear(self, seen: int) -> None:
+        """A watchdog check saw `seen` chunks and found the workspace under its limits."""
+        self.cleared = max(self.cleared, seen)
+        self._checked.set()
+
+    async def _wait_cleared(self) -> None:
+        """Until a check has cleared every chunk written so far. A watchdog that neither clears the last chunk nor stops
+        the command within 10 s fails the command rather than hanging the test, and marks `unchecked`: the end-of-run
+        scan would still report the quota then, so the test must look at this too."""
+        deadline = time.monotonic() + 10
+        try:
+            while self.cleared < self.written:
+                self._checked.clear()
+                await asyncio.wait_for(self._checked.wait(), max(0, deadline - time.monotonic()))
+        except TimeoutError:
+            self.unchecked = True
+            raise
 
     async def __call__(self, args, timeout=60, input_=None, env=None, drain=0, finished=None):
         if args[1] != "exec":
@@ -62,6 +86,8 @@ class FakeDocker:
                 (self.workspace / f"blob{self.written}").write_bytes(b"\0" * MB)
                 self.written += 1
                 await asyncio.sleep(self.pace)
+                if self.paced:
+                    await self._wait_cleared()
             return 0, "built", ""
         return 0, "", ""
 
@@ -132,14 +158,46 @@ def test_workspace_already_over_quota_may_shrink_but_not_grow(monkeypatch, tmp_p
     assert fake.written < 10                                  # still over quota at 20 MB: no growth
 
 
-def test_member_growth_is_capped_by_the_account_quota(monkeypatch, tmp_path):
+def _slow_watch(monkeypatch, fake: FakeDocker, slow: str, seconds: float = 0.2) -> None:
+    """Make each free-space read ("poll") or each workspace walk ("scan") take `seconds`, as a loaded runner can
+    (#906). Both run in threads, so the command keeps writing meanwhile."""
+    if slow == "poll":
+        monkeypatch.setattr(disk_watch.DiskWatch, "_free", lambda self: (time.sleep(seconds), fake.free())[1])
+    elif slow == "scan":
+        walk = disk_watch.dir_size
+        monkeypatch.setattr(disk_watch, "dir_size", lambda root: (time.sleep(seconds), walk(root))[1])
+
+
+def _pace_by_the_watch(monkeypatch, fake: FakeDocker) -> None:
+    """Let `fake` write its next chunk only once one of the watchdog's free-space checks has seen the last one and
+    found no limit possibly passed. The workspace holds nothing but its chunks, so the free space a check read says
+    how many it saw."""
+    fake.paced = True
+    may_be_over = disk_watch.DiskWatch._may_be_over
+
+    def checked(self, free: int):
+        over = may_be_over(self, free)
+        if not over:
+            fake.clear((TOTAL - free) // MB)
+        return over
+    monkeypatch.setattr(disk_watch.DiskWatch, "_may_be_over", checked)
+
+
+@pytest.mark.parametrize("slow", ["", "poll", "scan"])
+def test_member_growth_is_capped_by_the_account_quota(monkeypatch, tmp_path, slow):
+    """The account starts at 95 of its 100 MB, so the 6th 1 MB chunk passes the quota. The watchdog's guarantee: its
+    first free-space check after that write bounds the account over the quota and scans, and the scan stops the
+    command. Paced by those checks, the command writes exactly 6 chunks however slow the polls or scans are (#906)."""
     def usage() -> int:
         return 95 * MB + sum(p.stat().st_size for p in tmp_path.iterdir())
     limits = disk_watch.DiskLimits(500 * MB, 100 * MB, disk_watch.AccountLimit(100 * MB, usage))
     box, fake, _ = make(monkeypatch, tmp_path, limits, chunks=200)
+    _slow_watch(monkeypatch, fake, slow)
+    _pace_by_the_watch(monkeypatch, fake)
     with pytest.raises(disk_watch.DiskLimitExceeded, match="past its 100 MB disk quota"):
         asyncio.run(box.exec("make huge"))
-    assert fake.written < 15
+    assert fake.written == 6
+    assert not fake.unchecked  # the watchdog stopped the command while it ran, not the end-of-run scan after it
 
 
 def test_concurrent_member_commands_share_the_account_quota(monkeypatch, tmp_path):
