@@ -18,7 +18,7 @@ from harness.config import BackendConfig
 from harness.llm import Completion
 from harness.manager import HarnessError, Manager
 from harness.principal import OWNER_USER_ID
-from harness.runner import HOLDS_PLACE, RUN_SECONDS, WAITING, CliLimitError, RunClock, unresolved_calls
+from harness.runner import HOLDS_PLACE, RUN_SECONDS, WAITING, CliLimitError, RunClock, admission_key, unresolved_calls
 from harness.storage import workspaces_dir
 
 from test_app_stores import _key
@@ -541,7 +541,7 @@ def _parked_on_a_cap(m) -> bool:
     return any(not waiter.done() for waiter in m.runner.scheduler._eligibility_waiters)
 
 
-def _parked_on_the_gpu_cap(m, sid: str) -> bool:
+def _queued_behind_its_running_cap(m, sid: str) -> bool:
     """Local session `sid` is in the GPU queue with the slot free, turned away by its running cap. (`_parked_on_a_cap`
     sees hosted sessions only: a local one waits in the scheduler's queue, not on `wait_eligible`.)"""
     scheduler = m.runner.scheduler
@@ -615,6 +615,81 @@ def test_a_session_waiting_on_its_cap_does_not_block_a_parked_one_coming_back(tm
     asyncio.run(body())
 
 
+def test_a_hosted_sessions_running_committing_mid_check_still_counts_against_its_cap(tmp_path):
+    """The cap check reads what holds a place and what is about to run separately, while the writer commits on its
+    own thread. An admitted hosted session's `running` committing between those reads must not drop out of both:
+    it counts once it holds its place, and until then as about to run (#906)."""
+    m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
+    app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
+    assert m.db.set_app_limits(app_id, {"max_running": 1})
+    _insert(m, "hosted0906", "queued", app_id=app_id)
+    _insert(m, "local00906", "queued", app_id=app_id)
+    m.runner.admitted["hosted0906"] = admission_key(m.db, m.db.get_session("hosted0906"))
+    assert not m.runner.scheduler.eligible("local00906")  # the admitted session counts while nothing lands
+    count, get, landed = m.db.count_stored_app_sessions, m.db.get_session, []
+
+    def commit_running() -> None:  # the hosted session's `running` lands on the writer, right after this read
+        if not landed:
+            landed.append(True)
+            m.db.update_session("hosted0906", status="running", run={HOLDS_PLACE: True})
+
+    def counted(*args, **kwargs):
+        n = count(*args, **kwargs)
+        commit_running()
+        return n
+
+    def got(sid):
+        row = get(sid)
+        if sid == "hosted0906":
+            commit_running()
+        return row
+    m.db.count_stored_app_sessions, m.db.get_session = counted, got
+    assert not m.runner.scheduler.eligible("local00906")
+    assert landed
+
+
+def _record_statuses(m) -> list[tuple[str, str]]:
+    """Every status the runner writes, in the order they commit, as (session, status): what happened between two
+    looks (#906)."""
+    emit, written = m.runner.bus.emit, []
+
+    def wrapped(sid, kind, data, *args, **kwargs):
+        if kind == "status":
+            written.append((sid, data["status"]))
+        return emit(sid, kind, data, *args, **kwargs)
+    m.runner.bus.emit = wrapped
+    return written
+
+
+def _slow_hand_off(m, point: str, seconds: float = 0.8) -> None:
+    """Stretch one step of the App's hosted session's hand-off from admission to its approval, the candidate gaps in
+    its hold on the App's running cap (#906): its `running` write ("running", held before the write and again after
+    it commits, before `_unreserve`), the time after `_unreserve` dropped its reservation before its CLI starts
+    ("unreserve"), or its `waiting_approval` write ("approval", held before and after)."""
+    def hosted(sid):
+        s = m.db.get_session(sid)
+        return bool(s["app_id"]) and s["backend"] == "claude"
+    if point == "unreserve":
+        start = m.runner._start_cli
+
+        async def started(sid, *args):
+            if hosted(sid):
+                await asyncio.sleep(seconds)
+            return await start(sid, *args)
+        m.runner._start_cli = started
+        return
+    aset_status, status_of = m.runner.aset_status, {"running": "running", "approval": "waiting_approval"}[point]
+
+    async def wrapped(sid, status, **fields):
+        slow = status == status_of and hosted(sid)
+        if slow:
+            await asyncio.sleep(seconds)
+        await aset_status(sid, status, **fields)
+        if slow:
+            await asyncio.sleep(seconds)
+    m.runner.aset_status = wrapped
+
+
 def _slow_app_setup(m, hosted: float = 1.5, local: float = 0.7) -> None:
     """Hold the App's sessions in their setup, before admission: its hosted session for `hosted` seconds and its local
     one for `local`, the time a loaded runner can take there (#906). Both read as `queued` meanwhile."""
@@ -627,14 +702,18 @@ def _slow_app_setup(m, hosted: float = 1.5, local: float = 0.7) -> None:
     m.runner._prepare_repo = wrapped
 
 
-@pytest.mark.parametrize("slow", ["", "setup"])
+@pytest.mark.parametrize("slow", ["", "setup", "running", "unreserve", "approval"])
 def test_a_hosted_session_waiting_for_a_backend_slot_holds_its_apps_running_cap(tmp_path, slow):
     """The App's hosted session passed its cap and waits for the busy backend: the App's local session must not
-    start meanwhile, or both would run once the backend frees up."""
+    start meanwhile, or both would run once the backend frees up. Each `slow` stretches one step a loaded runner can
+    take long over (#906): setup before admission, or a candidate gap in the hand-off after it."""
     async def body():
         m, modes, key = _mixed_manager(tmp_path)
-        if slow:
+        if slow == "setup":
             _slow_app_setup(m)
+        elif slow:
+            _slow_hand_off(m, slow)
+        written = _record_statuses(m)
         await m.start()
         busy = m.create("the owner's", backend="claude")["id"]
         modes[busy] = "cancel"
@@ -644,15 +723,16 @@ def test_a_hosted_session_waiting_for_a_backend_slot_holds_its_apps_running_cap(
         # for the hosted session to pass it.
         await _until(lambda: hosted in m.runner.admitted)
         local = m.create("local", app=key)["id"]
-        await _until(lambda: _parked_on_the_gpu_cap(m, local))
+        await _until(lambda: _queued_behind_its_running_cap(m, local))
         assert (m.get(hosted)["status"], m.get(local)["status"]) == ("queued", "queued")
         await m.cancel(busy)
         await wait_status(m, hosted, "waiting_approval")
-        assert _parked_on_the_gpu_cap(m, local)  # the hosted session still holds the App's slot
-        assert m.get(local)["status"] == "queued"
+        assert _queued_behind_its_running_cap(m, local)  # the hosted session still holds the App's slot
         m.decide(hosted, None, approve=True)
         await wait_status(m, hosted, "done")
         await wait_status(m, local, "done")
+        # Between those looks too: the local session started only once the hosted one had ended.
+        assert written.index((local, "running")) > written.index((hosted, "done"))
         await m.stop()
     asyncio.run(body())
 
