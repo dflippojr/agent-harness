@@ -570,7 +570,9 @@ so it must say who it is:
 - An App, device or owner API token (`Authorization: Bearer …`) on `/api/v1` and `/api/admin/v1`, an owner admin
   token anywhere, an inference key on `/v1`, a runner token on the runner routes, or a stream ticket still works; its
   route checks it as before.
-- `/health` and `/metrics` answer without a credential, so Prometheus and the restart scripts keep working.
+- `/health` and `/metrics` answer without a credential, so Prometheus and the restart scripts keep working. So does
+  the App discovery document, `GET /api/v1` (exact path), which holds no credentials and lists no projects: an App
+  reads it before it sends its token (#909).
 
 Approving, denying or releasing the standalone Hub's claim needs one more secret: the daemon writes a new
 `data_dir/hub-approval.secret` at every start, and `harness hub approve`, `deny` and `release` read it, so they work only
