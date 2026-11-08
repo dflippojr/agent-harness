@@ -363,3 +363,28 @@ def test_a_cd_inside_a_command_substitution_ends_with_it(measure):
     existing = {"calc.py", "tests/calc.py"}
     assert measure("echo $(cd tests; cat calc.py) > calc.py", existing) == {"read_before_edit": False,
                                                                             "edited_unread": ["calc.py"]}
+
+
+# leading assignments and command wrappers don't hide the command
+@DRIVERS
+@pytest.mark.parametrize("command", ["LC_ALL=C sed -i s/a/b/ calc.py", "A=1 B='x y' cp new.py calc.py",
+                                     "env LC_ALL=C sed -i s/a/b/ calc.py", "env -u HOME tee calc.py < notes.md",
+                                     "command cp new.py calc.py", "nice -n 5 sed -i s/a/b/ calc.py",
+                                     "timeout -k 5 30s cp new.py calc.py", "time truncate -s 0 calc.py",
+                                     "nohup sudo -E mv new.py calc.py", "exec cp new.py calc.py"])
+def test_an_assignment_or_wrapper_before_a_write_still_writes(measure, command):
+    assert measure(command)["edited_unread"] == ["calc.py"]
+
+
+@DRIVERS
+@pytest.mark.parametrize("command", ["LC_ALL=C cat calc.py; printf x > calc.py",
+                                     "env LANG=C grep -n add calc.py && printf x > calc.py",
+                                     "timeout 5 head -n 3 calc.py; printf x > calc.py",
+                                     "X=1 cd tests && cd .. && cat calc.py; printf x > calc.py"])
+def test_an_assignment_or_wrapper_before_a_viewer_still_reads(measure, command):
+    assert measure(command) == {"read_before_edit": True, "edited_unread": []}
+
+
+@DRIVERS
+def test_a_bare_assignment_is_no_command(measure):
+    assert measure("X=calc.py; printf x > notes.md") == {"read_before_edit": False, "edited_unread": ["notes.md"]}
