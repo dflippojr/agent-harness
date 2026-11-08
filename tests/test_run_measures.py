@@ -492,3 +492,36 @@ def test_a_numeric_perl_option_does_not_hide_an_in_place_edit(measure, command):
 @DRIVERS
 def test_a_numeric_perl_option_without_i_is_no_edit(measure):
     assert measure("perl -0777pe 's/a/b/' calc.py") == {"read_before_edit": None, "edited_unread": []}
+
+
+# a background job runs alongside the commands after it, until `wait`
+@DRIVERS
+@pytest.mark.parametrize("command", ["(sleep 0.2; cat calc.py) & printf x > calc.py; wait",
+                                     "cat calc.py & printf x > calc.py", "grep add calc.py & sed -i s/a/b/ calc.py",
+                                     "cat notes.md & cat calc.py & printf x > calc.py"])
+def test_a_background_read_does_not_precede_a_later_write(measure, command):
+    assert measure(command) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+@pytest.mark.parametrize("command", ["cat calc.py & wait; printf x > calc.py", "cat calc.py; wait; printf x > calc.py",
+                                     "cat notes.md & cat calc.py; printf x > calc.py",
+                                     "cat calc.py && printf x > calc.py &"])
+def test_a_read_finished_before_the_write_still_counts(measure, command):
+    assert measure(command) == {"read_before_edit": True, "edited_unread": []}
+
+
+# paths that leave the workspace and come back still name its files
+@DRIVERS
+@pytest.mark.parametrize("command", ["cd ..; printf x > workspace/calc.py", "printf x > ../workspace/calc.py",
+                                     "cd /; cd workspace/tests; printf x > ../calc.py",
+                                     "cd /tmp && cp new.py ../workspace/calc.py"])
+def test_a_path_that_leaves_and_reenters_the_workspace_is_its_file(measure, command):
+    assert measure(command) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+def test_a_path_outside_the_workspace_is_none_of_its_files(measure):
+    assert measure("cd ..; printf x > calc.py") == {"read_before_edit": None, "edited_unread": []}
+    assert measure("cat ../workspace/calc.py; cd /workspace && printf x > calc.py") == {"read_before_edit": True,
+                                                                                         "edited_unread": []}
