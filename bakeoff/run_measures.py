@@ -67,11 +67,37 @@ _SHOW = {ord(v): k for k, v in ((chr(k), v) for k, v in _HIDE.items())}
 
 def _protect(command: str) -> str:
     """The command with unquoted `# ...` comments removed (keeping the newline that ends them), line continuations
-    joined, and quoted or backslash-escaped operator characters hidden from the lexer."""
+    joined, and quoted or backslash-escaped operator characters hidden from the lexer. Command substitutions come
+    out as unquoted `$( ... )`: backticks are rewritten, and one inside double quotes is lifted out of them
+    (`"a $(cmd) b"` -> `"a "$(cmd)" b"`), so its commands are parsed like any others."""
     out: list[str] = []
+    subs: list[list] = []  # open substitutions: [opened inside double quotes, "paren" | "tick", paren depth]
     quote, i = "", 0
     while i < len(command):
         c = command[i]
+        if quote == '"' and (c == "`" or command.startswith("$(", i)):  # lift it out of the quotes
+            out.append('"$(')
+            subs.append([True, "tick" if c == "`" else "paren", 1])
+            quote = ""
+            i += 1 if c == "`" else 2
+            continue
+        if not quote and subs and (c == "`" and subs[-1][1] == "tick" or c in "()" and subs[-1][1] == "paren"):
+            subs[-1][2] += 1 if c == "(" else -1
+            if c == "(" or subs[-1][2] > 0:
+                out.append(c)
+                i += 1
+                continue
+            out.append(")")  # the substitution ends: back inside the quotes it was lifted from
+            if subs.pop()[0]:
+                out.append('"')
+                quote = '"'
+            i += 1
+            continue
+        if not quote and c == "`":  # a backtick substitution opens: written as $(
+            out.append("$(")
+            subs.append([False, "tick", 1])
+            i += 1
+            continue
         if quote:
             if c == quote:
                 quote = ""
@@ -160,7 +186,8 @@ def shell_access(command: str) -> list[tuple[str, str]]:
     workspace with no previous directory."""
     events: list[tuple[str, str]] = []
     cwd, oldpwd = "", None
-    outer: list[tuple[str, str | None, int]] = []  # each open subshell: its directories then, where its events begin
+    outer: list[tuple] = []  # open `( ... )`: ("shell", cwd, oldpwd, where its events begin) or a `$( ... )`:
+    #                          ("sub", cwd, oldpwd, the enclosing command's words and redirects so far)
     segment: list[str] = []
     redirects: list[tuple[str, str]] = []
     words = [w for word in _words(command) for w in (_operators(word) if _is_operator(word) else [word])] + [";"]
@@ -180,6 +207,13 @@ def shell_access(command: str) -> list[tuple[str, str]]:
             redirects += _redirect(word, words[i + 1])
             i += 2
             continue
+        if word == "(" and segment and segment[-1].endswith("$"):  # `$(`: a command substitution
+            # It expands before the enclosing command runs or opens its redirects: keep that command open.
+            segment[-1] = segment[-1][:-1]
+            outer.append(("sub", cwd, oldpwd, [w for w in segment if w], redirects))
+            segment, redirects = [], []
+            i += 1
+            continue
         if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
             events += [(kind, normalize(t, cwd)) for kind, t in redirects]
             if segment and segment[0].rsplit("/", 1)[-1] == "cd":
@@ -188,9 +222,11 @@ def shell_access(command: str) -> list[tuple[str, str]]:
                 _segment_access(segment, cwd, events)
             segment, redirects = [], []
             if word == "(":
-                outer.append((cwd, oldpwd, len(events)))
+                outer.append(("shell", cwd, oldpwd, len(events)))
+            elif word == ")" and outer and outer[-1][0] == "sub":
+                _, cwd, oldpwd, segment, redirects = outer.pop()  # the enclosing command goes on after the expansion
             elif word == ")" and outer:
-                cwd, oldpwd, start = outer.pop()
+                _, cwd, oldpwd, start = outer.pop()
                 body = events[start:]
                 del events[start:]
                 while i + 1 < len(words):  # the subshell's own redirects come first (`2>log`, `2>&1`, `1> f`)
