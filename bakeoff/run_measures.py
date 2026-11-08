@@ -166,6 +166,12 @@ def shell_access(command: str) -> list[tuple[str, str]]:
     i = 0
     while i < len(words):
         word = words[i]
+        if word.isdigit() and i + 1 < len(words) and words[i + 1] in REDIRECTS + DUPS:
+            i += 1  # `2>log`, `2>&1`: the number is redirect syntax, not an operand
+            continue
+        if word in DUPS:  # a descriptor copy opens no file; its target (`1`, `-`) is no operand
+            i += 1 if _is_operator(words[i + 1]) else 2
+            continue
         if word in REDIRECTS:
             if _is_operator(words[i + 1]):  # a dangling redirect (a syntax error): skip it, keep what follows
                 i += 1
