@@ -27,16 +27,16 @@ HOME = "/~"  # stands for "somewhere outside the workspace" after `cd` alone
 
 def normalize(path: str, cwd: str = "") -> str:
     """A path as the workspace-relative POSIX path bakeoff.tasks.hash_tree keys by. A relative path resolves against
-    `cwd` (workspace-relative, "" for the workspace root); a path outside the workspace stays absolute."""
+    `cwd` (workspace-relative, "" for the workspace root, or absolute outside it), on the container's real
+    filesystem: `../workspace/calc.py` is calc.py again. A path outside the workspace stays absolute."""
     p = (path or "").strip().replace("\\", "/")
-    if p.startswith("/"):
-        if not (p + "/").startswith(WORKSPACE):
-            return posixpath.normpath(p)
-        p = p[len(WORKSPACE):]
-    else:
-        p = posixpath.join(cwd, p)
-    p = posixpath.normpath(p) if p else "."
-    return "" if p == "." else p
+    if not p.startswith("/"):
+        base = cwd if cwd.startswith("/") else posixpath.join(WORKSPACE, cwd)
+        p = posixpath.join(base, p)
+    p = "/" + posixpath.normpath(p).lstrip("/")
+    if p == WORKSPACE.rstrip("/"):
+        return ""
+    return p[len(WORKSPACE):] if p.startswith(WORKSPACE) else p
 
 
 # `<<WORD` or `<<-WORD` (WORD whole, quoted or not); not a here-string `<<<`
@@ -240,6 +240,8 @@ def shell_access(command: str) -> list[tuple[str, str]]:
         if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
             events += [(kind, normalize(t, cwd)) for kind, t in redirects]
             command_words, chdirs = _command(segment)
+            if command_words and command_words[0] == "wait":
+                _end_background(events, pipes[-1])  # the jobs started so far have finished
             piped = word in PIPES or after_pipe  # a pipeline's commands run in subshells: a cd there moves nothing
             after_pipe = word in PIPES
             if command_words and command_words[0].rsplit("/", 1)[-1] == "cd":
@@ -258,8 +260,16 @@ def shell_access(command: str) -> list[tuple[str, str]]:
                 level["bounds"].append(len(events))
             elif word != "(":  # `(` opens a stage; anything else ends the pipeline at this level
                 _end_pipeline(events, level)
+            if word == "&":  # the list element just read runs in the background, alongside what follows
+                if level["bg_from"] is None:
+                    level["bg_from"] = level["element"]
+                level["bg"].append((level["element"], len(events)))
             if word not in ("(", ")"):
                 level["command"] = len(events)  # the next command (a stage, or not) begins here
+            if word in (";", "\n", "&", ";;"):
+                level["element"] = len(events)
+            if word == ")":
+                _end_background(events, level)
             if word == ")" and len(pipes) > 1:
                 pipes.pop()
             if word == "(":
@@ -288,6 +298,7 @@ def shell_access(command: str) -> list[tuple[str, str]]:
         i += 1
     for level in reversed(pipes):  # a `(` never closed (a syntax error) leaves its pipeline open
         _end_pipeline(events, level)
+        _end_background(events, level)
     return events
 
 
@@ -295,7 +306,33 @@ PIPES = ("|", "|&")
 
 
 def _pipeline(command_start: int) -> dict:
-    return {"start": None, "bounds": [], "command": command_start}
+    """A nesting level's concurrency state: the pipeline being read (its first event, stage boundaries), where the
+    current command and the current list element (`a && b`, up to `;`, `&` or a newline) began, and the background
+    jobs started since the last `wait` (their event spans, and where the first began)."""
+    return {"start": None, "bounds": [], "command": command_start, "element": command_start, "bg": [],
+            "bg_from": None}
+
+
+def _end_background(events: list[tuple[str, str]], level: dict) -> None:
+    """Close the background jobs at this level (at `wait`, or where the level ends). Each job ran alongside the
+    others and alongside everything after it, so, as for pipeline stages, a file one of them writes and another
+    reads is written where the first job began."""
+    start = level["bg_from"]
+    if start is not None:
+        spans = level["bg"]
+        rest = [e for k, e in enumerate(events[start:], start) if not any(a <= k < b for a, b in spans)]
+        _write_first(events, start, [events[a:b] for a, b in spans] + [rest])
+    level["bg"], level["bg_from"] = [], None
+
+
+def _write_first(events: list[tuple[str, str]], start: int, stages: list[list[tuple[str, str]]]) -> None:
+    first: list[str] = []
+    for j, stage in enumerate(stages):
+        for kind, path in stage:
+            if kind == "write" and path not in first and any(
+                    ("read", path) in other for k, other in enumerate(stages) if k != j):
+                first.append(path)
+    events[start:start] = [("write", path) for path in first]
 
 
 def _end_pipeline(events: list[tuple[str, str]], level: dict) -> None:
@@ -305,14 +342,7 @@ def _end_pipeline(events: list[tuple[str, str]], level: dict) -> None:
     start = level["start"]
     if start is not None:
         cuts = [start, *level["bounds"], len(events)]
-        stages = [events[a:b] for a, b in itertools.pairwise(cuts)]
-        first: list[str] = []
-        for j, stage in enumerate(stages):
-            for kind, path in stage:
-                if kind == "write" and path not in first and any(
-                        ("read", path) in other for k, other in enumerate(stages) if k != j):
-                    first.append(path)
-        events[start:start] = [("write", path) for path in first]
+        _write_first(events, start, [events[a:b] for a, b in itertools.pairwise(cuts)])
     level["start"], level["bounds"] = None, []
 
 
