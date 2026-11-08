@@ -233,3 +233,21 @@ def test_native_measures_come_from_the_session_events():
                  "tool_calls": {"edit_file": 1, "read_file": 1, "run_shell": 1, "write_file": 1},
                  "read_before_edit": False, "edited_unread": ["util.py"]}
     assert native_measures({"totals": {}}, [], set())["cached_prompt_tokens"] is None
+
+
+# `cd -` goes back to the previous directory
+@DRIVERS
+@pytest.mark.parametrize("command", ["cd tests; cd -; printf fixed > calc.py", "cd tests && cd - >/dev/null && printf x > calc.py",
+                                     "cd tests; cd ..; cd -; cd -; printf x > calc.py",
+                                     "cd tests; (cd -; printf x > calc.py)"])
+def test_cd_dash_returns_to_the_previous_directory(measure, command):
+    assert measure(command) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+def test_cd_dash_with_no_previous_directory_stays_put(measure):
+    # a fresh shell has no OLDPWD: `cd -` fails and the command stays where it was
+    assert measure("cd -; printf x > calc.py") == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+    existing = {"calc.py", "tests/calc.py"}
+    assert measure("cd tests; cd ..; cd -; printf x > calc.py", existing) == {"read_before_edit": False,
+                                                                               "edited_unread": ["tests/calc.py"]}
