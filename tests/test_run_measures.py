@@ -267,3 +267,21 @@ def test_a_subshell_s_descriptor_redirects_open_before_its_body(measure, command
                                      "(cat calc.py) 2>&1; printf x 1> calc.py"])
 def test_a_subshell_with_only_descriptor_redirects_still_reads_first(measure, command):
     assert measure(command) == {"read_before_edit": True, "edited_unread": []}
+
+
+# an agent's shell syntax error never takes the run down
+@DRIVERS
+@pytest.mark.parametrize("command", ["(cat calc.py) >", "(cat calc.py) 2>", "(cat calc.py) 2", "(cat calc.py) >&",
+                                     "cat calc.py >", "cat calc.py <", ">", "2>", "(", ")", "((", "))", ") > calc.py",
+                                     "cd", "cd -", "cat <<", "cat <<EOF", "'", '"', "\\", "cp -t", "sed -i", "|", ";;",
+                                     "(cd tests; cat calc.py) 2>&", "x\n>", "", "   "])
+def test_a_malformed_command_measures_without_raising(measure, command):
+    result = measure(command)
+    assert result["read_before_edit"] in (True, False, None) and isinstance(result["edited_unread"], list)
+
+
+@DRIVERS
+def test_a_dangling_redirect_keeps_the_command_before_it(measure):
+    # `cat calc.py >` is a syntax error, but what it names before the dangling `>` is still parsed
+    assert measure("cat calc.py >; printf x > calc.py") == {"read_before_edit": True, "edited_unread": []}
+    assert measure("(cat calc.py) >; printf x > calc.py") == {"read_before_edit": True, "edited_unread": []}
