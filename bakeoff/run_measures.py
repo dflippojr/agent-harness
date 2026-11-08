@@ -166,7 +166,10 @@ def shell_access(command: str) -> list[tuple[str, str]]:
     i = 0
     while i < len(words):
         word = words[i]
-        if word in REDIRECTS and i + 1 < len(words):
+        if word in REDIRECTS:
+            if _is_operator(words[i + 1]):  # a dangling redirect (a syntax error): skip it, keep what follows
+                i += 1
+                continue
             redirects += _redirect(word, words[i + 1])
             i += 2
             continue
@@ -183,9 +186,13 @@ def shell_access(command: str) -> list[tuple[str, str]]:
                 cwd, oldpwd, start = outer.pop()
                 body = events[start:]
                 del events[start:]
-                while True:  # the subshell's own redirects come first (`2>log`, `2>&1`, `1> f` included)
-                    j = i + 2 if words[i + 1].isdigit() and words[i + 2] in REDIRECTS + DUPS else i + 1
-                    if j + 1 >= len(words) or words[j] not in REDIRECTS + DUPS:
+                while i + 1 < len(words):  # the subshell's own redirects come first (`2>log`, `2>&1`, `1> f`)
+                    digit = words[i + 1].isdigit() and i + 2 < len(words) and words[i + 2] in REDIRECTS + DUPS
+                    j = i + 2 if digit else i + 1
+                    if words[j] not in REDIRECTS + DUPS:
+                        break
+                    if j + 1 >= len(words) or _is_operator(words[j + 1]):  # dangling: skip it, keep what follows
+                        i = j
                         break
                     if words[j] in REDIRECTS:
                         events += [(kind, normalize(t, cwd)) for kind, t in _redirect(words[j], words[j + 1])]
