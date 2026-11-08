@@ -183,9 +183,13 @@ def shell_access(command: str) -> list[tuple[str, str]]:
                 cwd, oldpwd, start = outer.pop()
                 body = events[start:]
                 del events[start:]
-                while i + 2 < len(words) and words[i + 1] in REDIRECTS:  # the subshell's own redirects come first
-                    events += [(kind, normalize(t, cwd)) for kind, t in _redirect(words[i + 1], words[i + 2])]
-                    i += 2
+                while True:  # the subshell's own redirects come first (`2>log`, `2>&1`, `1> f` included)
+                    j = i + 2 if words[i + 1].isdigit() and words[i + 2] in REDIRECTS + DUPS else i + 1
+                    if j + 1 >= len(words) or words[j] not in REDIRECTS + DUPS:
+                        break
+                    if words[j] in REDIRECTS:
+                        events += [(kind, normalize(t, cwd)) for kind, t in _redirect(words[j], words[j + 1])]
+                    i = j + 1  # a descriptor copy (`>&`, `<&`) opens no file
                 events += body
         else:
             segment.append(word.translate(_SHOW))
@@ -194,6 +198,7 @@ def shell_access(command: str) -> list[tuple[str, str]]:
 
 
 REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<")
+DUPS = (">&", "<&")  # descriptor copies: `2>&1`
 
 
 def _redirect(op: str, target: str) -> list[tuple[str, str]]:
