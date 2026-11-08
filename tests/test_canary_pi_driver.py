@@ -238,6 +238,18 @@ def test_a_cd_inside_a_subshell_ends_with_it():
     assert file_access(calls, existing)["edited_unread"] == ["inventory/report.py"]
 
 
+@pytest.mark.parametrize("command", ["cp -t . staging/calc.py", "mv --target-directory=/workspace out/calc.py",
+                                     "cp -t/workspace new/calc.py", "cp --target-directory . -f staging/calc.py"])
+def test_cp_or_mv_with_a_target_directory_overwrites_the_task_file_of_that_name(command):
+    assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
+
+
+@pytest.mark.parametrize("command", ["printf x\n>calc.py", "echo x;>calc.py", "true&&>calc.py", "(echo x)>calc.py",
+                                     "echo hi &> calc.py", "echo hi &>>calc.py"])
+def test_a_redirect_next_to_other_punctuation_is_still_a_write(command):
+    assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
+
+
 def test_here_document_bodies_are_data_not_commands():
     heredoc = "cat > new.py <<'EOF'\nopen('calc.py', 'w').write(x > util.py)\nEOF\ncat calc.py\nsed -i s/a/b/ calc.py"
     assert file_access([("bash", {"command": heredoc})], EXISTING) == {"read_before_edit": True,

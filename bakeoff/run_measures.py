@@ -126,6 +126,20 @@ def _in_place(cmd: str, args: list[str]) -> bool:
     return False
 
 
+OPERATORS = sorted(["&&", "||", ";;", "<<<", "<<-", "<<", ">>", ">|", "&>>", "&>", ">&", "<&", "<>", ";", "&", "|",
+                    "(", ")", "<", ">", "\n"], key=len, reverse=True)
+
+
+def _operators(run: str) -> list[str]:
+    """shlex runs adjacent punctuation together (`\n>`, `);`): split it into shell operators, longest first."""
+    out, i = [], 0
+    while i < len(run):
+        op = next(o for o in [*OPERATORS, run[i]] if run.startswith(o, i))
+        out.append(op)
+        i += len(op)
+    return out
+
+
 def _is_operator(word: str) -> bool:
     return bool(word) and set(word) <= set(";|&()<>\n")
 
@@ -146,11 +160,11 @@ def shell_access(command: str) -> list[tuple[str, str]]:
     outer: list[str] = []  # the directory each open subshell started in
     segment: list[str] = []
     redirects: list[tuple[str, str]] = []
-    words = [*_words(command), ";"]
+    words = [w for word in _words(command) for w in (_operators(word) if _is_operator(word) else [word])] + [";"]
     i = 0
     while i < len(words):
         word = words[i]
-        if word in (">", ">>", ">|", "<") and i + 1 < len(words):
+        if word in (">", ">>", ">|", "&>", "&>>", "<") and i + 1 < len(words):
             target = words[i + 1]
             if not _is_operator(target) and target != "/dev/null":
                 redirects.append(("read" if word == "<" else "write", target.translate(_SHOW)))
@@ -183,6 +197,7 @@ VALUE_OPTIONS = {
            "--max-columns", "--encoding", "--max-depth", "--replace", "-r"},
     "sed": {"-e", "-f", "--expression", "--file"}, "perl": {"-e", "-E"}, "awk": {"-F", "-v", "-f"},
     "nl": {"-b", "-w", "-s", "-v", "-i"}, "truncate": {"-s", "-r", "--size", "--reference"},
+    "cp": {"-t", "--target-directory", "-S", "--suffix"}, "mv": {"-t", "--target-directory", "-S", "--suffix"},
 }
 SCRIPT_OPTIONS = {"grep": {"-e", "-f", "--regexp", "--file"}, "rg": {"-e", "-f", "--regexp", "--file"},
                   "sed": {"-e", "-f", "--expression", "--file"}, "awk": {"-f"}, "perl": {"-e", "-E"}}
@@ -218,6 +233,18 @@ def operands(cmd: str, args: list[str]) -> list[str]:
     return out[1:] if scripts and not script_given else out
 
 
+def _target_directory(args: list[str]) -> str | None:
+    """The directory `cp`/`mv -t DIR` (`-tDIR`, `--target-directory[=]DIR`) copies into, or None."""
+    for i, a in enumerate(args):
+        if a in ("-t", "--target-directory"):
+            return args[i + 1] if i + 1 < len(args) else None
+        if a.startswith("--target-directory="):
+            return a.split("=", 1)[1]
+        if a.startswith("-t") and len(a) > 2 and not a.startswith("--"):
+            return a[2:]
+    return None
+
+
 def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]]) -> str:
     """Append one simple command's own reads and writes; return the working directory after it."""
     if not segment:
@@ -232,10 +259,13 @@ def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]])
         events += [("read", f) for f in files]
     elif cmd in ("tee", "truncate"):
         events += [("write", f) for f in files]
-    elif cmd in ("cp", "mv") and len(files) >= 2:  # onto a file, or into a directory under each source's name
-        dest = files[-1]
-        events.append(("write", dest))
-        events += [("write", posixpath.join(dest, posixpath.basename(src))) for src in files[:-1]]
+    elif cmd in ("cp", "mv"):  # onto a file, or into a directory under each source's name (`-t DIR` names it)
+        target = _target_directory(args)
+        dest, sources = (normalize(target, cwd), files) if target is not None else (
+            (files[-1], files[:-1]) if len(files) >= 2 else ("", []))
+        if sources:
+            events.append(("write", dest))
+            events += [("write", posixpath.join(dest, posixpath.basename(src))) for src in sources]
     return cwd
 
 
