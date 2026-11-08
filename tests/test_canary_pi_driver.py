@@ -297,7 +297,7 @@ def test_the_image_pins_the_release_the_driver_records():
     assert re.search(r"^FROM (\S+)$", dockerfile.split("AS pi")[1], re.M).group(1) == pi_driver.SANDBOX_IMAGE
     entrypoint = (ROOT / "reference" / "pi" / "entrypoint.sh").read_text(encoding="utf-8")
     assert '"$PI_CODING_AGENT_DIR/models.json"' in entrypoint and 'exec "$@"' in entrypoint
-    assert pi_driver.pin()["docs"].startswith(f"https://github.com/earendil-works/pi/blob/v{pi_driver.PI_VERSION}/")
+    assert pi_driver.pin()["docs_url"] == pi_driver.PI_DOCS and pi_driver.PI_DOCS.startswith(f"https://github.com/earendil-works/pi/blob/v{pi_driver.PI_VERSION}/")
 
 
 # the manual runner

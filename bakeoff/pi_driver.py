@@ -272,7 +272,7 @@ def build_images(root: Path = ROOT) -> None:
 
 
 def pin() -> dict:
-    return {"package": PI_PACKAGE, "version": PI_VERSION, "repo": PI_REPO, "commit": PI_COMMIT, "docs": PI_DOCS,
+    return {"package": PI_PACKAGE, "version": PI_VERSION, "repo": PI_REPO, "commit": PI_COMMIT, "docs_url": PI_DOCS,
             "image": IMAGE}
 
 
