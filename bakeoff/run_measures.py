@@ -155,10 +155,11 @@ def shell_access(command: str) -> list[tuple[str, str]]:
     within one, its redirects come first (the shell opens them before it runs the command), then what the command
     reads, then what it writes. A subshell `( ... ) > f` is one command too: the redirects after its `)` open
     before anything in it runs, so `(cat f) > f` empties f before reading it. `cd` moves where later relative paths
-    resolve, until the subshell it ran in ends; the command starts in the workspace."""
+    resolve (`cd -` back to the previous directory), until the subshell it ran in ends; the command starts in the
+    workspace with no previous directory."""
     events: list[tuple[str, str]] = []
-    cwd = ""
-    outer: list[tuple[str, int]] = []  # each open subshell: the directory it started in, where its events begin
+    cwd, oldpwd = "", None
+    outer: list[tuple[str, str | None, int]] = []  # each open subshell: its directories then, where its events begin
     segment: list[str] = []
     redirects: list[tuple[str, str]] = []
     words = [w for word in _words(command) for w in (_operators(word) if _is_operator(word) else [word])] + [";"]
@@ -171,12 +172,15 @@ def shell_access(command: str) -> list[tuple[str, str]]:
             continue
         if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
             events += [(kind, normalize(t, cwd)) for kind, t in redirects]
-            cwd = _segment_access(segment, cwd, events)
+            if segment and segment[0].rsplit("/", 1)[-1] == "cd":
+                cwd, oldpwd = _cd(segment[1:], cwd, oldpwd)
+            else:
+                _segment_access(segment, cwd, events)
             segment, redirects = [], []
             if word == "(":
-                outer.append((cwd, len(events)))
+                outer.append((cwd, oldpwd, len(events)))
             elif word == ")" and outer:
-                cwd, start = outer.pop()
+                cwd, oldpwd, start = outer.pop()
                 body = events[start:]
                 del events[start:]
                 while i + 2 < len(words) and words[i + 1] in REDIRECTS:  # the subshell's own redirects come first
@@ -261,14 +265,24 @@ def _target_directory(args: list[str]) -> str | None:
     return None
 
 
-def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]]) -> str:
-    """Append one simple command's own reads and writes; return the working directory after it."""
+def _cd(args: list[str], cwd: str, oldpwd: str | None) -> tuple[str, str | None]:
+    """(working directory, previous one) after `cd ARGS`. `cd -` goes back (and stays put when there is no previous
+    directory, as a fresh shell has none); `cd` alone or `cd ~...` leaves the workspace; a directory outside it stays
+    absolute."""
+    ops = operands("cd", args)
+    if ops and ops[0] == "-":
+        return (oldpwd, cwd) if oldpwd is not None else (cwd, oldpwd)
+    if not ops or ops[0].startswith("~"):
+        return HOME, cwd
+    return normalize(ops[0], cwd), cwd
+
+
+def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]]) -> None:
+    """Append one simple command's own reads and writes (`cd` is shell_access's own business)."""
     if not segment:
-        return cwd
+        return
     cmd, args = segment[0].rsplit("/", 1)[-1], segment[1:]
     files = [normalize(a, cwd) for a in operands(cmd, args)]
-    if cmd == "cd":  # a directory outside the workspace stays absolute; `cd` alone (or `cd ~`, `cd -`) leaves it
-        return files[0] if files and not files[0].startswith(("~", "-")) else HOME
     if cmd in ("sed", "perl") and _in_place(cmd, args):
         events += [("write", f) for f in files]
     elif cmd in SHELL_READERS:
@@ -282,7 +296,6 @@ def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]])
         if sources:
             events.append(("write", dest))
             events += [("write", posixpath.join(dest, posixpath.basename(src))) for src in sources]
-    return cwd
 
 
 def file_access(calls: list[tuple[str, dict]], existing: set[str]) -> dict:
