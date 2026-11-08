@@ -461,3 +461,21 @@ def test_a_cd_before_a_pipeline_still_moves_the_shell(measure):
                                                                                        "edited_unread": []}
     assert measure("cd tests | cat; cat tests/calc.py; printf x > tests/calc.py", existing) == {
         "read_before_edit": True, "edited_unread": []}
+
+
+# pipeline stages run at the same time: a read in one stage proves nothing about another stage's write
+@DRIVERS
+@pytest.mark.parametrize("command", ["(sleep 0.2; cat calc.py) | tee calc.py", "cat calc.py | tee calc.py",
+                                     "grep add calc.py |& tee calc.py", "cat calc.py | cat | tee -a calc.py",
+                                     "tee calc.py < notes.md | cat calc.py", "(cd tests; cat ../calc.py) | tee calc.py"])
+def test_a_read_in_one_pipeline_stage_does_not_precede_another_stage_s_write(measure, command):
+    assert measure(command) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+@pytest.mark.parametrize("command", ["cat calc.py; cat notes.md | tee calc.py",
+                                     "(cat calc.py; printf x > calc.py) | cat",
+                                     "cat calc.py | tee out.txt; printf x > calc.py",
+                                     "cat calc.py && (head notes.md | tee calc.py)"])
+def test_order_within_a_stage_and_before_the_pipeline_still_counts(measure, command):
+    assert measure(command) == {"read_before_edit": True, "edited_unread": []}
