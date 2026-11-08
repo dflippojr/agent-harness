@@ -8,6 +8,7 @@ whether the task files were read before they were edited. The native driver take
 
 from __future__ import annotations
 
+import posixpath
 import shlex
 from collections import Counter
 
@@ -18,16 +19,21 @@ SHELL_TOOLS = {"run_shell", "bash"}
 # A shell command reads a file only through a viewer; `python x.py` or `pytest tests/x.py` names it without reading it.
 SHELL_READERS = {"cat", "head", "tail", "sed", "nl", "less", "more", "grep", "rg", "awk", "bat"}
 WORKSPACE = "/workspace/"
+HOME = "/~"  # stands for "somewhere outside the workspace" after `cd` alone
 
 
-def normalize(path: str) -> str:
-    """A tool's path argument as a workspace-relative POSIX path (what bakeoff.tasks.hash_tree keys by)."""
+def normalize(path: str, cwd: str = "") -> str:
+    """A path as the workspace-relative POSIX path bakeoff.tasks.hash_tree keys by. A relative path resolves against
+    `cwd` (workspace-relative, "" for the workspace root); a path outside the workspace stays absolute."""
     p = (path or "").strip().replace("\\", "/")
-    if p.startswith(WORKSPACE):
+    if p.startswith("/"):
+        if not (p + "/").startswith(WORKSPACE):
+            return posixpath.normpath(p)
         p = p[len(WORKSPACE):]
-    while p.startswith("./"):
-        p = p[2:]
-    return p
+    else:
+        p = posixpath.join(cwd, p)
+    p = posixpath.normpath(p) if p else "."
+    return "" if p == "." else p
 
 
 def _words(command: str) -> list[str]:
@@ -45,47 +51,60 @@ def _in_place(args: list[str]) -> bool:
                for a in args)
 
 
-def shell_access(command: str) -> tuple[set[str], set[str]]:
-    """(paths a shell command shows, paths it writes), normalized.
+def _is_operator(word: str) -> bool:
+    return bool(word) and set(word) <= set(";|&()<>")
+
+
+def shell_access(command: str) -> list[tuple[str, str]]:
+    """What a shell command shows and writes, in order: ("read" | "write", workspace-relative path).
 
     Shown: through a viewer (`cat a.py | head`, `sed -n 1,20p b.py`) or an input redirect (`< c.py`). Written: an
     output redirect (`>`, `>>`), `tee`, `sed -i` / `perl -pi` (which edit without showing), or the target of `cp`,
-    `mv` or `truncate`. Running a file (`python x.py`, `pytest tests/x.py`) neither shows nor writes it."""
-    shown: set[str] = set()
-    written: set[str] = set()
+    `mv` or `truncate`. Running a file (`python x.py`, `pytest tests/x.py`) neither shows nor writes it. Simple
+    commands count in order; within one, its redirects come first (the shell opens them before it runs the command),
+    then what the command reads, then what it writes. `cd` moves where later relative paths resolve; the command
+    starts in the workspace."""
+    events: list[tuple[str, str]] = []
+    cwd = ""
     segment: list[str] = []
+    redirects: list[tuple[str, str]] = []
     words = [*_words(command), ";"]
     i = 0
     while i < len(words):
         word = words[i]
         if word in (">", ">>", ">|", "<") and i + 1 < len(words):
             target = words[i + 1]
-            if not set(target) <= set(";|&()<>") and target != "/dev/null":
-                (shown if word == "<" else written).add(normalize(target))
+            if not _is_operator(target) and target != "/dev/null":
+                redirects.append(("read" if word == "<" else "write", target))
             i += 2
             continue
-        if word and set(word) <= set(";|&()<>"):  # end of a simple command (`>&` and friends end up here too)
-            _segment_access(segment, shown, written)
-            segment = []
+        if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
+            events += [(kind, normalize(t, cwd)) for kind, t in redirects]
+            cwd = _segment_access(segment, cwd, events)
+            segment, redirects = [], []
         else:
             segment.append(word)
         i += 1
-    return shown, written
+    return events
 
 
-def _segment_access(segment: list[str], shown: set[str], written: set[str]) -> None:
+def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]]) -> str:
+    """Append one simple command's own reads and writes; return the working directory after it."""
     if not segment:
-        return
+        return cwd
     cmd, args = segment[0].rsplit("/", 1)[-1], segment[1:]
-    files = [normalize(a) for a in args if not a.startswith("-")]
+    files = [normalize(a, cwd) for a in args if not a.startswith("-")]
+    if cmd == "cd":  # a directory outside the workspace stays absolute; `cd` alone (or `cd ~`, `cd -`) leaves it
+        return files[0] if files and not files[0].startswith(("~", "-")) else HOME
     if cmd in ("sed", "perl") and _in_place(args):
-        written.update(files)
+        events += [("write", f) for f in files]
     elif cmd in SHELL_READERS:
-        shown.update(files)
+        events += [("read", f) for f in files]
     elif cmd in ("tee", "truncate"):
-        written.update(files)
+        events += [("write", f) for f in files]
     elif cmd in ("cp", "mv") and len(files) >= 2:
-        written.add(files[-1])
+        events.append(("write", files[-1]))
+    return cwd
 
 
 def file_access(calls: list[tuple[str, dict]], existing: set[str]) -> dict:
@@ -93,9 +112,8 @@ def file_access(calls: list[tuple[str, dict]], existing: set[str]) -> dict:
 
     `calls` are (tool name, arguments) in the order the agent made them; `existing` the files the task started with.
     Only edits to files that existed count (a new file has nothing to read). An edit is an edit or write tool call, or
-    a shell command that writes the file (`shell_access`). A file counts as read once a read tool named it, or a shell
-    command showed it; within one shell command what it shows comes before what it writes. `read_before_edit` is None
-    when no existing file was edited."""
+    a shell command that writes the file; a file counts as read once a read tool named it, or a shell command showed
+    it, in the order `shell_access` gives. `read_before_edit` is None when no existing file was edited."""
     read: set[str] = set()
     edited: list[str] = []
     unread: list[str] = []
@@ -111,10 +129,11 @@ def file_access(calls: list[tuple[str, dict]], existing: set[str]) -> dict:
         if name in READ_TOOLS and args.get("path"):
             read.add(normalize(str(args["path"])))
         elif name in SHELL_TOOLS and args.get("command"):
-            shown, written = shell_access(str(args["command"]))
-            read.update(shown)
-            for path in sorted(written):
-                edit(path)
+            for kind, path in shell_access(str(args["command"])):
+                if kind == "read":
+                    read.add(path)
+                else:
+                    edit(path)
         elif name in EDIT_TOOLS and args.get("path"):
             edit(normalize(str(args["path"])))
     return {"read_before_edit": (not unread) if edited else None, "edited_unread": unread}

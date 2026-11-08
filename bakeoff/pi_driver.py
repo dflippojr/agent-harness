@@ -204,11 +204,15 @@ def parse_transcript(stdout: str, existing: set[str]) -> dict:
 
     Tokens are what llama-server reported per call, as Pi records them in each assistant message's usage: Pi splits
     the server's prompt_tokens into `input` (uncached), `cacheRead` (prompt_tokens_details.cached_tokens) and
-    `cacheWrite`, so prompt tokens are their sum, the same count the native driver records."""
+    `cacheWrite`, so prompt tokens are their sum, the same count the native driver records. Tokens include
+    compaction summaries (`compaction_end.result.usage`); `turns` counts assistant turns only."""
     evs = events(stdout)
     assistants = [e["message"] for e in evs if e.get("type") == "message_end"
                   and isinstance(e.get("message"), dict) and e["message"].get("role") == "assistant"]
-    usage = [m.get("usage") or {} for m in assistants]
+    # Compaction summaries are model calls too (the native totals count theirs): their usage is on compaction_end.
+    summaries = [e["result"].get("usage") for e in evs if e.get("type") == "compaction_end"
+                 and isinstance(e.get("result"), dict)]
+    usage = [m.get("usage") or {} for m in assistants] + [u for u in summaries if isinstance(u, dict)]
     calls = [(e.get("toolName", ""), e.get("args") or {}) for e in evs if e.get("type") == "tool_execution_start"]
     if not calls:  # no execution events (an older stream): the calls the model made, from its messages
         calls = [(b.get("name", ""), b.get("arguments") or {}) for m in assistants for b in m.get("content") or []

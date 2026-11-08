@@ -140,10 +140,47 @@ def test_a_shell_command_that_shows_a_file_before_writing_it_reads_first(command
                                                                              "edited_unread": []}
 
 
+@pytest.mark.parametrize("command", ["printf fixed > calc.py; cat calc.py", "cat calc.py > calc.py",
+                                     "printf x | tee calc.py && head calc.py"])
+def test_a_shell_command_that_writes_a_file_before_showing_it_did_not_read_it_first(command):
+    assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
+
+
+def test_shell_paths_follow_cd():
+    existing = {"inventory/report.py", "report.py"}
+    assert file_access([("bash", {"command": "cd inventory && printf fixed > report.py"})], existing) == {
+        "read_before_edit": False, "edited_unread": ["inventory/report.py"]}
+    assert file_access([("bash", {"command": "cd /workspace/inventory; cat report.py; sed -i s/a/b/ report.py"})],
+                       existing) == {"read_before_edit": True, "edited_unread": []}
+    assert file_access([("bash", {"command": "cd inventory; cd ..; printf x > report.py"})], existing)[
+        "edited_unread"] == ["report.py"]
+    for elsewhere in ("cd /tmp && printf x > report.py", "cd && printf x > report.py", "cd ~; cp a report.py"):
+        assert file_access([("bash", {"command": elsewhere})], existing)["read_before_edit"] is None, elsewhere
+    # each call starts in the workspace again
+    assert file_access([("bash", {"command": "cd inventory"}), ("bash", {"command": "printf x > report.py"})],
+                       existing)["edited_unread"] == ["report.py"]
+
+
 @pytest.mark.parametrize("command", ["pytest -q 2>&1 | tail -n 20", "python calc.py > /dev/null", "git diff calc.py",
                                      "printf x > new_file.py"])
 def test_shell_commands_that_write_no_task_file_are_no_edit(command):
     assert file_access([("bash", {"command": command})], EXISTING)["read_before_edit"] is None
+
+
+def test_compaction_summaries_count_towards_the_tokens_but_not_the_turns():
+    summary = {"type": "compaction_end", "reason": "threshold", "aborted": False, "willRetry": False,
+               "result": {"summary": "s", "firstKeptEntryId": "e1", "tokensBefore": 30000,
+                          "estimatedTokensAfter": 4000, "usage": _usage(9000, 400, cache_read=1000), "details": {}}}
+    failed = {"type": "compaction_end", "reason": "overflow", "aborted": False, "willRetry": False,
+              "errorMessage": "summary failed"}
+    records = transcript()
+    plain = pi_driver.parse_transcript(_jsonl(records), EXISTING)
+    m = pi_driver.parse_transcript(_jsonl([*records[:10], {"type": "compaction_start", "reason": "threshold"},
+                                           summary, failed, *records[10:]]), EXISTING)
+    assert m["prompt_tokens"] == plain["prompt_tokens"] + 10000
+    assert m["completion_tokens"] == plain["completion_tokens"] + 400
+    assert m["cached_prompt_tokens"] == plain["cached_prompt_tokens"] + 1000
+    assert m["turns"] == plain["turns"] == 6
 
 
 def test_an_error_or_exhausted_retries_is_recorded():
