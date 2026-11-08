@@ -388,3 +388,25 @@ def test_an_assignment_or_wrapper_before_a_viewer_still_reads(measure, command):
 @DRIVERS
 def test_a_bare_assignment_is_no_command(measure):
     assert measure("X=calc.py; printf x > notes.md") == {"read_before_edit": False, "edited_unread": ["notes.md"]}
+
+
+# a wrapper that changes directory (env -C, sudo -D) runs only its command there
+@DRIVERS
+@pytest.mark.parametrize("command", ["env -C tests cat calc.py; printf fixed > calc.py",
+                                     "env --chdir=tests cat calc.py; printf x > calc.py",
+                                     "env -Ctests cat calc.py; printf x > calc.py",
+                                     "sudo -D tests cat calc.py; printf x > calc.py",
+                                     "env --chdir tests cat calc.py > ../out.txt; printf x > calc.py"])
+def test_a_chdir_wrapper_resolves_its_command_s_paths_there(measure, command):
+    existing = {"calc.py", "tests/calc.py"}
+    assert measure(command, existing) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+def test_a_chdir_wrapper_leaves_the_shell_s_directory_and_redirects_alone(measure):
+    existing = {"calc.py", "tests/calc.py"}
+    # the redirect opens in the shell's directory, and the next command runs there too
+    assert measure("env -C tests cat calc.py > calc.py", existing) == {"read_before_edit": False,
+                                                                       "edited_unread": ["calc.py"]}
+    assert measure("env -C tests sed -i s/a/b/ calc.py; cat calc.py", existing) == {
+        "read_before_edit": False, "edited_unread": ["tests/calc.py"]}
