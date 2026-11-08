@@ -51,7 +51,8 @@ def _without_heredoc_bodies(command: str) -> str:
                 ends.pop(0)
             continue
         out.append(line)
-        ends = [(m.group(3), m.group(1) == "-") for m in HEREDOC.finditer(line)]
+        # only a real marker: not in a comment or inside quotes (_protect drops the one, hides the other's `<`)
+        ends = [(m.group(3), m.group(1) == "-") for m in HEREDOC.finditer(_protect(line))]
     return "\n".join(out)
 
 
@@ -108,10 +109,20 @@ def _words(command: str) -> list[str]:
         return command.replace("\n", " ; ").split()
 
 
-def _in_place(args: list[str]) -> bool:
-    """`sed -i`, `sed -i.bak`, `sed --in-place`, `perl -pi`: short flags that include i, or --in-place."""
-    return any(a.split("=", 1)[0] == "--in-place" or (a[:1] == "-" and a[1:2] != "-" and "i" in a[1:])
-               for a in args)
+def _in_place(cmd: str, args: list[str]) -> bool:
+    """`sed -i`, `sed -i.bak`, `sed --in-place`, `perl -pi`: an i among the short flags before any that takes a value
+    (so not the i in an attached script such as `-e'/fix/p'`), or --in-place."""
+    takes = VALUE_OPTIONS.get(cmd, set())
+    for a in args:
+        if a.split("=", 1)[0] == "--in-place":
+            return True
+        if a[:1] == "-" and a[1:2] not in ("", "-"):
+            for c in a[1:]:
+                if c == "i":
+                    return True
+                if not c.isalpha() or f"-{c}" in takes:
+                    break
+    return False
 
 
 def _is_operator(word: str) -> bool:
@@ -163,8 +174,12 @@ def shell_access(command: str) -> list[tuple[str, str]]:
 # file), per command. A value joined to its option (`-n5`, `--regexp=x`) needs no skipping.
 VALUE_OPTIONS = {
     "head": {"-n", "-c"}, "tail": {"-n", "-c"},
-    "grep": {"-e", "-f", "-A", "-B", "-C", "-m", "--regexp", "--file"},
-    "rg": {"-e", "-f", "-A", "-B", "-C", "-m", "-g", "-t", "-T", "--regexp", "--file", "--glob", "--type"},
+    "grep": {"-e", "-f", "-A", "-B", "-C", "-m", "-d", "-D", "--regexp", "--file", "--include", "--exclude",
+             "--exclude-dir", "--exclude-from", "--max-count", "--context", "--after-context", "--before-context",
+             "--label", "--color", "--colour", "--binary-files", "--devices", "--directories"},
+    "rg": {"-e", "-f", "-A", "-B", "-C", "-m", "-g", "-t", "-T", "-M", "-E", "--regexp", "--file", "--glob",
+           "--iglob", "--type", "--type-not", "--max-count", "--context", "--after-context", "--before-context",
+           "--max-columns", "--encoding", "--max-depth", "--replace", "-r"},
     "sed": {"-e", "-f", "--expression", "--file"}, "perl": {"-e", "-E"}, "awk": {"-F", "-v", "-f"},
     "nl": {"-b", "-w", "-s", "-v", "-i"}, "truncate": {"-s", "-r", "--size", "--reference"},
 }
@@ -210,7 +225,7 @@ def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]])
     files = [normalize(a, cwd) for a in operands(cmd, args)]
     if cmd == "cd":  # a directory outside the workspace stays absolute; `cd` alone (or `cd ~`, `cd -`) leaves it
         return files[0] if files and not files[0].startswith(("~", "-")) else HOME
-    if cmd in ("sed", "perl") and _in_place(args):
+    if cmd in ("sed", "perl") and _in_place(cmd, args):
         events += [("write", f) for f in files]
     elif cmd in SHELL_READERS:
         events += [("read", f) for f in files]

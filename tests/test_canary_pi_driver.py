@@ -205,6 +205,24 @@ def test_quoted_or_escaped_operators_are_data():
         "read_before_edit"] is True
 
 
+@pytest.mark.parametrize("command", ["sed -n -e'/fix/p' calc.py", "sed -ne '/i/p' calc.py", "sed -n -f fix.sed calc.py"])
+def test_an_i_inside_an_attached_script_is_not_in_place(command):
+    assert file_access([("bash", {"command": f"{command}; printf x > calc.py"})], EXISTING)["read_before_edit"] is True
+
+
+@pytest.mark.parametrize("command", ["echo hi # <<EOF\nprintf fixed > calc.py", "echo '<<EOF'\nprintf fixed > calc.py",
+                                     'echo "a <<EOF b"\nprintf fixed > calc.py'])
+def test_a_here_document_marker_in_a_comment_or_quotes_is_none(command):
+    assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
+
+
+@pytest.mark.parametrize("command", ["grep --include '*.md' calc.py notes.md", "grep --exclude-dir .git -r calc.py .",
+                                     "rg --glob '*.py' calc.py", "grep --max-count 1 calc.py notes.md"])
+def test_long_options_that_take_a_value_keep_the_pattern_apart(command):
+    assert file_access([("bash", {"command": f"{command}; printf x > calc.py"})], EXISTING)["edited_unread"] == [
+        "calc.py"]
+
+
 def test_a_cd_inside_a_subshell_ends_with_it():
     existing = {"inventory/report.py", "report.py"}
     calls = [("bash", {"command": "(cd inventory; cat report.py); printf fixed > report.py"})]
@@ -360,6 +378,17 @@ def test_a_crash_a_turn_overrun_and_the_wall_limit_are_not_passes(tmp_path, fake
     slow = _attempt(tmp_path / "c", fake_pi, _task(wall_limit=1))
     assert slow["status"] == "wall_limit" and not slow["ok"] and slow["exit_code"] is None
     assert "stopped at the 1 s wall-clock limit" in slow["note"]
+
+
+def test_a_last_reply_cut_off_at_the_token_limit_is_no_finished_answer(tmp_path, fake_pi):
+    records = transcript()
+    for r in records[-4:]:
+        if r["type"] in ("message_end", "turn_end"):
+            r["message"] = {**r["message"], "stopReason": "length"}
+    fake_pi.script.write_text(_jsonl(records), encoding="utf-8")
+    res = _attempt(tmp_path, fake_pi)
+    assert res["status"] == "failed" and not res["ok"] and res["stop_reason"] == "length"
+    assert res["note"].endswith("pi stopped at the token limit")
 
 
 def test_a_run_with_no_events_says_what_pi_printed(tmp_path, fake_pi):

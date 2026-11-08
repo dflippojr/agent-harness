@@ -247,7 +247,8 @@ def run_attempt(task, repeat: int, *, base_url: str, model, launch: Launch, prep
 
     `status` is `done` when Pi settled without an error, `wall_limit` when it ran past the task's wall-clock limit,
     `max_turns` when it took more turns than the task allows the native driver (Pi has no turn cap of its own, so
-    the attempt is graded as the native driver's would be when it stops there), else `failed`."""
+    the attempt is graded as the native driver's would be when it stops there), else `failed` (including a last reply
+    cut off at the token limit)."""
     ws = workdir / f"{task.id}-{repeat}"
     ws.mkdir(parents=True)
     baseline = prepare(task, ws)
@@ -260,9 +261,9 @@ def run_attempt(task, repeat: int, *, base_url: str, model, launch: Launch, prep
         status = "wall_limit"
     elif measures["turns"] > task.max_turns:
         status = "max_turns"
-    elif run.exit_code == 0 and settled and not error:
+    elif run.exit_code == 0 and settled and not error and measures["stop_reason"] != "length":
         status = "done"
-    else:
+    else:  # a last reply cut off at the token limit is no finished answer (the native loop would go on)
         status = "failed"
     ok, note = grade(task, ws, answer, baseline)
     if status == "wall_limit":
@@ -270,7 +271,8 @@ def run_attempt(task, repeat: int, *, base_url: str, model, launch: Launch, prep
     elif status == "max_turns":
         note = f"{note}; {measures['turns']} turns, over the task's {task.max_turns}"
     elif status == "failed":
-        why = error or (f"exited {run.exit_code}" if run.exit_code else "never settled")
+        why = error or (f"exited {run.exit_code}" if run.exit_code else "never settled" if not settled
+                        else "stopped at the token limit")
         note = f"{note}; pi {why}"
         if not measures["events"]:
             note += f"; no events (stderr: {run.stderr.strip()[-300:]})"

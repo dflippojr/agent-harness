@@ -315,7 +315,7 @@ Every attempt of either driver records:
 
 | Field | Meaning | native source | Pi source |
 | --- | --- | --- | --- |
-| `ok`, `status`, `note` | the hidden checker's verdict, and whether the agent finished cleanly | session status | Pi settled with no error; `wall_limit`, `max_turns`, `failed` |
+| `ok`, `status`, `note` | the hidden checker's verdict, and whether the agent finished cleanly | session status | Pi settled with no error and its last reply was not cut off at the token limit; otherwise `wall_limit`, `max_turns` or `failed` |
 | `turns` | model calls | session totals | `turn_end` events |
 | `prompt_tokens` | prompt tokens llama-server reported, cached prefix included | session totals | per-message usage `input + cacheRead + cacheWrite` (Pi splits llama-server's `prompt_tokens` this way), compaction summaries (`compaction_end.result.usage`) included |
 | `completion_tokens` | generated tokens | session totals | usage `output`, summaries included |
