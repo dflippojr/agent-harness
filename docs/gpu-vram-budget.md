@@ -84,7 +84,7 @@ costs about two expert layers (estimate about −6 tok/s per 1,024 with Q4).
 
 ## Recommendation
 
-**Option B: keep Qwen3.6-35B-A3B Q4_K_XL at 64K and add `--fit-target 2048`.** It is the only option that fits one
+**Option B: keep Qwen3.6-35B-A3B Q4_K_XL at 64K and add `--fit-target 2048`.** It is the preferred option: it fits one
 transcode plus Sunshine with no quality change, it is a single argument on the llama-server unit, and rolling it back
 is removing that argument. It is preferred over B2 because `--fit` adapts to what is free at load, while a fixed
 placement can fail to load beside a running stream. Option A is the next step only if B's measured decode lands below ~70 tok/s, and only
@@ -214,9 +214,10 @@ the owner says so on a card first. Use only `/health` and `/props` on a sleeping
    (`docker stats --no-stream ah823-measure`). Decode and prompt speed: `POST http://127.0.0.1:8097/completion` with
    fixed prompts of about 2K, 16K and 58K tokens (`n_predict: 200`, `cache_prompt: false`), reading
    `timings.predicted_per_second` and `timings.prompt_per_second` from each answer. Then `docker stop ah823-measure`
-   and repeat without `--fit-target 2048` as the baseline, in the same session. `bakeoff/context_test.py` doesn't do
-   this on Ubuntu as it stands: it starts its own server from `bakeoff/models.yaml` (Windows paths) and reads process
-   memory through PowerShell (follow-up 8).
+   and repeat without `--fit-target 2048` as the baseline, in the same session. `bakeoff/context_test.py --base-url <url>
+   --server-pid <pid>` measures a server started this way on Ubuntu (follow-up 8, #943): it does not start one, and it
+   reads process memory from `/proc`. Without `--base-url` it starts its own server from `bakeoff/models.yaml` (Windows
+   paths) and reads process memory through PowerShell.
 5. **Coexistence.** With option B loaded and idle, repeat 2 and 3 together, and confirm `nvidia-smi` free memory stays
    above 256 and that Plex's dashboard shows "(hw)" for the stream.
 6. **Option A, only if B is too slow.** Steps 4 and 5 with the Q3_K_XL file (and B2's arguments if a fixed
@@ -250,7 +251,8 @@ No code changes in #823. These are the code and config changes this design impli
    `nvidia-gpu` dashboard.
 8. **Measurement run** (owner-gated, "Measuring later" above), then update this doc. *Option B done in #827.* Optionally port
    `bakeoff/context_test.py` first: a `--base-url` mode that measures an already running server, and Linux process
-   memory from `/proc` instead of PowerShell, so later model studies on the tower can reuse it.
+   memory from `/proc` instead of PowerShell, so later model studies on the tower can reuse it. *Done in #943:* both,
+   unit-tested; the run on Ubuntu is still to do.
 9. **Linux page-out (prerequisite for the guard on the tower).** Make `ServerControl.stop()` work on Linux: stop the
    `agent-harness-<instance>-llama` container (`docker stop`, as `run-server.sh`'s own trap does), or have
    `run-server.sh` watch the pause flag while the container runs and stop it when the flag appears. Replace the
