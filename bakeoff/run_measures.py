@@ -8,6 +8,7 @@ whether the task files were read before they were edited. The native driver take
 
 from __future__ import annotations
 
+import itertools
 import posixpath
 import re
 import shlex
@@ -169,7 +170,7 @@ def _in_place(cmd: str, args: list[str]) -> bool:
     return False
 
 
-OPERATORS = sorted(["&&", "||", ";;", "<<<", "<<-", "<<", ">>", ">|", "&>>", "&>", ">&", "<&", "<>", ";", "&", "|",
+OPERATORS = sorted(["|&", "&&", "||", ";;", "<<<", "<<-", "<<", ">>", ">|", "&>>", "&>", ">&", "<&", "<>", ";", "&", "|",
                     "(", ")", "<", ">", "\n"], key=len, reverse=True)
 
 
@@ -203,6 +204,7 @@ def shell_access(command: str) -> list[tuple[str, str]]:
     events: list[tuple[str, str]] = []
     cwd, oldpwd = "", None
     after_pipe = False  # the command being read follows a `|`
+    pipes = [_pipeline(0)]  # per nesting level: the pipeline being read, its stage boundaries, where this command began
     outer: list[tuple] = []  # open `( ... )`: ("shell", cwd, oldpwd, where its events begin) or a `$( ... )`:
     #                          ("sub", cwd, oldpwd, the enclosing command's words and redirects so far)
     segment: list[str] = []
@@ -228,14 +230,15 @@ def shell_access(command: str) -> list[tuple[str, str]]:
             # It expands before the enclosing command runs or opens its redirects: keep that command open.
             segment[-1] = segment[-1][:-1]
             outer.append(("sub", cwd, oldpwd, [w for w in segment if w], redirects))
+            pipes.append(_pipeline(len(events)))
             segment, redirects = [], []
             i += 1
             continue
         if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
             events += [(kind, normalize(t, cwd)) for kind, t in redirects]
             command_words, chdirs = _command(segment)
-            piped = word == "|" or after_pipe  # a pipeline's commands run in subshells: a cd there moves nothing
-            after_pipe = word == "|"
+            piped = word in PIPES or after_pipe  # a pipeline's commands run in subshells: a cd there moves nothing
+            after_pipe = word in PIPES
             if command_words and command_words[0].rsplit("/", 1)[-1] == "cd":
                 if not piped:
                     cwd, oldpwd = _cd(command_words[1:], cwd, oldpwd)
@@ -245,8 +248,20 @@ def shell_access(command: str) -> list[tuple[str, str]]:
                     run_in = normalize(d, run_in)
                 _segment_access(command_words, run_in, events)
             segment, redirects = [], []
+            level = pipes[-1]
+            if word in PIPES:  # one more stage
+                if level["start"] is None:
+                    level["start"] = level["command"]
+                level["bounds"].append(len(events))
+            elif word != "(":  # `(` opens a stage; anything else ends the pipeline at this level
+                _end_pipeline(events, level)
+            if word not in ("(", ")"):
+                level["command"] = len(events)  # the next command (a stage, or not) begins here
+            if word == ")" and len(pipes) > 1:
+                pipes.pop()
             if word == "(":
                 outer.append(("shell", cwd, oldpwd, len(events)))
+                pipes.append(_pipeline(len(events)))
             elif word == ")" and outer and outer[-1][0] == "sub":
                 _, cwd, oldpwd, segment, redirects = outer.pop()  # the enclosing command goes on after the expansion
             elif word == ")" and outer:
@@ -268,7 +283,34 @@ def shell_access(command: str) -> list[tuple[str, str]]:
         else:
             segment.append(word.translate(_SHOW))
         i += 1
+    for level in reversed(pipes):  # a `(` never closed (a syntax error) leaves its pipeline open
+        _end_pipeline(events, level)
     return events
+
+
+PIPES = ("|", "|&")
+
+
+def _pipeline(command_start: int) -> dict:
+    return {"start": None, "bounds": [], "command": command_start}
+
+
+def _end_pipeline(events: list[tuple[str, str]], level: dict) -> None:
+    """Close the pipeline being read at this level, if any. Its stages run at the same time, so a read in one stage
+    proves nothing about a write in another: each file one stage writes and another reads is written at the start of
+    the pipeline (the worst case). Order inside a stage stands."""
+    start = level["start"]
+    if start is not None:
+        cuts = [start, *level["bounds"], len(events)]
+        stages = [events[a:b] for a, b in itertools.pairwise(cuts)]
+        first: list[str] = []
+        for j, stage in enumerate(stages):
+            for kind, path in stage:
+                if kind == "write" and path not in first and any(
+                        ("read", path) in other for k, other in enumerate(stages) if k != j):
+                    first.append(path)
+        events[start:start] = [("write", path) for path in first]
+    level["start"], level["bounds"] = None, []
 
 
 REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<")
