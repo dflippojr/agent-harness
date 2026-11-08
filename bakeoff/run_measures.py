@@ -216,11 +216,14 @@ def shell_access(command: str) -> list[tuple[str, str]]:
             continue
         if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
             events += [(kind, normalize(t, cwd)) for kind, t in redirects]
-            command_words = _command(segment)
+            command_words, chdirs = _command(segment)
             if command_words and command_words[0].rsplit("/", 1)[-1] == "cd":
                 cwd, oldpwd = _cd(command_words[1:], cwd, oldpwd)
-            else:
-                _segment_access(command_words, cwd, events)
+            else:  # in the directory a wrapper moved it to (env -C), the shell's own staying put
+                run_in = cwd
+                for d in chdirs:
+                    run_in = normalize(d, run_in)
+                _segment_access(command_words, run_in, events)
             segment, redirects = [], []
             if word == "(":
                 outer.append(("shell", cwd, oldpwd, len(events)))
@@ -328,28 +331,38 @@ WRAPPERS = {"env": ({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}, 
             "builtin": (set(), 0), "exec": ({"-a"}, 0), "time": ({"-f", "--format", "-o", "--output"}, 0),
             "nice": ({"-n", "--adjustment"}, 0), "nohup": (set(), 0), "stdbuf": ({"-i", "-o", "-e"}, 0),
             "timeout": ({"-s", "--signal", "-k", "--kill-after"}, 1),
-            "sudo": ({"-u", "--user", "-g", "--group", "-C", "-D", "-h", "-p", "-r", "-t", "-U"}, 0)}
+            "sudo": ({"-u", "--user", "-g", "--group", "-C", "-D", "--chdir", "-h", "-p", "-r", "-t", "-U"}, 0)}
+CHDIR_OPTIONS = {"env": ("-C", "--chdir"), "sudo": ("-D", "--chdir")}  # run the command in that directory
 
 
-def _command(segment: list[str]) -> list[str]:
-    """A simple command's words from the command itself on: leading `NAME=value` assignments and wrappers such as
-    `env`, `nice -n 5`, `timeout 30s` or `sudo -E` dropped. Only assignments: no command at all."""
-    words = list(segment)
+def _command(segment: list[str]) -> tuple[list[str], list[str]]:
+    """A simple command's words from the command itself on, and the directories wrappers run it in (`env -C dir`,
+    `sudo -D dir`), in order: leading `NAME=value` assignments and wrappers such as `env`, `nice -n 5`,
+    `timeout 30s` or `sudo -E` dropped. Only assignments: no command at all."""
+    words, chdirs = list(segment), []
     while words:
         name = words[0].rsplit("/", 1)[-1]
         if ASSIGNMENT.match(words[0]):
             words = words[1:]
         elif name in WRAPPERS:
             takes, plain = WRAPPERS[name]
+            short, long = CHDIR_OPTIONS.get(name, ("", ""))
             i = 1
             while i < len(words) and words[i].startswith("-") and words[i] != "--":
-                i += 2 if words[i] in takes else 1
+                a = words[i]
+                if short and a in (short, long) and i + 1 < len(words):
+                    chdirs.append(words[i + 1])
+                elif long and a.startswith(long + "="):
+                    chdirs.append(a.split("=", 1)[1])
+                elif short and a.startswith(short) and len(a) > len(short):
+                    chdirs.append(a[len(short):])
+                i += 2 if a in takes else 1
             if i < len(words) and words[i] == "--":
                 i += 1
             words = words[i + plain:]
         else:
             break
-    return words
+    return words, chdirs
 
 
 def _cd(args: list[str], cwd: str, oldpwd: str | None) -> tuple[str, str | None]:
