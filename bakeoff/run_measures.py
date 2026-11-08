@@ -30,48 +30,93 @@ def normalize(path: str) -> str:
     return p
 
 
-def _shell_reads(command: str) -> set[str]:
-    """Paths a shell command shows through a viewer (`cat a.py | head`, `sed -n 1,20p b.py`), normalized."""
+def _words(command: str) -> list[str]:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
-        words = list(lexer)
+        return list(lexer)
     except ValueError:  # an unbalanced quote: judge it word by word
-        words = command.split()
-    read: set[str] = set()
+        return command.split()
+
+
+def _in_place(args: list[str]) -> bool:
+    """`sed -i`, `sed -i.bak`, `sed --in-place`, `perl -pi`: short flags that include i, or --in-place."""
+    return any(a.split("=", 1)[0] == "--in-place" or (a[:1] == "-" and a[1:2] != "-" and "i" in a[1:])
+               for a in args)
+
+
+def shell_access(command: str) -> tuple[set[str], set[str]]:
+    """(paths a shell command shows, paths it writes), normalized.
+
+    Shown: through a viewer (`cat a.py | head`, `sed -n 1,20p b.py`) or an input redirect (`< c.py`). Written: an
+    output redirect (`>`, `>>`), `tee`, `sed -i` / `perl -pi` (which edit without showing), or the target of `cp`,
+    `mv` or `truncate`. Running a file (`python x.py`, `pytest tests/x.py`) neither shows nor writes it."""
+    shown: set[str] = set()
+    written: set[str] = set()
     segment: list[str] = []
-    for word in [*words, ";"]:
-        if word and set(word) <= set(";|&()<>"):
-            if segment and segment[0].rsplit("/", 1)[-1] in SHELL_READERS:
-                read.update(normalize(w) for w in segment[1:] if not w.startswith("-"))
+    words = [*_words(command), ";"]
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word in (">", ">>", ">|", "<") and i + 1 < len(words):
+            target = words[i + 1]
+            if not set(target) <= set(";|&()<>") and target != "/dev/null":
+                (shown if word == "<" else written).add(normalize(target))
+            i += 2
+            continue
+        if word and set(word) <= set(";|&()<>"):  # end of a simple command (`>&` and friends end up here too)
+            _segment_access(segment, shown, written)
             segment = []
         else:
             segment.append(word)
-    return read
+        i += 1
+    return shown, written
+
+
+def _segment_access(segment: list[str], shown: set[str], written: set[str]) -> None:
+    if not segment:
+        return
+    cmd, args = segment[0].rsplit("/", 1)[-1], segment[1:]
+    files = [normalize(a) for a in args if not a.startswith("-")]
+    if cmd in ("sed", "perl") and _in_place(args):
+        written.update(files)
+    elif cmd in SHELL_READERS:
+        shown.update(files)
+    elif cmd in ("tee", "truncate"):
+        written.update(files)
+    elif cmd in ("cp", "mv") and len(files) >= 2:
+        written.add(files[-1])
 
 
 def file_access(calls: list[tuple[str, dict]], existing: set[str]) -> dict:
     """Whether every task file the agent edited had been read first.
 
     `calls` are (tool name, arguments) in the order the agent made them; `existing` the files the task started with.
-    Only edits to files that existed count (a new file has nothing to read). A file counts as read once a read tool
-    named it, or a shell command showed it through a viewer (cat, sed, head...). `read_before_edit` is None when no
-    existing file was edited."""
+    Only edits to files that existed count (a new file has nothing to read). An edit is an edit or write tool call, or
+    a shell command that writes the file (`shell_access`). A file counts as read once a read tool named it, or a shell
+    command showed it; within one shell command what it shows comes before what it writes. `read_before_edit` is None
+    when no existing file was edited."""
     read: set[str] = set()
     edited: list[str] = []
     unread: list[str] = []
+
+    def edit(path: str) -> None:
+        if path in existing and path not in edited:
+            edited.append(path)
+            if path not in read:
+                unread.append(path)
+
     for name, args in calls:
         args = args if isinstance(args, dict) else {}
         if name in READ_TOOLS and args.get("path"):
             read.add(normalize(str(args["path"])))
         elif name in SHELL_TOOLS and args.get("command"):
-            read.update(_shell_reads(str(args["command"])))
+            shown, written = shell_access(str(args["command"]))
+            read.update(shown)
+            for path in sorted(written):
+                edit(path)
         elif name in EDIT_TOOLS and args.get("path"):
-            path = normalize(str(args["path"]))
-            if path in existing and path not in edited:
-                edited.append(path)
-                if path not in read:
-                    unread.append(path)
+            edit(normalize(str(args["path"])))
     return {"read_before_edit": (not unread) if edited else None, "edited_unread": unread}
 
 

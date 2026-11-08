@@ -293,11 +293,15 @@ hidden checker. Every attempt gets its task's whole wall-clock limit: naming the
 - **pi** builds the bake-off sandbox image and `agent-harness-pi` on it (so Pi sees the same Python, pytest and git as
   the checkers), then runs `pi --mode json --no-session --offline --no-extensions --no-skills --no-prompt-templates
   --no-context-files --provider canary --model <default_model> -- <prompt>` in a container per attempt. The task
-  workspace is the container's only mount (`models.json` comes in an environment variable that the image's
-  entrypoint writes to a file). Its only network is an internal Docker network made for the run. The one other
-  member of that network is a socat forwarder that passes exactly llama-server's port (from the model's `base_url`)
-  to the host, through a second bridge Pi never joins, as `ops/cli-llm` does. Both networks and the forwarder are
-  removed when the run ends. Results go to `runs/pi-canary-*.json` and record the pin.
+  workspace is the container's only host mount (`models.json` comes in an environment variable that the image's
+  entrypoint writes to a file), and the container has no network (`--network none`). Its one way to llama-server is
+  a Unix socket on a Docker volume made for the run. A socat forwarder on the host network listens on that socket and
+  connects to llama-server's host and port (from the model's `base_url`), nothing else. Inside Pi's container the
+  entrypoint relays `127.0.0.1:<port>` to the socket, so Pi's `baseUrl` is its own loopback. The forwarder sits on
+  the host network because the tower's llama-server listens on the host's loopback only (`install/run-server.sh`),
+  which a container on a bridge can't reach through host-gateway (there, `172.17.0.1:8090` is the metrics proxy).
+  The volume and the forwarder are removed when the run ends. Results go to `runs/pi-canary-*.json` and record the
+  pin.
 - Pi has no turn cap of its own. An attempt that takes more turns than the task's `max_turns` (where the native loop
   would have stopped) is recorded as `max_turns`, a fail. One that runs past the task's `wall_limit` is stopped and
   recorded as `wall_limit`, a fail.
@@ -318,7 +322,7 @@ Every attempt of either driver records:
 | `cached_prompt_tokens` | prompt tokens served from llama-server's cache | `turn_metrics.cache_tokens` (llama-server's reported cached prefix; `null` if it never said) | usage `cacheRead` (llama-server's `prompt_tokens_details.cached_tokens`) |
 | `seconds` | wall time of the attempt | GPU time, which is wall time with the daemon stopped | container wall time |
 | `tool_calls` | calls by tool name | `tool_call` events | `tool_execution_start` events |
-| `read_before_edit`, `edited_unread` | whether every task file the agent edited had been read first, and which were not | read tool, or a shell viewer (`cat`, `sed`, `head`...) naming the file, before its first edit or write; files the agent created don't count; `null` when it edited no task file | same rule |
+| `read_before_edit`, `edited_unread` | whether every task file the agent edited had been read first, and which were not | a read tool, or a shell command showing the file (a viewer such as `cat`, `sed -n` or `head`, or `< file`), before its first edit. An edit is an edit or write tool call, or a shell command writing the file (`>`, `>>`, `tee`, `sed -i`, `perl -pi`, or `cp`, `mv` or `truncate` onto it). Files the agent created don't count; `null` when it edited no task file. A file a script or git rewrites isn't seen | same rule |
 
 The native tool names are `read_file`, `edit_file`, `write_file` and `run_shell`; Pi's are `read`, `edit`, `write` and
 `bash` (plus `grep`, `find` and `ls`, off by default). `bakeoff/run_measures.py` holds the shared rules.

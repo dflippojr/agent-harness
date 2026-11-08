@@ -11,10 +11,12 @@ an OpenAI-compatible endpoint: llama-server is a custom provider with `api: open
 Pi's built-in llama.cpp extension manages llama.cpp's router mode (`/llama`, `/models`); the harness's llama-server
 runs one model, so the driver switches extensions off (`--no-extensions`).
 
-Isolation, like ops/cli-llm and bakeoff/reference.py: Pi runs in its own container, built on the bake-off sandbox
-image (the same Linux tools the checkers use), with the task workspace as its only mount. Its only network is an
-internal Docker network made for the run whose one other member is a socat forwarder passing exactly the llama-server
-port to the host. The forwarder reaches the host through a second bridge of its own that Pi never joins.
+Isolation: Pi runs in its own container, built on the bake-off sandbox image (the same Linux tools the checkers use),
+with the task workspace as its only host mount and no network at all (`--network none`). Its one way out is a Unix
+socket on a Docker volume made for the run: a socat forwarder on the host network listens on that socket and connects
+to llama-server's host and port, nothing else; inside Pi's container the entrypoint relays 127.0.0.1:<port> to the
+socket. A forwarder on the host network reaches a llama-server bound to the host's loopback (as on the tower:
+install/run-server.sh), which a bridge container going through host-gateway cannot.
 """
 
 from __future__ import annotations
@@ -41,9 +43,10 @@ PI_DOCS = (f"https://github.com/{PI_REPO}/blob/v{PI_VERSION}/packages/coding-age
 IMAGE = "agent-harness-pi"
 SANDBOX_IMAGE = "agent-harness-sandbox:py312"
 FORWARDER_IMAGE = "alpine/socat:1.8.0.3"  # the forwarder ops/cli-llm and bakeoff/reference.py use
+SOCKET_DIR = "/run/llm"  # where the run's volume is mounted in the forwarder and in Pi's container
+SOCKET = f"{SOCKET_DIR}/llm.sock"
 PROVIDER = "canary"  # the models.json provider id the driver selects
 AGENT_DIR = "/tmp/pi-agent"  # Pi's config dir inside the container (PI_CODING_AGENT_DIR); models.json goes here
-LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -73,13 +76,15 @@ def pi_env(base_url: str, model) -> dict[str, str]:
             "PI_OFFLINE": "1", "PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
 
 
-def docker_argv(name: str, ws: Path, network: str, env: dict[str, str], argv: list[str],
+def docker_argv(name: str, ws: Path, route: "Route", env: dict[str, str], argv: list[str],
                 image: str = IMAGE) -> list[str]:
-    """`docker run` for one attempt: the workspace is the only mount, the run's internal network the only network."""
-    env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
-    return ["docker", "run", "--rm", "--name", name, "--network", network, "--memory", "4g", "--cpus", "2",
+    """`docker run` for one attempt: no network; the workspace is the only host mount, plus the run's socket volume.
+    PI_LLM_PORT tells the entrypoint which loopback port to relay to the socket."""
+    env_args = [a for k, v in {**env, "PI_LLM_PORT": str(route.port)}.items() for a in ("-e", f"{k}={v}")]
+    return ["docker", "run", "--rm", "--name", name, "--network", "none", "--memory", "4g", "--cpus", "2",
             "--pids-limit", "1024", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--init",
-            "--mount", f"type=bind,source={ws.resolve()},target=/workspace", "-w", "/workspace", *env_args,
+            "--mount", f"type=bind,source={ws.resolve()},target=/workspace",
+            "--mount", f"type=volume,source={route.volume},target={SOCKET_DIR}", "-w", "/workspace", *env_args,
             image, *argv]
 
 
@@ -90,31 +95,28 @@ def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess:
 
 
 class Route:
-    """An internal network for one run whose only way out is a forwarder to llama-server's port (ops/cli-llm's
-    pattern). `base_url` is the endpoint as Pi sees it from inside that network."""
+    """The run's one way to llama-server: a socket volume and a host-network forwarder from it to llama-server's host
+    and port. `base_url` is the endpoint as Pi sees it (its container's loopback, relayed to the socket)."""
 
     def __init__(self, model_base_url: str, docker: Callable[..., subprocess.CompletedProcess] | None = None):
         url = urlsplit(model_base_url)
         if url.scheme != "http" or not url.hostname:
             raise ValueError(f"the Pi driver needs an http:// llama-server base_url, not {model_base_url!r}")
         self.port = url.port or 80
-        # A loopback llama-server is the host's: the forwarder reaches it as host.docker.internal (host-gateway).
-        self.target = "host.docker.internal" if url.hostname in LOOPBACK else url.hostname
+        host = "127.0.0.1" if url.hostname == "localhost" else url.hostname
+        self.target = f"TCP6:[{host}]:{self.port}" if ":" in host else f"TCP:{host}:{self.port}"
         token = uuid.uuid4().hex[:10]
-        self.network, self.host_network = f"canary-pi-{token}", f"canary-pi-{token}-host"
-        self.forwarder = f"canary-pi-{token}-llm"
-        self.base_url = f"http://{self.forwarder}:{self.port}"
+        self.volume, self.forwarder = f"canary-pi-{token}", f"canary-pi-{token}-llm"
+        self.base_url = f"http://127.0.0.1:{self.port}"
         self.docker = docker or _docker
 
     def __enter__(self) -> "Route":
         try:
-            self.docker("network", "create", "--internal", self.network)
-            self.docker("network", "create", self.host_network)
-            self.docker("run", "-d", "--rm", "--name", self.forwarder, "--network", self.host_network,
-                        "--add-host", "host.docker.internal:host-gateway", "--read-only", "--memory", "32m",
-                        "--cap-drop", "ALL", "--security-opt", "no-new-privileges", FORWARDER_IMAGE,
-                        f"TCP-LISTEN:{self.port},fork,reuseaddr", f"TCP:{self.target}:{self.port}")
-            self.docker("network", "connect", self.network, self.forwarder)
+            self.docker("volume", "create", self.volume)
+            self.docker("run", "-d", "--rm", "--name", self.forwarder, "--network", "host", "--read-only",
+                        "--memory", "32m", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                        "--mount", f"type=volume,source={self.volume},target={SOCKET_DIR}", FORWARDER_IMAGE,
+                        f"UNIX-LISTEN:{SOCKET},fork,unlink-early", self.target)
         except BaseException:
             self.close()
             raise
@@ -125,8 +127,7 @@ class Route:
 
     def close(self) -> None:
         self.docker("rm", "-f", self.forwarder, check=False)
-        self.docker("network", "rm", self.network, check=False)
-        self.docker("network", "rm", self.host_network, check=False)
+        self.docker("volume", "rm", "-f", self.volume, check=False)
 
 
 # launching
@@ -143,8 +144,8 @@ Launch = Callable[[list[str], dict[str, str], Path, float, str], Launched]
 
 
 def launch_local(argv: list[str], env: dict[str, str], ws: Path, timeout: float, name: str) -> Launched:
-    """Run the Pi argv as a host process in the workspace (a fake Pi in the tests; never the real one by hand: that
-    goes through `launch_docker`)."""
+    """Run the Pi argv as a host process in the workspace (a fake Pi in the tests; the real one by hand always goes
+    through `launch_docker`)."""
     import os
     started = time.monotonic()
     try:
@@ -155,13 +156,13 @@ def launch_local(argv: list[str], env: dict[str, str], ws: Path, timeout: float,
     return Launched(proc.stdout, proc.stderr, proc.returncode, False, round(time.monotonic() - started, 1))
 
 
-def launch_docker(network: str, docker: Callable[..., subprocess.CompletedProcess] | None = None) -> Launch:
+def launch_docker(route: Route, docker: Callable[..., subprocess.CompletedProcess] | None = None) -> Launch:
     docker = docker or _docker
 
     def launch(argv: list[str], env: dict[str, str], ws: Path, timeout: float, name: str) -> Launched:
         started = time.monotonic()
         try:
-            proc = subprocess.run(docker_argv(name, ws, network, env, argv), capture_output=True, text=True,
+            proc = subprocess.run(docker_argv(name, ws, route, env, argv), capture_output=True, text=True,
                                   encoding="utf-8", errors="replace", timeout=timeout)
         except subprocess.TimeoutExpired as e:
             docker("rm", "-f", name, check=False)
@@ -228,7 +229,7 @@ def parse_transcript(stdout: str, existing: set[str]) -> dict:
 
 # one attempt
 def run_attempt(task, repeat: int, *, base_url: str, model, launch: Launch, prepare: Callable, grade: Callable,
-                workdir: Path, pi_bin: str = "pi") -> dict:
+                workdir: Path) -> dict:
     """Prepare the task's workspace, run Pi on its prompt there, grade it with the hidden checker.
 
     `status` is `done` when Pi settled without an error, `wall_limit` when it ran past the task's wall-clock limit,
@@ -238,7 +239,7 @@ def run_attempt(task, repeat: int, *, base_url: str, model, launch: Launch, prep
     ws.mkdir(parents=True)
     baseline = prepare(task, ws)
     name = f"canary-pi-{task.id}-{repeat}-{uuid.uuid4().hex[:6]}".replace("_", "-")
-    run = launch(pi_argv(model.name, task.prompt, pi_bin), pi_env(base_url, model), ws, task.wall_limit, name)
+    run = launch(pi_argv(model.name, task.prompt), pi_env(base_url, model), ws, task.wall_limit, name)
     measures = parse_transcript(run.stdout, set(baseline))
     answer = measures.pop("answer")
     settled, error = measures.pop("settled"), measures.pop("error")
@@ -277,10 +278,10 @@ def pin() -> dict:
 
 
 def run_suite(suite: dict, only: list[str] | None, base_url: str, model, launch: Launch,
-              prepare: Callable, grade: Callable, workdir: Path, pi_bin: str = "pi") -> list[dict]:
+              prepare: Callable, grade: Callable, workdir: Path) -> list[dict]:
     tasks = [t for t in suite["hard"] if not only or t.id in only]
     return [run_attempt(t, r, base_url=base_url, model=model, launch=launch, prepare=prepare, grade=grade,
-                        workdir=workdir, pi_bin=pi_bin)
+                        workdir=workdir)
             for t in tasks for r in range(suite["repeats"])]
 
 
@@ -295,7 +296,7 @@ def run_standalone(suite: dict, only: list[str] | None, name: str, build: bool =
     tmp = Path(tempfile.mkdtemp(prefix="canary-pi-"))
     try:
         with Route(model.base_url) as route:
-            outcomes = run_suite(suite, only, route.base_url, model, launch_docker(route.network),
+            outcomes = run_suite(suite, only, route.base_url, model, launch_docker(route),
                                  prepare_hard_task, grade_hard_task, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

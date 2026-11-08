@@ -9,7 +9,6 @@ import asyncio
 import inspect
 import json
 import re
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -125,6 +124,28 @@ def test_a_run_that_read_everything_it_edited_and_one_that_edited_nothing():
                        EXISTING)["edited_unread"] == ["calc.py"]
 
 
+@pytest.mark.parametrize("command", ["printf fixed > calc.py", "echo x >> ./calc.py", "cat patch.txt | tee calc.py",
+                                     "sed -i 's/a - b/a + b/' calc.py", "perl -pi -e 's/-/+/' calc.py",
+                                     "cp /tmp/new.py calc.py", "python gen.py && mv out.py /workspace/calc.py",
+                                     "truncate -s 0 calc.py"])
+def test_a_shell_write_to_an_unread_task_file_is_an_edit_without_reading(command):
+    m = pi_driver.parse_transcript(_jsonl(_turn([_call(1, "bash", command=command)], _usage(10, 1))), EXISTING)
+    assert m["read_before_edit"] is False and m["edited_unread"] == ["calc.py"]
+
+
+@pytest.mark.parametrize("command", ["cat calc.py > /tmp/copy && printf x > calc.py",
+                                     "grep -n add < calc.py; printf x > calc.py"])
+def test_a_shell_command_that_shows_a_file_before_writing_it_reads_first(command):
+    assert file_access([("run_shell", {"command": command})], EXISTING) == {"read_before_edit": True,
+                                                                             "edited_unread": []}
+
+
+@pytest.mark.parametrize("command", ["pytest -q 2>&1 | tail -n 20", "python calc.py > /dev/null", "git diff calc.py",
+                                     "printf x > new_file.py"])
+def test_shell_commands_that_write_no_task_file_are_no_edit(command):
+    assert file_access([("bash", {"command": command})], EXISTING)["read_before_edit"] is None
+
+
 def test_an_error_or_exhausted_retries_is_recorded():
     records = transcript()[:-2]
     records[-2]["message"] = _assistant([], _usage(10, 0), stop="error", errorMessage="400 context too long")
@@ -136,13 +157,12 @@ def test_an_error_or_exhausted_retries_is_recorded():
 
 
 # the command, with a fake Pi process
-FAKE_PI = r'''#!{python}
-"""A stand-in for `pi`: records how it was started, edits calc.py like the model would, prints a transcript."""
+FAKE_PI = r'''"""A stand-in for `pi`: records how it was started, edits calc.py like the model would, prints a transcript."""
 import json, os, sys
 from pathlib import Path
-Path(os.environ["FAKE_PI_RECORD"]).write_text(json.dumps({{
+Path(os.environ["FAKE_PI_RECORD"]).write_text(json.dumps({
     "argv": sys.argv[1:], "cwd": os.getcwd(), "models": json.loads(os.environ["PI_MODELS_JSON"]),
-    "agent_dir": os.environ["PI_CODING_AGENT_DIR"], "offline": os.environ.get("PI_OFFLINE")}}))
+    "agent_dir": os.environ["PI_CODING_AGENT_DIR"], "offline": os.environ.get("PI_OFFLINE")}))
 calc = Path("calc.py")
 calc.write_text(calc.read_text().replace("a - b", "a + b"))
 mode = os.environ.get("FAKE_PI_MODE", "ok")
@@ -155,15 +175,22 @@ sys.exit(3 if mode == "crash" else 0)
 
 @pytest.fixture
 def fake_pi(tmp_path, monkeypatch):
-    path = tmp_path / "bin" / "pi"
+    path = tmp_path / "bin" / "fake_pi.py"
     path.parent.mkdir()
-    path.write_text(FAKE_PI.format(python=sys.executable), encoding="utf-8")
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    path.write_text(FAKE_PI, encoding="utf-8")
     record, script = tmp_path / "record.json", tmp_path / "transcript.jsonl"
     script.write_text(_jsonl(transcript()), encoding="utf-8")
     monkeypatch.setenv("FAKE_PI_RECORD", str(record))
     monkeypatch.setenv("FAKE_PI_TRANSCRIPT", str(script))
-    return SimpleNamespace(bin=str(path), record=record, script=script)
+    started = []
+
+    def launch(argv, env, ws, timeout, name):
+        """`pi ...` as the driver builds it, run as `python fake_pi.py ...` (Windows runs no shebang scripts)."""
+        started.append(argv)
+        assert argv[0] == "pi"
+        return pi_driver.launch_local([sys.executable, str(path), *argv[1:]], env, ws, timeout, name)
+
+    return SimpleNamespace(launch=launch, started=started, record=record, script=script)
 
 
 def _task(**kw):
@@ -184,8 +211,7 @@ def _grade(task, ws: Path, answer: str, baseline) -> tuple[bool, str]:
 
 def _attempt(tmp_path, fake_pi, task=None):
     return pi_driver.run_attempt(task or _task(), 0, base_url="http://canary-pi-x-llm:8090", model=MODEL,
-                                 launch=pi_driver.launch_local, prepare=_prepare, grade=_grade,
-                                 workdir=tmp_path / "work", pi_bin=fake_pi.bin)
+                                 launch=fake_pi.launch, prepare=_prepare, grade=_grade, workdir=tmp_path / "work")
 
 
 def test_the_pi_command_passes_the_endpoint_model_prompt_and_task_directory(tmp_path, fake_pi):
@@ -229,14 +255,21 @@ def test_a_run_with_no_events_says_what_pi_printed(tmp_path, fake_pi):
     assert res["status"] == "failed" and res["note"].endswith("pi never settled; no events (stderr: )")
 
 
-def test_docker_mounts_only_the_workspace_on_the_internal_network(tmp_path):
-    argv = pi_driver.docker_argv("canary-pi-a", tmp_path, "canary-pi-n", {"K": "v"}, ["pi", "--mode", "json"])
+def _route(calls=None) -> pi_driver.Route:
+    return pi_driver.Route("http://127.0.0.1:8090", docker=lambda *a, check=True: (calls if calls is not None else []).append(a))
+
+
+def test_docker_gives_pi_no_network_and_the_workspace_as_its_only_host_mount(tmp_path):
+    route = _route()
+    argv = pi_driver.docker_argv("canary-pi-a", tmp_path, route, {"K": "v"}, ["pi", "--mode", "json"])
     assert argv[:3] == ["docker", "run", "--rm"]
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--mount"] == [
-        f"type=bind,source={tmp_path.resolve()},target=/workspace"]
-    assert not {"-v", "--volume", "--privileged"} & set(argv)
-    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--network"] == ["canary-pi-n"]
-    assert argv[argv.index("--cap-drop") + 1] == "ALL" and argv[argv.index("-e") + 1] == "K=v"
+        f"type=bind,source={tmp_path.resolve()},target=/workspace",
+        f"type=volume,source={route.volume},target=/run/llm"]  # a Docker volume holding only the socket
+    assert not {"-v", "--volume", "--privileged", "-p", "--publish"} & set(argv)
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--network"] == ["none"]
+    env = [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
+    assert env == ["K=v", "PI_LLM_PORT=8090"] and argv[argv.index("--cap-drop") + 1] == "ALL"
     assert argv[argv.index(pi_driver.IMAGE):] == [pi_driver.IMAGE, "pi", "--mode", "json"]
 
 
@@ -250,7 +283,7 @@ def test_launch_docker_runs_that_command_and_removes_a_container_past_the_limit(
         return SimpleNamespace(stdout="{}", stderr="", returncode=0)
 
     monkeypatch.setattr(pi_driver.subprocess, "run", fake_run)
-    launch = pi_driver.launch_docker("canary-pi-n", docker=lambda *a, check=True: removed.append(a))
+    launch = pi_driver.launch_docker(_route(), docker=lambda *a, check=True: removed.append(a))
     ok = launch(["pi"], {}, tmp_path, 60, "canary-pi-a")
     assert ok.exit_code == 0 and not ok.timed_out and runs[0][-2:] == [pi_driver.IMAGE, "pi"]
     slow = launch(["pi"], {}, tmp_path, 0.5, "canary-pi-b")
@@ -259,19 +292,20 @@ def test_launch_docker_runs_that_command_and_removes_a_container_past_the_limit(
 
 def test_the_route_forwards_only_the_llama_server_port_and_cleans_up():
     calls = []
-    with pi_driver.Route("http://127.0.0.1:8090", docker=lambda *a, check=True: calls.append(a)) as route:
-        assert route.base_url == f"http://{route.forwarder}:8090"
-    created = [c for c in calls if c[:2] == ("network", "create")]
-    assert created == [("network", "create", "--internal", route.network),
-                       ("network", "create", route.host_network)]
+    with _route(calls) as route:
+        assert route.base_url == "http://127.0.0.1:8090"  # Pi's own loopback, relayed to the socket
+    assert calls[0] == ("volume", "create", route.volume)
     forwarder = next(c for c in calls if c[0] == "run")
-    assert forwarder[-2:] == ("TCP-LISTEN:8090,fork,reuseaddr", "TCP:host.docker.internal:8090")
-    assert forwarder[forwarder.index("--network") + 1] == route.host_network  # Pi never joins this one
-    assert ("network", "connect", route.network, route.forwarder) in calls
-    assert calls[-3:] == [("rm", "-f", route.forwarder), ("network", "rm", route.network),
-                          ("network", "rm", route.host_network)]
+    # On the host network, so a llama-server bound to the host's loopback (the tower's) is reachable; it listens
+    # only on the run's socket and connects only to llama-server's port.
+    assert forwarder[forwarder.index("--network") + 1] == "host"
+    assert forwarder[-2:] == ("UNIX-LISTEN:/run/llm/llm.sock,fork,unlink-early", "TCP:127.0.0.1:8090")
+    assert forwarder[forwarder.index("--mount") + 1] == f"type=volume,source={route.volume},target=/run/llm"
+    assert calls[-2:] == [("rm", "-f", route.forwarder), ("volume", "rm", "-f", route.volume)]
     lan = pi_driver.Route("http://gpu-box:8091", docker=lambda *a, check=True: None)
-    assert lan.target == "gpu-box" and lan.port == 8091
+    assert lan.target == "TCP:gpu-box:8091" and lan.port == 8091
+    assert pi_driver.Route("http://localhost:8090").target == "TCP:127.0.0.1:8090"
+    assert pi_driver.Route("http://[::1]:8090").target == "TCP6:[::1]:8090"
     with pytest.raises(ValueError):
         pi_driver.Route("https://api.example.com")
 
@@ -286,7 +320,7 @@ def test_a_route_that_fails_half_way_removes_what_it_made():
 
     with pytest.raises(subprocess.CalledProcessError):
         pi_driver.Route("http://127.0.0.1:8090", docker=docker).__enter__()
-    assert [c[:2] for c in calls[-3:]] == [("rm", "-f"), ("network", "rm"), ("network", "rm")]
+    assert [c[:2] for c in calls[-2:]] == [("rm", "-f"), ("volume", "rm")]
 
 
 def test_the_image_pins_the_release_the_driver_records():
@@ -297,6 +331,8 @@ def test_the_image_pins_the_release_the_driver_records():
     assert re.search(r"^FROM (\S+)$", dockerfile.split("AS pi")[1], re.M).group(1) == pi_driver.SANDBOX_IMAGE
     entrypoint = (ROOT / "reference" / "pi" / "entrypoint.sh").read_text(encoding="utf-8")
     assert '"$PI_CODING_AGENT_DIR/models.json"' in entrypoint and 'exec "$@"' in entrypoint
+    assert '"TCP-LISTEN:${PI_LLM_PORT},bind=127.0.0.1,fork,reuseaddr" UNIX-CONNECT:/run/llm/llm.sock' in entrypoint
+    assert re.search(r"apt-get install .*\bsocat\b", dockerfile)
     assert pi_driver.pin()["docs_url"] == pi_driver.PI_DOCS and pi_driver.PI_DOCS.startswith(f"https://github.com/earendil-works/pi/blob/v{pi_driver.PI_VERSION}/")
 
 
@@ -347,10 +383,10 @@ def test_run_standalone_with_driver_pi_runs_the_suite_through_pi_and_writes_the_
     monkeypatch.setattr(pi_driver, "_docker", lambda *a, check=True: docker.append(a))
     started = []
 
-    def launcher(network):
+    def launcher(route):
         def launch(argv, env, ws, timeout, name):
-            started.append((network, argv[0], timeout))
-            return pi_driver.launch_local([fake_pi.bin, *argv[1:]], env, ws, timeout, name)
+            started.append((route.volume, argv[0], timeout))
+            return fake_pi.launch(argv, env, ws, timeout, name)
         return launch
 
     monkeypatch.setattr(pi_driver, "launch_docker", launcher)
@@ -367,9 +403,11 @@ def test_run_standalone_with_driver_pi_runs_the_suite_through_pi_and_writes_the_
     assert [(o["task"], o["repeat"], o["ok"]) for o in data["outcomes"]] == [("sqlite_report", 0, True),
                                                                              ("sqlite_report", 1, True)]
     assert built == [True] and {s[1] for s in started} == {"pi"} and {s[2] for s in started} == {60}
-    network = next(c[3] for c in docker if c[:3] == ("network", "create", "--internal"))
-    assert {s[0] for s in started} == {network}
-    assert ("network", "rm", network) in docker
+    volume = next(c[2] for c in docker if c[:2] == ("volume", "create"))
+    assert {s[0] for s in started} == {volume}
+    assert ("volume", "rm", "-f", volume) in docker
+    models = json.loads(fake_pi.record.read_text())["models"]
+    assert models["providers"]["canary"]["baseUrl"] == "http://127.0.0.1:8090/v1"
     with pytest.raises(ValueError):
         asyncio.run(canary.run_standalone([], None, tmp_path, driver="opencode"))
 
