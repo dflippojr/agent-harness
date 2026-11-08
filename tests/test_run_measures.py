@@ -542,3 +542,12 @@ def test_a_background_list_s_cd_does_not_move_the_foreground(measure, command):
                                      "cd tests && cat calc.py; printf x > calc.py"])
 def test_a_foreground_cd_still_moves_the_shell(measure, command):
     assert measure(command, {"calc.py", "tests/calc.py"}) == {"read_before_edit": True, "edited_unread": []}
+
+
+# a read before the write in the writer's own sequence counts, whatever runs alongside
+@DRIVERS
+@pytest.mark.parametrize("command", ["cat calc.py & cat calc.py; printf fixed > calc.py; wait",
+                                     "(cat calc.py; printf x > calc.py) | cat calc.py",
+                                     "grep add calc.py | (cat calc.py; sed -i s/a/b/ calc.py)"])
+def test_a_read_before_the_write_in_its_own_sequence_counts_despite_concurrent_readers(measure, command):
+    assert measure(command) == {"read_before_edit": True, "edited_unread": []}
