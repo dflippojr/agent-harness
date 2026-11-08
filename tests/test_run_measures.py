@@ -479,3 +479,16 @@ def test_a_read_in_one_pipeline_stage_does_not_precede_another_stage_s_write(mea
                                      "cat calc.py && (head notes.md | tee calc.py)"])
 def test_order_within_a_stage_and_before_the_pipeline_still_counts(measure, command):
     assert measure(command) == {"read_before_edit": True, "edited_unread": []}
+
+
+# perl's numeric options (-0777, -l0) sit inside clusters without hiding -i or -e
+@DRIVERS
+@pytest.mark.parametrize("command", ["perl -0777pi -e 's/a - b/a + b/' calc.py", "perl -0777 -pi -e s/a/b/ calc.py",
+                                     "perl -l0pi -e s/a/b/ calc.py", "perl -0777pie 's/a/b/' calc.py"])
+def test_a_numeric_perl_option_does_not_hide_an_in_place_edit(measure, command):
+    assert measure(command) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+def test_a_numeric_perl_option_without_i_is_no_edit(measure):
+    assert measure("perl -0777pe 's/a/b/' calc.py") == {"read_before_edit": None, "edited_unread": []}
