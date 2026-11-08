@@ -525,3 +525,20 @@ def test_a_path_outside_the_workspace_is_none_of_its_files(measure):
     assert measure("cd ..; printf x > calc.py") == {"read_before_edit": None, "edited_unread": []}
     assert measure("cat ../workspace/calc.py; cd /workspace && printf x > calc.py") == {"read_before_edit": True,
                                                                                          "edited_unread": []}
+
+
+# a background list runs in a subshell: its cd moves only itself
+@DRIVERS
+@pytest.mark.parametrize("command", ["cd tests && cat calc.py & wait; printf x > calc.py",
+                                     "cd tests && cat calc.py & printf x > calc.py",
+                                     "(cd tests) & cd tests && cat calc.py & wait; printf x > calc.py"])
+def test_a_background_list_s_cd_does_not_move_the_foreground(measure, command):
+    existing = {"calc.py", "tests/calc.py"}
+    assert measure(command, existing) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+@pytest.mark.parametrize("command", ["cd tests & cat calc.py; printf x > calc.py",
+                                     "cd tests && cat calc.py; printf x > calc.py"])
+def test_a_foreground_cd_still_moves_the_shell(measure, command):
+    assert measure(command, {"calc.py", "tests/calc.py"}) == {"read_before_edit": True, "edited_unread": []}
