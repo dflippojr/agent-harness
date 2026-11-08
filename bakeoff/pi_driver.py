@@ -114,7 +114,7 @@ class Route:
         self.target = f"TCP6:[{host}]:{self.port}" if ":" in host else f"TCP:{host}:{self.port}"
         token = uuid.uuid4().hex[:10]
         self.volume, self.forwarder = f"canary-pi-{token}", f"canary-pi-{token}-llm"
-        self.base_url = f"http://127.0.0.1:{self.port}"
+        self.base_url = f"http://127.0.0.1:{self.port}{url.path.rstrip('/')}"  # a reverse proxy's path prefix stays
         self.docker = docker or _docker
 
     def __enter__(self) -> "Route":

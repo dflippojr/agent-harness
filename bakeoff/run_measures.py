@@ -37,7 +37,8 @@ def normalize(path: str, cwd: str = "") -> str:
     return "" if p == "." else p
 
 
-HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+# `<<WORD` or `<<-WORD` (WORD whole, quoted or not); not a here-string `<<<`
+HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([^\s'\";&|()<>]+)\2")
 
 
 def _without_heredoc_bodies(command: str) -> str:

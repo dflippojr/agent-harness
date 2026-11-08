@@ -210,6 +210,13 @@ def test_an_i_inside_an_attached_script_is_not_in_place(command):
     assert file_access([("bash", {"command": f"{command}; printf x > calc.py"})], EXISTING)["read_before_edit"] is True
 
 
+@pytest.mark.parametrize("command", ["cat <<< hello\nprintf fixed > calc.py", "cat <<<EOF\nprintf fixed > calc.py",
+                                     "cat <<EOF-MARKER\nEOF\nx\nEOF-MARKER\nprintf fixed > calc.py",
+                                     "cat <<'END.TXT'\nprintf no > util.py\nEND.TXT\nprintf fixed > calc.py"])
+def test_here_strings_are_no_here_document_and_delimiters_are_whole_words(command):
+    assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
+
+
 @pytest.mark.parametrize("command", ["echo hi # <<EOF\nprintf fixed > calc.py", "echo '<<EOF'\nprintf fixed > calc.py",
                                      'echo "a <<EOF b"\nprintf fixed > calc.py'])
 def test_a_here_document_marker_in_a_comment_or_quotes_is_none(command):
@@ -450,6 +457,11 @@ def test_the_route_forwards_only_the_llama_server_port_and_cleans_up():
     assert lan.target == "TCP:gpu-box:8091" and lan.port == 8091
     assert pi_driver.Route("http://localhost:8090").target == "TCP:127.0.0.1:8090"
     assert pi_driver.Route("http://[::1]:8090").target == "TCP6:[::1]:8090"
+    # a reverse proxy's path prefix is kept, as the native driver keeps it (base_url + /v1/chat/completions)
+    prefixed = pi_driver.Route("http://127.0.0.1:8443/llama/", docker=lambda *a, check=True: None)
+    assert prefixed.base_url == "http://127.0.0.1:8443/llama" and prefixed.target == "TCP:127.0.0.1:8443"
+    assert pi_driver.models_json(prefixed.base_url, MODEL)["providers"]["canary"]["baseUrl"] == \
+        "http://127.0.0.1:8443/llama/v1"
     with pytest.raises(ValueError):
         pi_driver.Route("https://api.example.com")
 
