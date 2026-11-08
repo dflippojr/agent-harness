@@ -233,7 +233,7 @@ def shell_access(command: str) -> list[tuple[str, str]]:
             # It expands before the enclosing command runs or opens its redirects: keep that command open.
             segment[-1] = segment[-1][:-1]
             outer.append(("sub", cwd, oldpwd, [w for w in segment if w], redirects))
-            pipes.append(_pipeline(len(events)))
+            pipes.append(_pipeline(len(events), (cwd, oldpwd)))
             segment, redirects = [], []
             i += 1
             continue
@@ -264,17 +264,19 @@ def shell_access(command: str) -> list[tuple[str, str]]:
                 if level["bg_from"] is None:
                     level["bg_from"] = level["element"]
                 level["bg"].append((level["element"], len(events)))
+                cwd, oldpwd = level["dirs"]  # in a subshell: its cd moved only itself
             if word not in ("(", ")"):
                 level["command"] = len(events)  # the next command (a stage, or not) begins here
             if word in (";", "\n", "&", ";;"):
                 level["element"] = len(events)
+                level["dirs"] = (cwd, oldpwd)
             if word == ")":
                 _end_background(events, level)
             if word == ")" and len(pipes) > 1:
                 pipes.pop()
             if word == "(":
                 outer.append(("shell", cwd, oldpwd, len(events)))
-                pipes.append(_pipeline(len(events)))
+                pipes.append(_pipeline(len(events), (cwd, oldpwd)))
             elif word == ")" and outer and outer[-1][0] == "sub":
                 _, cwd, oldpwd, segment, redirects = outer.pop()  # the enclosing command goes on after the expansion
             elif word == ")" and outer:
@@ -305,12 +307,14 @@ def shell_access(command: str) -> list[tuple[str, str]]:
 PIPES = ("|", "|&")
 
 
-def _pipeline(command_start: int) -> dict:
+def _pipeline(command_start: int, dirs: tuple[str, str | None] = ("", None)) -> dict:
     """A nesting level's concurrency state: the pipeline being read (its first event, stage boundaries), where the
     current command and the current list element (`a && b`, up to `;`, `&` or a newline) began, and the background
-    jobs started since the last `wait` (their event spans, and where the first began)."""
+    jobs started since the last `wait` (their event spans, and where the first began). `dirs` is the working and
+    previous directory where the current list element began: a background element runs in a subshell, so its cd
+    is undone at its `&`."""
     return {"start": None, "bounds": [], "command": command_start, "element": command_start, "bg": [],
-            "bg_from": None}
+            "bg_from": None, "dirs": dirs}
 
 
 def _end_background(events: list[tuple[str, str]], level: dict) -> None:
