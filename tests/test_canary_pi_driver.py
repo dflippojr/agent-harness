@@ -502,3 +502,41 @@ def test_a_native_hard_attempt_by_hand_records_them_and_the_nightly_one_does_not
     assert by_hand["read_before_edit"] is False and by_hand["edited_unread"] == ["util.py"]
     nightly = asyncio.run(body(None))
     assert nightly["status"] == "done" and not {"driver", "tool_calls", "read_before_edit"} & set(nightly)
+
+
+# stopping a run by hand stops Pi
+def test_the_pi_suite_runs_on_the_caller_s_thread_so_an_interrupt_stops_it(monkeypatch, tmp_path):
+    import threading
+    seen = []
+    monkeypatch.setattr(pi_driver, "run_standalone", lambda *a, **k: seen.append(threading.current_thread()) or tmp_path)
+    monkeypatch.setattr(canary, "load_suite", lambda: {"repeats": 1, "hard": [_task()], "web": []})
+    asyncio.run(canary.run_standalone([], None, tmp_path, driver="pi"))
+    # not a worker thread: cancelling an await would leave one running attempt after attempt
+    assert seen == [threading.main_thread()]
+
+
+def test_an_interrupted_docker_run_removes_its_container_and_re_raises(tmp_path, monkeypatch):
+    removed = []
+
+    def interrupted(cmd, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(pi_driver.subprocess, "run", interrupted)
+    launch = pi_driver.launch_docker(_route(), docker=lambda *a, check=True: removed.append(a))
+    with pytest.raises(KeyboardInterrupt):
+        launch(["pi"], {}, tmp_path, 60, "canary-pi-a")
+    # killing the docker CLI leaves a --rm container running: it is removed by name
+    assert removed == [("rm", "-f", "canary-pi-a")]
+
+
+def test_an_interrupt_ends_the_suite_without_another_attempt(tmp_path):
+    launched = []
+
+    def launch(argv, env, ws, timeout, name):
+        launched.append(name)
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        pi_driver.run_suite({"repeats": 2, "hard": [_task(), _task(id="other")]}, None, "http://127.0.0.1:8090",
+                            MODEL, launch, _prepare, _grade, tmp_path / "work")
+    assert len(launched) == 1
