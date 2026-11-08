@@ -233,7 +233,8 @@ def parse_transcript(stdout: str, existing: set[str]) -> dict:
     error = (last.get("errorMessage") or last.get("stopReason")) if last.get("stopReason") in ("error", "aborted") \
         else (retry_failed[-1].get("finalError") or "retries exhausted") if retry_failed else ""
     answer = next((t for t in (_text_of(m) for m in reversed(assistants)) if t.strip()), "")
-    return {"answer": answer.strip(), "turns": sum(e.get("type") == "turn_end" for e in evs),
+    # a turn is a finished assistant reply: one cut off by the wall limit mid-tool has no turn_end yet
+    return {"answer": answer.strip(), "turns": len(assistants),
             "prompt_tokens": sum(u.get("input", 0) + u.get("cacheRead", 0) + u.get("cacheWrite", 0) for u in usage),
             "completion_tokens": sum(u.get("output", 0) for u in usage),
             # agent turns only: the native loop records no cached prefix for its summaries (run_measures)

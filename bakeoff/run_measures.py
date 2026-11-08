@@ -202,6 +202,7 @@ def shell_access(command: str) -> list[tuple[str, str]]:
     workspace with no previous directory."""
     events: list[tuple[str, str]] = []
     cwd, oldpwd = "", None
+    after_pipe = False  # the command being read follows a `|`
     outer: list[tuple] = []  # open `( ... )`: ("shell", cwd, oldpwd, where its events begin) or a `$( ... )`:
     #                          ("sub", cwd, oldpwd, the enclosing command's words and redirects so far)
     segment: list[str] = []
@@ -233,8 +234,11 @@ def shell_access(command: str) -> list[tuple[str, str]]:
         if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
             events += [(kind, normalize(t, cwd)) for kind, t in redirects]
             command_words, chdirs = _command(segment)
+            piped = word == "|" or after_pipe  # a pipeline's commands run in subshells: a cd there moves nothing
+            after_pipe = word == "|"
             if command_words and command_words[0].rsplit("/", 1)[-1] == "cd":
-                cwd, oldpwd = _cd(command_words[1:], cwd, oldpwd)
+                if not piped:
+                    cwd, oldpwd = _cd(command_words[1:], cwd, oldpwd)
             else:  # in the directory a wrapper moved it to (env -C), the shell's own staying put
                 run_in = cwd
                 for d in chdirs:
