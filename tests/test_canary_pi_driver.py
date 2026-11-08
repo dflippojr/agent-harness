@@ -171,6 +171,29 @@ def test_cp_or_mv_into_the_workspace_overwrites_the_task_file_of_that_name(comma
     assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
 
 
+@pytest.mark.parametrize("command", ["grep calc.py README.md", "rg -n calc.py tests", "awk '/calc.py/' notes.md",
+                                     "sed -n /calc.py/p notes.md", "grep -A 3 -e calc.py notes.md",
+                                     "head -n calc.py notes.md"])
+def test_a_pattern_or_option_value_naming_a_file_is_not_reading_it(command):
+    calls = [("bash", {"command": f"{command}; printf fixed > calc.py"})]
+    assert file_access(calls, EXISTING)["edited_unread"] == ["calc.py"]
+
+
+@pytest.mark.parametrize("command", ["grep -n add calc.py", "grep -e add -e sub calc.py", "rg -A 3 add calc.py",
+                                     "sed -n 1,20p calc.py", "awk -F, '{print}' calc.py", "head -n 5 calc.py",
+                                     "tail -n 20 calc.py", "cat -- calc.py"])
+def test_a_viewer_s_file_operands_are_reads(command):
+    assert file_access([("bash", {"command": f"{command}; printf fixed > calc.py"})], EXISTING)["read_before_edit"]
+
+
+def test_a_cd_inside_a_subshell_ends_with_it():
+    existing = {"inventory/report.py", "report.py"}
+    calls = [("bash", {"command": "(cd inventory; cat report.py); printf fixed > report.py"})]
+    assert file_access(calls, existing) == {"read_before_edit": False, "edited_unread": ["report.py"]}
+    calls = [("bash", {"command": "cd inventory && (cd /tmp; cat report.py) && sed -i s/a/b/ report.py"})]
+    assert file_access(calls, existing)["edited_unread"] == ["inventory/report.py"]
+
+
 def test_here_document_bodies_are_data_not_commands():
     heredoc = "cat > new.py <<'EOF'\nopen('calc.py', 'w').write(x > util.py)\nEOF\ncat calc.py\nsed -i s/a/b/ calc.py"
     assert file_access([("bash", {"command": heredoc})], EXISTING) == {"read_before_edit": True,

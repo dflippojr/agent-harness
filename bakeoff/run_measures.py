@@ -111,12 +111,15 @@ def shell_access(command: str) -> list[tuple[str, str]]:
 
     Shown: through a viewer (`cat a.py | head`, `sed -n 1,20p b.py`) or an input redirect (`< c.py`). Written: an
     output redirect (`>`, `>>`), `tee`, `sed -i` / `perl -pi` (which edit without showing), the target of `cp` or
-    `mv` (a file, or a directory the sources land in under their own names), or `truncate`. Running a file (`python x.py`, `pytest tests/x.py`) neither shows nor writes it. Simple
-    commands count in order; within one, its redirects come first (the shell opens them before it runs the command),
-    then what the command reads, then what it writes. `cd` moves where later relative paths resolve; the command
-    starts in the workspace."""
+    `mv` (a file, or a directory the sources land in under their own names), or `truncate`. Only file operands
+    count: a viewer's pattern or script (`grep calc.py README.md`, `sed -n 1p x`) and option values are not files.
+    Running a file (`python x.py`, `pytest tests/x.py`) neither shows nor writes it. Simple commands count in order;
+    within one, its redirects come first (the shell opens them before it runs the command), then what the command
+    reads, then what it writes. `cd` moves where later relative paths resolve, until the subshell `( ... )` it ran in
+    ends; the command starts in the workspace."""
     events: list[tuple[str, str]] = []
     cwd = ""
+    outer: list[str] = []  # the directory each open subshell started in
     segment: list[str] = []
     redirects: list[tuple[str, str]] = []
     words = [*_words(command), ";"]
@@ -133,10 +136,49 @@ def shell_access(command: str) -> list[tuple[str, str]]:
             events += [(kind, normalize(t, cwd)) for kind, t in redirects]
             cwd = _segment_access(segment, cwd, events)
             segment, redirects = [], []
+            for c in word:  # punctuation runs together: `);` or `((`
+                if c == "(":
+                    outer.append(cwd)
+                elif c == ")" and outer:
+                    cwd = outer.pop()
         else:
             segment.append(word)
         i += 1
     return events
+
+
+# Options that take a value as the next word, and options that give the pattern or script (so the first operand is a
+# file), per command. A value joined to its option (`-n5`, `--regexp=x`) needs no skipping.
+VALUE_OPTIONS = {
+    "head": {"-n", "-c"}, "tail": {"-n", "-c"},
+    "grep": {"-e", "-f", "-A", "-B", "-C", "-m", "--regexp", "--file"},
+    "rg": {"-e", "-f", "-A", "-B", "-C", "-m", "-g", "-t", "-T", "--regexp", "--file", "--glob", "--type"},
+    "sed": {"-e", "-f", "--expression", "--file"}, "perl": {"-e", "-E"}, "awk": {"-F", "-v", "-f"},
+    "nl": {"-b", "-w", "-s", "-v", "-i"}, "truncate": {"-s", "-r", "--size", "--reference"},
+}
+SCRIPT_OPTIONS = {"grep": {"-e", "-f", "--regexp", "--file"}, "rg": {"-e", "-f", "--regexp", "--file"},
+                  "sed": {"-e", "-f", "--expression", "--file"}, "awk": {"-f"}, "perl": {"-e", "-E"}}
+
+
+def operands(cmd: str, args: list[str]) -> list[str]:
+    """A command's file operands: no options or option values, and for grep, rg, sed, awk and perl no pattern or
+    script (their first operand, unless an option gave it)."""
+    takes, scripts = VALUE_OPTIONS.get(cmd, set()), SCRIPT_OPTIONS.get(cmd, set())
+    out: list[str] = []
+    script_given, ended, i = False, False, 0
+    while i < len(args):
+        a = args[i]
+        if ended or a == "-" or not a.startswith("-"):
+            out.append(a)
+        elif a == "--":
+            ended = True
+        else:
+            name = a.split("=", 1)[0]
+            script_given = script_given or name in scripts
+            if name in takes and "=" not in a:
+                i += 1
+        i += 1
+    return out[1:] if scripts and not script_given else out
 
 
 def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]]) -> str:
@@ -144,7 +186,7 @@ def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]])
     if not segment:
         return cwd
     cmd, args = segment[0].rsplit("/", 1)[-1], segment[1:]
-    files = [normalize(a, cwd) for a in args if not a.startswith("-")]
+    files = [normalize(a, cwd) for a in operands(cmd, args)]
     if cmd == "cd":  # a directory outside the workspace stays absolute; `cd` alone (or `cd ~`, `cd -`) leaves it
         return files[0] if files and not files[0].startswith(("~", "-")) else HOME
     if cmd in ("sed", "perl") and _in_place(args):
