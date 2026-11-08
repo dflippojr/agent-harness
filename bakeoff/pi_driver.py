@@ -22,6 +22,7 @@ install/run-server.sh), which a bridge container going through host-gateway cann
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -47,6 +48,7 @@ SOCKET_DIR = "/run/llm"  # where the run's volume is mounted in the forwarder an
 SOCKET = f"{SOCKET_DIR}/llm.sock"
 PROVIDER = "canary"  # the models.json provider id the driver selects
 AGENT_DIR = "/tmp/pi-agent"  # Pi's config dir inside the container (PI_CODING_AGENT_DIR); models.json goes here
+HOME = "/tmp/pi-home"  # Pi runs as the host user, who has no home in the image
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -79,9 +81,13 @@ def pi_env(base_url: str, model) -> dict[str, str]:
 def docker_argv(name: str, ws: Path, route: "Route", env: dict[str, str], argv: list[str],
                 image: str = IMAGE) -> list[str]:
     """`docker run` for one attempt: no network; the workspace is the only host mount, plus the run's socket volume.
-    PI_LLM_PORT tells the entrypoint which loopback port to relay to the socket."""
-    env_args = [a for k, v in {**env, "PI_LLM_PORT": str(route.port)}.items() for a in ("-e", f"{k}={v}")]
-    return ["docker", "run", "--rm", "--name", name, "--network", "none", "--memory", "4g", "--cpus", "2",
+    PI_LLM_PORT tells the entrypoint which loopback port to relay to the socket.
+
+    Pi runs as the host user that prepared the workspace (with no capabilities, container root could not write its
+    0644 files), so what it writes stays the host user's and the run's temp dir can be removed."""
+    env_args = [a for k, v in {**env, "PI_LLM_PORT": str(route.port), "HOME": HOME}.items() for a in ("-e", f"{k}={v}")]
+    user = ["--user", f"{os.getuid()}:{os.getgid()}"] if hasattr(os, "getuid") else []
+    return ["docker", "run", "--rm", "--name", name, *user, "--network", "none", "--memory", "4g", "--cpus", "2",
             "--pids-limit", "1024", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--init",
             "--mount", f"type=bind,source={ws.resolve()},target=/workspace",
             "--mount", f"type=volume,source={route.volume},target={SOCKET_DIR}", "-w", "/workspace", *env_args,
@@ -116,7 +122,7 @@ class Route:
             self.docker("run", "-d", "--rm", "--name", self.forwarder, "--network", "host", "--read-only",
                         "--memory", "32m", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                         "--mount", f"type=volume,source={self.volume},target={SOCKET_DIR}", FORWARDER_IMAGE,
-                        f"UNIX-LISTEN:{SOCKET},fork,unlink-early", self.target)
+                        f"UNIX-LISTEN:{SOCKET},fork,unlink-early,mode=666", self.target)
         except BaseException:
             self.close()
             raise
@@ -146,7 +152,6 @@ Launch = Callable[[list[str], dict[str, str], Path, float, str], Launched]
 def launch_local(argv: list[str], env: dict[str, str], ws: Path, timeout: float, name: str) -> Launched:
     """Run the Pi argv as a host process in the workspace (a fake Pi in the tests; the real one by hand always goes
     through `launch_docker`)."""
-    import os
     started = time.monotonic()
     try:
         proc = subprocess.run(argv, cwd=ws, env={**os.environ, **env}, capture_output=True, text=True,
@@ -204,15 +209,17 @@ def parse_transcript(stdout: str, existing: set[str]) -> dict:
 
     Tokens are what llama-server reported per call, as Pi records them in each assistant message's usage: Pi splits
     the server's prompt_tokens into `input` (uncached), `cacheRead` (prompt_tokens_details.cached_tokens) and
-    `cacheWrite`, so prompt tokens are their sum, the same count the native driver records. Tokens include
-    compaction summaries (`compaction_end.result.usage`); `turns` counts assistant turns only."""
+    `cacheWrite`, so prompt tokens are their sum, the same count the native driver records. Prompt and completion
+    tokens include compaction summaries (`compaction_end.result.usage`), as the native totals do; cached-prompt tokens
+    and `turns` count agent turns only, as the native record does."""
     evs = events(stdout)
     assistants = [e["message"] for e in evs if e.get("type") == "message_end"
                   and isinstance(e.get("message"), dict) and e["message"].get("role") == "assistant"]
     # Compaction summaries are model calls too (the native totals count theirs): their usage is on compaction_end.
     summaries = [e["result"].get("usage") for e in evs if e.get("type") == "compaction_end"
                  and isinstance(e.get("result"), dict)]
-    usage = [m.get("usage") or {} for m in assistants] + [u for u in summaries if isinstance(u, dict)]
+    turn_usage = [m.get("usage") or {} for m in assistants]
+    usage = turn_usage + [u for u in summaries if isinstance(u, dict)]
     calls = [(e.get("toolName", ""), e.get("args") or {}) for e in evs if e.get("type") == "tool_execution_start"]
     if not calls:  # no execution events (an older stream): the calls the model made, from its messages
         calls = [(b.get("name", ""), b.get("arguments") or {}) for m in assistants for b in m.get("content") or []
@@ -225,7 +232,8 @@ def parse_transcript(stdout: str, existing: set[str]) -> dict:
     return {"answer": answer.strip(), "turns": sum(e.get("type") == "turn_end" for e in evs),
             "prompt_tokens": sum(u.get("input", 0) + u.get("cacheRead", 0) + u.get("cacheWrite", 0) for u in usage),
             "completion_tokens": sum(u.get("output", 0) for u in usage),
-            "cached_prompt_tokens": sum(u.get("cacheRead", 0) for u in usage),
+            # agent turns only: the native loop records no cached prefix for its summaries (run_measures)
+            "cached_prompt_tokens": sum(u.get("cacheRead", 0) for u in turn_usage),
             "tool_calls": tool_counts(calls), **file_access(calls, existing),
             "settled": any(e.get("type") == "agent_settled" for e in evs), "stop_reason": last.get("stopReason", ""),
             "error": str(error), "events": len(evs)}

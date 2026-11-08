@@ -9,6 +9,7 @@ whether the task files were read before they were edited. The native driver take
 from __future__ import annotations
 
 import posixpath
+import re
 import shlex
 from collections import Counter
 
@@ -36,13 +37,33 @@ def normalize(path: str, cwd: str = "") -> str:
     return "" if p == "." else p
 
 
+HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+
+
+def _without_heredoc_bodies(command: str) -> str:
+    """The command with each here-document's body dropped (its text is data, not commands)."""
+    out: list[str] = []
+    ends: list[tuple[str, bool]] = []
+    for line in command.split("\n"):
+        if ends:
+            delim, tabs = ends[0]
+            if (line.lstrip("\t") if tabs else line) == delim:
+                ends.pop(0)
+            continue
+        out.append(line)
+        ends = [(m.group(3), m.group(1) == "-") for m in HEREDOC.finditer(line)]
+    return "\n".join(out)
+
+
 def _words(command: str) -> list[str]:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    """Shell words and operators; an unquoted newline is an operator (it ends a command, like `;`)."""
+    lexer = shlex.shlex(_without_heredoc_bodies(command), posix=True, punctuation_chars=";&|()<>\n")
     lexer.whitespace_split = True
+    lexer.whitespace = " \t\r"
     try:
         return list(lexer)
     except ValueError:  # an unbalanced quote: judge it word by word
-        return command.split()
+        return command.replace("\n", " ; ").split()
 
 
 def _in_place(args: list[str]) -> bool:
@@ -52,7 +73,7 @@ def _in_place(args: list[str]) -> bool:
 
 
 def _is_operator(word: str) -> bool:
-    return bool(word) and set(word) <= set(";|&()<>")
+    return bool(word) and set(word) <= set(";|&()<>\n")
 
 
 def shell_access(command: str) -> list[tuple[str, str]]:
@@ -146,8 +167,10 @@ def tool_counts(calls: list[tuple[str, dict]]) -> dict[str, int]:
 def native_measures(session: dict, events: list[dict], existing: set[str]) -> dict:
     """The measures a native canary session adds to its outcome by hand (bakeoff.canary.run_standalone).
 
-    Prompt and completion tokens are the session totals (llama-server's usage per call); cached-prompt tokens are the
-    cached prefix llama-server reported per turn (`turn_metrics.cache_tokens`), None if it never said."""
+    Prompt and completion tokens are the session totals (llama-server's usage per call, compaction summaries
+    included); cached-prompt tokens are the cached prefix llama-server reported per agent turn
+    (`turn_metrics.cache_tokens`), None if it never said. A summary's cached prefix isn't recorded, so neither driver
+    counts it there."""
     calls = [(e["data"].get("name", ""), e["data"].get("args") or {}) for e in events if e["type"] == "tool_call"]
     cache = [e["data"].get("cache_tokens") for e in events if e["type"] == "turn_metrics"]
     known = [c for c in cache if isinstance(c, int)]

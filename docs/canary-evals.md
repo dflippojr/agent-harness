@@ -294,7 +294,7 @@ hidden checker. Every attempt gets its task's whole wall-clock limit: naming the
   the checkers), then runs `pi --mode json --no-session --offline --no-extensions --no-skills --no-prompt-templates
   --no-context-files --provider canary --model <default_model> -- <prompt>` in a container per attempt. The task
   workspace is the container's only host mount (`models.json` comes in an environment variable that the image's
-  entrypoint writes to a file), and the container has no network (`--network none`). Its one way to llama-server is
+  entrypoint writes to a file), and the container has no network (`--network none`). It runs as the host user that prepared the workspace, with no capabilities, so it can write the task files and leaves nothing root-owned. Its one way to llama-server is
   a Unix socket on a Docker volume made for the run. A socat forwarder on the host network listens on that socket and
   connects to llama-server's host and port (from the model's `base_url`), nothing else. Inside Pi's container the
   entrypoint relays `127.0.0.1:<port>` to the socket, so Pi's `baseUrl` is its own loopback. The forwarder sits on
@@ -319,10 +319,10 @@ Every attempt of either driver records:
 | `turns` | model calls | session totals | `turn_end` events |
 | `prompt_tokens` | prompt tokens llama-server reported, cached prefix included | session totals | per-message usage `input + cacheRead + cacheWrite` (Pi splits llama-server's `prompt_tokens` this way), compaction summaries (`compaction_end.result.usage`) included |
 | `completion_tokens` | generated tokens | session totals | usage `output`, summaries included |
-| `cached_prompt_tokens` | prompt tokens served from llama-server's cache | `turn_metrics.cache_tokens` (llama-server's reported cached prefix; `null` if it never said) | usage `cacheRead` (llama-server's `prompt_tokens_details.cached_tokens`) |
+| `cached_prompt_tokens` | prompt tokens served from llama-server's cache | `turn_metrics.cache_tokens` (llama-server's reported cached prefix; `null` if it never said) | usage `cacheRead` (llama-server's `prompt_tokens_details.cached_tokens`) of agent turns; summaries are left out on both sides, since the native loop records no cached prefix for its summaries |
 | `seconds` | wall time of the attempt | GPU time, which is wall time with the daemon stopped | container wall time |
 | `tool_calls` | calls by tool name | `tool_call` events | `tool_execution_start` events |
-| `read_before_edit`, `edited_unread` | whether every task file the agent edited had been read first, and which were not | a read tool, or a shell command showing the file (a viewer such as `cat`, `sed -n` or `head`, or `< file`), before its first edit. An edit is an edit or write tool call, or a shell command writing the file (`>`, `>>`, `tee`, `sed -i`, `perl -pi`, or `cp`, `mv` or `truncate` onto it). Within a shell command, accesses count in order (a simple command's redirects first, as the shell opens them), and relative paths follow `cd`; each call starts in the workspace. Files the agent created don't count; `null` when it edited no task file. A file a script or git rewrites isn't seen | same rule |
+| `read_before_edit`, `edited_unread` | whether every task file the agent edited had been read first, and which were not | a read tool, or a shell command showing the file (a viewer such as `cat`, `sed -n` or `head`, or `< file`), before its first edit. An edit is an edit or write tool call, or a shell command writing the file (`>`, `>>`, `tee`, `sed -i`, `perl -pi`, or `cp`, `mv` or `truncate` onto it). Within a shell command, accesses count in order (a newline ends a command like `;`, a simple command's redirects come first, as the shell opens them, and here-document bodies are data), and relative paths follow `cd`; each call starts in the workspace. Files the agent created don't count; `null` when it edited no task file. A file a script or git rewrites isn't seen | same rule |
 
 The native tool names are `read_file`, `edit_file`, `write_file` and `run_shell`; Pi's are `read`, `edit`, `write` and
 `bash` (plus `grep`, `find` and `ls`, off by default). `bakeoff/run_measures.py` holds the shared rules.

@@ -4,7 +4,7 @@
 # (/run/llm/llm.sock, served by the host-network forwarder): the container itself has no network. Then runs the
 # command (`pi --mode json ...`).
 set -eu
-mkdir -p "$PI_CODING_AGENT_DIR"
+mkdir -p "$PI_CODING_AGENT_DIR" "${HOME:-/tmp/pi-home}"
 printf '%s' "$PI_MODELS_JSON" > "$PI_CODING_AGENT_DIR/models.json"
 if [ -n "${PI_LLM_PORT:-}" ]; then
     i=0

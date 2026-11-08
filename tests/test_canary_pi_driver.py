@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import re
 import subprocess
 import sys
@@ -146,6 +147,24 @@ def test_a_shell_command_that_writes_a_file_before_showing_it_did_not_read_it_fi
     assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
 
 
+def test_a_newline_ends_a_command_like_a_semicolon():
+    m = pi_driver.parse_transcript(_jsonl(_turn([_call(1, "bash", command="cat calc.py\nprintf fixed > calc.py")],
+                                                _usage(10, 1))), EXISTING)
+    assert m["read_before_edit"] is True and m["edited_unread"] == []
+    assert file_access([("bash", {"command": "printf fixed > calc.py\ncat calc.py"})], EXISTING)[
+        "edited_unread"] == ["calc.py"]
+    # a newline inside quotes is data
+    assert file_access([("bash", {"command": 'printf "a\nb" > calc.py'})], EXISTING)["edited_unread"] == ["calc.py"]
+
+
+def test_here_document_bodies_are_data_not_commands():
+    heredoc = "cat > new.py <<'EOF'\nopen('calc.py', 'w').write(x > util.py)\nEOF\ncat calc.py\nsed -i s/a/b/ calc.py"
+    assert file_access([("bash", {"command": heredoc})], EXISTING) == {"read_before_edit": True,
+                                                                        "edited_unread": []}
+    tabbed = "python - <<-PY\n\tprint(1) > calc.py\n\tPY\nprintf x > util.py"
+    assert file_access([("bash", {"command": tabbed})], EXISTING)["edited_unread"] == ["util.py"]
+
+
 def test_shell_paths_follow_cd():
     existing = {"inventory/report.py", "report.py"}
     assert file_access([("bash", {"command": "cd inventory && printf fixed > report.py"})], existing) == {
@@ -167,7 +186,7 @@ def test_shell_commands_that_write_no_task_file_are_no_edit(command):
     assert file_access([("bash", {"command": command})], EXISTING)["read_before_edit"] is None
 
 
-def test_compaction_summaries_count_towards_the_tokens_but_not_the_turns():
+def test_compaction_summaries_count_towards_prompt_and_completion_tokens_only():
     summary = {"type": "compaction_end", "reason": "threshold", "aborted": False, "willRetry": False,
                "result": {"summary": "s", "firstKeptEntryId": "e1", "tokensBefore": 30000,
                           "estimatedTokensAfter": 4000, "usage": _usage(9000, 400, cache_read=1000), "details": {}}}
@@ -179,7 +198,8 @@ def test_compaction_summaries_count_towards_the_tokens_but_not_the_turns():
                                            summary, failed, *records[10:]]), EXISTING)
     assert m["prompt_tokens"] == plain["prompt_tokens"] + 10000
     assert m["completion_tokens"] == plain["completion_tokens"] + 400
-    assert m["cached_prompt_tokens"] == plain["cached_prompt_tokens"] + 1000
+    # cached-prompt tokens count agent turns only: the native loop records no cached prefix for its summaries
+    assert m["cached_prompt_tokens"] == plain["cached_prompt_tokens"]
     assert m["turns"] == plain["turns"] == 6
 
 
@@ -306,7 +326,9 @@ def test_docker_gives_pi_no_network_and_the_workspace_as_its_only_host_mount(tmp
     assert not {"-v", "--volume", "--privileged", "-p", "--publish"} & set(argv)
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--network"] == ["none"]
     env = [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
-    assert env == ["K=v", "PI_LLM_PORT=8090"] and argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert env == ["K=v", "PI_LLM_PORT=8090", f"HOME={pi_driver.HOME}"] and argv[argv.index("--cap-drop") + 1] == "ALL"
+    if hasattr(os, "getuid"):  # as the host user that prepared the workspace: no capabilities needed to write it
+        assert argv[argv.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert argv[argv.index(pi_driver.IMAGE):] == [pi_driver.IMAGE, "pi", "--mode", "json"]
 
 
@@ -336,7 +358,7 @@ def test_the_route_forwards_only_the_llama_server_port_and_cleans_up():
     # On the host network, so a llama-server bound to the host's loopback (the tower's) is reachable; it listens
     # only on the run's socket and connects only to llama-server's port.
     assert forwarder[forwarder.index("--network") + 1] == "host"
-    assert forwarder[-2:] == ("UNIX-LISTEN:/run/llm/llm.sock,fork,unlink-early", "TCP:127.0.0.1:8090")
+    assert forwarder[-2:] == ("UNIX-LISTEN:/run/llm/llm.sock,fork,unlink-early,mode=666", "TCP:127.0.0.1:8090")
     assert forwarder[forwarder.index("--mount") + 1] == f"type=volume,source={route.volume},target=/run/llm"
     assert calls[-2:] == [("rm", "-f", route.forwarder), ("volume", "rm", "-f", route.volume)]
     lan = pi_driver.Route("http://gpu-box:8091", docker=lambda *a, check=True: None)
