@@ -410,3 +410,17 @@ def test_a_chdir_wrapper_leaves_the_shell_s_directory_and_redirects_alone(measur
                                                                        "edited_unread": ["calc.py"]}
     assert measure("env -C tests sed -i s/a/b/ calc.py; cat calc.py", existing) == {
         "read_before_edit": False, "edited_unread": ["tests/calc.py"]}
+
+
+# cp/mv -t inside a cluster of short options
+@DRIVERS
+@pytest.mark.parametrize("command", ["cp -ft . staging/calc.py", "mv -ft . staging/calc.py", "cp -vft. staging/calc.py",
+                                     "cp -rt /workspace staging/calc.py", "mv -fvt . a/x.py staging/calc.py"])
+def test_a_target_directory_inside_an_option_cluster_is_still_the_destination(measure, command):
+    assert measure(command)["edited_unread"] == ["calc.py"]
+
+
+@DRIVERS
+def test_a_cluster_without_t_keeps_the_last_operand_as_the_destination(measure):
+    assert measure("cp -fv staging/calc.py calc.py") == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+    assert measure("cp -fv calc.py staging/") == {"read_before_edit": None, "edited_unread": []}
