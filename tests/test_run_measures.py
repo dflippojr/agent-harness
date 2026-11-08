@@ -302,3 +302,40 @@ def test_a_descriptor_redirect_on_a_command_is_no_operand(measure, command):
                                      "head -n 5 calc.py 2>errors.log; printf x 1> calc.py"])
 def test_a_viewer_with_a_descriptor_redirect_still_reads(measure, command):
     assert measure(command) == {"read_before_edit": True, "edited_unread": []}
+
+
+# each driver's file tools resolve paths their own way
+def _native_calls(*calls: tuple[str, dict]) -> dict:
+    events = [{"type": "tool_call", "data": {"name": name, "args": args}} for name, args in calls]
+    m = native_measures({"totals": {}}, events, EXISTING)
+    return {"read_before_edit": m["read_before_edit"], "edited_unread": m["edited_unread"]}
+
+
+@pytest.mark.parametrize("path", ["/calc.py", "//calc.py", "/workspace/calc.py", "./calc.py", "tests/../calc.py"])
+def test_native_file_tools_read_a_leading_slash_as_the_workspace_as_fileops_does(path):
+    from harness.fileops import normalize_path
+    assert normalize_path(path).lstrip("./").replace("tests/../", "") == "calc.py"  # the tools' own rule
+    assert _native_calls(("write_file", {"path": path, "content": "x"})) == {"read_before_edit": False,
+                                                                              "edited_unread": ["calc.py"]}
+    assert _native_calls(("read_file", {"path": path}), ("edit_file", {"path": "calc.py"})) == {
+        "read_before_edit": True, "edited_unread": []}
+    assert _native_calls(("read_file", {"path": "calc.py"}), ("write_file", {"path": path})) == {
+        "read_before_edit": True, "edited_unread": []}
+
+
+def test_pi_file_tools_take_a_leading_slash_as_the_filesystem_root():
+    # Pi's read/edit/write resolve like any path: /calc.py is outside the workspace (/workspace/calc.py is inside)
+    def pi_calls(*calls):
+        records = []
+        for i, (name, args) in enumerate(calls):
+            records += [{"type": "tool_execution_start", "toolCallId": f"c{i}", "toolName": name, "args": args},
+                        {"type": "turn_end", "message": {"role": "assistant"}, "toolResults": []}]
+        m = pi_driver.parse_transcript("".join(json.dumps(r) + "\n" for r in records), EXISTING)
+        return {"read_before_edit": m["read_before_edit"], "edited_unread": m["edited_unread"]}
+
+    assert pi_calls(("write", {"path": "/calc.py", "content": "x"})) == {"read_before_edit": None,
+                                                                          "edited_unread": []}
+    assert pi_calls(("write", {"path": "/workspace/calc.py", "content": "x"})) == {"read_before_edit": False,
+                                                                                    "edited_unread": ["calc.py"]}
+    assert pi_calls(("read", {"path": "/workspace/calc.py"}), ("edit", {"path": "./tests/../calc.py"})) == {
+        "read_before_edit": True, "edited_unread": []}
