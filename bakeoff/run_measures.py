@@ -65,21 +65,35 @@ _HIDE = {ord(c): chr(0xE000 + i) for i, c in enumerate(OPERATOR_CHARS)}
 _SHOW = {ord(v): k for k, v in ((chr(k), v) for k, v in _HIDE.items())}
 
 
+UNKNOWN = "\ue0ff"  # marks a word whose value a substitution decides: it matches no file
+WORD_BREAKS = " \t\n;&|()<>"
+
+
 def _protect(command: str) -> str:
     """The command with unquoted `# ...` comments removed (keeping the newline that ends them), line continuations
     joined, and quoted or backslash-escaped operator characters hidden from the lexer. Command substitutions come
     out as unquoted `$( ... )`: backticks are rewritten, and one inside double quotes is lifted out of them
-    (`"a $(cmd) b"` -> `"a "$(cmd)" b"`), so its commands are parsed like any others."""
+    (`"a $(cmd) b"` -> `"a "$(cmd)" b"`), so its commands are parsed like any others. A word a substitution is
+    glued into (`calc.py$(echo .bak)`) has a value nobody knows: it carries UNKNOWN, so it names no task file."""
     out: list[str] = []
     subs: list[list] = []  # open substitutions: [opened inside double quotes, "paren" | "tick", paren depth]
     quote, i = "", 0
+
+    def glued() -> str:  # UNKNOWN when the last character written belongs to a word
+        return UNKNOWN if out and out[-1] and out[-1][-1] not in WORD_BREAKS else ""
+
     while i < len(command):
         c = command[i]
         if quote == '"' and (c == "`" or command.startswith("$(", i)):  # lift it out of the quotes
-            out.append('"$(')
+            out.append('"' + UNKNOWN + "$(")  # whatever the quotes held is part of the interpolated word
             subs.append([True, "tick" if c == "`" else "paren", 1])
             quote = ""
             i += 1 if c == "`" else 2
+            continue
+        if not quote and command.startswith("$(", i):
+            out.append(glued() + "$(")
+            subs.append([False, "paren", 1])
+            i += 2
             continue
         if not quote and subs and (c == "`" and subs[-1][1] == "tick" or c in "()" and subs[-1][1] == "paren"):
             subs[-1][2] += 1 if c == "(" else -1
@@ -89,12 +103,14 @@ def _protect(command: str) -> str:
                 continue
             out.append(")")  # the substitution ends: back inside the quotes it was lifted from
             if subs.pop()[0]:
-                out.append('"')
+                out.append('"' + UNKNOWN)
                 quote = '"'
+            elif i + 1 < len(command) and command[i + 1] not in WORD_BREAKS:  # text glued on after it
+                out.append(UNKNOWN)
             i += 1
             continue
         if not quote and c == "`":  # a backtick substitution opens: written as $(
-            out.append("$(")
+            out.append(glued() + "$(")
             subs.append([False, "tick", 1])
             i += 1
             continue
