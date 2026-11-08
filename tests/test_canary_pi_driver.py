@@ -186,6 +186,25 @@ def test_a_viewer_s_file_operands_are_reads(command):
     assert file_access([("bash", {"command": f"{command}; printf fixed > calc.py"})], EXISTING)["read_before_edit"]
 
 
+@pytest.mark.parametrize("command", ["sed -i -e's/a - b/a + b/' calc.py", "perl -pi -e's/-/+/' calc.py",
+                                     "perl -pie 's/-/+/' calc.py", "sed -i -es/a/b/ -e s/c/d/ calc.py"])
+def test_a_script_attached_to_its_option_still_leaves_the_file_as_the_operand(command):
+    m = pi_driver.parse_transcript(_jsonl(_turn([_call(1, "bash", command=command)], _usage(10, 1))), EXISTING)
+    assert m["read_before_edit"] is False and m["edited_unread"] == ["calc.py"]
+
+
+def test_quoted_or_escaped_operators_are_data():
+    assert file_access([("bash", {"command": "grep '>' calc.py"})], EXISTING)["read_before_edit"] is None
+    calls = [("bash", {"command": "printf '%s' '<' calc.py; printf fixed > calc.py"})]
+    assert file_access(calls, EXISTING)["edited_unread"] == ["calc.py"]
+    assert file_access([("bash", {"command": 'grep "a|b;c" calc.py && printf x > calc.py'})], EXISTING)[
+        "read_before_edit"] is True
+    assert file_access([("bash", {"command": "echo \\> calc.py"})], EXISTING)["read_before_edit"] is None
+    # a line continuation joins the words around it
+    assert file_access([("bash", {"command": "cat \\\n  calc.py; printf x > calc.py"})], EXISTING)[
+        "read_before_edit"] is True
+
+
 def test_a_cd_inside_a_subshell_ends_with_it():
     existing = {"inventory/report.py", "report.py"}
     calls = [("bash", {"command": "(cd inventory; cat report.py); printf fixed > report.py"})]

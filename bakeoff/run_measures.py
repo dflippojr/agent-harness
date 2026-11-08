@@ -55,8 +55,16 @@ def _without_heredoc_bodies(command: str) -> str:
     return "\n".join(out)
 
 
-def _without_comments(command: str) -> str:
-    """The command with unquoted `# ...` comments removed up to, not including, the newline that ends them."""
+OPERATOR_CHARS = ";&|()<>\n"
+# Quoted or escaped operator characters are data: they stand in as private-use characters while shlex splits the
+# command (posix shlex drops the quotes that would tell them apart), and come back in the words afterwards.
+_HIDE = {ord(c): chr(0xE000 + i) for i, c in enumerate(OPERATOR_CHARS)}
+_SHOW = {ord(v): k for k, v in ((chr(k), v) for k, v in _HIDE.items())}
+
+
+def _protect(command: str) -> str:
+    """The command with unquoted `# ...` comments removed (keeping the newline that ends them), line continuations
+    joined, and quoted or backslash-escaped operator characters hidden from the lexer."""
     out: list[str] = []
     quote, i = "", 0
     while i < len(command):
@@ -67,13 +75,18 @@ def _without_comments(command: str) -> str:
             elif c == "\\" and quote == '"' and i + 1 < len(command):
                 out.append(c)
                 i += 1
-                c = command[i]
+                c = command[i].translate(_HIDE)
+            else:
+                c = c.translate(_HIDE)
         elif c in "'\"":
             quote = c
         elif c == "\\" and i + 1 < len(command):
-            out.append(c)
             i += 1
-            c = command[i]
+            if command[i] == "\n":  # a line continuation: no character at all
+                i += 1
+                continue
+            out.append(c)
+            c = command[i].translate(_HIDE)
         elif c == "#" and (not out or out[-1] in " \t\n;&|()"):
             while i < len(command) and command[i] != "\n":
                 i += 1
@@ -85,13 +98,12 @@ def _without_comments(command: str) -> str:
 
 def _words(command: str) -> list[str]:
     """Shell words and operators; an unquoted newline is an operator (it ends a command, like `;`)."""
-    lexer = shlex.shlex(_without_comments(_without_heredoc_bodies(command)), posix=True,
-                        punctuation_chars=";&|()<>\n")
+    lexer = shlex.shlex(_protect(_without_heredoc_bodies(command)), posix=True, punctuation_chars=OPERATOR_CHARS)
     lexer.commenters = ""
     lexer.whitespace_split = True
     lexer.whitespace = " \t\r"
     try:
-        return list(lexer)
+        return list(lexer)  # quoted operator characters stay hidden until shell_access has classified the words
     except ValueError:  # an unbalanced quote: judge it word by word
         return command.replace("\n", " ; ").split()
 
@@ -129,7 +141,7 @@ def shell_access(command: str) -> list[tuple[str, str]]:
         if word in (">", ">>", ">|", "<") and i + 1 < len(words):
             target = words[i + 1]
             if not _is_operator(target) and target != "/dev/null":
-                redirects.append(("read" if word == "<" else "write", target))
+                redirects.append(("read" if word == "<" else "write", target.translate(_SHOW)))
             i += 2
             continue
         if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
@@ -142,7 +154,7 @@ def shell_access(command: str) -> list[tuple[str, str]]:
                 elif c == ")" and outer:
                     cwd = outer.pop()
         else:
-            segment.append(word)
+            segment.append(word.translate(_SHOW))
         i += 1
     return events
 
@@ -172,11 +184,20 @@ def operands(cmd: str, args: list[str]) -> list[str]:
             out.append(a)
         elif a == "--":
             ended = True
-        else:
+        elif a.startswith("--"):
             name = a.split("=", 1)[0]
             script_given = script_given or name in scripts
             if name in takes and "=" not in a:
                 i += 1
+        else:  # a cluster of short options (`-ne`, `-pie`); the first that takes a value ends it
+            for j, c in enumerate(a[1:], 1):
+                if not c.isalpha():
+                    break
+                if f"-{c}" in takes:
+                    script_given = script_given or f"-{c}" in scripts
+                    if j == len(a) - 1:  # its value is the next word; otherwise it is attached (`-e's/a/b/'`, `-n5`)
+                        i += 1
+                    break
         i += 1
     return out[1:] if scripts and not script_given else out
 
