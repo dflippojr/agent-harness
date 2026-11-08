@@ -330,10 +330,15 @@ def _end_background(events: list[tuple[str, str]], level: dict) -> None:
 
 
 def _write_first(events: list[tuple[str, str]], start: int, stages: list[list[tuple[str, str]]]) -> None:
+    """Record at `start` each write whose only earlier reads ran in other, concurrent stages: those reads prove
+    nothing. A read earlier in the writer's own stage does, and leaves that write where it is."""
     first: list[str] = []
     for j, stage in enumerate(stages):
+        read_here: set[str] = set()
         for kind, path in stage:
-            if kind == "write" and path not in first and any(
+            if kind == "read":
+                read_here.add(path)
+            elif path not in first and path not in read_here and any(
                     ("read", path) in other for k, other in enumerate(stages) if k != j):
                 first.append(path)
     events[start:start] = [("write", path) for path in first]
