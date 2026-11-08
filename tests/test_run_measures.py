@@ -285,3 +285,20 @@ def test_a_dangling_redirect_keeps_the_command_before_it(measure):
     # `cat calc.py >` is a syntax error, but what it names before the dangling `>` is still parsed
     assert measure("cat calc.py >; printf x > calc.py") == {"read_before_edit": True, "edited_unread": []}
     assert measure("(cat calc.py) >; printf x > calc.py") == {"read_before_edit": True, "edited_unread": []}
+
+
+# descriptor numbers are redirect syntax in plain commands too, never operands
+@DRIVERS
+@pytest.mark.parametrize("command", ["cp fixed.py calc.py 2>errors.log", "cp fixed.py calc.py 2>&1",
+                                     "mv out/a.py calc.py 2>/dev/null", "printf x 1>calc.py",
+                                     "cp fixed.py calc.py 2> errors.log 1>&2", "sed -i s/a/b/ calc.py 2>&1 | tail -n 3"])
+def test_a_descriptor_redirect_on_a_command_is_no_operand(measure, command):
+    assert measure(command) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+@pytest.mark.parametrize("command", ["cat calc.py 2>&1 | head; printf x > calc.py",
+                                     "grep add calc.py 2>/dev/null && printf x > calc.py",
+                                     "head -n 5 calc.py 2>errors.log; printf x 1> calc.py"])
+def test_a_viewer_with_a_descriptor_redirect_still_reads(measure, command):
+    assert measure(command) == {"read_before_edit": True, "edited_unread": []}
