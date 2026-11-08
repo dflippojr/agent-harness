@@ -12,6 +12,7 @@ import posixpath
 import re
 import shlex
 from collections import Counter
+from collections.abc import Callable
 
 # Tool names per driver: native (harness/tools.py) and Pi's built-ins (packages/coding-agent/src/core/tools).
 READ_TOOLS = {"read_file", "read"}
@@ -316,13 +317,23 @@ def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]])
             events += [("write", posixpath.join(dest, posixpath.basename(src))) for src in sources]
 
 
-def file_access(calls: list[tuple[str, dict]], existing: set[str]) -> dict:
+def native_tool_path(path: str) -> str:
+    """Where a native file tool (read_file, edit_file, write_file) puts PATH: harness.fileops.normalize_path's rule,
+    which strips /workspace and then any leading slash, so `/calc.py` is the workspace's calc.py."""
+    from harness.fileops import normalize_path
+    return normalize(normalize_path(path))
+
+
+def file_access(calls: list[tuple[str, dict]], existing: set[str],
+                tool_path: Callable[[str], str] = normalize) -> dict:
     """Whether every task file the agent edited had been read first.
 
     `calls` are (tool name, arguments) in the order the agent made them; `existing` the files the task started with.
     Only edits to files that existed count (a new file has nothing to read). An edit is an edit or write tool call, or
     a shell command that writes the file; a file counts as read once a read tool named it, or a shell command showed
-    it, in the order `shell_access` gives. `read_before_edit` is None when no existing file was edited."""
+    it, in the order `shell_access` gives. `read_before_edit` is None when no existing file was edited.
+    `tool_path` resolves a file tool's path argument the way that driver's tools do (Pi's: like any path; the
+    native ones: `native_tool_path`); shell commands resolve as a shell does in the workspace."""
     read: set[str] = set()
     edited: list[str] = []
     unread: list[str] = []
@@ -336,7 +347,7 @@ def file_access(calls: list[tuple[str, dict]], existing: set[str]) -> dict:
     for name, args in calls:
         args = args if isinstance(args, dict) else {}
         if name in READ_TOOLS and args.get("path"):
-            read.add(normalize(str(args["path"])))
+            read.add(tool_path(str(args["path"])))
         elif name in SHELL_TOOLS and args.get("command"):
             for kind, path in shell_access(str(args["command"])):
                 if kind == "read":
@@ -344,7 +355,7 @@ def file_access(calls: list[tuple[str, dict]], existing: set[str]) -> dict:
                 else:
                     edit(path)
         elif name in EDIT_TOOLS and args.get("path"):
-            edit(normalize(str(args["path"])))
+            edit(tool_path(str(args["path"])))
     return {"read_before_edit": (not unread) if edited else None, "edited_unread": unread}
 
 
@@ -365,4 +376,4 @@ def native_measures(session: dict, events: list[dict], existing: set[str]) -> di
     totals = session.get("totals") or {}
     return {"driver": "native", "completion_tokens": totals.get("completion_tokens", 0),
             "cached_prompt_tokens": sum(known) if known else None, "tool_calls": tool_counts(calls),
-            **file_access(calls, existing)}
+            **file_access(calls, existing, native_tool_path)}
