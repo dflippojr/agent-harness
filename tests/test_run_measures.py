@@ -339,3 +339,27 @@ def test_pi_file_tools_take_a_leading_slash_as_the_filesystem_root():
                                                                                     "edited_unread": ["calc.py"]}
     assert pi_calls(("read", {"path": "/workspace/calc.py"}), ("edit", {"path": "./tests/../calc.py"})) == {
         "read_before_edit": True, "edited_unread": []}
+
+
+# a command substitution expands before the enclosing command's redirects open
+@DRIVERS
+@pytest.mark.parametrize("command", ["echo $(cat calc.py) > calc.py", 'echo "$(cat calc.py)" > calc.py',
+                                     "echo `cat calc.py` > calc.py", 'echo "`cat calc.py`" >calc.py',
+                                     'x=$(cat calc.py); printf %s "$x" > calc.py', "echo $(head -n 3 calc.py)>calc.py",
+                                     'printf "%s\\n" "a $(grep add calc.py) b" > calc.py'])
+def test_a_command_substitution_reads_before_the_redirect_opens(measure, command):
+    assert measure(command) == {"read_before_edit": True, "edited_unread": []}
+
+
+@DRIVERS
+@pytest.mark.parametrize("command", ["printf x > calc.py; echo $(cat calc.py)", "(cat calc.py) > calc.py",
+                                     "echo $(printf x > calc.py; cat calc.py)", "echo '$(cat calc.py)' > calc.py"])
+def test_a_write_before_the_substitution_or_a_quoted_dollar_is_still_unread(measure, command):
+    assert measure(command) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+def test_a_cd_inside_a_command_substitution_ends_with_it(measure):
+    existing = {"calc.py", "tests/calc.py"}
+    assert measure("echo $(cd tests; cat calc.py) > calc.py", existing) == {"read_before_edit": False,
+                                                                            "edited_unread": ["calc.py"]}
