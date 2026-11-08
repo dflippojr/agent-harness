@@ -1,0 +1,428 @@
+"""`python -m bakeoff.canary --driver pi` (#942): the Pi driver, built and tested with a fake Pi process.
+
+No Docker, no model and no real Pi: the fake Pi records what it was started with and prints a canned JSON transcript
+in Pi 1.5.0's event format (packages/coding-agent/docs/json.md at the pin)."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from bakeoff import canary, pi_driver
+from bakeoff.run_measures import file_access, native_measures
+from harness.config import ModelConfig
+
+ROOT = Path(__file__).resolve().parent.parent
+MODEL = ModelConfig(name="qwen3.6-35b-a3b", base_url="http://127.0.0.1:8090", context_tokens=65536, max_tokens=8192,
+                    sampling={"temperature": 0.6, "top_k": 20})
+PROMPT = "Fix the failing tests in calc.py. Do not edit tests/."
+
+
+def _usage(inp: int, out: int, cache_read: int = 0, cache_write: int = 0) -> dict:
+    return {"input": inp, "output": out, "cacheRead": cache_read, "cacheWrite": cache_write,
+            "totalTokens": inp + out + cache_read + cache_write,
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}
+
+
+def _assistant(content: list[dict], usage: dict, stop: str = "toolUse", **extra) -> dict:
+    return {"role": "assistant", "content": content, "api": "openai-completions", "provider": "canary",
+            "model": MODEL.name, "usage": usage, "stopReason": stop, "timestamp": 1, **extra}
+
+
+def _turn(content: list[dict], usage: dict, stop: str = "toolUse", **extra) -> list[dict]:
+    """One Pi turn: the assistant message, an execution start/end per tool call, then turn_end."""
+    msg = _assistant(content, usage, stop, **extra)
+    out = [{"type": "turn_start"}, {"type": "message_start", "message": {**msg, "stopReason": "pending"}},
+           {"type": "message_update", "usage": usage,
+            "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "x"}},
+           {"type": "message_end", "message": msg}]
+    for block in content:
+        if block["type"] == "toolCall":
+            out += [{"type": "tool_execution_start", "toolCallId": block["id"], "toolName": block["name"],
+                     "args": block["arguments"]},
+                    {"type": "tool_execution_end", "toolCallId": block["id"], "toolName": block["name"],
+                     "result": {"content": [{"type": "text", "text": "ok"}], "details": {}}, "isError": False,
+                     "durationMs": 3}]
+    return out + [{"type": "turn_end", "message": msg, "toolResults": []}]
+
+
+def _call(i: int, name: str, **args) -> dict:
+    return {"type": "toolCall", "id": f"call_{i}", "name": name, "arguments": args}
+
+
+def transcript(answer: str = "Fixed calc.add; all tests pass.") -> list[dict]:
+    """Six turns: read calc.py and edit it (read first), show notes.md through `cat` then rewrite it, overwrite
+    util.py without reading it, add a new file, run the tests, answer."""
+    return [
+        {"type": "session", "version": 3, "id": "s-1", "timestamp": "2026-11-07T00:00:00.000Z", "cwd": "/workspace"},
+        {"type": "agent_start"},
+        {"type": "message_start", "message": {"role": "user", "content": PROMPT, "timestamp": 1}},
+        {"type": "message_end", "message": {"role": "user", "content": PROMPT, "timestamp": 1}},
+        *_turn([{"type": "thinking", "thinking": "look first"}, _call(1, "read", path="calc.py")],
+               _usage(3000, 40)),
+        *_turn([_call(2, "edit", path="/workspace/calc.py", edits=[{"oldText": "a - b", "newText": "a + b"}])],
+               _usage(200, 60, cache_read=3000)),
+        *_turn([_call(3, "bash", command="cat ./notes.md | head -n 5"), _call(4, "write", path="notes.md",
+                                                                               content="n")],
+               _usage(150, 30, cache_read=3200, cache_write=10)),
+        *_turn([_call(5, "write", path="util.py", content="u"), _call(6, "write", path="tests/new_test.py",
+                                                                      content="t")],
+               _usage(120, 50, cache_read=3400)),
+        *_turn([_call(7, "bash", command="python -m pytest -q")], _usage(90, 20, cache_read=3600)),
+        *_turn([{"type": "text", "text": answer}], _usage(80, 25, cache_read=3700), stop="stop"),
+        {"type": "agent_end", "messages": [], "willRetry": False},
+        {"type": "agent_settled", "aborted": False},
+    ]
+
+
+EXISTING = {"calc.py", "notes.md", "util.py", "tests/test_calc.py"}
+
+
+def _jsonl(records: list[dict]) -> str:
+    return "".join(json.dumps(r) + "\n" for r in records)
+
+
+# result parsing
+def test_parsing_a_pi_transcript_yields_every_measure():
+    m = pi_driver.parse_transcript("npm warn: noise\n" + _jsonl(transcript()), EXISTING)
+    assert m["answer"] == "Fixed calc.add; all tests pass."
+    assert m["turns"] == 6
+    # Pi splits llama-server's prompt_tokens into input + cacheRead + cacheWrite; the record adds them back
+    assert m["prompt_tokens"] == (3000 + 200 + 150 + 120 + 90 + 80) + (3000 + 3200 + 3400 + 3600 + 3700) + 10
+    assert m["completion_tokens"] == 40 + 60 + 30 + 50 + 20 + 25
+    assert m["cached_prompt_tokens"] == 3000 + 3200 + 3400 + 3600 + 3700
+    assert m["tool_calls"] == {"bash": 2, "edit": 1, "read": 1, "write": 3}
+    assert m["read_before_edit"] is False and m["edited_unread"] == ["util.py"]
+    assert m["settled"] is True and m["error"] == "" and m["stop_reason"] == "stop"
+
+
+def test_tool_calls_come_from_the_messages_when_the_stream_has_no_execution_events():
+    records = [r for r in transcript() if not r["type"].startswith("tool_execution")]
+    m = pi_driver.parse_transcript(_jsonl(records), EXISTING)
+    assert m["tool_calls"] == {"bash": 2, "edit": 1, "read": 1, "write": 3}
+    assert m["edited_unread"] == ["util.py"]
+
+
+def test_a_run_that_read_everything_it_edited_and_one_that_edited_nothing():
+    calls = [("read", {"path": "calc.py"}), ("edit", {"path": "./calc.py"})]
+    assert file_access(calls, EXISTING) == {"read_before_edit": True, "edited_unread": []}
+    assert file_access([("read", {"path": "calc.py"})], EXISTING) == {"read_before_edit": None, "edited_unread": []}
+    # naming a file to run it is not reading it
+    assert file_access([("bash", {"command": "python calc.py"}), ("edit", {"path": "calc.py"})],
+                       EXISTING)["edited_unread"] == ["calc.py"]
+    assert file_access([("bash", {"command": "sed -n '1,40p' calc.py && pytest"}), ("edit", {"path": "calc.py"})],
+                       EXISTING)["read_before_edit"] is True
+    assert file_access([("bash", {"command": "cat 'unbalanced"}), ("write", {"path": "calc.py"})],
+                       EXISTING)["edited_unread"] == ["calc.py"]
+
+
+def test_an_error_or_exhausted_retries_is_recorded():
+    records = transcript()[:-2]
+    records[-2]["message"] = _assistant([], _usage(10, 0), stop="error", errorMessage="400 context too long")
+    assert pi_driver.parse_transcript(_jsonl(records), EXISTING)["error"] == "400 context too long"
+    retry = [*transcript(), {"type": "auto_retry_end", "success": False, "attempt": 3, "finalError": "503"}]
+    assert pi_driver.parse_transcript(_jsonl(retry), EXISTING)["error"] == "503"
+    empty = pi_driver.parse_transcript("", set())
+    assert empty["turns"] == 0 and empty["answer"] == "" and empty["read_before_edit"] is None
+
+
+# the command, with a fake Pi process
+FAKE_PI = r'''#!{python}
+"""A stand-in for `pi`: records how it was started, edits calc.py like the model would, prints a transcript."""
+import json, os, sys
+from pathlib import Path
+Path(os.environ["FAKE_PI_RECORD"]).write_text(json.dumps({{
+    "argv": sys.argv[1:], "cwd": os.getcwd(), "models": json.loads(os.environ["PI_MODELS_JSON"]),
+    "agent_dir": os.environ["PI_CODING_AGENT_DIR"], "offline": os.environ.get("PI_OFFLINE")}}))
+calc = Path("calc.py")
+calc.write_text(calc.read_text().replace("a - b", "a + b"))
+mode = os.environ.get("FAKE_PI_MODE", "ok")
+if mode == "hang":
+    import time; time.sleep(30)
+sys.stdout.write(Path(os.environ["FAKE_PI_TRANSCRIPT"]).read_text())
+sys.exit(3 if mode == "crash" else 0)
+'''
+
+
+@pytest.fixture
+def fake_pi(tmp_path, monkeypatch):
+    path = tmp_path / "bin" / "pi"
+    path.parent.mkdir()
+    path.write_text(FAKE_PI.format(python=sys.executable), encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    record, script = tmp_path / "record.json", tmp_path / "transcript.jsonl"
+    script.write_text(_jsonl(transcript()), encoding="utf-8")
+    monkeypatch.setenv("FAKE_PI_RECORD", str(record))
+    monkeypatch.setenv("FAKE_PI_TRANSCRIPT", str(script))
+    return SimpleNamespace(bin=str(path), record=record, script=script)
+
+
+def _task(**kw):
+    return SimpleNamespace(**{"id": "calc_fix", "prompt": PROMPT, "max_turns": 50, "wall_limit": 60, **kw})
+
+
+def _prepare(task, ws: Path) -> dict[str, str]:
+    from bakeoff.tasks import hash_tree, materialize
+    materialize(ws, {"calc.py": "def add(a, b):\n    return a - b\n", "notes.md": "n\n", "util.py": "u\n",
+                     "tests/test_calc.py": "from calc import add\n"})
+    return hash_tree(ws)
+
+
+def _grade(task, ws: Path, answer: str, baseline) -> tuple[bool, str]:
+    fixed = "a + b" in (ws / "calc.py").read_text()
+    return fixed and "all tests pass" in answer, "graded by the hidden checker" if fixed else "calc.py unchanged"
+
+
+def _attempt(tmp_path, fake_pi, task=None):
+    return pi_driver.run_attempt(task or _task(), 0, base_url="http://canary-pi-x-llm:8090", model=MODEL,
+                                 launch=pi_driver.launch_local, prepare=_prepare, grade=_grade,
+                                 workdir=tmp_path / "work", pi_bin=fake_pi.bin)
+
+
+def test_the_pi_command_passes_the_endpoint_model_prompt_and_task_directory(tmp_path, fake_pi):
+    res = _attempt(tmp_path, fake_pi)
+    seen = json.loads(fake_pi.record.read_text())
+    ws = tmp_path / "work" / "calc_fix-0"
+    assert Path(seen["cwd"]).resolve() == ws.resolve()  # Pi ran in the task's workspace, which the checker graded
+    argv = seen["argv"]
+    assert argv[-2:] == ["--", PROMPT]  # the task's prompt text, verbatim and last
+    assert argv[argv.index("--mode") + 1] == "json" and "--no-session" in argv and "--no-extensions" in argv
+    assert argv[argv.index("--provider") + 1] == "canary" and argv[argv.index("--model") + 1] == MODEL.name
+    provider = seen["models"]["providers"]["canary"]
+    assert provider["baseUrl"] == "http://canary-pi-x-llm:8090/v1" and provider["api"] == "openai-completions"
+    assert provider["models"] == [{"id": MODEL.name, "contextWindow": 65536, "maxTokens": 8192,
+                                   "samplingParams": {"temperature": 0.6, "top_k": 20}}]
+    assert seen["agent_dir"] == pi_driver.AGENT_DIR and seen["offline"] == "1"
+    assert res == {"task": "calc_fix", "repeat": 0, "driver": "pi", "ok": True, "note": "graded by the hidden checker",
+                   "status": "done", "seconds": res["seconds"], "exit_code": 0, "turns": 6,
+                   "prompt_tokens": 20550, "completion_tokens": 225, "cached_prompt_tokens": 16900,
+                   "tool_calls": {"bash": 2, "edit": 1, "read": 1, "write": 3}, "read_before_edit": False,
+                   "edited_unread": ["util.py"], "stop_reason": "stop", "events": len(transcript())}
+    assert isinstance(res["seconds"], float)
+
+
+def test_a_crash_a_turn_overrun_and_the_wall_limit_are_not_passes(tmp_path, fake_pi, monkeypatch):
+    monkeypatch.setenv("FAKE_PI_MODE", "crash")
+    crashed = _attempt(tmp_path / "a", fake_pi)
+    assert crashed["status"] == "failed" and not crashed["ok"] and crashed["note"].endswith("pi exited 3")
+    monkeypatch.setenv("FAKE_PI_MODE", "ok")
+    over = _attempt(tmp_path / "b", fake_pi, _task(max_turns=5))
+    assert over["status"] == "max_turns" and not over["ok"] and "6 turns, over the task's 5" in over["note"]
+    monkeypatch.setenv("FAKE_PI_MODE", "hang")
+    slow = _attempt(tmp_path / "c", fake_pi, _task(wall_limit=1))
+    assert slow["status"] == "wall_limit" and not slow["ok"] and slow["exit_code"] is None
+    assert "stopped at the 1 s wall-clock limit" in slow["note"]
+
+
+def test_a_run_with_no_events_says_what_pi_printed(tmp_path, fake_pi):
+    fake_pi.script.write_text("", encoding="utf-8")
+    res = _attempt(tmp_path, fake_pi)
+    assert res["status"] == "failed" and res["note"].endswith("pi never settled; no events (stderr: )")
+
+
+def test_docker_mounts_only_the_workspace_on_the_internal_network(tmp_path):
+    argv = pi_driver.docker_argv("canary-pi-a", tmp_path, "canary-pi-n", {"K": "v"}, ["pi", "--mode", "json"])
+    assert argv[:3] == ["docker", "run", "--rm"]
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--mount"] == [
+        f"type=bind,source={tmp_path.resolve()},target=/workspace"]
+    assert not {"-v", "--volume", "--privileged"} & set(argv)
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--network"] == ["canary-pi-n"]
+    assert argv[argv.index("--cap-drop") + 1] == "ALL" and argv[argv.index("-e") + 1] == "K=v"
+    assert argv[argv.index(pi_driver.IMAGE):] == [pi_driver.IMAGE, "pi", "--mode", "json"]
+
+
+def test_launch_docker_runs_that_command_and_removes_a_container_past_the_limit(tmp_path, monkeypatch):
+    runs, removed = [], []
+
+    def fake_run(cmd, **kw):
+        runs.append(cmd)
+        if kw["timeout"] < 1:
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"], output=b'{"type":"agent_start"}\n')
+        return SimpleNamespace(stdout="{}", stderr="", returncode=0)
+
+    monkeypatch.setattr(pi_driver.subprocess, "run", fake_run)
+    launch = pi_driver.launch_docker("canary-pi-n", docker=lambda *a, check=True: removed.append(a))
+    ok = launch(["pi"], {}, tmp_path, 60, "canary-pi-a")
+    assert ok.exit_code == 0 and not ok.timed_out and runs[0][-2:] == [pi_driver.IMAGE, "pi"]
+    slow = launch(["pi"], {}, tmp_path, 0.5, "canary-pi-b")
+    assert slow.timed_out and slow.stdout == '{"type":"agent_start"}\n' and removed == [("rm", "-f", "canary-pi-b")]
+
+
+def test_the_route_forwards_only_the_llama_server_port_and_cleans_up():
+    calls = []
+    with pi_driver.Route("http://127.0.0.1:8090", docker=lambda *a, check=True: calls.append(a)) as route:
+        assert route.base_url == f"http://{route.forwarder}:8090"
+    created = [c for c in calls if c[:2] == ("network", "create")]
+    assert created == [("network", "create", "--internal", route.network),
+                       ("network", "create", route.host_network)]
+    forwarder = next(c for c in calls if c[0] == "run")
+    assert forwarder[-2:] == ("TCP-LISTEN:8090,fork,reuseaddr", "TCP:host.docker.internal:8090")
+    assert forwarder[forwarder.index("--network") + 1] == route.host_network  # Pi never joins this one
+    assert ("network", "connect", route.network, route.forwarder) in calls
+    assert calls[-3:] == [("rm", "-f", route.forwarder), ("network", "rm", route.network),
+                          ("network", "rm", route.host_network)]
+    lan = pi_driver.Route("http://gpu-box:8091", docker=lambda *a, check=True: None)
+    assert lan.target == "gpu-box" and lan.port == 8091
+    with pytest.raises(ValueError):
+        pi_driver.Route("https://api.example.com")
+
+
+def test_a_route_that_fails_half_way_removes_what_it_made():
+    calls = []
+
+    def docker(*a, check=True):
+        calls.append(a)
+        if a[0] == "run":
+            raise subprocess.CalledProcessError(125, "docker run")
+
+    with pytest.raises(subprocess.CalledProcessError):
+        pi_driver.Route("http://127.0.0.1:8090", docker=docker).__enter__()
+    assert [c[:2] for c in calls[-3:]] == [("rm", "-f"), ("network", "rm"), ("network", "rm")]
+
+
+def test_the_image_pins_the_release_the_driver_records():
+    dockerfile = (ROOT / "reference" / "pi" / "Dockerfile").read_text(encoding="utf-8")
+    assert re.search(r"^ARG PI_VERSION=(\S+)$", dockerfile, re.M).group(1) == pi_driver.PI_VERSION
+    assert f'"{pi_driver.PI_PACKAGE}@${{PI_VERSION}}"' in dockerfile
+    assert f"org.opencontainers.image.revision={pi_driver.PI_COMMIT}" in dockerfile
+    assert re.search(r"^FROM (\S+)$", dockerfile.split("AS pi")[1], re.M).group(1) == pi_driver.SANDBOX_IMAGE
+    entrypoint = (ROOT / "reference" / "pi" / "entrypoint.sh").read_text(encoding="utf-8")
+    assert '"$PI_CODING_AGENT_DIR/models.json"' in entrypoint and 'exec "$@"' in entrypoint
+    assert pi_driver.pin()["docs"].startswith(f"https://github.com/earendil-works/pi/blob/v{pi_driver.PI_VERSION}/")
+
+
+# the manual runner
+def test_the_cli_passes_driver_pi_through_and_keeps_native_the_default(monkeypatch):
+    assert inspect.signature(canary.run_standalone).parameters["driver"].default == "native"
+    seen = []
+
+    async def fake_run(task_ids, repeats, fixture, **kw):
+        seen.append(dict(kw, task_ids=task_ids, repeats=repeats))
+
+    monkeypatch.setattr(canary, "run_standalone", fake_run)
+    canary.main(["--driver", "pi", "--tasks", "sqlite_report", "--repeats", "1"])
+    canary.main(["--tasks", "sqlite_report"])
+    assert seen[0]["driver"] == "pi" and seen[0]["task_ids"] == ["sqlite_report"] and seen[0]["repeats"] == 1
+    assert "driver" not in seen[1]  # native: run_standalone's default
+
+
+@pytest.mark.parametrize("flags", [["--plan-reinject"], ["--mask-batch-at", "0.45"], ["--system-line", "be careful"],
+                                   ["--keep-metrics", "m.json"], ["--capture-prompts", "p.jsonl"],
+                                   ["--tasks", "pdf_transformer"], ["--driver", "opencode"]])
+def test_the_cli_refuses_what_pi_cannot_run(monkeypatch, flags, capsys):
+    monkeypatch.setattr(canary, "run_standalone", lambda *a, **k: pytest.fail("must not run"))
+    args = flags if flags[0] == "--driver" else ["--driver", "pi", *flags]
+    with pytest.raises(SystemExit):
+        canary.main(args)
+
+
+def test_the_nightly_path_never_selects_pi():
+    from harness.manager import Manager
+    # The nightly entry point builds the native CanaryRunner, which has no driver to choose.
+    nightly = inspect.getsource(Manager._build_canary)
+    assert "CanaryRunner(self, self.cfg.canary, Path(self.cfg.canary.fixture_dir))" in nightly
+    assert "driver" not in nightly and "pi_driver" not in nightly
+    assert "driver" not in inspect.signature(canary.CanaryRunner).parameters
+    with pytest.raises(TypeError):
+        canary.CanaryRunner(SimpleNamespace(), SimpleNamespace(suite=""), driver="pi")
+    assert not [p for p in (ROOT / "harness").rglob("*.py") if "pi_driver" in p.read_text(encoding="utf-8")]
+
+
+def test_run_standalone_with_driver_pi_runs_the_suite_through_pi_and_writes_the_pin(monkeypatch, tmp_path, fake_pi):
+    from harness import config as config_mod
+    base = SimpleNamespace(default_model="qwen", models={"qwen": MODEL})
+    monkeypatch.setattr(config_mod, "load", lambda: base)
+    monkeypatch.setattr("harness.manager.Manager", lambda *a, **k: pytest.fail("the Pi driver needs no Manager"))
+    built, docker = [], []
+    monkeypatch.setattr(pi_driver, "build_images", lambda: built.append(True))
+    monkeypatch.setattr(pi_driver, "_docker", lambda *a, check=True: docker.append(a))
+    started = []
+
+    def launcher(network):
+        def launch(argv, env, ws, timeout, name):
+            started.append((network, argv[0], timeout))
+            return pi_driver.launch_local([fake_pi.bin, *argv[1:]], env, ws, timeout, name)
+        return launch
+
+    monkeypatch.setattr(pi_driver, "launch_docker", launcher)
+    monkeypatch.setattr("bakeoff.canary.prepare_hard_task", _prepare)
+    monkeypatch.setattr("bakeoff.canary.grade_hard_task", _grade)
+    monkeypatch.setattr(pi_driver, "ROOT", tmp_path)
+    task = _task(id="sqlite_report")
+    monkeypatch.setattr(canary, "load_suite", lambda: {"repeats": 2, "hard": [task, _task(id="other")], "web": []})
+    out = asyncio.run(canary.run_standalone(["sqlite_report"], None, tmp_path, driver="pi"))
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert out.parent == tmp_path / "runs" and out.name.startswith("pi-canary-")
+    assert data["driver"] == "pi" and data["model"] == MODEL.name and data["pi"]["version"] == pi_driver.PI_VERSION
+    assert data["pi"]["commit"] == pi_driver.PI_COMMIT
+    assert [(o["task"], o["repeat"], o["ok"]) for o in data["outcomes"]] == [("sqlite_report", 0, True),
+                                                                             ("sqlite_report", 1, True)]
+    assert built == [True] and {s[1] for s in started} == {"pi"} and {s[2] for s in started} == {60}
+    network = next(c[3] for c in docker if c[:3] == ("network", "create", "--internal"))
+    assert {s[0] for s in started} == {network}
+    assert ("network", "rm", network) in docker
+    with pytest.raises(ValueError):
+        asyncio.run(canary.run_standalone([], None, tmp_path, driver="opencode"))
+
+
+# the native driver records the same measures by hand
+def test_native_measures_come_from_the_session_events():
+    events = [{"type": "tool_call", "data": {"name": "read_file", "args": {"path": "calc.py"}}},
+              {"type": "turn_metrics", "data": {"cache_tokens": None}},
+              {"type": "tool_call", "data": {"name": "edit_file", "args": {"path": "calc.py"}}},
+              {"type": "turn_metrics", "data": {"cache_tokens": 2900}},
+              {"type": "tool_call", "data": {"name": "write_file", "args": {"path": "util.py"}}},
+              {"type": "tool_call", "data": {"name": "run_shell", "args": {"command": "pytest -q"}}},
+              {"type": "turn_metrics", "data": {"cache_tokens": 3100}}]
+    m = native_measures({"totals": {"completion_tokens": 321}}, events, EXISTING)
+    assert m == {"driver": "native", "completion_tokens": 321, "cached_prompt_tokens": 6000,
+                 "tool_calls": {"edit_file": 1, "read_file": 1, "run_shell": 1, "write_file": 1},
+                 "read_before_edit": False, "edited_unread": ["util.py"]}
+    assert native_measures({"totals": {}}, [], set())["cached_prompt_tokens"] is None
+
+
+def test_a_native_hard_attempt_by_hand_records_them_and_the_nightly_one_does_not(tmp_path):
+    from bakeoff.canary import CanaryRunner
+    from bakeoff.tasks_hard import HARD_TASKS
+    from harness.llm import Completion
+    from harness.manager import Manager
+    from test_daemon import Script, call, make_cfg
+    task = next(t for t in HARD_TASKS if t.id == "merge_conflict")
+    steps = [Completion(tool_calls=[call("read_file", 0, path="calc.py")], prompt_tokens=500, completion_tokens=20),
+             Completion(tool_calls=[call("write_file", 1, path="util.py", content="u\n")], prompt_tokens=600,
+                        completion_tokens=30),
+             Completion(content="done", prompt_tokens=700, completion_tokens=5)]
+
+    def prepare(tk, ws: Path):
+        (ws / "calc.py").write_text("x\n")
+        (ws / "util.py").write_text("u0\n")
+        return {"calc.py": "h", "util.py": "h"}
+
+    async def body(measure):
+        cfg = make_cfg(tmp_path / ("by-hand" if measure else "nightly"))
+        m = Manager(cfg, chat=Script(steps))
+        await m.start(maintenance=False)
+        try:
+            runner = CanaryRunner(m, cfg.canary, tmp_path, {"repeats": 1, "hard": [task], "web": []}, poll_seconds=0.01,
+                                  prepare_hard=prepare, grade_hard=lambda tk, ws, answer, base: (True, "graded"),
+                                  measure=measure)
+            return (await runner.run("manual")).outcomes[0]
+        finally:
+            await m.stop()
+            m.db.close()
+
+    by_hand = asyncio.run(body(native_measures))
+    assert by_hand["status"] == "done" and by_hand["driver"] == "native" and by_hand["completion_tokens"] == 55
+    assert by_hand["tool_calls"] == {"read_file": 1, "write_file": 1}
+    assert by_hand["read_before_edit"] is False and by_hand["edited_unread"] == ["util.py"]
+    nightly = asyncio.run(body(None))
+    assert nightly["status"] == "done" and not {"driver", "tool_calls", "read_before_edit"} & set(nightly)

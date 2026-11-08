@@ -252,3 +252,82 @@ Turns per attempt are in parentheses.
   evidence to propose it for agent-playbook's worker rules. Revisit it if a later run shows an XY drop.
 - Not run: a hosted CLI backend (left out to save subscription quota; the owner can ask for it). More repeats would
   narrow the error bars (two per cell can't separate small effects).
+
+## Harness comparison (#942, #808)
+
+How much does the harness itself cost the local model? The same hard tasks, with the same model on the same
+llama-server, are run once by this repository's native session loop and once by the
+[Pi coding agent](https://github.com/earendil-works/pi) (MIT), and compared on pass rate, tokens, cache reuse and
+time. This is a manual run: the nightly canary, `bakeoff/canary.yaml`, `harness/canary.py` and the regression
+thresholds are unchanged, and the nightly path cannot choose Pi (`harness/manager.py` builds only the native
+`CanaryRunner`, which has no driver setting). The run itself, on the tower's GPU, is #808.
+
+### The pin
+
+`@earendil-works/pi-coding-agent` **1.5.0**, from earendil-works/pi tag `v1.5.0` (commit `f9a26365`), installed in the
+`agent-harness-pi` image (`reference/pi/Dockerfile`; `PI_VERSION` in `bakeoff/pi_driver.py` must match, and a test
+checks that it does). Docs consulted at the pin, under `packages/coding-agent/docs/`: `models.md` ("Configure a
+compatible endpoint"), `models-configuration.md`, `llama-cpp.md`, `cli.md` and `json.md`.
+
+Pi needs only an OpenAI-compatible endpoint, not a Pi extension. The driver gives Pi a `models.json` with one custom
+provider (`api: openai-completions`, `baseUrl` llama-server's `/v1`) holding the harness's `default_model` with its
+`context_tokens`, `max_tokens` and `sampling` (sent with every request, as the native loop sends them). Pi's built-in
+llama.cpp extension is for llama.cpp's router mode (`/llama`, `/models`), while the harness runs one model per
+server, so the driver turns extensions off.
+
+### How each driver runs
+
+With the daemon stopped (the daemon's model parked), as for the other manual runs:
+
+```
+python -m bakeoff.canary --tasks sqlite_report,merge_conflict,cli_json_output,log_correlation,duration_parser,multi_bug_inventory --repeats 2                 # native
+python -m bakeoff.canary --tasks sqlite_report,merge_conflict,cli_json_output,log_correlation,duration_parser,multi_bug_inventory --repeats 2 --driver pi     # Pi
+```
+
+`--driver native` is the default. Both write each task's files into a fresh workspace (running the task's setup in the
+sandbox), give the agent the task's prompt text unchanged, and grade the workspace and final answer with the task's
+hidden checker. Every attempt gets its task's whole wall-clock limit: naming the tasks lifts the native run's cap to
+`heldout_cap_seconds`, and the Pi driver has no run cap.
+
+- **native** runs through `Manager` and the runner, as the nightly canary does. Results go to `runs/canary-*.json`.
+- **pi** builds the bake-off sandbox image and `agent-harness-pi` on it (so Pi sees the same Python, pytest and git as
+  the checkers), then runs `pi --mode json --no-session --offline --no-extensions --no-skills --no-prompt-templates
+  --no-context-files --provider canary --model <default_model> -- <prompt>` in a container per attempt. The task
+  workspace is the container's only mount (`models.json` comes in an environment variable that the image's
+  entrypoint writes to a file). Its only network is an internal Docker network made for the run. The one other
+  member of that network is a socat forwarder that passes exactly llama-server's port (from the model's `base_url`)
+  to the host, through a second bridge Pi never joins, as `ops/cli-llm` does. Both networks and the forwarder are
+  removed when the run ends. Results go to `runs/pi-canary-*.json` and record the pin.
+- Pi has no turn cap of its own. An attempt that takes more turns than the task's `max_turns` (where the native loop
+  would have stopped) is recorded as `max_turns`, a fail. One that runs past the task's `wall_limit` is stopped and
+  recorded as `wall_limit`, a fail.
+- `--plan-reinject`, `--mask-batch-at`, `--system-line`, `--keep-metrics` and `--capture-prompts` change or observe the
+  native loop, so `--driver pi` refuses them, and it refuses web tasks (Pi gets no recorded web). The native side runs
+  under whatever observation-masking mode production uses at run time. #808 records that mode.
+
+### Measures
+
+Every attempt of either driver records:
+
+| Field | Meaning | native source | Pi source |
+| --- | --- | --- | --- |
+| `ok`, `status`, `note` | the hidden checker's verdict, and whether the agent finished cleanly | session status | Pi settled with no error; `wall_limit`, `max_turns`, `failed` |
+| `turns` | model calls | session totals | `turn_end` events |
+| `prompt_tokens` | prompt tokens llama-server reported, cached prefix included | session totals | per-message usage `input + cacheRead + cacheWrite` (Pi splits llama-server's `prompt_tokens` this way) |
+| `completion_tokens` | generated tokens | session totals | usage `output` |
+| `cached_prompt_tokens` | prompt tokens served from llama-server's cache | `turn_metrics.cache_tokens` (llama-server's reported cached prefix; `null` if it never said) | usage `cacheRead` (llama-server's `prompt_tokens_details.cached_tokens`) |
+| `seconds` | wall time of the attempt | GPU time, which is wall time with the daemon stopped | container wall time |
+| `tool_calls` | calls by tool name | `tool_call` events | `tool_execution_start` events |
+| `read_before_edit`, `edited_unread` | whether every task file the agent edited had been read first, and which were not | read tool, or a shell viewer (`cat`, `sed`, `head`...) naming the file, before its first edit or write; files the agent created don't count; `null` when it edited no task file | same rule |
+
+The native tool names are `read_file`, `edit_file`, `write_file` and `run_shell`; Pi's are `read`, `edit`, `write` and
+`bash` (plus `grep`, `find` and `ls`, off by default). `bakeoff/run_measures.py` holds the shared rules.
+
+### Results
+
+Left for #808 (the tower run). Two attempts per task per driver.
+
+| Driver | Pass | Mean turns | Prompt tokens | Completion tokens | Cached prompt tokens | Wall time | Read before edit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| native | | | | | | | |
+| Pi 1.5.0 | | | | | | | |

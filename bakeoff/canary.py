@@ -12,6 +12,7 @@ The daemon calls `CanaryRunner.run` from its nightly trigger (harness/canary.py)
     python -m bakeoff.canary --xy --system-line "..."  # #773: XY-problem variants, an extra project-instructions line
     python -m bakeoff.canary --tasks log_correlation --repeats 1 --keep-metrics runs/m.json --capture-prompts runs/p.jsonl
                                                     # #774: per-turn cache reuse and the exact prompts (prefix study)
+    python -m bakeoff.canary --driver pi            # #942: the hard tasks driven by the Pi coding agent (pi_driver.py)
 
 Hard tasks are written into the session's workspace and graded by their existing hidden checkers (Docker sandbox, as
 in the bake-off). Web tasks replay the recorded web (web_suite.py) through a per-session WebTools.
@@ -48,6 +49,7 @@ SUITE = Path(__file__).with_name("canary.yaml")
 WEB_WALL_LIMIT = 1500  # seconds of GPU time a web task attempt may use (hard tasks carry their own)
 MAX_RESTARTS = 2  # a task attempt that was suspended mid-way restarts, up to this many times
 DONE = ("done", "failed", "cancelled")
+DRIVERS = ("native", "pi")  # #942: --driver on the manual runner; the nightly path builds CanaryRunner (native) only
 
 
 def load_suite(path: Path = SUITE) -> dict:
@@ -88,9 +90,12 @@ class CanaryRunner:
 
     def __init__(self, manager, cfg, fixture: Path = DEFAULT_FIXTURE, suite: dict | None = None,
                  poll_seconds: float = 5, clock: Callable[[], float] = time.monotonic, sleep=asyncio.sleep,
-                 grade_hard: Callable | None = None, prepare_hard: Callable | None = None, system_line: str = ""):
+                 grade_hard: Callable | None = None, prepare_hard: Callable | None = None, system_line: str = "",
+                 measure: Callable[[dict, list[dict], set[str]], dict] | None = None):
         self.m, self.cfg, self.fixture = manager, cfg, fixture
         self.system_line = system_line  # #773, by hand only: the canary projects' instructions (production has none)
+        # #942, by hand only: extra per-attempt measures for a hard task (session, events, files it started with)
+        self._measure = measure
         self.suite = suite or load_suite(Path(ROOT / cfg.suite) if cfg.suite else SUITE)
         self.poll, self.clock, self.sleep = poll_seconds, clock, sleep
         self._grade_hard = grade_hard or grade_hard_task
@@ -217,10 +222,13 @@ class CanaryRunner:
             if starved:  # excluded as it is: restarting would only wait past the cap again
                 note, suspended = f"{note}; still waiting for the GPU at the run's cap", False
             totals = final["totals"]
-            return {"task": task.id, "repeat": repeat, "ok": bool(ok and status == "done"), "note": note,
-                    "status": status, "turns": totals.get("turns", 0),
-                    "prompt_tokens": totals.get("prompt_tokens", 0), "seconds": round(ran, 1),
-                    "suspended": suspended}
+            res = {"task": task.id, "repeat": repeat, "ok": bool(ok and status == "done"), "note": note,
+                   "status": status, "turns": totals.get("turns", 0),
+                   "prompt_tokens": totals.get("prompt_tokens", 0), "seconds": round(ran, 1),
+                   "suspended": suspended}
+            if self._measure is not None and kind == "hard":
+                res.update(self._measure(final, m.db.events(sid), set(baseline)))
+            return res
         except BaseException:  # setup failed (Docker down) or the run was cancelled: leave no canary on the GPU
             await self._stop(sid)
             raise
@@ -324,14 +332,22 @@ def turn_metrics_by_session(db) -> list[dict]:
 async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path, heldout: bool = False,
                          plan_reinject: bool = False, xy: bool = False, system_line: str = "",
                          keep_metrics: Path | None = None, capture_prompts: Path | None = None,
-                         mask_batch_at: float = 0.0) -> Path:
+                         mask_batch_at: float = 0.0, driver: str = "native") -> Path:
     from harness import config as config_mod
     from harness.manager import Manager
 
-    base = config_mod.load()
+    from .run_measures import native_measures
+
     suite = heldout_suite(3) if heldout else xy_suite(2) if xy else load_suite()
     if repeats:
         suite["repeats"] = repeats
+    if driver == "pi":  # #942: no Manager; Pi talks to llama-server itself (bakeoff/pi_driver.py)
+        from . import pi_driver
+        return await asyncio.to_thread(pi_driver.run_standalone, suite, task_ids or None,
+                                       "heldout" if heldout else "xy" if xy else "canary")
+    if driver != "native":
+        raise ValueError(f"unknown canary driver {driver!r}")
+    base = config_mod.load()
     canary_cfg = base.canary
     # An experiment (a separate set, a prompt line or named tasks) gets room for every attempt, so its conditions are
     # judged alike; only the whole nightly set by hand keeps the nightly cap.
@@ -351,7 +367,7 @@ async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path
         capture.holder = lambda: m.scheduler.holder
     await m.start(maintenance=False)
     try:
-        runner = CanaryRunner(m, cfg.canary, fixture, suite, system_line=system_line)
+        runner = CanaryRunner(m, cfg.canary, fixture, suite, system_line=system_line, measure=native_measures)
         report = await runner.run("manual", task_ids or None)
     finally:
         await m.stop()
@@ -389,13 +405,29 @@ def main(argv: list[str] | None = None) -> int:
                         help="#774: write each session's turn_metrics rows to this JSON file before the data dir goes")
     parser.add_argument("--capture-prompts", type=Path, metavar="PATH",
                         help="#774: append the exact messages and tools of every model call to this JSONL file")
+    parser.add_argument("--driver", choices=DRIVERS, default="native",
+                        help="#942: who drives the hard tasks: the native session loop or the Pi coding agent "
+                             "(by hand only; the nightly canary is always native)")
     args = parser.parse_args(argv)
     if args.heldout and args.xy:
         parser.error("--heldout and --xy are separate task sets; pick one")
+    if args.driver == "pi":
+        native_only = [flag for flag, on in (("--plan-reinject", args.plan_reinject),
+                                             ("--mask-batch-at", args.mask_batch_at),
+                                             ("--system-line", args.system_line.strip()),
+                                             ("--keep-metrics", args.keep_metrics),
+                                             ("--capture-prompts", args.capture_prompts)) if on]
+        if native_only:
+            parser.error(f"{', '.join(native_only)} change the native session loop; they don't apply to --driver pi")
+        web = sorted({t.id for t in WEB_TASKS} & set(args.tasks.split(",")))
+        if web:
+            parser.error(f"--driver pi runs the hard tasks only; {', '.join(web)} are web tasks")
     if args.mask_batch_at and not _mask_batch_at(args.mask_batch_at):
         parser.error("--mask-batch-at must be a share of the window below elide_at (0.55)")
     debug = {k: v for k, v in (("keep_metrics", args.keep_metrics), ("capture_prompts", args.capture_prompts),
                                ("mask_batch_at", args.mask_batch_at)) if v}
+    if args.driver != "native":
+        debug["driver"] = args.driver
     asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture,
                                heldout=args.heldout, plan_reinject=args.plan_reinject, xy=args.xy,
                                system_line=args.system_line.strip(), **debug))
