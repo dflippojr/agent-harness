@@ -155,7 +155,8 @@ def _words(command: str) -> list[str]:
 
 
 def _in_place(cmd: str, args: list[str]) -> bool:
-    """`sed -i`, `sed -i.bak`, `sed --in-place`, `perl -pi`: an i among the short flags before any that takes a value
+    """`sed -i`, `sed -i.bak`, `sed --in-place`, `perl -pi`, `perl -0777pi`: an i among the short flags (digits
+    included) before any that takes a value
     (so not the i in an attached script such as `-e'/fix/p'`), or --in-place."""
     takes = VALUE_OPTIONS.get(cmd, set())
     for a in args:
@@ -165,6 +166,8 @@ def _in_place(cmd: str, args: list[str]) -> bool:
             for c in a[1:]:
                 if c == "i":
                     return True
+                if c.isdigit():  # perl's numeric options (-0777, -l0) sit inside clusters
+                    continue
                 if not c.isalpha() or f"-{c}" in takes:
                     break
     return False
@@ -361,8 +364,10 @@ def operands(cmd: str, args: list[str]) -> list[str]:
             script_given = script_given or name in scripts
             if name in takes and "=" not in a:
                 i += 1
-        else:  # a cluster of short options (`-ne`, `-pie`); the first that takes a value ends it
+        else:  # a cluster of short options (`-ne`, `-pie`, `-0777pe`); the first that takes a value ends it
             for j, c in enumerate(a[1:], 1):
+                if c.isdigit():
+                    continue
                 if not c.isalpha():
                     break
                 if f"-{c}" in takes:
