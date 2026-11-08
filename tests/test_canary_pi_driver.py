@@ -212,7 +212,8 @@ def test_an_i_inside_an_attached_script_is_not_in_place(command):
 
 @pytest.mark.parametrize("command", ["cat <<< hello\nprintf fixed > calc.py", "cat <<<EOF\nprintf fixed > calc.py",
                                      "cat <<EOF-MARKER\nEOF\nx\nEOF-MARKER\nprintf fixed > calc.py",
-                                     "cat <<'END.TXT'\nprintf no > util.py\nEND.TXT\nprintf fixed > calc.py"])
+                                     "cat <<'END.TXT'\nprintf no > util.py\nEND.TXT\nprintf fixed > calc.py",
+                                     "cat <<\\EOF\nprintf no > util.py\nEOF\nprintf fixed > calc.py"])
 def test_here_strings_are_no_here_document_and_delimiters_are_whole_words(command):
     assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
 
@@ -221,6 +222,18 @@ def test_here_strings_are_no_here_document_and_delimiters_are_whole_words(comman
                                      'echo "a <<EOF b"\nprintf fixed > calc.py'])
 def test_a_here_document_marker_in_a_comment_or_quotes_is_none(command):
     assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
+
+
+@pytest.mark.parametrize("command", ["grep --color add calc.py", "grep --color=always add calc.py",
+                                     "rg --sort path add calc.py", "rg --color never add calc.py"])
+def test_optional_and_required_option_values_leave_the_file_operand(command):
+    assert file_access([("bash", {"command": f"{command}; printf x > calc.py"})], EXISTING)["read_before_edit"] is True
+
+
+@pytest.mark.parametrize("command", ["rg --sort path calc.py notes.md", "grep --color calc.py notes.md"])
+def test_a_pattern_after_an_option_value_is_still_a_pattern(command):
+    assert file_access([("bash", {"command": f"{command}; printf x > calc.py"})], EXISTING)["edited_unread"] == [
+        "calc.py"]
 
 
 @pytest.mark.parametrize("command", ["grep --include '*.md' calc.py notes.md", "grep --exclude-dir .git -r calc.py .",

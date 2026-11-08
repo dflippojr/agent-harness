@@ -38,7 +38,7 @@ def normalize(path: str, cwd: str = "") -> str:
 
 
 # `<<WORD` or `<<-WORD` (WORD whole, quoted or not); not a here-string `<<<`
-HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([^\s'\";&|()<>]+)\2")
+HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)\\?([^\s'\";&|()<>]+)\2")
 
 
 def _without_heredoc_bodies(command: str) -> str:
@@ -53,7 +53,7 @@ def _without_heredoc_bodies(command: str) -> str:
             continue
         out.append(line)
         # only a real marker: not in a comment or inside quotes (_protect drops the one, hides the other's `<`)
-        ends = [(m.group(3), m.group(1) == "-") for m in HEREDOC.finditer(_protect(line))]
+        ends = [(m.group(3).replace("\\", ""), m.group(1) == "-") for m in HEREDOC.finditer(_protect(line))]
     return "\n".join(out)
 
 
@@ -191,10 +191,12 @@ VALUE_OPTIONS = {
     "head": {"-n", "-c"}, "tail": {"-n", "-c"},
     "grep": {"-e", "-f", "-A", "-B", "-C", "-m", "-d", "-D", "--regexp", "--file", "--include", "--exclude",
              "--exclude-dir", "--exclude-from", "--max-count", "--context", "--after-context", "--before-context",
-             "--label", "--color", "--colour", "--binary-files", "--devices", "--directories"},
+             "--label", "--binary-files", "--devices", "--directories"},  # --color[=WHEN]: optional, joined
     "rg": {"-e", "-f", "-A", "-B", "-C", "-m", "-g", "-t", "-T", "-M", "-E", "--regexp", "--file", "--glob",
            "--iglob", "--type", "--type-not", "--max-count", "--context", "--after-context", "--before-context",
-           "--max-columns", "--encoding", "--max-depth", "--replace", "-r"},
+           "--max-columns", "--encoding", "--max-depth", "--replace", "-r", "--sort", "--sortr", "--color",
+           "--colors", "--path-separator", "--pre", "--pre-glob", "--ignore-file", "--threads", "-j",
+           "--max-filesize", "--engine"},
     "sed": {"-e", "-f", "--expression", "--file"}, "perl": {"-e", "-E"}, "awk": {"-F", "-v", "-f"},
     "nl": {"-b", "-w", "-s", "-v", "-i"}, "truncate": {"-s", "-r", "--size", "--reference"},
     "cp": {"-t", "--target-directory", "-S", "--suffix"}, "mv": {"-t", "--target-directory", "-S", "--suffix"},
