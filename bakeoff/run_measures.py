@@ -313,14 +313,24 @@ def operands(cmd: str, args: list[str]) -> list[str]:
 
 
 def _target_directory(args: list[str]) -> str | None:
-    """The directory `cp`/`mv -t DIR` (`-tDIR`, `--target-directory[=]DIR`) copies into, or None."""
+    """The directory `cp`/`mv -t DIR` copies into, or None: `-t DIR`, `-tDIR`, `--target-directory[=]DIR`, or a t
+    in a cluster of short options (`-ft DIR`, `-vft.`), read the way `operands` reads clusters."""
+    takes = VALUE_OPTIONS["cp"]
     for i, a in enumerate(args):
-        if a in ("-t", "--target-directory"):
+        if a == "--":
+            return None
+        if a == "--target-directory":
             return args[i + 1] if i + 1 < len(args) else None
         if a.startswith("--target-directory="):
             return a.split("=", 1)[1]
-        if a.startswith("-t") and len(a) > 2 and not a.startswith("--"):
-            return a[2:]
+        if a[:1] == "-" and a[1:2] not in ("", "-"):
+            for j, c in enumerate(a[1:], 1):
+                if not c.isalpha():
+                    break
+                if f"-{c}" in takes:  # this option takes the rest of the word, or the next word
+                    if c != "t":
+                        break
+                    return a[j + 1:] or (args[i + 1] if i + 1 < len(args) else None)
     return None
 
 
