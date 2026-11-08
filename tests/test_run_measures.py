@@ -251,3 +251,19 @@ def test_cd_dash_with_no_previous_directory_stays_put(measure):
     existing = {"calc.py", "tests/calc.py"}
     assert measure("cd tests; cd ..; cd -; printf x > calc.py", existing) == {"read_before_edit": False,
                                                                                "edited_unread": ["tests/calc.py"]}
+
+
+# a subshell's trailing redirects with descriptor numbers (`2>`, `1>`, `2>&1`) still open before its body
+@DRIVERS
+@pytest.mark.parametrize("command", ["(cat calc.py) 2>errors.log >calc.py", "(cat calc.py) 2>&1 >calc.py",
+                                     "(cat calc.py) 1>calc.py", "(cat calc.py) 2>/dev/null > calc.py",
+                                     "(cat calc.py) 2> errors.log 1> calc.py"])
+def test_a_subshell_s_descriptor_redirects_open_before_its_body(measure, command):
+    assert measure(command) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+@pytest.mark.parametrize("command", ["(cat calc.py) 2>errors.log; printf x > calc.py",
+                                     "(cat calc.py) 2>&1; printf x 1> calc.py"])
+def test_a_subshell_with_only_descriptor_redirects_still_reads_first(measure, command):
+    assert measure(command) == {"read_before_edit": True, "edited_unread": []}
