@@ -55,9 +55,39 @@ def _without_heredoc_bodies(command: str) -> str:
     return "\n".join(out)
 
 
+def _without_comments(command: str) -> str:
+    """The command with unquoted `# ...` comments removed up to, not including, the newline that ends them."""
+    out: list[str] = []
+    quote, i = "", 0
+    while i < len(command):
+        c = command[i]
+        if quote:
+            if c == quote:
+                quote = ""
+            elif c == "\\" and quote == '"' and i + 1 < len(command):
+                out.append(c)
+                i += 1
+                c = command[i]
+        elif c in "'\"":
+            quote = c
+        elif c == "\\" and i + 1 < len(command):
+            out.append(c)
+            i += 1
+            c = command[i]
+        elif c == "#" and (not out or out[-1] in " \t\n;&|()"):
+            while i < len(command) and command[i] != "\n":
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _words(command: str) -> list[str]:
     """Shell words and operators; an unquoted newline is an operator (it ends a command, like `;`)."""
-    lexer = shlex.shlex(_without_heredoc_bodies(command), posix=True, punctuation_chars=";&|()<>\n")
+    lexer = shlex.shlex(_without_comments(_without_heredoc_bodies(command)), posix=True,
+                        punctuation_chars=";&|()<>\n")
+    lexer.commenters = ""
     lexer.whitespace_split = True
     lexer.whitespace = " \t\r"
     try:
@@ -80,8 +110,8 @@ def shell_access(command: str) -> list[tuple[str, str]]:
     """What a shell command shows and writes, in order: ("read" | "write", workspace-relative path).
 
     Shown: through a viewer (`cat a.py | head`, `sed -n 1,20p b.py`) or an input redirect (`< c.py`). Written: an
-    output redirect (`>`, `>>`), `tee`, `sed -i` / `perl -pi` (which edit without showing), or the target of `cp`,
-    `mv` or `truncate`. Running a file (`python x.py`, `pytest tests/x.py`) neither shows nor writes it. Simple
+    output redirect (`>`, `>>`), `tee`, `sed -i` / `perl -pi` (which edit without showing), the target of `cp` or
+    `mv` (a file, or a directory the sources land in under their own names), or `truncate`. Running a file (`python x.py`, `pytest tests/x.py`) neither shows nor writes it. Simple
     commands count in order; within one, its redirects come first (the shell opens them before it runs the command),
     then what the command reads, then what it writes. `cd` moves where later relative paths resolve; the command
     starts in the workspace."""
@@ -123,8 +153,10 @@ def _segment_access(segment: list[str], cwd: str, events: list[tuple[str, str]])
         events += [("read", f) for f in files]
     elif cmd in ("tee", "truncate"):
         events += [("write", f) for f in files]
-    elif cmd in ("cp", "mv") and len(files) >= 2:
-        events.append(("write", files[-1]))
+    elif cmd in ("cp", "mv") and len(files) >= 2:  # onto a file, or into a directory under each source's name
+        dest = files[-1]
+        events.append(("write", dest))
+        events += [("write", posixpath.join(dest, posixpath.basename(src))) for src in files[:-1]]
     return cwd
 
 

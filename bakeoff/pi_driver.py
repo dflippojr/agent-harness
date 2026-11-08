@@ -21,6 +21,7 @@ install/run-server.sh), which a bridge container going through host-gateway cann
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
@@ -277,6 +278,35 @@ def run_attempt(task, repeat: int, *, base_url: str, model, launch: Launch, prep
             "status": status, "seconds": run.seconds, "exit_code": run.exit_code, **measures}
 
 
+# workspace ownership
+def give_back(ws: Path, docker: Callable[..., subprocess.CompletedProcess] | None = None) -> bool:
+    """Hand the workspace back to the host user. A task's setup and its checker run in the root sandbox
+    (bakeoff/sandbox.py), so they can leave root-owned files, such as merge_conflict's .git, that Pi, running as the
+    host user, could not change and the run could not remove. True if anything had to change hands."""
+    if not hasattr(os, "getuid"):
+        return False
+    uid, gid = os.getuid(), os.getgid()
+    paths = [ws, *ws.rglob("*")]
+    if all(p.lstat().st_uid == uid for p in paths):
+        return False
+    (docker or _docker)("run", "--rm", "--network", "none", "--mount", f"type=bind,source={ws.resolve()},target=/w",
+                        SANDBOX_IMAGE, "chown", "-R", f"{uid}:{gid}", "/w")
+    return True
+
+
+def prepare_for_pi(prepare: Callable, task, ws: Path) -> dict[str, str]:
+    baseline = prepare(task, ws)
+    give_back(ws)
+    return baseline
+
+
+def grade_for_pi(grade: Callable, task, ws: Path, answer: str, baseline: dict[str, str]) -> tuple[bool, str]:
+    try:
+        return grade(task, ws, answer, baseline)
+    finally:
+        give_back(ws)
+
+
 # by hand
 def build_images(root: Path = ROOT) -> None:
     from .sandbox import build_image
@@ -309,7 +339,8 @@ def run_standalone(suite: dict, only: list[str] | None, name: str, build: bool =
     try:
         with Route(model.base_url) as route:
             outcomes = run_suite(suite, only, route.base_url, model, launch_docker(route),
-                                 prepare_hard_task, grade_hard_task, tmp)
+                                 functools.partial(prepare_for_pi, prepare_hard_task),
+                                 functools.partial(grade_for_pi, grade_hard_task), tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     out = ROOT / "runs" / f"pi-{name}-{time.strftime('%Y%m%d-%H%M%S')}.json"

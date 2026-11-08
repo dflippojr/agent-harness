@@ -157,6 +157,20 @@ def test_a_newline_ends_a_command_like_a_semicolon():
     assert file_access([("bash", {"command": 'printf "a\nb" > calc.py'})], EXISTING)["edited_unread"] == ["calc.py"]
 
 
+def test_a_comment_keeps_the_newline_that_ends_its_command():
+    assert file_access([("bash", {"command": "cat calc.py # inspect\nprintf fixed > calc.py"})], EXISTING) == {
+        "read_before_edit": True, "edited_unread": []}
+    # `#` inside quotes or a word is no comment
+    assert file_access([("bash", {"command": "echo '# x' > calc.py # note"})], EXISTING)["edited_unread"] == ["calc.py"]
+    assert file_access([("bash", {"command": "echo a#b > util.py"})], EXISTING)["edited_unread"] == ["util.py"]
+
+
+@pytest.mark.parametrize("command", ["cp staging/calc.py .", "mv /tmp/out/calc.py ./", "cp -f a.py calc.py",
+                                     "cp new/calc.py /workspace/"])
+def test_cp_or_mv_into_the_workspace_overwrites_the_task_file_of_that_name(command):
+    assert file_access([("bash", {"command": command})], EXISTING)["edited_unread"] == ["calc.py"]
+
+
 def test_here_document_bodies_are_data_not_commands():
     heredoc = "cat > new.py <<'EOF'\nopen('calc.py', 'w').write(x > util.py)\nEOF\ncat calc.py\nsed -i s/a/b/ calc.py"
     assert file_access([("bash", {"command": heredoc})], EXISTING) == {"read_before_edit": True,
@@ -380,6 +394,30 @@ def test_a_route_that_fails_half_way_removes_what_it_made():
     with pytest.raises(subprocess.CalledProcessError):
         pi_driver.Route("http://127.0.0.1:8090", docker=docker).__enter__()
     assert [c[:2] for c in calls[-2:]] == [("rm", "-f"), ("volume", "rm")]
+
+
+def test_root_owned_setup_files_are_handed_back_before_pi_runs_and_after_grading(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(pi_driver, "_docker", lambda *a, check=True: calls.append(a))
+    (tmp_path / "ws" / ".git").mkdir(parents=True)
+    ws = tmp_path / "ws"
+    if not hasattr(os, "getuid"):
+        assert pi_driver.give_back(ws) is False and not calls
+        return
+    assert pi_driver.give_back(ws) is False and not calls  # all the host user's already: no container
+    # setup ran in the root sandbox (merge_conflict's .git): the files belong to someone else
+    monkeypatch.setattr(pi_driver.os, "getuid", lambda: os.stat(ws).st_uid + 1)
+    baseline = pi_driver.prepare_for_pi(lambda task, w: {"urls.py": "h"}, _task(), ws)
+    assert baseline == {"urls.py": "h"}
+    uid, gid = os.stat(ws).st_uid + 1, os.getgid()
+    assert calls == [("run", "--rm", "--network", "none", "--mount", f"type=bind,source={ws.resolve()},target=/w",
+                      pi_driver.SANDBOX_IMAGE, "chown", "-R", f"{uid}:{gid}", "/w")]
+
+    def broken_checker(*a):
+        raise RuntimeError("checker crashed")
+    with pytest.raises(RuntimeError):
+        pi_driver.grade_for_pi(broken_checker, _task(), ws, "", baseline)
+    assert len(calls) == 2  # handed back even when the checker fails
 
 
 def test_the_image_pins_the_release_the_driver_records():
