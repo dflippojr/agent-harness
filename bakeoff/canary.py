@@ -329,25 +329,33 @@ def turn_metrics_by_session(db) -> list[dict]:
 
 
 # by hand, daemon stopped
+def manual_suite(repeats: int | None, heldout: bool = False, xy: bool = False) -> dict:
+    suite = heldout_suite(3) if heldout else xy_suite(2) if xy else load_suite()
+    if repeats:
+        suite["repeats"] = repeats
+    return suite
+
+
+def run_pi(task_ids: list[str], repeats: int | None, heldout: bool = False, xy: bool = False) -> Path:
+    """#942: the hard tasks driven by the Pi coding agent (bakeoff/pi_driver.py). No Manager: Pi talks to llama-server
+    itself. Plain blocking code, called outside asyncio.run: there Ctrl-C (SIGINT) would only cancel the main task,
+    which blocking code never yields to, and the attempts would go on; here it raises KeyboardInterrupt at once."""
+    from . import pi_driver
+    return pi_driver.run_standalone(manual_suite(repeats, heldout, xy), task_ids or None,
+                                    "heldout" if heldout else "xy" if xy else "canary")
+
+
 async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path, heldout: bool = False,
                          plan_reinject: bool = False, xy: bool = False, system_line: str = "",
                          keep_metrics: Path | None = None, capture_prompts: Path | None = None,
-                         mask_batch_at: float = 0.0, driver: str = "native") -> Path:
+                         mask_batch_at: float = 0.0) -> Path:
+    """The native driver by hand (the Pi driver is run_pi)."""
     from harness import config as config_mod
     from harness.manager import Manager
 
     from .run_measures import native_measures
 
-    suite = heldout_suite(3) if heldout else xy_suite(2) if xy else load_suite()
-    if repeats:
-        suite["repeats"] = repeats
-    if driver == "pi":  # #942: no Manager; Pi talks to llama-server itself (bakeoff/pi_driver.py)
-        from . import pi_driver
-        # On this thread, not a worker: nothing else shares the loop, and an interrupt (Ctrl-C) must stop the run.
-        # A worker thread would keep starting attempts after the await was cancelled.
-        return pi_driver.run_standalone(suite, task_ids or None, "heldout" if heldout else "xy" if xy else "canary")
-    if driver != "native":
-        raise ValueError(f"unknown canary driver {driver!r}")
+    suite = manual_suite(repeats, heldout, xy)
     base = config_mod.load()
     canary_cfg = base.canary
     # An experiment (a separate set, a prompt line or named tasks) gets room for every attempt, so its conditions are
@@ -425,11 +433,13 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"--driver pi runs the hard tasks only; {', '.join(web)} are web tasks")
     if args.mask_batch_at and not _mask_batch_at(args.mask_batch_at):
         parser.error("--mask-batch-at must be a share of the window below elide_at (0.55)")
+    task_ids = [t for t in args.tasks.split(",") if t]
+    if args.driver == "pi":  # outside asyncio.run, so Ctrl-C stops it (run_pi)
+        run_pi(task_ids, args.repeats or None, heldout=args.heldout, xy=args.xy)
+        return 0
     debug = {k: v for k, v in (("keep_metrics", args.keep_metrics), ("capture_prompts", args.capture_prompts),
                                ("mask_batch_at", args.mask_batch_at)) if v}
-    if args.driver != "native":
-        debug["driver"] = args.driver
-    asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture,
+    asyncio.run(run_standalone(task_ids, args.repeats or None, args.fixture,
                                heldout=args.heldout, plan_reinject=args.plan_reinject, xy=args.xy,
                                system_line=args.system_line.strip(), **debug))
     return 0

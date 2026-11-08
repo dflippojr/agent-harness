@@ -388,18 +388,20 @@ def test_the_image_pins_the_release_the_driver_records():
 
 
 # the manual runner
-def test_the_cli_passes_driver_pi_through_and_keeps_native_the_default(monkeypatch):
-    assert inspect.signature(canary.run_standalone).parameters["driver"].default == "native"
-    seen = []
+def test_the_cli_sends_driver_pi_to_run_pi_and_keeps_native_the_default(monkeypatch):
+    native, pi = [], []
 
     async def fake_run(task_ids, repeats, fixture, **kw):
-        seen.append(dict(kw, task_ids=task_ids, repeats=repeats))
+        native.append(dict(kw, task_ids=task_ids, repeats=repeats))
 
     monkeypatch.setattr(canary, "run_standalone", fake_run)
-    canary.main(["--driver", "pi", "--tasks", "sqlite_report", "--repeats", "1"])
+    monkeypatch.setattr(canary, "run_pi", lambda task_ids, repeats, **kw: pi.append(dict(kw, task_ids=task_ids,
+                                                                                         repeats=repeats)))
+    canary.main(["--driver", "pi", "--tasks", "sqlite_report", "--repeats", "1", "--heldout"])
     canary.main(["--tasks", "sqlite_report"])
-    assert seen[0]["driver"] == "pi" and seen[0]["task_ids"] == ["sqlite_report"] and seen[0]["repeats"] == 1
-    assert "driver" not in seen[1]  # native: run_standalone's default
+    assert pi == [{"task_ids": ["sqlite_report"], "repeats": 1, "heldout": True, "xy": False}]
+    assert len(native) == 1 and native[0]["task_ids"] == ["sqlite_report"]  # no --driver: the native loop
+    assert "driver" not in inspect.signature(canary.run_standalone).parameters  # the native runner has no Pi path
 
 
 @pytest.mark.parametrize("flags", [["--plan-reinject"], ["--mask-batch-at", "0.45"], ["--system-line", "be careful"],
@@ -407,6 +409,7 @@ def test_the_cli_passes_driver_pi_through_and_keeps_native_the_default(monkeypat
                                    ["--tasks", "pdf_transformer"], ["--driver", "opencode"]])
 def test_the_cli_refuses_what_pi_cannot_run(monkeypatch, flags, capsys):
     monkeypatch.setattr(canary, "run_standalone", lambda *a, **k: pytest.fail("must not run"))
+    monkeypatch.setattr(canary, "run_pi", lambda *a, **k: pytest.fail("must not run"))
     args = flags if flags[0] == "--driver" else ["--driver", "pi", *flags]
     with pytest.raises(SystemExit):
         canary.main(args)
@@ -424,7 +427,7 @@ def test_the_nightly_path_never_selects_pi():
     assert not [p for p in (ROOT / "harness").rglob("*.py") if "pi_driver" in p.read_text(encoding="utf-8")]
 
 
-def test_run_standalone_with_driver_pi_runs_the_suite_through_pi_and_writes_the_pin(monkeypatch, tmp_path, fake_pi):
+def test_run_pi_runs_the_suite_through_pi_and_writes_the_pin(monkeypatch, tmp_path, fake_pi):
     from harness import config as config_mod
     base = SimpleNamespace(default_model="qwen", models={"qwen": MODEL})
     monkeypatch.setattr(config_mod, "load", lambda: base)
@@ -446,7 +449,7 @@ def test_run_standalone_with_driver_pi_runs_the_suite_through_pi_and_writes_the_
     monkeypatch.setattr(pi_driver, "ROOT", tmp_path)
     task = _task(id="sqlite_report")
     monkeypatch.setattr(canary, "load_suite", lambda: {"repeats": 2, "hard": [task, _task(id="other")], "web": []})
-    out = asyncio.run(canary.run_standalone(["sqlite_report"], None, tmp_path, driver="pi"))
+    out = canary.run_pi(["sqlite_report"], None)
     data = json.loads(out.read_text(encoding="utf-8"))
     assert out.parent == tmp_path / "runs" and out.name.startswith("pi-canary-")
     assert data["driver"] == "pi" and data["model"] == MODEL.name and data["pi"]["version"] == pi_driver.PI_VERSION
@@ -459,8 +462,6 @@ def test_run_standalone_with_driver_pi_runs_the_suite_through_pi_and_writes_the_
     assert ("volume", "rm", "-f", volume) in docker
     models = json.loads(fake_pi.record.read_text())["models"]
     assert models["providers"]["canary"]["baseUrl"] == "http://127.0.0.1:8090/v1"
-    with pytest.raises(ValueError):
-        asyncio.run(canary.run_standalone([], None, tmp_path, driver="opencode"))
 
 
 # the native driver records the same measures by hand
@@ -505,14 +506,24 @@ def test_a_native_hard_attempt_by_hand_records_them_and_the_nightly_one_does_not
 
 
 # stopping a run by hand stops Pi
-def test_the_pi_suite_runs_on_the_caller_s_thread_so_an_interrupt_stops_it(monkeypatch, tmp_path):
+def test_the_pi_suite_runs_on_the_main_thread_outside_any_event_loop(monkeypatch, tmp_path):
     import threading
+
+    def record(*a, **k):
+        try:
+            asyncio.get_running_loop()
+            loop = True
+        except RuntimeError:
+            loop = False
+        seen.append((threading.current_thread(), loop))
+        return tmp_path
+
     seen = []
-    monkeypatch.setattr(pi_driver, "run_standalone", lambda *a, **k: seen.append(threading.current_thread()) or tmp_path)
+    monkeypatch.setattr(pi_driver, "run_standalone", record)
     monkeypatch.setattr(canary, "load_suite", lambda: {"repeats": 1, "hard": [_task()], "web": []})
-    asyncio.run(canary.run_standalone([], None, tmp_path, driver="pi"))
-    # not a worker thread: cancelling an await would leave one running attempt after attempt
-    assert seen == [threading.main_thread()]
+    canary.main(["--driver", "pi"])
+    # not a worker thread (it would go on after a cancel), not inside asyncio.run (SIGINT would only cancel a task)
+    assert seen == [(threading.main_thread(), False)]
 
 
 def test_an_interrupted_docker_run_removes_its_container_and_re_raises(tmp_path, monkeypatch):
