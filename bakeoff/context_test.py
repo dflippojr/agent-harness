@@ -86,11 +86,12 @@ def snapshot(pid: int | None) -> dict:
 
 
 @contextmanager
-def serving(args: argparse.Namespace, ctx: int, out_dir: Path, config: dict) -> Iterator[tuple[str, int | None, float | None]]:
+def serving(args: argparse.Namespace, ctx: int, out_dir: Path) -> Iterator[tuple[str, int | None, float | None]]:
     """Yields (base URL, server pid, load seconds): a server started at this ctx, or the one --base-url names."""
     if args.base_url:
         yield args.base_url, args.server_pid, None
         return
+    config = copy.deepcopy(load_config())
     config["ctx_size"] = ctx
     with LlamaServer(args.model, out_dir / f"server-{ctx}.log", config) as server:
         yield server.base_url, server.proc.pid, round(server.load_seconds or 0, 1)
@@ -119,11 +120,10 @@ def main(argv: list[str] | None = None) -> None:
     out_dir.mkdir(parents=True)
     results = []
     for ctx in ctxs:
-        config = copy.deepcopy(load_config())
         sizes = [s for s in (2000, 16000, 30000, 60000, 120000) if s < ctx - 3000]
         row: dict = {"ctx": ctx}
         try:
-            with serving(args, ctx, out_dir, config) as (base_url, pid, load_seconds):
+            with serving(args, ctx, out_dir) as (base_url, pid, load_seconds):
                 row["load_seconds"] = load_seconds
                 row["after_load"] = snapshot(pid)
                 if load_seconds is not None:
