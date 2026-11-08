@@ -216,10 +216,11 @@ def shell_access(command: str) -> list[tuple[str, str]]:
             continue
         if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
             events += [(kind, normalize(t, cwd)) for kind, t in redirects]
-            if segment and segment[0].rsplit("/", 1)[-1] == "cd":
-                cwd, oldpwd = _cd(segment[1:], cwd, oldpwd)
+            command_words = _command(segment)
+            if command_words and command_words[0].rsplit("/", 1)[-1] == "cd":
+                cwd, oldpwd = _cd(command_words[1:], cwd, oldpwd)
             else:
-                _segment_access(segment, cwd, events)
+                _segment_access(command_words, cwd, events)
             segment, redirects = [], []
             if word == "(":
                 outer.append(("shell", cwd, oldpwd, len(events)))
@@ -318,6 +319,37 @@ def _target_directory(args: list[str]) -> str | None:
         if a.startswith("-t") and len(a) > 2 and not a.startswith("--"):
             return a[2:]
     return None
+
+
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Commands that run the rest of their words as a command: their options that take a value, and how many plain words
+# come before that command (timeout's duration).
+WRAPPERS = {"env": ({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}, 0), "command": (set(), 0),
+            "builtin": (set(), 0), "exec": ({"-a"}, 0), "time": ({"-f", "--format", "-o", "--output"}, 0),
+            "nice": ({"-n", "--adjustment"}, 0), "nohup": (set(), 0), "stdbuf": ({"-i", "-o", "-e"}, 0),
+            "timeout": ({"-s", "--signal", "-k", "--kill-after"}, 1),
+            "sudo": ({"-u", "--user", "-g", "--group", "-C", "-D", "-h", "-p", "-r", "-t", "-U"}, 0)}
+
+
+def _command(segment: list[str]) -> list[str]:
+    """A simple command's words from the command itself on: leading `NAME=value` assignments and wrappers such as
+    `env`, `nice -n 5`, `timeout 30s` or `sudo -E` dropped. Only assignments: no command at all."""
+    words = list(segment)
+    while words:
+        name = words[0].rsplit("/", 1)[-1]
+        if ASSIGNMENT.match(words[0]):
+            words = words[1:]
+        elif name in WRAPPERS:
+            takes, plain = WRAPPERS[name]
+            i = 1
+            while i < len(words) and words[i].startswith("-") and words[i] != "--":
+                i += 2 if words[i] in takes else 1
+            if i < len(words) and words[i] == "--":
+                i += 1
+            words = words[i + plain:]
+        else:
+            break
+    return words
 
 
 def _cd(args: list[str], cwd: str, oldpwd: str | None) -> tuple[str, str | None]:
