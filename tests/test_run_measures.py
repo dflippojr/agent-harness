@@ -424,3 +424,22 @@ def test_a_target_directory_inside_an_option_cluster_is_still_the_destination(me
 def test_a_cluster_without_t_keeps_the_last_operand_as_the_destination(measure):
     assert measure("cp -fv staging/calc.py calc.py") == {"read_before_edit": False, "edited_unread": ["calc.py"]}
     assert measure("cp -fv calc.py staging/") == {"read_before_edit": None, "edited_unread": []}
+
+
+# a word with a substitution glued into it is not known, so it names no task file
+@DRIVERS
+@pytest.mark.parametrize("command", ["cat calc.py$(printf .bak); printf fixed > calc.py",
+                                     "cat $(printf calc).py; printf x > calc.py",
+                                     "cat calc.py`echo .bak`; printf x > calc.py",
+                                     'cat "calc.py$(echo .bak)"; printf x > calc.py',
+                                     "head -n 3 x$(echo)calc.py; printf x > calc.py"])
+def test_a_word_with_a_glued_substitution_names_no_known_file(measure, command):
+    assert measure(command) == {"read_before_edit": False, "edited_unread": ["calc.py"]}
+
+
+@DRIVERS
+@pytest.mark.parametrize("command", ["cat $(echo x) calc.py; printf x > calc.py",
+                                     "cat calc.py $(echo x); printf x > calc.py",
+                                     "echo $(cat calc.py)>calc.py"])
+def test_a_substitution_beside_a_word_leaves_the_word_known(measure, command):
+    assert measure(command) == {"read_before_edit": True, "edited_unread": []}
