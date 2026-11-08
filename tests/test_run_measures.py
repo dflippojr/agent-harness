@@ -443,3 +443,21 @@ def test_a_word_with_a_glued_substitution_names_no_known_file(measure, command):
                                      "echo $(cat calc.py)>calc.py"])
 def test_a_substitution_beside_a_word_leaves_the_word_known(measure, command):
     assert measure(command) == {"read_before_edit": True, "edited_unread": []}
+
+
+# a cd in a pipeline runs in that pipeline's subshell
+@DRIVERS
+@pytest.mark.parametrize("command", ["cat calc.py; cd tests | cat; printf x > calc.py",
+                                     "cat calc.py; true | cd tests; printf x > calc.py",
+                                     "cat calc.py; cd tests | cd .. | cat; printf x > calc.py"])
+def test_a_cd_in_a_pipeline_leaves_the_shell_where_it_was(measure, command):
+    assert measure(command, {"calc.py", "tests/calc.py"}) == {"read_before_edit": True, "edited_unread": []}
+
+
+@DRIVERS
+def test_a_cd_before_a_pipeline_still_moves_the_shell(measure):
+    existing = {"calc.py", "tests/calc.py"}
+    assert measure("cd tests && cat calc.py | head; printf x > calc.py", existing) == {"read_before_edit": True,
+                                                                                       "edited_unread": []}
+    assert measure("cd tests | cat; cat tests/calc.py; printf x > tests/calc.py", existing) == {
+        "read_before_edit": True, "edited_unread": []}

@@ -580,3 +580,14 @@ def test_a_real_sigint_stops_a_manual_pi_run_after_the_attempt_in_flight(monkeyp
     with pytest.raises(KeyboardInterrupt):
         canary.main(["--driver", "pi"])
     assert len(launched) == 1, "attempts kept starting after the interrupt"
+
+
+def test_a_transcript_cut_off_mid_tool_still_counts_its_finished_turn():
+    # the wall limit killed Pi while a tool ran: the reply finished, its turn_end never came
+    msg = _assistant([_call(1, "bash", command="pytest -q")], _usage(3000, 40))
+    records = [{"type": "agent_start"}, {"type": "turn_start"}, {"type": "message_end", "message": msg},
+               {"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "bash",
+                "args": {"command": "pytest -q"}}]
+    m = pi_driver.parse_transcript(_jsonl(records), EXISTING)
+    assert m["turns"] == 1 and m["prompt_tokens"] == 3000 and m["tool_calls"] == {"bash": 1}
+    assert pi_driver.parse_transcript(_jsonl(transcript()), EXISTING)["turns"] == 6  # complete runs unchanged
