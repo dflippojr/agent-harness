@@ -215,7 +215,7 @@ the owner says so on a card first. Use only `/health` and `/props` on a sleeping
    fixed prompts of about 2K, 16K and 58K tokens (`n_predict: 200`, `cache_prompt: false`), reading
    `timings.predicted_per_second` and `timings.prompt_per_second` from each answer. Then `docker stop ah823-measure`
    and repeat without `--fit-target 2048` as the baseline, in the same session. `bakeoff/context_test.py --base-url <url>
-   --server-pid <pid>` measures a server started this way on Ubuntu (follow-up 8, #943): it does not start one, and it
+   --ctx <the server's --ctx-size> --server-pid <pid>` measures a server started this way on Ubuntu (follow-up 8, #943): it does not start one, and it
    reads process memory from `/proc`. Without `--base-url` it starts its own server from `bakeoff/models.yaml` (Windows
    paths) and reads process memory through PowerShell.
 5. **Coexistence.** With option B loaded and idle, repeat 2 and 3 together, and confirm `nvidia-smi` free memory stays
