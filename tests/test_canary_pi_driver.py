@@ -540,3 +540,64 @@ def test_an_interrupt_ends_the_suite_without_another_attempt(tmp_path):
         pi_driver.run_suite({"repeats": 2, "hard": [_task(), _task(id="other")]}, None, "http://127.0.0.1:8090",
                             MODEL, launch, _prepare, _grade, tmp_path / "work")
     assert len(launched) == 1
+
+
+SIGINT_RUN = r'''
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[2])
+from bakeoff import canary, pi_driver
+from harness import config as config_mod
+from harness.config import ModelConfig
+work = Path(sys.argv[1])
+model = ModelConfig(name="m", base_url="http://127.0.0.1:8090")
+config_mod.load = lambda: SimpleNamespace(default_model="m", models={"m": model})
+pi_driver.build_images = lambda: None
+pi_driver._docker = lambda *a, check=True: None
+pi_driver.ROOT = work
+
+
+def launcher(route):
+    def launch(argv, env, ws, timeout, name):  # a slow fake Pi: one line per attempt started, then 3 s of "work"
+        return pi_driver.launch_local([sys.executable, str(work / "slow_pi.py"), *argv[1:]], env, ws, timeout, name)
+    return launch
+
+
+pi_driver.launch_docker = launcher
+task = SimpleNamespace(id="t", prompt="p", max_turns=50, wall_limit=60)
+canary.load_suite = lambda: {"repeats": 4, "hard": [task], "web": []}
+canary.prepare_hard_task = lambda t, ws: {}
+canary.grade_hard_task = lambda t, ws, answer, baseline: (False, "graded")
+canary.main(["--driver", "pi"])
+'''
+SLOW_PI = r'''
+import sys, time
+from pathlib import Path
+with open(Path(__file__).with_name("started.log"), "a") as f:
+    f.write("attempt\n")
+time.sleep(3)
+'''
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="sends a real SIGINT to a child process (POSIX signals)")
+def test_a_real_sigint_stops_a_manual_pi_run_after_the_attempt_in_flight(tmp_path):
+    import signal
+    import time
+    (tmp_path / "run.py").write_text(SIGINT_RUN, encoding="utf-8")
+    (tmp_path / "slow_pi.py").write_text(SLOW_PI, encoding="utf-8")
+    log = tmp_path / "started.log"
+    proc = subprocess.Popen([sys.executable, str(tmp_path / "run.py"), str(tmp_path), str(ROOT)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 60
+        while not log.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert log.exists(), proc.stderr.read() if proc.poll() is not None else "no attempt started"
+        proc.send_signal(signal.SIGINT)  # what Ctrl-C sends
+        _, err = proc.communicate(timeout=60)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert log.read_text().count("attempt") == 1, "attempts kept starting after the interrupt"
+    assert proc.returncode != 0 and "KeyboardInterrupt" in err
