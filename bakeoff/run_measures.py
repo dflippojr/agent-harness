@@ -153,36 +153,50 @@ def shell_access(command: str) -> list[tuple[str, str]]:
     count: a viewer's pattern or script (`grep calc.py README.md`, `sed -n 1p x`) and option values are not files.
     Running a file (`python x.py`, `pytest tests/x.py`) neither shows nor writes it. Simple commands count in order;
     within one, its redirects come first (the shell opens them before it runs the command), then what the command
-    reads, then what it writes. `cd` moves where later relative paths resolve, until the subshell `( ... )` it ran in
-    ends; the command starts in the workspace."""
+    reads, then what it writes. A subshell `( ... ) > f` is one command too: the redirects after its `)` open
+    before anything in it runs, so `(cat f) > f` empties f before reading it. `cd` moves where later relative paths
+    resolve, until the subshell it ran in ends; the command starts in the workspace."""
     events: list[tuple[str, str]] = []
     cwd = ""
-    outer: list[str] = []  # the directory each open subshell started in
+    outer: list[tuple[str, int]] = []  # each open subshell: the directory it started in, where its events begin
     segment: list[str] = []
     redirects: list[tuple[str, str]] = []
     words = [w for word in _words(command) for w in (_operators(word) if _is_operator(word) else [word])] + [";"]
     i = 0
     while i < len(words):
         word = words[i]
-        if word in (">", ">>", ">|", "&>", "&>>", "<") and i + 1 < len(words):
-            target = words[i + 1]
-            if not _is_operator(target) and target != "/dev/null":
-                redirects.append(("read" if word == "<" else "write", target.translate(_SHOW)))
+        if word in REDIRECTS and i + 1 < len(words):
+            redirects += _redirect(word, words[i + 1])
             i += 2
             continue
         if _is_operator(word):  # end of a simple command (`>&` and friends end up here too)
             events += [(kind, normalize(t, cwd)) for kind, t in redirects]
             cwd = _segment_access(segment, cwd, events)
             segment, redirects = [], []
-            for c in word:  # punctuation runs together: `);` or `((`
-                if c == "(":
-                    outer.append(cwd)
-                elif c == ")" and outer:
-                    cwd = outer.pop()
+            if word == "(":
+                outer.append((cwd, len(events)))
+            elif word == ")" and outer:
+                cwd, start = outer.pop()
+                body = events[start:]
+                del events[start:]
+                while i + 2 < len(words) and words[i + 1] in REDIRECTS:  # the subshell's own redirects come first
+                    events += [(kind, normalize(t, cwd)) for kind, t in _redirect(words[i + 1], words[i + 2])]
+                    i += 2
+                events += body
         else:
             segment.append(word.translate(_SHOW))
         i += 1
     return events
+
+
+REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<")
+
+
+def _redirect(op: str, target: str) -> list[tuple[str, str]]:
+    """The access one redirect makes: `< f` reads f, the others write it (nothing for /dev/null or a missing word)."""
+    if _is_operator(target) or target == "/dev/null":
+        return []
+    return [("read" if op == "<" else "write", target.translate(_SHOW))]
 
 
 # Options that take a value as the next word, and options that give the pattern or script (so the first operand is a
