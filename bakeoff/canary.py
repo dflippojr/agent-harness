@@ -343,8 +343,9 @@ async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path
         suite["repeats"] = repeats
     if driver == "pi":  # #942: no Manager; Pi talks to llama-server itself (bakeoff/pi_driver.py)
         from . import pi_driver
-        return await asyncio.to_thread(pi_driver.run_standalone, suite, task_ids or None,
-                                       "heldout" if heldout else "xy" if xy else "canary")
+        # On this thread, not a worker: nothing else shares the loop, and an interrupt (Ctrl-C) must stop the run.
+        # A worker thread would keep starting attempts after the await was cancelled.
+        return pi_driver.run_standalone(suite, task_ids or None, "heldout" if heldout else "xy" if xy else "canary")
     if driver != "native":
         raise ValueError(f"unknown canary driver {driver!r}")
     base = config_mod.load()

@@ -173,6 +173,9 @@ def launch_docker(route: Route, docker: Callable[..., subprocess.CompletedProces
         except subprocess.TimeoutExpired as e:
             docker("rm", "-f", name, check=False)
             return Launched(_text(e.stdout), _text(e.stderr), None, True, round(time.monotonic() - started, 1))
+        except BaseException:  # interrupted: the docker CLI dies, but a --rm container would run on
+            docker("rm", "-f", name, check=False)
+            raise
         return Launched(proc.stdout, proc.stderr, proc.returncode, False, round(time.monotonic() - started, 1))
     return launch
 
