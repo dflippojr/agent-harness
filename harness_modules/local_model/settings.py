@@ -1,6 +1,7 @@
 """Resource guard registry keys with their original YAML and overlay names."""
 from harness.modules import (
-    Config, cfg_field, module_installed, setting_float as _float, setting_bool as _bool, setting_int as _int,
+    PLEX_TRANSCODES_ALLOWED_MAX, Config, cfg_field, module_installed, setting_float as _float, setting_bool as _bool,
+    setting_int as _int,
 )
 
 GPU_GUARD = "GPU guard"
@@ -32,6 +33,11 @@ def specs():
              "Free VRAM under this for two polls in a row parks the model. 0 turns the check off.",
              GPU_GUARD, 0, *cfg_field("gpu_guard", "min_free_vram_mib", cast=int), 0, 65536,
              ("gpu_guard", "min_free_vram_mib"), modules=("gpu_guard",)),
+        _int("gpu_guard.plex_transcodes_allowed", "Plex transcodes allowed",
+             "Plex hardware transcodes the model can share the GPU with. One more parks the model. 0 parks on the "
+             "first, as before.",
+             GPU_GUARD, 0, *cfg_field("gpu_guard", "plex_transcodes_allowed", cast=int), 0, PLEX_TRANSCODES_ALLOWED_MAX,
+             ("gpu_guard", "plex_transcodes_allowed"), modules=("gpu_guard",)),
         _float("gpu_guard.vram_drain_timeout_seconds", "Low VRAM drain timeout (seconds)",
                "Longest wait for the current model turn when low free VRAM alone starts the pause.",
                GPU_GUARD, 30, *cfg_field("gpu_guard", "vram_drain_timeout_seconds", cast=float), 5, 1800,

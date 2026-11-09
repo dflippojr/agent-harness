@@ -243,6 +243,9 @@ class CleanupConfig:
     min_free_gb: float = 20               # refuse new sessions when the data drive has less free space
 
 
+PLEX_TRANSCODES_ALLOWED_MAX = 4
+
+
 @dataclass
 class GpuGuardConfig:
     """The resource guard (gpu_guard.py): pause the queue and unload the model while a game or a Plex hardware
@@ -280,6 +283,9 @@ class GpuGuardConfig:
     plex_url: str = "http://127.0.0.1:32400"  # hardware transcodes, with the token in Plex's registry key; without
                                               # one (Linux) nvidia-smi's Plex Transcoder processes count instead
     plex: bool = True
+    # Plex hardware transcodes the model shares the card with (docs/gpu-vram-budget.md, follow-up 2): the guard parks
+    # only when there are more than this. Count only; a heavy (4K/HDR) one is left to min_free_vram_mib. 0 to 4.
+    plex_transcodes_allowed: int = 0
 
 
 def validate_gpu_guard(guard: GpuGuardConfig) -> None:
@@ -290,6 +296,10 @@ def validate_gpu_guard(guard: GpuGuardConfig) -> None:
     drain = guard.vram_drain_timeout_seconds
     if not isinstance(drain, (int, float)) or isinstance(drain, bool) or not 0 <= drain < float("inf"):
         raise ValueError(f"gpu_guard.vram_drain_timeout_seconds must be a number of seconds, got {drain!r}")
+    allowed = guard.plex_transcodes_allowed
+    if not isinstance(allowed, int) or isinstance(allowed, bool) or not 0 <= allowed <= PLEX_TRANSCODES_ALLOWED_MAX:
+        raise ValueError(f"gpu_guard.plex_transcodes_allowed must be a whole number from 0 to "
+                         f"{PLEX_TRANSCODES_ALLOWED_MAX}, got {allowed!r}")
 
 
 @dataclass

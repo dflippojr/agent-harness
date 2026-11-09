@@ -258,7 +258,7 @@ ROWS = (
     Row("local_model", _local_model, switch="local_model", probe=("GET", "/models/status"),
         answers={"on": 200, "off": 200},
         keys=("gpu_guard.enabled", "gpu_guard.poll_seconds", "gpu_guard.resume_after_seconds",
-              "gpu_guard.drain_timeout_seconds", "gpu_guard.min_free_vram_mib",
+              "gpu_guard.drain_timeout_seconds", "gpu_guard.min_free_vram_mib", "gpu_guard.plex_transcodes_allowed",
               "gpu_guard.vram_drain_timeout_seconds", "modules.gpu_guard", "modules.local_model"),
         caps={"local_model": "present", "gpu_guard": "on"}, scopes=("models:warm",),
         routes=("/models/status", "/models/warm", "/gpu", "/gpu/{action}", "/resources", "/resources/diagnostics",

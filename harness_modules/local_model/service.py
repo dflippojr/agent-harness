@@ -16,8 +16,9 @@ and ComfyUI jobs wait (MemoryWatch; the runner and the image service check it be
 Windows doesn't report VRAM per process, so the triggers are what's running, not memory numbers: an executable
 under a game library folder, a Steam Big Picture window (Sunshine's Big Picture app), or a Plex transcode with
 hardware encoding or decoding. Plex is asked through its API when the registry holds a token; without one (Linux) a
-`Plex Transcoder` process in nvidia-smi's compute apps counts, with no credential. Desktop streaming with nothing
-else running doesn't pause anything. The one memory number is a backstop for all of those being wrong:
+`Plex Transcoder` process in nvidia-smi's compute apps counts, with no credential. Up to `plex_transcodes_allowed`
+transcodes (default 0) share the card with the model; one more is a trigger, and then all of them are. Desktop
+streaming with nothing else running doesn't pause anything. The one memory number is a backstop for all of those being wrong:
 `min_free_vram_mib` (VramFloor), off by default.
 
 Sessions hear about it through `gpu_paused` / `gpu_resumed` events (see Runner.note_gpu_pause), which also notify
@@ -199,6 +200,15 @@ def plex_transcoders(processes: list[dict]) -> list[dict]:
         detail = "Plex transcode" + (f" ({used // 1024 ** 2} MiB)" if used is not None else "")
         out.append({"key": f"plex:pid{proc['pid']}", "kind": "plex", "detail": detail})
     return out
+
+
+def over_plex_allowance(signals: list[dict], allowed: int) -> list[dict]:
+    """The signals that are triggers: Plex transcodes only while there are more than `allowed` (#828). Within it they
+    drop out entirely, so they neither park the model nor join another trigger's reasons; over it every one counts, as
+    none of them is "the extra one". Count only: a heavy transcode is left to the free-VRAM floor."""
+    if sum(1 for s in signals if s["kind"] == "plex") > allowed:
+        return signals
+    return [s for s in signals if s["kind"] != "plex"]
 
 
 class Detector:
@@ -727,7 +737,8 @@ class GpuGuard:
     async def check(self, startup: bool = False) -> None:
         if self.manual and self.manual_until is not None and time.time() >= self.manual_until:
             self.resume(override_signals=False)
-        signals = await self.detector()
+        # The allowance is read on every check, like the floor: a Settings write applies live.
+        signals = over_plex_allowance(await self.detector(), self.cfg.plex_transcodes_allowed)
         sampled_at = await self._recovery_sample_start()
         self.signals = signals + await self.vram_floor(self.control.flagged)
         self.last_check = time.time()
