@@ -43,6 +43,8 @@ that on the tower, and this repository doesn't.
 - ***Resume anyway*** over the allowance ignores the transcodes running then. It ends when the set changes: a new
   transcode pauses again, and so does the same set returning after the count dipped to the allowance in between.
 - **Applies live.** Each check reads the value, so a Settings write takes effect on the next poll.
+- **Metrics.** `harness_gpu_guard_triggers{kind="plex"}` counts transcodes only while they are triggers: it reads
+  `0` while the count is within the allowance.
 - **Count only (owner decision, 2026-11-06).** No code reads a transcode's source resolution or HDR flag, and there is
   no per-process VRAM threshold or Plex token for it. On Linux `nvidia-smi` has no such input anyway. A heavy
   transcode inside the allowance, such as a 4K HDR source with tone mapping (~1,400 MiB, over the budget), is caught by

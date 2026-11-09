@@ -2558,6 +2558,24 @@ def test_resume_anyway_over_the_allowance_lasts_until_the_set_of_transcodes_chan
     asyncio.run(body())
 
 
+
+def test_resume_anyway_ends_when_the_same_transcodes_return_after_a_dip_to_the_allowance():
+    async def body():
+        guard, detect, control, scheduler, _ = make_guard(plex_transcodes_allowed=1, resume_after_seconds=0)
+        detect.signals = _transcodes(2)
+        await guard.check()
+        guard.resume()
+        await guard.check()
+        await guard.check()
+        assert guard.state == CLEAR and control.stops == 1
+        detect.signals = _transcodes(1)  # within the allowance: nothing shows, so the override ends
+        await guard.check()
+        assert guard.override is None and guard.state == CLEAR
+        detect.signals = _transcodes(2)
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 2 and scheduler.paused
+    asyncio.run(body())
+
 def test_no_guard_code_reads_a_source_resolution_or_hdr_flag():
     """Owner decision (a), count-only: heavy transcodes are left to the min_free_vram_mib backstop."""
     import re
