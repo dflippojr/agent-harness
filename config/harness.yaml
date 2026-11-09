@@ -251,6 +251,7 @@ gpu_guard:
   drain_timeout_seconds: 300
   min_free_vram_mib: 0             # free VRAM under this for two polls parks the model; 0 turns it off
   vram_drain_timeout_seconds: 30   # the drain when that alone starts the pause
+  plex_transcodes_allowed: 0       # Plex hardware transcodes the model shares the GPU with; one more parks it (0 to 4)
   lazy_load: true
   min_available_ram_gb: 4          # 0 turns the RAM check off
   model_ram_gb: 14                 # a model load waits unless available RAM minus this stays above the minimum

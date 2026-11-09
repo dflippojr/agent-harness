@@ -15,7 +15,8 @@ through `install/run-server.sh`, and its pause flag is `~/.local/share/agent-har
 Windows text applies to a Windows boot only. The measurements further down are records from the Windows tower.
 
 Plex detection on Linux takes no Plex credential (#830). With no registry token, the guard runs `nvidia-smi
---query-compute-apps=pid,process_name,used_memory` each poll and counts one trigger per `Plex Transcoder` process.
+--query-compute-apps=pid,process_name,used_memory` each poll and counts one signal per `Plex Transcoder` process
+(whether those park the model depends on `gpu_guard.plex_transcodes_allowed`, below).
 Plex Media Server itself doesn't count, and a software transcode isn't on the GPU, so it doesn't either. If
 `nvidia-smi` fails, `plex_error` in `GET /resources` says so and `doctor` warns: the guard is blind to Plex until it
 works again. Windows keeps asking Plex's API while the registry holds a token, and the two sources are never added
@@ -24,6 +25,29 @@ together. Whether an NVENC-only transcode appears in that query has not been che
 
 Game detection is Windows-only: on Linux `process_paths()` and `window_titles()` return nothing, so a game or a
 Big Picture window doesn't trigger the guard there (`docs/gpu-vram-budget.md`, follow-up 5).
+
+## Plex transcode allowance (#828)
+
+`gpu_guard.plex_transcodes_allowed` is how many Plex hardware transcodes the model shares the card with. The guard
+parks the model only when the count is **above** it. The shipped default is `0`: the first transcode parks, as before.
+The range is 0 to 4, and Settings and `harness.yaml` both refuse anything else. The tower's intended value is **1**,
+which fits beside the model with `--fit-target 2048` (`docs/gpu-vram-budget.md`, option B); the owner or liaison sets
+that on the tower, and this repository doesn't.
+
+- **What counts.** One signal per hardware transcode, from whichever source the platform has: Plex's API on Windows
+  with a token, `Plex Transcoder` processes in `nvidia-smi` on Linux. The count is all the guard compares.
+- **Within the allowance** the transcodes drop out of `signals` altogether: they don't park the model, and they don't
+  show among the `reasons` of a pause something else started (a game, the floor, a manual hold).
+- **Over it** every transcode is a trigger, not only the newest, so `reasons` lists them all. When the count falls back
+  to the allowance the transcodes stop counting and `resume_after_seconds` starts, as for any trigger ending.
+- ***Resume anyway*** over the allowance ignores the transcodes running then. It ends when the set changes: a new
+  transcode pauses again, and so does the same set returning after the count dipped to the allowance in between.
+- **Applies live.** Each check reads the value, so a Settings write takes effect on the next poll.
+- **Count only (owner decision, 2026-11-06).** No code reads a transcode's source resolution or HDR flag, and there is
+  no per-process VRAM threshold or Plex token for it. On Linux `nvidia-smi` has no such input anyway. A heavy
+  transcode inside the allowance, such as a 4K HDR source with tone mapping (~1,400 MiB, over the budget), is caught by
+  the free-VRAM floor below: with the tower's 256 MiB it parks the model once free VRAM has stayed under that for two
+  polls. With the floor at `0` nothing catches it, so turn the floor on before raising the allowance.
 
 ## Free-VRAM floor (#829)
 

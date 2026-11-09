@@ -99,14 +99,15 @@ transcode as a reason to park.
 | --- | --- | --- |
 | Game (library folder, Big Picture window) | park | park (unchanged). On Linux `process_paths()` and `window_titles()` return nothing, so this trigger is off there; follow-up 5 |
 | Sunshine desktop stream | no action | no action (unchanged); it is inside the 2,048 margin |
-| Plex hardware transcodes | park on the first | new `gpu_guard.plex_transcodes_allowed` (default 0 = today's behaviour; the tower sets 1). Park when the count of hardware transcodes is above it, or when any of them has a 4K or HDR tone-mapped source (~1,400, over budget). Needs #811's Plex detection on Linux |
+| Plex hardware transcodes | park on the first | `gpu_guard.plex_transcodes_allowed` (default 0 = today's behaviour; the tower sets 1). Park when the count of hardware transcodes is above it. Count only: a 4K or HDR tone-mapped source (~1,400, over budget) is left to the free-VRAM floor below. *Shipped in #828* |
 | Free VRAM | none | new `gpu_guard.min_free_vram_mib` (tower: 256; 0 = off). Park when `nvidia-smi` free VRAM stays below it for two polls. This is the backstop for every estimate above being wrong: a second stream, a 4K source, an unknown CUDA app. The reading already exists (`harness_modules/local_model/resources.py`, `gpu_reading`) |
 
 How this ties to Plex detection: #830 makes `Detector._plex()` work on Linux with no credential (the owner chose this
 over #811's token file). `nvidia-smi --query-compute-apps=pid,process_name,used_memory` lists `Plex Transcoder`
 processes with their VRAM, and each is one signal. That gives this design its **count** but not a **source
-resolution**, so the 4K/HDR rule above has no input on Linux yet; it would need `/status/sessions`, and so a token, or
-another source. That NVENC-only transcodes appear in the query is still unverified (follow-up 4).
+resolution**. A 4K/HDR rule would have needed `/status/sessions`, and so a token, or another source; the owner chose
+count-only instead (2026-11-06, #828), and the `min_free_vram_mib` floor covers a heavy transcode. That NVENC-only
+transcodes appear in the query is still unverified (follow-up 4).
 
 Settings that stay: `poll_seconds` 10, `resume_after_seconds` 180, `lazy_load` true, `drain_timeout_seconds` 300 for
 the Plex-count trigger. The free-VRAM trigger gets a shorter drain (follow-up 3): by the time it fires, something is
@@ -116,7 +117,8 @@ already short of memory.
 
 1. **A first transcode (within `plex_transcodes_allowed`).** Nothing happens. It takes its ~700 MiB from the 2,048
    margin; the model keeps serving. This is the change from today.
-2. **A transcode over the allowance, or a 4K/HDR one, or free VRAM under the floor for two polls (≤ 20 s).**
+2. **A transcode over the allowance, or free VRAM under the floor for two polls (≤ 20 s), which is how a heavy
+   4K/HDR transcode inside the allowance is caught.**
    Page-out as today: the queue pauses, the model turn in flight finishes (up to `drain_timeout_seconds`, or the
    shorter free-VRAM drain), then `ModelWarmer.park` writes the pause flag and stops llama-server. ~13.7 GB comes free
    once the container exits. **On Linux this needs follow-up 9 first:** `ServerControl.stop()` finds the server with
@@ -193,7 +195,7 @@ the owner says so on a card first. Use only `/health` and `/props` on a sleeping
    --format=csv` with the desktop idle. That gives the Ubuntu desktop figure and the real card total.
 2. **Plex, model parked.** The owner starts one 1080p H.264 and then one 1080p HEVC hardware transcode from a client.
    Read `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv` and the GPU line once each
-   stream is steady (about 30 s in). Optionally one 4K HDR source for the guard's 4K rule.
+   stream is steady (about 30 s in). Optionally one 4K HDR source, to check the free-VRAM floor catches it.
 3. **Sunshine, model parked.** One desktop stream at the owner's usual resolution and frame rate; same two queries.
 4. **Option B.** Production stays stopped (step 0): two copies don't fit, and a leftover copy would push the
    throwaway server's experts to the CPU. Then a throwaway server on
@@ -233,8 +235,10 @@ No code changes in #823. These are the code and config changes this design impli
 1. **llama-server margin.** Add `--fit-target 2048` to the Qwen arguments in `install/install.sh` (behind an installer
    flag such as `--vram-headroom-mib`, so a machine without Plex keeps the default), and to the tower's
    `agent-harness-main-llama.service`. Decide whether `ops/llama-server/run-qwen.ps1` follows.
-2. **`gpu_guard.plex_transcodes_allowed`** (default 0, range 0 to 4), with the 4K/HDR rule. Registry entry in
-   `harness_modules/local_model/settings.py`, docs in `docs/resource-guard.md`. Depends on #811.
+2. **`gpu_guard.plex_transcodes_allowed`** (default 0, range 0 to 4). Registry entry in
+   `harness_modules/local_model/settings.py`, docs in `docs/resource-guard.md`. *Done in #828, count-only* (owner
+   decision, 2026-11-06): it parks when the hardware-transcode count is above the setting, with no 4K/HDR rule, since
+   Linux has no source resolution to read. The `min_free_vram_mib` backstop (follow-up 3) covers heavy transcodes.
 3. **`gpu_guard.min_free_vram_mib`** (default 0 = off) as a trigger from `gpu_reading`, two consecutive polls, with its
    own drain timeout (for example `vram_drain_timeout_seconds`, default 30).
 4. **Plex detection without a token on Linux** (#830, done): count `Plex Transcoder` processes in `nvidia-smi

@@ -35,6 +35,7 @@ _PUBLIC = {
     "operation_audit": ("harness.operation_audit", None),
     "audit_context": ("harness.audit_context", None),
     "GpuGuardConfig": ("harness.config", "GpuGuardConfig"),
+    "PLEX_TRANSCODES_ALLOWED_MAX": ("harness.config", "PLEX_TRANSCODES_ALLOWED_MAX"),
     "ACTIVE": ("harness.runner", "ACTIVE"),
     "doctor_run": ("harness.doctor", "run"),
     "local_owner": ("harness.local_owner", None),
