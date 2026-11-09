@@ -2471,3 +2471,146 @@ def test_the_daemon_counts_a_recovery_only_with_the_model_ready_not_asleep(tmp_p
         return state
     monkeypatch.setattr(ModelWarmer, "state", fixed)
     assert asyncio.run(m.guard.model_loaded()) is loaded
+
+
+# the Plex transcode allowance (#828): gpu_guard.plex_transcodes_allowed, count-only, on a fake detector; no GPU needed
+def _transcodes(count: int) -> list[dict]:
+    return [{"key": f"plex:pid{100 + i}", "kind": "plex", "detail": "Plex transcode (700 MiB)"} for i in range(count)]
+
+
+def test_the_allowance_defaults_to_zero_so_the_first_transcode_parks():
+    async def body():
+        assert GpuGuardConfig().plex_transcodes_allowed == 0
+        guard, detect, control, scheduler, log = make_guard()
+        detect.signals = _transcodes(1)
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 1 and scheduler.paused
+        assert [r["key"] for r in guard.reasons] == ["plex:pid100"]
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize("allowed", [0, 1, 2, 3, 4])
+def test_n_transcodes_within_the_allowance_do_not_park_and_one_more_does(allowed):
+    async def body():
+        guard, detect, control, scheduler, log = make_guard(plex_transcodes_allowed=allowed)
+        detect.signals = _transcodes(allowed)
+        await guard.check()
+        assert guard.state == CLEAR and control.stops == 0 and not scheduler.paused and log == []
+        assert guard.signals == []
+        detect.signals = _transcodes(allowed + 1)
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 1 and scheduler.paused
+        # every transcode is a reason once the count is over: no one of them is "the extra one"
+        assert [r["key"] for r in guard.reasons] == [s["key"] for s in _transcodes(allowed + 1)]
+    asyncio.run(body())
+
+
+def test_back_within_the_allowance_counts_as_clear():
+    async def body():
+        guard, detect, control, scheduler, log = make_guard(plex_transcodes_allowed=1, resume_after_seconds=0)
+        detect.signals = _transcodes(2)
+        await guard.check()
+        assert guard.state == PAUSED
+        detect.signals = _transcodes(1)
+        await guard.check()
+        assert guard.signals == [] and control.starts == 1 and not control.flag
+        await guard.check()
+        assert guard.state == CLEAR and not scheduler.paused
+    asyncio.run(body())
+
+
+def test_an_allowed_transcode_does_not_hide_a_game_or_join_its_reasons():
+    async def body():
+        guard, detect, control, _, _ = make_guard(plex_transcodes_allowed=1)
+        detect.signals = [GAME] + _transcodes(1)
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 1
+        assert [r["key"] for r in guard.reasons] == [GAME["key"]]
+    asyncio.run(body())
+
+
+def test_the_allowance_applies_on_the_next_poll():
+    """A Settings write changes the config object in place; the guard reads the allowance on every check."""
+    async def body():
+        guard, detect, control, _, _ = make_guard(plex_transcodes_allowed=1)
+        detect.signals = _transcodes(1)
+        await guard.check()
+        assert guard.state == CLEAR
+        guard.cfg.plex_transcodes_allowed = 0
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 1
+    asyncio.run(body())
+
+
+def test_resume_anyway_over_the_allowance_lasts_until_the_set_of_transcodes_changes():
+    async def body():
+        guard, detect, control, scheduler, _ = make_guard(plex_transcodes_allowed=1, resume_after_seconds=0)
+        detect.signals = _transcodes(2)
+        await guard.check()
+        assert guard.state == PAUSED
+        guard.resume()
+        await guard.check()
+        await guard.check()
+        assert guard.state == CLEAR and not scheduler.paused
+        detect.signals = _transcodes(3)  # a new transcode is a new trigger
+        await guard.check()
+        assert guard.state == PAUSED and control.stops == 2
+    asyncio.run(body())
+
+
+def test_no_guard_code_reads_a_source_resolution_or_hdr_flag():
+    """Owner decision (a), count-only: heavy transcodes are left to the min_free_vram_mib backstop."""
+    import re
+    root = Path(__file__).parents[1] / "harness_modules" / "local_model"
+    pattern = re.compile(r"resolution|hdr|tone.?map|\b4k\b|colorTrc|dovi", re.IGNORECASE)
+    hits = [f"{p.name}:{n}" for p in sorted(root.glob("*.py"))
+            for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1) if pattern.search(line)]
+    assert hits == []
+
+
+def test_a_4k_hdr_transcode_is_one_signal_like_any_other():
+    from harness_modules.local_model.service import hw_transcodes
+    session = {"videoDecision": "transcode", "transcodeHwEncoding": "nvenc", "transcodeHwDecoding": "nvdec"}
+    hdr = {**session, "key": "/transcode/sessions/a", "sourceVideoResolution": "4k", "transcodeHwFullPipeline": True,
+           "videoResolution": "4k", "colorTrc": "smpte2084"}
+    plain = {**session, "key": "/transcode/sessions/b", "videoResolution": "1080"}
+    signals = hw_transcodes({"MediaContainer": {"TranscodeSession": [hdr, plain]}})
+    assert [(s["key"], s["detail"]) for s in signals] == [("plex:a", "Plex transcode (nvenc)"),
+                                                           ("plex:b", "Plex transcode (nvenc)")]
+
+
+@pytest.mark.parametrize("value", [-1, 5, 1.5, "1", True])
+def test_config_refuses_an_allowance_outside_zero_to_four(value):
+    from harness.config import validate_gpu_guard
+    with pytest.raises(ValueError, match="plex_transcodes_allowed"):
+        validate_gpu_guard(GpuGuardConfig(plex_transcodes_allowed=value))
+
+
+@pytest.mark.parametrize("value", [0, 1, 4])
+def test_config_accepts_an_allowance_of_zero_to_four(value):
+    from harness.config import validate_gpu_guard
+    validate_gpu_guard(GpuGuardConfig(plex_transcodes_allowed=value))
+
+
+def test_settings_registry_lists_the_allowance_with_default_zero_and_range_zero_to_four():
+    from harness.settings import parse_value
+    from harness_modules.local_model.settings import specs
+    spec = next(s for s in specs() if s.key == "gpu_guard.plex_transcodes_allowed")
+    assert (spec.value_type, spec.default, spec.bounds.minimum, spec.bounds.maximum) == ("int", 0, 0, 4)
+    assert spec.yaml_path == ("gpu_guard", "plex_transcodes_allowed") and spec.apply_mode == "live"
+    assert spec.modules == ("gpu_guard",)
+    assert [parse_value(spec, v) for v in range(5)] == [0, 1, 2, 3, 4]
+    for bad in (-1, 5, 1.5):
+        with pytest.raises(ValueError):
+            parse_value(spec, bad)
+
+
+def test_loading_a_config_with_too_many_allowed_transcodes_fails_and_the_shipped_one_allows_none(tmp_path):
+    import yaml
+    from harness.config import load
+    from test_config_registry import _write_loadable_config
+    cfg_dir, data_dir = _write_loadable_config(tmp_path, "gpu_guard: {plex_transcodes_allowed: 5}\n")
+    with pytest.raises(ValueError, match="plex_transcodes_allowed"):
+        load(cfg_dir, data_dir)
+    shipped = yaml.safe_load((Path(__file__).parents[1] / "config" / "harness.yaml").read_text(encoding="utf-8"))
+    assert shipped["gpu_guard"]["plex_transcodes_allowed"] == 0
