@@ -1,6 +1,6 @@
 # The pinned Stables release
 
-Stables, the browser client, lives in [dflippojr/stables](https://github.com/dflippojr/stables) (#334). This
+Stables, the browser client, is the owner's private add-on and lives in its own private repository (#334). This
 directory pins the release the Server uses:
 
 - `pin.json`: the repository, tag and commit.

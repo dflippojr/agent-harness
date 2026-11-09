@@ -24,8 +24,8 @@ npm --prefix tools/ui-tests ci
 npm --prefix tools/ui-tests exec -- playwright install chromium
 ```
 
-Then point `HARNESS_STABLES_DIR` at the `public/` directory of a dflippojr/stables checkout at the tag in
-`tools/stables/pin.json`, or clone that checkout into this one as `stables/` (git-ignored). The commands are the same in
+Then point `HARNESS_STABLES_DIR` at the `public/` directory of the owner's private Stables checkout at the tag in
+`tools/stables/pin.json`, or place that checkout in this one as `stables/` (git-ignored). The commands are the same in
 PowerShell, Git Bash and macOS shells. Without either, the launch step fails at once and names what is missing.
 
 ## 1. Launch

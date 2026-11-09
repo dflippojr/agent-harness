@@ -2,8 +2,8 @@ schema_version: 1
 kind: module
 target: readme-components
 title: Stables
-summary: 'The first-party browser client and installable PWA, standalone over the documented API ([`docs/web.md`](docs/web.md))'
+summary: "The first-party browser client and installable PWA, standalone over the documented API. The owner's private add-on: the server runs without it"
 order: 20
 links:
-  - text: 'dflippojr/stables'
-    href: https://github.com/dflippojr/stables
+  - text: '`docs/web.md`'
+    href: docs/web.md

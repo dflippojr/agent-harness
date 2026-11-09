@@ -1,12 +1,12 @@
 # Installing Agent Harness
 
-Run AI agents on Windows, Linux, or Apple Silicon macOS and drive them from a browser or your phone. Use either a
+Run AI agents on Windows, Linux, or Apple Silicon macOS and drive them from the `harness` CLI, from apps, or, with the owner's private Stables add-on, from a browser or your phone. Use either a
 local model or your own hosted-provider CLI subscriptions. Agents work in Docker sandboxes and ask before risky
 actions.
 
-The installer sets up **Agent Harness Server**, which hosts the APIs and serves **Stables** when it finds a copy.
-Stables lives in its own repository, [dflippojr/stables](https://github.com/dflippojr/stables); clone it into the checkout as `stables/` (or set
-`HARNESS_STABLES_DIR`) to serve it, as [the guide](web.md#where-the-server-finds-stables) describes. An
+The installer sets up **Agent Harness Server**, which hosts the APIs. **Stables**, the browser client and installable PWA,
+is the owner's private add-on. The public installers don't fetch it, and the install works without it: without Stables
+the server answers the APIs, the `harness` CLI and the SDK as documented, and `/` returns 404 instead of a web page. An
 **Agent Harness App** is a third-party API integration. **Agent Harness for Mac** installs the `harness` command
 (**Agent Harness CLI**) and a **Mac Runner** together; the Python library in `sdk/` is **Agent Harness SDK**.
 
@@ -151,7 +151,7 @@ config (`-Force` rewrites it).
 Useful options: `-Profile Service`, `-EnableModules jobs,backup`, `-Model gpt-oss`, `-InstallDir D:\agent-harness`, `-DataDir D:\agents`, `-ModelPath <existing .gguf>`,
 `-LlamaDir <existing llama.cpp>`, `-Port 8100`, `-NoTasks`, `-DryRun`. See `Get-Help .\install\install.ps1 -Full`.
 
-Then open **http://127.0.0.1:8100** in Stables. The first model load takes a minute or two.
+Then check the install with **`python -m harness.doctor`**, or request **http://127.0.0.1:8100/health**. The first model load takes a minute or two. With the owner's Stables add-on installed, the browser UI is at **http://127.0.0.1:8100/**.
 
 > **Antivirus:** some engines flag `uv.exe` (Astral's Rust-based Python manager) as suspicious because it's unsigned
 > and downloads packages. It's a false positive; allow the `%LOCALAPPDATA%\agent-harness\bin` folder. You can check
@@ -236,7 +236,10 @@ Logs are under `%LOCALAPPDATA%\agent-harness\logs` on Windows and
 
 ## Use Stables from your phone
 
-Agent Harness Server listens only on localhost. To reach Stables from other devices, use
+Stables is the owner's private add-on. Steps 1–4 expose the server's API to your tailnet with or without it; step 5
+applies only when the add-on is installed.
+
+Agent Harness Server listens only on localhost. To reach the server from other devices, use
 [Tailscale](https://tailscale.com):
 
 1. Install Tailscale on the PC and your phone, and sign in to both with the same account.
@@ -255,7 +258,7 @@ Agent Harness Server listens only on localhost. To reach Stables from other devi
    or with `harness github-member-auth set true`; see [`member-github-auth.md`](member-github-auth.md).
    For a shared household device whose tailnet login is no single member, configure `google_signin` so members
    identify themselves with their linked Google account; see [`google-signin.md`](google-signin.md).
-5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Stables icon is
+5. With Stables installed, open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Stables icon is
    labeled **Harness**. iOS may retain an older label until you remove that icon and add it again; no server or
    browser data migration is required. See [`web.md`](web.md).
 

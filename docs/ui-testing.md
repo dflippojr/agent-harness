@@ -13,10 +13,11 @@ runs Start, a doctor, a smoke journey and Teardown in one command and saves the 
 
 ## Scope and isolation
 
-- **Target.** Stables (dflippojr/stables, native JavaScript, no build step) at the release pinned in
+- **Target.** Stables (the owner's private add-on, native JavaScript, no build step) at the release pinned in
   `tools/stables/pin.json`, served against Agent Harness Server (`harness/`) from this repository,
-  `dflippojr/agent-harness`. Point `HARNESS_STABLES_DIR` at that checkout's `public/` (CI checks the tag out into
-  `stables-release/`), or clone it into this checkout as `stables/`.
+  `dflippojr/agent-harness`. Point `HARNESS_STABLES_DIR` at the `public/` of the owner's private Stables checkout (CI
+  checks the tag out into `stables-release/`), or place that checkout in this one as `stables/`. Without it the
+  fake-model instance refuses to start, so these steps need the owner's access.
 - **Loopback only.** Both listeners bind `127.0.0.1` and nothing else:
   - the Server at `http://127.0.0.1:<port>`
   - a separately hosted copy of Web at `http://127.0.0.1:<web-port>`

@@ -1,10 +1,10 @@
 # Stables
 
 Stables (formerly Agent Harness Web) is the first-party browser UI and installable PWA for Agent Harness Server. Each
-model is a horse; the agent system is its harness. It lives in its own repository, [dflippojr/stables](https://github.com/dflippojr/stables), and its
-static files (`public/` there) have no build step. Agent Harness Server serves a copy when it finds one (see "Where the
-Server finds Stables" below), so existing Tailscale PWA installs continue to work. The same files can also be hosted at
-a separate HTTPS origin.
+model is a horse; the agent system is its harness. It is the owner's private add-on and is not part of the public install.
+Its static files (`public/`) have no build step. Agent Harness Server serves a copy when it finds one (see "Where the
+Server finds Stables" below) and runs the API alone when it finds none, so existing Tailscale PWA installs continue to
+work. The same files can also be hosted at a separate HTTPS origin.
 
 The PWA manifest name, short name, browser title and Apple standalone title are **Stables**. Functional navigation
 labels such as Agents, Jobs, Images, Profile, and Settings remain task-oriented.
@@ -32,13 +32,13 @@ Daemon administration is not in Stables (#545); see below.
 
 `harness/stables_shell.py` serves the first of:
 
-1. the directory in `HARNESS_STABLES_DIR` (the `public/` directory of a Stables checkout);
-2. `stables/public` inside the Server's checkout: clone dflippojr/stables there as `stables/`, which git ignores.
+1. the directory in `HARNESS_STABLES_DIR` (the `public/` directory of the owner's Stables checkout);
+2. `stables/public` inside the Server's checkout: the owner's Stables checkout placed there as `stables/`, which git ignores.
 
 The tower's deployment uses the first: `ops/harness/deploy-ci.ps1` copies the pinned release (`tools/stables/pin.json`)
 next to the checkout, writes its path to `.stables-path`, and the supervisor (`install/run-daemon.sh` on Linux,
 `ops/harness/run-daemon.ps1` on Windows) passes it to the daemon. To move the
-tower to another Stables release, tag it in dflippojr/stables and re-pin it here (`tools/stables/README.md`).
+tower to another Stables release, tag it in the owner's Stables repository and re-pin it here (`tools/stables/README.md`).
 
 The bundled Server accepts requests only for `127.0.0.1`, `localhost`, or `[::1]` on its configured listen port,
 or the exact authority in `public_url` (including its public port). Other Host headers receive **421** on every
