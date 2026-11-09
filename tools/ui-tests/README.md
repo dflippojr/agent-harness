@@ -1,8 +1,8 @@
 # Stables UI tests
 
 Run from the repository root with Python dependencies installed and a checkout of the pinned Stables release
-(`tools/stables/pin.json`): set `HARNESS_STABLES_DIR` to its `public/` directory, or clone it into this checkout as
-`stables/`. CI checks the tag out into `stables-release/`.
+(`tools/stables/pin.json`, the owner's private add-on): set `HARNESS_STABLES_DIR` to its `public/` directory, or place
+that checkout in this one as `stables/`. CI checks the tag out into `stables-release/`.
 
 ```
 npm --prefix tools/ui-tests ci

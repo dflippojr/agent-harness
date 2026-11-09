@@ -151,7 +151,7 @@ config (`-Force` rewrites it).
 Useful options: `-Profile Service`, `-EnableModules jobs,backup`, `-Model gpt-oss`, `-InstallDir D:\agent-harness`, `-DataDir D:\agents`, `-ModelPath <existing .gguf>`,
 `-LlamaDir <existing llama.cpp>`, `-Port 8100`, `-NoTasks`, `-DryRun`. See `Get-Help .\install\install.ps1 -Full`.
 
-Then check the install with **`python -m harness.doctor`**, or open **http://127.0.0.1:8100/health**. The first model load takes a minute or two. With the owner's Stables add-on installed, the same address serves the browser UI.
+Then check the install with **`python -m harness.doctor`**, or request **http://127.0.0.1:8100/health**. The first model load takes a minute or two. With the owner's Stables add-on installed, the browser UI is at **http://127.0.0.1:8100/**.
 
 > **Antivirus:** some engines flag `uv.exe` (Astral's Rust-based Python manager) as suspicious because it's unsigned
 > and downloads packages. It's a false positive; allow the `%LOCALAPPDATA%\agent-harness\bin` folder. You can check
