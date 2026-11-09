@@ -250,7 +250,8 @@ No code changes in #823. These are the code and config changes this design impli
 6. **`doctor` warnings.** WARN when `gpu_guard` is on and no Plex detection source works on this platform (done in
    #830, from `plex_error`); WARN when `plex_transcodes_allowed > 0` but the llama-server arguments have no `--fit-target` of at least about
    `700 × allowed + 500 + 256` MiB; WARN when `min_free_vram_mib` is not below the `--fit-target`, which would park
-   right after every load.
+   right after every load. *Done in #832:* `doctor` reads `--fit-target` from the llama unit the installer writes
+   (`docs/resource-guard.md`, "Doctor checks for the margin").
 7. **Metrics.** Export free VRAM and `encoder.stats.sessionCount` as `harness_resource_*` series for the
    `nvidia-gpu` dashboard.
 8. **Measurement run** (owner-gated, "Measuring later" above), then update this doc. *Option B done in #827.* Optionally port

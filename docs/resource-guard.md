@@ -89,7 +89,23 @@ this repository doesn't.
   - a manual hold is resumed, the floor is set to 0, or the daemon restarts.
 
 `harness_gpu_guard_triggers{kind="vram"}` counts it, and `reasons` in `GET /resources` shows its detail. A floor above
-what the card can ever have free would park every load. #832 adds the warning for that.
+what the card can ever have free would park every load; `doctor` warns about that (below).
+
+## Doctor checks for the margin (#832)
+
+Both settings depend on llama-server's `--fit-target`, the VRAM its `--fit` leaves free, which the daemon never sees.
+`doctor` reads it from the `ExecStart=` of `agent-harness-<instance>-llama.service` in the user's systemd unit
+directory, the unit `install/install.sh` writes (`--vram-headroom-mib` sets it). With the guard on and either setting
+above 0, it warns:
+
+- when `plex_transcodes_allowed` is above 0 and the unit has no `--fit-target`, or one below `700 × allowed + 500 +
+  256` MiB (1,456 for one transcode). The warning names the setting, the value found and the value needed;
+- when `min_free_vram_mib` is above 0 and not below the `--fit-target` (llama-server's default of 1024 when the unit
+  sets none): the guard would park the model right after every load.
+
+With no unit to read (an existing server, Windows or macOS, a missing or unreadable file, a value that isn't a whole
+number), `doctor` says the check wasn't possible and warns about neither. It reads the unit for `--instance`, or for
+`Main` without one, and doesn't read systemd drop-ins: a margin set in an override isn't seen.
 
 ## When the model loads
 

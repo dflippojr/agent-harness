@@ -590,6 +590,24 @@ def test_vram_headroom_adds_fit_target_to_the_qwen_unit(tmp_path):
     assert args == [*QWEN_DEFAULT_ARGS, "--fit-target", "2048"]
 
 
+@pytest.mark.parametrize("headroom, expected", [("2048", 2048), ("0", None)], ids=["set", "left-out"])
+def test_doctor_reads_the_fit_target_from_the_unit_the_installer_writes(tmp_path, headroom, expected):
+    """#832: doctor's parser against a real install, with a space, `%` and `"` in the model path to escape."""
+    if not BASH or os.name == "nt":
+        pytest.skip("needs bash on a POSIX host (and Windows refuses a `\"` in the file name below)")
+    from harness_modules.local_model.doctor import read_fit_target
+    root = tmp_path / "unit"
+    root.mkdir()
+    model = root / 'my 50% "q4" model.gguf'
+    model.write_text("stub")
+    result, daemon_unit, _ = _install_linux_units(root, root / "app", "--model", "qwen", "--model-path", str(model),
+                                                  "--vram-headroom-mib", headroom, profile="full")
+    assert result.returncode == 0, result.stdout + result.stderr
+    unit = daemon_unit.with_name("agent-harness-main-llama.service")
+    assert "%%" in unit.read_text() and '\\"q4\\"' in unit.read_text()  # the escaping the parser has to undo
+    assert read_fit_target(unit) == expected
+
+
 @pytest.mark.parametrize("flag", [(), ("--vram-headroom-mib", "0")], ids=["left-out", "zero"])
 def test_no_vram_headroom_leaves_the_qwen_unit_unchanged(tmp_path, flag):
     assert _llama_unit_args(tmp_path, "default", "--model", "qwen", *flag) == QWEN_DEFAULT_ARGS
