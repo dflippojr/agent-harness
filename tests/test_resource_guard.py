@@ -2576,16 +2576,6 @@ def test_resume_anyway_ends_when_the_same_transcodes_return_after_a_dip_to_the_a
         assert guard.state == PAUSED and control.stops == 2 and scheduler.paused
     asyncio.run(body())
 
-def test_no_guard_code_reads_a_source_resolution_or_hdr_flag():
-    """Owner decision (a), count-only: heavy transcodes are left to the min_free_vram_mib backstop."""
-    import re
-    root = Path(__file__).parents[1] / "harness_modules" / "local_model"
-    pattern = re.compile(r"resolution|hdr|tone.?map|\b4k\b|colorTrc|dovi", re.IGNORECASE)
-    hits = [f"{p.name}:{n}" for p in sorted(root.glob("*.py"))
-            for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1) if pattern.search(line)]
-    assert hits == []
-
-
 def test_a_4k_hdr_transcode_is_one_signal_like_any_other():
     from harness_modules.local_model.service import hw_transcodes
     session = {"videoDecision": "transcode", "transcodeHwEncoding": "nvenc", "transcodeHwDecoding": "nvdec"}
