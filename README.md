@@ -12,7 +12,7 @@ You drive them from a phone or laptop over Tailscale. Every tool call runs in a 
 your approval (a push notification lets you approve from the lock screen), and each session's work arrives as a
 git branch for you to review and merge.
 
-- **One daemon, many front ends:** an installable PWA, a CLI, a Python SDK, versioned app/owner REST APIs, and
+- **One daemon, many front ends:** an installable PWA (Stables, the owner's private add-on), a CLI, a Python SDK, versioned app/owner REST APIs, and
   an OpenAI- and Anthropic-compatible inference endpoint.
 - **Local and hosted backends behind one interface:** the native agent loop runs the local model, and the
   unmodified vendor CLIs run in isolated containers. Their JSONL output is translated into the same event stream.
@@ -33,7 +33,7 @@ git branch for you to review and merge.
 flowchart TB
     subgraph Clients["Clients (over Tailscale)"]
         direction LR
-        WEB["Stables<br/>installable PWA"]
+        WEB["Stables (private add-on)<br/>installable PWA"]
         CLI["harness CLI"]
         SDK["Python SDK and<br/>third-party apps"]
     end
@@ -173,7 +173,7 @@ agent-harness/
 | Component | What it is | Where it lives |
 | --- | --- | --- |
 | **Agent Harness Server** | The host daemon and its APIs | [`harness/`](harness) |
-| **Stables** | The first-party browser client and installable PWA, standalone over the documented API ([`docs/web.md`](docs/web.md)) | [dflippojr/stables](https://github.com/dflippojr/stables) |
+| **Stables** | The first-party browser client and installable PWA, standalone over the documented API. The owner's private add-on: the server runs without it | [web guide](docs/web.md) |
 | **Agent Harness CLI** | The installed `harness` command | [`harness/cli.py`](harness/cli.py) |
 | **Agent Harness Runner** | A remote execution worker, such as the Mac Runner | [`macrunner/`](macrunner) |
 | **Agent Harness SDK** | The supported Python client library | [`sdk/`](sdk) |
@@ -226,7 +226,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | **Native macOS sandboxing** ([`sandbox.sb`](macrunner/sandbox.sb)) | Shell commands run under `sandbox-exec`: writes limited to the workspace and build caches, credentials and personal folders unreadable, no network unless approved. |
 | **Protocol-versioned clients** ([`compat.py`](harness/compat.py), [docs](docs/compatibility.md)) | Wire protocols are versioned separately from releases. The server accepts current and previous versions. Skew returns `426 client_update_required` or `426 daemon_update_required` while health and update discovery stay reachable. |
 | **Transactional self-update** ([`updater.py`](harness/updater.py)) | The Mac client downloads only from its own server, verifies size and SHA-256, swaps the runtime atomically, keeps credentials and config, and rolls back on failure. |
-| **No-build PWA on public contracts** ([Stables](https://github.com/dflippojr/stables)) | The web UI is vanilla JS with a service worker. It uses the same `/api/v1` and `/api/admin/v1` contracts offered to third-party apps, and authenticated SSE, images, and downloads never put bearer tokens in URLs. |
+| **No-build PWA on public contracts** (Stables, the owner's private add-on; [web guide](docs/web.md)) | The web UI is vanilla JS with a service worker. It uses the same `/api/v1` and `/api/admin/v1` contracts offered to third-party apps, and authenticated SSE, images, and downloads never put bearer tokens in URLs. |
 
 ### Configuration and data
 
@@ -243,7 +243,7 @@ The techniques below are the ones I think are most worth a look. Each links to i
 | --- | --- |
 | **Self-validating benchmarks** ([`bakeoff/`](bakeoff)) | Each task ships with a reference solution. `--selftest` proves every checker passes on correct work and fails on no work. The hard suite grades mostly with hidden tests, and `rescore` regrades saved runs after a checker fix. |
 | **Isolated comparison harnesses** ([`reference.py`](bakeoff/reference.py)) | OpenHands and OpenCode run the same tasks on an internal Docker network whose only route out is a socat proxy to the local model. |
-| **One suite for everything** ([`tests/`](tests)) | The CI and deploy workflows, the installers, and the docs' product naming have their own tests. Stables, in its own repository, runs its Node harnesses there; this repository runs its Playwright journeys against the pinned release ([`tools/stables`](tools/stables)). |
+| **One suite for everything** ([`tests/`](tests)) | The CI and deploy workflows, the installers, and the docs' product naming have their own tests. Stables, the owner's private add-on, runs its own checks; this repository runs its Playwright journeys against the pinned release ([`tools/stables`](tools/stables)). |
 | **Fail-closed deployment** ([`ci-cd.yml`](.github/workflows/ci-cd.yml), [docs](docs/CI-CD.md)) | Deployment triggers from `workflow_run` on the exact tested SHA and pulls immutable `sha-` images. It builds a new venv side by side and switches a pointer, so rollback is instant, then waits for `/health`. |
 | **Trusted-code staging slot** ([`resolve_staging_ref.py`](scripts/resolve_staging_ref.py)) | A GitHub-hosted job resolves a branch or PR to one commit and rejects fork refs before anything reaches the server. Staging gets its own database and freshly minted tokens, never production credentials. |
 | **Multi-provider AI code review** ([`review.yml`](.github/workflows/review.yml)) | Pull requests are reviewed by Codex, Claude, or Cursor on a self-hosted runner pool, with incremental re-review when a prior review marker makes that safe. The `Automated Code Review` check fails when the review has findings, and other projects call the same workflow through a thin caller pinned to `review-v4`. |
@@ -300,6 +300,10 @@ ops/backends/login.sh codex         # or claude / cursor
 
 Diagnose an install with `python -m harness.doctor`. The full guide is [`docs/INSTALL.md`](docs/INSTALL.md).
 
+Stables, the browser client and installable PWA, is the owner's private add-on and is not part of the public install.
+The install works without it: the server, the `harness` CLI and the SDK run as documented, and `/` returns 404 instead
+of a web page.
+
 ### Quick start (development)
 
 ```powershell
@@ -348,7 +352,7 @@ gives up the GPU.
 | App API and SDK | [app-api](docs/app-api.md) · [`sdk/`](sdk) |
 | Owner API, members, per-app provider keys | [admin-api](docs/admin-api.md) |
 | Configuration registry | [config-registry](docs/config-registry.md) |
-| Stables (web client) | [web](docs/web.md) |
+| Stables (web client, private add-on) | [web](docs/web.md) |
 | UI testing with the fake model | [ui-testing](docs/ui-testing.md) |
 | Harness-design gap report (arXiv 2609.00006, 2609.20804) | [harness-design-gap-report](docs/harness-design-gap-report.md) |
 | Native mobile client study (Swift, Flutter or PWA only) | [native-mobile-client-study](docs/native-mobile-client-study.md) |
