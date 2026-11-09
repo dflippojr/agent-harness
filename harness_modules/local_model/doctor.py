@@ -82,12 +82,15 @@ def read_fit_target(unit: Path) -> int | None:
         if line.startswith("ExecStart="):
             args = shlex.split(line.removeprefix("ExecStart=").replace("%%", "%"))
             for i, arg in enumerate(args):
-                value = args[i + 1] if arg == "--fit-target" and i + 1 < len(args) else (
-                    arg.removeprefix("--fit-target=") if arg.startswith("--fit-target=") else None)
-                if value is not None:
-                    if not value.isdigit():
-                        raise ValueError(f"--fit-target {value!r} is not a whole number of MiB")
-                    return int(value)
+                if arg == "--fit-target":
+                    value = args[i + 1] if i + 1 < len(args) else ""
+                elif arg.startswith("--fit-target="):
+                    value = arg.removeprefix("--fit-target=")
+                else:
+                    continue
+                if not value.isdigit():
+                    raise ValueError(f"--fit-target {value!r} is not a whole number of MiB")
+                return int(value)
     return None
 
 
