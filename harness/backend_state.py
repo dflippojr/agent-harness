@@ -152,7 +152,9 @@ def forget_end_user_login(name: str, app_id: str, end_user: str) -> None:
 def token_login(name: str, cfg, app_id: str = "") -> bool | None:
     """Claude's subscription login when the owner's token is configured (#390), else None. Sessions then authenticate
     with the token and mount no login volume, so the volume probe says nothing: Web and the Apps in oauth_token_apps
-    are logged in while the token is present and not past its expiry; any other App is refused the subscription."""
+    are logged in while the token is present and its `.expires` date is readable, valid and not past; any other App
+    is refused the subscription. Fails closed: a token file whose expiry is missing, unreadable or malformed is no
+    login, so an expired token can't look signed in once its sidecar goes away."""
     from . import claude_token
     path = getattr(cfg, "oauth_token_file", "") if name == "claude" else ""
     if not path:
@@ -160,7 +162,7 @@ def token_login(name: str, cfg, app_id: str = "") -> bool | None:
     if not claude_token.uses_token(cfg, app_id, ""):
         return False
     left = claude_token.days_left(path)
-    return bool(claude_token.read_token(path)) and (left is None or left >= 0)
+    return left is not None and left >= 0 and bool(claude_token.read_token(path))
 
 
 def subscription_status(name: str, cfg, app_id: str = "") -> bool:

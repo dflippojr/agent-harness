@@ -422,9 +422,10 @@ outranks any login and never refreshes. A session on the token has **no login vo
   `backends.claude.oauth_token_apps`; any other App on the subscription is refused with a pointer to API-key billing.
   Other people's use needs API keys or a Commercial Terms agreement, not this token.
 - **Sign-in state (#946):** with `oauth_token_file` set, Claude's `logged_in` in the backend lists follows the token,
-  not the login volume: true for Web and the Apps in `oauth_token_apps` while the token is present and not past its
-  expiry, always false on the subscription for any other App (its runs would be refused). An App with an API-key
-  policy is still logged in on its key.
+  not the login volume: true for Web and the Apps in `oauth_token_apps` while the token is present and its
+  `<file>.expires` date is readable, valid and not past, always false on the subscription for any other App (its runs
+  would be refused). It fails closed: a missing, unreadable or malformed `.expires` reads as not logged in (reissue
+  with `login.ps1 claude -Token`). An App with an API-key policy is still logged in on its key.
 - **Costs:** claude.ai connectors and Remote Control don't work on the token. The old login volume stays for runs
   without `oauth_token_file`, and is still what `login.ps1 claude` signs in.
 
