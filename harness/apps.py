@@ -609,16 +609,18 @@ async def api_root(request: Request):
 
 @route_table.get("/api/v1/backends", response_model=list[BackendResponse])
 async def backends(request: Request):
-    """Each configured backend's availability, login state, limits and usage; some callers see only the local backend."""
+    """The local model and each configured backend: availability, login state, limits and usage; members see only the local model."""
     m = mgr(request)
     key = auth(request, "sessions")
+    from .backend_state import local_view, view as backend_view
     if key.get("kind") == "member":
-        from .backend_state import local_view
         return [local_view(m)]
+    # Every App and device may start `local` sessions with no grant, so the list shows it first, as discovery's
+    # app_tools_only_backends and the admin list do (#946).
     app_id = None if owner_key(key) else key["id"]
-    from .backend_state import view as backend_view
-    return list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, True, app_id, True)
-                                       for name in m.cfg.backends]))
+    hosted = await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, True, app_id, True)
+                                    for name in m.cfg.backends])
+    return [local_view(m), *hosted]
 
 
 def _member_me(m, key: dict, ident) -> dict:
