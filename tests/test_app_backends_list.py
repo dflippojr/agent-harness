@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from harness import backend_state
@@ -130,9 +132,42 @@ def test_a_missing_empty_or_expired_token_is_not_logged_in(tmp_path):
     assert backend_state.view(manager, "claude")["logged_in"] is False
 
 
-def test_a_token_with_no_expiry_file_still_counts(tmp_path):
+def test_a_token_with_no_expiry_file_is_not_logged_in(tmp_path):
+    """Fail closed (#947 security round): a nonempty token file alone is no login without valid expiry evidence."""
     manager = _manager(tmp_path, oauth_token_file=_token(tmp_path, expires=""))
-    assert backend_state.view(manager, "claude")["logged_in"] is True
+    assert backend_state.view(manager, "claude")["logged_in"] is False
+
+
+def test_a_malformed_expiry_is_not_logged_in(tmp_path):
+    manager = _manager(tmp_path, oauth_token_file=_token(tmp_path, expires=""))
+    for bad in ("not-a-date", "2099-13-40", "", "  "):
+        (tmp_path / "claude-oauth-token.expires").write_text(bad, encoding="utf-8")
+        assert backend_state.view(manager, "claude")["logged_in"] is False, repr(bad)
+
+
+def test_an_unreadable_expiry_is_not_logged_in(tmp_path, monkeypatch):
+    manager = _manager(tmp_path, oauth_token_file=_token(tmp_path))
+    sidecar = tmp_path / "claude-oauth-token.expires"
+    real = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if self == sidecar:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", denied)
+    assert backend_state.view(manager, "claude")["logged_in"] is False
+
+
+def test_an_expired_token_stays_logged_out_when_its_expiry_goes_missing(tmp_path):
+    manager = _manager(tmp_path, oauth_token_file=_token(tmp_path, expires="2020-01-01"))
+    assert backend_state.view(manager, "claude")["logged_in"] is False
+    (tmp_path / "claude-oauth-token.expires").unlink()
+    assert backend_state.view(manager, "claude")["logged_in"] is False
+
+
+def test_an_allowlisted_app_fails_closed_without_expiry_too(tmp_path):
+    manager = _manager(tmp_path, oauth_token_file=_token(tmp_path, expires=""), oauth_token_apps=["k-owner-app"])
+    assert backend_state.view(manager, "claude", app_id="k-owner-app")["logged_in"] is False
 
 
 def test_public_discovery_does_not_reveal_the_token(tmp_path):
