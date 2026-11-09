@@ -77,8 +77,9 @@ incremental context, app tools, approvals, cancellation, resumable events, provi
 `Harness.validate_openapi()` during an integration check to verify that its operation and request types still match
 Agent Harness Server's live `/openapi.json`; the repository test suite performs the same check against every change.
 
-`GET /api/v1/backends` is authenticated and app-specific. Its `today`, `week`, and `usage_by_source` fields contain
-only the calling app's usage. `provider_policy` reports whether that app may use the backend, its billing policy and
+`GET /api/v1/backends` is authenticated and app-specific. Its first row is the local model (`local`, the backend
+every App and device may start sessions on with no grant), then each configured backend (#946). Its `today`, `week`,
+and `usage_by_source` fields contain only the calling app's usage. `provider_policy` reports whether that app may use the backend, its billing policy and
 model allowlist, and whether the assigned credential source is available. It never contains a provider key, key-file
 path, or owner-only opaque reference. The unauthenticated discovery document at `GET /api/v1` does not list project
 names (`projects` is always `[]`); an authenticated principal enumerates usable projects at `GET /api/v1/projects`.
@@ -478,7 +479,7 @@ Generated from the route registrations (`scripts/docs/build.py`; do not edit bet
 | POST | `/api/v1/auth/google/start` | see source | Start a Google sign-in, link, or invite attempt bound to this browser and return its authorization URL; invite needs a link code. | `harness/google_signin_api.py` `google_start` |
 | POST | `/api/v1/auth/logout` | see source | End this browser's Web session and clear its cookie; a request with an active session must send the CSRF token. | `harness/google_signin_api.py` `logout` |
 | GET | `/api/v1/auth/session` | see source | Report Google sign-in availability and this browser's sign-in state; the CSRF token appears only with a session. | `harness/google_signin_api.py` `auth_session` |
-| GET | `/api/v1/backends` | scope `sessions` | Each configured backend's availability, login state, limits and usage; some callers see only the local backend. | `harness/apps.py` `backends` |
+| GET | `/api/v1/backends` | scope `sessions` | The local model and each configured backend: availability, login state, limits and usage; members see only the local model. | `harness/apps.py` `backends` |
 | GET | `/api/v1/config` | see source | Return this App's settings with configured and effective values, the revision, and any daemon cap that applies. | `harness/config_api.py` `app_config` |
 | PATCH | `/api/v1/config` | see source | Change this App's settings; a stale `revision` returns 409, and `dry_run` returns the plan without saving. | `harness/config_api.py` `app_patch` |
 | GET | `/api/v1/config/schema` | see source | Describe the App settings and mark the ones this App cannot write. | `harness/config_api.py` `app_schema` |
