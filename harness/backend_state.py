@@ -149,7 +149,24 @@ def forget_end_user_login(name: str, app_id: str, end_user: str) -> None:
     _eu_cache.pop((name, app_id, end_user), None)
 
 
+def token_login(name: str, cfg, app_id: str = "") -> bool | None:
+    """Claude's subscription login when the owner's token is configured (#390), else None. Sessions then authenticate
+    with the token and mount no login volume, so the volume probe says nothing: Web and the Apps in oauth_token_apps
+    are logged in while the token is present and not past its expiry; any other App is refused the subscription."""
+    from . import claude_token
+    path = getattr(cfg, "oauth_token_file", "") if name == "claude" else ""
+    if not path:
+        return None
+    if not claude_token.uses_token(cfg, app_id, ""):
+        return False
+    left = claude_token.days_left(path)
+    return bool(claude_token.read_token(path)) and (left is None or left >= 0)
+
+
 def subscription_status(name: str, cfg, app_id: str = "") -> bool:
+    token = token_login(name, cfg, app_id)
+    if token is not None:
+        return token
     from . import cli_domains
     login_app = app_id if cli_domains.needs_app_login(name) else ""
     return _subscription_status(name, cfg, login_app) if login_app else _subscription_status(name, cfg)

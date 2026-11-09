@@ -950,7 +950,8 @@ def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
             token = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions"]}).json()["key"]
             headers = {"Authorization": f"Bearer {token}"}
             # App status is attributed to that app; owner and other-app usage is not exposed.
-            assert client.get("/api/v1/backends", headers=headers).json()[0]["week"]["cost_usd"] == 0
+            rows = {row["name"]: row for row in client.get("/api/v1/backends", headers=headers).json()}
+            assert rows["claude"]["week"]["cost_usd"] == 0
             assert client.get("/api/v1").json()["backends"][0]["notice"]
     asyncio.run(body())
 
