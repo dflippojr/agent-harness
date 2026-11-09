@@ -593,6 +593,8 @@ def test_vram_headroom_adds_fit_target_to_the_qwen_unit(tmp_path):
 @pytest.mark.parametrize("headroom, expected", [("2048", 2048), ("0", None)], ids=["set", "left-out"])
 def test_doctor_reads_the_fit_target_from_the_unit_the_installer_writes(tmp_path, headroom, expected):
     """#832: doctor's parser against a real install, with a space, `%` and `"` in the model path to escape."""
+    if not BASH or os.name == "nt":
+        pytest.skip("needs bash on a POSIX host (and Windows refuses a `\"` in the file name below)")
     from harness_modules.local_model.doctor import read_fit_target
     root = tmp_path / "unit"
     root.mkdir()
