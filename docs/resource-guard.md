@@ -100,8 +100,8 @@ above 0, it warns:
 
 - when `plex_transcodes_allowed` is above 0 and the unit has no `--fit-target`, or one below `700 × allowed + 500 +
   256` MiB (1,456 for one transcode). The warning names the setting, the value found and the value needed;
-- when `min_free_vram_mib` is above 0 and not below the `--fit-target`, or below llama-server's default of 1024 when the
-  unit sets none: the guard would park the model right after every load.
+- when `min_free_vram_mib` is above 0 and not below the `--fit-target` (llama-server's default of 1024 when the unit
+  sets none): the guard would park the model right after every load.
 
 With no unit to read (an existing server, Windows or macOS, a missing or unreadable file, a value that isn't a whole
 number), `doctor` says the check wasn't possible and warns about neither. It reads the unit for `--instance`, or for
