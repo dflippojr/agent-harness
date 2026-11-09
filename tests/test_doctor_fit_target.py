@@ -80,7 +80,7 @@ def test_a_margin_at_or_above_the_plex_minimum_does_not_warn(units, capsys, allo
     _write(units, fit)
     r, lines = _run(_cfg(allowed=allowed), capsys)
     assert r.warned == 0 and r.failed == 0
-    assert len(lines) == 1 and "[ OK ]" in lines[0] and f"--fit-target {fit}" in lines[0]
+    assert len(lines) == 1 and "[ OK ]" in lines[0] and f"--fit-target {fit} in " in lines[0]
 
 
 def test_a_margin_below_the_plex_minimum_warns_with_setting_found_and_needed(units, capsys):
