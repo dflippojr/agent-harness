@@ -173,7 +173,7 @@ agent-harness/
 | Component | What it is | Where it lives |
 | --- | --- | --- |
 | **Agent Harness Server** | The host daemon and its APIs | [`harness/`](harness) |
-| **Stables** | The first-party browser client and installable PWA, standalone over the documented API. The owner's private add-on: the server runs without it | [web guide](docs/web.md) |
+| **Stables** | The first-party browser client and installable PWA, standalone over the documented API. The owner's private add-on: the server runs without it | [`docs/web.md`](docs/web.md) |
 | **Agent Harness CLI** | The installed `harness` command | [`harness/cli.py`](harness/cli.py) |
 | **Agent Harness Runner** | A remote execution worker, such as the Mac Runner | [`macrunner/`](macrunner) |
 | **Agent Harness SDK** | The supported Python client library | [`sdk/`](sdk) |
