@@ -136,20 +136,41 @@ def test_cron_accepts_only_the_list_grammar():
     assert accepted_off_grammar == []
 
 
-def test_scheduler_parks_stored_job_with_empty_list_item(tmp_path):
-    """A job saved before #933 with `0,30,` is parked with an error, not run, and doesn't block other jobs."""
-    m = jobs_manager(tmp_path)
+def _stale_and_good_jobs(m, next_run_at: float) -> list[str]:
+    """A job saved before #933 with `0,30,` beside a good one; returns the list create() appends job ids to."""
     good = service.validate({"name": "Good", "prompt": "fake", "cron": "@daily"}, m.cfg.projects, m.cfg.models)
-    now = time.time()
-    m.db.insert_job({**good, "cron": "0,30, * * * *", "id": "fake-stale", "next_run_at": now - 10})
-    m.db.insert_job({**good, "id": "fake-good", "next_run_at": now - 10})
-    started = []
+    m.db.insert_job({**good, "cron": "0,30, * * * *", "id": "fake-stale", "next_run_at": next_run_at})
+    m.db.insert_job({**good, "id": "fake-good", "next_run_at": next_run_at})
+    started: list[str] = []
     m.jobs.create = lambda *args, **kwargs: started.append(kwargs["job_id"]) or {"id": f"s-{len(started)}"}
-    m.jobs._catch_up(now)  # recent misses: catch-up leaves both to tick(), and the stale one must not break it
-    assert len(m.jobs.tick(now)) == 1
-    assert started == ["fake-good"]
+    return started
+
+
+def _assert_parked(m):
     stale = m.db.get_job("fake-stale")
     assert stale["next_run_at"] is None
     assert "empty list item" in stale["last_error"]
+
+
+def test_tick_parks_stored_job_with_empty_list_item(tmp_path):
+    """The job falls due while the daemon runs: tick() parks it instead of starting a session, and runs the other."""
+    m = jobs_manager(tmp_path)
+    now = time.time()
+    started = _stale_and_good_jobs(m, now - 10)
+    assert len(m.jobs.tick(now)) == 1
+    assert started == ["fake-good"]
+    _assert_parked(m)
     assert m.jobs.tick(now + 60) == [] and started == ["fake-good"]
+    m.db.close()
+
+
+def test_catch_up_parks_stored_job_with_empty_list_item(tmp_path):
+    """Missed beyond the catch-up window while the daemon was down: startup parks it instead of failing."""
+    m = jobs_manager(tmp_path)
+    now = time.time()
+    started = _stale_and_good_jobs(m, now - 7 * 24 * 3600)
+    m.jobs._catch_up(now)
+    _assert_parked(m)
+    assert m.db.get_job("fake-good")["next_run_at"] > now  # the good job's miss is skipped and rescheduled as usual
+    assert m.jobs.tick(now) == [] and started == []
     m.db.close()
