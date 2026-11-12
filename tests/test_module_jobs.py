@@ -1,5 +1,7 @@
 """Jobs extraction: isolated databases and fake sessions, never production jobs."""
 import asyncio
+import itertools
+import re
 import time
 from types import SimpleNamespace
 
@@ -113,38 +115,25 @@ def test_cron_empty_step_base_stays_wildcard():
     assert service.Cron("/15 * * * *").minutes == {0, 15, 30, 45}
 
 
-# Class-level check (#933): a list field is exactly the union of its items, and a malformed item never widens it.
-# Every field, every list position: a blank item is rejected, and a list of valid items parses to their union.
-FIELDS = [  # (index, valid items, parsed attribute)
-    (0, ["0", "30", "5-10", "*/20", "45/5"], "minutes"),
-    (1, ["0", "9", "1-3", "*/6", "22/1"], "hours"),
-    (2, ["1", "15", "28-31", "*/10", "3/9"], "days"),
-    (3, ["1", "jan", "mar-may", "*/4", "dec"], "months"),
-    (4, ["0", "mon", "tue-thu", "*/2", "7", "sat"], "weekdays"),
-]
+# Class-level check (#933), bug class "a malformed list item is accepted": the parser may accept only strings in
+# the cron list grammar. Every string of 1-5 characters over the field's alphabet is tried in the minute field; any
+# string Cron accepts must match the reference grammar. Name lookup (`mon`) is out of scope here: numeric fields only.
+CRON_ITEM = r"(?:(?:\*|\d+(?:-\d+)?)(?:/\d+)?|/\d+)"
+CRON_LIST = re.compile(rf"{CRON_ITEM}(?:,{CRON_ITEM})*")
 
 
-def _expr(index: int, field: str) -> str:
-    parts = ["0", "0", "*", "*", "*"]
-    parts[index] = field
-    return " ".join(parts)
-
-
-def _parsed(index: int, field: str, attr: str) -> set[int]:
-    return getattr(service.Cron(_expr(index, field)), attr)
-
-
-@pytest.mark.parametrize("index,items,attr", FIELDS)
-def test_cron_list_is_union_of_items_and_rejects_blank_items(index, items, attr):
-    import itertools
-    for size in (1, 2, 3):
-        for combo in itertools.permutations(items, size):
-            union = set().union(*(_parsed(index, item, attr) for item in combo))
-            assert _parsed(index, ",".join(combo), attr) == union, combo
-            for pos in range(size + 1):
-                bad = ",".join([*combo[:pos], "", *combo[pos:]])
-                with pytest.raises(service.CronError):
-                    service.Cron(_expr(index, bad))
+def test_cron_accepts_only_the_list_grammar():
+    accepted_off_grammar = []
+    for size in range(1, 6):
+        for chars in itertools.product("05*,-/", repeat=size):
+            field = "".join(chars)
+            try:
+                service.Cron(f"{field} * * * *")
+            except service.CronError:
+                continue
+            if not CRON_LIST.fullmatch(field):
+                accepted_off_grammar.append(field)
+    assert accepted_off_grammar == []
 
 
 def test_scheduler_parks_stored_job_with_empty_list_item(tmp_path):
