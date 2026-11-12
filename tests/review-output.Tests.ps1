@@ -448,7 +448,7 @@ Describe 'Review publication safety' {
             $script:shownOtherwise = @(
                 'gh\*\*p_\*\*', '\[/ho\]\[ref\]', '%5Bgh%5D', '&#91;gh&#93;', '\\\[/ho\\\]', 'exposed \\\\server', '\\\\\?\\Volume',
                 '\(file:', 'NegativeMediumSpace', '%26ZeroWidthSpace', '&amp;ZeroWidthSpace', '&frac12;', '&#xFFFF;',
-                '<x y=a<b>', 'ghp\x01_', '/ho\x85me', 'src="//server/', 'exposed \\\\example\.com'
+                '<x y=a<b>', 'ghp\x01_', '/ho\x85me', 'src="//server/', 'exposed \\\\example\.com', 'exposed \\/example\.com'
             ) -join '|'
         }
 

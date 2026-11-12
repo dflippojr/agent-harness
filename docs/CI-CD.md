@@ -353,11 +353,11 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
 
 - Any Windows absolute root is rejected, whatever follows it: a drive root (`C:\` or `C:/`), a UNC or extended
   prefix (`\\server\`, `//server/`, `\\?\`, `\\.\`), or a `file:` URL.
-  One spelling is exempt, so a review can quote a protocol-relative URL (#781): `//`, a host name of two or more
-  dot-separated labels whose last label starts with a letter, an optional `:port`, then `/`, all in forward slashes
-  (`//cdn.example.com/a.png`). `//server/share/`, `//localhost/`, `//192.168.1.5/`, `//example.com\share`,
-  `//user@example.com/` and `\\example.com\share\` stay rejected, in prose, attributes, code spans and fences alike.
-  Diagnostics redaction does not use the exemption.
+  One spelling is exempt, so a review can quote a protocol-relative URL (#781): `//` or `/\` (which browsers read as
+  `//`), a host name of two or more dot-separated labels whose last label starts with a letter, an optional `:port`,
+  then `/` (`//cdn.example.com/a.png`, `/\example.com/p`). `//server/share/`, `//localhost/`, `//192.168.1.5/`,
+  `//example.com\share`, `\/example.com/`, `//user@example.com/` and `\\example.com\share\` stay rejected, in prose,
+  attributes, code spans and fences alike. Diagnostics redaction does not use the exemption.
 - Any separator followed by a profile directory name (`Users`, `home`, `root` or `Documents and Settings`, including
   Windows trailing-period, trailing-space and short-name spellings) is rejected unless it is part of a known
   repository path. `docs/users.md` and `root-ca.md` are not profile directories; an unknown `examples/home/x.py` is

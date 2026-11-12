@@ -410,12 +410,14 @@ function Get-ReviewPublishPattern {
 # Dot segments, quoting and whitespace cannot hide either form, so no path parsing is needed.
 # UNC roots may use either separator; a URL authority (after a scheme's colon) is not one.
 $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
-# Review text may quote a protocol-relative URL (#781): two forward slashes, a DNS host name of two or
-# more labels whose last label starts with a letter (so no IP address, localhost or bare server name),
-# an optional port, then a forward slash. Any backslash, user info, trailing dot or other host spelling
-# is still a network root. The exemption is the same in prose, attributes, code spans and fences, and
-# applies to the publication scan only: diagnostics redaction keeps the strict pattern above.
-$script:ReviewPublishAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])(?!//(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z](?:[a-z0-9-]*[a-z0-9])?(?::[0-9]{1,5})?/)[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
+# Review text may quote a protocol-relative URL (#781): a forward slash, then a forward slash or a
+# backslash (browsers read /\host/ as //host/, and Windows reads both as the same UNC root), a DNS host
+# name of two or more labels whose last label starts with a letter (so no IP address, localhost or bare
+# server name), an optional port, then a forward slash. A \/ or \\ lead, a backslash after the host,
+# user info, a trailing dot or any other host spelling is still a network root. The exemption is the same
+# in prose, attributes, code spans and fences, and applies to the publication scan only: diagnostics
+# redaction keeps the strict pattern above.
+$script:ReviewPublishAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])(?!/[\\/](?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z](?:[a-z0-9-]*[a-z0-9])?(?::[0-9]{1,5})?/)[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
 # Trailing periods, spaces or short-name tildes still match (Windows aliases); users.md or rooted do not.
 $script:ReviewProfileSegmentPattern = '(?i)[\\/](?:users|home|root|documents and settings)(?![\p{L}\p{N}\p{M}_-])(?!\.[\p{L}\p{N}])'
 # GitHub decodes HTML5 named entities that WebUtility.HtmlDecode does not know; these spell ASCII punctuation.
