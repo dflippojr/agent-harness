@@ -18,7 +18,8 @@ helpers, credential helpers, sshCommand, remote helpers, or include-file config.
 
 The owner's source repository and global/system Git config are trusted: merge/push into a local source, and
 URL-remote credentials, still use them. Isolation is fail-closed for workspace repos: gitdir/commondir
-pointers that escape the workspace are refused rather than followed.
+pointers that escape the workspace are refused rather than followed, and so are links in the ref state the host
+copies in and out (HEAD, refs, logs and the other state files).
 """
 
 from __future__ import annotations
