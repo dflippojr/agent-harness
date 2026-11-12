@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -154,7 +155,7 @@ def _read_gitdir_pointer(text: str, base: Path) -> Path:
         if line.lower().startswith("gitdir:"):
             target = line.split(":", 1)[1].strip().strip('"')
             path = Path(target)
-            return path if path.is_absolute() else _resolve(base / path)
+            return _resolve(path if path.is_absolute() else base / path)
     raise GitError("invalid gitdir pointer")
 
 
@@ -178,10 +179,63 @@ def _resolve_workspace_git(repo: Path) -> tuple[Path, Path, Path]:
     common = git_dir / "commondir"
     if common.is_file():
         target = common.read_text(encoding="utf-8", errors="replace").strip()
-        metadata = Path(target) if Path(target).is_absolute() else _resolve(git_dir / target)
+        metadata = _resolve(Path(target) if Path(target).is_absolute() else git_dir / target)
         if not _contained(metadata, work_tree):
             raise GitError("refusing git commondir outside the workspace")
     return git_dir, metadata, work_tree
+
+
+_isjunction = getattr(os.path, "isjunction", lambda _path: False)  # Python 3.12+; Windows junctions are links too
+# Open state files without following a final-component link, and without blocking on a FIFO (POSIX only).
+_NOFOLLOW_READ = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _is_link(path: Path) -> bool:
+    return path.is_symlink() or _isjunction(path)
+
+
+def _require_plain(path: Path) -> None:
+    """Refuse a link in the git state the host copies: following it would read or write outside the workspace."""
+    if _is_link(path):
+        raise GitError(f"refusing symlinked git state {path.name}")
+
+
+def _remove(path: Path) -> None:
+    """Remove a file, a directory tree, or a link itself (never what the link points to)."""
+    if _isjunction(path):
+        os.rmdir(path)
+    elif path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _copy_state_file(src: Path, dst: Path) -> None:
+    """Copy one regular file without following a link at either end.
+
+    The bytes go to a sibling temp file that then replaces `dst`, so a link at `dst` is replaced rather than written
+    through. The temp name starts with a dot and ends in `.lock`, which git never reads as a ref.
+    """
+    _require_plain(src)
+    fd = os.open(src, _NOFOLLOW_READ)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise GitError(f"refusing non-regular git state {src.name}")
+        if dst.is_dir() and not _is_link(dst):
+            shutil.rmtree(dst)
+        out_fd, tmp = tempfile.mkstemp(prefix=f".{dst.name}.", suffix=".lock", dir=dst.parent)
+        try:
+            with os.fdopen(out_fd, "wb") as out, os.fdopen(os.dup(fd), "rb") as inp:
+                shutil.copyfileobj(inp, out)
+            os.chmod(tmp, stat.S_IMODE(st.st_mode))
+            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+            os.replace(tmp, dst)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    finally:
+        os.close(fd)
 
 
 def _mirror_tree(src: Path, dst: Path) -> None:
@@ -189,41 +243,39 @@ def _mirror_tree(src: Path, dst: Path) -> None:
 
     `shutil.copytree(..., dirs_exist_ok=True)` only adds/overwrites, so a fetch
     `--prune` in the isolated git-dir would otherwise leave stale loose refs in
-    the real repository.
+    the real repository. Links are refused in `src` and replaced in `dst`, never followed.
     """
+    _require_plain(src)
+    if _is_link(dst) or (dst.exists() and not dst.is_dir()):
+        _remove(dst)
     dst.mkdir(parents=True, exist_ok=True)
     seen = set()
     for child in src.iterdir():
         seen.add(child.name)
         _mirror_entry(child, dst / child.name)
     for child in sorted(dst.iterdir()):
-        if child.name in seen:
-            continue
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
+        if child.name not in seen:
+            _remove(child)
 
 
 def _mirror_entry(child: Path, target: Path) -> None:
-    if child.is_dir() and not child.is_symlink():
-        if target.is_symlink() or target.is_file():
-            target.unlink()
+    _require_plain(child)
+    if child.is_dir():
         _mirror_tree(child, target)
     else:
-        if target.is_dir() and not target.is_symlink():
-            shutil.rmtree(target)
-        shutil.copy2(child, target)
+        _copy_state_file(child, target)
 
 
 def _copy_git_state(src: Path, dst: Path) -> None:
     dst.mkdir(parents=True, exist_ok=True)
     for name in _STATE_FILES:
-        s, d = src / name, dst / name
+        s = src / name
+        _require_plain(s)
         if s.is_file():
-            shutil.copy2(s, d)
+            _copy_state_file(s, dst / name)
     for name in _STATE_DIRS:
         s = src / name
+        _require_plain(s)
         if s.is_dir():
             _mirror_tree(s, dst / name)
 
