@@ -84,8 +84,8 @@ Describe 'Review publication safety' {
         @{ Payload = 'file:///tmp/config.py' }
         @{ Payload = '[profile](file:///home/reviewer/.codex/auth.json)' }
         @{ Payload = 'file://server/share/Users/reviewer/.codex/auth.json' }
-        # #781: a protocol-relative URL is exempt only as //dotted.host.name/ or /\dotted.host.name/, ending
-        # in a forward slash. Every other network root stays rejected, in prose, attributes, code spans and fences.
+        # #781: a protocol-relative URL is exempt only as an href or src attribute value or a Markdown link or
+        # image destination, with an allowlisted host. Every other network root stays rejected.
         @{ Payload = '`//server/share/folder/config.py`' }
         @{ Payload = "``````text`n//server/share/folder/config.py`n``````" }
         @{ Payload = 'The feed uses <img src="//server/share/a.png">.' }
@@ -193,6 +193,35 @@ Describe 'Review publication safety' {
         @{ Payload = '//fs.example.io/share/config.py' }
         @{ Payload = '//files.ipv4only.arpa/share/config.py' }
         @{ Payload = '//xn--fs-abc.example.com/share/config.py' }
+        # #781 owner decision: outside a link or image context, an allowlisted host is still a network root.
+        @{ Payload = 'The feed rewrites protocol-relative URLs such as //example.com/images/a.png to https://example.com/images/a.png.' }
+        @{ Payload = 'Also //cdn.example.org/a.png and //example.com:8080/feed.xml in prose.' }
+        @{ Payload = '//fs.corp.example.com/share/config.py' }
+        @{ Payload = '`//fs.corp.example.com/share/config.py`' }
+        @{ Payload = "``````text`n//www.example.com/rss.xml`n``````" }
+        @{ Payload = 'It also keeps `/\example.com/p`, which browsers read as protocol-relative.' }
+        @{ Payload = 'It also keeps /\example.com/p as written.' }
+        @{ Payload = '`data-href="//example.com/share/config.py"`' }
+        @{ Payload = '`title="//example.com/share/config.py"`' }
+        @{ Payload = '`srcset="//example.com/share/a.png 1x"`' }
+        @{ Payload = '`href=//example.com/share/config.py`' }
+        @{ Payload = '`href= "//example.com/share/config.py"`' }
+        @{ Payload = '`href=" //example.com/share/config.py"`' }
+        @{ Payload = '`[x] (//example.com/share/config.py)`' }
+        @{ Payload = '`[x]( //example.com/share/config.py)`' }
+        @{ Payload = '`[x](<//example.com/share/config.py>)`' }
+        @{ Payload = '`[x]: //example.com/share/config.py`' }
+        @{ Payload = '`(//example.com/share/config.py)`' }
+        # A link or image context does not widen the host allowlist.
+        @{ Payload = '`<a href="//fs.alt/share/config.py">`' }
+        @{ Payload = '`<img src="//127-0-0-1.nip.io/share/a.png">`' }
+        @{ Payload = '`[x](//server/share/config.py)`' }
+        @{ Payload = '`![x](//fs.example.io/share/a.png)`' }
+        @{ Payload = '`[x](//cdn2.example.com/share/config.py)`' }
+        @{ Payload = '`<a href="//example.com\share\config.py">`' }
+        @{ Payload = '`<a href="\\example.com\share\config.py">`' }
+        @{ Payload = '`[x](%2F%2Ffs.alt%2Fshare%2Fconfig.py)`' }
+        @{ Payload = '`[x](&#47;&#47;fs.onion/share/config.py)`' }
         # Any separator followed by a profile directory name outside a known repository path.
         @{ Payload = '/home/reviewer/.codex/auth.json' }
         @{ Payload = '/Users/reviewer/.claude/credentials.json' }
@@ -403,16 +432,16 @@ Describe 'Review publication safety' {
         @{ Payload = '`$env:USERPROFILE` and `~/.claude/settings.json` are inherited.' }
         @{ Payload = 'Call 127.0.0.1:8100/gpu or localhost:8100/gpu.' }
         @{ Payload = 'See https://github.com/dflippojr/agent-harness/pull/549 and // a code comment.' }
-        # #781: protocol-relative URLs with a dotted host name publish (personal-website PR #271 quotes its RSS feed's).
-        @{ Payload = 'The feed rewrites protocol-relative URLs such as //example.com/images/a.png to https://example.com/images/a.png.' }
+        # #781: protocol-relative URLs publish as href or src attribute values and Markdown link or image
+        # destinations (personal-website PR #271 quotes its RSS feed's).
         @{ Payload = 'In `feed.xml`, `<img src="//cdn.example.com/a.png">` becomes `<img src="https://cdn.example.com/a.png">`.' }
         @{ Payload = 'The item links to <a href="//example.com/posts/1">the post</a>.' }
-        @{ Payload = 'See [the feed](//blog.example.net/feed.xml), //cdn.example.org/a.png and //example.com:8080/feed.xml.' }
+        @{ Payload = 'See [the feed](//blog.example.net/feed.xml), ![logo](//cdn.example.org/a.png) and [the port](//example.com:8080/feed.xml).' }
         @{ Payload = "The template:`n`n``````html`n<link rel=`"alternate`" href=`"//www.example.com/rss.xml`">`n```````n`nDone." }
+        @{ Payload = 'Upper case works too: `<IMG SRC=''//CDN.EXAMPLE.COM/A.PNG''>`.' }
         # personal-website 557ad69 (PR #271's test) keeps a backslash spelling that browsers read as protocol-relative.
         @{ Payload = 'The test passes `''<a href="//example.com/p">p</a> <a href="/\\example.com/p">q</a> <img src=\''//example.com/i.png\'' alt="">''`.' }
-        @{ Payload = 'It also keeps `/\example.com/p`, which browsers read as protocol-relative.' }
-        @{ Payload = 'It also keeps /\example.com/p as written.' }
+        @{ Payload = 'A Markdown link may use it too: [p](/\example.com/p).' }
         @{ Payload = '**Structure** `harness/__init__.py`: keep the `<n>` placeholder.' }
         @{ Payload = 'Send a Bearer token in the header; the `Bearer` scheme is case-insensitive.' }
         @{ Payload = 'The header is built as `f"Bearer {token}"`.' }
