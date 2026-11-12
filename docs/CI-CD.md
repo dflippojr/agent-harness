@@ -355,9 +355,12 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
   prefix (`\\server\`, `//server/`, `\\?\`, `\\.\`), or a `file:` URL.
   One spelling is exempt, so a review can quote a protocol-relative URL (#781): `//` or `/\` (which browsers read as
   `//`), a host name of two or more dot-separated labels whose last label starts with a letter, an optional `:port`,
-  then `/` (`//cdn.example.com/a.png`, `/\example.com/p`). `//server/share/`, `//localhost/`, `//192.168.1.5/`,
-  `//example.com\share`, `\/example.com/`, `//user@example.com/` and `\\example.com\share\` stay rejected, in prose,
-  attributes, code spans and fences alike. Diagnostics redaction does not use the exemption.
+  then `/` (`//cdn.example.com/a.png`, `/\example.com/p`). A host with an all-digit label (`//192.168.1.5.nip.io/`,
+  `in-addr.arpa` names) or ending in a local or reserved namespace (`.localhost`, `.localdomain`, `.local`, `.test`,
+  `.invalid`, `.example`, `.internal`, `.arpa`, `.lan`, `.home`, `.corp`, `.intranet`) or in `.ipv6-literal.net` is not
+  exempt. `//server/share/`, `//localhost/`, `//192.168.1.5/`, `//example.com\share`, `\/example.com/`,
+  `//user@example.com/` and `\\example.com\share\` stay rejected, in prose, attributes, code spans and fences alike.
+  Diagnostics redaction does not use the exemption.
 - Any separator followed by a profile directory name (`Users`, `home`, `root` or `Documents and Settings`, including
   Windows trailing-period, trailing-space and short-name spellings) is rejected unless it is part of a known
   repository path. `docs/users.md` and `root-ca.md` are not profile directories; an unknown `examples/home/x.py` is
