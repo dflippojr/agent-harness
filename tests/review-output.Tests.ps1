@@ -84,8 +84,8 @@ Describe 'Review publication safety' {
         @{ Payload = 'file:///tmp/config.py' }
         @{ Payload = '[profile](file:///home/reviewer/.codex/auth.json)' }
         @{ Payload = 'file://server/share/Users/reviewer/.codex/auth.json' }
-        # #781: a protocol-relative URL is exempt only as //dotted.host.name/ in forward slashes. Every
-        # other network root stays rejected, in prose, attributes, code spans and fences alike.
+        # #781: a protocol-relative URL is exempt only as //dotted.host.name/ or /\dotted.host.name/, ending
+        # in a forward slash. Every other network root stays rejected, in prose, attributes, code spans and fences.
         @{ Payload = '`//server/share/folder/config.py`' }
         @{ Payload = "``````text`n//server/share/folder/config.py`n``````" }
         @{ Payload = 'The feed uses <img src="//server/share/a.png">.' }
@@ -100,6 +100,10 @@ Describe 'Review publication safety' {
         @{ Payload = 'file://example.com/share/config.py' }
         @{ Payload = '//example.com/Users/reviewer/.codex/auth.json' }
         @{ Payload = '&#47;&#47;server/share/config.py' }
+        @{ Payload = '/\server/share/config.py' }
+        @{ Payload = '/\192.168.1.5/share/config.py' }
+        @{ Payload = '/\example.com\share\config.py' }
+        @{ Payload = '\/example.com/share/config.py' }
         # Any separator followed by a profile directory name outside a known repository path.
         @{ Payload = '/home/reviewer/.codex/auth.json' }
         @{ Payload = '/Users/reviewer/.claude/credentials.json' }
@@ -316,6 +320,10 @@ Describe 'Review publication safety' {
         @{ Payload = 'The item links to <a href="//example.com/posts/1">the post</a>.' }
         @{ Payload = 'See [the feed](//blog.example.co.uk/feed.xml) and //example.com:8080/feed.xml.' }
         @{ Payload = "The template:`n`n``````html`n<link rel=`"alternate`" href=`"//www.example.com/rss.xml`">`n```````n`nDone." }
+        # personal-website 557ad69 (PR #271's test) keeps a backslash spelling that browsers read as protocol-relative.
+        @{ Payload = 'The test passes `''<a href="//example.com/p">p</a> <a href="/\\example.com/p">q</a> <img src=\''//example.com/i.png\'' alt="">''`.' }
+        @{ Payload = 'It also keeps `/\example.com/p`, which browsers read as protocol-relative.' }
+        @{ Payload = 'It also keeps /\example.com/p as written.' }
         @{ Payload = '**Structure** `harness/__init__.py`: keep the `<n>` placeholder.' }
         @{ Payload = 'Send a Bearer token in the header; the `Bearer` scheme is case-insensitive.' }
         @{ Payload = 'The header is built as `f"Bearer {token}"`.' }
