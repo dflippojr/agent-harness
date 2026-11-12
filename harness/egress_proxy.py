@@ -29,7 +29,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 Address = ipaddress.IPv4Address | ipaddress.IPv6Address
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
@@ -204,7 +204,7 @@ def parse_request(head: bytes) -> Request:
     if method == "CONNECT":
         host, port = _host_port("//" + target, None)
         return Request(True, host, port)
-    split = urlsplit(target)
+    split = _split(target)
     if split.scheme.lower() != "http" or not split.netloc:
         raise BadRequest("only CONNECT and absolute http:// URLs are proxied")
     host, port = _host_port(target, 80)
@@ -220,8 +220,15 @@ def parse_request(head: bytes) -> Request:
     return Request(False, host, port, upstream.encode("latin-1"))
 
 
+def _split(target: str) -> SplitResult:
+    try:
+        return urlsplit(target)
+    except ValueError as e:     # an unclosed IPv6 bracket, for example `[::1`
+        raise BadRequest("invalid host") from e
+
+
 def _host_port(target: str, default: int | None) -> tuple[str, int]:
-    split = urlsplit(target)
+    split = _split(target)
     try:
         port = split.port if split.port is not None else default
     except ValueError as e:
