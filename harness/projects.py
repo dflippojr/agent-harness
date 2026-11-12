@@ -192,34 +192,36 @@ _O_BINARY = getattr(os, "O_BINARY", 0)
 # Read state files without following a final-component link and without blocking on a FIFO (POSIX only).
 _NOFOLLOW_READ = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | _O_BINARY
 # POSIX: walk and copy git state through directory descriptors opened without following links, so a path component
-# the workspace swaps for a link mid-copy cannot redirect a read or a write. Windows has no *at calls; there each
-# entry is checked with lstat right before use instead.
+# the workspace swaps for a link mid-copy cannot redirect a read or a write. Windows has no *at calls; there the
+# directory chain is checked for links right before each operation instead (a narrower window, not a closed one).
 _FD_OPS = (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd
            and os.stat in os.supports_dir_fd and os.mkdir in os.supports_dir_fd and os.rename in os.supports_dir_fd
            and os.unlink in os.supports_dir_fd and os.rmdir in os.supports_dir_fd and os.scandir in os.supports_fd
-           and os.utime in os.supports_fd)
+           and os.chmod in os.supports_fd and os.utime in os.supports_fd)
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _MISSING, _FILE, _DIR, _OTHER = "missing", "file", "dir", "other"
 
 
-def _kind(mode: int) -> str:
-    return _FILE if stat.S_ISREG(mode) else _DIR if stat.S_ISDIR(mode) else _OTHER
-
-
 class _StateDir:
-    """A directory of git state, addressed by entry name, that never follows a link (see `_FD_OPS`)."""
+    """A directory of git state, addressed by entry name, that never follows a link (see `_FD_OPS`).
 
-    def __init__(self, path: Path, fd: int | None = None):
-        self.path, self.fd = path, fd
+    Every call names an entry through `_at`: the bare name with `fd` as `dir_fd` on POSIX, or the full path (with
+    `dir_fd=None`) after re-checking the directory chain elsewhere.
+    """
+
+    def __init__(self, path: Path, root: Path, fd: int | None = None):
+        self.path, self.root, self.fd = path, root, fd
 
     @classmethod
     def open(cls, path: Path) -> _StateDir:
-        """Open an existing canonical directory. On POSIX every component is opened without following links, so a
-        link anywhere on the path (one swapped in after the path was resolved, say) is refused."""
+        """Open an existing canonical directory, refusing a link anywhere on its path (one swapped in after the path
+        was resolved, say). On POSIX every component is opened without following links."""
         if not _FD_OPS:
-            if _is_link(path) or not path.is_dir():
-                raise GitError(f"refusing git state directory {path.name}: not a plain directory")
-            return cls(path)
+            state = cls(path, path)
+            state._check_chain()
+            if not path.is_dir():
+                raise GitError(f"refusing git state directory {path.name}: not a directory")
+            return state
         fd = os.open(path.anchor, _DIR_FLAGS)
         try:
             for part in path.parts[1:]:
@@ -229,7 +231,7 @@ class _StateDir:
         except BaseException:
             os.close(fd)
             raise
-        return cls(path, fd)
+        return cls(path, path, fd)
 
     def __enter__(self) -> _StateDir:
         return self
@@ -239,29 +241,41 @@ class _StateDir:
             os.close(self.fd)
             self.fd = None
 
+    def _check_chain(self) -> None:
+        current = self.path
+        while True:
+            if _is_link(current):
+                raise GitError(f"refusing symlinked git state {current.name}")
+            if current == self.root or current == current.parent:
+                return
+            current = current.parent
+
+    def _at(self, name: str) -> str:
+        if self.fd is not None:
+            return name
+        self._check_chain()
+        return str(self.path / name)
+
     def kind(self, name: str) -> str:
+        where = self._at(name)
+        if self.fd is None and _isjunction(where):
+            return _OTHER
         try:
-            if self.fd is not None:
-                return _kind(os.stat(name, dir_fd=self.fd, follow_symlinks=False).st_mode)
-            path = self.path / name
-            if _is_link(path):
-                return _OTHER
-            return _kind(os.lstat(path).st_mode)
+            mode = os.stat(where, dir_fd=self.fd, follow_symlinks=False).st_mode
         except FileNotFoundError:
             return _MISSING
+        return _FILE if stat.S_ISREG(mode) else _DIR if stat.S_ISDIR(mode) else _OTHER
 
     def names(self) -> list[str]:
-        if self.fd is not None:
-            with os.scandir(self.fd) as entries:
-                return [entry.name for entry in entries]
-        return os.listdir(self.path)
+        with os.scandir(self.fd if self.fd is not None else self._at("")) as entries:
+            return [entry.name for entry in entries]
 
     def subdir(self, name: str) -> _StateDir:
         if self.fd is not None:
-            return _StateDir(self.path / name, os.open(name, _DIR_FLAGS, dir_fd=self.fd))
+            return _StateDir(self.path / name, self.root, os.open(name, _DIR_FLAGS, dir_fd=self.fd))
         if self.kind(name) != _DIR:
             raise GitError(f"refusing git state {name}: not a plain directory")
-        return _StateDir(self.path / name)
+        return _StateDir(self.path / name, self.root)
 
     def ensure_subdir(self, name: str) -> _StateDir:
         """The subdirectory `name`, created first; anything else in its place (a link, a file) is removed."""
@@ -269,10 +283,7 @@ class _StateDir:
         if kind not in (_DIR, _MISSING):
             self.remove(name)
         if kind != _DIR:
-            if self.fd is not None:
-                os.mkdir(name, dir_fd=self.fd)
-            else:
-                os.mkdir(self.path / name)
+            os.mkdir(self._at(name), dir_fd=self.fd)
         return self.subdir(name)
 
     def remove(self, name: str) -> None:
@@ -282,26 +293,19 @@ class _StateDir:
             with self.subdir(name) as sub:
                 for child in sub.names():
                     sub.remove(child)
-            if self.fd is not None:
-                os.rmdir(name, dir_fd=self.fd)
-            else:
-                os.rmdir(self.path / name)
+            os.rmdir(self._at(name), dir_fd=self.fd)
         elif kind != _MISSING:
-            if self.fd is not None:
-                os.unlink(name, dir_fd=self.fd)
-            elif _isjunction(self.path / name):
-                os.rmdir(self.path / name)  # removes the junction, not its target
+            where = self._at(name)
+            if self.fd is None and _isjunction(where):
+                os.rmdir(where)  # removes the junction, not its target
             else:
-                os.unlink(self.path / name)
+                os.unlink(where, dir_fd=self.fd)
 
     def open_read(self, name: str) -> int:
         """A descriptor on regular file `name`, never through a link."""
-        if self.fd is not None:
-            fd = os.open(name, _NOFOLLOW_READ, dir_fd=self.fd)
-        elif self.kind(name) != _FILE:
+        if self.fd is None and self.kind(name) != _FILE:
             raise GitError(f"refusing git state {name}: not a regular file")
-        else:
-            fd = os.open(self.path / name, _NOFOLLOW_READ)
+        fd = os.open(self._at(name), _NOFOLLOW_READ, dir_fd=self.fd)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
             raise GitError(f"refusing git state {name}: not a regular file")
@@ -310,32 +314,29 @@ class _StateDir:
     def write(self, name: str, source_fd: int) -> None:
         """Copy `source_fd` to `name` through a new temp file renamed over it, so a link at `name` is replaced rather
         than written through. The short temp name starts with a dot and ends in `.lock`: git never reads it as a ref,
-        and it fits beside the longest ref name git allows."""
+        and its length doesn't depend on `name`."""
         st = os.fstat(source_fd)
-        temp = f".tmp-{secrets.token_hex(8)}.lock"
+        temp = _temp_name()
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | _O_BINARY
-        out = os.open(temp, flags, 0o600, dir_fd=self.fd) if self.fd is not None else os.open(self.path / temp, flags, 0o600)
+        out = os.open(self._at(temp), flags, 0o600, dir_fd=self.fd)
         try:
             try:
-                while True:
-                    chunk = os.read(source_fd, 1 << 16)
-                    if not chunk:
-                        break
+                while chunk := os.read(source_fd, 1 << 16):
                     os.write(out, chunk)
-                if self.fd is not None:
-                    os.fchmod(out, stat.S_IMODE(st.st_mode))
-                    os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
+                # Mode and times through the descriptor where the OS allows it, else by the just-checked path.
+                target = out if self.fd is not None else self._at(temp)
+                os.chmod(target, stat.S_IMODE(st.st_mode))
+                os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
             finally:
                 os.close(out)
-            if self.fd is not None:
-                os.rename(temp, name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
-            else:
-                os.chmod(self.path / temp, stat.S_IMODE(st.st_mode))
-                os.utime(self.path / temp, ns=(st.st_atime_ns, st.st_mtime_ns))
-                os.replace(self.path / temp, self.path / name)
+            os.replace(self._at(temp), self._at(name), src_dir_fd=self.fd, dst_dir_fd=self.fd)
         except BaseException:
             self.remove(temp)
             raise
+
+
+def _temp_name() -> str:
+    return f".tmp-{secrets.token_hex(8)}.lock"
 
 
 def _is_link(path: Path) -> bool:

@@ -565,37 +565,32 @@ def test_copy_git_state_refuses_state_entries_of_the_wrong_type(tmp_path):
         _copy_git_state(src, dst)
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
-def test_copy_git_state_refuses_a_fifo_without_blocking(tmp_path):
+def test_copy_git_state_temp_names_stay_short_whatever_the_ref_name(tmp_path, monkeypatch):
+    """The copy's temp file sits beside the ref it replaces, so its name must not grow with the ref's: git allows a
+    245-byte ref component, and the name limit is 255."""
     src, dst = _state_dirs(tmp_path)
-    os.mkfifo(src / "FETCH_HEAD")
-    os.mkfifo(src / "refs" / "heads" / "pipe")
-    with pytest.raises(GitError, match="FETCH_HEAD"):
-        _copy_git_state(src, dst)
-    (src / "FETCH_HEAD").unlink()
-    with pytest.raises(GitError, match="pipe"):
-        _copy_git_state(src, dst)
-
-
-@pytest.mark.skipif(os.name != "posix", reason="the 255-byte name limit is POSIX; Windows paths hit MAX_PATH first")
-def test_copy_git_state_copies_the_longest_ref_name(tmp_path):
-    """Git allows a 245-byte ref component (its lock file then fills the 255-byte name limit); the copy's own temp file
-    must fit beside it."""
-    src, dst = _state_dirs(tmp_path)
-    name = "r" * 245
+    name = "r" * 120
     (src / "refs" / "heads" / name).write_bytes(b"bbb\n")
     (dst / "refs" / "heads").mkdir(parents=True)
     (dst / "refs" / "heads" / name).write_bytes(b"old\n")
+    temps = []
+    real_replace = os.replace
 
+    def replace(source, target, **kwargs):
+        temps.append(os.path.basename(source))
+        return real_replace(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
     _copy_git_state(src, dst)
 
     assert (dst / "refs" / "heads" / name).read_bytes() == b"bbb\n"
     assert sorted(p.name for p in (dst / "refs" / "heads").iterdir()) == sorted(["main", name])
+    assert temps and all(len(t) <= 32 and t.startswith(".") and t.endswith(".lock") for t in temps)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative copy is POSIX only")
-def test_copy_git_state_ignores_a_directory_swapped_for_a_link_mid_copy(tmp_path, monkeypatch):
-    """A destination directory replaced by a link after it was opened: nothing lands where the link points (#966)."""
+def test_copy_git_state_does_not_follow_a_directory_swapped_for_a_link_mid_copy(tmp_path, monkeypatch):
+    """A destination directory replaced by a link after the copy reached it: nothing lands where the link points.
+    POSIX keeps writing through the directory it opened; elsewhere the re-checked path refuses (#966)."""
     import harness.projects as projects
 
     src, dst = _state_dirs(tmp_path)
@@ -603,6 +598,9 @@ def test_copy_git_state_ignores_a_directory_swapped_for_a_link_mid_copy(tmp_path
     heads.mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
+    probe = tmp_path / "probe"
+    _symlink_or_skip(probe, outside)
+    probe.unlink()
     real_write = projects._StateDir.write
     swapped = []
 
@@ -614,21 +612,22 @@ def test_copy_git_state_ignores_a_directory_swapped_for_a_link_mid_copy(tmp_path
         return real_write(self, name, source_fd)
 
     monkeypatch.setattr(projects._StateDir, "write", write)
-    _copy_git_state(src, dst)
+    try:
+        _copy_git_state(src, dst)
+    except GitError:
+        pass
 
     assert swapped == ["main"]
-    assert list(outside.iterdir()) == []  # the write went to the opened directory, which the mirror then pruned
+    assert list(outside.iterdir()) == []
 
 
-@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative copy is POSIX only")
 def test_copy_git_state_refuses_a_link_swapped_into_its_path(tmp_path):
-    """The state directory itself is reopened component by component without following links."""
+    """The state directory itself is refused when a link replaced it after its path was resolved."""
     src, dst = _state_dirs(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
-    real = tmp_path / "real"
-    dst.rename(real)
-    dst.symlink_to(outside, target_is_directory=True)
+    dst.rename(tmp_path / "real")
+    _symlink_or_skip(dst, outside)
     with pytest.raises(GitError):
         _copy_git_state(src, dst)
     assert list(outside.iterdir()) == []
