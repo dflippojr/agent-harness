@@ -143,7 +143,7 @@ async def _parse_body(request: Request, flavor: str) -> tuple[dict | None, JSONR
         body = json.loads(raw or b"{}")
         if not isinstance(body, dict):
             raise ValueError
-    except ValueError:
+    except (ValueError, RecursionError):  # #930: deep nesting such as [[[...]]] exhausts the parser's recursion limit
         return None, error(flavor, 400, "invalid_request_error", "body must be a JSON object")
     return body, None
 
