@@ -209,15 +209,15 @@ class _StateDir:
     `dir_fd=None`) after re-checking the directory chain elsewhere.
     """
 
-    def __init__(self, path: Path, root: Path, fd: int | None = None):
-        self.path, self.root, self.fd = path, root, fd
+    def __init__(self, path: Path, fd: int | None = None):
+        self.path, self.fd = path, fd
 
     @classmethod
     def open(cls, path: Path) -> _StateDir:
         """Open an existing canonical directory, refusing a link anywhere on its path (one swapped in after the path
         was resolved, say). On POSIX every component is opened without following links."""
         if not _FD_OPS:
-            state = cls(path, path)
+            state = cls(path)
             state._check_chain()
             if not path.is_dir():
                 raise GitError(f"refusing git state directory {path.name}: not a directory")
@@ -231,7 +231,7 @@ class _StateDir:
         except BaseException:
             os.close(fd)
             raise
-        return cls(path, path, fd)
+        return cls(path, fd)
 
     def __enter__(self) -> _StateDir:
         return self
@@ -242,11 +242,12 @@ class _StateDir:
             self.fd = None
 
     def _check_chain(self) -> None:
+        """No component of the canonical path, up to the filesystem root, may have become a link."""
         current = self.path
         while True:
             if _is_link(current):
                 raise GitError(f"refusing symlinked git state {current.name}")
-            if current == self.root or current == current.parent:
+            if current == current.parent:
                 return
             current = current.parent
 
@@ -272,10 +273,19 @@ class _StateDir:
 
     def subdir(self, name: str) -> _StateDir:
         if self.fd is not None:
-            return _StateDir(self.path / name, self.root, os.open(name, _DIR_FLAGS, dir_fd=self.fd))
+            return _StateDir(self.path / name, os.open(name, _DIR_FLAGS, dir_fd=self.fd))
         if self.kind(name) != _DIR:
             raise GitError(f"refusing git state {name}: not a plain directory")
-        return _StateDir(self.path / name, self.root)
+        return _StateDir(self.path / name)
+
+    def open_or_create_subdir(self, name: str) -> _StateDir:
+        """The subdirectory `name`, created if missing; anything else in its place is refused, not replaced."""
+        kind = self.kind(name)
+        if kind == _MISSING:
+            os.mkdir(self._at(name), dir_fd=self.fd)
+        elif kind != _DIR:
+            raise GitError(f"refusing git state directory {name}: not a plain directory")
+        return self.subdir(name)
 
     def ensure_subdir(self, name: str) -> _StateDir:
         """The subdirectory `name`, created first; anything else in its place (a link, a file) is removed."""
@@ -322,7 +332,9 @@ class _StateDir:
         try:
             try:
                 while chunk := os.read(source_fd, 1 << 16):
-                    os.write(out, chunk)
+                    view = memoryview(chunk)
+                    while view:  # os.write may write less than asked
+                        view = view[os.write(out, view):]
                 # Mode and times through the descriptor where the OS allows it, else by the just-checked path.
                 target = out if self.fd is not None else self._at(temp)
                 os.chmod(target, stat.S_IMODE(st.st_mode))
@@ -381,9 +393,10 @@ def _copy_git_state(src: Path, dst: Path) -> None:
 
     Fails closed with GitError on a link or special file in `src`, or a state entry of the wrong type.
     """
-    dst.mkdir(parents=True, exist_ok=True)
     try:
-        with _StateDir.open(src) as s, _StateDir.open(dst) as d:
+        # `dst` is created, if missing, under its checked parent, so a link swapped onto its path creates nothing.
+        with _StateDir.open(src) as s, _StateDir.open(dst.parent) as parent, \
+                parent.open_or_create_subdir(dst.name) as d:
             for name in _STATE_FILES:
                 kind = s.kind(name)
                 if kind == _FILE:

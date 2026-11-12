@@ -14,6 +14,7 @@ import pytest
 
 from harness.changes import workspace_changes
 from harness.config import Project
+import harness.projects as _projects
 from harness.projects import GitError, _copy_git_state, git, prepare, publish_local, push, refresh_origin, snapshot
 
 MARKER = "ISSUE104_GIT_EXEC_MARKER"
@@ -588,11 +589,20 @@ def test_copy_git_state_temp_names_stay_short_whatever_the_ref_name(tmp_path, mo
     assert temps and all(len(t) <= 32 and t.startswith(".") and t.endswith(".lock") for t in temps)
 
 
-def test_copy_git_state_does_not_follow_a_directory_swapped_for_a_link_mid_copy(tmp_path, monkeypatch):
-    """A destination directory replaced by a link after the copy reached it: nothing lands where the link points.
-    POSIX keeps writing through the directory it opened; elsewhere the re-checked path refuses (#966)."""
-    import harness.projects as projects
+# Both state-copy backends where this OS has them: descriptor-relative (POSIX) and checked paths (any OS).
+_BACKENDS = [False] + ([True] if _projects._FD_OPS else [])
 
+
+def _swap_for_link(directory: Path, outside: Path) -> None:
+    directory.rename(directory.with_name(directory.name + "-moved"))
+    directory.symlink_to(outside, target_is_directory=True)
+
+
+@pytest.mark.parametrize("fd_ops", _BACKENDS)
+def test_copy_git_state_does_not_follow_a_directory_swapped_for_a_link_mid_copy(tmp_path, monkeypatch, fd_ops):
+    """A destination directory replaced by a link after the copy reached it: nothing lands where the link points.
+    Descriptor-relative copy keeps writing through the directory it opened; the checked-path copy refuses (#966)."""
+    monkeypatch.setattr(_projects, "_FD_OPS", fd_ops)
     src, dst = _state_dirs(tmp_path)
     heads = dst / "refs" / "heads"
     heads.mkdir(parents=True)
@@ -601,17 +611,16 @@ def test_copy_git_state_does_not_follow_a_directory_swapped_for_a_link_mid_copy(
     probe = tmp_path / "probe"
     _symlink_or_skip(probe, outside)
     probe.unlink()
-    real_write = projects._StateDir.write
+    real_write = _projects._StateDir.write
     swapped = []
 
     def write(self, name, source_fd):
         if self.path == heads and not swapped:
-            heads.rename(dst / "refs" / "moved")
-            heads.symlink_to(outside, target_is_directory=True)
+            _swap_for_link(heads, outside)
             swapped.append(name)
         return real_write(self, name, source_fd)
 
-    monkeypatch.setattr(projects._StateDir, "write", write)
+    monkeypatch.setattr(_projects._StateDir, "write", write)
     try:
         _copy_git_state(src, dst)
     except GitError:
@@ -619,6 +628,70 @@ def test_copy_git_state_does_not_follow_a_directory_swapped_for_a_link_mid_copy(
 
     assert swapped == ["main"]
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("fd_ops", _BACKENDS)
+def test_copy_git_state_does_not_follow_an_ancestor_swapped_for_a_link_mid_copy(tmp_path, monkeypatch, fd_ops):
+    """A directory above the git dir (a workspace holding a nested git dir) replaced by a link mid-copy (#966)."""
+    monkeypatch.setattr(_projects, "_FD_OPS", fd_ops)
+    src, _ = _state_dirs(tmp_path)
+    workspace = tmp_path / "ws"
+    dst = workspace / "nested" / "git"
+    (dst / "refs" / "heads").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    (outside / "nested" / "git" / "refs" / "heads").mkdir(parents=True)
+    before = _tree_snapshot(outside)
+    probe = tmp_path / "probe"
+    _symlink_or_skip(probe, outside)
+    probe.unlink()
+    real_write = _projects._StateDir.write
+    swapped = []
+
+    def write(self, name, source_fd):
+        if not swapped:
+            _swap_for_link(workspace, outside)
+            swapped.append(name)
+        return real_write(self, name, source_fd)
+
+    monkeypatch.setattr(_projects._StateDir, "write", write)
+    try:
+        _copy_git_state(src, dst)
+    except GitError:
+        pass
+
+    assert swapped
+    assert _tree_snapshot(outside) == before
+    assert sorted(p.relative_to(outside).as_posix() for p in outside.rglob("*")) == [
+        "nested", "nested/git", "nested/git/refs", "nested/git/refs/heads"]
+
+
+@pytest.mark.parametrize("fd_ops", _BACKENDS)
+def test_copy_git_state_creates_nothing_through_a_linked_destination_path(tmp_path, monkeypatch, fd_ops):
+    """A missing destination under a linked ancestor is refused before anything is created where the link points."""
+    monkeypatch.setattr(_projects, "_FD_OPS", fd_ops)
+    src, _ = _state_dirs(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    workspace = tmp_path / "ws"
+    _symlink_or_skip(workspace, outside)
+    with pytest.raises(GitError):
+        _copy_git_state(src, workspace / "git")
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("fd_ops", _BACKENDS)
+def test_copy_git_state_completes_short_writes(tmp_path, monkeypatch, fd_ops):
+    monkeypatch.setattr(_projects, "_FD_OPS", fd_ops)
+    src, dst = _state_dirs(tmp_path)
+    content = b"# pack-refs with: peeled fully-peeled sorted\n" + b"a" * 40 + b" refs/heads/main\n"
+    (src / "packed-refs").write_bytes(content)
+    real_write = os.write
+    monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, bytes(data[:3])))
+
+    _copy_git_state(src, dst)
+
+    assert (dst / "packed-refs").read_bytes() == content
+    assert (dst / "refs" / "heads" / "main").read_bytes() == b"aaa\n"
 
 
 def test_copy_git_state_refuses_a_link_swapped_into_its_path(tmp_path):
