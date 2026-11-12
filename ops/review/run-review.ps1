@@ -410,24 +410,29 @@ function Get-ReviewPublishPattern {
 # Dot segments, quoting and whitespace cannot hide either form, so no path parsing is needed.
 # UNC roots may use either separator; a URL authority (after a scheme's colon) is not one.
 $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
-# Review text may quote a protocol-relative URL (#781). The exemption is narrow by construction, an
-# allowlist of spellings rather than a list of bad hosts: a forward slash, then a forward slash or a
-# backslash (browsers read /\host/ as //host/, and Windows reads both as the same UNC root), then a host
-# of two or more labels, each made of letters joined by single hyphens, whose last label is com, net or
-# org, then an optional port and a forward slash. So:
-# - No digit can appear in the host, so no IPv4 address in any spelling (dotted, dashed, decimal, or hex as
-#   in 7f000001.sslip.io: every private, loopback, link-local and shared range has a digit in hex), no
-#   bare server name with a digit, no punycode (xn--) and no compressed IPv6 (fc00--1).
-# - A label of hyphen-joined hex groups (full-form IPv6 spelled in letters, fdaa-bbbb-...) is not exempt.
-# - Every IANA special-use domain (.alt, .arpa, .example, .invalid, .local, .localhost, .onion, .test and
-#   their subdomains) falls outside com, net and org, except the reserved documentation domains
-#   example.com, example.net and example.org. Wildcard-IP DNS services (nip.io, sslip.io, traefik.me)
-#   are outside them too, and inside them no label can spell an address.
-# - Any other TLD, a backslash after the host, a \/ or \\ lead, user info or a trailing dot is a network root.
-# The rule reads spelling only: what a public name resolves to is its owner's choice and is not checked.
-# It is the same in prose, attributes, code spans and fences, and applies to the publication scan only:
-# diagnostics redaction keeps the strict pattern above.
-$script:ReviewPublishAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])(?!/[\\/](?:(?![a-f]{1,4}(?:-[a-f]{1,4})+\.)[a-z]+(?:-[a-z]+)*\.)+(?:com|net|org)(?::[0-9]{1,5})?/)[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
+# Review text may quote a protocol-relative URL (#781). In prose a network path and a scheme-less URL are
+# spelled the same, so the exemption applies only where the text marks a URL, and only for an allowlisted
+# host. Both parts are narrow by construction: allowlists of spellings, not lists of bad hosts.
+# - Context: the root starts an href or src attribute value (href=" href=' src=" src=', the name not part
+#   of a longer one such as data-href or srcset, a backslash allowed before the quote as in an escaped
+#   string, no space anywhere), or a Markdown link or image destination (directly after "](").
+#   Everything else is refused: bare prose, code spans and fences without such a context, unquoted or
+#   space-padded attributes, title= and other attributes, "] (", "]( ", "](<", reference definitions.
+# - Root: a forward slash, then a forward slash or a backslash (browsers read /\host/ as //host/, and
+#   Windows reads both as the same UNC root).
+# - Host: two or more labels, each made of letters joined by single hyphens, the last one com, net or org,
+#   then an optional port and a forward slash. No digit can appear, so no IPv4 address in any spelling
+#   (dotted, dashed, decimal, or hex as in 7f000001.sslip.io), no punycode and no compressed IPv6; a label
+#   of hyphen-joined hex groups (full-form IPv6) is not exempt either. Every IANA special-use domain falls
+#   outside com, net and org, except the documentation domains example.com, example.net and example.org;
+#   wildcard-IP DNS services are outside them too. Any other TLD, a backslash after the host, a \/ or \\
+#   lead, user info or a trailing dot is a network root.
+# The rule reads spelling only (what a public name resolves to is not checked), and decoded forms are
+# scanned too, so an encoded context or root gets the same answer. It applies to the publication scan
+# only: diagnostics redaction keeps the strict pattern above.
+$script:ReviewPublishUrlContext = '(?<=(?<![\p{L}\p{N}\p{M}_-])(?:href|src)=\\?["'']|\]\()'
+$script:ReviewPublishUrlHost = '/[\\/](?:(?![a-f]{1,4}(?:-[a-f]{1,4})+\.)[a-z]+(?:-[a-z]+)*\.)+(?:com|net|org)(?::[0-9]{1,5})?/'
+$script:ReviewPublishAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])(?!' + $script:ReviewPublishUrlContext + $script:ReviewPublishUrlHost + ')[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
 # Trailing periods, spaces or short-name tildes still match (Windows aliases); users.md or rooted do not.
 $script:ReviewProfileSegmentPattern = '(?i)[\\/](?:users|home|root|documents and settings)(?![\p{L}\p{N}\p{M}_-])(?!\.[\p{L}\p{N}])'
 # GitHub decodes HTML5 named entities that WebUtility.HtmlDecode does not know; these spell ASCII punctuation.

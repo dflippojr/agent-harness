@@ -353,17 +353,23 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
 
 - Any Windows absolute root is rejected, whatever follows it: a drive root (`C:\` or `C:/`), a UNC or extended
   prefix (`\\server\`, `//server/`, `\\?\`, `\\.\`), or a `file:` URL.
-  One spelling is exempt, so a review can quote a protocol-relative URL (#781). It is an allowlist: `//` or `/\`
-  (which browsers read as `//`), a host of two or more labels made only of letters joined by single hyphens, whose last
-  label is `com`, `net` or `org`, an optional `:port`, then `/` (`//cdn.example.com/a.png`, `/\example.com/p`). No digit
-  can appear in the host, so no IPv4 address in any spelling (dotted, dashed or hex) and no compressed IPv6; a label of
-  hyphen-joined hex groups is not exempt either. Every IANA special-use name (`.alt`, `.arpa`, `.onion`, `.local`,
-  `.localhost`, `.test`, ...) falls outside `com`, `net` and `org`, apart from the documentation domains example.com,
-  example.net and example.org; so do wildcard-IP DNS services such as nip.io and sslip.io. `//server/share/`,
-  `//192.168.1.5/`, `//127-0-0-1.nip.io/`, `//fs.alt/`, `//cdn2.example.com/`, `//blog.example.co.uk/`,
-  `//example.com\share`, `\/example.com/`, `//user@example.com/` and `\\example.com\share\` stay rejected, in prose,
-  attributes, code spans and fences alike. The rule reads spelling only; where a public name resolves is up to its
-  owner. Diagnostics redaction does not use the exemption.
+  A review can quote a protocol-relative URL only where the text marks it as one (#781), since in prose a network
+  path and a scheme-less URL are spelled the same. Both the context and the host are allowlists. The context is an
+  `href` or `src` attribute value (`href="`, `href='`, `src="` or `src='`, with no space and not part of a longer name
+  such as `data-href` or `srcset`; a backslash before the quote is allowed, as in an escaped string) or a Markdown link
+  or image destination (directly after `](`). The URL is `//` or `/\` (which browsers read as `//`), a host of two or
+  more labels made only of letters joined by single hyphens, whose last label is `com`, `net` or `org`, an optional
+  `:port`, then `/`. So `<a href="//example.com/posts/1">`, `` `<img src="//cdn.example.com/a.png">` ``,
+  `[feed](//blog.example.net/feed.xml)` and `![logo](//cdn.example.org/a.png)` publish. A bare `//example.com/x` in
+  prose, a code span or a fence is refused, and so are `title="//..."`, unquoted or space-padded attributes,
+  `] (//...)`, `]( //...)`, `](<//...>)` and reference definitions. No digit can appear in the host, so no IPv4
+  address in any spelling (dotted, dashed or hex) and no compressed IPv6; a label of hyphen-joined hex groups is not
+  exempt either. Every IANA special-use name (`.alt`, `.arpa`, `.onion`, `.local`, `.localhost`, `.test`, ...) falls
+  outside `com`, `net` and `org`, apart from the documentation domains example.com, example.net and example.org; so do
+  wildcard-IP DNS services such as nip.io and sslip.io. Even in a link, `//server/share/`, `//192.168.1.5/`,
+  `//127-0-0-1.nip.io/`, `//fs.alt/`, `//cdn2.example.com/`, `//blog.example.co.uk/`, `//example.com\share`,
+  `\/example.com/`, `//user@example.com/` and `\\example.com\share\` stay rejected. The rule reads spelling only;
+  where a public name resolves is up to its owner. Diagnostics redaction does not use the exemption.
 - Any separator followed by a profile directory name (`Users`, `home`, `root` or `Documents and Settings`, including
   Windows trailing-period, trailing-space and short-name spellings) is rejected unless it is part of a known
   repository path. `docs/users.md` and `root-ca.md` are not profile directories; an unknown `examples/home/x.py` is
