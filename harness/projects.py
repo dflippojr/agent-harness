@@ -18,8 +18,9 @@ helpers, credential helpers, sshCommand, remote helpers, or include-file config.
 
 The owner's source repository and global/system Git config are trusted: merge/push into a local source, and
 URL-remote credentials, still use them. Isolation is fail-closed for workspace repos: gitdir/commondir
-pointers that escape the workspace are refused rather than followed, and so are links in the ref state the host
-copies in and out (HEAD, refs, logs and the other state files).
+pointers that escape the workspace are refused rather than followed (checked as strings, never resolved), and so
+are links in the ref state the host copies in and out (HEAD, refs, logs and the other state files). Platforms that
+can't hold the copied directories against replacement (descriptor-relative calls, or Windows handles) refuse.
 """
 
 from __future__ import annotations
@@ -29,11 +30,12 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -76,7 +78,7 @@ def _temp_dir() -> str | None:
 
 def _git_state_lock(metadata: Path):
     """Share a lock for aliases of a metadata directory, without retaining idle workspaces."""
-    key = os.path.normcase(str(_resolve(metadata)))
+    key = os.path.normcase(os.path.normpath(str(metadata)))  # lexical: `metadata` is canonical and link-free
     with _GIT_STATE_LOCKS_GUARD:
         lock = _GIT_STATE_LOCKS.get(key)
         if lock is None:
@@ -108,8 +110,9 @@ def _resolve(path: Path) -> Path:
     return Path(text[4:]) if text.startswith("\\\\?\\") else Path(text)
 
 
-def _contained(path: Path, root: Path) -> bool:
-    path_s, root_s = os.path.normcase(str(_resolve(path))), os.path.normcase(str(_resolve(root)))
+def _lexically_within(path: Path, root: Path) -> bool:
+    """Whether normalised `path` lies in `root`, by string comparison only (no filesystem access)."""
+    path_s, root_s = os.path.normcase(os.path.normpath(str(path))), os.path.normcase(os.path.normpath(str(root)))
     try:
         return os.path.commonpath([path_s, root_s]) == root_s
     except ValueError:
@@ -151,39 +154,67 @@ def _isolate_env() -> dict:
     return env
 
 
-def _read_gitdir_pointer(text: str, base: Path) -> Path:
+def _pointer_target(text: str, base: Path, work_tree: Path, what: str) -> Path:
+    """The workspace directory a `gitdir:` or `commondir` pointer names, without resolving it.
+
+    The pointer is workspace content. It is checked as a string first, so that a target outside the workspace (an
+    absolute or `..` path, a UNC, device or drive-relative path, NUL) is refused before any filesystem call. Then each
+    component below `work_tree` is checked with lstat and refused if it is a link or junction; the result therefore
+    needs no resolving.
+    """
+    refused = GitError(f"refusing git {what} outside the workspace")
+    if not text or "\0" in text or text.startswith(("\\\\", "//")):
+        raise refused
+    pure = PureWindowsPath(text) if os.name == "nt" else PurePosixPath(text)
+    if pure.drive and not pure.root:  # drive-relative (C:dir) or a bare UNC drive
+        raise refused
+    candidate = Path(os.path.normpath(str(pure if pure.is_absolute() else base / pure)))
+    if not _lexically_within(candidate, work_tree):
+        raise refused
+    parts = candidate.relative_to(work_tree).parts
+    # Windows reads `name.` and `name ` as `name` (so `.. ` as `..`) and `a:b` as a stream: refuse such components.
+    if any(part != part.rstrip(". ") or ":" in part for part in parts):
+        raise refused
+    current = work_tree
+    for part in parts:
+        current = current / part
+        if _is_link(current):
+            raise GitError(f"refusing git {what} through a link")
+    return current
+
+
+def _read_gitdir_pointer(text: str, base: Path, work_tree: Path) -> Path:
     for raw in text.splitlines():
         line = raw.strip()
         if line.lower().startswith("gitdir:"):
-            target = line.split(":", 1)[1].strip().strip('"')
-            path = Path(target)
-            return _resolve(path if path.is_absolute() else base / path)
+            return _pointer_target(line.split(":", 1)[1].strip().strip('"'), base, work_tree, "directory")
     raise GitError("invalid gitdir pointer")
 
 
 def _resolve_workspace_git(repo: Path) -> tuple[Path, Path, Path]:
     """Return (git dir for index, metadata dir for objects/refs/config, work tree).
 
-    Follows `.git` files and `commondir` only when the target stays inside `repo`. Linked worktrees store the
-    index in the worktree git dir and objects/refs/config in the common dir.
+    Follows `.git` files and `commondir` only when the target stays inside `repo`, through no link. Linked worktrees
+    store the index in the worktree git dir and objects/refs/config in the common dir. Pointer contents are never
+    resolved (see `_pointer_target`).
     """
-    work_tree = _resolve(repo)
-    dot_git = repo / ".git"
+    work_tree = _resolve(repo)  # the daemon's own workspace path, not workspace content
+    dot_git = work_tree / ".git"
+    if _is_link(dot_git):
+        raise GitError("refusing git directory outside the workspace")
     if not dot_git.exists():
         raise GitError(f"{repo} is not a git repository")
     if dot_git.is_file():
-        git_dir = _read_gitdir_pointer(dot_git.read_text(encoding="utf-8", errors="replace"), repo)
+        git_dir = _read_gitdir_pointer(dot_git.read_text(encoding="utf-8", errors="replace"), work_tree, work_tree)
     else:
-        git_dir = _resolve(dot_git)
-    if not _contained(git_dir, work_tree):
-        raise GitError("refusing git directory outside the workspace")
+        git_dir = dot_git
     metadata = git_dir
     common = git_dir / "commondir"
+    if _is_link(common):
+        raise GitError("refusing git commondir outside the workspace")
     if common.is_file():
         target = common.read_text(encoding="utf-8", errors="replace").strip()
-        metadata = _resolve(Path(target) if Path(target).is_absolute() else git_dir / target)
-        if not _contained(metadata, work_tree):
-            raise GitError("refusing git commondir outside the workspace")
+        metadata = _pointer_target(target, git_dir, work_tree, "commondir")
     return git_dir, metadata, work_tree
 
 
@@ -191,71 +222,110 @@ _isjunction = getattr(os.path, "isjunction", lambda _path: False)  # Python 3.12
 _O_BINARY = getattr(os, "O_BINARY", 0)
 # Read state files without following a final-component link and without blocking on a FIFO (POSIX only).
 _NOFOLLOW_READ = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | _O_BINARY
-# POSIX: walk and copy git state through directory descriptors opened without following links, so a path component
-# the workspace swaps for a link mid-copy cannot redirect a read or a write. Windows has no *at calls; there the
-# directory chain is checked for links right before each operation instead (a narrower window, not a closed one).
+# How the state copy keeps a path component the workspace swaps for a link mid-copy from redirecting a read or write:
+# - POSIX: directory descriptors opened without following links, and *at calls relative to them.
+# - Windows (no *at calls): every directory on the path is opened as itself (never through a reparse point) and held
+#   open without FILE_SHARE_DELETE for the whole copy, so it can be neither renamed nor deleted, and the checked path
+#   through it cannot change. Files are opened as themselves and verified regular.
+# Elsewhere the copy refuses to run (fail closed).
 _FD_OPS = (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd
            and os.stat in os.supports_dir_fd and os.mkdir in os.supports_dir_fd and os.rename in os.supports_dir_fd
            and os.unlink in os.supports_dir_fd and os.rmdir in os.supports_dir_fd and os.scandir in os.supports_fd
            and os.chmod in os.supports_fd and os.utime in os.supports_fd)
+_WIN_HANDLES = sys.platform == "win32"
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _MISSING, _FILE, _DIR, _OTHER = "missing", "file", "dir", "other"
+# Win32 constants (winnt.h, fileapi.h) that _winapi does not export.
+_SHARE_READ_WRITE, _SHARE_DELETE = 0x1 | 0x2, 0x4
+_GENERIC_READ, _FILE_READ_ATTRIBUTES, _OPEN_EXISTING = 0x80000000, 0x80, 3
+_FLAG_BACKUP_SEMANTICS, _FLAG_OPEN_REPARSE_POINT = 0x02000000, 0x00200000
+_ATTRIBUTE_DIRECTORY, _ATTRIBUTE_REPARSE_POINT = 0x10, 0x400
+
+
+if sys.platform == "win32":
+    import _winapi
+    import msvcrt
+
+    def _win_open(path: Path, directory: bool) -> int:
+        """A descriptor on `path` itself, never on what a reparse point (symlink, junction) names (Windows only).
+
+        A directory is opened without FILE_SHARE_DELETE: while the descriptor is open, the directory cannot be renamed or
+        deleted. A file is opened for reading. Either is refused unless it is a plain directory or regular file.
+        """
+        access = _FILE_READ_ATTRIBUTES if directory else _GENERIC_READ
+        share = _SHARE_READ_WRITE if directory else _SHARE_READ_WRITE | _SHARE_DELETE
+        flags = _FLAG_OPEN_REPARSE_POINT | (_FLAG_BACKUP_SEMANTICS if directory else 0)
+        handle = _winapi.CreateFile(str(path), access, share, _winapi.NULL, _OPEN_EXISTING, flags, _winapi.NULL)
+        try:
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | _O_BINARY)
+        except BaseException:
+            _winapi.CloseHandle(handle)
+            raise
+        attributes = os.fstat(fd).st_file_attributes
+        if attributes & _ATTRIBUTE_REPARSE_POINT or bool(attributes & _ATTRIBUTE_DIRECTORY) != directory:
+            os.close(fd)
+            raise GitError(f"refusing symlinked or special git state {path.name}")
+        return fd
+else:
+    def _win_open(path: Path, directory: bool) -> int:
+        raise GitError("Windows handles are unavailable on this platform")
 
 
 class _StateDir:
-    """A directory of git state, addressed by entry name, that never follows a link (see `_FD_OPS`).
+    """A directory of git state, addressed by entry name, that never follows a link (see `_FD_OPS`, `_WIN_HANDLES`).
 
-    Every call names an entry through `_at`: the bare name with `fd` as `dir_fd` on POSIX, or the full path (with
-    `dir_fd=None`) after re-checking the directory chain elsewhere.
+    POSIX: `fd` is the directory's descriptor and every call passes the bare name with `dir_fd=fd`. Windows: `pins`
+    hold this directory (and, for the opened root, each directory above it) open, and calls take the full path.
     """
 
-    def __init__(self, path: Path, fd: int | None = None):
-        self.path, self.fd = path, fd
+    def __init__(self, path: Path, fd: int | None = None, pins: list[int] | None = None):
+        self.path, self.fd, self.pins = path, fd, pins or []
 
     @classmethod
     def open(cls, path: Path) -> _StateDir:
         """Open an existing canonical directory, refusing a link anywhere on its path (one swapped in after the path
-        was resolved, say). On POSIX every component is opened without following links."""
-        if not _FD_OPS:
-            state = cls(path)
-            state._check_chain()
-            if not path.is_dir():
-                raise GitError(f"refusing git state directory {path.name}: not a directory")
-            return state
-        fd = os.open(path.anchor, _DIR_FLAGS)
-        try:
-            for part in path.parts[1:]:
-                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+        was resolved, say)."""
+        if _FD_OPS:
+            fd = os.open(path.anchor, _DIR_FLAGS)
+            try:
+                for part in path.parts[1:]:
+                    child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                    os.close(fd)
+                    fd = child
+            except BaseException:
                 os.close(fd)
-                fd = child
+                raise
+            return cls(path, fd)
+        if not _WIN_HANDLES:
+            raise GitError("host git isolation needs descriptor-relative or handle-held file access, "
+                           "which this platform lacks")
+        state = cls(path)
+        try:
+            current = Path(path.anchor)
+            state.pins.append(_win_open(current, True))
+            for part in path.parts[1:]:
+                current = current / part
+                state.pins.append(_win_open(current, True))
         except BaseException:
-            os.close(fd)
+            state.close()
             raise
-        return cls(path, fd)
+        return state
 
     def __enter__(self) -> _StateDir:
         return self
 
     def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def close(self) -> None:
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
-
-    def _check_chain(self) -> None:
-        """No component of the canonical path, up to the filesystem root, may have become a link."""
-        current = self.path
-        while True:
-            if _is_link(current):
-                raise GitError(f"refusing symlinked git state {current.name}")
-            if current == current.parent:
-                return
-            current = current.parent
+        while self.pins:
+            os.close(self.pins.pop())
 
     def _at(self, name: str) -> str:
-        if self.fd is not None:
-            return name
-        self._check_chain()
-        return str(self.path / name)
+        return name if self.fd is not None else str(self.path / name)
 
     def kind(self, name: str) -> str:
         where = self._at(name)
@@ -268,15 +338,13 @@ class _StateDir:
         return _FILE if stat.S_ISREG(mode) else _DIR if stat.S_ISDIR(mode) else _OTHER
 
     def names(self) -> list[str]:
-        with os.scandir(self.fd if self.fd is not None else self._at("")) as entries:
+        with os.scandir(self.fd if self.fd is not None else self.path) as entries:
             return [entry.name for entry in entries]
 
     def subdir(self, name: str) -> _StateDir:
         if self.fd is not None:
             return _StateDir(self.path / name, os.open(name, _DIR_FLAGS, dir_fd=self.fd))
-        if self.kind(name) != _DIR:
-            raise GitError(f"refusing git state {name}: not a plain directory")
-        return _StateDir(self.path / name)
+        return _StateDir(self.path / name, pins=[_win_open(self.path / name, True)])
 
     def open_or_create_subdir(self, name: str) -> _StateDir:
         """The subdirectory `name`, created if missing; anything else in its place is refused, not replaced."""
@@ -313,9 +381,9 @@ class _StateDir:
 
     def open_read(self, name: str) -> int:
         """A descriptor on regular file `name`, never through a link."""
-        if self.fd is None and self.kind(name) != _FILE:
-            raise GitError(f"refusing git state {name}: not a regular file")
-        fd = os.open(self._at(name), _NOFOLLOW_READ, dir_fd=self.fd)
+        if self.fd is None:
+            return _win_open(self.path / name, False)
+        fd = os.open(name, _NOFOLLOW_READ, dir_fd=self.fd)
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
             raise GitError(f"refusing git state {name}: not a regular file")
@@ -335,10 +403,9 @@ class _StateDir:
                     view = memoryview(chunk)
                     while view:  # os.write may write less than asked
                         view = view[os.write(out, view):]
-                # Mode and times through the descriptor where the OS allows it, else by the just-checked path.
-                target = out if self.fd is not None else self._at(temp)
-                os.chmod(target, stat.S_IMODE(st.st_mode))
-                os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+                if self.fd is not None:  # Windows keeps the new file's defaults: no mode bits, times unused by git
+                    os.chmod(out, stat.S_IMODE(st.st_mode))
+                    os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
             finally:
                 os.close(out)
             os.replace(self._at(temp), self._at(name), src_dir_fd=self.fd, dst_dir_fd=self.fd)
