@@ -93,3 +93,41 @@ def test_accounting_failure_preserves_response(tmp_path, monkeypatch):
     with TestClient(create_app(m)) as client:
         key = client.post("/keys", json={"name": "fake"}).json()["key"]
         assert client.post("/v1/chat/completions", headers={"Authorization": "Bearer " + key}, json={}).status_code == 200
+
+
+DEEP = 100_000  # far past the interpreter's recursion limit, still well under MAX_BODY
+HOSTILE_BODIES = {  # #930: each is a body json.loads rejects or that isn't an object; none may become a 5xx
+    "nested arrays": b"[" * DEEP + b"]" * DEEP,
+    "nested objects": b'{"a":' * DEEP + b"1" + b"}" * DEEP,
+    "nesting inside an object": b'{"messages":' + b"[" * DEEP + b"]" * DEEP + b"}",
+    "unterminated nesting": b"[" * DEEP,
+    "not JSON": b"invalid",
+    "invalid UTF-8": b'{"model": "\xff\xfe"}',
+    "huge integer": b'{"max_tokens": ' + b"9" * 5000 + b"}",
+    "array": b"[1]",
+    "string": b'"text"',
+    "null": b"null",
+}
+
+
+@pytest.mark.parametrize("path", sorted(service.ROUTES))
+def test_hostile_bodies_get_the_flavor_400(tmp_path, path):
+    """Class-level check (#930): every inference route, OpenAI and Anthropic alike, answers each hostile body with its
+    own flavor's 400, never a 500. It walks service.ROUTES, so a new route is covered when it's added."""
+    m = endpoint_manager(tmp_path)
+    flavor = service.ROUTES[path]
+    with TestClient(create_app(m), raise_server_exceptions=False) as client:
+        key = client.post("/keys", json={"name": "fake"}).json()["key"]
+        auth = {"x-api-key": key} if flavor == "anthropic" else {"Authorization": "Bearer " + key}
+        wrong = {}
+        for name, content in HOSTILE_BODIES.items():
+            response = client.post(path, headers=auth, content=content)
+            body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+            shaped = (body.get("type") == "error" and body["error"]["type"] == "invalid_request_error"
+                      if flavor == "anthropic" else
+                      body.get("error", {}).get("type") == "invalid_request_error" and body["error"]["code"] == 400)
+            if response.status_code != 400 or not shaped:
+                wrong[name] = (response.status_code, response.text[:120])
+        assert wrong == {}
+        assert m.db.conn.execute("SELECT COUNT(*) FROM endpoint_requests").fetchone()[0] == 0
+    m.db.close()
