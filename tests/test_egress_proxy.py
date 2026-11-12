@@ -179,6 +179,9 @@ def test_parse_plain_http_strips_hop_headers():
     assert ep.parse_request(b"GET http://pkg.example HTTP/1.1\r\n\r\n").head.startswith(b"GET / HTTP/1.1\r\n")
 
 
+UNCLOSED_BRACKET = [b"CONNECT [::1 HTTP/1.1\r\n\r\n", b"GET http://[::1/ HTTP/1.1\r\n\r\n"]   # issue #931
+
+
 @pytest.mark.parametrize("head", [
     b"GET / HTTP/1.1\r\nHost: pkg.example\r\n\r\n",            # origin form: not a proxy request
     b"GET https://pkg.example/ HTTP/1.1\r\n\r\n",               # https goes through CONNECT
@@ -189,10 +192,44 @@ def test_parse_plain_http_strips_hop_headers():
     b"CONNECT :443 HTTP/1.1\r\n\r\n",
     b"CONNECT pkg.example:443\r\n\r\n",
     b"CONNECT pkg.example:443 SPDY/3\r\n\r\n",
+    *UNCLOSED_BRACKET,
 ])
 def test_parse_refuses_what_is_not_a_proxy_request(head):
     with pytest.raises(ep.BadRequest):
         ep.parse_request(head)
+
+
+# Issue #931: every malformed request head is a BadRequest (a 400 and a log line), never another exception that
+# escapes the handler. The seeds are valid targets; each mutation deletes, replaces or inserts one character that
+# means something to a URL parser, so a parser error the proxy does not translate shows up here, not in production.
+MUTATION_SEEDS = [("CONNECT", "pkg.example:443"), ("CONNECT", "[2001:db8::1]:443"), ("CONNECT", "user@pkg.example:443"),
+                  ("GET", "http://pkg.example/simple/?a=1"), ("GET", "http://[2001:db8::1]:8080/p#f"),
+                  ("GET", "http://user:pw@pkg.example:80/")]
+URL_CHARS = "[]:@/?#%. \t\\\x00\xaa\xff"
+
+
+def _mutations(target: str):
+    for i in range(len(target) + 1):
+        if i < len(target):
+            yield target[:i] + target[i + 1:]
+        for char in URL_CHARS:
+            yield target[:i] + char + target[i:]
+            if i < len(target):
+                yield target[:i] + char + target[i + 1:]
+
+
+@pytest.mark.parametrize("method, seed", MUTATION_SEEDS, ids=[f"{m} {s}" for m, s in MUTATION_SEEDS])
+def test_a_mutated_target_parses_or_is_a_bad_request(method, seed):
+    escaped = []
+    for target in _mutations(seed):
+        head = f"{method} {target} HTTP/1.1\r\n\r\n".encode("latin-1")
+        try:
+            ep.parse_request(head)
+        except ep.BadRequest:
+            pass
+        except Exception as e:  # noqa: BLE001 - any other exception is the bug this test looks for
+            escaped.append(f"{head!r}: {type(e).__name__}: {e}")
+    assert escaped == []
 
 
 # the proxy, in-process on loopback
@@ -354,6 +391,21 @@ def test_a_bad_request_answers_400():
     response, logs = run(proxied(net, b"GET / HTTP/1.1\r\nHost: pkg.example\r\n\r\n"))
     assert response.startswith(b"HTTP/1.1 400 Bad Request")
     assert logs[0].endswith(" - - deny (only CONNECT and absolute http:// URLs are proxied)")
+
+
+@pytest.mark.parametrize("head", UNCLOSED_BRACKET, ids=["CONNECT", "GET"])
+def test_an_unclosed_ipv6_bracket_answers_400_and_logs_without_an_unhandled_exception(head):
+    async def scenario():
+        unhandled: list[dict] = []
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: unhandled.append(context))
+        response, logs = await proxied(Net({}), head)
+        for _ in range(10):         # let the handler task finish and report, if it failed
+            await asyncio.sleep(0.01)
+        return response, logs, unhandled
+    response, logs, unhandled = run(scenario())
+    assert response.startswith(b"HTTP/1.1 400 Bad Request")
+    assert len(logs) == 1 and logs[0].endswith(" - - deny (invalid host)")
+    assert unhandled == []
 
 
 def test_a_client_that_hangs_up_early_is_dropped_quietly():
