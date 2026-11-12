@@ -84,6 +84,22 @@ Describe 'Review publication safety' {
         @{ Payload = 'file:///tmp/config.py' }
         @{ Payload = '[profile](file:///home/reviewer/.codex/auth.json)' }
         @{ Payload = 'file://server/share/Users/reviewer/.codex/auth.json' }
+        # #781: a protocol-relative URL is exempt only as //dotted.host.name/ in forward slashes. Every
+        # other network root stays rejected, in prose, attributes, code spans and fences alike.
+        @{ Payload = '`//server/share/folder/config.py`' }
+        @{ Payload = "``````text`n//server/share/folder/config.py`n``````" }
+        @{ Payload = 'The feed uses <img src="//server/share/a.png">.' }
+        @{ Payload = '//localhost/share/config.py' }
+        @{ Payload = '//192.168.1.5/share/config.py' }
+        @{ Payload = '//10.0.0.5:445/share/config.py' }
+        @{ Payload = '//example.com\share\config.py' }
+        @{ Payload = '\\example.com\share\config.py' }
+        @{ Payload = '//example.com./share/config.py' }
+        @{ Payload = '//user@example.com/share/config.py' }
+        @{ Payload = '//-bad.example.com/share/config.py' }
+        @{ Payload = 'file://example.com/share/config.py' }
+        @{ Payload = '//example.com/Users/reviewer/.codex/auth.json' }
+        @{ Payload = '&#47;&#47;server/share/config.py' }
         # Any separator followed by a profile directory name outside a known repository path.
         @{ Payload = '/home/reviewer/.codex/auth.json' }
         @{ Payload = '/Users/reviewer/.claude/credentials.json' }
@@ -294,6 +310,12 @@ Describe 'Review publication safety' {
         @{ Payload = '`$env:USERPROFILE` and `~/.claude/settings.json` are inherited.' }
         @{ Payload = 'Call 127.0.0.1:8100/gpu or localhost:8100/gpu.' }
         @{ Payload = 'See https://github.com/dflippojr/agent-harness/pull/549 and // a code comment.' }
+        # #781: protocol-relative URLs with a dotted host name publish (personal-website PR #271 quotes its RSS feed's).
+        @{ Payload = 'The feed rewrites protocol-relative URLs such as //example.com/images/a.png to https://example.com/images/a.png.' }
+        @{ Payload = 'In `feed.xml`, `<img src="//cdn.example.com/a.png">` becomes `<img src="https://cdn.example.com/a.png">`.' }
+        @{ Payload = 'The item links to <a href="//example.com/posts/1">the post</a>.' }
+        @{ Payload = 'See [the feed](//blog.example.co.uk/feed.xml) and //example.com:8080/feed.xml.' }
+        @{ Payload = "The template:`n`n``````html`n<link rel=`"alternate`" href=`"//www.example.com/rss.xml`">`n```````n`nDone." }
         @{ Payload = '**Structure** `harness/__init__.py`: keep the `<n>` placeholder.' }
         @{ Payload = 'Send a Bearer token in the header; the `Bearer` scheme is case-insensitive.' }
         @{ Payload = 'The header is built as `f"Bearer {token}"`.' }
