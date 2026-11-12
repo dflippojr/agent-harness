@@ -154,13 +154,13 @@ def _isolate_env() -> dict:
     return env
 
 
-def _pointer_target(text: str, base: Path, work_tree: Path, what: str) -> Path:
-    """The workspace directory a `gitdir:` or `commondir` pointer names, without resolving it.
+def _pointer_parts(text: str, base: tuple[str, ...], work_tree: Path, what: str) -> tuple[str, ...]:
+    """The path, as components below `work_tree`, that a `gitdir:` or `commondir` pointer names; `base` is the
+    directory holding the pointer, also as components.
 
-    The pointer is workspace content. It is checked as a string first, so that a target outside the workspace (an
-    absolute or `..` path, a UNC, device or drive-relative path, NUL) is refused before any filesystem call. Then each
-    component below `work_tree` is checked with lstat and refused if it is a link or junction; the result therefore
-    needs no resolving.
+    The pointer is workspace content, so it is checked as a string, before any filesystem call: a target outside the
+    workspace (an absolute or `..` path, a UNC, device or drive-relative path, NUL) is refused. The caller then walks
+    the components through held directory handles that refuse links (`_open_parts`); nothing is ever resolved.
     """
     refused = GitError(f"refusing git {what} outside the workspace")
     if not text or "\0" in text or text.startswith(("\\\\", "//")):
@@ -168,26 +168,55 @@ def _pointer_target(text: str, base: Path, work_tree: Path, what: str) -> Path:
     pure = PureWindowsPath(text) if os.name == "nt" else PurePosixPath(text)
     if pure.drive and not pure.root:  # drive-relative (C:dir) or a bare UNC drive
         raise refused
-    candidate = Path(os.path.normpath(str(pure if pure.is_absolute() else base / pure)))
+    candidate = Path(os.path.normpath(str(pure if pure.is_absolute() else work_tree.joinpath(*base) / pure)))
     if not _lexically_within(candidate, work_tree):
         raise refused
     parts = candidate.relative_to(work_tree).parts
     # Windows reads `name.` and `name ` as `name` (so `.. ` as `..`) and `a:b` as a stream: refuse such components.
     if any(part != part.rstrip(". ") or ":" in part for part in parts):
         raise refused
-    current = work_tree
-    for part in parts:
-        current = current / part
-        if _is_link(current):
-            raise GitError(f"refusing git {what} through a link")
-    return current
+    return parts
 
 
-def _read_gitdir_pointer(text: str, base: Path, work_tree: Path) -> Path:
+@contextmanager
+def _open_parts(root: _StateDir, parts: tuple[str, ...], what: str):
+    """Yield the directory `parts` below `root`, opened one component at a time through the held parent, so no
+    component can be a link (or become one) on the way."""
+    opened: list[_StateDir] = []
+    current = root
+    try:
+        for part in parts:
+            kind = current.kind(part)
+            if kind == _MISSING:
+                raise GitError(f"git {what} {'/'.join(parts)} does not exist")
+            if kind != _DIR:
+                raise GitError(f"refusing git {what} through a link")
+            try:
+                current = current.subdir(part)
+            except (OSError, GitError) as e:  # a link swapped in after the check
+                raise GitError(f"refusing git {what} through a link") from e
+            opened.append(current)
+        yield current
+    finally:
+        for state in reversed(opened):
+            state.close()
+
+
+def _read_pointer(state: _StateDir, name: str) -> str:
+    """The text of pointer file `name`, opened as a regular file without following links."""
+    try:
+        fd = state.open_read(name)
+    except (OSError, GitError) as e:
+        raise GitError(f"refusing git pointer {name}: not a regular file") from e
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read(1 << 16).decode("utf-8", errors="replace")
+
+
+def _gitdir_line(text: str) -> str:
     for raw in text.splitlines():
         line = raw.strip()
         if line.lower().startswith("gitdir:"):
-            return _pointer_target(line.split(":", 1)[1].strip().strip('"'), base, work_tree, "directory")
+            return line.split(":", 1)[1].strip().strip('"')
     raise GitError("invalid gitdir pointer")
 
 
@@ -195,27 +224,37 @@ def _resolve_workspace_git(repo: Path) -> tuple[Path, Path, Path]:
     """Return (git dir for index, metadata dir for objects/refs/config, work tree).
 
     Follows `.git` files and `commondir` only when the target stays inside `repo`, through no link. Linked worktrees
-    store the index in the worktree git dir and objects/refs/config in the common dir. Pointer contents are never
-    resolved (see `_pointer_target`).
+    store the index in the worktree git dir and objects/refs/config in the common dir. Pointer files are read, and
+    their targets walked, through held directory handles that never follow a link; pointer contents are never
+    resolved (see `_pointer_parts`).
     """
     work_tree = _resolve(repo)  # the daemon's own workspace path, not workspace content
-    dot_git = work_tree / ".git"
-    if _is_link(dot_git):
-        raise GitError("refusing git directory outside the workspace")
-    if not dot_git.exists():
-        raise GitError(f"{repo} is not a git repository")
-    if dot_git.is_file():
-        git_dir = _read_gitdir_pointer(dot_git.read_text(encoding="utf-8", errors="replace"), work_tree, work_tree)
-    else:
-        git_dir = dot_git
-    metadata = git_dir
-    common = git_dir / "commondir"
-    if _is_link(common):
-        raise GitError("refusing git commondir outside the workspace")
-    if common.is_file():
-        target = common.read_text(encoding="utf-8", errors="replace").strip()
-        metadata = _pointer_target(target, git_dir, work_tree, "commondir")
-    return git_dir, metadata, work_tree
+    try:
+        root = _StateDir.open(work_tree)
+    except OSError as e:
+        raise GitError(f"{repo} is not a git repository") from e
+    with root:
+        kind = root.kind(".git")
+        if kind == _MISSING:
+            raise GitError(f"{repo} is not a git repository")
+        if kind == _FILE:
+            git_parts = _pointer_parts(_gitdir_line(_read_pointer(root, ".git")), (), work_tree, "directory")
+        elif kind == _DIR:
+            git_parts = (".git",)
+        else:
+            raise GitError("refusing git directory outside the workspace")
+        meta_parts = git_parts
+        with _open_parts(root, git_parts, "directory") as git_dir:
+            common = git_dir.kind("commondir")
+            if common == _FILE:
+                target = _read_pointer(git_dir, "commondir").strip()
+                meta_parts = _pointer_parts(target, git_parts, work_tree, "commondir")
+            elif common != _MISSING:
+                raise GitError("refusing git commondir outside the workspace")
+        if meta_parts != git_parts:
+            with _open_parts(root, meta_parts, "commondir"):
+                pass
+    return work_tree.joinpath(*git_parts), work_tree.joinpath(*meta_parts), work_tree
 
 
 _isjunction = getattr(os.path, "isjunction", lambda _path: False)  # Python 3.12+; Windows junctions are links too
@@ -341,7 +380,12 @@ class _StateDir:
 
     def names(self) -> list[str]:
         with os.scandir(self.fd if self.fd is not None else self.path) as entries:
-            return [entry.name for entry in entries]
+            names = [entry.name for entry in entries]
+        if _WINDOWS_NAMES:
+            for name in names:
+                if _ambiguous_windows_name(name):
+                    raise GitError(f"refusing git state entry {name!r}: an ambiguous Windows name")
+        return names
 
     def subdir(self, name: str) -> _StateDir:
         if self.fd is not None:
@@ -414,6 +458,19 @@ class _StateDir:
         except BaseException:
             self.remove(temp)
             raise
+
+
+# Windows rewrites some names on the way from a full path to a file (trailing dots and spaces dropped, device names
+# such as CON or COM1 mapped to devices), so a name read from a directory listing may not reach the same entry when
+# used again. Git never writes such names into its ref state; refuse them there.
+_WINDOWS_NAMES = sys.platform == "win32"
+_WINDOWS_DEVICES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {
+    f"{port}{digit}" for port in ("COM", "LPT") for digit in "123456789\u00b9\u00b2\u00b3"}
+
+
+def _ambiguous_windows_name(name: str) -> bool:
+    return (name != name.rstrip(". ") or any(c in name for c in '<>:"/\\|?*') or any(ord(c) < 32 for c in name)
+            or name.split(".")[0].rstrip(" ").upper() in _WINDOWS_DEVICES)
 
 
 def _temp_name() -> str:

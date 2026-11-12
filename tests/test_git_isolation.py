@@ -863,3 +863,97 @@ def test_a_relative_gitdir_pointer_inside_the_workspace_still_works(tmp_path):
     git_dir, metadata, _ = _projects._resolve_workspace_git(workspace)
     assert git_dir == metadata == workspace.resolve() / ".gitdata"
     assert git(workspace, "status", "--porcelain").code == 0
+
+
+def _at_filesystem_call(monkeypatch, name: str, action, opens_only: bool = False) -> None:
+    """Run `action` once, immediately before the first filesystem call that names `name`: a stat or an open (os.open,
+    io.open, or the Windows handle open), or only an open. This is the boundary between a check and the use."""
+    import io
+
+    done = []
+
+    def wrap(real):
+        def call(path, *args, **kwargs):
+            if not done and isinstance(path, (str, bytes, os.PathLike)) and os.path.basename(os.fsdecode(path)) == name:
+                done.append(action())
+            return real(path, *args, **kwargs)
+        return call
+
+    calls = [(os, "open"), (io, "open")] + ([] if opens_only else [(os, "stat"), (os, "lstat")])
+    for module, attr in calls:
+        monkeypatch.setattr(module, attr, wrap(getattr(module, attr)))
+    if hasattr(_projects, "_win_open"):
+        monkeypatch.setattr(_projects, "_win_open", wrap(_projects._win_open))
+
+
+def _swap_file_for_link(path: Path, target: Path) -> None:
+    path.unlink()
+    path.symlink_to(target)
+
+
+@pytest.mark.parametrize("pointer", [".git", "commondir"])
+def test_a_pointer_file_swapped_for_a_link_at_its_read_is_refused(tmp_path, monkeypatch, pointer):
+    """The pointer file is replaced by a link to an outside file between its check and its read: the read refuses
+    the link instead of returning the outside file's text (#966)."""
+    workspace = make_repo(tmp_path / "ws")
+    shutil.move(str(workspace / ".git"), str(workspace / ".gitdata"))
+    (workspace / ".git").write_text("gitdir: .gitdata\n", encoding="utf-8")
+    if pointer == "commondir":
+        (workspace / ".gitdata" / "commondir").write_text(".\n", encoding="utf-8")
+    outside = tmp_path / "outside-pointer"
+    (outside / "gitdata").mkdir(parents=True)
+    _require_symlinks(tmp_path, outside)
+    # The outside text names a real in-workspace directory, so following the link would succeed quietly.
+    outside_file = outside / "pointer"
+    outside_file.write_text("gitdir: .gitdata\n" if pointer == ".git" else "../.gitdata\n", encoding="utf-8")
+    path = workspace / pointer if pointer == ".git" else workspace / ".gitdata" / pointer
+    reads = []
+    _at_filesystem_call(monkeypatch, pointer, lambda: (_swap_file_for_link(path, outside_file), reads.append(1)),
+                        opens_only=True)
+
+    with pytest.raises(GitError, match="not a regular file"):
+        _projects._resolve_workspace_git(workspace)
+    assert reads == [1]
+
+
+def test_a_pointer_target_ancestor_swapped_during_the_walk_is_not_followed(tmp_path, monkeypatch):
+    """A directory on the pointer's target path is replaced by a link to an outside tree after the walk passed it:
+    later steps keep using the held directory, so nothing outside is read (#966)."""
+    workspace = make_repo(tmp_path / "ws")
+    (workspace / "sub").mkdir()
+    shutil.move(str(workspace / ".git"), str(workspace / "sub" / "gitdata"))
+    (workspace / ".git").write_text("gitdir: sub/gitdata\n", encoding="utf-8")
+    outside = tmp_path / "outside-tree"
+    (outside / "gitdata").mkdir(parents=True)
+    # Reading this outside commondir would raise: it points out of the workspace.
+    (outside / "gitdata" / "commondir").write_text("../../../elsewhere\n", encoding="utf-8")
+    _require_symlinks(tmp_path, outside)
+    swapped = []
+    _at_filesystem_call(monkeypatch, "commondir",
+                        lambda: swapped.append(_swap_for_link(workspace / "sub", outside)))
+
+    git_dir, metadata, _ = _projects._resolve_workspace_git(workspace)
+
+    assert swapped == [True] if _projects._FD_OPS else swapped == [False]
+    assert git_dir == metadata == workspace.resolve() / "sub" / "gitdata"
+
+
+@pytest.mark.parametrize("name", ["CON", "aux.lock", "com1", "name.", "name "])
+def test_copy_git_state_refuses_ambiguous_windows_entry_names(tmp_path, monkeypatch, name):
+    """A state entry whose name Windows would rewrite when it is used as a path (a device name, a trailing dot or
+    space) is refused before it is touched (#966). On Windows the fixture is a native NTFS name."""
+    monkeypatch.setattr(_projects, "_WINDOWS_NAMES", True)
+    src, dst = _state_dirs(tmp_path)
+    entry = src / "refs" / "heads" / name
+    native = "\\\\?\\" + str(entry) if os.name == "nt" else str(entry)  # \\?\ keeps the name exactly as written
+    with open(native, "wb") as handle:
+        handle.write(b"bbb\n")
+    opened = []
+    real_open = _projects._StateDir.open_read
+    monkeypatch.setattr(_projects._StateDir, "open_read",
+                        lambda self, n: opened.append(n) or real_open(self, n))
+
+    with pytest.raises(GitError, match="ambiguous Windows name"):
+        _copy_git_state(src, dst)
+
+    assert name not in opened
