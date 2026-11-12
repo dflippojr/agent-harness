@@ -83,3 +83,65 @@ def test_scheduler_failures_do_not_block_other_jobs(tmp_path):
         assert m.jobs._task is None
     asyncio.run(lifecycle())
     m.db.close()
+
+
+# #933: an empty list item must not widen a cron field to every value.
+EMPTY_ITEM_CRONS = ["0,30, * * * *", "0 9 1,,15 * *", "0 9 * * mon,"]
+
+
+@pytest.mark.parametrize("cron", EMPTY_ITEM_CRONS)
+def test_cron_rejects_empty_list_item(cron):
+    with pytest.raises(service.CronError):
+        service.Cron(cron)
+
+
+@pytest.mark.parametrize("cron", EMPTY_ITEM_CRONS)
+def test_job_routes_reject_empty_list_item(tmp_path, cron):
+    m = jobs_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        body = {"name": "Fake", "prompt": "fake", "cron": cron}
+        assert client.post("/jobs", json=body).status_code == 400
+        jid = client.post("/jobs", json={**body, "cron": "@daily"}).json()["id"]
+        assert client.put(f"/jobs/{jid}", json=body).status_code == 400
+        assert client.get(f"/jobs/{jid}").json()["cron"] == "@daily"
+        preview = client.get("/jobs/preview", params={"cron": cron})
+        assert preview.status_code == 200 and preview.json()["ok"] is False
+    m.db.close()
+
+
+def test_cron_empty_step_base_stays_wildcard():
+    assert service.Cron("/15 * * * *").minutes == {0, 15, 30, 45}
+
+
+# Class-level check (#933): a list field is exactly the union of its items, and a malformed item never widens it.
+# Every field, every list position: a blank item is rejected, and a list of valid items parses to their union.
+FIELDS = [  # (index, valid items, parsed attribute)
+    (0, ["0", "30", "5-10", "*/20", "45/5"], "minutes"),
+    (1, ["0", "9", "1-3", "*/6", "22/1"], "hours"),
+    (2, ["1", "15", "28-31", "*/10", "3/9"], "days"),
+    (3, ["1", "jan", "mar-may", "*/4", "dec"], "months"),
+    (4, ["0", "mon", "tue-thu", "*/2", "7", "sat"], "weekdays"),
+]
+
+
+def _expr(index: int, field: str) -> str:
+    parts = ["0", "0", "*", "*", "*"]
+    parts[index] = field
+    return " ".join(parts)
+
+
+def _parsed(index: int, field: str, attr: str) -> set[int]:
+    return getattr(service.Cron(_expr(index, field)), attr)
+
+
+@pytest.mark.parametrize("index,items,attr", FIELDS)
+def test_cron_list_is_union_of_items_and_rejects_blank_items(index, items, attr):
+    import itertools
+    for size in (1, 2, 3):
+        for combo in itertools.permutations(items, size):
+            union = set().union(*(_parsed(index, item, attr) for item in combo))
+            assert _parsed(index, ",".join(combo), attr) == union, combo
+            for pos in range(size + 1):
+                bad = ",".join([*combo[:pos], "", *combo[pos:]])
+                with pytest.raises(service.CronError):
+                    service.Cron(_expr(index, bad))
