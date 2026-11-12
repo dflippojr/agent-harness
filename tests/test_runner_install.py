@@ -512,7 +512,7 @@ def test_systemd_accepts_the_clean_exit_restart_in_the_dry_run_unit(tmp_path):
     unit_file.write_text(text, encoding="utf-8")
     verified = subprocess.run([analyze, "verify", str(unit_file)], capture_output=True, text=True, check=False)
     # The runner directory does not exist here, so verify reports the missing runsvc.sh; it must not reject a setting.
-    complaints = [line for line in verified.stderr.splitlines() if "RestartForceExitStatus" in line or "Unknown" in line]
+    complaints = [line for line in verified.stderr.splitlines() if "is not executable" not in line]
     assert complaints == [], verified.stderr
 
 

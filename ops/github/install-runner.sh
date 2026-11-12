@@ -151,6 +151,13 @@ fi
 # MemoryHigh=3G, MemoryMax=4G, Restart=on-failure and RestartSec=30 are the memory caps and restart policy from
 # agent-ops#442: memory above 3 GB is throttled, the kernel kills the runner above 4 GB, and a failed runner restarts
 # 30 seconds later.
+# RestartForceExitStatus=0 (#918) restarts it after a clean exit too. On a boot with a skewed clock the listener's
+# session request fails and runsvc.sh stops with exit 0 ("no retry needed"), which Restart=on-failure never restarts,
+# so the whole pool stayed down. A retry rather than After=time-sync.target: that target waits for a real sync only
+# with an NTP daemon's wait unit enabled (the tower runs chrony, whose chrony-wait gives up after 3 minutes and lets
+# the runner start anyway), while the retry recovers whenever the clock is fixed, with any NTP daemon. No start limit,
+# so a long skew cannot exhaust it; the cost is that a runner whose registration really was deleted retries every 30
+# seconds.
 write_unit() {
   cat <<UNIT
 [Unit]
@@ -169,6 +176,8 @@ MemoryHigh=3G
 MemoryMax=4G
 Restart=on-failure
 RestartSec=30
+# Also restart after runsvc.sh's clean "no retry needed" exit, such as a session refused on a skewed boot clock (#918).
+RestartForceExitStatus=0
 
 [Install]
 WantedBy=multi-user.target
