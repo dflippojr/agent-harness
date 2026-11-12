@@ -493,8 +493,9 @@ def test_dry_run_also_restarts_the_runner_after_its_clean_no_retry_exit():
     # It adds to the #916 restart policy rather than replacing it.
     assert "Restart=on-failure" in service
     assert "RestartSec=30" in service
-    # No start limit: a long skew would use it up and leave the runner down again.
-    assert not [line for line in service if line.startswith(("StartLimitBurst=", "StartLimitIntervalSec="))]
+    # No start limit anywhere in the unit (its home is [Unit]): a long skew would use it up and leave the runner down.
+    unit_lines = result.stdout[result.stdout.index("[Unit]"):].splitlines()
+    assert not [line for line in unit_lines if line.startswith(("StartLimitBurst=", "StartLimitIntervalSec="))]
     # The unit itself says why, in a comment just above the setting.
     comment = service[service.index(CLEAN_EXIT_RESTART) - 1]
     assert comment.startswith("#")
