@@ -904,6 +904,43 @@ def test_claude_cli_restart_resumes_and_keeps_pending_approval(tmp_path):
     asyncio.run(body())
 
 
+def test_claude_restart_binds_to_pending_approval_despite_decided_twin(tmp_path):
+    """#925: the same command asked and decided earlier in the session must not block the restart binding."""
+    async def body():
+        m1, _, state = _claude_manager(tmp_path, "ask")
+        await m1.start()
+        sid = m1.create("run it", backend="claude")["id"]
+        await wait_status(m1, sid, "waiting_approval")
+        aid = m1.db.pending_approvals(sid)[0]["id"]
+        m1.db.insert_approval({"id": "a-earlier1", "session_id": sid, "tool_call_id": "tool-0", "tool": "Bash",
+                               "args": {"command": "python build.py"}, "reason": "runs a Claude Code shell command",
+                               "status": "denied"})
+        await m1.stop()
+        m1.db.close()
+
+        m2, made, _ = _claude_manager(tmp_path, "ask", state=state)
+        await m2.start()
+        for _ in range(500):
+            if made:
+                break
+            await asyncio.sleep(0.02)
+        assert made
+        await wait_status(m2, sid, "waiting_approval")
+        for _ in range(500):  # the regenerated request waits on an approval: the bound one or a new one
+            if m2.runner.approval_events:
+                break
+            await asyncio.sleep(0.02)
+        assert m2.runner.approval_events
+        pending = [a["id"] for a in m2.db.pending_approvals(sid)]
+        assert pending == [aid], f"pending approvals after the restart: {pending} (expected only {aid})"
+        m2.decide(sid, aid, approve=True)
+        s = await wait_status(m2, sid, "done")
+        assert s["answer"] == "allow"
+        assert [a["id"] for a in m2.db.approvals(sid) if a["status"] == "pending"] == []
+        await m2.stop()
+    asyncio.run(body())
+
+
 def test_claude_backend_validation_and_policy(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.backends["claude"] = BackendConfig(enabled=False)
