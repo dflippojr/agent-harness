@@ -740,9 +740,12 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         assert finished
         assert finished[-1]["status"] == "failed"
         assert m.summary(s).get("failure") == s["run"]["failure"]
+        # A failed run answers the calls it leaves and cancels its approvals too, as a cancel does (#924).
         results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg.get("role") == "tool"}
-        assert results == {}
-        assert m.db.pending_approvals(sid)
+        assert results == {"tool-running": "Stopped: the run failed while this ran; its effects are unknown.",
+                           "tool-queued": "Not run: the run failed."}
+        assert m.db.pending_approvals(sid) == []
+        assert m.db.approvals(sid)[0]["status"] == "cancelled"
         await m.stop()
 
     async def already_cancelled_does_not_record_again():

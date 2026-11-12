@@ -1022,29 +1022,24 @@ class Runner:
             message = str(e)
             code = (TOOLS_ONLY_UNSUPPORTED if isinstance(e, ToolsOnlyUnsupported)
                     else e.code or self._cli_failure_code(self.db.get_session(sid), message))
-            self._record_failure(sid, code, message, code in ("model_unavailable", "provider_unavailable"),
+            await self._fail_run(sid, code, message, code in ("model_unavailable", "provider_unavailable"),
                                  f"{code}: {message}")
-            await self._end_run(sid)
         except SandboxUnavailable as e:
-            self._record_failure(sid, "backend_unavailable", str(e), True, f"sandbox_unavailable: {e}")
-            await self._end_run(sid)
+            await self._fail_run(sid, "backend_unavailable", str(e), True, f"sandbox_unavailable: {e}")
         except (projects.GitError, RunnerError) as e:
-            self._record_failure(sid, "workspace_error", str(e), False, f"workspace_error: {e}")
-            await self._end_run(sid)
+            await self._fail_run(sid, "workspace_error", str(e), False, f"workspace_error: {e}")
         except llm.LLMError as e:
             # The model call failed after its retries (#915): the model's failure, not a daemon bug, so no traceback.
             if await self._take_pending_cancel(sid):
                 return
             log.warning("session %s model call failed: %s", sid, str(e)[:200])
-            self._record_failure(sid, "model_error", str(e), e.retryable, f"model_error: {e}")
-            await self._end_run(sid)
+            await self._fail_run(sid, "model_error", str(e), e.retryable, f"model_error: {e}")
         except Exception as e:  # noqa: BLE001 - a crash must not leave the session looking active
             if await self._take_pending_cancel(sid):
                 return
             log.exception("session %s crashed", sid)
-            self._record_failure(sid, "internal_error", f"{type(e).__name__}: {e}", True,
+            await self._fail_run(sid, "internal_error", f"{type(e).__name__}: {e}", True,
                                  f"internal_error: {type(e).__name__}: {e}")
-            await self._end_run(sid)
         finally:
             if watch is not None:
                 watch.cancel()
@@ -1180,6 +1175,23 @@ class Runner:
         if any(marker in message.lower() for marker in ("auth", "login", "api key", "api-key", "credential")):
             return "provider_auth_required"
         return "provider_unavailable"
+
+    async def _fail_run(self, sid: str, code: str, message: str, retryable: bool, stop_reason: str) -> None:
+        """End a run that failed, as a cancel ends one (#924): each tool call it leaves gets a result, so the next run's
+        context answers every call, and its pending approvals are cancelled. One unit, so a daemon stop meanwhile can't
+        leave the run active."""
+        await finish_then_cancel(self._fail_run_inner(sid, code, message, retryable, stop_reason))
+
+    async def _fail_run_inner(self, sid: str, code: str, message: str, retryable: bool, stop_reason: str) -> None:
+        try:
+            await self._close_unresolved(sid, "Not run: the run failed.",
+                                         "Stopped: the run failed while this ran; its effects are unknown.")
+            for approval in self.db.pending_approvals(sid):
+                self.db.decide_approval(approval["id"], "cancelled")
+        except Exception:  # noqa: BLE001 - whatever broke the run may break this too: it must still end failed
+            log.exception("session %s: could not answer the failed run's open tool calls", sid)
+        self._record_failure(sid, code, message, retryable, stop_reason)
+        await self._end_run(sid)
 
     def _record_failure(self, sid: str, code: str, message: str, retryable: bool, stop_reason: str) -> None:
         s = self.db.get_session(sid)
