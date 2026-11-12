@@ -130,3 +130,47 @@ def test_a_like_wildcard_in_a_session_ref_is_matched_literally(tmp_path):
             r = client.get(f"/sessions/{ref}")
             assert r.status_code == 404, (ref, r.text)
             assert client.post(f"/sessions/{ref}/taint/clear").status_code == 404
+
+
+def test_a_non_ascii_session_ref_on_the_admin_alias_is_a_404(tmp_path):
+    """#929: a percent-encoded non-ASCII segment on an alias route answers like the unversioned route, not 500."""
+    client, _ = make_client(tmp_path)
+    with TestClient(client.app, raise_server_exceptions=False) as client:
+        assert client.get("/sessions/%C3%A9").status_code == 404
+        r = client.get(f"{PREFIX}/sessions/%C3%A9")
+        assert r.status_code == 404, (r.status_code, r.text)
+        # A client that percent-encodes the prefix itself still reaches the alias (the rewrite re-encodes the tail).
+        r = client.get("/api/%61dmin/v1/sessions/%C3%A9")
+        assert r.status_code == 404, (r.status_code, r.text)
+
+
+# Segments the alias rewrite must carry through without changing the answer: non-ASCII (two- and three-byte UTF-8),
+# an encoded space, an encoded percent sign and an encoded slash.
+_AWKWARD_SEGMENTS = ("%C3%A9", "%E2%9C%93", "a%20b", "%25", "x%2Fy")
+
+
+def _filled(template: str, segment: str) -> str:
+    import re
+
+    return re.sub(r"\{[^}/]+\}", segment, template)
+
+
+def test_every_templated_alias_route_answers_like_its_unversioned_route(tmp_path):
+    """#929 class check: for each templated owner route and method, an awkward path segment gets the same status on
+    /api/admin/v1 as on the unversioned route, and never a 500. Catches any alias-rewrite encoding bug on any route."""
+    from fastapi.routing import APIRoute
+
+    client, _ = make_client(tmp_path)
+    with TestClient(client.app, raise_server_exceptions=False) as client:
+        routes = [r for r in client.app.routes if isinstance(r, APIRoute) and r.path in ADMIN_PATHS and "{" in r.path]
+        assert len(routes) > 10
+        mismatches = []
+        for route in routes:
+            for method in sorted(route.methods - {"HEAD"}):
+                for segment in _AWKWARD_SEGMENTS:
+                    path = _filled(route.path, segment)
+                    plain = client.request(method, path)
+                    alias = client.request(method, PREFIX + path)
+                    if alias.status_code >= 500 or alias.status_code != plain.status_code:
+                        mismatches.append((method, path, plain.status_code, alias.status_code))
+        assert not mismatches, mismatches

@@ -20,6 +20,7 @@ from copy import deepcopy
 import logging
 import math
 import re
+from urllib.parse import quote
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
@@ -612,5 +613,8 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         request.scope["harness_original_path"] = path
         request.scope["path"] = rest
         if "raw_path" in request.scope:
-            request.scope["raw_path"] = rest.encode("ascii")
+            # `rest` is percent-decoded and may hold non-ASCII (#929): keep the client's own encoding of the tail.
+            raw = request.scope["raw_path"]
+            prefix = PREFIX.encode("ascii")
+            request.scope["raw_path"] = raw[len(prefix):] if raw.startswith(prefix + b"/") else quote(rest).encode("ascii")
         return await call_next(request)
