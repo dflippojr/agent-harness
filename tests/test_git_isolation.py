@@ -464,8 +464,8 @@ def _tree_snapshot(root: Path) -> dict[str, bytes]:
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
-def test_refresh_origin_does_not_write_through_a_symlinked_state_file(tmp_path):
-    """A workspace state file that is a symlink is never followed when host git copies the state back (#966)."""
+def test_refresh_origin_refuses_a_symlinked_state_file(tmp_path):
+    """A workspace state file that is a symlink is refused, never read or written through by host git (#966)."""
     src = make_repo(tmp_path / "src")
     workspace = tmp_path / "ws"
     prepare(Project(name="proj", repo=str(src)), workspace, "link01")
@@ -475,13 +475,14 @@ def test_refresh_origin_does_not_write_through_a_symlinked_state_file(tmp_path):
     fetch_head.unlink(missing_ok=True)
     _symlink_or_skip(fetch_head, outside)
 
-    refresh_origin(Project(name="proj", repo=str(src)), workspace)
+    err = refresh_origin(Project(name="proj", repo=str(src)), workspace)
 
+    assert "refusing symlinked or special git state FETCH_HEAD" in err
     assert outside.read_text(encoding="utf-8") == "unchanged\n"
 
 
-def test_refresh_origin_does_not_mirror_into_a_symlinked_state_dir(tmp_path):
-    """A workspace `logs` dir that is a symlink is neither read nor written through by host git (#966)."""
+def test_refresh_origin_refuses_a_symlinked_state_dir(tmp_path):
+    """A workspace `logs` dir that is a symlink is refused, never read or written through by host git (#966)."""
     src = make_repo(tmp_path / "src")
     workspace = tmp_path / "ws"
     prepare(Project(name="proj", repo=str(src)), workspace, "link02")
@@ -495,8 +496,9 @@ def test_refresh_origin_does_not_mirror_into_a_symlinked_state_dir(tmp_path):
     _symlink_or_skip(logs, outside)
     sh(src, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "next")
 
-    refresh_origin(Project(name="proj", repo=str(src)), workspace)
+    err = refresh_origin(Project(name="proj", repo=str(src)), workspace)
 
+    assert "refusing symlinked or special git state logs" in err
     assert _tree_snapshot(outside) == before
 
 
@@ -540,3 +542,93 @@ def test_copy_git_state_replaces_symlinked_destination_entries(tmp_path):
     assert (dst / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main\n"
     assert (dst / "refs" / "heads" / "main").read_text(encoding="utf-8") == "aaa\n"
     assert (dst / "logs" / "HEAD").read_text(encoding="utf-8") == "headlog\n"
+
+
+def _state_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "refs" / "heads").mkdir(parents=True)
+    (src / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+    (src / "refs" / "heads" / "main").write_bytes(b"aaa\n")
+    dst.mkdir()
+    return src, dst
+
+
+def test_copy_git_state_refuses_state_entries_of_the_wrong_type(tmp_path):
+    src, dst = _state_dirs(tmp_path)
+    (src / "FETCH_HEAD").mkdir()
+    with pytest.raises(GitError, match="FETCH_HEAD"):
+        _copy_git_state(src, dst)
+    (src / "FETCH_HEAD").rmdir()
+    shutil.rmtree(src / "refs")
+    (src / "refs").write_bytes(b"not a directory\n")
+    with pytest.raises(GitError, match="refs"):
+        _copy_git_state(src, dst)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_copy_git_state_refuses_a_fifo_without_blocking(tmp_path):
+    src, dst = _state_dirs(tmp_path)
+    os.mkfifo(src / "FETCH_HEAD")
+    os.mkfifo(src / "refs" / "heads" / "pipe")
+    with pytest.raises(GitError, match="FETCH_HEAD"):
+        _copy_git_state(src, dst)
+    (src / "FETCH_HEAD").unlink()
+    with pytest.raises(GitError, match="pipe"):
+        _copy_git_state(src, dst)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the 255-byte name limit is POSIX; Windows paths hit MAX_PATH first")
+def test_copy_git_state_copies_the_longest_ref_name(tmp_path):
+    """Git allows a 245-byte ref component (its lock file then fills the 255-byte name limit); the copy's own temp file
+    must fit beside it."""
+    src, dst = _state_dirs(tmp_path)
+    name = "r" * 245
+    (src / "refs" / "heads" / name).write_bytes(b"bbb\n")
+    (dst / "refs" / "heads").mkdir(parents=True)
+    (dst / "refs" / "heads" / name).write_bytes(b"old\n")
+
+    _copy_git_state(src, dst)
+
+    assert (dst / "refs" / "heads" / name).read_bytes() == b"bbb\n"
+    assert sorted(p.name for p in (dst / "refs" / "heads").iterdir()) == sorted(["main", name])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative copy is POSIX only")
+def test_copy_git_state_ignores_a_directory_swapped_for_a_link_mid_copy(tmp_path, monkeypatch):
+    """A destination directory replaced by a link after it was opened: nothing lands where the link points (#966)."""
+    import harness.projects as projects
+
+    src, dst = _state_dirs(tmp_path)
+    heads = dst / "refs" / "heads"
+    heads.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_write = projects._StateDir.write
+    swapped = []
+
+    def write(self, name, source_fd):
+        if self.path == heads and not swapped:
+            heads.rename(dst / "refs" / "moved")
+            heads.symlink_to(outside, target_is_directory=True)
+            swapped.append(name)
+        return real_write(self, name, source_fd)
+
+    monkeypatch.setattr(projects._StateDir, "write", write)
+    _copy_git_state(src, dst)
+
+    assert swapped == ["main"]
+    assert list(outside.iterdir()) == []  # the write went to the opened directory, which the mirror then pruned
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-relative copy is POSIX only")
+def test_copy_git_state_refuses_a_link_swapped_into_its_path(tmp_path):
+    """The state directory itself is reopened component by component without following links."""
+    src, dst = _state_dirs(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real = tmp_path / "real"
+    dst.rename(real)
+    dst.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(GitError):
+        _copy_git_state(src, dst)
+    assert list(outside.iterdir()) == []

@@ -25,6 +25,7 @@ copies in and out (HEAD, refs, logs and the other state files).
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 import stat
 import subprocess
@@ -187,98 +188,218 @@ def _resolve_workspace_git(repo: Path) -> tuple[Path, Path, Path]:
 
 
 _isjunction = getattr(os.path, "isjunction", lambda _path: False)  # Python 3.12+; Windows junctions are links too
-# Open state files without following a final-component link, and without blocking on a FIFO (POSIX only).
-_NOFOLLOW_READ = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
+# Read state files without following a final-component link and without blocking on a FIFO (POSIX only).
+_NOFOLLOW_READ = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | _O_BINARY
+# POSIX: walk and copy git state through directory descriptors opened without following links, so a path component
+# the workspace swaps for a link mid-copy cannot redirect a read or a write. Windows has no *at calls; there each
+# entry is checked with lstat right before use instead.
+_FD_OPS = (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW") and os.open in os.supports_dir_fd
+           and os.stat in os.supports_dir_fd and os.mkdir in os.supports_dir_fd and os.rename in os.supports_dir_fd
+           and os.unlink in os.supports_dir_fd and os.rmdir in os.supports_dir_fd and os.scandir in os.supports_fd
+           and os.utime in os.supports_fd)
+_DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_MISSING, _FILE, _DIR, _OTHER = "missing", "file", "dir", "other"
+
+
+def _kind(mode: int) -> str:
+    return _FILE if stat.S_ISREG(mode) else _DIR if stat.S_ISDIR(mode) else _OTHER
+
+
+class _StateDir:
+    """A directory of git state, addressed by entry name, that never follows a link (see `_FD_OPS`)."""
+
+    def __init__(self, path: Path, fd: int | None = None):
+        self.path, self.fd = path, fd
+
+    @classmethod
+    def open(cls, path: Path) -> _StateDir:
+        """Open an existing canonical directory. On POSIX every component is opened without following links, so a
+        link anywhere on the path (one swapped in after the path was resolved, say) is refused."""
+        if not _FD_OPS:
+            if _is_link(path) or not path.is_dir():
+                raise GitError(f"refusing git state directory {path.name}: not a plain directory")
+            return cls(path)
+        fd = os.open(path.anchor, _DIR_FLAGS)
+        try:
+            for part in path.parts[1:]:
+                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = child
+        except BaseException:
+            os.close(fd)
+            raise
+        return cls(path, fd)
+
+    def __enter__(self) -> _StateDir:
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def kind(self, name: str) -> str:
+        try:
+            if self.fd is not None:
+                return _kind(os.stat(name, dir_fd=self.fd, follow_symlinks=False).st_mode)
+            path = self.path / name
+            if _is_link(path):
+                return _OTHER
+            return _kind(os.lstat(path).st_mode)
+        except FileNotFoundError:
+            return _MISSING
+
+    def names(self) -> list[str]:
+        if self.fd is not None:
+            with os.scandir(self.fd) as entries:
+                return [entry.name for entry in entries]
+        return os.listdir(self.path)
+
+    def subdir(self, name: str) -> _StateDir:
+        if self.fd is not None:
+            return _StateDir(self.path / name, os.open(name, _DIR_FLAGS, dir_fd=self.fd))
+        if self.kind(name) != _DIR:
+            raise GitError(f"refusing git state {name}: not a plain directory")
+        return _StateDir(self.path / name)
+
+    def ensure_subdir(self, name: str) -> _StateDir:
+        """The subdirectory `name`, created first; anything else in its place (a link, a file) is removed."""
+        kind = self.kind(name)
+        if kind not in (_DIR, _MISSING):
+            self.remove(name)
+        if kind != _DIR:
+            if self.fd is not None:
+                os.mkdir(name, dir_fd=self.fd)
+            else:
+                os.mkdir(self.path / name)
+        return self.subdir(name)
+
+    def remove(self, name: str) -> None:
+        """Remove an entry: a directory with its contents, or a file or link itself (never what a link points to)."""
+        kind = self.kind(name)
+        if kind == _DIR:
+            with self.subdir(name) as sub:
+                for child in sub.names():
+                    sub.remove(child)
+            if self.fd is not None:
+                os.rmdir(name, dir_fd=self.fd)
+            else:
+                os.rmdir(self.path / name)
+        elif kind != _MISSING:
+            if self.fd is not None:
+                os.unlink(name, dir_fd=self.fd)
+            elif _isjunction(self.path / name):
+                os.rmdir(self.path / name)  # removes the junction, not its target
+            else:
+                os.unlink(self.path / name)
+
+    def open_read(self, name: str) -> int:
+        """A descriptor on regular file `name`, never through a link."""
+        if self.fd is not None:
+            fd = os.open(name, _NOFOLLOW_READ, dir_fd=self.fd)
+        elif self.kind(name) != _FILE:
+            raise GitError(f"refusing git state {name}: not a regular file")
+        else:
+            fd = os.open(self.path / name, _NOFOLLOW_READ)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise GitError(f"refusing git state {name}: not a regular file")
+        return fd
+
+    def write(self, name: str, source_fd: int) -> None:
+        """Copy `source_fd` to `name` through a new temp file renamed over it, so a link at `name` is replaced rather
+        than written through. The short temp name starts with a dot and ends in `.lock`: git never reads it as a ref,
+        and it fits beside the longest ref name git allows."""
+        st = os.fstat(source_fd)
+        temp = f".tmp-{secrets.token_hex(8)}.lock"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | _O_BINARY
+        out = os.open(temp, flags, 0o600, dir_fd=self.fd) if self.fd is not None else os.open(self.path / temp, flags, 0o600)
+        try:
+            try:
+                while True:
+                    chunk = os.read(source_fd, 1 << 16)
+                    if not chunk:
+                        break
+                    os.write(out, chunk)
+                if self.fd is not None:
+                    os.fchmod(out, stat.S_IMODE(st.st_mode))
+                    os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
+            finally:
+                os.close(out)
+            if self.fd is not None:
+                os.rename(temp, name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+            else:
+                os.chmod(self.path / temp, stat.S_IMODE(st.st_mode))
+                os.utime(self.path / temp, ns=(st.st_atime_ns, st.st_mtime_ns))
+                os.replace(self.path / temp, self.path / name)
+        except BaseException:
+            self.remove(temp)
+            raise
 
 
 def _is_link(path: Path) -> bool:
     return path.is_symlink() or _isjunction(path)
 
 
-def _require_plain(path: Path) -> None:
-    """Refuse a link in the git state the host copies: following it would read or write outside the workspace."""
-    if _is_link(path):
-        raise GitError(f"refusing symlinked git state {path.name}")
-
-
-def _remove(path: Path) -> None:
-    """Remove a file, a directory tree, or a link itself (never what the link points to)."""
-    if _isjunction(path):
-        os.rmdir(path)
-    elif path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    else:
-        path.unlink()
-
-
-def _copy_state_file(src: Path, dst: Path) -> None:
-    """Copy one regular file without following a link at either end.
-
-    The bytes go to a sibling temp file that then replaces `dst`, so a link at `dst` is replaced rather than written
-    through. The temp name starts with a dot and ends in `.lock`, which git never reads as a ref.
-    """
-    _require_plain(src)
-    fd = os.open(src, _NOFOLLOW_READ)
+def _copy_state_file(src: _StateDir, dst: _StateDir, name: str) -> None:
+    source_fd = src.open_read(name)
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            raise GitError(f"refusing non-regular git state {src.name}")
-        if dst.is_dir() and not _is_link(dst):
-            shutil.rmtree(dst)
-        out_fd, tmp = tempfile.mkstemp(prefix=f".{dst.name}.", suffix=".lock", dir=dst.parent)
-        try:
-            with os.fdopen(out_fd, "wb") as out, os.fdopen(os.dup(fd), "rb") as inp:
-                shutil.copyfileobj(inp, out)
-            os.chmod(tmp, stat.S_IMODE(st.st_mode))
-            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
-            os.replace(tmp, dst)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        if dst.kind(name) == _DIR:
+            dst.remove(name)
+        dst.write(name, source_fd)
     finally:
-        os.close(fd)
+        os.close(source_fd)
 
 
-def _mirror_tree(src: Path, dst: Path) -> None:
+def _mirror_tree(src: _StateDir, dst: _StateDir) -> None:
     """Copy `src` onto `dst`, then remove dest entries that `src` no longer has.
 
     `shutil.copytree(..., dirs_exist_ok=True)` only adds/overwrites, so a fetch
     `--prune` in the isolated git-dir would otherwise leave stale loose refs in
-    the real repository. Links are refused in `src` and replaced in `dst`, never followed.
+    the real repository. Links and special files are refused in `src`; in `dst` they are replaced, never followed.
     """
-    _require_plain(src)
-    if _is_link(dst) or (dst.exists() and not dst.is_dir()):
-        _remove(dst)
-    dst.mkdir(parents=True, exist_ok=True)
     seen = set()
-    for child in src.iterdir():
-        seen.add(child.name)
-        _mirror_entry(child, dst / child.name)
-    for child in sorted(dst.iterdir()):
-        if child.name not in seen:
-            _remove(child)
-
-
-def _mirror_entry(child: Path, target: Path) -> None:
-    _require_plain(child)
-    if child.is_dir():
-        _mirror_tree(child, target)
-    else:
-        _copy_state_file(child, target)
+    for name in src.names():
+        seen.add(name)
+        kind = src.kind(name)
+        if kind == _DIR:
+            with src.subdir(name) as sub_src, dst.ensure_subdir(name) as sub_dst:
+                _mirror_tree(sub_src, sub_dst)
+        elif kind == _FILE:
+            _copy_state_file(src, dst, name)
+        else:
+            raise GitError(f"refusing symlinked or special git state {name}")
+    for name in sorted(dst.names()):
+        if name not in seen:
+            dst.remove(name)
 
 
 def _copy_git_state(src: Path, dst: Path) -> None:
+    """Copy the ref state (`_STATE_FILES`, `_STATE_DIRS`) from git dir `src` to git dir `dst`, both canonical paths.
+
+    Fails closed with GitError on a link or special file in `src`, or a state entry of the wrong type.
+    """
     dst.mkdir(parents=True, exist_ok=True)
-    for name in _STATE_FILES:
-        s = src / name
-        _require_plain(s)
-        if s.is_file():
-            _copy_state_file(s, dst / name)
-    for name in _STATE_DIRS:
-        s = src / name
-        _require_plain(s)
-        if s.is_dir():
-            _mirror_tree(s, dst / name)
+    try:
+        with _StateDir.open(src) as s, _StateDir.open(dst) as d:
+            for name in _STATE_FILES:
+                kind = s.kind(name)
+                if kind == _FILE:
+                    _copy_state_file(s, d, name)
+                elif kind != _MISSING:
+                    raise GitError(f"refusing symlinked or special git state {name}")
+            for name in _STATE_DIRS:
+                kind = s.kind(name)
+                if kind == _DIR:
+                    with s.subdir(name) as sub_src, d.ensure_subdir(name) as sub_dst:
+                        _mirror_tree(sub_src, sub_dst)
+                elif kind != _MISSING:
+                    raise GitError(f"refusing symlinked or special git state {name}")
+    except GitError:
+        raise
+    except OSError as e:  # a link or a type change raced in after a check (ELOOP, ENOTDIR, ...): fail closed
+        raise GitError(f"could not copy git state: {e.strerror or e}") from e
 
 
 def _write_isolated_config(dest: Path, hooks: Path) -> None:
@@ -378,7 +499,8 @@ def isolated_git_dir(repo: Path, base_env: dict, keep_on_error: bool = True):
     # Copy-in and copy-out are one transaction: concurrent readers also copy back
     # stale refs and can collide with open files on Windows. Keep other repos independent.
     with _git_state_lock(metadata), tempfile.TemporaryDirectory(prefix="harness-git-", dir=_temp_dir()) as raw_tmp:
-        tmp, hooks = Path(raw_tmp) / "git", Path(raw_tmp) / "hooks"
+        base = _resolve(Path(raw_tmp))  # canonical: the state copy refuses links anywhere on its paths
+        tmp, hooks = base / "git", base / "hooks"
         hooks.mkdir(parents=True)
         tmp.mkdir()
         _copy_git_state(metadata, tmp)
