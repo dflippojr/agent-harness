@@ -525,7 +525,7 @@ def test_copy_git_state_replaces_symlinked_destination_entries(tmp_path):
     outside_file.write_text("outside\n", encoding="utf-8")
     outside_dir = tmp_path / "outside"
     outside_dir.mkdir()
-    (outside_dir / "keep").write_text("keep\n", encoding="utf-8")
+    (outside_dir / "keep").write_bytes(b"keep\n")
     (dst / "refs" / "heads").mkdir(parents=True)
     _symlink_or_skip(dst / "HEAD", outside_file)
     _symlink_or_skip(dst / "refs" / "heads" / "main", outside_file)
