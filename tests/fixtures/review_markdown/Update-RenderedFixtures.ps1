@@ -1,6 +1,6 @@
 # Regenerates rendered.json: GitHub's POST /markdown HTML for the publication-scan payloads in
 # tests/review-output.Tests.ps1, so the tests can stub the renderer with real answers and make no
-# network calls. Run it by hand (gh must be signed in, Pester 5 installed) after adding payloads there:
+# network calls. Run it by hand (gh must be signed in, Pester 5.2+ installed) after adding payloads there:
 #   powershell -NoProfile -File tests/fixtures/review_markdown/Update-RenderedFixtures.ps1
 # Every payload is synthetic, so nothing sensitive is sent.
 $ErrorActionPreference = 'Stop'
@@ -8,7 +8,7 @@ $root = Resolve-Path (Join-Path $PSScriptRoot '../../..')
 . (Join-Path $root 'ops/review/run-review.ps1')
 
 # Pester's discovery evaluates each It's -TestCases, so the payloads come out exactly as the tests see them.
-Import-Module Pester -MinimumVersion 5.0
+Import-Module Pester -MinimumVersion 5.2  # New-PesterConfiguration and Run.SkipRun arrived in 5.2
 $config = New-PesterConfiguration
 $config.Run.Path = (Join-Path $root 'tests/review-output.Tests.ps1')
 $config.Run.SkipRun = $true
