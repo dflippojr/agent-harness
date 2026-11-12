@@ -103,7 +103,7 @@ def test_job_routes_reject_empty_list_item(tmp_path, cron):
         assert client.post("/jobs", json=body).status_code == 400
         jid = client.post("/jobs", json={**body, "cron": "@daily"}).json()["id"]
         assert client.put(f"/jobs/{jid}", json=body).status_code == 400
-        assert client.get(f"/jobs/{jid}").json()["cron"] == "@daily"
+        assert client.get(f"/jobs/{jid}").json()["cron"] == "0 0 * * *"  # @daily, unchanged
         preview = client.get("/jobs/preview", params={"cron": cron})
         assert preview.status_code == 200 and preview.json()["ok"] is False
     m.db.close()
@@ -145,3 +145,22 @@ def test_cron_list_is_union_of_items_and_rejects_blank_items(index, items, attr)
                 bad = ",".join([*combo[:pos], "", *combo[pos:]])
                 with pytest.raises(service.CronError):
                     service.Cron(_expr(index, bad))
+
+
+def test_scheduler_parks_stored_job_with_empty_list_item(tmp_path):
+    """A job saved before #933 with `0,30,` is parked with an error, not run, and doesn't block other jobs."""
+    m = jobs_manager(tmp_path)
+    good = service.validate({"name": "Good", "prompt": "fake", "cron": "@daily"}, m.cfg.projects, m.cfg.models)
+    now = time.time()
+    m.db.insert_job({**good, "cron": "0,30, * * * *", "id": "fake-stale", "next_run_at": now - 10})
+    m.db.insert_job({**good, "id": "fake-good", "next_run_at": now - 10})
+    started = []
+    m.jobs.create = lambda *args, **kwargs: started.append(kwargs["job_id"]) or {"id": f"s-{len(started)}"}
+    m.jobs._catch_up(now)  # recent misses: catch-up leaves both to tick(), and the stale one must not break it
+    assert len(m.jobs.tick(now)) == 1
+    assert started == ["fake-good"]
+    stale = m.db.get_job("fake-stale")
+    assert stale["next_run_at"] is None
+    assert "empty list item" in stale["last_error"]
+    assert m.jobs.tick(now + 60) == [] and started == ["fake-good"]
+    m.db.close()
