@@ -704,3 +704,29 @@ def test_copy_git_state_refuses_a_link_swapped_into_its_path(tmp_path):
     with pytest.raises(GitError):
         _copy_git_state(src, dst)
     assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("fd_ops", _BACKENDS)
+def test_copy_git_state_replaces_a_directory_link_at_a_file_name(tmp_path, monkeypatch, fd_ops):
+    """A directory link (a junction on Windows) at a state file's name is removed itself, then replaced. The rename
+    here refuses a directory-link target, as Windows' MoveFileEx does, so the link must be gone first (#966)."""
+    monkeypatch.setattr(_projects, "_FD_OPS", fd_ops)
+    src, dst = _state_dirs(tmp_path)
+    (src / "FETCH_HEAD").write_bytes(b"fetched\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _symlink_or_skip(dst / "FETCH_HEAD", outside)
+    real_replace = os.replace
+
+    def replace(source, target, **kwargs):
+        at = dst / os.path.basename(target)  # every replace in this copy lands directly in `dst`
+        if at.is_symlink() and at.is_dir():
+            raise IsADirectoryError(target)
+        return real_replace(source, target, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+    _copy_git_state(src, dst)
+
+    assert not (dst / "FETCH_HEAD").is_symlink()
+    assert (dst / "FETCH_HEAD").read_bytes() == b"fetched\n"
+    assert list(outside.iterdir()) == []

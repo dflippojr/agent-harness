@@ -358,7 +358,7 @@ def _is_link(path: Path) -> bool:
 def _copy_state_file(src: _StateDir, dst: _StateDir, name: str) -> None:
     source_fd = src.open_read(name)
     try:
-        if dst.kind(name) == _DIR:
+        if dst.kind(name) not in (_FILE, _MISSING):  # a directory, or a link of any kind: Windows renames over neither
             dst.remove(name)
         dst.write(name, source_fd)
     finally:
