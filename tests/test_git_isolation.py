@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import subprocess
 import threading
@@ -450,3 +451,92 @@ def test_push_records_the_pushed_commit_as_the_origin_tracking_ref(tmp_path):
     push(Project(name="proj", repo=src.resolve().as_uri()), workspace, info["branch"], source_ref=pushed)
     assert sh(workspace, "rev-parse", f"origin/{info['branch']}").stdout.strip() == pushed
     assert git(workspace, "log", "--oneline", f"origin/{info['branch']}..HEAD").out.strip() == ""
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    except (OSError, NotImplementedError) as e:  # Windows without symlink privilege
+        pytest.skip(f"symlinks unavailable: {e}")
+
+
+def _tree_snapshot(root: Path) -> dict[str, bytes]:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_refresh_origin_does_not_write_through_a_symlinked_state_file(tmp_path):
+    """A workspace state file that is a symlink is never followed when host git copies the state back (#966)."""
+    src = make_repo(tmp_path / "src")
+    workspace = tmp_path / "ws"
+    prepare(Project(name="proj", repo=str(src)), workspace, "link01")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("unchanged\n", encoding="utf-8")
+    fetch_head = workspace / ".git" / "FETCH_HEAD"
+    fetch_head.unlink(missing_ok=True)
+    _symlink_or_skip(fetch_head, outside)
+
+    refresh_origin(Project(name="proj", repo=str(src)), workspace)
+
+    assert outside.read_text(encoding="utf-8") == "unchanged\n"
+
+
+def test_refresh_origin_does_not_mirror_into_a_symlinked_state_dir(tmp_path):
+    """A workspace `logs` dir that is a symlink is neither read nor written through by host git (#966)."""
+    src = make_repo(tmp_path / "src")
+    workspace = tmp_path / "ws"
+    prepare(Project(name="proj", repo=str(src)), workspace, "link02")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "notes.txt").write_text("unchanged\n", encoding="utf-8")
+    before = _tree_snapshot(outside)
+    logs = workspace / ".git" / "logs"
+    if logs.exists():
+        shutil.rmtree(logs)
+    _symlink_or_skip(logs, outside)
+    sh(src, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "next")
+
+    refresh_origin(Project(name="proj", repo=str(src)), workspace)
+
+    assert _tree_snapshot(outside) == before
+
+
+def test_copy_git_state_refuses_a_symlinked_source_entry(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "refs" / "heads").mkdir(parents=True)
+    (src / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    _symlink_or_skip(src / "refs" / "heads" / "main", outside)
+
+    with pytest.raises(GitError, match="symlink"):
+        _copy_git_state(src, dst)
+
+    assert not (dst / "refs" / "heads" / "main").exists()
+
+
+def test_copy_git_state_replaces_symlinked_destination_entries(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "refs" / "heads").mkdir(parents=True)
+    (src / "logs").mkdir()
+    (src / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (src / "refs" / "heads" / "main").write_text("aaa\n", encoding="utf-8")
+    (src / "logs" / "HEAD").write_text("headlog\n", encoding="utf-8")
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("outside\n", encoding="utf-8")
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (outside_dir / "keep").write_text("keep\n", encoding="utf-8")
+    (dst / "refs" / "heads").mkdir(parents=True)
+    _symlink_or_skip(dst / "HEAD", outside_file)
+    _symlink_or_skip(dst / "refs" / "heads" / "main", outside_file)
+    _symlink_or_skip(dst / "logs", outside_dir)
+
+    _copy_git_state(src, dst)
+
+    assert outside_file.read_text(encoding="utf-8") == "outside\n"
+    assert _tree_snapshot(outside_dir) == {"keep": b"keep\n"}
+    for entry in (dst / "HEAD", dst / "refs" / "heads" / "main", dst / "logs"):
+        assert not entry.is_symlink()
+    assert (dst / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main\n"
+    assert (dst / "refs" / "heads" / "main").read_text(encoding="utf-8") == "aaa\n"
+    assert (dst / "logs" / "HEAD").read_text(encoding="utf-8") == "headlog\n"
