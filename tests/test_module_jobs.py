@@ -3,6 +3,7 @@ import asyncio
 import itertools
 import re
 import time
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -146,6 +147,9 @@ def _stale_and_good_jobs(m, next_run_at: float) -> list[str]:
     return started
 
 
+NOON = datetime(2026, 6, 15, 12, 0).timestamp()
+
+
 def _assert_parked(m):
     stale = m.db.get_job("fake-stale")
     assert stale["next_run_at"] is None
@@ -155,7 +159,7 @@ def _assert_parked(m):
 def test_tick_parks_stored_job_with_empty_list_item(tmp_path):
     """The job falls due while the daemon runs: tick() parks it instead of starting a session, and runs the other."""
     m = jobs_manager(tmp_path)
-    now = time.time()
+    now = NOON  # fixed midday: the good @daily job cannot fall due during the test
     started = _stale_and_good_jobs(m, now - 10)
     assert len(m.jobs.tick(now)) == 1
     assert started == ["fake-good"]
@@ -167,7 +171,7 @@ def test_tick_parks_stored_job_with_empty_list_item(tmp_path):
 def test_catch_up_parks_stored_job_with_empty_list_item(tmp_path):
     """Missed beyond the catch-up window while the daemon was down: startup parks it instead of failing."""
     m = jobs_manager(tmp_path)
-    now = time.time()
+    now = NOON
     started = _stale_and_good_jobs(m, now - 7 * 24 * 3600)
     m.jobs._catch_up(now)
     _assert_parked(m)
