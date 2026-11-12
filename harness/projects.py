@@ -237,7 +237,7 @@ _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLL
 _MISSING, _FILE, _DIR, _OTHER = "missing", "file", "dir", "other"
 # Win32 constants (winnt.h, fileapi.h) that _winapi does not export.
 _SHARE_READ_WRITE, _SHARE_DELETE = 0x1 | 0x2, 0x4
-_GENERIC_READ, _FILE_READ_ATTRIBUTES, _OPEN_EXISTING = 0x80000000, 0x80, 3
+_GENERIC_READ, _FILE_LIST_DIRECTORY, _FILE_READ_ATTRIBUTES, _OPEN_EXISTING = 0x80000000, 0x1, 0x80, 3
 _FLAG_BACKUP_SEMANTICS, _FLAG_OPEN_REPARSE_POINT = 0x02000000, 0x00200000
 _ATTRIBUTE_DIRECTORY, _ATTRIBUTE_REPARSE_POINT = 0x10, 0x400
 
@@ -252,7 +252,9 @@ if sys.platform == "win32":
         A directory is opened without FILE_SHARE_DELETE: while the descriptor is open, the directory cannot be renamed or
         deleted. A file is opened for reading. Either is refused unless it is a plain directory or regular file.
         """
-        access = _FILE_READ_ATTRIBUTES if directory else _GENERIC_READ
+        # FILE_LIST_DIRECTORY is a data right: a handle with attribute rights alone takes no part in share-mode
+        # checks, so it would not stop a rename.
+        access = _FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES if directory else _GENERIC_READ
         share = _SHARE_READ_WRITE if directory else _SHARE_READ_WRITE | _SHARE_DELETE
         flags = _FLAG_OPEN_REPARSE_POINT | (_FLAG_BACKUP_SEMANTICS if directory else 0)
         handle = _winapi.CreateFile(str(path), access, share, _winapi.NULL, _OPEN_EXISTING, flags, _winapi.NULL)
