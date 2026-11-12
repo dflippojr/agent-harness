@@ -139,6 +139,9 @@ def test_a_non_ascii_session_ref_on_the_admin_alias_is_a_404(tmp_path):
         assert client.get("/sessions/%C3%A9").status_code == 404
         r = client.get(f"{PREFIX}/sessions/%C3%A9")
         assert r.status_code == 404, (r.status_code, r.text)
+        # A client that percent-encodes the prefix itself still reaches the alias (the rewrite re-encodes the tail).
+        r = client.get("/api/%61dmin/v1/sessions/%C3%A9")
+        assert r.status_code == 404, (r.status_code, r.text)
 
 
 # Segments the alias rewrite must carry through without changing the answer: non-ASCII (two- and three-byte UTF-8),
