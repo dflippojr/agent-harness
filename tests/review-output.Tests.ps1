@@ -139,6 +139,60 @@ Describe 'Review publication safety' {
         @{ Payload = '%2F%2Ffd00--1.ipv6-literal.net%2Fshare%2Fconfig.py' }
         @{ Payload = '//192.168.1.5.nip.io/share/config.py' }
         @{ Payload = '//10.0.0.5.example.com/share/config.py' }
+        # #781 round 2: only letter-only labels under com, net or org are exempt, so special-use names
+        # (.alt, .onion, the arpa zones) and IPs spelled dashed, in hex or as IPv6 groups stay network roots.
+        @{ Payload = '//fs.alt/share/config.py' }
+        @{ Payload = '/\fs.alt/share/config.py' }
+        @{ Payload = '//FS.ALT:445/share/config.py' }
+        @{ Payload = ' /\FS.ALT:445/share/config.py ' }
+        @{ Payload = '`//fs.alt/share/config.py`' }
+        @{ Payload = '%2F%2Ffs.alt%2Fshare%2Fconfig.py' }
+        @{ Payload = '&#47;&#47;fs.alt/share/config.py' }
+        @{ Payload = '//fs.onion/share/config.py' }
+        @{ Payload = '/\fs.onion/share/config.py' }
+        @{ Payload = '//FS.ONION:445/share/config.py' }
+        @{ Payload = ' /\FS.ONION:445/share/config.py ' }
+        @{ Payload = '`//fs.onion/share/config.py`' }
+        @{ Payload = '%2F%2Ffs.onion%2Fshare%2Fconfig.py' }
+        @{ Payload = '&#47;&#47;fs.onion/share/config.py' }
+        @{ Payload = '//127-0-0-1.nip.io/share/config.py' }
+        @{ Payload = '/\127-0-0-1.nip.io/share/config.py' }
+        @{ Payload = '//127-0-0-1.NIP.IO:445/share/config.py' }
+        @{ Payload = ' /\127-0-0-1.NIP.IO:445/share/config.py ' }
+        @{ Payload = '`//127-0-0-1.nip.io/share/config.py`' }
+        @{ Payload = '%2F%2F127-0-0-1.nip.io%2Fshare%2Fconfig.py' }
+        @{ Payload = '&#47;&#47;127-0-0-1.nip.io/share/config.py' }
+        @{ Payload = '//192-168-1-5.nip.io/share/config.py' }
+        @{ Payload = '/\192-168-1-5.nip.io/share/config.py' }
+        @{ Payload = '//192-168-1-5.NIP.IO:445/share/config.py' }
+        @{ Payload = ' /\192-168-1-5.NIP.IO:445/share/config.py ' }
+        @{ Payload = '`//192-168-1-5.nip.io/share/config.py`' }
+        @{ Payload = '%2F%2F192-168-1-5.nip.io%2Fshare%2Fconfig.py' }
+        @{ Payload = '&#47;&#47;192-168-1-5.nip.io/share/config.py' }
+        @{ Payload = '//7f000001.sslip.io/share/config.py' }
+        @{ Payload = '/\7f000001.sslip.io/share/config.py' }
+        @{ Payload = '//7F000001.SSLIP.IO:445/share/config.py' }
+        @{ Payload = ' /\7F000001.SSLIP.IO:445/share/config.py ' }
+        @{ Payload = '`//7f000001.sslip.io/share/config.py`' }
+        @{ Payload = '%2F%2F7f000001.sslip.io%2Fshare%2Fconfig.py' }
+        @{ Payload = '&#47;&#47;7f000001.sslip.io/share/config.py' }
+        @{ Payload = '//fc00--1.sslip.io/share/config.py' }
+        @{ Payload = '/\fc00--1.sslip.io/share/config.py' }
+        @{ Payload = '//FC00--1.SSLIP.IO:445/share/config.py' }
+        @{ Payload = ' /\FC00--1.SSLIP.IO:445/share/config.py ' }
+        @{ Payload = '`//fc00--1.sslip.io/share/config.py`' }
+        @{ Payload = '%2F%2Ffc00--1.sslip.io%2Fshare%2Fconfig.py' }
+        @{ Payload = '&#47;&#47;fc00--1.sslip.io/share/config.py' }
+        @{ Payload = '//127-0-0-1.example.com/share/config.py' }
+        @{ Payload = '//7f000001.example.com/share/config.py' }
+        @{ Payload = '//fc00--1.example.com/share/config.py' }
+        @{ Payload = '//fdaa-bbbb-cccc-dddd-eeee-ffff-aaaa-bbbb.example.com/share/config.py' }
+        @{ Payload = '/\fdaa-bbbb-cccc-dddd-eeee-ffff-aaaa-bbbb.ipv6-literal.net/share/config.py' }
+        @{ Payload = '//cdn2.example.com/share/config.py' }
+        @{ Payload = '//blog.example.co.uk/share/config.py' }
+        @{ Payload = '//fs.example.io/share/config.py' }
+        @{ Payload = '//files.ipv4only.arpa/share/config.py' }
+        @{ Payload = '//xn--fs-abc.example.com/share/config.py' }
         # Any separator followed by a profile directory name outside a known repository path.
         @{ Payload = '/home/reviewer/.codex/auth.json' }
         @{ Payload = '/Users/reviewer/.claude/credentials.json' }
@@ -353,7 +407,7 @@ Describe 'Review publication safety' {
         @{ Payload = 'The feed rewrites protocol-relative URLs such as //example.com/images/a.png to https://example.com/images/a.png.' }
         @{ Payload = 'In `feed.xml`, `<img src="//cdn.example.com/a.png">` becomes `<img src="https://cdn.example.com/a.png">`.' }
         @{ Payload = 'The item links to <a href="//example.com/posts/1">the post</a>.' }
-        @{ Payload = 'See [the feed](//blog.example.co.uk/feed.xml) and //example.com:8080/feed.xml.' }
+        @{ Payload = 'See [the feed](//blog.example.net/feed.xml), //cdn.example.org/a.png and //example.com:8080/feed.xml.' }
         @{ Payload = "The template:`n`n``````html`n<link rel=`"alternate`" href=`"//www.example.com/rss.xml`">`n```````n`nDone." }
         # personal-website 557ad69 (PR #271's test) keeps a backslash spelling that browsers read as protocol-relative.
         @{ Payload = 'The test passes `''<a href="//example.com/p">p</a> <a href="/\\example.com/p">q</a> <img src=\''//example.com/i.png\'' alt="">''`.' }
