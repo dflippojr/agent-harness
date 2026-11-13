@@ -902,17 +902,18 @@ def test_flatten_refuses_to_overwrite_on_name_clash(tmp_path):
     assert (staged / "wrapper" / "python_embeded").is_dir()
 
 
-def test_flatten_checks_every_name_before_moving_any(tmp_path, monkeypatch):
-    """Directory order differs by filesystem (#973): with the clashing name listed last, nothing moves either."""
+def test_flatten_checks_every_name_before_moving_any(tmp_path):
+    """A clash on the name that sorts last still moves nothing (#973): every destination is checked first, so the
+    result does not depend on the order the entries are listed or moved in."""
     staged = tmp_path / "staged"
-    plant_comfy(staged / "wrapper")
-    (staged / "ComfyUI").mkdir()
-    real_iterdir = Path.iterdir
-    monkeypatch.setattr(Path, "iterdir", lambda self: iter(sorted(real_iterdir(self), reverse=True)))
+    plant_comfy(staged / "wrapper")  # ComfyUI and python_embeded, which sort before the clashing name
+    (staged / "wrapper" / "zz_tools").mkdir()
+    (staged / "zz_tools").mkdir()
     with pytest.raises(RuntimeError, match="destination exists"):
         images_models_mod._flatten_portable(staged)
-    assert (staged / "wrapper" / "python_embeded").is_dir()
-    assert not (staged / "python_embeded").exists()
+    for name in ("ComfyUI", "python_embeded", "zz_tools"):
+        assert (staged / "wrapper" / name).is_dir(), name
+    assert not (staged / "ComfyUI").exists() and not (staged / "python_embeded").exists()
 
 
 def test_stage_extraction_error_propagates_and_leaves_production_alone(tmp_path):
