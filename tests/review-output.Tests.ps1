@@ -710,7 +710,7 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Review = "- app.py:1: the fixture C:\fixture\x`n- app.py:2: x &#x202E; y`n- app.py:3: a safe finding."; Rendered = $null }
         # The whole body's rejections decide, not the review text's alone: an unterminated tag on the last line
         # is raw HTML once the footer follows it (PR #978 review).
-        @{ Review = "- app.py:1: a safe finding.`n- app.py:2: see <b title=C:\fixture\x"; Rendered = $null }
+        @{ Review = "- app.py:1: a safe finding.`n<div title=C:\fixture\x"; Rendered = $null }
         # A form that joins lines (a link title spanning them) cannot be split line by line.
         @{ Review = ("- app.py:1: [a](x " + '"t' + "`n" + 'u") C:\fixture\x' + "`n- app.py:2: a safe finding."); Rendered = $null }
     ) {
