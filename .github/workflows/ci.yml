@@ -2,11 +2,13 @@ name: CI
 
 # One workflow, all GitHub-hosted (free for this public repo):
 #   openapi   - the committed OpenAPI document (tools/openapi/openapi.json) matches the Server
-#   test      - the complete pytest suite with coverage (coverage.xml artifact)
+#   test      - the complete pytest suite on Windows, recording coverage (coverage-data-windows artifact)
+#   test-linux - the complete pytest suite on Linux, recording coverage (coverage-data-linux artifact, #973)
+#   coverage  - combines both coverage runs, applies the 88% floor to the union, writes coverage.xml
 #   test-py313 - the same suite on Python 3.13, after an import smoke test (#730); no coverage
 #   review-linux - the review tooling's tests under PowerShell 7 on Linux, where the review runners live (#806)
 #   unix-installers - tests/test_unix_installers.py on Linux: the installer contracts, on every pull request (#825)
-#   sonar     - SonarCloud analysis of that coverage, with the quality-gate wait
+#   sonar     - SonarCloud analysis of the combined coverage, with the quality-gate wait
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
 #   hub-contract - the pinned Hub's (dflippojr/agent-harness-hub) contract suite against this daemon in fake-model mode
 #   deploy-linux - the tower's Linux deployment path (deploy-ci.ps1 under pwsh, run-daemon.sh) on Linux (#812)
@@ -15,7 +17,9 @@ name: CI
 #   gate-guard - the shared gate guard (dflippojr/.github) on pull requests: an early signal, not the judge (#727)
 #   gate      - the check to require, with the gate-guard check that .github/workflows/gate-guard-target.yml posts
 #               from main: always runs, fails if any job it needs failed or was cancelled
-# The suite runs twice: `test` on Python 3.12 with coverage, and `test-py313` on Python 3.13 without it (#730).
+# The suite runs three times: `test` (Windows) and `test-linux` (Linux) on Python 3.12 with coverage, which
+# `coverage` combines so code that runs on only one platform still counts (#973), and `test-py313` on Python 3.13
+# without it (#730).
 # Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
 # tower; that pool is retired so CI no longer competes with llama-server and the
 # desktop for RAM. The job ids `test` and `sonar` keep the check names they had
@@ -27,8 +31,8 @@ name: CI
 # The workflow always runs, so `gate` always reports and a ruleset can require it
 # (#726, dflippojr/agent-ops#48). The docs-only skip lives in the `changes` job:
 # CI_SKIP_UNREAD_PATHS is an allow-list of files no pytest currently reads, and
-# `test`, `test-py313`, `review-linux`, `openapi`, `ui-tests`, `hub-contract` and `deploy-linux` skip only when every
-# changed file is on it.
+# `test`, `test-linux`, `test-py313`, `review-linux`, `openapi`, `ui-tests`, `hub-contract` and `deploy-linux` skip only
+# when every changed file is on it.
 # Entries are exact paths, not globs. Do not add `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
 # INSTALL.md, admin-api.md, app-api.md, mac-client.md, and service-profile.md
 # are asserted by tests/test_product_naming.py, which also reads every tracked docs/*.md its history regex doesn't
@@ -104,7 +108,8 @@ jobs:
       # Fixed -n 4 --dist loadfile: hosted windows-latest has 4 vCPUs; do not
       # use pytest's auto worker count. NUMBER_OF_PROCESSORS is logged so run
       # logs can verify the 4-vCPU assumption. pytest-cov merges worker data
-      # into coverage.xml. COVERAGE_CORE sysmon is not set: .coveragerc enables
+      # into .coverage; the `coverage` job combines it with `test-linux`'s and
+      # applies the floor (#973). COVERAGE_CORE sysmon is not set: .coveragerc enables
       # branch coverage, and sysmon cannot measure branches on Python 3.12
       # (branch sysmon needs 3.14+).
       # Serial escape hatch locally: python -m pytest tests -q -p no:xdist
@@ -124,7 +129,90 @@ jobs:
         run: >
           python -m pytest tests -q -n 4 --dist loadfile -o faulthandler_timeout=300
           --cov=harness --cov=harness_modules --cov=sdk --cov=scripts --cov=macrunner
-          --cov-report=xml:coverage.xml --cov-report=term --cov-fail-under=88
+          --cov-report=term
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-data-windows
+          path: .coverage
+          include-hidden-files: true
+          retention-days: 3
+
+  test-linux:
+    # The same suite on Linux (#973), recording coverage that the `coverage` job combines with `test`'s. Code that runs
+    # on only one platform is tested and measured where it runs: host git operations on workspaces need
+    # directory-relative file operations, which Windows lacks, and Windows-only behaviour (consoles, ACLs, Windows
+    # paths) stays with `test`. Docker-image and GPU tests skip here as they do on windows-latest.
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-repomap.txt -r requirements-telemetry.txt pytest-cov pytest-xdist
+
+      # Hosted ubuntu-latest has 4 vCPUs, so the same fixed -n 4 --dist loadfile as `test`.
+      - name: Run tests with coverage
+        timeout-minutes: 40
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
+        run: >
+          python -m pytest tests -q -n 4 --dist loadfile -o faulthandler_timeout=300
+          --cov=harness --cov=harness_modules --cov=sdk --cov=scripts --cov=macrunner
+          --cov-report=term
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-data-linux
+          path: .coverage
+          include-hidden-files: true
+          retention-days: 3
+
+  coverage:
+    # One coverage measure across both platforms (#973): the union of `test` (Windows) and `test-linux` (Linux), with
+    # the 88% floor applied to it, and the coverage.xml that `sonar` analyses. .coveragerc records relative file
+    # paths, so the two runs' data combine here and coverage.xml names files relative to the checkout. It runs only
+    # when both test jobs ran and passed.
+    needs: [test, test-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # The same unpinned pytest-cov the test jobs install, so the same coverage release reads their data.
+      - name: Install coverage
+        run: python -m pip install pytest-cov
+
+      - name: Download coverage data
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-data-*
+          path: coverage-data
+
+      # The XML is written with the measured packages as its sources, the same shape pytest-cov wrote before: one
+      # <source> per package and package-relative file names, which SonarCloud resolves against the checkout.
+      - name: Combine coverage and apply the floor
+        run: |
+          python -m coverage combine --keep coverage-data/coverage-data-windows/.coverage coverage-data/coverage-data-linux/.coverage
+          python -m coverage report --fail-under=88
+          python -c "import coverage; c = coverage.Coverage(source=['harness', 'harness_modules', 'sdk', 'scripts', 'macrunner']); c.load(); c.xml_report(outfile='coverage.xml')"
 
       - name: Upload coverage
         uses: actions/upload-artifact@v7
@@ -229,10 +317,9 @@ jobs:
         run: python -m pytest tests/test_unix_installers.py -q -rs -p no:cacheprovider
 
   sonar:
-    # SonarCloud analysis of the `test` job's coverage. Automatic analysis is
-    # turned off in SonarCloud; this job is the analysis. Same windows-latest
-    # image as `test`, so the absolute <source> paths in coverage.xml resolve.
-    needs: test
+    # SonarCloud analysis of the combined coverage from the `coverage` job (#973). Automatic analysis is
+    # turned off in SonarCloud; this job is the analysis. coverage.xml names files relative to the checkout.
+    needs: coverage
     runs-on: windows-latest
     # Forks have no secrets. Same-repository Dependabot PRs use the separate
     # Dependabot secret store; they run the same scan when its token is set.
@@ -521,7 +608,7 @@ jobs:
     # `changes`). Any needed job failed or cancelled fails it; see scripts/ci_gate.py for the rules. Add every new job
     # here.
     if: always()
-    needs: [changes, lint, test, test-py313, review-linux, unix-installers, sonar, openapi, ui-tests, hub-contract, deploy-linux, gate-guard]
+    needs: [changes, lint, test, test-linux, coverage, test-py313, review-linux, unix-installers, sonar, openapi, ui-tests, hub-contract, deploy-linux, gate-guard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
