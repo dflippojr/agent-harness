@@ -2817,15 +2817,43 @@ function Get-ReviewRuleHitLines {
     return , $hitLines
 }
 
-function Test-ReviewSubstantiveLine {
-    param([AllowEmptyString()][string]$Line)
+function Remove-ReviewSuppliedMarkers {
+    param([AllowEmptyString()][string]$Text)
 
-    # True when a kept line says something: not blank, not a heading or a fence delimiter, and with a
-    # letter or digit once list, quote and indent markers are dropped. A review left with only formatting
-    # (headings, fences, rules, table delimiters, bare list markers) is no review and is not published.
-    $content = $Line -replace '^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?', ''
-    if ($content -match '^[ \t]*(?:#{1,6}(?:[ \t]|$)|```|~~~)') { return $false }
-    return $content -match '[\p{L}\p{N}]'
+    # The review text with every HTML comment that names agent-review removed, in any spelling, case or
+    # spacing, on one line or several, in a code span or not, and an unterminated one to the end of the text
+    # (it hides the rest on GitHub anyway). Only the job writes review markers (Write-ReviewResult), so
+    # nothing the reviewer wrote can be read back as one, whatever the scan makes of it. Removal repeats
+    # until nothing changes, so pieces left around a removed comment cannot join into a new one.
+    $comment = [regex]'<!--[\s\S]*?(?:-->|\z)'
+    do {
+        $before = $Text
+        $Text = $comment.Replace($Text, { param($m) if ($m.Value -match '(?i)agent\W*review') { '' } else { $m.Value } })
+    } while ($Text -cne $before)
+    return $Text
+}
+
+function Measure-ReviewSubstantiveLines {
+    param([AllowEmptyString()][string]$Text)
+
+    # The number of lines of $Text that say something a reader can see. HTML comments, tags and entities go
+    # first, across lines, then on each line every container marker (quote, list and task markers, nested
+    # and empty, with or without text after them). A line left as a heading, a fence delimiter or a link
+    # reference definition says nothing; any other line counts when it still holds a letter or digit. A
+    # review left with only formatting (rules, table delimiters, emphasis, empty lists) is no review.
+    $visible = [regex]::Replace($Text, '<!--[\s\S]*?(?:-->|\z)', '')
+    $visible = [regex]::Replace($visible, '</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:"[^"]*"|''[^'']*''|[^<>"''])*)?/?>|<![A-Za-z\[][^>]*>|<\?[\s\S]*?(?:\?>|\z)', '')
+    $visible = [regex]::Replace($visible, '&#?[A-Za-z0-9]+;|!?\[[ \t]*\]\([^)]*\)', '')
+    $count = 0
+    foreach ($line in ($visible -split "`r?`n")) {
+        do {
+            $before = $line
+            $line = $line -replace '^[ \t]*(?:>|[-*+](?=[ \t]|$)|[0-9]{1,9}[.)](?=[ \t]|$)|\[[ xX]\](?=[ \t]|$))', ''
+        } while ($line -cne $before)
+        if ($line -match '^[ \t]*(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,}|\[[^\]]*\]:)') { continue }
+        if ($line -match '[\p{L}\p{N}]') { $count++ }
+    }
+    return $count
 }
 
 function Get-ReviewWithheldOutput {
@@ -2842,19 +2870,21 @@ function Get-ReviewWithheldOutput {
     if ($null -eq $contextLines) { return $null }
     $lines = @($Text -split "`r?`n")
     $withheld = New-Object System.Collections.Generic.List[int]
-    $kept = 0
+    $kept = New-Object System.Collections.Generic.List[string]
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ([string]::IsNullOrWhiteSpace($lines[$i])) { continue }
+        if ([string]::IsNullOrWhiteSpace($lines[$i])) { $kept.Add(''); continue }
         if (-not $contextLines.Contains($i) -and @(Get-ReviewRuleHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) {
-            if (Test-ReviewSubstantiveLine -Line $lines[$i]) { $kept++ }
+            $kept.Add($lines[$i])
             continue
         }
+        $kept.Add('')
         $prefix = [regex]::Match($lines[$i], '^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?').Value
         $lines[$i] = $prefix + $script:ReviewWithheldLine
         $withheld.Add($i + 1)
     }
-    # KeptLines counts only the kept lines that say something (Test-ReviewSubstantiveLine).
-    return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $kept }
+    # KeptLines counts only the kept lines that say something, read together (Measure-ReviewSubstantiveLines).
+    $keptCount = Measure-ReviewSubstantiveLines -Text ($kept -join "`n")
+    return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $keptCount }
 }
 
 function Test-ReviewLinesCanBeWithheld {
@@ -2978,7 +3008,10 @@ function Write-ReviewResult {
         }
     }
     $format = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**."
-    $output = $Result.Output.Trim()
+    # Only this function writes review markers: any the reviewer's text carries go before the scan (#974).
+    $output = Remove-ReviewSuppliedMarkers -Text $Result.Output
+    if ($output -cne $Result.Output) { Write-Host 'Removed review markers from the review text; only the job writes them.' }
+    $output = $output.Trim()
     if ($WithholdUnsafeLines) { $Result | Add-Member -NotePropertyName WithheldLines -NotePropertyValue 0 -Force }
     $body = $format -f $CoverageLine.Trim(), $output, $label
     try {
