@@ -3,7 +3,8 @@
 `json.loads` reports most malformed bodies as `ValueError` (bad syntax, invalid UTF-8, an integer too long to
 convert), but a deeply nested body such as `[[[...]]]` exhausts the parser's recursion limit and raises
 `RecursionError` instead. A route that catches only `ValueError` turns that body into a 500. Every request-body parse
-catches `BODY_PARSE_ERRORS`; tests/test_request_body_parse.py audits the source for it."""
+catches `BODY_PARSE_ERRORS` (a module under harness_modules/, which imports only `harness.modules`, spells out the same
+tuple); tests/test_request_body_parse.py audits the source for it."""
 from __future__ import annotations
 
 from typing import Any
