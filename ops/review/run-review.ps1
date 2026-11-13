@@ -2909,7 +2909,7 @@ function Write-ReviewResult {
         }
         Write-Host "Publication safety scan: withheld $described; scanning the rest again."
         $note = $(if ($count -eq 1) { '1 line' } else { "$count lines" })
-        $output = "$($withheld.Text)`n`n_The publication safety scan withheld $note of this review that quoted an absolute path, a credential or a long token, which it never posts. The workflow run log gives the line numbers._"
+        $output = "$($withheld.Text)`n`n_The publication safety scan withheld $note of this review that held text it never posts, such as an absolute path, a credential or a long token. The workflow run log gives the line numbers._"
         $body = $format -f $CoverageLine.Trim(), $output, $label
         Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
         Write-Host "Publication safety scan: the rest of the review passed and is posted with $note withheld."
