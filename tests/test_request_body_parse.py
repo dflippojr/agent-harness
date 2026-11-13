@@ -223,7 +223,8 @@ class _BodyParses(ast.NodeVisitor):
 
     def _function(self, node):
         args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
-        params = {a.arg for a in args if a.annotation is not None and _is_request_annotation(a.annotation)}
+        params = {a.arg for a in args if (a.annotation is not None and _is_request_annotation(a.annotation))
+                  or (a.annotation is None and a.arg in ("request", "req"))}   # an unannotated helper too
         self.functions.append((node.name, params))
         saved, self.tries = self.tries, []
         self.generic_visit(node)
@@ -311,3 +312,4 @@ def test_the_audit_flags_a_parse_that_catches_only_value_error():
     assert scan("async def f(request: Request):\n    return json.loads(await request.body())\n") == [False]
     assert scan("async def f(request: Request):\n    return await json_body(request)\n") == [True]
     assert scan("def f(text):\n    return json.loads(text)\n") == []   # not a request body
+    assert scan("async def _read(request):\n    return json.loads(await request.body())\n") == [False]
