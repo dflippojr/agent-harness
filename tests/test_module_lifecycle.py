@@ -12,6 +12,7 @@ agent tools. Adding a module means adding one row here, not copying a test file.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -386,6 +387,16 @@ def test_service_profile_leaves_every_module_uninstalled(tmp_path, monkeypatch, 
     _check(Manager(config.load(tmp_path / "cfg")), row, "uninstalled")
 
 
+class _WindowsSys:
+    """A `sys` stand-in that reports win32, for a single module (#973): Windows-only settings become available
+    without sending the whole process down its Windows paths (which patching `sys.platform` itself would)."""
+
+    platform = "win32"
+
+    def __getattr__(self, name):
+        return getattr(sys, name)
+
+
 @pytest.mark.parametrize("package,key,value", [
     ("images", "images.job_timeout_seconds", 900),
     ("local_model", "gpu_guard.poll_seconds", 12),
@@ -394,8 +405,14 @@ def test_service_profile_leaves_every_module_uninstalled(tmp_path, monkeypatch, 
     ("backup", "backup.keep_days", 7),
     ("remote_control", "remote_control.discovery.max_depth", 2),
 ])
-def test_an_absent_modules_saved_settings_stay_dormant(tmp_path, package, key, value):
+def test_an_absent_modules_saved_settings_stay_dormant(tmp_path, monkeypatch, package, key, value):
     """Uninstalling a module must not quarantine a managed overlay that still sets one of its keys."""
+    if package == "remote_control":  # its discovery settings exist only on Windows
+        import harness.settings as settings_module
+        import harness_modules.remote_control.discovery_paths as discovery_paths
+
+        monkeypatch.setattr(settings_module, "sys", _WindowsSys())
+        monkeypatch.setattr(discovery_paths, "sys", _WindowsSys())  # no roots are set, so no Windows call follows
     cfg = make_cfg(tmp_path)
     m = Manager(cfg, chat=Script([Completion(content="hi")]))
     m.settings.patch_admin({key: value}, revision=None, actor={"kind": "owner"})

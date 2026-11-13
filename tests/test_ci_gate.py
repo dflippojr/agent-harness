@@ -123,7 +123,8 @@ def test_changes_command_writes_the_output(repo, monkeypatch, tmp_path_factory):
 
 def _needs(tests: str = "true", changes: str = "success", **results: str) -> dict:
     needs = {"changes": {"result": changes, "outputs": {"tests": tests}}}
-    for job in ("lint", "test", "test-py313", "review-linux", "sonar", "openapi", "ui-tests", "hub-contract", "deploy-linux"):
+    for job in ("lint", "test", "test-linux", "coverage", "test-py313", "review-linux", "sonar", "openapi", "ui-tests",
+                "hub-contract", "deploy-linux"):
         needs[job] = {"result": results.get(job.replace("-", "_"), "success"), "outputs": {}}
     return needs
 
@@ -133,13 +134,14 @@ def test_gate_passes_when_every_job_passed():
 
 
 def test_gate_passes_a_docs_only_change_with_tests_skipped():
-    needs = _needs("false", test="skipped", test_py313="skipped", review_linux="skipped", sonar="skipped",
-                   openapi="skipped", ui_tests="skipped", hub_contract="skipped")
+    needs = _needs("false", test="skipped", test_linux="skipped", coverage="skipped", test_py313="skipped",
+                   review_linux="skipped", sonar="skipped", openapi="skipped", ui_tests="skipped", hub_contract="skipped")
     assert ci_gate.gate_failures(needs) == []
 
 
 @pytest.mark.parametrize(
-    "job", ["lint", "test", "test_py313", "review_linux", "openapi", "ui_tests", "hub_contract", "sonar"])
+    "job", ["lint", "test", "test_linux", "coverage", "test_py313", "review_linux", "openapi", "ui_tests", "hub_contract",
+            "sonar"])
 @pytest.mark.parametrize("result", ["failure", "cancelled"])
 def test_gate_fails_when_a_pull_request_job_failed_or_was_cancelled(job, result):
     failures = ci_gate.gate_failures(_needs(**{job: result}))
@@ -152,17 +154,18 @@ def test_gate_fails_when_tests_were_wanted_but_skipped():
 
 
 def test_gate_fails_when_lint_was_skipped_even_on_a_docs_only_change():
-    needs = _needs("false", lint="skipped", test="skipped", review_linux="skipped", sonar="skipped",
-                   openapi="skipped", ui_tests="skipped", hub_contract="skipped")
+    needs = _needs("false", lint="skipped", test="skipped", test_linux="skipped", coverage="skipped",
+                   review_linux="skipped", sonar="skipped", openapi="skipped", ui_tests="skipped", hub_contract="skipped")
     assert ci_gate.gate_failures(needs) == ["lint: skipped although it runs on every change"]
 
 
 def test_gate_fails_when_changes_failed():
-    needs = _needs("", changes="failure", test="skipped", test_py313="skipped", review_linux="skipped",
-                   sonar="skipped", openapi="skipped", ui_tests="skipped", hub_contract="skipped")
+    needs = _needs("", changes="failure", test="skipped", test_linux="skipped", coverage="skipped",
+                   test_py313="skipped", review_linux="skipped", sonar="skipped", openapi="skipped", ui_tests="skipped",
+                   hub_contract="skipped")
     failures = ci_gate.gate_failures(needs)
     assert failures[0] == "changes: failure"
-    assert len(failures) == 7  # and each test job skipped without a decision
+    assert len(failures) == 8  # and each test job skipped without a decision
 
 
 def test_gate_fails_on_a_failed_sonar():
@@ -239,7 +242,9 @@ def test_test_jobs_skip_only_on_the_changes_decision():
     for job in ci_gate.TEST_JOBS:
         assert CI["jobs"][job]["needs"] == "changes", job
         assert CI["jobs"][job]["if"] == "needs.changes.outputs.tests == 'true'", job
-    assert CI["jobs"]["sonar"]["needs"] == "test"
+    # Combined coverage (#973) runs after both coverage runs, and the analysis after it: both skip with the tests.
+    assert CI["jobs"]["coverage"]["needs"] == ["test", "test-linux"]
+    assert CI["jobs"]["sonar"]["needs"] == "coverage"
 
 
 def test_main_pushes_never_cancel_or_replace_each_other():
@@ -250,9 +255,13 @@ def test_main_pushes_never_cancel_or_replace_each_other():
 
 
 def test_coverage_has_a_floor():
-    run = next(s for s in CI["jobs"]["test"]["steps"] if s.get("name") == "Run tests with coverage")["run"]
-    assert "--cov-fail-under=88" in run
-    assert CI_TEXT.count("--cov-fail-under") == 1
+    # The floor applies to the union of the Windows and Linux runs (#973), in the one place it is set.
+    run = next(s for s in CI["jobs"]["coverage"]["steps"] if s.get("name") == "Combine coverage and apply the floor")["run"]
+    assert "coverage report --fail-under=88" in run
+    assert CI_TEXT.count("fail-under") == 1
+    for job in ("test", "test-linux"):
+        step = next(s for s in CI["jobs"][job]["steps"] if s.get("name") == "Run tests with coverage")
+        assert all(f"--cov={pkg}" in step["run"] for pkg in ("harness", "harness_modules", "sdk", "scripts", "macrunner"))
 
 
 def test_publish_and_deploy_wait_for_the_guard():

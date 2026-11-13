@@ -329,6 +329,22 @@ def test_remote_control_refuses_untrusted_and_reports_failures(tmp_path):
     asyncio.run(failing())
 
 
+def _pretend_windows(monkeypatch, rc_module) -> None:
+    """Make only the Remote Control service see Windows: its own `sys` reports win32 (patching `sys.platform` itself
+    would send every module in the process down its Windows path) and `subprocess` carries the console flags that
+    exist only on Windows, so these tests run on Linux too (#973)."""
+
+    class _WindowsSys:
+        platform = "win32"
+
+        def __getattr__(self, name):
+            return getattr(_sys, name)
+
+    monkeypatch.setattr(rc_module, "sys", _WindowsSys())
+    for flag, value in (("CREATE_NEW_CONSOLE", 0x10), ("CREATE_NEW_PROCESS_GROUP", 0x200), ("CREATE_NO_WINDOW", 0x8000000)):
+        monkeypatch.setattr(rc_module.subprocess, flag, getattr(rc_module.subprocess, flag, value), raising=False)
+
+
 def test_remote_control_opens_trust_prompt_in_exact_folder(tmp_path, monkeypatch):
     import harness_modules.remote_control.service as rc_module
 
@@ -349,7 +365,7 @@ def test_remote_control_opens_trust_prompt_in_exact_folder(tmp_path, monkeypatch
         return process
 
     rc.popen = fake_popen
-    monkeypatch.setattr(rc_module.sys, "platform", "win32")
+    _pretend_windows(monkeypatch, rc_module)
     monkeypatch.setattr(rc_module.shutil, "which", lambda name: "C:\\Windows\\powershell.exe" if name == "powershell.exe" else None)
 
     view = rc.open_trust_prompt("repo")
@@ -384,7 +400,7 @@ def test_remote_control_trust_web_endpoint(tmp_path, monkeypatch):
             return None
 
     rc.popen = lambda command, **kwargs: FakeProcess()
-    monkeypatch.setattr(rc_module.sys, "platform", "win32")
+    _pretend_windows(monkeypatch, rc_module)
     monkeypatch.setattr(rc_module.shutil, "which", lambda name: "powershell.exe")
     manager = Manager(rc.cfg, chat=Script([Completion(content="unused")]))
     manager.remote_control = rc

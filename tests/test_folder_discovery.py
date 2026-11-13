@@ -225,7 +225,20 @@ def test_registry_has_only_dedicated_owner_settings(tmp_path, monkeypatch):
         service.patch_admin({'remote_control.discovery.enabled': True}, 0)
 
 
+class _WindowsSys:
+    """A `sys` stand-in that reports win32, for a single module (#973): Windows-only settings become available
+    without sending the whole process down its Windows paths (which patching `sys.platform` itself would)."""
+
+    platform = "win32"
+
+    def __getattr__(self, name):
+        return getattr(sys, name)
+
+
 def test_stale_root_does_not_block_unrelated_settings(tmp_path, monkeypatch):
+    import harness.settings as settings_module
+
+    monkeypatch.setattr(settings_module, 'sys', _WindowsSys())
     cfg = make_cfg(tmp_path)
     service = SettingsService(cfg)
     calls = []

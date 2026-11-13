@@ -32,7 +32,7 @@ import asyncio
 import json
 import logging
 import math
-import os
+import ntpath
 import re
 import sys
 import time
@@ -151,7 +151,7 @@ def find_games(cfg: GpuGuardConfig, paths: list[str], titles: list[str]) -> list
     names = {n.lower() for n in cfg.game_processes}
     for path in paths:
         low = path.lower()
-        exe = os.path.basename(path)
+        exe = ntpath.basename(path)  # splits on \ and /, so a process path names its file on any host
         if any(i in low for i in ignore):
             continue
         if exe.lower() in names or any(d in low for d in dirs):

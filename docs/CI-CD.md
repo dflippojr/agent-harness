@@ -3,9 +3,11 @@
 `.github/workflows/ci.yml` is the single test workflow, and `.github/workflows/ci-cd.yml` publishes and deploys only
 after that workflow succeeds for the exact commit pushed to `main`:
 
-1. **CI / test** runs the complete test suite once, with coverage, on GitHub-hosted `windows-latest` for pull
-   requests and pushes to `main`, and uploads `coverage.xml` as an artifact. **CI / sonar** (same workflow,
-   `needs: test`) feeds that coverage to SonarCloud and waits for the quality gate. A failing gate fails the check on
+1. **CI / test** runs the complete test suite, with coverage, on GitHub-hosted `windows-latest` for pull
+   requests and pushes to `main`, and **CI / test-linux** (#973) runs it again on `ubuntu-latest`, so code that runs
+   on only one platform is tested and measured where it runs. Each uploads its `.coverage` data. **CI / coverage**
+   combines the two, fails below 88% of the union, and uploads `coverage.xml`. **CI / sonar** (same workflow,
+   `needs: coverage`) feeds that coverage to SonarCloud and waits for the quality gate. A failing gate fails the check on
    pull requests and fails the CI run on a push to `main`, so it blocks deployment just as failing tests do (#728).
    Tests used to run a second time on a self-hosted `agent-harness-ci` pool on the
    tower; that pool is retired so CI no longer competes with llama-server for the tower's RAM.
@@ -135,17 +137,20 @@ Dependabot PR has no token yet, the job emits a notice and a summary explicitly 
 performed, and skips the scanner. Add an authorized analysis token in GitHub Settings → Secrets and variables →
 Dependabot → New repository secret, named exactly `SONARCLOUD_TOKEN`, then rerun the Dependabot PR workflow and
 verify analysis for its head commit in SonarCloud. A missing token on an ordinary PR or `main` push fails the
-Sonar job. The `test` job installs `pytest-cov`
-and `pytest-xdist` as extras (not in `requirements.txt`), logs `NUMBER_OF_PROCESSORS` to confirm the hosted 4-vCPU
-shape, then runs `python -m pytest tests -q -n 4 --dist loadfile` with pytest-cov Cobertura output
-(`coverage.xml`), which `sonar` downloads before scanning. Both jobs use `windows-latest`, so the absolute source paths
-in `coverage.xml` resolve. Worker count is fixed at 4 (not pytest's auto count) because a public-repo
-`windows-latest` runner has 4 vCPUs. pytest-cov merges xdist workers into one `coverage.xml`.
+Sonar job. The `test` and `test-linux` jobs install `pytest-cov`
+and `pytest-xdist` as extras (not in `requirements.txt`); `test` logs `NUMBER_OF_PROCESSORS` to confirm the hosted
+4-vCPU shape. Both run `python -m pytest tests -q -n 4 --dist loadfile` with pytest-cov, which merges the xdist workers
+into one `.coverage` data file per job, uploaded as `coverage-data-windows` and `coverage-data-linux`. The `coverage`
+job runs `coverage combine` on the two, `coverage report --fail-under=88` (the only coverage floor), writes
+`coverage.xml` with the five measured packages as its sources (the shape pytest-cov wrote before), and uploads it for
+`sonar` to download before scanning. `.coveragerc` records relative file paths (`relative_files = True`), so the
+Windows and Linux data combine. Worker count is fixed at 4 (not pytest's auto count) because the public-repo hosted runners have 4
+vCPUs.
 `COVERAGE_CORE=sysmon` is not used: `.coveragerc` sets `branch = True`, and coverage.py's sysmon core cannot
 measure branches on Python 3.12 (this job; sysmon branch support starts at 3.14). The scan still uses
-`sonar.qualitygate.wait=true`. The suite is Windows-native; Ubuntu hosted runners fail coverage collection on
-`msvcrt`, console-creation flags, and Windows paths. Docker-image and GPU tests still skip on the hosted runner
-and do not contribute coverage. Non-Python trees (`ops`, scripts that are not `.py`) are excluded
+`sonar.qualitygate.wait=true`. Tests of Windows-only behaviour (consoles, ACLs, Windows paths) emulate Windows
+for the module under test only, never through `sys.platform` itself, so they run on Linux too. Docker-image and GPU
+tests still skip on the hosted runners and do not contribute coverage. Non-Python trees (`ops`, scripts that are not `.py`) are excluded
 from the coverage metric. Confirm the SonarCloud project still uses a gate that includes coverage on new code;
 the workflow cannot set that condition itself. PR analysis stays on GitHub-hosted Windows; it must not move to
 the tower.
