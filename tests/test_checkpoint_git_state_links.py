@@ -194,10 +194,9 @@ def test_put_git_state_writes_head_and_index_back(ws, branch):
     assert (ws / ".git" / "HEAD").read_bytes() == state["head"]
     assert (ws / ".git" / "index").read_bytes() == state["index"]
     assert sh(ws, "status", "--porcelain") == "?? b.txt\n"
-    if os.name == "posix":  # a new file at git's usual mode, not the temp file's private one
-        umask = os.umask(0)
-        os.umask(umask)
-        assert (ws / ".git" / "HEAD").stat().st_mode & 0o777 == 0o666 & ~umask
+    probe = ws / ".git" / "probe"  # a plain new file gets the mode git gives one, not the temp file's private 0600
+    probe.write_bytes(b"")
+    assert (ws / ".git" / "HEAD").stat().st_mode & 0o777 == probe.stat().st_mode & 0o777
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
@@ -207,4 +206,8 @@ def test_put_git_state_removes_an_index_the_checkpoint_did_not_have(ws, branch):
     checkpoints.put_git_state(ws, state)
 
     assert (ws / ".git" / "HEAD").read_bytes() == state["head"]
+    assert not (ws / ".git" / "index").exists()
+
+    checkpoints.put_git_state(ws, state)  # no index to remove: nothing to do
+
     assert not (ws / ".git" / "index").exists()
