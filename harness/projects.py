@@ -452,8 +452,31 @@ class _StateDir:
         self._replace(name, fill, 0o600)
 
     def write_bytes(self, name: str, data: bytes) -> None:
-        """Write `data` to `name` the same way as `write`; a new file gets git's usual mode (0666 less the umask)."""
-        self._replace(name, lambda out: _write_all(out, data), 0o666)
+        """Write `data` to `name` the same way as `write`. The temp file is owner-only while the content goes in;
+        then it takes the permission bits of the regular file it replaces, so a mode is kept and never widened. A
+        new file stays owner-only."""
+        try:
+            existing = os.stat(self._at(name), dir_fd=self.fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            existing = 0
+
+        def fill(out: int) -> None:
+            _write_all(out, data)
+            if self.fd is not None and stat.S_ISREG(existing):  # Windows has no mode bits to keep
+                os.chmod(out, stat.S_IMODE(existing) & 0o777)
+
+        self._replace(name, fill, 0o600)
+
+    def unlink_file(self, name: str) -> None:
+        """Remove regular file `name`; a missing one is fine, anything else is refused. The removal is one unlink
+        call (relative to the held directory on POSIX), which never removes a directory, let alone its contents, so
+        a directory raced in after the check fails the call. A link raced in is itself removed, never its target."""
+        kind = self.kind(name)
+        if kind == _MISSING:
+            return
+        if kind != _FILE:
+            raise GitError(f"refusing symlinked or special git state {name}")
+        os.unlink(self._at(name), dir_fd=self.fd)
 
     def _replace(self, name: str, fill, mode: int) -> None:
         temp = _temp_name()
@@ -563,18 +586,18 @@ def put_state_file(git_dir: Path, name: str, data: bytes | None) -> None:
 
     Uses the state copy's link-safe access (`_StateDir`): every directory from the filesystem root down to `git_dir`
     is opened without following a link, and the file is written to a temp file renamed over `name`, so a link raced
-    in at `name` is replaced, never written through. A link or anything but a regular file already at `name` is
-    refused. Fails closed with GitError, also where that access is unavailable.
+    in at `name` is replaced, never written through; the file keeps its mode (`_StateDir.write_bytes`). Removal unlinks
+    a regular file only and never recurses (`_StateDir.unlink_file`). A link or anything but a regular file already
+    at `name` is refused. Fails closed with GitError, also where that access is unavailable.
     """
     try:
         with _StateDir.open(git_dir) as d:
-            kind = d.kind(name)
-            if kind not in (_FILE, _MISSING):
+            if data is None:
+                d.unlink_file(name)
+                return
+            if d.kind(name) not in (_FILE, _MISSING):
                 raise GitError(f"refusing symlinked or special git state {name}")
-            if data is not None:
-                d.write_bytes(name, data)
-            elif kind == _FILE:
-                d.remove(name)
+            d.write_bytes(name, data)
     except GitError:
         raise
     except OSError as e:  # a link or a type change on the path (ELOOP, ENOTDIR, ...), or a failed write
