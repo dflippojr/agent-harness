@@ -2780,20 +2780,61 @@ function Add-ReviewDiffContext {
     return (Format-ReviewDiffPrompt -Prompt $Prompt -Embedding $embedding)
 }
 
+function Get-ReviewRuleHitLines {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+
+    # The 0-based lines of $Text that hold a match of a path, credential or token rule in any scan form of
+    # the whole text, as Get-ReviewRuleHits reads it: the same forms, masking and URL segmenting, split line
+    # by line. A match may need context from another line (a reference definition anywhere drops every
+    # bracket), so scanning each line alone can miss it. Returns $null when a form does not keep the raw
+    # text's lines, since a form line then does not name a raw line. A line tested on its own loses only
+    # what lies before it, which can add a match but never hide one.
+    $lineCount = @($Text -split "`n").Count
+    $hitLines = New-Object 'System.Collections.Generic.HashSet[int]'
+    $rules = @(Get-ReviewRedactionRules)
+    $mark = {
+        param([string]$FormText, [string[]]$Patterns)
+        $formLines = @($FormText -split "`n")
+        if ($formLines.Count -ne $lineCount) { return $false }
+        for ($i = 0; $i -lt $formLines.Count; $i++) {
+            foreach ($pattern in $Patterns) { if ([regex]::IsMatch($formLines[$i], $pattern)) { [void]$hitLines.Add($i); break } }
+        }
+        return $true
+    }
+    $unmasked = @($script:ReviewAbsoluteRootPattern) + @($rules | Where-Object { -not $_.Maskable } | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
+    $maskable = @($rules | Where-Object { $_.Maskable } | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
+    foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
+        if (-not (& $mark $form.Text $unmasked)) { return $null }
+    }
+    $maskedText = Remove-ReviewRepositoryCitations -Text $Text -Paths $KnownPaths
+    foreach ($form in (Get-ReviewNamedScanForms -Text $maskedText)) {
+        if (-not (& $mark (Remove-ReviewRepositoryCitations -Text $form.Text -Paths $KnownPaths) @($script:ReviewProfileSegmentPattern))) { return $null }
+    }
+    $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
+    foreach ($form in (Get-ReviewNamedScanForms -Text $segmented)) {
+        if (-not (& $mark (Remove-ReviewRepositoryCitations -Text $form.Text -Paths $KnownPaths) $maskable)) { return $null }
+    }
+    return , $hitLines
+}
+
 function Get-ReviewWithheldOutput {
     param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
 
-    # Each line of the review that a path, credential or token rule rejects on its own, replaced whole
-    # (#974). A match is often only a prefix (a root or one segment), and the rest of the line may
-    # continue what it names, so the matched span alone is never enough. A list marker, quote marker and
-    # indentation are kept so the review keeps its shape. Call it only once Test-ReviewLinesCanBeWithheld
-    # passes; the caller scans the whole result again, so nothing that fails is ever published.
+    # Each line of the review that a path, credential or token rule rejects, replaced whole (#974): a line
+    # that fails on its own, and a line that holds a match in the whole text's scan forms. A match is often
+    # only a prefix (a root or one segment), and the rest of the line may continue what it names, so the
+    # matched span alone is never enough. A list marker, quote marker and indentation are kept so the
+    # review keeps its shape. Call it only once Test-ReviewLinesCanBeWithheld passes, so no match crosses a
+    # line; the caller scans the whole result again, so nothing that fails is ever published. Returns
+    # $null when the lines cannot be told apart (Get-ReviewRuleHitLines).
+    $contextLines = Get-ReviewRuleHitLines -Text $Text -KnownPaths $KnownPaths
+    if ($null -eq $contextLines) { return $null }
     $lines = @($Text -split "`r?`n")
     $withheld = New-Object System.Collections.Generic.List[int]
     $kept = 0
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ([string]::IsNullOrWhiteSpace($lines[$i])) { continue }
-        if (@(Get-ReviewRuleHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) { $kept++; continue }
+        if (-not $contextLines.Contains($i) -and @(Get-ReviewRuleHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) { $kept++; continue }
         $prefix = [regex]::Match($lines[$i], '^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?').Value
         $lines[$i] = $prefix + $script:ReviewWithheldLine
         $withheld.Add($i + 1)
@@ -2935,6 +2976,10 @@ function Write-ReviewResult {
             throw
         }
         $withheld = Get-ReviewWithheldOutput -Text $output -KnownPaths $knownPaths
+        if ($null -eq $withheld) {
+            Write-Warning 'Publication safety scan: a scan form moves text between lines, so no line can be withheld.'
+            throw
+        }
         $count = $withheld.Lines.Count
         if ($count -eq 0) {
             Write-Warning 'Publication safety scan: no single line of the review fails on its own, so none could be withheld.'
