@@ -411,14 +411,11 @@ function Get-ReviewPublishPattern {
 # UNC roots may use either separator; a URL authority (after a scheme's colon) is not one.
 $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
 # Review text may quote a protocol-relative URL (#781). In prose a network path and a scheme-less URL are
-# spelled the same, so the exemption applies only where the text marks a URL, and only for an allowlisted
-# host. Both parts are narrow by construction: allowlists of spellings, not lists of bad hosts.
-# - Context: the root starts an href or src attribute value (href=" href=' src=" src=', the exact name
-#   with whitespace before it, so no longer or prefixed name such as data-href, data:href, xlink:href,
-#   img.src or srcset; a backslash allowed before the quote as in an escaped string; no space after the
-#   name), or a Markdown link or image destination (directly after "](").
-#   Everything else is refused: bare prose, code spans and fences without such a context, unquoted or
-#   space-padded attributes, title= and other attributes, "] (", "]( ", "](<", reference definitions.
+# spelled the same, so the publication scan (Find-ReviewPublishAbsoluteRoot) exempts one only where the text
+# marks it as a URL, and only for an allowlisted host. Both parts are narrow by construction.
+# - Context (Get-ReviewUrlValueStarts): the root starts the value of an exact href or src attribute in a
+#   complete start tag, as Get-ReviewHtmlToken reads it (the tokenizer the rendered-form scan uses, so the
+#   two cannot disagree), or a Markdown link or image destination (directly after "](").
 # - Root: a forward slash, then a forward slash or a backslash (browsers read /\host/ as //host/, and
 #   Windows reads both as the same UNC root).
 # - Host: two or more labels, each made of letters joined by single hyphens, the last one com, net or org,
@@ -428,12 +425,11 @@ $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\
 #   outside com, net and org, except the documentation domains example.com, example.net and example.org;
 #   wildcard-IP DNS services are outside them too. Any other TLD, a backslash after the host, a \/ or \\
 #   lead, user info or a trailing dot is a network root.
-# The rule reads spelling only (what a public name resolves to is not checked), and decoded forms are
-# scanned too, so an encoded context or root gets the same answer. It applies to the publication scan
-# only: diagnostics redaction keeps the strict pattern above.
-$script:ReviewPublishUrlContext = '(?<=(?<=\s)(?:href|src)=\\?["'']|\]\()'
-$script:ReviewPublishUrlHost = '/[\\/](?:(?![a-f]{1,4}(?:-[a-f]{1,4})+\.)[a-z]+(?:-[a-z]+)*\.)+(?:com|net|org)(?::[0-9]{1,5})?/'
-$script:ReviewPublishAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])(?!' + $script:ReviewPublishUrlContext + $script:ReviewPublishUrlHost + ')[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
+# The rule reads spelling only (what a public name resolves to is not checked). Every scan form is checked
+# on its own and any hit rejects the body. It applies to the publication scan only: diagnostics redaction
+# keeps the strict pattern above.
+$script:ReviewAbsoluteRootRegex = [regex]::new($script:ReviewAbsoluteRootPattern)
+$script:ReviewPublishUrlHostRegex = [regex]::new('(?i)\G/[\\/](?:(?![a-f]{1,4}(?:-[a-f]{1,4})+\.)[a-z]+(?:-[a-z]+)*\.)+(?:com|net|org)(?::[0-9]{1,5})?/')
 # Trailing periods, spaces or short-name tildes still match (Windows aliases); users.md or rooted do not.
 $script:ReviewProfileSegmentPattern = '(?i)[\\/](?:users|home|root|documents and settings)(?![\p{L}\p{N}\p{M}_-])(?!\.[\p{L}\p{N}])'
 # GitHub decodes HTML5 named entities that WebUtility.HtmlDecode does not know; these spell ASCII punctuation.
@@ -682,11 +678,13 @@ function Get-ReviewHtmlToken {
 
     # The markup an HTML5 tokenizer reads from the < at $Start, as GitHub's sanitizer and a browser
     # read a raw HTML block: its length, whether it ends before the end of $Text, and for a start tag
-    # its lower-case name and attribute names. $null when the < is text.
+    # its lower-case name, attribute names, and the offset of each attribute value it reads (Values:
+    # Name, Start and Quoted). $null when the < is text.
     $length = $Text.Length
     $space = " `t`n`r`f"
+    $values = [System.Collections.Generic.List[object]]::new()
     $token = { param([int]$End, [string]$Name = '', $Attributes = @())
-        [pscustomobject]@{ Length = [Math]::Min($End, $length) - $Start; Complete = $End -le $length; Name = $Name; Attributes = @($Attributes) } }
+        [pscustomobject]@{ Length = [Math]::Min($End, $length) - $Start; Complete = $End -le $length; Name = $Name; Attributes = @($Attributes); Values = @($values) } }
     $toClose = { param([int]$From) $end = $Text.IndexOf('>', [Math]::Min($From, $length)); if ($end -lt 0) { $length + 1 } else { $end + 1 } }
     $startsWith = { param([string]$Value) $Value.Length -le $length - $Start -and [string]::CompareOrdinal($Text, $Start, $Value, 0, $Value.Length) -eq 0 }
     if ($Start + 1 -ge $length) { return $null }
@@ -728,16 +726,68 @@ function Get-ReviewHtmlToken {
         while ($index -lt $length -and $space.IndexOf($Text[$index]) -ge 0) { $index++ }
         if ($index -ge $length) { break }
         $quote = $Text[$index]
+        $attribute = $attributes[$attributes.Count - 1]
         if ($quote -eq '"' -or $quote -eq "'") {
             # A quoted value may hold > or <.
+            $valueStart = $index + 1
             $index = $Text.IndexOf($quote, $index + 1)
             if ($index -lt 0) { break }
+            $values.Add([pscustomobject]@{ Name = $attribute; Start = $valueStart; Quoted = $true })
             $index++
         } else {
+            $values.Add([pscustomobject]@{ Name = $attribute; Start = $index; Quoted = $false })
             while ($index -lt $length -and $space.IndexOf($Text[$index]) -lt 0 -and $Text[$index] -ne '>') { $index++ }
         }
     }
     return & $token ($length + 1) $name $attributes
+}
+
+function Get-ReviewUrlValueStarts {
+    param([AllowEmptyString()][string]$Text)
+
+    # The offsets in $Text where a link target starts (#781): the value of an exact href or src attribute
+    # in a complete start tag, as Get-ReviewHtmlToken reads it, and each Markdown link or image destination
+    # (just after "]("). An unquoted value that opens with a backslash-escaped quote, as in a string
+    # literal, starts after that quote. Markup is read as in a document: a < inside a tag is not a new tag.
+    $starts = New-Object 'System.Collections.Generic.HashSet[int]'
+    $at = $Text.IndexOf('<')
+    while ($at -ge 0) {
+        $next = $at + 1
+        $token = Get-ReviewHtmlToken -Text $Text -Start $at
+        if ($token -and $token.Complete) {
+            $next = $at + $token.Length
+            if ($token.Name) {
+                foreach ($value in $token.Values) {
+                    if ($value.Name -cne 'href' -and $value.Name -cne 'src') { continue }
+                    $start = $value.Start
+                    if (-not $value.Quoted -and $start + 1 -lt $Text.Length -and $Text[$start] -eq '\' -and ($Text[$start + 1] -eq '"' -or $Text[$start + 1] -eq "'")) { $start += 2 }
+                    [void]$starts.Add($start)
+                }
+            }
+        }
+        $at = if ($next -lt $Text.Length) { $Text.IndexOf('<', $next) } else { -1 }
+    }
+    foreach ($destination in [regex]::Matches($Text, '\]\(')) { [void]$starts.Add($destination.Index + 2) }
+    return , $starts
+}
+
+function Find-ReviewPublishAbsoluteRoot {
+    param([AllowEmptyString()][string]$Text)
+
+    # The first absolute root in $Text that the publication scan rejects: a match of the strict pattern,
+    # unless it is an allowlisted protocol-relative host at the start of a link target (#781). After an
+    # exempt match the search resumes one character later, as a lookahead in the pattern would.
+    $starts = $null
+    $at = 0
+    while ($true) {
+        $match = $script:ReviewAbsoluteRootRegex.Match($Text, $at)
+        if (-not $match.Success) { return $match }
+        if ($script:ReviewPublishUrlHostRegex.Match($Text, $match.Index).Success) {
+            if ($null -eq $starts) { $starts = Get-ReviewUrlValueStarts -Text $Text }
+            if ($starts.Contains($match.Index)) { $at = $match.Index + 1; continue }
+        }
+        return $match
+    }
 }
 
 function Get-ReviewMarkdownLines {
@@ -1105,7 +1155,7 @@ function Get-ReviewRuleHits {
     $forms = { param([string]$Value) Get-ReviewNamedScanForms -Text $Value -PlainText:$PlainText }
     $check = {
         param([string]$RuleName, [string]$FormName, [string]$FormText, [string]$Pattern)
-        $match = [regex]::Match($FormText, $Pattern)
+        $match = if ($RuleName -eq 'absolute-root') { Find-ReviewPublishAbsoluteRoot -Text $FormText } else { [regex]::Match($FormText, $Pattern) }
         if ($FormPrefix) { $FormName = if ($FormName -eq 'raw') { $FormPrefix } else { "$FormPrefix-$FormName" } }
         if ($match.Success) {
             $classes = if ($RuleName -eq 'long-token') { ", classes $(Get-ReviewCharacterClasses -Value $match.Value)" } else { '' }
@@ -1114,7 +1164,7 @@ function Get-ReviewRuleHits {
     }
     # Absolute roots and credential patterns always scan the unmasked text.
     foreach ($form in (& $forms $Text)) {
-        if (-not $CredentialsOnly) { & $check 'absolute-root' $form.Name $form.Text $script:ReviewPublishAbsoluteRootPattern }
+        if (-not $CredentialsOnly) { & $check 'absolute-root' $form.Name $form.Text '' }
         foreach ($rule in $credentialRules) { & $check $rule.Name $form.Name $form.Text (Get-ReviewPublishPattern -Rule $rule) }
     }
     if ($CredentialsOnly) { return }

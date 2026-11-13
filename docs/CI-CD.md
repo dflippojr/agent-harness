@@ -355,14 +355,14 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
   prefix (`\\server\`, `//server/`, `\\?\`, `\\.\`), or a `file:` URL.
   A review can quote a protocol-relative URL only where the text marks it as one (#781), since in prose a network
   path and a scheme-less URL are spelled the same. Both the context and the host are allowlists. The context is an
-  `href` or `src` attribute value (`href="`, `href='`, `src="` or `src='`: the exact name with whitespace before it, so
-  not `data-href`, `data:href`, `xlink:href`, `img.src` or `srcset`, and no space after it; a backslash before the quote
-  is allowed, as in an escaped string) or a Markdown link
-  or image destination (directly after `](`). The URL is `//` or `/\` (which browsers read as `//`), a host of two or
+  `href` or `src` attribute value in a complete start tag, read by the scan's own HTML tokenizer (the one the rendered
+  forms use), so only an exact `href` or `src` attribute name counts, attribute names split only at HTML's ASCII
+  whitespace, and a value that starts with a space is not a URL; an unquoted value that opens with a backslash-escaped
+  quote, as in a string literal, starts after it) or a Markdown link or image destination (directly after `](`). The URL is `//` or `/\` (which browsers read as `//`), a host of two or
   more labels made only of letters joined by single hyphens, whose last label is `com`, `net` or `org`, an optional
   `:port`, then `/`. So `<a href="//example.com/posts/1">`, `` `<img src="//cdn.example.com/a.png">` ``,
   `[feed](//blog.example.net/feed.xml)` and `![logo](//cdn.example.org/a.png)` publish. A bare `//example.com/x` in
-  prose, a code span or a fence is refused, and so are `title="//..."`, unquoted or space-padded attributes,
+  prose, a code span or a fence is refused, and so are `title="//..."`, `href="//..."` outside a tag,
   `] (//...)`, `]( //...)`, `](<//...>)` and reference definitions. No digit can appear in the host, so no IPv4
   address in any spelling (dotted, dashed or hex) and no compressed IPv6; a label of hyphen-joined hex groups is not
   exempt either. Every IANA special-use name (`.alt`, `.arpa`, `.onion`, `.local`, `.localhost`, `.test`, ...) falls

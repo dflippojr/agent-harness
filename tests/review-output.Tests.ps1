@@ -480,6 +480,7 @@ Describe 'Review publication safety' {
         # personal-website 557ad69 (PR #271's test) keeps a backslash spelling that browsers read as protocol-relative.
         @{ Payload = 'The test passes `''<a href="//example.com/p">p</a> <a href="/\\example.com/p">q</a> <img src=\''//example.com/i.png\'' alt="">''`.' }
         @{ Payload = 'A Markdown link may use it too: [p](/\example.com/p).' }
+        @{ Payload = "Tabs separate attributes as spaces do: ``<a`tclass=`"feed`"`thref=`"//example.com/feed.xml`">``." }
         @{ Payload = '**Structure** `harness/__init__.py`: keep the `<n>` placeholder.' }
         @{ Payload = 'Send a Bearer token in the header; the `Bearer` scheme is case-insensitive.' }
         @{ Payload = 'The header is built as `f"Bearer {token}"`.' }
