@@ -319,3 +319,33 @@ def test_put_git_state_keeps_a_directory_that_took_the_temp_name_after_a_failed_
 
     assert len(taken) == 1
     assert (taken[0] / "keep").read_bytes() == b"keep\n"
+
+
+def test_state_dir_remove_never_removes_a_directory(tmp_path):
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "keep").write_bytes(b"keep\n")
+    (tmp_path / "f").write_bytes(b"f\n")
+
+    with projects._StateDir.open(projects._resolve(tmp_path)) as d:
+        with pytest.raises(GitError, match="directory"):
+            d.remove("d")
+        d.remove("f")
+        d.remove("missing")
+
+    assert (tmp_path / "d" / "keep").read_bytes() == b"keep\n"
+    assert not (tmp_path / "f").exists()
+
+
+def test_copy_git_state_turns_a_ref_directory_into_a_ref_file(tmp_path):
+    """Git's directory/file switch (refs/heads/a/b deleted, refs/heads/a created) still reaches the workspace: the
+    stale ref directory is removed on purpose, through `remove_tree`."""
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "refs" / "heads").mkdir(parents=True)
+    (src / "HEAD").write_bytes(b"ref: refs/heads/a\n")
+    (src / "refs" / "heads" / "a").write_bytes(b"aaa\n")
+    (dst / "refs" / "heads" / "a" / "b").mkdir(parents=True)
+    (dst / "refs" / "heads" / "a" / "b" / "c").write_bytes(b"old\n")
+
+    projects._copy_git_state(src, dst)
+
+    assert (dst / "refs" / "heads" / "a").read_bytes() == b"aaa\n"
