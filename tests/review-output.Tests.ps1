@@ -779,6 +779,8 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Case = 'tags only'; Kept = '<details><summary></summary></details>' }
         @{ Case = 'a tag spanning lines'; Kept = "<p`nclass=placeholder></p>" }
         @{ Case = 'an entity'; Kept = '&nbsp;' }
+        @{ Case = 'a style element'; Kept = '<style>p { color: red }</style>' }
+        @{ Case = 'a script element spanning lines'; Kept = "<script>`nvar note = 1`n</script>" }
         @{ Case = 'an empty ordered list item'; Kept = '1.' }
         @{ Case = 'an empty ordered list item, paren'; Kept = '12)' }
         @{ Case = 'an empty ordered list item, trailing spaces'; Kept = "2.  `t" }
