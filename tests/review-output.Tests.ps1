@@ -767,6 +767,11 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Case = 'nested empty lists'; Kept = '- 1. * 2)' }
         @{ Case = 'an empty task item'; Kept = '- [x]' }
         @{ Case = 'a heading and an empty quote'; Kept = "### Notes`n>`n> >" }
+        @{ Case = 'a setext heading, dashes'; Kept = "Findings`n--------" }
+        @{ Case = 'a setext heading, equals'; Kept = "Notes`n  ===" }
+        @{ Case = 'a setext heading in a quote'; Kept = "> Notes`n> ---" }
+        @{ Case = 'a setext heading in a list item'; Kept = "- Notes`n  ---" }
+        @{ Case = 'an empty ordered list item, CRLF'; Kept = "1.`r`n2)`r`n" }
         @{ Case = 'emphasis only'; Kept = '**__**' }
         @{ Case = 'a fence with an info string'; Kept = "``````python`n``````" }
         @{ Case = 'a reference definition'; Kept = '[note]: https://example.invalid' }
@@ -786,6 +791,8 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Kept = '1. a finding' }
         @{ Kept = '> - 1. ok' }
         @{ Kept = '<b>ok</b>' }
+        # A rule after a list item is a rule, not a heading underline.
+        @{ Kept = "- a finding`n---" }
     ) {
         param($Kept)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "## Findings`n- app.py:1: C:\fixture\x`n$Kept" }
