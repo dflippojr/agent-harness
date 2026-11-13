@@ -34,7 +34,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
@@ -441,10 +441,8 @@ class _StateDir:
     def _discard(self, temp: str) -> None:
         """Best-effort cleanup of this object's own temp file after a failure: non-recursive, so anything but a
         file or link at that name is left alone, and a cleanup error never replaces the original one."""
-        try:
+        with suppress(OSError, GitError):
             self.remove(temp)
-        except (OSError, GitError):
-            pass
 
     def open_read(self, name: str) -> int:
         """A descriptor on regular file `name`, never through a link."""
