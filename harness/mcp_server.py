@@ -29,6 +29,7 @@ from typing import Awaitable, Callable
 
 from .digests import sha256_hex
 from .policy import MCP_SERVER
+from .request_body import BODY_PARSE_ERRORS
 from .sandbox import run_cmd
 
 log = logging.getLogger(__name__)
@@ -138,7 +139,7 @@ class McpServer:
             return _reply(405, {"error": "only POST is supported"})
         try:
             message = json.loads(request.get("body") or "")
-        except ValueError:
+        except BODY_PARSE_ERRORS:   # #965: deep nesting raises RecursionError, not ValueError
             return _reply(400, _error(None, -32700, "parse error"))
         if isinstance(message, list):
             replies = [r for r in [await self._rpc(sid, m) for m in message] if r is not None]
@@ -151,6 +152,8 @@ class McpServer:
             return _error(None, -32600, "invalid request")
         if "method" not in message or "id" not in message:
             return None  # a notification, or a response to a request we never send
+        if isinstance(message["id"], (list, dict)):   # an id is a string, a number or null; never echo a nested value
+            return _error(None, -32600, "invalid request")
         id_, method = message["id"], message["method"]
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         if method == "initialize":
@@ -249,7 +252,7 @@ class McpRelay:
     def _on_line(self, line: str) -> None:
         try:
             message = json.loads(line)
-        except ValueError:
+        except BODY_PARSE_ERRORS:
             return
         if not isinstance(message, dict):
             return

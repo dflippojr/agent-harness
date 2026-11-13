@@ -185,12 +185,14 @@ def test_hostile_mcp_bodies_get_a_json_rpc_error_not_a_500():
         tokens, server = _mcp_server([])
         token = tokens.mint("s1")
 
-        async def send(body: str) -> tuple[int, int | None]:
+        async def send(body: str) -> tuple[int, int | str | None]:
             response = await server.handle("s1", _mcp_request(token, body))
             json.dumps({"id": 1, **response})   # what the relay writes back
             reply = json.loads(response["body"]) if response["body"] else None
             first = reply[0] if isinstance(reply, list) and reply else reply
-            return response["status"], (first or {}).get("error", {}).get("code")
+            first = first or {}
+            return response["status"], first["error"]["code"] if "error" in first else (
+                "result" if "result" in first else None)
 
         def deep(n: int) -> str:
             return "[" * n + "]" * n
@@ -208,7 +210,7 @@ def test_hostile_mcp_bodies_get_a_json_rpc_error_not_a_500():
                 "params": '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":' + deep(depth) + "}",
             }.items():
                 got = await send(body)
-                if got[0] >= 500 or got[1] is None:   # always a JSON-RPC error, never a 5xx
+                if got[0] >= 500 or got[1] is None:   # an ordinary JSON-RPC reply (error or result), never a 5xx
                     wrong[f"{name} nested {depth}"] = got
         assert wrong == {}
         # JSON-RPC ids are a string, a number or null: a nested id is refused, not echoed back.
