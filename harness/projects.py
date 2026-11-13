@@ -19,7 +19,8 @@ helpers, credential helpers, sshCommand, remote helpers, or include-file config.
 The owner's source repository and global/system Git config are trusted: merge/push into a local source, and
 URL-remote credentials, still use them. Isolation is fail-closed for workspace repos: gitdir/commondir
 pointers that escape the workspace are refused rather than followed (checked as strings, never resolved), and so
-are links in the ref state the host copies in and out (HEAD, refs, logs and the other state files). Platforms that
+are links in the ref state the host copies in and out (HEAD, refs, logs and the other state files) and in the HEAD
+and index a checkpoint rewind puts back (`put_state_file`). Platforms that
 can't hold the copied directories against replacement (descriptor-relative calls, or Windows handles) refuse.
 """
 
@@ -440,24 +441,39 @@ class _StateDir:
         than written through. The short temp name starts with a dot and ends in `.lock`: git never reads it as a ref,
         and its length doesn't depend on `name`."""
         st = os.fstat(source_fd)
+
+        def fill(out: int) -> None:
+            while chunk := os.read(source_fd, 1 << 16):
+                _write_all(out, chunk)
+            if self.fd is not None:  # Windows keeps the new file's defaults: no mode bits, times unused by git
+                os.chmod(out, stat.S_IMODE(st.st_mode))
+                os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+        self._replace(name, fill, 0o600)
+
+    def write_bytes(self, name: str, data: bytes) -> None:
+        """Write `data` to `name` the same way as `write`; a new file gets git's usual mode (0666 less the umask)."""
+        self._replace(name, lambda out: _write_all(out, data), 0o666)
+
+    def _replace(self, name: str, fill, mode: int) -> None:
         temp = _temp_name()
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | _O_BINARY
-        out = os.open(self._at(temp), flags, 0o600, dir_fd=self.fd)
+        out = os.open(self._at(temp), flags, mode, dir_fd=self.fd)
         try:
             try:
-                while chunk := os.read(source_fd, 1 << 16):
-                    view = memoryview(chunk)
-                    while view:  # os.write may write less than asked
-                        view = view[os.write(out, view):]
-                if self.fd is not None:  # Windows keeps the new file's defaults: no mode bits, times unused by git
-                    os.chmod(out, stat.S_IMODE(st.st_mode))
-                    os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
+                fill(out)
             finally:
                 os.close(out)
             os.replace(self._at(temp), self._at(name), src_dir_fd=self.fd, dst_dir_fd=self.fd)
         except BaseException:
             self.remove(temp)
             raise
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:  # os.write may write less than asked
+        view = view[os.write(fd, view):]
 
 
 # Windows rewrites some names on the way from a full path to a file (trailing dots and spaces dropped, device names
@@ -540,6 +556,29 @@ def _copy_git_state(src: Path, dst: Path) -> None:
         raise
     except OSError as e:  # a link or a type change raced in after a check (ELOOP, ENOTDIR, ...): fail closed
         raise GitError(f"could not copy git state: {e.strerror or e}") from e
+
+
+def put_state_file(git_dir: Path, name: str, data: bytes | None) -> None:
+    """Replace regular file `name` in canonical git dir `git_dir` with `data`, or remove it when `data` is None.
+
+    Uses the state copy's link-safe access (`_StateDir`): every directory from the filesystem root down to `git_dir`
+    is opened without following a link, and the file is written to a temp file renamed over `name`, so a link raced
+    in at `name` is replaced, never written through. A link or anything but a regular file already at `name` is
+    refused. Fails closed with GitError, also where that access is unavailable.
+    """
+    try:
+        with _StateDir.open(git_dir) as d:
+            kind = d.kind(name)
+            if kind not in (_FILE, _MISSING):
+                raise GitError(f"refusing symlinked or special git state {name}")
+            if data is not None:
+                d.write_bytes(name, data)
+            elif kind == _FILE:
+                d.remove(name)
+    except GitError:
+        raise
+    except OSError as e:  # a link or a type change on the path (ELOOP, ENOTDIR, ...), or a failed write
+        raise GitError(f"could not write git state {name}: {e.strerror or e}") from e
 
 
 def _write_isolated_config(dest: Path, hooks: Path) -> None:

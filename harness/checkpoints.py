@@ -437,6 +437,8 @@ def git_state(workspace: Path, branch: str) -> dict | None:
 
 
 def put_git_state(workspace: Path, state: dict | None) -> None:
+    """Put back what `git_state` saved. HEAD and the index are written through `projects.put_state_file`, which
+    refuses a link at either name or on the path to it (GitError)."""
     if state is None:
         return
     index_dir, metadata, _ = projects._resolve_workspace_git(workspace)
@@ -445,11 +447,8 @@ def put_git_state(workspace: Path, state: dict | None) -> None:
             projects.git(workspace, "update-ref", f"refs/heads/{state['branch']}", state["tip"])
         else:
             projects.git(workspace, "update-ref", "-d", f"refs/heads/{state['branch']}", check=False)
-    (metadata / "HEAD").write_bytes(state["head"])
-    if state["index"] is None:
-        (index_dir / "index").unlink(missing_ok=True)
-    else:
-        (index_dir / "index").write_bytes(state["index"])
+    projects.put_state_file(metadata, "HEAD", state["head"])     # refuses links, like the host state copy
+    projects.put_state_file(index_dir, "index", state["index"])
 
 
 def head_and_branch(workspace: Path) -> tuple[str, str]:
