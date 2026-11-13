@@ -2884,15 +2884,18 @@ function Measure-ReviewSubstantiveLines {
                 if (-not ($listItem -and $next -match '^[-=]')) { continue }
             }
         }
+        $indented = ($line -replace '^(?:[ \t]{0,3}>)+', '') -match '^(?: {4}|\t)'
         do {
             $before = $line
             $line = $line -replace '^[ \t]*(?:>|[-*+](?=[ \t]|$)|[0-9]{1,9}[.)](?=[ \t]|$)|\[[ xX]\](?=[ \t]|$))', ''
         } while ($line -cne $before)
-        # A link reference or footnote definition says nothing, and neither do the lines that continue it:
-        # a destination or a title on the next line, the rest of a title spanning lines, or an indented
-        # footnote line. The definition ends there, at a blank line, or at any other line, which is text.
-        if ($line -notmatch '\S') { $definition = ''; continue }
-        if ($definition -eq 'footnote' -and $line -match '^(?: {4}|\t)') { continue }
+        # A link reference or footnote definition says nothing, and neither do the lines that continue it.
+        # A link reference definition goes on with a destination or a title on the next line, or the rest
+        # of a title spanning lines, and ends there, at a blank line, or at any other line, which is text.
+        # A footnote goes on with every line up to a blank line (a lazy continuation needs no indent), and
+        # after blank lines with every line indented as its content. It counts as nothing, referenced or not.
+        if ($line -notmatch '\S') { $definition = $(if ($definition -like 'footnote*') { 'footnote-gap' } else { '' }); continue }
+        if ($definition -eq 'footnote' -or ($definition -eq 'footnote-gap' -and $indented)) { continue }
         if ($definition -like 'title:*') {
             if ($line.Contains($definition.Substring(6))) { $definition = '' }
             continue
