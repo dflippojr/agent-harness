@@ -672,6 +672,11 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Review = "- app.py:1: a finding.`n- app.py:2: another."; Rendered = '<p>ghp_synthetic12345678</p>' }
         # Every line fails, so withholding leaves no review to post.
         @{ Review = "- app.py:1: C:\fixture\x`n`n- app.py:2: ghp_synthetic12345678"; Rendered = $null }
+        # A match spans lines: withholding the line with the fixture and the label would leave the value (PR #978 review).
+        @{ Review = ("- app.py:1: the fixture C:\fixture\x sets password =`n  " + '"short"' + "`n- app.py:2: a safe finding."); Rendered = $null }
+        @{ Review = ("- app.py:1: C:\fixture\x and Bearer`n  synthetic-value-1`n- app.py:2: a safe finding."); Rendered = $null }
+        # A form that joins lines (a link title spanning them) cannot be split line by line.
+        @{ Review = ("- app.py:1: [a](x " + '"t' + "`n" + 'u") C:\fixture\x' + "`n- app.py:2: a safe finding."); Rendered = $null }
     ) {
         param($Review, $Rendered)
         $script:rendered = $Rendered
