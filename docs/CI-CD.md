@@ -358,7 +358,8 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
   `href` or `src` attribute value in a complete start tag, read by the scan's own HTML tokenizer (the one the rendered
   forms use), so only an exact `href` or `src` attribute name counts, attribute names split only at HTML's ASCII
   whitespace, and a value that starts with a space is not a URL; an unquoted value that opens with a backslash-escaped
-  quote, as in a string literal, starts after it) or a Markdown link or image destination (directly after `](`). The URL is `//` or `/\` (which browsers read as `//`), a host of two or
+  quote, as in a string literal, starts after it) or a Markdown link or image destination (directly after `](`). Text
+  inside a tag, a comment or markup the tokenizer reads to the end of the text is never a context. The URL is `//` or `/\` (which browsers read as `//`), a host of two or
   more labels made only of letters joined by single hyphens, whose last label is `com`, `net` or `org`, an optional
   `:port`, then `/`. So `<a href="//example.com/posts/1">`, `` `<img src="//cdn.example.com/a.png">` ``,
   `[feed](//blog.example.net/feed.xml)` and `![logo](//cdn.example.org/a.png)` publish. A bare `//example.com/x` in
