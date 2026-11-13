@@ -280,7 +280,7 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 
 | Feature | Section | Needs |
 | --- | --- | --- |
-| Projects backed by git repos, with review branches | `config\projects.yaml` | a local repo path |
+| Projects backed by git repos, with review branches | `config\projects.yaml` | a local repo path, on a Linux or macOS host: a Windows host refuses git operations on session workspaces for now (#973) |
 | Pause for games / Plex transcodes | `gpu_guard` (on by default) | nothing |
 | Web search for agents | `web` | SearXNG container (`docs/phase6b-results.md`) |
 | OpenAI/Anthropic-compatible endpoint | `endpoint` (on by default) | a key from Settings → Inference endpoint |

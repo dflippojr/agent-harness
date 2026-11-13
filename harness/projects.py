@@ -20,8 +20,8 @@ The owner's source repository and global/system Git config are trusted: merge/pu
 URL-remote credentials, still use them. Isolation is fail-closed for workspace repos: gitdir/commondir
 pointers that escape the workspace are refused rather than followed (checked as strings, never resolved), and so
 are links in the ref state the host copies in and out (HEAD, refs, logs and the other state files) and in the HEAD
-and index a checkpoint rewind puts back (`put_state_file`). Platforms that
-can't hold the copied directories against replacement (descriptor-relative calls, or Windows handles) refuse.
+and index a checkpoint rewind puts back (`put_state_file`). Platforms without descriptor-relative calls refuse.
+Windows refuses every host git operation on a workspace for now (`require_host_git`, #973).
 """
 
 from __future__ import annotations
@@ -66,6 +66,9 @@ _GIT_STATE_LOCKS_GUARD = threading.Lock()
 # Where host-side git keeps its throwaway git dirs, hooks dirs and merge worktrees. None means the system temp
 # directory (the daemon). The Mac runner sets a private directory that its shell sandbox can't read or write.
 TEMP_ROOT: Path | None = None
+# The state copy's Windows path holds checked directories open but does not yet make each access relative to a held
+# handle (#973 step 3). Until it does, host git operations on workspaces refuse on Windows (`require_host_git`).
+_REFUSE_HOST_GIT = sys.platform == "win32"
 
 
 def _temp_dir() -> str | None:
@@ -92,6 +95,18 @@ class GitError(Exception):
     def __init__(self, message: str, status: int = 409):
         super().__init__(message)
         self.status = status
+
+
+def require_host_git() -> None:
+    """Refuse a host git operation on a workspace on Windows (`_REFUSE_HOST_GIT`), before it touches anything.
+
+    Called where the workspace git state copy starts (`_resolve_workspace_git`, `_StateDir.open`), by entries that
+    would write to a workspace before reaching it (`prepare`, the member and fork clones), and by `git` itself before
+    its `check=False` handling, so no caller reads a refusal as a failed git command ("no commits ahead", say).
+    """
+    if _REFUSE_HOST_GIT:
+        raise GitError("git operations on session workspaces aren't supported on Windows yet; "
+                       "run git projects on a Linux or macOS host (#973)")
 
 
 @dataclass
@@ -229,6 +244,7 @@ def _resolve_workspace_git(repo: Path) -> tuple[Path, Path, Path]:
     their targets walked, through held directory handles that never follow a link; pointer contents are never
     resolved (see `_pointer_parts`).
     """
+    require_host_git()
     work_tree = _resolve(repo)  # the daemon's own workspace path, not workspace content
     try:
         root = _StateDir.open(work_tree)
@@ -327,6 +343,7 @@ class _StateDir:
     def open(cls, path: Path) -> _StateDir:
         """Open an existing canonical directory, refusing a link anywhere on its path (one swapped in after the path
         was resolved, say)."""
+        require_host_git()  # so the Windows handle path below is unreachable until #973 step 3
         if _FD_OPS:
             fd = os.open(path.anchor, _DIR_FLAGS)
             try:
@@ -704,6 +721,7 @@ def git(repo: Path | str | None, *args: str, timeout: float = 600, check: bool =
             cmd += ["-c", f"safe.directory={Path(repo).as_posix()}", "-C", str(repo)]
         return _run(cmd + list(args), timeout=timeout, check=check, input_=input_)
 
+    require_host_git()  # raised even with check=False: a caller must not read a refusal as git's own answer
     try:
         with isolated_git_dir(Path(repo), _isolate_env()) as (flags, env, _tmp):
             result = _run(flags + list(args), timeout=timeout, check=False, input_=input_, env=env)
@@ -769,6 +787,7 @@ def prepare(project: Project, workspace: Path, sid: str, shared: bool = False, b
     """Clone the project into the (empty) workspace and create the session branch. `shared` (local sources only)
     borrows the source's objects through git alternates instead of copying them. `base_only` clones just the base
     branch through the git transport, so the workspace holds neither other branches nor their objects."""
+    require_host_git()  # before the clone writes anything
     src = project.repo
     if not is_url(src) and not Path(src).is_dir():
         raise GitError(f"project {project.name}: repository {src} doesn't exist", 400)

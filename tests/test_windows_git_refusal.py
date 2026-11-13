@@ -83,10 +83,12 @@ def test_isolated_git_refuses_before_touching_the_workspace(refuse, ws, args):
     assert tree(refuse) == {}  # no temp git dir was made
 
 
-def test_isolated_git_without_check_reports_the_refusal(refuse, ws):
+def test_isolated_git_without_check_still_raises_the_refusal(refuse, ws):
+    """`check=False` callers read a failed result as an answer (no commits ahead, a missing commit, no changes):
+    the refusal is raised to them instead."""
     before = tree(ws)
-    result = projects.git(ws, "status", "--porcelain", check=False)
-    assert result.code != 0 and REFUSAL in result.err
+    with pytest.raises(GitError, match=REFUSAL):
+        projects.git(ws, "log", "--oneline", "HEAD~1..HEAD", check=False)
     assert tree(ws) == before
 
 
@@ -206,7 +208,7 @@ def test_cleanup_keeps_a_workspace_it_cannot_check(refuse, ws, monkeypatch):
     base = sh(ws, "rev-parse", "HEAD").strip()
     s = {"id": "s1", "workspace": str(ws), "project": "p", "base_commit": base, "branch": "agent/s1"}
     assert REFUSAL in maintenance.unsaved_work({**s, "review": ""})         # never pushed: commits_ahead
-    assert maintenance.unsaved_work({**s, "review": "pushed"})              # pushed: the unpushed check
+    assert REFUSAL in maintenance.unsaved_work({**s, "review": "pushed"})   # pushed: the unpushed check
 
 
 def test_runner_cleanup_keeps_a_workspace_it_cannot_check(refuse, tmp_path):

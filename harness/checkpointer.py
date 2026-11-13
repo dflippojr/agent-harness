@@ -316,6 +316,7 @@ class Checkpointer:
 
     @staticmethod
     def _fork_clone(parent: dict, ckpt: dict, new_sid: str, workspace: Path) -> dict:
+        projects.require_host_git()  # before git init writes the fork's workspace
         parent_ws = Path(parent["workspace"])
         projects._run(["init", "-q", "-b", "main", str(workspace)], env=projects._isolate_env())
         projects.git(workspace, "config", "core.autocrlf", "false")
