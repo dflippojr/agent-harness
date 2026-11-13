@@ -19,7 +19,8 @@ helpers, credential helpers, sshCommand, remote helpers, or include-file config.
 The owner's source repository and global/system Git config are trusted: merge/push into a local source, and
 URL-remote credentials, still use them. Isolation is fail-closed for workspace repos: gitdir/commondir
 pointers that escape the workspace are refused rather than followed (checked as strings, never resolved), and so
-are links in the ref state the host copies in and out (HEAD, refs, logs and the other state files). Platforms that
+are links in the ref state the host copies in and out (HEAD, refs, logs and the other state files) and in the HEAD
+and index a checkpoint rewind puts back (`put_state_file`). Platforms that
 can't hold the copied directories against replacement (descriptor-relative calls, or Windows handles) refuse.
 """
 
@@ -33,7 +34,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING
@@ -411,19 +412,37 @@ class _StateDir:
         return self.subdir(name)
 
     def remove(self, name: str) -> None:
-        """Remove an entry: a directory with its contents, or a file or link itself (never what a link points to)."""
+        """Remove a file or link entry itself (never what a link points to) with one call that never recurses; a
+        missing entry is fine. A directory is refused, and one raced in after the check fails the call: a caller
+        that means to delete a directory uses `remove_tree`."""
         kind = self.kind(name)
+        if kind == _MISSING:
+            return
         if kind == _DIR:
-            with self.subdir(name) as sub:
-                for child in sub.names():
+            raise GitError(f"refusing to remove git state directory {name}")
+        where = self._at(name)
+        if self.fd is None and _isjunction(where):
+            os.rmdir(where)  # the junction itself, not its target; rmdir never removes a non-empty directory
+        else:
+            os.unlink(where, dir_fd=self.fd)
+
+    def remove_tree(self, name: str) -> None:
+        """Remove directory `name` and its contents, for a caller that decided to delete that directory. The walk
+        goes through the opened directory (`subdir`, which never follows a link), and each entry is removed by its
+        own type: files and links with `remove`, directories with `remove_tree`."""
+        with self.subdir(name) as sub:
+            for child in sub.names():
+                if sub.kind(child) == _DIR:
+                    sub.remove_tree(child)
+                else:
                     sub.remove(child)
-            os.rmdir(self._at(name), dir_fd=self.fd)
-        elif kind != _MISSING:
-            where = self._at(name)
-            if self.fd is None and _isjunction(where):
-                os.rmdir(where)  # removes the junction, not its target
-            else:
-                os.unlink(where, dir_fd=self.fd)
+        os.rmdir(self._at(name), dir_fd=self.fd)  # never removes a non-empty directory
+
+    def _discard(self, temp: str) -> None:
+        """Best-effort cleanup of this object's own temp file after a failure: non-recursive, so anything but a
+        file or link at that name is left alone, and a cleanup error never replaces the original one."""
+        with suppress(OSError, GitError):
+            self.remove(temp)
 
     def open_read(self, name: str) -> int:
         """A descriptor on regular file `name`, never through a link."""
@@ -440,24 +459,62 @@ class _StateDir:
         than written through. The short temp name starts with a dot and ends in `.lock`: git never reads it as a ref,
         and its length doesn't depend on `name`."""
         st = os.fstat(source_fd)
+
+        def fill(out: int) -> None:
+            while chunk := os.read(source_fd, 1 << 16):
+                _write_all(out, chunk)
+            if self.fd is not None:  # Windows keeps the new file's defaults: no mode bits, times unused by git
+                os.chmod(out, stat.S_IMODE(st.st_mode))
+                os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+        self._replace(name, fill, 0o600)
+
+    def write_bytes(self, name: str, data: bytes) -> None:
+        """Write `data` to `name` the same way as `write`. The temp file is owner-only while the content goes in;
+        then it takes the permission bits of the regular file it replaces, so a mode is kept and never widened. A
+        new file stays owner-only."""
+        try:
+            existing = os.stat(self._at(name), dir_fd=self.fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            existing = 0
+
+        def fill(out: int) -> None:
+            _write_all(out, data)
+            if self.fd is not None and stat.S_ISREG(existing):  # Windows has no mode bits to keep
+                os.chmod(out, stat.S_IMODE(existing) & 0o777)
+
+        self._replace(name, fill, 0o600)
+
+    def unlink_file(self, name: str) -> None:
+        """Remove regular file `name`; a missing one is fine, anything else is refused. The removal is one unlink
+        call (relative to the held directory on POSIX), which never removes a directory, let alone its contents, so
+        a directory raced in after the check fails the call. A link raced in is itself removed, never its target."""
+        kind = self.kind(name)
+        if kind == _MISSING:
+            return
+        if kind != _FILE:
+            raise GitError(f"refusing symlinked or special git state {name}")
+        os.unlink(self._at(name), dir_fd=self.fd)
+
+    def _replace(self, name: str, fill, mode: int) -> None:
         temp = _temp_name()
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | _O_BINARY
-        out = os.open(self._at(temp), flags, 0o600, dir_fd=self.fd)
+        out = os.open(self._at(temp), flags, mode, dir_fd=self.fd)
         try:
             try:
-                while chunk := os.read(source_fd, 1 << 16):
-                    view = memoryview(chunk)
-                    while view:  # os.write may write less than asked
-                        view = view[os.write(out, view):]
-                if self.fd is not None:  # Windows keeps the new file's defaults: no mode bits, times unused by git
-                    os.chmod(out, stat.S_IMODE(st.st_mode))
-                    os.utime(out, ns=(st.st_atime_ns, st.st_mtime_ns))
+                fill(out)
             finally:
                 os.close(out)
             os.replace(self._at(temp), self._at(name), src_dir_fd=self.fd, dst_dir_fd=self.fd)
         except BaseException:
-            self.remove(temp)
+            self._discard(temp)
             raise
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:  # os.write may write less than asked
+        view = view[os.write(fd, view):]
 
 
 # Windows rewrites some names on the way from a full path to a file (trailing dots and spaces dropped, device names
@@ -481,10 +538,17 @@ def _is_link(path: Path) -> bool:
     return path.is_symlink() or _isjunction(path)
 
 
-def _copy_state_file(src: _StateDir, dst: _StateDir, name: str) -> None:
+def _copy_state_file(src: _StateDir, dst: _StateDir, name: str, in_ref_tree: bool) -> None:
+    """Copy file `name`. A directory at `name` in `dst` is removed only `in_ref_tree` (refs, logs), where git
+    switches a ref between directory and file; at the top level (HEAD, FETCH_HEAD, ...) it is refused and kept."""
     source_fd = src.open_read(name)
     try:
-        if dst.kind(name) not in (_FILE, _MISSING):  # a directory, or a link of any kind: Windows renames over neither
+        kind = dst.kind(name)
+        if kind == _DIR:  # Windows renames over neither a directory nor a directory link
+            if not in_ref_tree:
+                raise GitError(f"refusing git state {name}: a directory where a file belongs")
+            dst.remove_tree(name)
+        elif kind != _FILE:  # a link of any kind, removed itself
             dst.remove(name)
         dst.write(name, source_fd)
     finally:
@@ -506,12 +570,15 @@ def _mirror_tree(src: _StateDir, dst: _StateDir) -> None:
             with src.subdir(name) as sub_src, dst.ensure_subdir(name) as sub_dst:
                 _mirror_tree(sub_src, sub_dst)
         elif kind == _FILE:
-            _copy_state_file(src, dst, name)
+            _copy_state_file(src, dst, name, in_ref_tree=True)
         else:
             raise GitError(f"refusing symlinked or special git state {name}")
     for name in sorted(dst.names()):
-        if name not in seen:
-            dst.remove(name)
+        if name not in seen:  # a ref (or a ref namespace directory) the source no longer has
+            if dst.kind(name) == _DIR:
+                dst.remove_tree(name)
+            else:
+                dst.remove(name)
 
 
 def _copy_git_state(src: Path, dst: Path) -> None:
@@ -526,7 +593,7 @@ def _copy_git_state(src: Path, dst: Path) -> None:
             for name in _STATE_FILES:
                 kind = s.kind(name)
                 if kind == _FILE:
-                    _copy_state_file(s, d, name)
+                    _copy_state_file(s, d, name, in_ref_tree=False)
                 elif kind != _MISSING:
                     raise GitError(f"refusing symlinked or special git state {name}")
             for name in _STATE_DIRS:
@@ -540,6 +607,29 @@ def _copy_git_state(src: Path, dst: Path) -> None:
         raise
     except OSError as e:  # a link or a type change raced in after a check (ELOOP, ENOTDIR, ...): fail closed
         raise GitError(f"could not copy git state: {e.strerror or e}") from e
+
+
+def put_state_file(git_dir: Path, name: str, data: bytes | None) -> None:
+    """Replace regular file `name` in canonical git dir `git_dir` with `data`, or remove it when `data` is None.
+
+    Uses the state copy's link-safe access (`_StateDir`): every directory from the filesystem root down to `git_dir`
+    is opened without following a link, and the file is written to a temp file renamed over `name`, so a link raced
+    in at `name` is replaced, never written through; the file keeps its mode (`_StateDir.write_bytes`). Removal unlinks
+    a regular file only and never recurses (`_StateDir.unlink_file`). A link or anything but a regular file already
+    at `name` is refused. Fails closed with GitError, also where that access is unavailable.
+    """
+    try:
+        with _StateDir.open(git_dir) as d:
+            if data is None:
+                d.unlink_file(name)
+                return
+            if d.kind(name) not in (_FILE, _MISSING):
+                raise GitError(f"refusing symlinked or special git state {name}")
+            d.write_bytes(name, data)
+    except GitError:
+        raise
+    except OSError as e:  # a link or a type change on the path (ELOOP, ENOTDIR, ...), or a failed write
+        raise GitError(f"could not write git state {name}: {e.strerror or e}") from e
 
 
 def _write_isolated_config(dest: Path, hooks: Path) -> None:
