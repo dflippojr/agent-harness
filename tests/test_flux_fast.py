@@ -902,6 +902,19 @@ def test_flatten_refuses_to_overwrite_on_name_clash(tmp_path):
     assert (staged / "wrapper" / "python_embeded").is_dir()
 
 
+def test_flatten_checks_every_name_before_moving_any(tmp_path, monkeypatch):
+    """Directory order differs by filesystem (#973): with the clashing name listed last, nothing moves either."""
+    staged = tmp_path / "staged"
+    plant_comfy(staged / "wrapper")
+    (staged / "ComfyUI").mkdir()
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(Path, "iterdir", lambda self: iter(sorted(real_iterdir(self), reverse=True)))
+    with pytest.raises(RuntimeError, match="destination exists"):
+        images_models_mod._flatten_portable(staged)
+    assert (staged / "wrapper" / "python_embeded").is_dir()
+    assert not (staged / "python_embeded").exists()
+
+
 def test_stage_extraction_error_propagates_and_leaves_production_alone(tmp_path):
     cfg = cfg_for(tmp_path)
     prod = Path(cfg.comfy_dir)

@@ -705,7 +705,13 @@ def _flatten_portable(staged: Path) -> None:
     wrappers = [p for p in staged.iterdir() if p.is_dir() and (p / "python_embeded").is_dir()]
     if len(wrappers) != 1:
         return
-    for child in wrappers[0].iterdir():
+    children = sorted(wrappers[0].iterdir())
+    # Check every name before moving any: directory order differs by filesystem, and a clash found halfway would
+    # leave the staged tree half flattened.
+    for child in children:
+        if (staged / child.name).exists():
+            raise RuntimeError(f"cannot move {child} -> {staged / child.name}: destination exists")
+    for child in children:
         _swap_dirs(child, staged / child.name)
     wrappers[0].rmdir()
 
