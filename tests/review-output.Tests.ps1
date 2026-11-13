@@ -708,6 +708,9 @@ Describe 'Withholding unsafe review lines (#974)' {
         # Markup the scan cannot settle (a tag spanning lines) fails closed rather than being split (PR #978 review).
         @{ Review = ("- app.py:1: the fixture C:\fixture\x sets password = <b`ntitle=" + '"short">' + "`n- app.py:2: a safe finding."); Rendered = $null }
         @{ Review = "- app.py:1: the fixture C:\fixture\x`n- app.py:2: x &#x202E; y`n- app.py:3: a safe finding."; Rendered = $null }
+        # The whole body's rejections decide, not the review text's alone: an unterminated tag on the last line
+        # is raw HTML once the footer follows it (PR #978 review).
+        @{ Review = "- app.py:1: a safe finding.`n- app.py:2: see <b title=C:\fixture\x"; Rendered = $null }
         # A form that joins lines (a link title spanning them) cannot be split line by line.
         @{ Review = ("- app.py:1: [a](x " + '"t' + "`n" + 'u") C:\fixture\x' + "`n- app.py:2: a safe finding."); Rendered = $null }
     ) {
@@ -828,6 +831,10 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Kept = '> - 1. ok' }
         @{ Kept = '<b>ok</b>' }
         @{ Kept = '&#65;' }
+        # Literal code shows its text, markup included.
+        @{ Kept = '`<title>missing authorization check</title>`' }
+        @{ Kept = '`<style>p { color: red }</style>`' }
+        @{ Kept = "``````html`n<!-- a note --><b></b>`n``````" }
         # A rule after a list item is a rule, not a heading underline.
         @{ Kept = "- a finding`n---" }
         # Text after a blank line that ends a reference definition is text again.
