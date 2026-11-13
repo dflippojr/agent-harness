@@ -33,6 +33,8 @@ $script:MaxIssueCommentPages = 10
 $script:MaxIssueComments = 100 * $script:MaxIssueCommentPages
 $script:ReviewSpecModes = @('off', 'on')
 $script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
+$script:ReviewPublicationFailure = 'Review did not complete: output failed the publication safety scan.'
+$script:ReviewWithheldLine = '(line withheld by the publication safety scan)'
 $script:ReviewVerdictPattern = '^`?REVIEW_VERDICT:\s*(?:(CLEAN)|FINDINGS\s+([1-9][0-9]{0,3}))\s*`?$'
 $script:ReviewCriteriaPattern = '^`?REVIEW_CRITERIA:\s*([0-9]{1,3})\s*/\s*([0-9]{1,3})\s*`?$'
 $script:ReviewRepositoryPattern = '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
@@ -1129,32 +1131,23 @@ function Get-ReviewGitHubFormHits {
     Get-ReviewRuleHits -Text $text -KnownPaths $KnownPaths -PlainText -FormPrefix 'github'
 }
 
-function Assert-ReviewOutputSafe {
-    [CmdletBinding()]
+function Get-ReviewLocalScanHits {
     param(
         [AllowEmptyString()][string]$Text,
-        [AllowEmptyString()][string]$Workspace = '',
-        [string[]]$DiffPaths = @(),
-        # The context GitHub's renderer resolves references against.
-        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
-        # For validated metadata such as a branch name: credential patterns only, no path or long-token rules.
+        [string[]]$KnownPaths = @(),
         [switch]$CredentialsOnly
     )
 
-    $knownPaths = @()
-    if ($Workspace -or $DiffPaths.Count -gt 0) {
-        $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
-    }
-    # Each hit is logged by rule, scan form and offset so a rejection can be diagnosed. Never log the
-    # matched text or its surroundings: they are what the scan withholds.
+    # Every check of the publication gate that runs here, without GitHub's renderer, as one log line per
+    # hit: rule, scan form, offset and length. Never the matched text or its surroundings: they are what
+    # the scan withholds. Offsets for the first rules count in the raw text, or in the entity-decoded
+    # text before format characters are removed.
     $hits = New-Object System.Collections.Generic.List[string]
     $check = {
         param([string]$RuleName, [string]$FormName, [string]$FormText, [string]$Pattern)
         $match = [regex]::Match($FormText, $Pattern)
         if ($match.Success) { $hits.Add("rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length))") }
     }
-    # Offsets for these rules count in the raw text, or in the entity-decoded text before format
-    # characters are removed.
     $entityDecoded = ConvertFrom-ReviewEntities -Text $Text
     & $check 'bidi-control' 'raw' $Text $script:ReviewBidiPattern
     & $check 'bidi-control' 'decoded' $entityDecoded $script:ReviewBidiPattern
@@ -1171,7 +1164,28 @@ function Assert-ReviewOutputSafe {
             if ($renderer) { $hits.Add("rule $($renderer.Rule) matched the $($form.Name) form at offset $($renderer.Offset) (length $($renderer.Length))") }
         }
     }
-    foreach ($hit in @(Get-ReviewRuleHits -Text $Text -KnownPaths $knownPaths -CredentialsOnly:$CredentialsOnly)) { $hits.Add($hit) }
+    foreach ($hit in @(Get-ReviewRuleHits -Text $Text -KnownPaths $KnownPaths -CredentialsOnly:$CredentialsOnly)) { $hits.Add($hit) }
+    return , $hits
+}
+
+function Assert-ReviewOutputSafe {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$Text,
+        [AllowEmptyString()][string]$Workspace = '',
+        [string[]]$DiffPaths = @(),
+        # The context GitHub's renderer resolves references against.
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
+        # For validated metadata such as a branch name: credential patterns only, no path or long-token rules.
+        [switch]$CredentialsOnly
+    )
+
+    $knownPaths = @()
+    if ($Workspace -or $DiffPaths.Count -gt 0) {
+        $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
+    }
+    # Each hit is logged by rule, scan form and offset so a rejection can be diagnosed.
+    $hits = Get-ReviewLocalScanHits -Text $Text -KnownPaths $knownPaths -CredentialsOnly:$CredentialsOnly
     # GitHub's own rendering is scanned too, never instead: only once every form above passes, so a body
     # they reject is never sent anywhere. A failed or timed-out call fails closed (markdown-render).
     if (-not $CredentialsOnly -and $hits.Count -eq 0) {
@@ -1189,7 +1203,7 @@ function Assert-ReviewOutputSafe {
     }
     if ($hits.Count -gt 0) {
         foreach ($hit in (Get-ReviewOrdinalUnique -Values $hits.ToArray())) { Write-Warning "Publication safety scan: $hit." }
-        throw 'Review did not complete: output failed the publication safety scan.'
+        throw $script:ReviewPublicationFailure
     }
 }
 
@@ -2766,6 +2780,67 @@ function Add-ReviewDiffContext {
     return (Format-ReviewDiffPrompt -Prompt $Prompt -Embedding $embedding)
 }
 
+function Get-ReviewWithheldOutput {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+
+    # Each line of the review that the local scan rejects on its own, replaced whole (#974). A match is
+    # often only a prefix (a root or one segment), and the rest of the line may continue what it names,
+    # so the matched span alone is never enough. A list marker, quote marker and indentation are kept so
+    # the review keeps its shape. A rejection that only spans lines (a link reference, a table) is not
+    # found here; the caller scans the whole result again, so nothing that fails is ever published.
+    $lines = @($Text -split "`r?`n")
+    $withheld = New-Object System.Collections.Generic.List[int]
+    $kept = 0
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ([string]::IsNullOrWhiteSpace($lines[$i])) { continue }
+        if ((Get-ReviewLocalScanHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) { $kept++; continue }
+        $prefix = [regex]::Match($lines[$i], '^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?').Value
+        $lines[$i] = $prefix + $script:ReviewWithheldLine
+        $withheld.Add($i + 1)
+    }
+    return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $kept }
+}
+
+function Get-ReviewUnpublishedNotice {
+    param(
+        [AllowEmptyString()][string]$HeadSha = '',
+        [AllowEmptyString()][string]$ServerUrl = $env:GITHUB_SERVER_URL,
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
+        [AllowEmptyString()][string]$RunId = $env:GITHUB_RUN_ID
+    )
+
+    # The PR comment for a review that cannot be published (#974). It carries no review text and no
+    # agent-review marker, so readiness tools never count it as a review. Only validated values go in,
+    # and it holds no double quote, which Windows PowerShell drops from a native argument.
+    $subject = 'The automated review'
+    if (Test-GitObjectId -Sha $HeadSha.Trim()) { $subject = "$subject of $($HeadSha.Trim().Substring(0, 7))" }
+    $notice = "$subject was not published: its text failed the publication safety scan, which never posts absolute paths, credentials or long tokens, even with the lines it flagged withheld. No verdict was posted for this commit."
+    if ($ServerUrl -match '^https://[A-Za-z0-9.-]+$' -and $Repository -match $script:ReviewRepositoryPattern -and $RunId -match '^[0-9]{1,20}$') {
+        $notice = "$notice The workflow run log names each rule, scan form and offset: $ServerUrl/$Repository/actions/runs/$RunId"
+    }
+    return $notice
+}
+
+function Send-ReviewUnpublishedNotice {
+    param(
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [AllowEmptyString()][string]$HeadSha = '',
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory
+    )
+
+    # A failed post is only a warning: the job fails on the scan either way.
+    if ($PrNumber -notmatch '^[0-9]{1,10}$') { Write-Warning 'No notice was posted: the pull request number is not valid.'; return }
+    $notice = Get-ReviewUnpublishedNotice -HeadSha $HeadSha
+    try {
+        $attempt = Invoke-ReviewGitHubCli -Arguments @('pr', 'comment', $PrNumber, '--body', $notice) -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'review-notice'
+        if ([int]$attempt.ExitCode -eq 0) { Write-Host 'Posted a notice on the pull request that the review was not published.' }
+        else { Write-Warning "Could not post the notice that the review was not published (gh exited with code $($attempt.ExitCode))." }
+    } catch {
+        Write-Warning 'Could not post the notice that the review was not published.'
+    }
+}
+
 function Write-ReviewResult {
     [CmdletBinding()]
     param(
@@ -2778,7 +2853,9 @@ function Write-ReviewResult {
         [AllowEmptyString()][string]$Workspace = '',
         [string[]]$DiffPaths = @(),
         [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
-        [bool]$PublishMarker = $true
+        [bool]$PublishMarker = $true,
+        # When the body fails the scan, withhold each line that fails on its own and scan the rest again (#974).
+        [switch]$WithholdUnsafeLines
     )
 
     # Remove a stale body before checking this attempt. The workflow skips posting on failure.
@@ -2809,8 +2886,34 @@ function Write-ReviewResult {
             $marker += "`r`n<!-- agent-review: sha=$($HeadSha.Trim()) criteria=$([int]$met)/$([int]$total) findings=$([int]$Result.FindingCount) -->"
         }
     }
-    $body = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**." -f $CoverageLine.Trim(), $Result.Output.Trim(), $label
-    Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+    $format = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**."
+    $output = $Result.Output.Trim()
+    $body = $format -f $CoverageLine.Trim(), $output, $label
+    try {
+        Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+    } catch {
+        if (-not $WithholdUnsafeLines -or $_.Exception.Message -ne $script:ReviewPublicationFailure) { throw }
+        $knownPaths = @()
+        if ($Workspace -or $DiffPaths.Count -gt 0) { $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths) }
+        $withheld = Get-ReviewWithheldOutput -Text $output -KnownPaths $knownPaths
+        $count = $withheld.Lines.Count
+        if ($count -eq 0) {
+            Write-Warning 'Publication safety scan: no single line of the review fails on its own, so none could be withheld.'
+            throw
+        }
+        $numbers = $withheld.Lines -join ', '
+        $described = $(if ($count -eq 1) { "1 line of the review (line $numbers)" } else { "$count lines of the review (lines $numbers)" })
+        if ($withheld.KeptLines -eq 0) {
+            Write-Warning "Publication safety scan: withholding $described would leave nothing of it, so it is not published."
+            throw
+        }
+        Write-Host "Publication safety scan: withheld $described; scanning the rest again."
+        $note = $(if ($count -eq 1) { '1 line' } else { "$count lines" })
+        $output = "$($withheld.Text)`n`n_The publication safety scan withheld $note of this review that quoted an absolute path, a credential or a long token, which it never posts. The workflow run log gives the line numbers._"
+        $body = $format -f $CoverageLine.Trim(), $output, $label
+        Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+        Write-Host "Publication safety scan: the rest of the review passed and is posted with $note withheld."
+    }
     # The marker contains validated Git metadata; its SHA intentionally resembles a long token.
     $body += $marker
     $body | Out-File -LiteralPath $OutputPath -Encoding utf8
@@ -2860,7 +2963,15 @@ function Invoke-ReviewMain {
     $publishMarker = (@($embedding.OmittedFiles).Count -eq 0)
     $coverageLine = $coverage.CoverageLine
     if (-not $publishMarker) { $coverageLine = Get-ReviewOmissionCoverageLine -Embedding $embedding }
-    Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -Workspace $Workspace -DiffPaths @($embedding.FilePaths) -PublishMarker:$publishMarker
+    try {
+        Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -Workspace $Workspace -DiffPaths @($embedding.FilePaths) -PublishMarker:$publishMarker -WithholdUnsafeLines
+    } catch {
+        # The job posts nothing once this step fails, so the PR is told here why no review came (#974).
+        if ($_.Exception.Message -eq $script:ReviewPublicationFailure) {
+            Send-ReviewUnpublishedNotice -PrNumber $PrNumber -HeadSha $coverage.HeadSha -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+        }
+        throw
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8

@@ -624,6 +624,76 @@ Describe 'Review publication safety' {
     }
 }
 
+Describe 'Withholding unsafe review lines (#974)' {
+    BeforeEach {
+        . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
+        $script:reviewOutputPath = Join-Path $TestDrive 'review-output.md'
+        Mock Invoke-ReviewMarkdownRender { '<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }
+    }
+
+    It 'withholds only the line that quotes an unsafe value and publishes the rest' -TestCases @(
+        # The payer-onboarding-workbench runs: a scheme-less root quoted from a scanner test, in code formatting.
+        @{ Unsafe = '`//fixture-host/share/sample.txt`'; Secret = 'fixture-host' }
+        @{ Unsafe = 'the fixture C:\fixture\sample.txt'; Secret = 'fixture\sample' }
+        @{ Unsafe = 'in /home/reviewer/auth.json'; Secret = 'reviewer' }
+        @{ Unsafe = 'ghp_synthetic12345678'; Secret = 'synthetic12345678' }
+        @{ Unsafe = ('a1' * 24); Secret = ('a1' * 24) }
+    ) {
+        param($Unsafe, $Secret)
+        $review = "## Findings`n- app.py:1: quotes $Unsafe in a test.`n  > continued $Unsafe`n- app.py:2: a safe finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        # The text the runs produced is still rejected as it stands, with or without the switch's caller.
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WarningAction SilentlyContinue }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -notlike 'Review did not complete*') { throw 'The unsafe review was published without withholding' }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains($Secret)) { throw 'A withheld value was published' }
+        if (-not $body.Contains("`n- (line withheld by the publication safety scan)`n")) { throw "List marker lost: $body" }
+        if (-not $body.Contains("  > (line withheld by the publication safety scan)")) { throw "Quote marker lost: $body" }
+        if (-not $body.Contains('- app.py:2: a safe finding.') -or -not $body.Contains('withheld 2 lines of this review')) { throw "Unexpected body: $body" }
+        if (-not $body.Contains("<!-- agent-review: sha=$('a' * 40) mode=full -->")) { throw 'The marker of a withheld review was dropped' }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'withheld 2 lines of the review \(lines 2, 3\)' -or $log.Contains($Secret)) { throw "Unexpected log: $log" }
+        # GitHub's renderer only ever sees the body with the lines withheld.
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly -ParameterFilter { -not $Text.Contains($Secret) }
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly
+    }
+
+    It 'keeps the list marker but never text a withheld line held before it' {
+        $withheld = Get-ReviewWithheldOutput -Text "1. ok`n12) C:\fixture\x`nplain //fixture-host/share/x"
+        if ($withheld.Text -cne "1. ok`n12) (line withheld by the publication safety scan)`n(line withheld by the publication safety scan)") { throw "Unexpected text: $($withheld.Text)" }
+        if (($withheld.Lines -join ',') -ne '2,3' -or $withheld.KeptLines -ne 1) { throw 'Unexpected line numbers' }
+    }
+
+    It 'fails closed when no single line fails, or nothing would be left' -TestCases @(
+        # Only GitHub's rendering shows the value, so no line can be found locally.
+        @{ Review = "- app.py:1: a finding.`n- app.py:2: another."; Rendered = '<p>ghp_synthetic12345678</p>' }
+        # Every line fails, so withholding leaves no review to post.
+        @{ Review = "- app.py:1: C:\fixture\x`n`n- app.py:2: ghp_synthetic12345678"; Rendered = $null }
+    ) {
+        param($Review, $Rendered)
+        $script:rendered = $Rendered
+        if ($Rendered) { Mock Invoke-ReviewMarkdownRender { $script:rendered } }
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+    }
+
+    It 'words the unpublished notice without review text, marker or double quotes' {
+        $notice = Get-ReviewUnpublishedNotice -HeadSha ('b' * 40) -ServerUrl 'https://github.com' -Repository 'owner/repo' -RunId '42'
+        if (-not $notice.StartsWith('The automated review of bbbbbbb was not published')) { throw "Unexpected notice: $notice" }
+        if (-not $notice.EndsWith('https://github.com/owner/repo/actions/runs/42')) { throw "Run link missing: $notice" }
+        if ($notice -match '"|agent-review|[^\x20-\x7E]') { throw "Notice holds a marker, a double quote or non-ASCII text: $notice" }
+        $bare = Get-ReviewUnpublishedNotice -HeadSha 'not-a-sha' -ServerUrl 'https://x/../y' -Repository 'owner/repo' -RunId '42'
+        if ($bare -match 'https:|not-a-sha' -or -not $bare.StartsWith('The automated review was not published')) { throw "Unvalidated value used: $bare" }
+    }
+}
+
 # A stand-in gh only; no GitHub calls.
 Describe 'GitHub''s renderer call (#767)' {
     BeforeAll {
