@@ -223,6 +223,43 @@ def test_hostile_mcp_bodies_get_a_json_rpc_error_not_a_500():
     asyncio.run(run())
 
 
+def _python_nested(depth: int) -> list:
+    """A list nested `depth` deep, built without recursion: the value a parser that accepts any depth would hand over."""
+    value: list = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+def test_mcp_never_formats_a_nested_value_from_the_request(depth):
+    """Whatever depth the JSON parser accepts (newer Pythons parse deeper), a parsed MCP request whose method, tool
+    name or call ids hold a nested value gets an ordinary JSON-RPC reply: nothing str()s or formats that value."""
+    from harness.mcp_server import CODEX_CALL_META, TOOL_USE_META
+
+    async def run():
+        calls: list = []
+        tokens, server = _mcp_server(calls)
+        deep = _python_nested(depth)
+        replies = {
+            "method": await server._rpc("s1", {"jsonrpc": "2.0", "id": 1, "method": deep}),
+            "tool name": await server._rpc("s1", {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                                  "params": {"name": deep, "arguments": {}}}),
+            "protocol version": await server._rpc("s1", {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                                         "params": {"protocolVersion": deep}}),
+        }
+        for key in (TOOL_USE_META, CODEX_CALL_META):
+            replies[key] = await server._rpc("s1", {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "web_search", "arguments": {"query": "q"}, "_meta": {key: deep}}})
+        for reply in replies.values():
+            json.dumps(reply)
+        assert replies["method"]["error"]["code"] == -32600
+        assert replies["tool name"]["result"]["isError"] is True
+        assert "result" in replies["protocol version"]
+        assert [c[3] for c in calls] == ["", ""]   # a nested call id is dropped, the call itself still runs
+    asyncio.run(run())
+
+
 def test_a_deeply_nested_relay_line_is_dropped():
     """The relay's stdout reader (McpRelay._on_line) drops a line it cannot parse, deep nesting included, rather
     than raising on the relay's reader."""
