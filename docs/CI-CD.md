@@ -358,12 +358,14 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
   `href` or `src` attribute value in a complete start tag, read by the scan's own HTML tokenizer (the one the rendered
   forms use), so only an exact `href` or `src` attribute name counts, attribute names split only at HTML's ASCII
   whitespace, and a value that starts with a space is not a URL; an unquoted value that opens with a backslash-escaped
-  quote, as in a string literal, starts after it) or a Markdown link or image destination (directly after `](`). Text
-  inside a tag, a comment or markup the tokenizer reads to the end of the text is never a context. The URL is `//` or `/\` (which browsers read as `//`), a host of two or
+  quote, as in a string literal, starts after it) or the destination of an inline link or image as the scan's own
+  Markdown link reader reads it (the one the rendered forms use), starting directly after `](`. Text inside a tag, a
+  comment, markup the tokenizer reads to the end of the text, or the content of a raw-text or RCDATA element (`script`,
+  `style`, `textarea`, `title` and the like) is never a context. The URL is `//` or `/\` (which browsers read as `//`), a host of two or
   more labels made only of letters joined by single hyphens, whose last label is `com`, `net` or `org`, an optional
   `:port`, then `/`. So `<a href="//example.com/posts/1">`, `` `<img src="//cdn.example.com/a.png">` ``,
   `[feed](//blog.example.net/feed.xml)` and `![logo](//cdn.example.org/a.png)` publish. A bare `//example.com/x` in
-  prose, a code span or a fence is refused, and so are `title="//..."`, `href="//..."` outside a tag,
+  prose, a code span or a fence is refused, and so are `title="//..."`, `href="//..."` outside a complete tag (inside one, values are read as HTML reads them, quoted or not),
   `] (//...)`, `]( //...)`, `](<//...>)` and reference definitions. No digit can appear in the host, so no IPv4
   address in any spelling (dotted, dashed or hex) and no compressed IPv6; a label of hyphen-joined hex groups is not
   exempt either. Every IANA special-use name (`.alt`, `.arpa`, `.onion`, `.local`, `.localhost`, `.test`, ...) falls

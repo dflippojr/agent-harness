@@ -415,8 +415,9 @@ $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\
 # marks it as a URL, and only for an allowlisted host. Both parts are narrow by construction.
 # - Context (Get-ReviewUrlValueStarts): the root starts the value of an exact href or src attribute in a
 #   complete start tag, as Get-ReviewHtmlToken reads it (the tokenizer the rendered-form scan uses, so the
-#   two cannot disagree), or a Markdown link or image destination (directly after "](") outside every token
-#   the tokenizer reads. Text inside a tag, a comment or an incomplete token is never a context.
+#   two cannot disagree), or the destination of an inline link or image as $script:ReviewLinkPattern reads
+#   it (the reader the rendered forms use), starting directly after "](". Text inside a tag, a comment or
+#   an incomplete token is never a context, and a link that overlaps one is not either.
 # - Root: a forward slash, then a forward slash or a backslash (browsers read /\host/ as //host/, and
 #   Windows reads both as the same UNC root).
 # - Host: two or more labels, each made of letters joined by single hyphens, the last one com, net or org,
@@ -743,15 +744,20 @@ function Get-ReviewHtmlToken {
     return & $token ($length + 1) $name $attributes
 }
 
+# Elements whose content HTML reads as text (raw text and RCDATA, and noscript with scripting on).
+$script:ReviewRawTextElements = @('script', 'style', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'textarea', 'title', 'plaintext')
+
 function Get-ReviewUrlValueStarts {
     param([AllowEmptyString()][string]$Text)
 
     # The offsets in $Text where a link target starts (#781): the value of an exact href or src attribute
-    # in a complete start tag, as Get-ReviewHtmlToken reads it, and each Markdown link or image destination
-    # (just after "](") that lies outside every token the tokenizer reads. An unquoted value that opens
+    # in a complete start tag, as Get-ReviewHtmlToken reads it, and the destination of each inline link
+    # or image that $script:ReviewLinkPattern reads (the reader the rendered forms use), when it starts
+    # directly after "](" and lies outside every token the tokenizer reads. An unquoted value that opens
     # with a backslash-escaped quote, as in a string literal, starts after that quote. Markup is read as
     # in a document: the search resumes after each token's full length, so text inside a tag, a comment or
-    # an incomplete token running to the end of $Text is never read as a tag of its own.
+    # an incomplete token running to the end of $Text is never read as a tag of its own, and after a
+    # raw-text or RCDATA element's start tag it resumes at the element's end tag.
     $starts = New-Object 'System.Collections.Generic.HashSet[int]'
     $markup = [System.Collections.Generic.List[int[]]]::new()
     $at = $Text.IndexOf('<')
@@ -760,6 +766,12 @@ function Get-ReviewUrlValueStarts {
         $token = Get-ReviewHtmlToken -Text $Text -Start $at
         if ($token) {
             $next = $at + [Math]::Max(1, $token.Length)
+            # HTML reads the content of a raw-text or RCDATA element as text, up to its end tag (to the end of
+            # $Text for plaintext, or when the end tag is missing), so that content is markup here too.
+            if ($token.Complete -and $script:ReviewRawTextElements -ccontains $token.Name) {
+                $end = if ($token.Name -ceq 'plaintext') { $null } else { [regex]::Match($Text.Substring($next), "(?i)</$($token.Name)(?=[ \t\n\f\r/>])") }
+                $next = if ($end -and $end.Success) { $next + $end.Index } else { $Text.Length }
+            }
             $markup.Add([int[]]@($at, $next))
             if ($token.Complete -and $token.Name) {
                 foreach ($value in $token.Values) {
@@ -772,10 +784,14 @@ function Get-ReviewUrlValueStarts {
         }
         $at = if ($next -lt $Text.Length) { $Text.IndexOf('<', $next) } else { -1 }
     }
-    foreach ($destination in [regex]::Matches($Text, '\]\(')) {
-        $inMarkup = $false
-        foreach ($span in $markup) { if ($destination.Index + 2 -ge $span[0] -and $destination.Index -lt $span[1]) { $inMarkup = $true; break } }
-        if (-not $inMarkup) { [void]$starts.Add($destination.Index + 2) }
+    # Spans and links both come in increasing order, so one walk over the spans checks every link.
+    $span = 0
+    foreach ($link in [regex]::Matches($Text, $script:ReviewLinkPattern)) {
+        $target = $link.Groups['target']
+        if (-not $link.Groups['label'].Success -or $Text[$target.Index] -ne '(') { continue }
+        while ($span -lt $markup.Count -and $markup[$span][1] -le $link.Index) { $span++ }
+        if ($span -lt $markup.Count -and $markup[$span][0] -lt $link.Index + $link.Length) { continue }
+        [void]$starts.Add($target.Index + 1)
     }
     return , $starts
 }

@@ -271,10 +271,10 @@ Describe 'Review publication safety' {
         @{ Payload = 'Note `](//fs.corp.example.com/share/config.py)` here.' }
         @{ Payload = 'Note x](//fs.corp.example.com/share/config.py) here.' }
         @{ Payload = 'Note \](//fs.corp.example.com/share/config.py) here.' }
-        @{ Payload = 'Note [x\](//fs.corp.example.com/share/config.py) here.' }
-        @{ Payload = 'Note \[x](//fs.corp.example.com/share/config.py) here.' }
-        @{ Payload = 'Note [x]\(//fs.corp.example.com/share/config.py) here.' }
-        @{ Payload = 'Note &#91;x&#93;(//fs.corp.example.com/share/config.py) here.' }
+        @{ Payload = 'Note `[x\](//fs.corp.example.com/share/config.py)` here.' }
+        @{ Payload = 'Note `\[x](//fs.corp.example.com/share/config.py)` here.' }
+        @{ Payload = 'Note `[x]\(//fs.corp.example.com/share/config.py)` here.' }
+        @{ Payload = 'Note `&#91;x&#93;(//fs.corp.example.com/share/config.py)` here.' }
         @{ Payload = 'Note x&#93;(//fs.corp.example.com/share/config.py) here.' }
         # HTML reads the content of raw-text and RCDATA elements as text, never as tags or links.
         foreach ($element in 'script', 'style', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'textarea', 'title', 'plaintext') {
@@ -646,7 +646,7 @@ Describe 'Review publication safety' {
                 'gh\*\*p_\*\*', '\[/ho\]\[ref\]', '%5Bgh%5D', '&#91;gh&#93;', '\\\[/ho\\\]', 'exposed \\\\server', '\\\\\?\\Volume',
                 '\(file:', 'NegativeMediumSpace', '%26ZeroWidthSpace', '&amp;ZeroWidthSpace', '&frac12;', '&#xFFFF;',
                 '<x y=a<b>', 'ghp\x01_', '/ho\x85me', 'src="//server/', 'exposed \\\\example\.com', 'exposed \\/example\.com',
-                'exposed Note </?(?:!--|b )'
+                'exposed Note </?(?:!--|b |(?:script|style|xmp|iframe|noembed|noframes|noscript|textarea|title|plaintext)>)'
             ) -join '|'
         }
 
