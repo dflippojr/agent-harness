@@ -72,8 +72,10 @@ def test_sonar_job_produces_coverage_xml_before_the_scan():
     assert "-n 4 --dist loadfile" in workflow  # the verbosity flag is free to change; the worker split is not
     for job, artifact in (("test", "coverage-data-windows"), ("test-linux", "coverage-data-linux")):
         steps = jobs[job]["steps"]
-        run = next(step for step in steps if step.get("name") == "Run tests with coverage")["run"]
-        assert "--cov=harness" in run and "-n auto" not in run and "COVERAGE_CORE" not in run, job
+        step = next(step for step in steps if step.get("name") == "Run tests with coverage")
+        assert "--cov=harness" in step["run"], job
+        whole_step = yaml.safe_dump(step)  # the command and its env: sysmon cannot measure branches on 3.12
+        assert "-n auto" not in whole_step and "COVERAGE_CORE" not in whole_step, job
         upload = next(step for step in steps if step.get("name") == "Upload coverage data")
         assert upload["with"]["name"] == artifact and upload["with"]["path"] == ".coverage", job
         assert upload["with"]["include-hidden-files"] is True, job
