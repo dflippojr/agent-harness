@@ -34,6 +34,7 @@ from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
 from .origins import check_key_origin, daemon_origins, normalize_origin
 from .policy import TOOLS_ONLY
+from .request_body import json_body
 from . import audit_context, catalog_ids, compat, credential_audit, idempotency, namespace_audit
 
 NO_SUCH_SESSION = "no session matches that id"
@@ -786,10 +787,7 @@ async def api_member_keys(request: Request):
 async def api_member_key_set(backend: str, request: Request):
     """Store or replace the key. The body is read by hand, so a validation error can never echo the key back."""
     m, uid = _github_member(request, mutate=True, what="API keys")
-    try:
-        body = await request.json()
-    except ValueError:
-        body = None
+    body = await json_body(request)
     key = body.get("key") if isinstance(body, dict) else None
     out = await asyncio.to_thread(m.member_key_set, uid, backend, key if isinstance(key, str) else "",
                                   credential_audit.member_context(uid))
@@ -1102,10 +1100,7 @@ async def submit_end_user_login_code(end_user: str, backend: str, attempt_id: st
     """Pass the one-time code the person pasted into the popup (Claude) straight to the waiting login. The body is
     read by hand, so a validation error can never echo the code back."""
     m, app_id = end_user_app(request)
-    try:
-        body = await request.json()
-    except ValueError:
-        body = None
+    body = await json_body(request)
     code = body.get("code") if isinstance(body, dict) else None
     out = await m.end_user_login_code(app_id, end_user, backend, attempt_id, code,
                                     context=namespace_audit.key_context(auth(request, "sessions")))

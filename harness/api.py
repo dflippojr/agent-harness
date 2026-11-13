@@ -29,6 +29,7 @@ from . import google_signin
 from . import idempotency
 from . import local_owner
 from . import stables_shell
+from .request_body import json_body
 from . import tailscale_peer
 from . import taint
 from . import telemetry
@@ -1296,11 +1297,13 @@ async def list_keys(request: Request):
 @api_router.post("/keys", status_code=201)
 async def create_key(request: Request):
     """Mints an API key and returns its secret only in this response; a Hub's owner-kind request gets 403."""
-    body = await request.json()
+    body = await json_body(request)
     from .admin import parse_key_spec
     m = mgr(request)
     ctx = credential_audit.request_context(request, m)
     try:
+        if not isinstance(body, dict):
+            raise HarnessError(400, "the request body must be a JSON object")
         name, scopes, kind = parse_key_spec(body)
         origins = _key_origins(body, kind)
         catalog_app_id = _key_catalog_app_id(body)

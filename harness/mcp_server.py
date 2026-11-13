@@ -29,6 +29,7 @@ from typing import Awaitable, Callable
 
 from .digests import sha256_hex
 from .policy import MCP_SERVER
+from .request_body import BODY_PARSE_ERRORS
 from .sandbox import run_cmd
 
 log = logging.getLogger(__name__)
@@ -107,6 +108,11 @@ def _reply(status: int, payload: dict | list | None = None) -> dict:
             "body": json.dumps(payload, ensure_ascii=False)}
 
 
+def _text(value) -> str:
+    """A string field from the request, or "" for anything else: never str() of a caller's value (#965)."""
+    return value if isinstance(value, str) else ""
+
+
 def _error(id_, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
 
@@ -138,7 +144,7 @@ class McpServer:
             return _reply(405, {"error": "only POST is supported"})
         try:
             message = json.loads(request.get("body") or "")
-        except ValueError:
+        except BODY_PARSE_ERRORS:   # #965: deep nesting raises RecursionError, not ValueError
             return _reply(400, _error(None, -32700, "parse error"))
         if isinstance(message, list):
             replies = [r for r in [await self._rpc(sid, m) for m in message] if r is not None]
@@ -151,6 +157,10 @@ class McpServer:
             return _error(None, -32600, "invalid request")
         if "method" not in message or "id" not in message:
             return None  # a notification, or a response to a request we never send
+        # An id is a string, a number or null, and a method is a string: a nested value is refused, never echoed back
+        # or formatted (deep nesting exhausts the recursion limit, #965).
+        if isinstance(message["id"], (list, dict)) or not isinstance(message["method"], str):
+            return _error(None, -32600, "invalid request")
         id_, method = message["id"], message["method"]
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         if method == "initialize":
@@ -169,14 +179,14 @@ class McpServer:
         return _error(id_, -32601, f"method not found: {method}")
 
     async def _tools_call(self, sid: str, params: dict) -> dict:
-        name = str(params.get("name") or "")
+        name = _text(params.get("name"))
         args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
         meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
         if name not in {(t.get("function") or {}).get("name") for t in self._tools(sid)}:
             text, ok = f"Error: unknown tool {name!r}", False
         else:
             text, ok = await self._call(sid, name, args,
-                                        str(meta.get(TOOL_USE_META) or meta.get(CODEX_CALL_META) or ""))
+                                        _text(meta.get(TOOL_USE_META)) or _text(meta.get(CODEX_CALL_META)))
         return {"content": [{"type": "text", "text": text}], "isError": not ok}
 
 
@@ -249,7 +259,7 @@ class McpRelay:
     def _on_line(self, line: str) -> None:
         try:
             message = json.loads(line)
-        except ValueError:
+        except BODY_PARSE_ERRORS:
             return
         if not isinstance(message, dict):
             return

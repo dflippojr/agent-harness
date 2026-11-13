@@ -41,6 +41,7 @@ from . import audit_context, catalog_ids, credential_audit
 from .digests import sha256_hex
 from .manager import HarnessError
 from .origins import normalize_origin, request_origin as _request_origin
+from .request_body import json_body
 
 PENDING, ARMED, CLAIMED, APPROVED = "pending", "armed", "claimed", "approved"
 DENIED, REDEEMED, EXPIRED = "denied", "redeemed", "expired"
@@ -352,10 +353,7 @@ def register_app(app: FastAPI) -> None:
         the verifier back."""
         m = mgr(request)
         origin = _request_origin(request)
-        try:
-            body = await request.json()
-        except ValueError:
-            body = None
+        body = await json_body(request)
         verifier = body.get("code_verifier") if isinstance(body, dict) else None
         verifier = verifier if isinstance(verifier, str) and VERIFIER.fullmatch(verifier) else ""
 
