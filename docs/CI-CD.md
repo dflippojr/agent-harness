@@ -1006,6 +1006,23 @@ sandbox children behind, one unit peaked at 13.3 GB, and the tower ran out of me
 Members installed before this change get the same caps from the `install-review-guards.sh` drop-in in
 [dflippojr/agent-ops#444](https://github.com/dflippojr/agent-ops/pull/444), not from this installer.
 
+**Restarting after a bad-clock boot.** The unit also sets `RestartForceExitStatus=0`, so a member restarts 30 seconds
+after a clean exit too, not only after a failure
+([#918](https://github.com/dflippojr/agent-harness/issues/918)). On the 2026-11-05 boot the tower's clock started
+about an hour ahead. Every listener's session request failed on the skewed clock, and `runsvc.sh` then stopped the
+service with exit code 0 ("no retry needed"). `Restart=on-failure` never restarts a clean exit, so the whole pool
+stayed down until someone restarted it by hand. With the setting, each member retries every 30 seconds and comes back
+once the clock is right.
+
+The fix is a retry rather than ordering the unit after `time-sync.target`. That target waits for a real sync only when
+the NTP daemon's wait unit is enabled. The tower runs chrony, and its `chrony-wait.service` gives up after 3 minutes
+and lets the runner start on a clock that may still be wrong. The retry works with any NTP daemon and however long the
+clock takes to settle. The unit sets no start limit, because a long skew would use it up and leave the pool down again.
+The cost: a member whose registration really was deleted restarts every 30 seconds until it is re-registered or
+disabled, and its journal shows the same "no retry needed" message each time. Members installed before this change
+need the same line added to the `[Service]` section of the agent-ops#444 drop-in, followed by
+`systemctl daemon-reload`.
+
 `--user` and `--install-dir` choose another user or directory. The directory must stay under `/home`, because the
 publication scan rejects home-directory paths and so cannot post a leaked runner path. A consumer repository's runner
 adds `--repo dflippojr/<project> --labels <project>-review`. `--dry-run` prints the plan, with the unit it would write, and changes nothing. Install `pwsh`, `git` and `gh` for the service user, and log in its Codex, Claude and Cursor CLIs
