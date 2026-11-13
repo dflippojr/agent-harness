@@ -2861,14 +2861,31 @@ function Get-ReviewDefinitionState {
 function Measure-ReviewSubstantiveLines {
     param([AllowEmptyString()][string]$Text)
 
-    # The number of lines of $Text that say something a reader can see. HTML comments, tags and elements
-    # GitHub never shows with their text (script, style and the like) go first, across lines, entities are
-    # decoded, then on each line every container marker (quote, list and task markers, nested and empty,
-    # with or without text after them). A line left as a heading (# or underlined), a fence delimiter or part of a
-    # link reference or footnote definition says nothing; any other line counts when it still holds a
-    # letter or digit. A review left with only formatting (rules, table delimiters, emphasis, empty lists)
-    # is no review.
-    $visible = [regex]::Replace($Text, $script:ReviewHtmlCommentPattern, '')
+    # The number of lines of $Text that say something a reader can see. Outside literal code, HTML
+    # comments, tags and elements GitHub never shows with their text (script, style and the like) go first,
+    # across lines, entities are decoded, then on each line every container marker (quote, list and task
+    # markers, nested and empty, with or without text after them). A line left as a heading (# or
+    # underlined), a fence delimiter or part of a link reference or footnote definition says nothing; any
+    # other line counts when it still holds a letter or digit. A review left with only formatting (rules,
+    # table delimiters, emphasis, empty lists) is no review.
+    # Literal code shows its text, markup included, so its <, > and & become spaces before markup goes:
+    # every line inside a fenced block, and each inline code span on one line (an opener after a
+    # backslash opens none).
+    $literal = New-Object System.Collections.Generic.List[string]
+    $fence = ''
+    foreach ($line in ($Text -split "`r?`n")) {
+        $open = [regex]::Match($line, '^[ \t]*(?:(?:>|[-*+]|[0-9]{1,9}[.)])[ \t]*)*(`{3,}|~{3,})')
+        if ($fence) {
+            if ($open.Success -and $open.Groups[1].Value[0] -eq $fence[0] -and $open.Groups[1].Length -ge $fence.Length -and $line -match '^[^`~]*[`~]+[ \t]*$') { $fence = '' }
+            else { $line = $line -replace '[<>&]', ' ' }
+        } elseif ($open.Success -and -not ($open.Groups[1].Value[0] -eq '`' -and $line.Substring($open.Index + $open.Length).Contains('`'))) {
+            $fence = $open.Groups[1].Value
+        } else {
+            $line = [regex]::Replace($line, '(?<![\\`])(`+)(?!`)(.+?)(?<!`)\1(?!`)', { param($m) $m.Groups[1].Value + ($m.Groups[2].Value -replace '[<>&]', ' ') + $m.Groups[1].Value })
+        }
+        $literal.Add($line)
+    }
+    $visible = [regex]::Replace(($literal -join "`n"), $script:ReviewHtmlCommentPattern, '')
     $visible = [regex]::Replace($visible, '(?i)<(script|style|textarea|title|template)\b[\s\S]*?(?:</\1[^>]*>|\z)', '')
     $visible = [regex]::Replace($visible, '</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:"[^"]*"|''[^'']*''|[^<>"''])*)?/?>|<![A-Za-z\[][^>]*>|<\?[\s\S]*?(?:\?>|\z)', '')
     # Entities count by what they render (&nbsp is a space with or without its semicolon, &#65; a letter).
@@ -2954,7 +2971,7 @@ function Get-ReviewWithheldOutput {
 }
 
 function Test-ReviewLinesCanBeWithheld {
-    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @(), [AllowEmptyString()][string]$Body = '')
 
     # True when withholding whole lines can remove every rejection in $Text. Each rejection must come from
     # a path, credential or token rule: the other rules reject markup or characters whose reading the scan
@@ -2970,8 +2987,13 @@ function Test-ReviewLinesCanBeWithheld {
     # The search reads from that line's start, so the rule sees no text before it: that can only add
     # matches, never hide one.
     $contentRules = @('absolute-root', 'profile-segment') + @(Get-ReviewRedactionRules | ForEach-Object { $_.Name })
-    foreach ($hit in (Get-ReviewLocalScanHits -Text $Text -KnownPaths $KnownPaths)) {
-        if ($hit -notmatch '^rule (\S+) ' -or $contentRules -notcontains $Matches[1]) { return $false }
+    # The published body adds lines around the review, and text after it can change what a rule reads (an
+    # unterminated tag on the last line is raw HTML once more text follows), so its rejections count too.
+    foreach ($scanned in @($Text, $Body)) {
+        if ([string]::IsNullOrEmpty($scanned)) { continue }
+        foreach ($hit in (Get-ReviewLocalScanHits -Text $scanned -KnownPaths $KnownPaths)) {
+            if ($hit -notmatch '^rule (\S+) ' -or $contentRules -notcontains $Matches[1]) { return $false }
+        }
     }
     $patterns = @($script:ReviewAbsoluteRootPattern, $script:ReviewProfileSegmentPattern) + @(Get-ReviewRedactionRules | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
     $lineCount = @($Text -split "`n").Count
@@ -3086,7 +3108,7 @@ function Write-ReviewResult {
         if (-not $WithholdUnsafeLines -or $_.Exception.Message -ne $script:ReviewPublicationFailure) { throw }
         $knownPaths = @()
         if ($Workspace -or $DiffPaths.Count -gt 0) { $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths) }
-        if (-not (Test-ReviewLinesCanBeWithheld -Text $output -KnownPaths $knownPaths)) {
+        if (-not (Test-ReviewLinesCanBeWithheld -Text $output -KnownPaths $knownPaths -Body $body)) {
             Write-Warning 'Publication safety scan: a rejection is not a path, credential or token on one line, so no line can be withheld.'
             throw
         }
