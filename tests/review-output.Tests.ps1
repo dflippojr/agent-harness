@@ -212,6 +212,35 @@ Describe 'Review publication safety' {
         @{ Payload = '`[x](<//example.com/share/config.py>)`' }
         @{ Payload = '`[x]: //example.com/share/config.py`' }
         @{ Payload = '`(//example.com/share/config.py)`' }
+        # Only an exact href or src attribute name, after whitespace, gives a URL context.
+        @{ Payload = '`data:href="//example.com/share/config.py"`' }
+        @{ Payload = '`data.href="//example.com/share/config.py"`' }
+        @{ Payload = '`x:src="//example.com/share/config.py"`' }
+        @{ Payload = '`xlink:href="//example.com/share/config.py"`' }
+        @{ Payload = '`img.src="//example.com/share/config.py"`' }
+        @{ Payload = '`a.href="//example.com/share/config.py"`' }
+        @{ Payload = '`:href="//example.com/share/config.py"`' }
+        @{ Payload = '`@href="//example.com/share/config.py"`' }
+        @{ Payload = '`#href="//example.com/share/config.py"`' }
+        @{ Payload = '`$src="//example.com/share/config.py"`' }
+        @{ Payload = '`/href="//example.com/share/config.py"`' }
+        @{ Payload = '`[href]="//example.com/share/config.py"`' }
+        @{ Payload = '`"href="//example.com/share/config.py"`' }
+        @{ Payload = '`''src="//example.com/share/config.py"`' }
+        @{ Payload = '`\href="//example.com/share/config.py"`' }
+        @{ Payload = '`%href="//example.com/share/config.py"`' }
+        @{ Payload = '`&href="//example.com/share/config.py"`' }
+        @{ Payload = '`*src="//example.com/share/config.py"`' }
+        @{ Payload = '`+src="//example.com/share/config.py"`' }
+        @{ Payload = '`~src="//example.com/share/config.py"`' }
+        @{ Payload = '`!href="//example.com/share/config.py"`' }
+        @{ Payload = '`|href="//example.com/share/config.py"`' }
+        @{ Payload = '`=href="//example.com/share/config.py"`' }
+        @{ Payload = '`?src="//example.com/share/config.py"`' }
+        @{ Payload = '`^href="//example.com/share/config.py"`' }
+        @{ Payload = '`(href="//example.com/share/config.py"`' }
+        @{ Payload = '`{src="//example.com/share/config.py"`' }
+        @{ Payload = '`href="//example.com/share/config.py"`' }
         # A link or image context does not widen the host allowlist.
         @{ Payload = '`<a href="//fs.alt/share/config.py">`' }
         @{ Payload = '`<img src="//127-0-0-1.nip.io/share/a.png">`' }
