@@ -2842,22 +2842,35 @@ function Remove-ReviewSuppliedMarkers {
     return $Text
 }
 
+function Get-ReviewDefinitionState {
+    param([AllowEmptyString()][string]$Rest)
+
+    # What may follow a link reference definition whose destination, and maybe a title, is $Rest:
+    # 'maybe-title' (a title may come on the next line), 'title:<close>' (a title is still open) or ''
+    # (the definition is complete).
+    $parts = [regex]::Match($Rest, '^[ \t]*(?:<[^>]*>|\S+)(?:[ \t]+(["''(])(.*))?$')
+    if (-not $parts.Success -or -not $parts.Groups[1].Success) { return 'maybe-title' }
+    $close = $(if ($parts.Groups[1].Value -eq '(') { ')' } else { $parts.Groups[1].Value })
+    if ($parts.Groups[2].Value.TrimEnd().EndsWith($close)) { return '' }
+    return "title:$close"
+}
+
 function Measure-ReviewSubstantiveLines {
     param([AllowEmptyString()][string]$Text)
 
     # The number of lines of $Text that say something a reader can see. HTML comments, tags, entities and
     # elements GitHub never shows with their text (script, style and the like) go first, across lines,
     # then on each line every container marker (quote, list and task markers, nested and empty, with or
-    # without text after them). A line left as a heading (# or underlined), a fence
-    # delimiter or part of a link reference or footnote definition says nothing; any other line counts when
-    # it still holds a letter or digit. A review left with only formatting (rules, table delimiters,
-    # emphasis, empty lists) is no review.
+    # without text after them). A line left as a heading (# or underlined), a fence delimiter or part of a
+    # link reference or footnote definition says nothing; any other line counts when it still holds a
+    # letter or digit. A review left with only formatting (rules, table delimiters, emphasis, empty lists)
+    # is no review.
     $visible = [regex]::Replace($Text, '<!--[\s\S]*?(?:-->|\z)', '')
     $visible = [regex]::Replace($visible, '(?i)<(script|style|textarea|title|template)\b[\s\S]*?(?:</\1[^>]*>|\z)', '')
     $visible = [regex]::Replace($visible, '</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:"[^"]*"|''[^'']*''|[^<>"''])*)?/?>|<![A-Za-z\[][^>]*>|<\?[\s\S]*?(?:\?>|\z)', '')
     $visible = [regex]::Replace($visible, '&#?[A-Za-z0-9]+;|!?\[[ \t]*\]\([^)]*\)', '')
     $count = 0
-    $inDefinition = $false
+    $definition = ''
     $lines = @($visible -split "`r?`n")
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
@@ -2875,11 +2888,27 @@ function Measure-ReviewSubstantiveLines {
             $before = $line
             $line = $line -replace '^[ \t]*(?:>|[-*+](?=[ \t]|$)|[0-9]{1,9}[.)](?=[ \t]|$)|\[[ xX]\](?=[ \t]|$))', ''
         } while ($line -cne $before)
-        # A link reference or footnote definition says nothing, and neither do the lines that continue it
-        # (a destination or title on the next line), up to the next blank line.
-        if ($line -notmatch '\S') { $inDefinition = $false; continue }
-        if ($inDefinition) { continue }
-        if ($line -match '^[ \t]*\[[^\]]*\]:') { $inDefinition = $true; continue }
+        # A link reference or footnote definition says nothing, and neither do the lines that continue it:
+        # a destination or a title on the next line, the rest of a title spanning lines, or an indented
+        # footnote line. The definition ends there, at a blank line, or at any other line, which is text.
+        if ($line -notmatch '\S') { $definition = ''; continue }
+        if ($definition -eq 'footnote' -and $line -match '^(?: {4}|\t)') { continue }
+        if ($definition -like 'title:*') {
+            if ($line.Contains($definition.Substring(6))) { $definition = '' }
+            continue
+        }
+        if ($definition -eq 'destination') { $definition = Get-ReviewDefinitionState -Rest $line; continue }
+        if ($definition -eq 'maybe-title' -and $line -match '^[ \t]*["''(]') {
+            $definition = Get-ReviewDefinitionState -Rest ('<> ' + $line.Trim())
+            continue
+        }
+        $definition = ''
+        if ($line -match '^[ \t]*\[([^\]]*)\]:(.*)$') {
+            $label = $Matches[1]
+            $rest = $Matches[2]
+            $definition = $(if ($label.StartsWith('^')) { 'footnote' } elseif ($rest -notmatch '\S') { 'destination' } else { Get-ReviewDefinitionState -Rest $rest })
+            continue
+        }
         if ($line -match '^[ \t]*(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,})') { continue }
         if ($line -match '[\p{L}\p{N}]') { $count++ }
     }
