@@ -821,6 +821,12 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Kept = "- a finding`n---" }
         # Text after a blank line that ends a reference definition is text again.
         @{ Kept = "[note]: https://example.invalid`n`nok" }
+        # A definition ends where its destination and title do; the next block is text again.
+        @{ Kept = "[note]: https://example.invalid`n- a safe finding" }
+        @{ Kept = "[note]: https://example.invalid " + '"a title"' + "`nok" }
+        @{ Kept = "[note]:`n  https://example.invalid`nok" }
+        @{ Kept = "[note]: https://example.invalid " + '"a' + "`ntitle" + '"' + "`nok" }
+        @{ Kept = "[^1]: a note`nok" }
     ) {
         param($Kept)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "## Findings`n- app.py:1: C:\fixture\x`n$Kept" }
