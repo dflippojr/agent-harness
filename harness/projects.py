@@ -538,11 +538,15 @@ def _is_link(path: Path) -> bool:
     return path.is_symlink() or _isjunction(path)
 
 
-def _copy_state_file(src: _StateDir, dst: _StateDir, name: str) -> None:
+def _copy_state_file(src: _StateDir, dst: _StateDir, name: str, in_ref_tree: bool) -> None:
+    """Copy file `name`. A directory at `name` in `dst` is removed only `in_ref_tree` (refs, logs), where git
+    switches a ref between directory and file; at the top level (HEAD, FETCH_HEAD, ...) it is refused and kept."""
     source_fd = src.open_read(name)
     try:
         kind = dst.kind(name)
-        if kind == _DIR:  # a ref that became a file (git's directory/file switch): Windows renames over neither
+        if kind == _DIR:  # Windows renames over neither a directory nor a directory link
+            if not in_ref_tree:
+                raise GitError(f"refusing git state {name}: a directory where a file belongs")
             dst.remove_tree(name)
         elif kind != _FILE:  # a link of any kind, removed itself
             dst.remove(name)
@@ -566,7 +570,7 @@ def _mirror_tree(src: _StateDir, dst: _StateDir) -> None:
             with src.subdir(name) as sub_src, dst.ensure_subdir(name) as sub_dst:
                 _mirror_tree(sub_src, sub_dst)
         elif kind == _FILE:
-            _copy_state_file(src, dst, name)
+            _copy_state_file(src, dst, name, in_ref_tree=True)
         else:
             raise GitError(f"refusing symlinked or special git state {name}")
     for name in sorted(dst.names()):
@@ -589,7 +593,7 @@ def _copy_git_state(src: Path, dst: Path) -> None:
             for name in _STATE_FILES:
                 kind = s.kind(name)
                 if kind == _FILE:
-                    _copy_state_file(s, d, name)
+                    _copy_state_file(s, d, name, in_ref_tree=False)
                 elif kind != _MISSING:
                     raise GitError(f"refusing symlinked or special git state {name}")
             for name in _STATE_DIRS:
