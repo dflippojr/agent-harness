@@ -250,6 +250,22 @@ Describe 'Review publication safety' {
                 @{ Payload = "``<a data&#$separator;$name=`"//example.com/share/config.py`">``" }
             }
         }
+        # Markup the tokenizer reads to the end of the text (an unterminated comment or quoted value) holds no
+        # attribute or link of its own, in prose, in a code span and decoded from character references.
+        foreach ($name in 'href', 'src') {
+            foreach ($open in '<!--', '<b title=''x', '<b title="x', '</b title=''x') {
+                $tag = "$open <a $name=`"//example.com/share/config.py`">"
+                @{ Payload = "Note $tag here." }
+                @{ Payload = "Note ``$tag`` here." }
+                @{ Payload = "Note ``$($tag.Replace('<', '&lt;').Replace('&lt;a ', '<a '))`` here." }
+            }
+        }
+        # A Markdown destination inside markup is not a link.
+        @{ Payload = 'Note `<!-- [x](//example.com/share/config.py)` here.' }
+        @{ Payload = 'Note `<!-- [x](//example.com/share/config.py) -->` here.' }
+        @{ Payload = 'Note `<b title="[x](//example.com/share/config.py)">` here.' }
+        @{ Payload = 'Note `<b title=''[x](//example.com/share/config.py)` here.' }
+        @{ Payload = 'Note `<!-- <a href="//example.com/share/config.py"> -->` here.' }
         # A link or image context does not widen the host allowlist.
         @{ Payload = '`<a href="//fs.alt/share/config.py">`' }
         @{ Payload = '`<img src="//127-0-0-1.nip.io/share/a.png">`' }
