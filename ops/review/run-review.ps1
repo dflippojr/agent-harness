@@ -2845,13 +2845,15 @@ function Remove-ReviewSuppliedMarkers {
 function Measure-ReviewSubstantiveLines {
     param([AllowEmptyString()][string]$Text)
 
-    # The number of lines of $Text that say something a reader can see. HTML comments, tags and entities go
-    # first, across lines, then on each line every container marker (quote, list and task markers, nested
-    # and empty, with or without text after them). A line left as a heading (# or underlined), a fence
+    # The number of lines of $Text that say something a reader can see. HTML comments, tags, entities and
+    # elements GitHub never shows with their text (script, style and the like) go first, across lines,
+    # then on each line every container marker (quote, list and task markers, nested and empty, with or
+    # without text after them). A line left as a heading (# or underlined), a fence
     # delimiter or part of a link reference or footnote definition says nothing; any other line counts when
     # it still holds a letter or digit. A review left with only formatting (rules, table delimiters,
     # emphasis, empty lists) is no review.
     $visible = [regex]::Replace($Text, '<!--[\s\S]*?(?:-->|\z)', '')
+    $visible = [regex]::Replace($visible, '(?i)<(script|style|textarea|title|template)\b[\s\S]*?(?:</\1[^>]*>|\z)', '')
     $visible = [regex]::Replace($visible, '</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:"[^"]*"|''[^'']*''|[^<>"''])*)?/?>|<![A-Za-z\[][^>]*>|<\?[\s\S]*?(?:\?>|\z)', '')
     $visible = [regex]::Replace($visible, '&#?[A-Za-z0-9]+;|!?\[[ \t]*\]\([^)]*\)', '')
     $count = 0
