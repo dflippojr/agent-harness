@@ -266,6 +266,16 @@ Describe 'Review publication safety' {
         @{ Payload = 'Note `<b title="[x](//example.com/share/config.py)">` here.' }
         @{ Payload = 'Note `<b title=''[x](//example.com/share/config.py)` here.' }
         @{ Payload = 'Note `<!-- <a href="//example.com/share/config.py"> -->` here.' }
+        # A destination counts only where the scan's Markdown link reader reads a link.
+        @{ Payload = 'Note ](//fs.corp.example.com/share/config.py) here.' }
+        @{ Payload = 'Note `](//fs.corp.example.com/share/config.py)` here.' }
+        @{ Payload = 'Note x](//fs.corp.example.com/share/config.py) here.' }
+        @{ Payload = 'Note \](//fs.corp.example.com/share/config.py) here.' }
+        @{ Payload = 'Note [x\](//fs.corp.example.com/share/config.py) here.' }
+        @{ Payload = 'Note \[x](//fs.corp.example.com/share/config.py) here.' }
+        @{ Payload = 'Note [x]\(//fs.corp.example.com/share/config.py) here.' }
+        @{ Payload = 'Note &#91;x&#93;(//fs.corp.example.com/share/config.py) here.' }
+        @{ Payload = 'Note x&#93;(//fs.corp.example.com/share/config.py) here.' }
         # A link or image context does not widen the host allowlist.
         @{ Payload = '`<a href="//fs.alt/share/config.py">`' }
         @{ Payload = '`<img src="//127-0-0-1.nip.io/share/a.png">`' }
@@ -497,6 +507,10 @@ Describe 'Review publication safety' {
         @{ Payload = 'The test passes `''<a href="//example.com/p">p</a> <a href="/\\example.com/p">q</a> <img src=\''//example.com/i.png\'' alt="">''`.' }
         @{ Payload = 'A Markdown link may use it too: [p](/\example.com/p).' }
         @{ Payload = "Tabs separate attributes as spaces do: ``<a`tclass=`"feed`"`thref=`"//example.com/feed.xml`">``." }
+        # Inside a complete tag, values are read as HTML reads them: unquoted, or with spaces around the =.
+        @{ Payload = 'Unquoted: `<a href=//example.com/feed.xml>`, spaced: `<a href = "//example.com/feed.xml">`.' }
+        # A link in a code span is read as the rendered forms read it.
+        @{ Payload = 'Quoted Markdown: `[feed](//example.com/feed.xml)`.' }
         @{ Payload = '**Structure** `harness/__init__.py`: keep the `<n>` placeholder.' }
         @{ Payload = 'Send a Bearer token in the header; the `Bearer` scheme is case-insensitive.' }
         @{ Payload = 'The header is built as `f"Bearer {token}"`.' }
