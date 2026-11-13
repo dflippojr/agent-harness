@@ -30,6 +30,7 @@ from test_phase4 import FAKE_PID, bash, executor, needs_bash, record_group_kills
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "macrunner"))
 import harness_runner  # noqa: E402
+from host_git import needs_host_git
 
 PROFILE = Path(__file__).resolve().parent.parent / "macrunner" / "sandbox.sb"
 SID = "0123456789"
@@ -70,6 +71,7 @@ def test_runner_git_temp_root_is_inside_the_runner_directory(tmp_path):
     assert root.is_relative_to(home / ".agent-harness" / "runner")
 
 
+@needs_host_git
 def test_daemon_git_keeps_using_the_system_temp_directory(tmp_path, shared_tmp):
     assert projects.TEMP_ROOT is None
     seen = []
@@ -86,6 +88,7 @@ def test_daemon_git_keeps_using_the_system_temp_directory(tmp_path, shared_tmp):
     assert seen == [None]
 
 
+@needs_host_git
 def test_snapshot_keeps_git_scratch_out_of_the_shared_temp_directory(tmp_path, shared_tmp, private_root,
                                                                      monkeypatch):
     repo = make_repo(tmp_path / "ws")
@@ -111,6 +114,7 @@ def test_snapshot_keeps_git_scratch_out_of_the_shared_temp_directory(tmp_path, s
         assert stat.S_IMODE(private_root.stat().st_mode) == 0o700
 
 
+@needs_host_git
 def test_bare_source_merge_worktree_uses_the_private_root(tmp_path, shared_tmp, private_root, monkeypatch):
     seed = make_repo(tmp_path / "seed")
     source = tmp_path / "source.git"
@@ -134,6 +138,7 @@ def test_bare_source_merge_worktree_uses_the_private_root(tmp_path, shared_tmp, 
     assert list(private_root.iterdir()) == []  # the merge's scratch directory is removed too
 
 
+@needs_host_git
 def test_temp_root_must_be_a_plain_directory(tmp_path, monkeypatch):
     target = tmp_path / "elsewhere"
     target.mkdir()

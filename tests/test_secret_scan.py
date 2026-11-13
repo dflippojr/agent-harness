@@ -21,6 +21,7 @@ from harness.manager import HarnessError, Manager
 from test_api import make_client, wait_for
 from test_daemon import Script, call
 from test_phase3 import edit_steps, finished, make_repo, project_cfg, sh
+from host_git import needs_host_git
 
 # Built at runtime so the repository itself holds no credential-shaped string. Not EXAMPLE-suffixed:
 # the pinned aws-access-token rule allowlists AWS's documentation keys.
@@ -84,6 +85,7 @@ def test_cache_by_head_diff_and_pin(gitleaks_tools):
     assert other["findings"][0]["fingerprint"] != first["findings"][0]["fingerprint"]  # salted per session
 
 
+@needs_host_git
 def test_workspace_gitleaks_config_has_no_effect(gitleaks_tools, tmp_path, monkeypatch):
     repo = make_repo(tmp_path / "ws")
     base = sh(repo, "rev-parse", "HEAD")
@@ -116,6 +118,7 @@ def test_missing_or_broken_scanner_is_reported(tmp_path):
 @pytest.mark.parametrize("content_format", ["binary", "-diff", "nul"])
 @pytest.mark.parametrize("source", ["worktree", "staged", "untracked", "commit"])
 @pytest.mark.parametrize("strict", [False, True])
+@needs_host_git
 def test_diff_reads_content_as_text(gitleaks_tools, tmp_path, content_format, source, strict):
     repo = make_repo(tmp_path / "ws")
     path = repo / "settings.dat"
@@ -183,6 +186,7 @@ def _leaks(m: Manager, sid: str, caplog) -> list[str]:
     return [name for name, text in places.items() if KEY in text]
 
 
+@needs_host_git
 def test_committed_key_blocks_merge_until_dismissed(tmp_path, caplog):
     caplog.set_level(logging.DEBUG)
     src = make_repo(tmp_path / "src")
@@ -238,6 +242,7 @@ def test_committed_key_blocks_merge_until_dismissed(tmp_path, caplog):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_removing_the_key_from_the_diff_unblocks_merge(tmp_path):
     src = make_repo(tmp_path / "src")
     cfg = project_cfg(tmp_path, str(src))
@@ -257,6 +262,7 @@ def test_removing_the_key_from_the_diff_unblocks_merge(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_uncommitted_key_blocks_push(tmp_path, caplog):
     remote = make_repo(tmp_path / "remote.git", bare=True)
     cfg = project_cfg(tmp_path, remote.as_uri())
@@ -286,6 +292,7 @@ def _commit_then_remove_key(ws: Path) -> str:
     return added
 
 
+@needs_host_git
 def test_key_removed_by_a_later_commit_blocks_push_until_dismissed(tmp_path, caplog):
     remote = make_repo(tmp_path / "remote.git", bare=True)
     cfg = project_cfg(tmp_path, remote.as_uri())
@@ -321,6 +328,7 @@ def _user_messages(m: Manager, sid: str) -> list[str]:
     return [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"]
 
 
+@needs_host_git
 def test_ask_fix_on_a_commit_only_finding_asks_for_a_history_rewrite(tmp_path, caplog):
     """Owner decision on #263: a value only in an earlier commit is not skipped; the agent is asked to rewrite
     the branch's own commits, and Push is allowed once no commit since the base has it."""
@@ -356,6 +364,7 @@ def test_ask_fix_on_a_commit_only_finding_asks_for_a_history_rewrite(tmp_path, c
     asyncio.run(body())
 
 
+@needs_host_git
 def test_ask_fix_on_a_commit_already_pushed_says_dismiss_instead(tmp_path):
     """Nothing at or before the remote branch's tip is rewritten: that needs a force-push, so only dismiss is left."""
     remote = make_repo(tmp_path / "remote.git", bare=True)
@@ -390,6 +399,7 @@ def test_ask_fix_on_a_commit_already_pushed_says_dismiss_instead(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_key_moved_to_another_file_still_blocks_push_for_its_commit(tmp_path, caplog):
     """dev.env gets the key and loses it again; prod.env has it at HEAD. Dismissing the prod.env finding
     must not let the dev.env commit through, so the commit's finding is not folded into it."""
@@ -428,6 +438,7 @@ def _net_fingerprint(m: Manager, sid: str, ws: Path) -> str:
     return m.secret_scanner.scan(diffs, sid)["findings"][0]["fingerprint"]
 
 
+@needs_host_git
 def test_key_removed_by_a_later_commit_does_not_block_merge(tmp_path):
     src = make_repo(tmp_path / "src")
     cfg = project_cfg(tmp_path, str(src))
@@ -445,6 +456,7 @@ def test_key_removed_by_a_later_commit_does_not_block_merge(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_clean_multi_commit_push_passes(tmp_path):
     remote = make_repo(tmp_path / "remote.git", bare=True)
     cfg = project_cfg(tmp_path, remote.as_uri())
@@ -478,6 +490,7 @@ def test_cache_covers_the_commit_range(gitleaks_tools):
     assert not second["cached"] and [f["commit"] for f in second["findings"]] == ["b" * 12]
 
 
+@needs_host_git
 def test_scanner_failure_blocks_push_and_merge(tmp_path):
     src = make_repo(tmp_path / "src")
     cfg = project_cfg(tmp_path, str(src))
@@ -563,6 +576,7 @@ def _real_archive(tools: Path) -> bytes:
 
 
 # API: Ask agent to fix, Dismiss (owner only)
+@needs_host_git
 def test_api_fix_drafts_and_owner_only_dismiss(tmp_path):
     steps = [Completion(tool_calls=[call("write_file", 0, path="app.py", content="VALUE = 2\n")]),
              Completion(content="done"), Completion(content="removed it")]

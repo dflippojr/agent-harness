@@ -18,6 +18,7 @@ from harness.runner import new_run
 from harness.state import inject_payload, is_dead_end_retry, is_valid_state, validate_state
 from harness.tools import ToolError
 from test_daemon import Script, call, events, make_cfg, wait_status
+from host_git import needs_host_git
 
 PAGE = "SearXNG is free software released under the GNU Affero General Public License, version 3 or later."
 FAIL_ARGS = {"cmd": "boom", "flag": False}
@@ -216,6 +217,7 @@ def test_explicit_reset_keeps_dead_end_and_files_and_grounding(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_reset_lists_files_after_commit(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
