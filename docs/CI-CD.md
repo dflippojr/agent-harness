@@ -193,6 +193,7 @@ conclusion follows the review verdict:
 | `REVIEW_VERDICT: FINDINGS n` | `failure` | `n findings` (plus the partial note when files were omitted) |
 | `CLEAN`, but the diff exceeded `REVIEW_MAX_DIFF_BYTES` | `neutral` | `Partial review: n files not reviewed` |
 | Every backend failed or gave no valid verdict, or the comment was not posted | `failure` | `Review did not complete` |
+| The publication scan withheld lines, so the posted review is incomplete and has no marker (#974) | `failure` | `Review did not complete` |
 | Run cancelled | `cancelled` | `Automated review cancelled` |
 
 **Spec review (review-v3, #725).** Before the backend runs, the job reads the pull request's title and description and
@@ -353,9 +354,11 @@ quote and indent markers. Any of the fail-closed rules below (markup, math, Merm
 unknown entities) withholds nothing. A failing line goes whole, never only the match, because a match is often a prefix that the rest of the
 line continues. A note at the end of the review says how many lines were withheld, and the job log gives their numbers,
 never their text (#974). The result is scanned again in full, GitHub's rendering included. Only a result that
-passes is posted, with its marker. Nothing is withheld if a rejected match crosses a line break, for example a
+passes is posted. It is incomplete, so it carries no `agent-review` marker or criteria summary. The job reports
+`verdict=incomplete` and `withheld_lines=N`, and the check reads `Review did not complete`, so readiness tools never
+count it and the next run reviews the whole PR again. Nothing is withheld if a rejected match crosses a line break, for example a
 `password =` label and its value on two lines, or if a scan form moves text between lines. If that happens, if the
-result fails again, if no single line fails on its own, or if every line would be withheld, the wrapper removes any stale output and fails closed with `Review did not complete`. Nothing of the review
+result fails again, if no single line fails on its own, or if only formatting would be left (headings, fences, rules or bare list markers), the wrapper removes any stale output and fails closed with `Review did not complete`. Nothing of the review
 is posted or copied into the check summary. Instead it posts a short notice on the PR, with no review text and no
 `agent-review` marker, saying that the review was not published and linking the run log. The path rules never parse or
 canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot hide one:

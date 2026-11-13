@@ -2817,6 +2817,17 @@ function Get-ReviewRuleHitLines {
     return , $hitLines
 }
 
+function Test-ReviewSubstantiveLine {
+    param([AllowEmptyString()][string]$Line)
+
+    # True when a kept line says something: not blank, not a heading or a fence delimiter, and with a
+    # letter or digit once list, quote and indent markers are dropped. A review left with only formatting
+    # (headings, fences, rules, table delimiters, bare list markers) is no review and is not published.
+    $content = $Line -replace '^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?', ''
+    if ($content -match '^[ \t]*(?:#{1,6}(?:[ \t]|$)|```|~~~)') { return $false }
+    return $content -match '[\p{L}\p{N}]'
+}
+
 function Get-ReviewWithheldOutput {
     param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
 
@@ -2834,11 +2845,15 @@ function Get-ReviewWithheldOutput {
     $kept = 0
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ([string]::IsNullOrWhiteSpace($lines[$i])) { continue }
-        if (-not $contextLines.Contains($i) -and @(Get-ReviewRuleHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) { $kept++; continue }
+        if (-not $contextLines.Contains($i) -and @(Get-ReviewRuleHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) {
+            if (Test-ReviewSubstantiveLine -Line $lines[$i]) { $kept++ }
+            continue
+        }
         $prefix = [regex]::Match($lines[$i], '^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?').Value
         $lines[$i] = $prefix + $script:ReviewWithheldLine
         $withheld.Add($i + 1)
     }
+    # KeptLines counts only the kept lines that say something (Test-ReviewSubstantiveLine).
     return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $kept }
 }
 
@@ -2964,6 +2979,7 @@ function Write-ReviewResult {
     }
     $format = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**."
     $output = $Result.Output.Trim()
+    if ($WithholdUnsafeLines) { $Result | Add-Member -NotePropertyName WithheldLines -NotePropertyValue 0 -Force }
     $body = $format -f $CoverageLine.Trim(), $output, $label
     try {
         Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
@@ -2988,15 +3004,20 @@ function Write-ReviewResult {
         $numbers = $withheld.Lines -join ', '
         $described = $(if ($count -eq 1) { "1 line of the review (line $numbers)" } else { "$count lines of the review (lines $numbers)" })
         if ($withheld.KeptLines -eq 0) {
-            Write-Warning "Publication safety scan: withholding $described would leave nothing of it, so it is not published."
+            Write-Warning "Publication safety scan: withholding $described would leave no review content, so it is not published."
             throw
         }
         Write-Host "Publication safety scan: withheld $described; scanning the rest again."
         $note = $(if ($count -eq 1) { '1 line' } else { "$count lines" })
-        $output = "$($withheld.Text)`n`n_The publication safety scan withheld $note of this review that held text it never posts, such as an absolute path, a credential or a long token. The workflow run log gives the line numbers._"
+        $output = "$($withheld.Text)`n`n_The publication safety scan withheld $note of this review that held text it never posts, such as an absolute path, a credential or a long token. The workflow run log gives the line numbers. With lines withheld this review is incomplete, so it carries no review marker and readiness tools do not count it._"
         $body = $format -f $CoverageLine.Trim(), $output, $label
         Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
-        Write-Host "Publication safety scan: the rest of the review passed and is posted with $note withheld."
+        Write-Host "Publication safety scan: the rest of the review passed and is posted with $note withheld, as incomplete and without its marker."
+        # Withheld lines may hold criteria or findings, so the counts in the markers no longer describe what
+        # is published. Without a marker, readiness tools never count the review and the next run reviews
+        # the whole PR again.
+        $marker = ''
+        $Result | Add-Member -NotePropertyName WithheldLines -NotePropertyValue $count -Force
     }
     # The marker contains validated Git metadata; its SHA intentionally resembles a long token.
     $body += $marker
@@ -3060,11 +3081,17 @@ function Invoke-ReviewMain {
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         $verdictValue = if ($result.PSObject.Properties['Verdict']) { [string]$result.Verdict } else { '' }
+        # A review published with lines withheld is incomplete: never report its clean or findings verdict.
+        $withheldLines = if ($result.PSObject.Properties['WithheldLines']) { [int]$result.WithheldLines } else { 0 }
+        if ($withheldLines -gt 0) {
+            $verdictValue = 'incomplete'
+            "withheld_lines=$withheldLines" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        }
         $findingValue = if ($result.PSObject.Properties['FindingCount']) { [string]$result.FindingCount } else { '' }
         "verdict=$verdictValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "findings=$findingValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "omitted_files=$(@($embedding.OmittedFiles).Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-        if ($result.PSObject.Properties['CriteriaTotal'] -and $null -ne $result.CriteriaTotal) {
+        if ($withheldLines -eq 0 -and $result.PSObject.Properties['CriteriaTotal'] -and $null -ne $result.CriteriaTotal) {
             "criteria=$([int]$result.CriteriaMet)/$([int]$result.CriteriaTotal)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         }
         if (-not [string]::IsNullOrWhiteSpace([string]$result.Model)) {
