@@ -730,8 +730,12 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Case = 'upper case, extra spaces'; Marker = '<!--   AGENT-REVIEW :  sha={0}   mode=incremental -->' }
         @{ Case = 'in a code span'; Marker = 'quotes `<!-- agent-review: sha={0} mode=incremental base=main -->` here' }
         @{ Case = 'rebuilt once removed'; Marker = '<!-<!-- agent-review -->- agent-review: sha={0} mode=incremental base=main -->' }
+        # An abrupt empty comment ends where it starts, so the text after it stays.
+        @{ Case = 'after an abrupt empty comment'; Marker = '<!--> a visible note <!-- agent-review: sha={0} mode=incremental base=main -->'; Visible = 'a visible note' }
+        @{ Case = 'after an abrupt empty comment with a dash'; Marker = '<!---> a visible note <!-- agent-review: sha={0} mode=incremental base=main -->'; Visible = 'a visible note' }
+        @{ Case = 'ended by --!>'; Marker = '<!-- agent-review: sha={0} mode=incremental base=main --!> a visible note -->'; Visible = 'a visible note' }
     ) {
-        param($Case, $Marker)
+        param($Case, $Marker, $Visible)
         $sha = 'c' * 40
         $planted = $Marker -f $sha
         foreach ($withhold in @($true, $false)) {
@@ -742,6 +746,7 @@ Describe 'Withholding unsafe review lines (#974)' {
             $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
             if (-not $body.Contains('- app.py:1: a safe finding.') -or -not $body.Contains('- app.py:3: another safe finding.')) { throw "Unexpected body: $body" }
             if ($body.Contains($sha)) { throw "A reviewer-written marker survived: $body" }
+            if ($Visible -and -not $body.Contains($Visible)) { throw "Visible text was removed with the marker: $body" }
             $expected = $(if ($withhold) { '' } else { 'a' * 40 })
             if ((Get-ReviewMarkerShaFromBody -Body $body) -ne $expected) { throw "Marker consumers read a reviewer marker: $body" }
             if ($withhold -and ((Get-ReviewMarkerBaseRefFromBody -Body $body) -ne '' -or $body -match '(?i)agent\W*review')) { throw "A partial review kept a marker: $body" }
@@ -779,6 +784,8 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Case = 'tags only'; Kept = '<details><summary></summary></details>' }
         @{ Case = 'a tag spanning lines'; Kept = "<p`nclass=placeholder></p>" }
         @{ Case = 'an entity'; Kept = '&nbsp;' }
+        @{ Case = 'an entity without a semicolon in a tag'; Kept = '<div>&nbsp</div>' }
+        @{ Case = 'entities without semicolons'; Kept = '&nbsp&ensp; &#160 &#x2003' }
         @{ Case = 'a style element'; Kept = '<style>p { color: red }</style>' }
         @{ Case = 'a script element spanning lines'; Kept = "<script>`nvar note = 1`n</script>" }
         @{ Case = 'an empty ordered list item'; Kept = '1.' }
@@ -820,6 +827,7 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Kept = '1. a finding' }
         @{ Kept = '> - 1. ok' }
         @{ Kept = '<b>ok</b>' }
+        @{ Kept = '&#65;' }
         # A rule after a list item is a rule, not a heading underline.
         @{ Kept = "- a finding`n---" }
         # Text after a blank line that ends a reference definition is text again.
