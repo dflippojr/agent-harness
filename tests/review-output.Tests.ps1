@@ -728,9 +728,7 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Case = 'summary form'; Marker = '<!-- agent-review: sha={0} criteria=4/4 findings=0 -->' }
         @{ Case = 'no spaces'; Marker = '<!--agent-review:sha={0} mode=incremental base=main-->' }
         @{ Case = 'upper case, extra spaces'; Marker = '<!--   AGENT-REVIEW :  sha={0}   mode=incremental -->' }
-        @{ Case = 'spanning lines'; Marker = "<!--`nagent-review: sha={0} mode=incremental base=main`n-->" }
         @{ Case = 'in a code span'; Marker = 'quotes `<!-- agent-review: sha={0} mode=incremental base=main -->` here' }
-        @{ Case = 'unterminated'; Marker = '<!-- agent-review: sha={0} mode=incremental base=main' }
         @{ Case = 'rebuilt once removed'; Marker = '<!-<!-- agent-review -->- agent-review: sha={0} mode=incremental base=main -->' }
     ) {
         param($Case, $Marker)
@@ -742,13 +740,34 @@ Describe 'Withholding unsafe review lines (#974)' {
             $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
             Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -BaseRef 'main' -DiffPaths @($sha) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
             $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
-            # An unterminated comment hides the rest of the review on GitHub, so it is dropped to the end.
-            if (-not $body.Contains('- app.py:1: a safe finding.')) { throw "Unexpected body: $body" }
+            if (-not $body.Contains('- app.py:1: a safe finding.') -or -not $body.Contains('- app.py:3: another safe finding.')) { throw "Unexpected body: $body" }
             if ($body.Contains($sha)) { throw "A reviewer-written marker survived: $body" }
             $expected = $(if ($withhold) { '' } else { 'a' * 40 })
             if ((Get-ReviewMarkerShaFromBody -Body $body) -ne $expected) { throw "Marker consumers read a reviewer marker: $body" }
             if ($withhold -and ((Get-ReviewMarkerBaseRefFromBody -Body $body) -ne '' -or $body -match '(?i)agent\W*review')) { throw "A partial review kept a marker: $body" }
             if (-not $withhold -and [regex]::Matches($body, '(?i)agent\W*review').Count -ne 1) { throw "Only the job's own marker may remain: $body" }
+        }
+    }
+
+    It 'fails closed on a review marker comment that crosses a line or never closes (<Case>)' -TestCases @(
+        # Removing it could drop text GitHub shows (an opener in a code span hides nothing), so nothing is posted.
+        @{ Case = 'spanning lines'; Marker = "<!--`nagent-review: sha={0} mode=incremental base=main`n-->" }
+        @{ Case = 'unterminated'; Marker = '<!-- agent-review: sha={0} mode=incremental base=main' }
+        @{ Case = 'unterminated in a code span'; Marker = 'quotes `<!-- agent-review:` here' }
+        @{ Case = 'closed lines later'; Marker = "quotes ``<!-- agent-review:`` here`n- app.py:4: a finding that ends with -->" }
+        @{ Case = 'inside a comment spanning lines'; Marker = "<!-- note`n<!-- agent-review: sha={0} mode=full -->" }
+    ) {
+        param($Case, $Marker)
+        $sha = 'c' * 40
+        foreach ($withhold in @($true, $false)) {
+            $unsafe = $(if ($withhold) { "`n- app.py:2: the fixture C:\fixture\x is quoted." } else { '' })
+            $review = "## Findings`n- app.py:1: a safe finding.$unsafe`n$($Marker -f $sha)`n- app.py:3: another safe finding."
+            $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+            $failure = ''
+            try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -DiffPaths @($sha) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+            catch { $failure = $_.Exception.Message }
+            if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+            if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
         }
     }
 
