@@ -355,8 +355,9 @@ canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot
   prefix (`\\server\`, `//server/`, `\\?\`, `\\.\`), or a `file:` URL.
   A review can quote a protocol-relative URL only where the text marks it as one (#781), since in prose a network
   path and a scheme-less URL are spelled the same. Both the context and the host are allowlists. The context is an
-  `href` or `src` attribute value (`href="`, `href='`, `src="` or `src='`, with no space and not part of a longer name
-  such as `data-href` or `srcset`; a backslash before the quote is allowed, as in an escaped string) or a Markdown link
+  `href` or `src` attribute value (`href="`, `href='`, `src="` or `src='`: the exact name with whitespace before it, so
+  not `data-href`, `data:href`, `xlink:href`, `img.src` or `srcset`, and no space after it; a backslash before the quote
+  is allowed, as in an escaped string) or a Markdown link
   or image destination (directly after `](`). The URL is `//` or `/\` (which browsers read as `//`), a host of two or
   more labels made only of letters joined by single hyphens, whose last label is `com`, `net` or `org`, an optional
   `:port`, then `/`. So `<a href="//example.com/posts/1">`, `` `<img src="//cdn.example.com/a.png">` ``,

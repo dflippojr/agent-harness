@@ -240,7 +240,7 @@ Describe 'Review publication safety' {
         @{ Payload = '`^href="//example.com/share/config.py"`' }
         @{ Payload = '`(href="//example.com/share/config.py"`' }
         @{ Payload = '`{src="//example.com/share/config.py"`' }
-        @{ Payload = '`href="//example.com/share/config.py"`' }
+        @{ Payload = '(`href="//example.com/share/config.py"`)' }
         # A link or image context does not widen the host allowlist.
         @{ Payload = '`<a href="//fs.alt/share/config.py">`' }
         @{ Payload = '`<img src="//127-0-0-1.nip.io/share/a.png">`' }

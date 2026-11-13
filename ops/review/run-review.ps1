@@ -413,9 +413,10 @@ $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\
 # Review text may quote a protocol-relative URL (#781). In prose a network path and a scheme-less URL are
 # spelled the same, so the exemption applies only where the text marks a URL, and only for an allowlisted
 # host. Both parts are narrow by construction: allowlists of spellings, not lists of bad hosts.
-# - Context: the root starts an href or src attribute value (href=" href=' src=" src=', the name not part
-#   of a longer one such as data-href or srcset, a backslash allowed before the quote as in an escaped
-#   string, no space anywhere), or a Markdown link or image destination (directly after "](").
+# - Context: the root starts an href or src attribute value (href=" href=' src=" src=', the exact name
+#   with whitespace before it, so no longer or prefixed name such as data-href, data:href, xlink:href,
+#   img.src or srcset; a backslash allowed before the quote as in an escaped string; no space after the
+#   name), or a Markdown link or image destination (directly after "](").
 #   Everything else is refused: bare prose, code spans and fences without such a context, unquoted or
 #   space-padded attributes, title= and other attributes, "] (", "]( ", "](<", reference definitions.
 # - Root: a forward slash, then a forward slash or a backslash (browsers read /\host/ as //host/, and
@@ -430,7 +431,7 @@ $script:ReviewAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\
 # The rule reads spelling only (what a public name resolves to is not checked), and decoded forms are
 # scanned too, so an encoded context or root gets the same answer. It applies to the publication scan
 # only: diagnostics redaction keeps the strict pattern above.
-$script:ReviewPublishUrlContext = '(?<=(?<![\p{L}\p{N}\p{M}_-])(?:href|src)=\\?["'']|\]\()'
+$script:ReviewPublishUrlContext = '(?<=(?<=\s)(?:href|src)=\\?["'']|\]\()'
 $script:ReviewPublishUrlHost = '/[\\/](?:(?![a-f]{1,4}(?:-[a-f]{1,4})+\.)[a-z]+(?:-[a-z]+)*\.)+(?:com|net|org)(?::[0-9]{1,5})?/'
 $script:ReviewPublishAbsoluteRootPattern = '(?i)(?<![\p{L}\p{N}\p{M}_])[A-Z]:[\\/]|\\\\[^\s\\/]+\\|(?<![\p{L}\p{N}\p{M}_:\\/])(?!' + $script:ReviewPublishUrlContext + $script:ReviewPublishUrlHost + ')[\\/]{2}[^\s\\/]+[\\/]|\bfile:[\\/]'
 # Trailing periods, spaces or short-name tildes still match (Windows aliases); users.md or rooted do not.
