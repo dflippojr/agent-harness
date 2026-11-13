@@ -667,6 +667,21 @@ Describe 'Withholding unsafe review lines (#974)' {
         if (($withheld.Lines -join ',') -ne '2,3' -or $withheld.KeptLines -ne 1) { throw 'Unexpected line numbers' }
     }
 
+    It 'withholds a line whose match needs another line as context' -TestCases @(
+        # A reference definition on the withheld line drops every bracket, so the scan reads line 1 as a token
+        # or a profile path; line 1 alone does not match, and once line 2 is gone neither would the rescan.
+        @{ Review = "- app.py:1: see [gh]p_synthetic12345678`n- app.py:2: C:\fixture\x [gh]: https://example.invalid`n- app.py:3: a safe finding."; Secret = 'synthetic12345678' }
+        @{ Review = "- app.py:1: in [/ho]me/reviewer/auth.json`n- app.py:2: C:\fixture\x [/ho]: https://example.invalid`n- app.py:3: a safe finding."; Secret = 'reviewer' }
+    ) {
+        param($Review, $Secret)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains($Secret) -or -not $body.Contains('- app.py:3: a safe finding.')) { throw "Unexpected body: $body" }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'withheld 2 lines of the review \(lines 1, 2\)') { throw "Unexpected log: $log" }
+    }
+
     It 'fails closed when no single line fails, or nothing would be left' -TestCases @(
         # Only GitHub's rendering shows the value, so no line can be found locally.
         @{ Review = "- app.py:1: a finding.`n- app.py:2: another."; Rendered = '<p>ghp_synthetic12345678</p>' }
