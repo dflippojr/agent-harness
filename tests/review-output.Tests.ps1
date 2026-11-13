@@ -276,6 +276,14 @@ Describe 'Review publication safety' {
         @{ Payload = 'Note [x]\(//fs.corp.example.com/share/config.py) here.' }
         @{ Payload = 'Note &#91;x&#93;(//fs.corp.example.com/share/config.py) here.' }
         @{ Payload = 'Note x&#93;(//fs.corp.example.com/share/config.py) here.' }
+        # HTML reads the content of raw-text and RCDATA elements as text, never as tags or links.
+        foreach ($element in 'script', 'style', 'xmp', 'iframe', 'noembed', 'noframes', 'noscript', 'textarea', 'title', 'plaintext') {
+            @{ Payload = "Note <$element><a href=`"//fs.corp.example.com/share/config.py`"> here." }
+            @{ Payload = "Note ``<$element><a href=`"//fs.corp.example.com/share/config.py`">`` here." }
+            @{ Payload = "Note ``<$element>[x](//fs.corp.example.com/share/config.py)</$element>`` here." }
+            @{ Payload = "Note ``&lt;$element><a href=`"//fs.corp.example.com/share/config.py`">`` here." }
+        }
+        @{ Payload = 'Note `<TEXTAREA rows="2"><a href="//fs.corp.example.com/share/config.py"></textarea x>` here.' }
         # A link or image context does not widen the host allowlist.
         @{ Payload = '`<a href="//fs.alt/share/config.py">`' }
         @{ Payload = '`<img src="//127-0-0-1.nip.io/share/a.png">`' }
@@ -511,6 +519,8 @@ Describe 'Review publication safety' {
         @{ Payload = 'Unquoted: `<a href=//example.com/feed.xml>`, spaced: `<a href = "//example.com/feed.xml">`.' }
         # A link in a code span is read as the rendered forms read it.
         @{ Payload = 'Quoted Markdown: `[feed](//example.com/feed.xml)`.' }
+        # After a raw-text or RCDATA element's end tag, markup is read again.
+        @{ Payload = 'After it: `<textarea>x</textarea><a href="//example.com/feed.xml">` and `<title>t</TITLE ><img src="//cdn.example.com/a.png">`.' }
         @{ Payload = '**Structure** `harness/__init__.py`: keep the `<n>` placeholder.' }
         @{ Payload = 'Send a Bearer token in the header; the `Bearer` scheme is case-insensitive.' }
         @{ Payload = 'The header is built as `f"Bearer {token}"`.' }
