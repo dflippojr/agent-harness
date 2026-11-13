@@ -2821,15 +2821,24 @@ function Remove-ReviewSuppliedMarkers {
     param([AllowEmptyString()][string]$Text)
 
     # The review text with every HTML comment that names agent-review removed, in any spelling, case or
-    # spacing, on one line or several, in a code span or not, and an unterminated one to the end of the text
-    # (it hides the rest on GitHub anyway). Only the job writes review markers (Write-ReviewResult), so
-    # nothing the reviewer wrote can be read back as one, whatever the scan makes of it. Removal repeats
-    # until nothing changes, so pieces left around a removed comment cannot join into a new one.
+    # spacing, in a code span or not. Only the job writes review markers (Write-ReviewResult), so nothing
+    # the reviewer wrote can be read back as one, whatever the scan makes of it. Removal repeats until
+    # nothing changes, so pieces left around a removed comment cannot join into a new one. Only a comment
+    # that opens and closes on one line is removed. One that crosses a line or never closes fails closed:
+    # its opener may sit in a code span, where GitHub shows it and everything after it, so removing it
+    # could silently drop findings from a review published as complete.
+    $marker = '(?i)agent\W*review'
     $comment = [regex]'<!--[\s\S]*?(?:-->|\z)'
     do {
         $before = $Text
-        $Text = $comment.Replace($Text, { param($m) if ($m.Value -match '(?i)agent\W*review') { '' } else { $m.Value } })
+        $Text = $comment.Replace($Text, { param($m) if ($m.Value -match $marker -and $m.Value -notmatch '[\r\n]' -and $m.Value.EndsWith('-->')) { '' } else { $m.Value } })
     } while ($Text -cne $before)
+    foreach ($m in $comment.Matches($Text)) {
+        if ($m.Value -match $marker) {
+            Write-Warning 'Publication safety scan: a review marker comment in the review text crosses a line or never closes, so it cannot be removed.'
+            throw $script:ReviewPublicationFailure
+        }
+    }
     return $Text
 }
 
