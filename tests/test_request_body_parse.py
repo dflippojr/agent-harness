@@ -10,6 +10,8 @@ Synthetic data only: made-up members, names and verifiers generated here."""
 from __future__ import annotations
 
 import ast
+import asyncio
+import json
 import secrets
 from pathlib import Path
 
@@ -19,6 +21,7 @@ from fastapi.testclient import TestClient
 from harness import pairing_requests as pr
 from test_hub_claim import CLAIM, _audit, _host
 from test_household import ALICE, H
+from test_mcp_server import _request as _mcp_request, _server as _mcp_server
 from test_member_keys import CANARY, KEYS, setup
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -174,6 +177,49 @@ def test_valid_bodies_still_work(tmp_path, monkeypatch):
                            json={"code_verifier": verifier}).status_code == 201
 
 
+def test_hostile_mcp_bodies_get_a_json_rpc_error_not_a_500():
+    """The MCP endpoint (`POST /mcp`, relayed to McpServer.handle) parses its body by hand too. A body the parser
+    rejects is the same 400 parse error as any non-JSON body. One that parses but nests deeply gets an ordinary JSON-RPC
+    answer: handle never raises (the relay would answer 500) and the reply always encodes."""
+    async def run():
+        tokens, server = _mcp_server([])
+        token = tokens.mint("s1")
+
+        async def send(body: str) -> tuple[int, int | None]:
+            response = await server.handle("s1", _mcp_request(token, body))
+            json.dumps({"id": 1, **response})   # what the relay writes back
+            reply = json.loads(response["body"]) if response["body"] else None
+            first = reply[0] if isinstance(reply, list) and reply else reply
+            return response["status"], (first or {}).get("error", {}).get("code")
+
+        def deep(n: int) -> str:
+            return "[" * n + "]" * n
+
+        parse_error = await send("invalid")
+        assert parse_error == (400, -32700)
+        unparsable = {name: body.decode("utf-8") for name, body in HOSTILE_BODIES.items()
+                      if name in ("nested arrays", "nested objects", "unterminated nesting", "huge integer")}
+        wrong = {name: got for name, body in unparsable.items() if (got := await send(body)) != parse_error}
+        for depth in DEPTHS:
+            for name, body in {
+                "batch": deep(depth),
+                "id": '{"jsonrpc":"2.0","method":"ping","id":' + deep(depth) + "}",
+                "method": '{"jsonrpc":"2.0","id":1,"method":' + deep(depth) + "}",
+                "params": '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":' + deep(depth) + "}",
+            }.items():
+                got = await send(body)
+                if got[0] >= 500 or got[1] is None:   # always a JSON-RPC error, never a 5xx
+                    wrong[f"{name} nested {depth}"] = got
+        assert wrong == {}
+        # JSON-RPC ids are a string, a number or null: a nested id is refused, not echoed back.
+        refused = await server.handle("s1", _mcp_request(token, '{"jsonrpc":"2.0","method":"ping","id":[[1]]}'))
+        assert json.loads(refused["body"]) == {"jsonrpc": "2.0", "id": None,
+                                               "error": {"code": -32600, "message": "invalid request"}}
+        ok = await server.handle("s1", _mcp_request(token, {"jsonrpc": "2.0", "id": "a-1", "method": "ping"}))
+        assert ok["status"] == 200 and json.loads(ok["body"])["id"] == "a-1"
+    asyncio.run(run())
+
+
 # --- class-level check: every request-body JSON parse catches the #930 failure set ---------------------------------
 
 FAILURE_SET = {"ValueError", "RecursionError"}
@@ -188,6 +234,7 @@ KNOWN_SITES = {
     ("harness/hub_claim.py", "_parse"),
     ("harness/api.py", "create_key"),
     ("harness_modules/endpoint/service.py", "_parse_body"),
+    ("harness/mcp_server.py", "handle"),   # the relayed `POST /mcp` body, a dict named `request`
 }
 
 
@@ -223,8 +270,9 @@ class _BodyParses(ast.NodeVisitor):
 
     def _function(self, node):
         args = node.args.posonlyargs + node.args.args + node.args.kwonlyargs
-        params = {a.arg for a in args if (a.annotation is not None and _is_request_annotation(a.annotation))
-                  or (a.annotation is None and a.arg in ("request", "req"))}   # an unannotated helper too
+        # A `Request`, or anything named `request`/`req` (an unannotated helper, the MCP relay's request dict).
+        params = {a.arg for a in args if a.arg in ("request", "req")
+                  or (a.annotation is not None and _is_request_annotation(a.annotation))}
         self.functions.append((node.name, params))
         saved, self.tries = self.tries, []
         self.generic_visit(node)
@@ -313,3 +361,4 @@ def test_the_audit_flags_a_parse_that_catches_only_value_error():
     assert scan("async def f(request: Request):\n    return await json_body(request)\n") == [True]
     assert scan("def f(text):\n    return json.loads(text)\n") == []   # not a request body
     assert scan("async def _read(request):\n    return json.loads(await request.body())\n") == [False]
+    assert scan("async def handle(sid, request: dict):\n    return json.loads(request['body'])\n") == [False]
