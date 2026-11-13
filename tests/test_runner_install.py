@@ -480,6 +480,45 @@ def test_dry_run_caps_memory_and_restarts_a_failed_runner_in_the_service_section
         assert setting in service
 
 
+# Issue #918: on a boot with a skewed clock the listener's session request fails and runsvc.sh stops the service with a
+# clean exit ("no retry needed"), which Restart=on-failure alone never restarts.
+CLEAN_EXIT_RESTART = "RestartForceExitStatus=0"
+
+
+def test_dry_run_also_restarts_the_runner_after_its_clean_no_retry_exit():
+    result = run_install("--name", "tower-review-1", "--dry-run")
+    assert result.returncode == 0, result.stderr
+    service = service_section(result.stdout)
+    assert CLEAN_EXIT_RESTART in service
+    # It adds to the #916 restart policy rather than replacing it.
+    assert "Restart=on-failure" in service
+    assert "RestartSec=30" in service
+    # No start limit anywhere in the unit (its home is [Unit]): a long skew would use it up and leave the runner down.
+    unit_lines = result.stdout[result.stdout.index("[Unit]"):].splitlines()
+    assert not [line for line in unit_lines if line.startswith(("StartLimitBurst=", "StartLimitIntervalSec="))]
+    # The unit itself says why, in a comment just above the setting.
+    comment = service[service.index(CLEAN_EXIT_RESTART) - 1]
+    assert comment.startswith("#")
+    assert "clean" in comment.lower()
+
+
+def test_systemd_accepts_the_clean_exit_restart_in_the_dry_run_unit(tmp_path):
+    analyze = shutil.which("systemd-analyze")
+    if not analyze:
+        pytest.skip("systemd-analyze is not installed")
+    result = run_install("--name", "tower-review-1", "--dry-run")
+    assert result.returncode == 0, result.stderr
+    text = result.stdout[result.stdout.index("[Unit]"):]
+    unit_file = tmp_path / "actions.runner.dflippojr-agent-harness.tower-review-1.service"
+    unit_file.write_text(text, encoding="utf-8")
+    verified = subprocess.run([analyze, "verify", str(unit_file)], capture_output=True, text=True, check=False)
+    # The runner directory does not exist here, so verify reports the missing runsvc.sh; it must not reject a setting.
+    # Verify also loads the host's units multi-user.target pulls in, and may complain about those, so keep only ours.
+    complaints = [line for line in verified.stderr.splitlines()
+                  if unit_file.name in line and "is not executable" not in line]
+    assert complaints == [], verified.stderr
+
+
 def test_the_installed_unit_is_the_unit_the_dry_run_prints(tmp_path):
     host = FakeHost(tmp_path)
     planned = host.install("--dry-run")
@@ -525,6 +564,17 @@ def test_the_review_pool_doc_lists_the_memory_caps_and_restart_policy_with_a_lin
     for setting in MEMORY_AND_RESTART:
         assert setting in section
     assert "https://github.com/dflippojr/agent-ops/issues/442" in section
+
+
+def test_the_review_pool_doc_explains_the_clean_exit_restart_with_a_link():
+    text = CI_CD_DOC.read_text(encoding="utf-8")
+    section = text[text.index("### Linux (the tower"):text.index("### Windows (fallback boot)")]
+    assert CLEAN_EXIT_RESTART in section
+    assert "https://github.com/dflippojr/agent-harness/issues/918" in section
+    prose = " ".join(section.split())
+    # Why a retry rather than ordering after time-sync.target.
+    assert "time-sync.target" in prose
+    assert "no retry needed" in prose
 
 
 def test_re_registration_stops_the_service_and_checks_for_a_listener_before_config_sh():

@@ -274,6 +274,8 @@ class Runner:
         self.scheduler = scheduler
         self.chat = chat
         self.approval_events: dict[str, asyncio.Event] = {}
+        # Per recovered session: the approvals a restart left unanswered, the only ones a regenerated request binds to.
+        self._recovery_unanswered: dict[str, set[str]] = {}
         self.user_cancelled: set[str] = set()
         self._unended: set[str] = set()  # live runs whose _end_run has not started
         self._sandboxes: dict[str, Sandbox] = {}
@@ -1120,6 +1122,8 @@ class Runner:
         one saved before HOLDS_PLACE existed gets it now, before anything changes its status (an offline Mac, the GPU
         queue) and before another run's admission counts the cap."""
         sid = s["id"]
+        if s.get("backend", "local") != "local":
+            self._note_unanswered(sid)  # before the owner can answer a card the regenerated request should bind to
         ran = ("running", "waiting_approval", "waiting_app", "waiting_limit")
         if s["status"] not in ran or s["run"].get(HOLDS_PLACE):
             return
@@ -1284,6 +1288,8 @@ class Runner:
         await self._prepare_repo(s)
         slot = self._backend_slots[backend_name]
         while True:
+            if recovered and sid not in self._recovery_unanswered:
+                self._note_unanswered(sid)  # a CLI restarted within this daemon, or a run resumed without the Manager
             s = self.db.get_session(sid)
             if s["status"] == "waiting_limit":
                 delay = max(0, float(s["run"].get("limit_resets_at") or 0) - time.time())
@@ -1312,6 +1318,7 @@ class Runner:
                 await self._cli_limit_reached(sid, backend_name, limit, use_api_key)
                 recovered = True
             finally:
+                self._recovery_unanswered.pop(sid, None)
                 self._held_slots.pop(sid, None)
                 self._unreserve(sid)
                 await self._release_cli_turn(sid)  # a local-model CLI turn's leases on the model (#168)
@@ -2107,13 +2114,7 @@ class Runner:
         s = self.db.get_session(sid)
         existing = self.db.approval_for_call(sid, call_id)
         if existing is None and recovered and s["status"] == "waiting_approval":
-            # Claude regenerates the interrupted tool request with a new
-            # tool_use_id after --resume. Bind it to the one durable approval
-            # with identical semantics so the user sees and decides it once.
-            matches = [approval for approval in self.db.approvals(sid)
-                       if approval["tool"] == name and approval["args"] == args]
-            if len(matches) == 1:
-                existing = matches[0]
+            existing = self._recovery_approval(sid, name, args)
         if existing is None:
             existing = await self._ask_cli_policy(s, cli, request_id, request, name, args, call_id)
             if existing is None:
@@ -2132,6 +2133,25 @@ class Runner:
             return
         note = f" User note: {existing['note']}" if existing.get("note") else ""
         await cli.respond_permission(request_id, "deny", args, f"The user denied this {name} call.{note}")
+
+    def _note_unanswered(self, sid: str) -> None:
+        """Before a recovered run's CLI starts: the approvals still pending are the ones the restart left unanswered."""
+        self._recovery_unanswered[sid] = {approval["id"] for approval in self.db.pending_approvals(sid)}
+
+    def _recovery_approval(self, sid: str, name: str, args: dict | None) -> dict | None:
+        """The approval a regenerated CLI request binds to after a restart, or None to ask anew. Claude regenerates
+        the interrupted tool request with a new tool_use_id after --resume; it binds to the one durable approval with
+        identical semantics so the user sees and decides it once. Only an approval the restart left unanswered, that
+        no live request waits on, can bind; it keeps a decision made since (the owner may answer the card before the
+        request comes back) and binds once. The same command asked and decided before the restart is history (#925)."""
+        unanswered = self._recovery_unanswered.get(sid, set())
+        matches = [approval for approval in self.db.approvals(sid)
+                   if approval["id"] in unanswered and approval["id"] not in self.approval_events
+                   and approval["tool"] == name and approval["args"] == args]
+        if len(matches) != 1:
+            return None
+        unanswered.discard(matches[0]["id"])
+        return matches[0]
 
     def _hosted_status(self, sid: str) -> str:
         """A hosted session's status while it runs: parked on an approval or an App's reply while any is pending (its
