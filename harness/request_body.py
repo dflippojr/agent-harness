@@ -7,9 +7,10 @@ catches `BODY_PARSE_ERRORS` (a module under harness_modules/, which imports only
 tuple); tests/test_request_body_parse.py audits the source for it."""
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import Request
+if TYPE_CHECKING:   # the runner imports this through mcp_server and stays free of the web stack (test_tracing)
+    from fastapi import Request
 
 BODY_PARSE_ERRORS: tuple[type[Exception], ...] = (ValueError, RecursionError)
 

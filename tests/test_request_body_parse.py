@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from harness import pairing_requests as pr
 from test_hub_claim import CLAIM, _audit, _host
 from test_household import ALICE, H
+from harness.mcp_server import McpRelay
 from test_mcp_server import _request as _mcp_request, _server as _mcp_server
 from test_member_keys import CANARY, KEYS, setup
 
@@ -220,6 +221,15 @@ def test_hostile_mcp_bodies_get_a_json_rpc_error_not_a_500():
         ok = await server.handle("s1", _mcp_request(token, {"jsonrpc": "2.0", "id": "a-1", "method": "ping"}))
         assert ok["status"] == 200 and json.loads(ok["body"])["id"] == "a-1"
     asyncio.run(run())
+
+
+def test_a_deeply_nested_relay_line_is_dropped():
+    """The relay's stdout reader (McpRelay._on_line) drops a line it cannot parse, deep nesting included, rather
+    than raising on the relay's reader."""
+    relay = McpRelay(session_id="abc", backend=None, server=None)
+    for name, line in HOSTILE_BODIES.items():
+        assert relay._on_line(line.decode("utf-8", "replace")) is None, name
+    assert relay._tasks == set()
 
 
 # --- class-level check: every request-body JSON parse catches the #930 failure set ---------------------------------
