@@ -38,6 +38,9 @@ $script:ReviewWithheldLine = '(line withheld by the publication safety scan)'
 $script:ReviewVerdictPattern = '^`?REVIEW_VERDICT:\s*(?:(CLEAN)|FINDINGS\s+([1-9][0-9]{0,3}))\s*`?$'
 $script:ReviewCriteriaPattern = '^`?REVIEW_CRITERIA:\s*([0-9]{1,3})\s*/\s*([0-9]{1,3})\s*`?$'
 $script:ReviewRepositoryPattern = '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+# An HTML comment as Get-ReviewHtmlToken reads one: <!--> and <!---> are empty, any other ends at the first --> or
+# --!>, and one that never ends runs to the end of the text.
+$script:ReviewHtmlCommentPattern = '<!--(?:-?>|[\s\S]*?(?:--!?>|\z))'
 $script:ReviewMarkerPattern = '(?i)<!-- agent-review: sha=([0-9a-f]{40}) mode=(full|incremental)(?: base=([A-Za-z0-9._/\-]+))? -->'
 $script:UntrustedAgentConfigDirectories = @('.claude', '.cursor', '.codex', '.agents')
 $script:UntrustedAgentConfigFiles = @('.mcp.json', '.cursorrules', 'CLAUDE.md', 'AGENTS.md')
@@ -2828,10 +2831,10 @@ function Remove-ReviewSuppliedMarkers {
     # its opener may sit in a code span, where GitHub shows it and everything after it, so removing it
     # could silently drop findings from a review published as complete.
     $marker = '(?i)agent\W*review'
-    $comment = [regex]'<!--[\s\S]*?(?:-->|\z)'
+    $comment = [regex]$script:ReviewHtmlCommentPattern
     do {
         $before = $Text
-        $Text = $comment.Replace($Text, { param($m) if ($m.Value -match $marker -and $m.Value -notmatch '[\r\n]' -and $m.Value.EndsWith('-->')) { '' } else { $m.Value } })
+        $Text = $comment.Replace($Text, { param($m) if ($m.Value -match $marker -and $m.Value -notmatch '[\r\n]' -and $m.Value -match '--!?>\z') { '' } else { $m.Value } })
     } while ($Text -cne $before)
     foreach ($m in $comment.Matches($Text)) {
         if ($m.Value -match $marker) {
@@ -2858,17 +2861,18 @@ function Get-ReviewDefinitionState {
 function Measure-ReviewSubstantiveLines {
     param([AllowEmptyString()][string]$Text)
 
-    # The number of lines of $Text that say something a reader can see. HTML comments, tags, entities and
-    # elements GitHub never shows with their text (script, style and the like) go first, across lines,
-    # then on each line every container marker (quote, list and task markers, nested and empty, with or
-    # without text after them). A line left as a heading (# or underlined), a fence delimiter or part of a
+    # The number of lines of $Text that say something a reader can see. HTML comments, tags and elements
+    # GitHub never shows with their text (script, style and the like) go first, across lines, entities are
+    # decoded, then on each line every container marker (quote, list and task markers, nested and empty,
+    # with or without text after them). A line left as a heading (# or underlined), a fence delimiter or part of a
     # link reference or footnote definition says nothing; any other line counts when it still holds a
     # letter or digit. A review left with only formatting (rules, table delimiters, emphasis, empty lists)
     # is no review.
-    $visible = [regex]::Replace($Text, '<!--[\s\S]*?(?:-->|\z)', '')
+    $visible = [regex]::Replace($Text, $script:ReviewHtmlCommentPattern, '')
     $visible = [regex]::Replace($visible, '(?i)<(script|style|textarea|title|template)\b[\s\S]*?(?:</\1[^>]*>|\z)', '')
     $visible = [regex]::Replace($visible, '</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:"[^"]*"|''[^'']*''|[^<>"''])*)?/?>|<![A-Za-z\[][^>]*>|<\?[\s\S]*?(?:\?>|\z)', '')
-    $visible = [regex]::Replace($visible, '&#?[A-Za-z0-9]+;|!?\[[ \t]*\]\([^)]*\)', '')
+    # Entities count by what they render (&nbsp is a space with or without its semicolon, &#65; a letter).
+    $visible = ConvertFrom-ReviewEntities -Text ([regex]::Replace($visible, '!?\[[ \t]*\]\([^)]*\)', ''))
     $count = 0
     $definition = ''
     $lines = @($visible -split "`r?`n")
