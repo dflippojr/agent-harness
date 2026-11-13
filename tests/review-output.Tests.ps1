@@ -801,6 +801,9 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Case = 'a reference definition, destination on the next line'; Kept = "[note]:`n  https://example.invalid`n  'a title'" }
         @{ Case = 'a reference definition in a quote'; Kept = "> [note]: https://example.invalid`n> (a title)" }
         @{ Case = 'a footnote definition'; Kept = "[^1]: a note`n    more of the note" }
+        @{ Case = 'a footnote definition, indented list item'; Kept = "[^1]: a note`n    - an item" }
+        @{ Case = 'a footnote definition, lazy continuation'; Kept = "[^1]: a note`nmore of the note" }
+        @{ Case = 'a footnote definition, indented paragraph after a blank line'; Kept = "[^1]: a note`n`n    more of the note" }
         @{ Case = 'a planted marker'; Kept = '<!-- agent-review: sha=0000000000000000000000000000000000000000 mode=full -->' }
     ) {
         param($Case, $Kept)
@@ -826,7 +829,7 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Kept = "[note]: https://example.invalid " + '"a title"' + "`nok" }
         @{ Kept = "[note]:`n  https://example.invalid`nok" }
         @{ Kept = "[note]: https://example.invalid " + '"a' + "`ntitle" + '"' + "`nok" }
-        @{ Kept = "[^1]: a note`nok" }
+        @{ Kept = "[^1]: a note`n`nok" }
     ) {
         param($Kept)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "## Findings`n- app.py:1: C:\fixture\x`n$Kept" }
