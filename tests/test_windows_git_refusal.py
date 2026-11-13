@@ -13,6 +13,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,6 +37,8 @@ def make_repo(path: Path, branch: str = "main") -> Path:
     sh(path, "init", "-q", "-b", branch)
     sh(path, "config", "user.name", "t")
     sh(path, "config", "user.email", "t@t")
+    sh(path, "config", "gc.auto", "0")  # no background maintenance writing .git while `tree` reads it
+    sh(path, "config", "maintenance.auto", "false")
     (path / "a.txt").write_bytes(b"a\n")
     sh(path, "add", "-A")
     sh(path, "commit", "-q", "-m", "init")
@@ -196,6 +199,29 @@ def test_fork_refuses_before_creating_the_workspace(refuse, ws, tmp_path):
     with pytest.raises(GitError, match=REFUSAL):
         Checkpointer._fork_clone(parent, ckpt, "s2", fork)
     assert not fork.exists()
+
+
+def test_rewind_refuses_before_probing_the_workspace(refuse, ws):
+    """A rewind probes each file it would replace by renaming it aside and back (`Store.busy`); on a git workspace
+    the refusal comes first, so no file is moved."""
+
+    class Store:
+        def load_turn(self, turn):
+            return {}
+
+        def plan(self, *_a):
+            pytest.fail("the rewind planned before refusing")
+
+        busy = plan
+
+    checkpointer = object.__new__(Checkpointer)
+    checkpointer.db = SimpleNamespace(get_session=lambda sid: {"id": sid, "workspace": str(ws)})
+    checkpointer.checkpoint = lambda sid, turn: {"turn": turn, "sha": "0" * 40, "head": "", "branch": ""}
+    checkpointer.store = lambda s: Store()
+    before = tree(ws)
+    with pytest.raises(GitError, match=REFUSAL):
+        checkpointer.restore("s1", 1)
+    assert tree(ws) == before
 
 
 def test_cleanup_keeps_a_workspace_it_cannot_check(refuse, ws, monkeypatch):

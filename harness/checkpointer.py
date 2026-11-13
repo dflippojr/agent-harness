@@ -232,6 +232,8 @@ class Checkpointer:
         s = self.db.get_session(sid)
         ckpt = self.checkpoint(sid, turn)
         store, workspace = self.store(s), Path(s["workspace"])
+        if (workspace / ".git").exists():  # git_state and reset_branch below would refuse, after busy() probed files
+            projects.require_host_git()
         saved = store.load_turn(turn)
         with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
             plan = store.plan(workspace, ckpt["sha"], Path(tmp))

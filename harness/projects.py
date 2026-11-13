@@ -101,8 +101,9 @@ def require_host_git() -> None:
     """Refuse a host git operation on a workspace on Windows (`_REFUSE_HOST_GIT`), before it touches anything.
 
     Called where the workspace git state copy starts (`_resolve_workspace_git`, `_StateDir.open`), by entries that
-    would write to a workspace before reaching it (`prepare`, the member and fork clones), and by `git` itself before
-    its `check=False` handling, so no caller reads a refusal as a failed git command ("no commits ahead", say).
+    would write to a workspace before reaching it (`prepare`, the member and fork clones, a checkpoint rewind), and by
+    `git` itself before its `check=False` handling, so no caller reads a refusal as a failed git command ("no commits
+    ahead", say).
     """
     if _REFUSE_HOST_GIT:
         raise GitError("git operations on session workspaces aren't supported on Windows yet; "
