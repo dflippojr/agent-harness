@@ -211,3 +211,66 @@ def test_put_git_state_removes_an_index_the_checkpoint_did_not_have(ws, branch):
     checkpoints.put_git_state(ws, state)  # no index to remove: nothing to do
 
     assert not (ws / ".git" / "index").exists()
+
+
+@pytest.mark.parametrize("branch", BRANCHES)
+def test_put_git_state_never_removes_a_directory_raced_in_at_the_index(ws, monkeypatch, branch):
+    """Putting back an absent index removes a regular file only: a directory that replaces the index right after the
+    type check is refused, not removed with its contents."""
+    state = {**_state(ws, branch), "index": None}
+    index = ws / ".git" / "index"
+    real_kind = projects._StateDir.kind
+    swapped = []
+
+    def kind(self, name):
+        result = real_kind(self, name)
+        if name == "index" and not swapped:
+            index.unlink()
+            index.mkdir()
+            (index / "keep").write_bytes(b"keep\n")
+            swapped.append(True)
+        return result
+
+    monkeypatch.setattr(projects._StateDir, "kind", kind)
+    with pytest.raises(GitError, match="index"):
+        checkpoints.put_git_state(ws, state)
+
+    assert swapped == [True]
+    assert (index / "keep").read_bytes() == b"keep\n"
+
+
+@pytest.mark.parametrize("branch", BRANCHES)
+def test_put_git_state_keeps_an_owner_only_mode(ws, branch):
+    state = _state(ws, branch)
+    for name in ("HEAD", "index"):
+        (ws / ".git" / name).chmod(0o600)
+    want = {name: (ws / ".git" / name).stat().st_mode & 0o777 for name in ("HEAD", "index")}
+
+    checkpoints.put_git_state(ws, state)
+
+    assert {name: (ws / ".git" / name).stat().st_mode & 0o777 for name in ("HEAD", "index")} == want
+    assert (ws / ".git" / "HEAD").read_bytes() == state["head"]
+
+
+@pytest.mark.parametrize("branch", BRANCHES)
+def test_put_git_state_fills_owner_only_temp_files(ws, monkeypatch, branch):
+    """The temp file is owner-only while the content goes in; the destination's mode is applied after, and a file
+    that did not exist stays owner-only."""
+    state = _state(ws, branch)
+    (ws / ".git" / "index").unlink()
+    modes = []
+    real_write_all = projects._write_all
+
+    def write_all(fd, data):
+        if bytes(data) in (state["head"], state["index"]):  # not the isolated git call's own state copy
+            modes.append(os.fstat(fd).st_mode & 0o777)
+        return real_write_all(fd, data)
+
+    monkeypatch.setattr(projects, "_write_all", write_all)
+    checkpoints.put_git_state(ws, state)
+
+    assert len(modes) == 2
+    assert (ws / ".git" / "index").read_bytes() == state["index"]
+    if os.name == "posix":  # Windows has no group or other mode bits
+        assert modes == [0o600, 0o600]
+        assert (ws / ".git" / "index").stat().st_mode & 0o777 == 0o600
