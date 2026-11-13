@@ -957,3 +957,18 @@ def test_copy_git_state_refuses_ambiguous_windows_entry_names(tmp_path, monkeypa
         _copy_git_state(src, dst)
 
     assert name not in opened
+
+
+@pytest.mark.parametrize("name", ["HEAD", "FETCH_HEAD"])
+def test_copy_git_state_refuses_a_directory_at_a_top_level_state_file(tmp_path, name):
+    """Git never turns a top-level state file into a directory, so one found there is refused and kept, not deleted
+    with its contents (#972). Directory/file switches happen only in the refs and logs trees."""
+    src, dst = _state_dirs(tmp_path)
+    (src / "FETCH_HEAD").write_bytes(b"fetched\n")
+    (dst / name).mkdir()
+    (dst / name / "keep").write_bytes(b"keep\n")
+
+    with pytest.raises(GitError, match=name):
+        _copy_git_state(src, dst)
+
+    assert (dst / name / "keep").read_bytes() == b"keep\n"
