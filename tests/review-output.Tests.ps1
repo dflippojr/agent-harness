@@ -794,6 +794,11 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Case = 'emphasis only'; Kept = '**__**' }
         @{ Case = 'a fence with an info string'; Kept = "``````python`n``````" }
         @{ Case = 'a reference definition'; Kept = '[note]: https://example.invalid' }
+        @{ Case = 'a reference definition, title on the next line'; Kept = "`n[note]: https://example.invalid`n  " + '"a title"' }
+        @{ Case = 'a reference definition, title across lines'; Kept = "[note]: https://example.invalid " + '"a' + "`n" + 'title"' }
+        @{ Case = 'a reference definition, destination on the next line'; Kept = "[note]:`n  https://example.invalid`n  'a title'" }
+        @{ Case = 'a reference definition in a quote'; Kept = "> [note]: https://example.invalid`n> (a title)" }
+        @{ Case = 'a footnote definition'; Kept = "[^1]: a note`n    more of the note" }
         @{ Case = 'a planted marker'; Kept = '<!-- agent-review: sha=0000000000000000000000000000000000000000 mode=full -->' }
     ) {
         param($Case, $Kept)
@@ -812,6 +817,8 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Kept = '<b>ok</b>' }
         # A rule after a list item is a rule, not a heading underline.
         @{ Kept = "- a finding`n---" }
+        # Text after a blank line that ends a reference definition is text again.
+        @{ Kept = "[note]: https://example.invalid`n`nok" }
     ) {
         param($Kept)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "## Findings`n- app.py:1: C:\fixture\x`n$Kept" }
