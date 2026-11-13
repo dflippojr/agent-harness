@@ -287,3 +287,35 @@ def test_put_git_state_refuses_removing_a_directory_at_the_index(ws):
         checkpoints.put_git_state(ws, state)
 
     assert (index / "keep").read_bytes() == b"keep\n"
+
+
+@pytest.mark.parametrize("branch", BRANCHES)
+def test_put_git_state_keeps_a_directory_that_took_the_temp_name_after_a_failed_replace(ws, monkeypatch, branch):
+    """When renaming the temp file over HEAD fails, cleanup removes the temp file only: a directory that took the
+    temp name keeps its contents, and the original error is the one reported."""
+    state = _state(ws, branch)
+    real_write_all, real_replace = projects._write_all, os.replace
+    armed, taken = [], []
+
+    def write_all(fd, data):
+        if bytes(data) == state["head"]:  # put_git_state's own HEAD write, not the isolated git call's state copy
+            armed.append(True)
+        return real_write_all(fd, data)
+
+    def replace(src, dst, *args, **kwargs):
+        if armed and not taken:
+            temp = ws / ".git" / os.path.basename(os.fsdecode(src))
+            temp.unlink()
+            temp.mkdir()
+            (temp / "keep").write_bytes(b"keep\n")
+            taken.append(temp)
+            raise PermissionError(13, "replace failed")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(projects, "_write_all", write_all)
+    monkeypatch.setattr(os, "replace", replace)
+    with pytest.raises(GitError, match="replace failed"):
+        checkpoints.put_git_state(ws, state)
+
+    assert len(taken) == 1
+    assert (taken[0] / "keep").read_bytes() == b"keep\n"
