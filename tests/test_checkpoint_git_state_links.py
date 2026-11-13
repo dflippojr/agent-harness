@@ -274,3 +274,16 @@ def test_put_git_state_fills_owner_only_temp_files(ws, monkeypatch, branch):
     if os.name == "posix":  # Windows has no group or other mode bits
         assert modes == [0o600, 0o600]
         assert (ws / ".git" / "index").stat().st_mode & 0o777 == 0o600
+
+
+def test_put_git_state_refuses_removing_a_directory_at_the_index(ws):
+    state = {**_state(ws, ""), "index": None}
+    index = ws / ".git" / "index"
+    index.unlink()
+    index.mkdir()
+    (index / "keep").write_bytes(b"keep\n")
+
+    with pytest.raises(GitError, match="index"):
+        checkpoints.put_git_state(ws, state)
+
+    assert (index / "keep").read_bytes() == b"keep\n"
