@@ -241,6 +241,15 @@ Describe 'Review publication safety' {
         @{ Payload = '`(href="//example.com/share/config.py"`' }
         @{ Payload = '`{src="//example.com/share/config.py"`' }
         @{ Payload = '(`href="//example.com/share/config.py"`)' }
+        # HTML separates attribute names only with ASCII whitespace, so any other separator character keeps
+        # one longer name, in prose, in a code span and as a character reference.
+        foreach ($separator in @(0x0B, 0x85, 0xA0, 0x1680) + @(0x2000..0x200A) + @(0x2028, 0x2029, 0x202F, 0x205F, 0x3000)) {
+            foreach ($name in 'href', 'src') {
+                @{ Payload = "Set data$([char]$separator)$name=`"//example.com/share/config.py`" there." }
+                @{ Payload = "``<a data$([char]$separator)$name=`"//example.com/share/config.py`">``" }
+                @{ Payload = "``<a data&#$separator;$name=`"//example.com/share/config.py`">``" }
+            }
+        }
         # A link or image context does not widen the host allowlist.
         @{ Payload = '`<a href="//fs.alt/share/config.py">`' }
         @{ Payload = '`<img src="//127-0-0-1.nip.io/share/a.png">`' }
