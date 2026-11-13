@@ -2811,18 +2811,26 @@ function Test-ReviewLinesCanBeWithheld {
     # break, would move text between them), and no rule match in any form may cross a line break. A label
     # and its value on two lines (password = then a quoted value) cross one, so withholding either line
     # alone would leave the other.
+    # Listing matches is not enough: they never overlap, so a crossing match that starts inside an earlier
+    # one is skipped. Instead, for each line break, one anchored search asks whether any match can start
+    # on the line before it and end past it, and backtracking tries every start and every way to match.
+    # A match that crosses lines crosses its first line break, so the line before it holds the start.
+    # The search reads from that line's start, so the rule sees no text before it: that can only add
+    # matches, never hide one.
     $contentRules = @('absolute-root', 'profile-segment') + @(Get-ReviewRedactionRules | ForEach-Object { $_.Name })
     foreach ($hit in (Get-ReviewLocalScanHits -Text $Text -KnownPaths $KnownPaths)) {
         if ($hit -notmatch '^rule (\S+) ' -or $contentRules -notcontains $Matches[1]) { return $false }
     }
     $patterns = @($script:ReviewAbsoluteRootPattern, $script:ReviewProfileSegmentPattern) + @(Get-ReviewRedactionRules | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
     $lineCount = @($Text -split "`n").Count
+    $crossing = @($patterns | ForEach-Object { '\A[^\n]*?(?:' + $_ + ')(?<=\n[\s\S]*)' })
     foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
         if (@($form.Text -split "`n").Count -ne $lineCount) { return $false }
-        foreach ($pattern in $patterns) {
-            foreach ($match in [regex]::Matches($form.Text, $pattern)) {
-                if ($match.Value.IndexOfAny([char[]]@("`r", "`n")) -ge 0) { return $false }
-            }
+        $start = 0
+        while (($break = $form.Text.IndexOf("`n", $start)) -ge 0) {
+            $rest = $form.Text.Substring($start)
+            foreach ($pattern in $crossing) { if ([regex]::IsMatch($rest, $pattern)) { return $false } }
+            $start = $break + 1
         }
     }
     return $true
