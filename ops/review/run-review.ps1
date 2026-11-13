@@ -2801,6 +2801,27 @@ function Get-ReviewWithheldOutput {
     return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $kept }
 }
 
+function Test-ReviewHitsStayInLines {
+    param([AllowEmptyString()][string]$Text)
+
+    # True when withholding whole lines can remove every rule match in $Text: each scan form keeps the
+    # raw text's lines (a link title spanning lines, or an encoded line break, would move text between
+    # them), and no match of a path, credential or token rule in any form crosses a line break. A label
+    # and its value on two lines (password = then a quoted value) cross one, so withholding either line
+    # alone would leave the other; such a review fails closed instead.
+    $patterns = @($script:ReviewAbsoluteRootPattern, $script:ReviewProfileSegmentPattern) + @(Get-ReviewRedactionRules | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
+    $lineCount = @($Text -split "`n").Count
+    foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
+        if (@($form.Text -split "`n").Count -ne $lineCount) { return $false }
+        foreach ($pattern in $patterns) {
+            foreach ($match in [regex]::Matches($form.Text, $pattern)) {
+                if ($match.Value.IndexOfAny([char[]]@("`r", "`n")) -ge 0) { return $false }
+            }
+        }
+    }
+    return $true
+}
+
 function Get-ReviewUnpublishedNotice {
     param(
         [AllowEmptyString()][string]$HeadSha = '',
@@ -2895,6 +2916,10 @@ function Write-ReviewResult {
         if (-not $WithholdUnsafeLines -or $_.Exception.Message -ne $script:ReviewPublicationFailure) { throw }
         $knownPaths = @()
         if ($Workspace -or $DiffPaths.Count -gt 0) { $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths) }
+        if (-not (Test-ReviewHitsStayInLines -Text $output)) {
+            Write-Warning 'Publication safety scan: a rejected match crosses a line break, so withholding lines cannot remove it.'
+            throw
+        }
         $withheld = Get-ReviewWithheldOutput -Text $output -KnownPaths $knownPaths
         $count = $withheld.Lines.Count
         if ($count -eq 0) {

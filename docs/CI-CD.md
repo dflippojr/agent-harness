@@ -352,8 +352,9 @@ check below except GitHub's rendering) and withholds each line that fails, keepi
 markers. It withholds the whole line, never only the match, because a match is often a prefix that the rest of the
 line continues. A note at the end of the review says how many lines were withheld, and the job log gives their numbers,
 never their text (#974). The result is scanned again in full, GitHub's rendering included. Only a result that
-passes is posted, with its marker. If it fails again, if no single line fails on its own, or if every line would be
-withheld, the wrapper removes any stale output and fails closed with `Review did not complete`. Nothing of the review
+passes is posted, with its marker. Nothing is withheld if a rejected match crosses a line break, for example a
+`password =` label and its value on two lines, or if a scan form moves text between lines. If that happens, if the
+result fails again, if no single line fails on its own, or if every line would be withheld, the wrapper removes any stale output and fails closed with `Review did not complete`. Nothing of the review
 is posted or copied into the check summary. Instead it posts a short notice on the PR, with no review text and no
 `agent-review` marker, saying that the review was not published and linking the run log. The path rules never parse or
 canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot hide one:
