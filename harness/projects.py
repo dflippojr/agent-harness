@@ -412,19 +412,39 @@ class _StateDir:
         return self.subdir(name)
 
     def remove(self, name: str) -> None:
-        """Remove an entry: a directory with its contents, or a file or link itself (never what a link points to)."""
+        """Remove a file or link entry itself (never what a link points to) with one call that never recurses; a
+        missing entry is fine. A directory is refused, and one raced in after the check fails the call: a caller
+        that means to delete a directory uses `remove_tree`."""
         kind = self.kind(name)
+        if kind == _MISSING:
+            return
         if kind == _DIR:
-            with self.subdir(name) as sub:
-                for child in sub.names():
+            raise GitError(f"refusing to remove git state directory {name}")
+        where = self._at(name)
+        if self.fd is None and _isjunction(where):
+            os.rmdir(where)  # the junction itself, not its target; rmdir never removes a non-empty directory
+        else:
+            os.unlink(where, dir_fd=self.fd)
+
+    def remove_tree(self, name: str) -> None:
+        """Remove directory `name` and its contents, for a caller that decided to delete that directory. The walk
+        goes through the opened directory (`subdir`, which never follows a link), and each entry is removed by its
+        own type: files and links with `remove`, directories with `remove_tree`."""
+        with self.subdir(name) as sub:
+            for child in sub.names():
+                if sub.kind(child) == _DIR:
+                    sub.remove_tree(child)
+                else:
                     sub.remove(child)
-            os.rmdir(self._at(name), dir_fd=self.fd)
-        elif kind != _MISSING:
-            where = self._at(name)
-            if self.fd is None and _isjunction(where):
-                os.rmdir(where)  # removes the junction, not its target
-            else:
-                os.unlink(where, dir_fd=self.fd)
+        os.rmdir(self._at(name), dir_fd=self.fd)  # never removes a non-empty directory
+
+    def _discard(self, temp: str) -> None:
+        """Best-effort cleanup of this object's own temp file after a failure: non-recursive, so anything but a
+        file or link at that name is left alone, and a cleanup error never replaces the original one."""
+        try:
+            self.remove(temp)
+        except (OSError, GitError):
+            pass
 
     def open_read(self, name: str) -> int:
         """A descriptor on regular file `name`, never through a link."""
@@ -489,7 +509,7 @@ class _StateDir:
                 os.close(out)
             os.replace(self._at(temp), self._at(name), src_dir_fd=self.fd, dst_dir_fd=self.fd)
         except BaseException:
-            self.remove(temp)
+            self._discard(temp)
             raise
 
 
@@ -523,7 +543,10 @@ def _is_link(path: Path) -> bool:
 def _copy_state_file(src: _StateDir, dst: _StateDir, name: str) -> None:
     source_fd = src.open_read(name)
     try:
-        if dst.kind(name) not in (_FILE, _MISSING):  # a directory, or a link of any kind: Windows renames over neither
+        kind = dst.kind(name)
+        if kind == _DIR:  # a ref that became a file (git's directory/file switch): Windows renames over neither
+            dst.remove_tree(name)
+        elif kind != _FILE:  # a link of any kind, removed itself
             dst.remove(name)
         dst.write(name, source_fd)
     finally:
@@ -549,8 +572,11 @@ def _mirror_tree(src: _StateDir, dst: _StateDir) -> None:
         else:
             raise GitError(f"refusing symlinked or special git state {name}")
     for name in sorted(dst.names()):
-        if name not in seen:
-            dst.remove(name)
+        if name not in seen:  # a ref (or a ref namespace directory) the source no longer has
+            if dst.kind(name) == _DIR:
+                dst.remove_tree(name)
+            else:
+                dst.remove(name)
 
 
 def _copy_git_state(src: Path, dst: Path) -> None:
