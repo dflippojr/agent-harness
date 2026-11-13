@@ -2006,8 +2006,9 @@ def _pr_comment_calls(run) -> list[dict]:
 
 
 def test_review_script_withholds_a_line_that_quotes_a_scanner_fixture_and_posts_the_rest(tmp_path, fake_cli_launcher):
-    """Scenario (d3, #974): one finding quotes a fixture the scan blocks. That line is withheld, the rest of the review
-    and its marker are published, and neither the body, the renderer nor the log ever sees the fixture."""
+    """Scenario (d3, #974): one finding quotes a fixture the scan blocks. That line is withheld and the rest of the
+    review is published, but without its marker and with an incomplete verdict, so readiness tools never count it.
+    Neither the body, the renderer nor the log ever sees the fixture."""
     review = (
         "## Findings\n"
         f"- src/app.py:1: the new leak-scanner fixture `{QUOTED_FIXTURE}` has no negative case.\n"
@@ -2025,8 +2026,9 @@ def test_review_script_withholds_a_line_that_quotes_a_scanner_fixture_and_posts_
     assert "a second synthetic finding with nothing unsafe in it." in run.body
     assert "fixture-host" not in run.body and "fixture-host" not in run.text
     assert "withheld by the publication safety scan" in run.body
-    assert run.body.rstrip().endswith(f"<!-- agent-review: sha={HEAD_SHA} mode=full base=main -->")
-    assert run.outputs["verdict"] == "findings" and run.outputs["findings"] == "2"
+    assert "agent-review" not in run.body
+    assert run.outputs["verdict"] == "incomplete" and run.outputs["withheld_lines"] == "1"
+    assert "criteria" not in run.outputs
     renders = [call for call in run.gh if call["argv"] == MARKDOWN_ARGV]
     assert renders and all("fixture-host" not in call["stdin"] for call in renders)
     assert not _pr_comment_calls(run)
@@ -2059,6 +2061,31 @@ def test_review_script_posts_a_marker_free_notice_when_the_review_cannot_be_publ
     assert "agent-review" not in notice and "fixture-host" not in notice
     assert MARKDOWN_ARGV not in [call["argv"] for call in run.gh]
 
+
+
+def test_review_script_posts_the_notice_when_only_formatting_would_be_left(tmp_path, fake_cli_launcher):
+    """Scenario (d5, #974): every content line is withheld and only headings and a fence would remain. That is no
+    review, so nothing is published and the marker-free notice is posted instead."""
+    review = (
+        "## Acceptance criteria\n"
+        f"**Met** the fixture `{QUOTED_FIXTURE}` is covered.\n\n"
+        "## Findings\n"
+        f"- src/app.py:1: the fixture `{QUOTED_FIXTURE}` is unscanned.\n\n"
+        "## Style and structure (advisory)\n"
+        "```text\n```\n"
+        "REVIEW_VERDICT: FINDINGS 1\nREVIEW_STATUS: COMPLETE"
+    )
+    run = _run_review_script(
+        tmp_path,
+        fake_cli_launcher,
+        {"gh": [{"match": ["pr comment 7"], "stdout": ""}] + _gh_responses(), "claude": [{"match": ["-p"], "stdout": review}]},
+        NOTICE_ENV,
+    )
+    assert run.result.returncode != 0
+    assert run.body is None and run.outputs is None
+    assert "fixture-host" not in run.text
+    (comment,) = _pr_comment_calls(run)
+    assert "agent-review" not in comment["argv"][4] and "publication safety scan" in comment["argv"][4]
 
 # --- review-v3: the PR description and linked issues reach the reviewer as fenced untrusted data. ---
 

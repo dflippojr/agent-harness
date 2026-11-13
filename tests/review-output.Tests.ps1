@@ -653,12 +653,23 @@ Describe 'Withholding unsafe review lines (#974)' {
         if (-not $body.Contains("`n- (line withheld by the publication safety scan)`n")) { throw "List marker lost: $body" }
         if (-not $body.Contains("  > (line withheld by the publication safety scan)")) { throw "Quote marker lost: $body" }
         if (-not $body.Contains('- app.py:2: a safe finding.') -or -not $body.Contains('withheld 2 lines of this review')) { throw "Unexpected body: $body" }
-        if (-not $body.Contains("<!-- agent-review: sha=$('a' * 40) mode=full -->")) { throw 'The marker of a withheld review was dropped' }
+        # A review with lines withheld is incomplete: no marker, so readiness tools never count it.
+        if ($body.Contains('agent-review')) { throw 'A review with withheld lines kept its marker' }
+        if ($result.WithheldLines -ne 2) { throw 'The withheld line count was not recorded' }
         $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
         if ($log -notmatch 'withheld 2 lines of the review \(lines 2, 3\)' -or $log.Contains($Secret)) { throw "Unexpected log: $log" }
         # GitHub's renderer only ever sees the body with the lines withheld.
         Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly -ParameterFilter { -not $Text.Contains($Secret) }
         Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly
+    }
+
+    It 'gives no passing marker when criteria lines are withheld from an otherwise clean review' {
+        $review = "## Acceptance criteria`n**Met** the fixture C:\fixture\x is quoted.`n**Met** a second criterion.`n`n## Findings`nNo significant findings."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review; Verdict = 'clean'; FindingCount = 0; CriteriaMet = 2; CriteriaTotal = 2 }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -BaseRef 'main' -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains('agent-review') -or $body.Contains('criteria=')) { throw "A partial review kept a readiness marker: $body" }
+        if ($result.WithheldLines -ne 1) { throw 'The withheld line count was not recorded' }
     }
 
     It 'keeps the list marker but never text a withheld line held before it' {
@@ -687,6 +698,8 @@ Describe 'Withholding unsafe review lines (#974)' {
         @{ Review = "- app.py:1: a finding.`n- app.py:2: another."; Rendered = '<p>ghp_synthetic12345678</p>' }
         # Every line fails, so withholding leaves no review to post.
         @{ Review = "- app.py:1: C:\fixture\x`n`n- app.py:2: ghp_synthetic12345678"; Rendered = $null }
+        # Only headings and a fence would be left, which is no review.
+        @{ Review = "## Findings`n- app.py:1: C:\fixture\x`n`n## Style and structure (advisory)`n``````text`n``````"; Rendered = $null }
         # A match spans lines: withholding the line with the fixture and the label would leave the value (PR #978 review).
         @{ Review = ("- app.py:1: the fixture C:\fixture\x sets password =`n  " + '"short"' + "`n- app.py:2: a safe finding."); Rendered = $null }
         @{ Review = ("- app.py:1: C:\fixture\x and Bearer`n  synthetic-value-1`n- app.py:2: a safe finding."); Rendered = $null }
