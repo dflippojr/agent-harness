@@ -2783,17 +2783,17 @@ function Add-ReviewDiffContext {
 function Get-ReviewWithheldOutput {
     param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
 
-    # Each line of the review that the local scan rejects on its own, replaced whole (#974). A match is
-    # often only a prefix (a root or one segment), and the rest of the line may continue what it names,
-    # so the matched span alone is never enough. A list marker, quote marker and indentation are kept so
-    # the review keeps its shape. A rejection that only spans lines (a link reference, a table) is not
-    # found here; the caller scans the whole result again, so nothing that fails is ever published.
+    # Each line of the review that a path, credential or token rule rejects on its own, replaced whole
+    # (#974). A match is often only a prefix (a root or one segment), and the rest of the line may
+    # continue what it names, so the matched span alone is never enough. A list marker, quote marker and
+    # indentation are kept so the review keeps its shape. Call it only once Test-ReviewLinesCanBeWithheld
+    # passes; the caller scans the whole result again, so nothing that fails is ever published.
     $lines = @($Text -split "`r?`n")
     $withheld = New-Object System.Collections.Generic.List[int]
     $kept = 0
     for ($i = 0; $i -lt $lines.Count; $i++) {
         if ([string]::IsNullOrWhiteSpace($lines[$i])) { continue }
-        if ((Get-ReviewLocalScanHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) { $kept++; continue }
+        if (@(Get-ReviewRuleHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) { $kept++; continue }
         $prefix = [regex]::Match($lines[$i], '^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?').Value
         $lines[$i] = $prefix + $script:ReviewWithheldLine
         $withheld.Add($i + 1)
@@ -2801,14 +2801,20 @@ function Get-ReviewWithheldOutput {
     return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $kept }
 }
 
-function Test-ReviewHitsStayInLines {
-    param([AllowEmptyString()][string]$Text)
+function Test-ReviewLinesCanBeWithheld {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
 
-    # True when withholding whole lines can remove every rule match in $Text: each scan form keeps the
-    # raw text's lines (a link title spanning lines, or an encoded line break, would move text between
-    # them), and no match of a path, credential or token rule in any form crosses a line break. A label
+    # True when withholding whole lines can remove every rejection in $Text. Each rejection must come from
+    # a path, credential or token rule: the other rules reject markup or characters whose reading the scan
+    # cannot settle (a tag spanning lines, math, a bidi control), so a review holding any fails closed.
+    # Each scan form must keep the raw text's lines (a link title spanning lines, or an encoded line
+    # break, would move text between them), and no rule match in any form may cross a line break. A label
     # and its value on two lines (password = then a quoted value) cross one, so withholding either line
-    # alone would leave the other; such a review fails closed instead.
+    # alone would leave the other.
+    $contentRules = @('absolute-root', 'profile-segment') + @(Get-ReviewRedactionRules | ForEach-Object { $_.Name })
+    foreach ($hit in (Get-ReviewLocalScanHits -Text $Text -KnownPaths $KnownPaths)) {
+        if ($hit -notmatch '^rule (\S+) ' -or $contentRules -notcontains $Matches[1]) { return $false }
+    }
     $patterns = @($script:ReviewAbsoluteRootPattern, $script:ReviewProfileSegmentPattern) + @(Get-ReviewRedactionRules | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
     $lineCount = @($Text -split "`n").Count
     foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
@@ -2916,8 +2922,8 @@ function Write-ReviewResult {
         if (-not $WithholdUnsafeLines -or $_.Exception.Message -ne $script:ReviewPublicationFailure) { throw }
         $knownPaths = @()
         if ($Workspace -or $DiffPaths.Count -gt 0) { $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths) }
-        if (-not (Test-ReviewHitsStayInLines -Text $output)) {
-            Write-Warning 'Publication safety scan: a rejected match crosses a line break, so withholding lines cannot remove it.'
+        if (-not (Test-ReviewLinesCanBeWithheld -Text $output -KnownPaths $knownPaths)) {
+            Write-Warning 'Publication safety scan: a rejection is not a path, credential or token on one line, so no line can be withheld.'
             throw
         }
         $withheld = Get-ReviewWithheldOutput -Text $output -KnownPaths $knownPaths

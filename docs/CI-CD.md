@@ -347,9 +347,10 @@ The CLI must support these flags (restricted mode requires v2.1.248 or later); a
 See [Claude permission rules](https://code.claude.com/docs/en/permissions) and the [CLI flag reference](https://code.claude.com/docs/en/cli-reference).
 The wrapper, rather than a model, writes the final comment file. Before writing `review-output.md`, it scans the
 public review body using the diagnostic redaction patterns (bearer values, named credentials, provider tokens and
-long tokens) plus two path rules. When the body fails, the wrapper scans each line of the review on its own (every
-check below except GitHub's rendering) and withholds each line that fails, keeping only its list, quote and indent
-markers. It withholds the whole line, never only the match, because a match is often a prefix that the rest of the
+long tokens) plus two path rules. When the body fails only on those path, credential and token rules, the wrapper
+scans each line of the review against them on its own and withholds each line that fails, keeping only its list,
+quote and indent markers. Any of the fail-closed rules below (markup, math, Mermaid, bidi controls, line breaks,
+unknown entities) withholds nothing. A failing line goes whole, never only the match, because a match is often a prefix that the rest of the
 line continues. A note at the end of the review says how many lines were withheld, and the job log gives their numbers,
 never their text (#974). The result is scanned again in full, GitHub's rendering included. Only a result that
 passes is posted, with its marker. Nothing is withheld if a rejected match crosses a line break, for example a
