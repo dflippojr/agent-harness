@@ -205,6 +205,7 @@ def _caught(handler: ast.ExceptHandler) -> set[str]:
     if handler.type is None:
         return {"BaseException"}
     nodes = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    nodes = [n.value if isinstance(n, ast.Starred) else n for n in nodes]   # (*BODY_PARSE_ERRORS, Other)
     names = {n.id if isinstance(n, ast.Name) else n.attr if isinstance(n, ast.Attribute) else "" for n in nodes}
     return names | (FAILURE_SET if SHARED_GUARD in names else set())
 
@@ -282,6 +283,8 @@ def test_every_request_body_parse_catches_the_930_failure_set():
     body's `RecursionError` become a 500. Every parse in a function that takes a `Request` must sit in a `try` that
     catches `ValueError` and `RecursionError` (or use the shared helper), and every raw body read must be parsed
     under that guard in the same function."""
+    from harness.request_body import BODY_PARSE_ERRORS   # the audit trusts this name, so check what it holds
+    assert {e.__name__ for e in BODY_PARSE_ERRORS} == FAILURE_SET
     parses, reads = _scan()
     unguarded = [f"{path}:{line} {fn}: {kind}" for path, fn, kind, line, guarded in parses if not guarded]
     assert unguarded == [], "request-body parses that don't catch ValueError and RecursionError"
@@ -303,6 +306,8 @@ def test_the_audit_flags_a_parse_that_catches_only_value_error():
     assert scan(old) == [False]
     assert scan(old.replace("except ValueError", "except (ValueError, RecursionError)")) == [True]
     assert scan(old.replace("except ValueError", "except BODY_PARSE_ERRORS")) == [True]
+    assert scan(old.replace("except ValueError", "except (*BODY_PARSE_ERRORS, ValidationError)")) == [True]
+    assert scan(old.replace("except ValueError", "except (ValueError, ValidationError)")) == [False]
     assert scan("async def f(request: Request):\n    return json.loads(await request.body())\n") == [False]
     assert scan("async def f(request: Request):\n    return await json_body(request)\n") == [True]
     assert scan("def f(text):\n    return json.loads(text)\n") == []   # not a request body

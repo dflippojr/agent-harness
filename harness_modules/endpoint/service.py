@@ -30,6 +30,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from harness.modules import ModelConfig, GpuExclusive, QueueFull
+from harness.request_body import BODY_PARSE_ERRORS
 
 log = logging.getLogger("harness.endpoint")
 
@@ -143,7 +144,7 @@ async def _parse_body(request: Request, flavor: str) -> tuple[dict | None, JSONR
         body = json.loads(raw or b"{}")
         if not isinstance(body, dict):
             raise ValueError
-    except (ValueError, RecursionError):  # #930: deep nesting such as [[[...]]] exhausts the parser's recursion limit
+    except BODY_PARSE_ERRORS:  # #930: deep nesting such as [[[...]]] raises RecursionError, not ValueError
         return None, error(flavor, 400, "invalid_request_error", "body must be a JSON object")
     return body, None
 

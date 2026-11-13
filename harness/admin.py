@@ -124,7 +124,8 @@ def _validated_scopes(scopes) -> list[str]:
     from .apps import all_scopes
     known = all_scopes()
     if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
-        raise HarnessError(400, f"unknown scopes {scopes!r}; known: {', '.join(known)}")
+        # No repr of the value: a deeply nested one would exhaust the recursion limit (#965).
+        raise HarnessError(400, f"scopes must be a list of scope names; known: {', '.join(known)}")
     unknown = [s for s in scopes if s not in known and s != ADMIN_SCOPE]
     if unknown:
         raise HarnessError(400, f"unknown scopes {unknown}; known: {', '.join(known)}")
@@ -134,7 +135,10 @@ def _validated_scopes(scopes) -> list[str]:
 def parse_key_spec(body: dict | None) -> tuple[str, str, str]:
     """Validate POST /keys (and /api/admin/v1/keys). Returns (name, scopes, kind)."""
     body = body or {}
-    name = str(body.get("name") or "").strip()
+    raw_name = body.get("name")
+    if isinstance(raw_name, (list, dict)):   # #965: never str() of a nested value
+        raise HarnessError(400, "name must be a string")
+    name = str(raw_name or "").strip()
     if not name:
         raise HarnessError(400, "name is required")
     scopes = _validated_scopes(body.get("scopes") or ["inference"])
