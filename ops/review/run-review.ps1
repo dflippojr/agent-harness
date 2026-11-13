@@ -2838,14 +2838,27 @@ function Measure-ReviewSubstantiveLines {
 
     # The number of lines of $Text that say something a reader can see. HTML comments, tags and entities go
     # first, across lines, then on each line every container marker (quote, list and task markers, nested
-    # and empty, with or without text after them). A line left as a heading, a fence delimiter or a link
-    # reference definition says nothing; any other line counts when it still holds a letter or digit. A
-    # review left with only formatting (rules, table delimiters, emphasis, empty lists) is no review.
+    # and empty, with or without text after them). A line left as a heading (# or underlined), a fence
+    # delimiter or a link reference definition says nothing; any other line counts when it still holds a
+    # letter or digit. A review left with only formatting (rules, table delimiters, emphasis, empty lists)
+    # is no review.
     $visible = [regex]::Replace($Text, '<!--[\s\S]*?(?:-->|\z)', '')
     $visible = [regex]::Replace($visible, '</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:"[^"]*"|''[^'']*''|[^<>"''])*)?/?>|<![A-Za-z\[][^>]*>|<\?[\s\S]*?(?:\?>|\z)', '')
     $visible = [regex]::Replace($visible, '&#?[A-Za-z0-9]+;|!?\[[ \t]*\]\([^)]*\)', '')
     $count = 0
-    foreach ($line in ($visible -split "`r?`n")) {
+    $lines = @($visible -split "`r?`n")
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        # A line over an = or - underline is a setext heading, in a quote or a list item too. Only a list
+        # item over an unindented dash line is not: that line is a rule after the list.
+        if ($i + 1 -lt $lines.Count) {
+            $current = $line -replace '^(?:[ \t]*>)+', ''
+            $next = $lines[$i + 1] -replace '^(?:[ \t]*>)+', ''
+            if ($current -match '\S' -and $next -match '^[ \t]*(?:=+|-+)[ \t]*$') {
+                $listItem = $current -match '^[ \t]*(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)'
+                if (-not ($listItem -and $next -match '^[-=]')) { continue }
+            }
+        }
         do {
             $before = $line
             $line = $line -replace '^[ \t]*(?:>|[-*+](?=[ \t]|$)|[0-9]{1,9}[.)](?=[ \t]|$)|\[[ xX]\](?=[ \t]|$))', ''
