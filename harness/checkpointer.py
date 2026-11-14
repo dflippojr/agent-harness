@@ -304,10 +304,13 @@ class Checkpointer:
         """Build the fork's workspace at a checkpoint and import the checkpoint into the fork's own store, so it
         outlives pruning of the parent. Returns the git fields for the new session row."""
         ckpt = self.checkpoint(parent["id"], turn)
+        clone = bool(ckpt["head"]) and (Path(parent["workspace"]) / ".git").exists()
+        if clone:  # _fork_clone would refuse, after the workspace below was made
+            projects.require_host_git()
         source = self.store(parent)
         git_fields: dict = {}
         workspace.mkdir(parents=True, exist_ok=True)
-        if ckpt["head"] and (Path(parent["workspace"]) / ".git").exists():
+        if clone:
             git_fields = self._fork_clone(parent, ckpt, new_sid, workspace)
         fork = Store(source.base.parent / new_sid)
         fork.import_from(source, ckpt["sha"], ref_name(new_sid, turn))
