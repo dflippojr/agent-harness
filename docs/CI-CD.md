@@ -190,8 +190,8 @@ not satisfy that verification.
 `workflow_dispatch`. Re-review a PR with `gh workflow run review.yml -f pr_number=N` (optional `-f backend=…`).
 `workflow_dispatch` always uses the workflow file on `main`, so unmerged `review.yml` changes are not exercised by
 dispatch. Every run publishes an `Automated Code Review` Check Run on the reviewed PR head SHA (#120/#124/#313), whose
-conclusion follows the review verdict. The run pins that SHA when it starts: the event's head for `pull_request`, the
-API's `headRefOid` at dispatch time otherwise. It checks out that commit (never `refs/pull/N/head`, which GitHub
+conclusion follows the review verdict. The run pins that SHA when it starts, from the API's `headRefOid` for every
+trigger. It checks out that commit (never `refs/pull/N/head`, which GitHub
 updates after a push and can still name the previous commit), attaches the check to it, passes it to
 `run-review.ps1` as `REVIEW_HEAD_SHA` for the review marker, and fails before reviewing if the checkout is any other
 commit or the PR head moves before the diff is fetched (#975). Dispatch the review again after such a failure.

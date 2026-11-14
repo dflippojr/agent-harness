@@ -1335,6 +1335,8 @@ def _complete_check(
         ({"REVIEW_VERDICT": "", "REVIEW_FINDINGS": ""}, "failure", "Review did not complete"),
         ({"REVIEW_VERDICT": "findings", "REVIEW_FINDINGS": "x"}, "failure", "Review did not complete"),
         ({"AGENT_CONCLUSION": "failure"}, "failure", "Review did not complete"),
+        # A failed "Verify the PR checkout is the PR head" step skips the review (#975).
+        ({"AGENT_CONCLUSION": "skipped", "POST_CONCLUSION": "skipped"}, "failure", "Review did not complete"),
         ({"REVIEW_VERDICT": "clean", "POST_CONCLUSION": "failure"}, "failure", "Review did not complete"),
         ({"AGENT_CONCLUSION": "cancelled"}, "cancelled", "Automated review cancelled"),
     ],
@@ -1552,23 +1554,19 @@ def test_workflow_pins_one_head_sha_for_checkout_check_and_review():
 
 
 @pytest.mark.parametrize(
-    ("event_sha", "api_sha", "expected"),
+    "event_env",
     [
-        ("", TIP_SHA.upper(), TIP_SHA),  # workflow_dispatch / workflow_call: the API's head at dispatch time
-        (HEAD_SHA, TIP_SHA, HEAD_SHA),  # pull_request: the head the event was raised for
+        {"INPUT_PR_NUMBER": "7", "EVENT_PR_NUMBER": ""},  # workflow_dispatch / workflow_call
+        {"INPUT_PR_NUMBER": "", "EVENT_PR_NUMBER": "7"},  # pull_request opened: the API too, not the event payload
     ],
 )
-def test_resolve_pr_number_outputs_the_pr_head_sha(tmp_path, event_sha, api_sha, expected):
+def test_resolve_pr_number_outputs_the_api_pr_head_sha(tmp_path, event_env):
     calls = tmp_path / "gh-calls.jsonl"
-    view = json.dumps({"isCrossRepository": False, "headRefOid": api_sha})
-    result, outputs = _run_workflow_step(
-        tmp_path, "Resolve PR number",
-        {"INPUT_PR_NUMBER": "7", "EVENT_PR_NUMBER": "", "EVENT_HEAD_SHA": event_sha},
-        _fake_gh_recording(calls, view),
-    )
+    view = json.dumps({"isCrossRepository": False, "headRefOid": TIP_SHA.upper()})
+    result, outputs = _run_workflow_step(tmp_path, "Resolve PR number", event_env, _fake_gh_recording(calls, view))
     assert result.returncode == 0, output(result)
     assert outputs["number"] == "7"
-    assert outputs["head_sha"] == expected
+    assert outputs["head_sha"] == TIP_SHA
     assert outputs["workspace"] == str(tmp_path / "pr")
     [argv] = _recorded_calls(calls)
     assert argv[:2] == ["pr", "view"] and "7" in argv

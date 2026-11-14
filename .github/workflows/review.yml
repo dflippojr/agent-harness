@@ -33,8 +33,7 @@ name: Automated Code Review
 # repository, never from the PR.
 #
 # Every run publishes an "Automated Code Review" Check Run on the PR head SHA
-# it looked up when it started (the event's head for pull_request, the API's
-# head at dispatch time otherwise). The PR checkout, the check run and the
+# it looked up from the API when it started. The PR checkout, the check run and the
 # review marker all use that one SHA: the run fails before reviewing if its
 # checkout is not that commit, and the review script fails if the PR head
 # moves before it has fetched the diff (#975). The check's conclusion follows the reviewer's REVIEW_VERDICT line: success when
@@ -152,7 +151,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           $num = $env:EVENT_PR_NUMBER
@@ -165,9 +163,8 @@ jobs:
           if ($pr.isCrossRepository -isnot [bool] -or $pr.isCrossRepository) { throw "Refusing to review PR #${num}: it is not a branch of this repository." }
           # The one commit this run reviews: the checkout, the check run and the review marker all name it (#975).
           # refs/pull/N/head is not used, because GitHub updates it after a push and it can still name the last commit.
-          $head = $env:EVENT_HEAD_SHA
-          if ([string]::IsNullOrEmpty($head)) { $head = [string]$pr.headRefOid }
-          $head = $head.Trim().ToLowerInvariant()
+          # From the API for every trigger: an opened PR's run can wait in the queue while more commits are pushed.
+          $head = ([string]$pr.headRefOid).Trim().ToLowerInvariant()
           if ($head -notmatch '^[0-9a-f]{40}$') { throw "No head commit SHA for PR #${num}." }
           $workspace = Join-Path $env:GITHUB_WORKSPACE 'pr'
           "number=$num" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
