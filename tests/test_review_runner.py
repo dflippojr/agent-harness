@@ -342,6 +342,8 @@ Write-ReviewResult -Result $review -OutputPath (Join-Path '{tmp_path}' 'review-o
 LAST_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 HEAD_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 OTHER_SHA = "cccccccccccccccccccccccccccccccccccccccc"
+# A newer PR head than HEAD_SHA (#975).
+TIP_SHA = "dddddddddddddddddddddddddddddddddddddddd"
 
 
 def _mode_row(requested="auto", last_sha=LAST_SHA, compare_succeeded=True, merge_base=LAST_SHA,
@@ -1446,6 +1448,200 @@ def test_advisory_section_cannot_become_check_annotations(tmp_path):
     assert [(n["path"], n["start_line"]) for n in notes] == [("harness/web/app.js", 42)]
 
 
+# --- #975: the check run and the review marker name the PR head the run was dispatched for ---------------------
+
+def _git(repo: Path, *args: str) -> str:
+    """Run git in a temp repository with a fixed identity, unsigned (host or runner config must not matter)."""
+    result = subprocess.run(
+        ["git", "-c", "user.name=Review Test", "-c", "user.email=review-test@example.invalid",
+         "-c", "commit.gpgsign=false", "-C", str(repo), *args],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
+def _pr_checkout_behind_head(tmp_path: Path) -> tuple[str, str]:
+    """A `pr` checkout one commit behind its branch tip, as #969's run had: returns (tip, checked-out commit)."""
+    repo = tmp_path / "pr"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    for n in (1, 2):
+        (repo / "file.txt").write_bytes(f"version {n}\n".encode())
+        _git(repo, "add", "file.txt")
+        _git(repo, "commit", "--quiet", "-m", f"commit {n}")
+    tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "--quiet", "--detach", "HEAD~1")
+    return tip, _git(repo, "rev-parse", "HEAD")
+
+
+def _run_workflow_step(tmp_path: Path, name: str, env: dict[str, str], prelude: str = ""):
+    """Run a review.yml step's real script the way Actions' pwsh shell does (errors stop it), with `prelude`
+    defining fakes such as a `gh` function. Returns the process and the step's GITHUB_OUTPUT values."""
+    require_powershell()
+    step = _workflow_step(name)
+    github_output = tmp_path / "github-output.txt"
+    github_output.unlink(missing_ok=True)
+    script = tmp_path / "workflow-step.ps1"
+    script.write_text(f"{PLAIN_ERRORS}\n$ErrorActionPreference = 'Stop'\n{prelude}\n{step['run']}", encoding="utf-8-sig")
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(("REVIEW_", "GITHUB_", "GH_", "RUNNER_", "EVENT_", "INPUT_"))
+        and key not in {"PR_NUMBER", "HEAD_SHA"}
+    }
+    environment.update({
+        "GITHUB_REPOSITORY": "owner/repo",
+        "GITHUB_SERVER_URL": "https://github.example",
+        "GITHUB_RUN_ID": "975",
+        "GITHUB_WORKSPACE": str(tmp_path),
+        "GITHUB_OUTPUT": str(github_output),
+        "RUNNER_TEMP": str(tmp_path),
+        **env,
+    })
+    result = subprocess.run(
+        [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=30, check=False,
+    )
+    outputs = {}
+    if github_output.exists():
+        lines = github_output.read_text(encoding="utf-8-sig").splitlines()
+        outputs = dict(line.split("=", 1) for line in lines if "=" in line)
+    return result, outputs
+
+
+def _fake_gh_recording(calls: Path, stdout: str) -> str:
+    """A `gh` function that appends its arguments, one JSON array per call, to `calls` and prints `stdout`."""
+    return (
+        "function gh {\n"
+        f"    ConvertTo-Json -InputObject @($args) -Compress | Add-Content -LiteralPath '{_ps(calls)}' -Encoding utf8\n"
+        f"    '{stdout.replace(chr(39), chr(39) * 2)}'\n"
+        "    $global:LASTEXITCODE = 0\n"
+        "}\n"
+    )
+
+
+def _recorded_calls(calls: Path) -> list[list[str]]:
+    if not calls.exists():
+        return []
+    return [json.loads(line) for line in calls.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+
+
+def test_workflow_pins_one_head_sha_for_checkout_check_and_review():
+    """The checkout, the check run and run-review.ps1 all take the SHA "Resolve PR number" looked up, not
+    refs/pull/N/head (which GitHub updates after a push, so it can still name the previous commit) or the
+    checkout's own HEAD."""
+    pinned = "${{ steps.pr.outputs.head_sha }}"
+    assert _workflow_step("Check out PR head for review context")["with"]["ref"] == pinned
+    attach = _workflow_step("Attach running check to the PR")
+    assert attach["env"]["HEAD_SHA"] == pinned
+    assert "rev-parse" not in attach["run"]
+    verify = _workflow_step("Verify the PR checkout is the PR head")
+    assert verify["env"]["HEAD_SHA"] == pinned
+    assert "continue-on-error" not in verify and "if" not in verify
+    agent = _workflow_step("Run automated review")
+    # An environment value, not a parameter, so older tooling (a pinned tooling_ref) ignores it.
+    assert agent["env"]["REVIEW_HEAD_SHA"] == pinned
+    assert "-HeadSha" not in agent["run"]
+
+    import yaml
+
+    steps = [step["name"] for step in yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["review"]["steps"]]
+    # Attach first, so a failed verification still completes a red check on the right commit; verify before review.
+    assert (steps.index("Resolve PR number") < steps.index("Check out PR head for review context")
+            < steps.index("Attach running check to the PR") < steps.index("Verify the PR checkout is the PR head")
+            < steps.index("Run automated review"))
+
+
+@pytest.mark.parametrize(
+    ("event_sha", "api_sha", "expected"),
+    [
+        ("", TIP_SHA.upper(), TIP_SHA),  # workflow_dispatch / workflow_call: the API's head at dispatch time
+        (HEAD_SHA, TIP_SHA, HEAD_SHA),  # pull_request: the head the event was raised for
+    ],
+)
+def test_resolve_pr_number_outputs_the_pr_head_sha(tmp_path, event_sha, api_sha, expected):
+    calls = tmp_path / "gh-calls.jsonl"
+    view = json.dumps({"isCrossRepository": False, "headRefOid": api_sha})
+    result, outputs = _run_workflow_step(
+        tmp_path, "Resolve PR number",
+        {"INPUT_PR_NUMBER": "7", "EVENT_PR_NUMBER": "", "EVENT_HEAD_SHA": event_sha},
+        _fake_gh_recording(calls, view),
+    )
+    assert result.returncode == 0, output(result)
+    assert outputs["number"] == "7"
+    assert outputs["head_sha"] == expected
+    assert outputs["workspace"] == str(tmp_path / "pr")
+    [argv] = _recorded_calls(calls)
+    assert argv[:2] == ["pr", "view"] and "7" in argv
+    assert "isCrossRepository,headRefOid" in argv
+
+
+@pytest.mark.parametrize(
+    "view",
+    [
+        {"isCrossRepository": True, "headRefOid": TIP_SHA},
+        {"isCrossRepository": False, "headRefOid": "not-a-sha"},
+        {"isCrossRepository": False},
+    ],
+)
+def test_resolve_pr_number_refuses_a_fork_or_a_missing_head_sha(tmp_path, view):
+    result, outputs = _run_workflow_step(
+        tmp_path, "Resolve PR number", {"INPUT_PR_NUMBER": "7"},
+        _fake_gh_recording(tmp_path / "gh-calls.jsonl", json.dumps(view)),
+    )
+    assert result.returncode != 0
+    assert "head_sha" not in outputs
+    assert ("Refusing to review PR #7" if view.get("isCrossRepository") else "No head commit SHA for PR #7") in output(result)
+
+
+def test_attach_check_names_the_pr_head_when_the_checkout_is_behind(tmp_path):
+    """#969: the checkout was one commit behind the PR head, and the check run landed on that older commit."""
+    tip, stale = _pr_checkout_behind_head(tmp_path)
+    calls = tmp_path / "gh-calls.jsonl"
+    result, outputs = _run_workflow_step(
+        tmp_path, "Attach running check to the PR", {"PR_NUMBER": "7", "HEAD_SHA": tip},
+        _fake_gh_recording(calls, "131571344558"),
+    )
+    assert result.returncode == 0, output(result)
+    assert outputs["id"] == "131571344558"
+    [argv] = _recorded_calls(calls)
+    assert f"head_sha={tip}" in argv
+    assert f"head_sha={stale}" not in argv
+
+
+def test_attach_check_refuses_without_a_pinned_head_sha(tmp_path):
+    _pr_checkout_behind_head(tmp_path)
+    calls = tmp_path / "gh-calls.jsonl"
+    result, outputs = _run_workflow_step(
+        tmp_path, "Attach running check to the PR", {"PR_NUMBER": "7", "HEAD_SHA": ""},
+        _fake_gh_recording(calls, "1"),
+    )
+    assert result.returncode != 0
+    assert "id" not in outputs and _recorded_calls(calls) == []
+
+
+def test_verify_step_fails_before_review_when_the_checkout_is_behind_the_pr_head(tmp_path):
+    tip, stale = _pr_checkout_behind_head(tmp_path)
+    result, _ = _run_workflow_step(tmp_path, "Verify the PR checkout is the PR head", {"HEAD_SHA": tip})
+    assert result.returncode != 0
+    text = output(result)
+    assert f"The PR checkout is at {stale}, not the PR head {tip}" in text
+
+
+def test_verify_step_passes_when_the_checkout_is_the_pr_head(tmp_path):
+    tip, _ = _pr_checkout_behind_head(tmp_path)
+    _git(tmp_path / "pr", "checkout", "--quiet", "--detach", tip)
+    result, _ = _run_workflow_step(tmp_path, "Verify the PR checkout is the PR head", {"HEAD_SHA": tip})
+    assert result.returncode == 0, output(result)
+    assert f"PR checkout is the PR head {tip}" in result.stdout
+
+
+def test_verify_step_fails_without_a_pinned_head_sha(tmp_path):
+    _pr_checkout_behind_head(tmp_path)
+    result, _ = _run_workflow_step(tmp_path, "Verify the PR checkout is the PR head", {"HEAD_SHA": ""})
+    assert result.returncode != 0
+    assert "No pinned PR head SHA" in output(result)
+
+
 def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     import yaml
 
@@ -1495,8 +1691,8 @@ def test_workflow_is_reusable_with_pinned_tooling_and_fork_refusal():
     assert head["path"] == "pr"
     assert head["fetch-depth"] == 0
     assert "fetch-depth" not in tooling
-    assert "github.event.pull_request.head.sha" in head["ref"]
-    assert "refs/pull/{0}/head" in head["ref"]
+    # Pinned to the head SHA "Resolve PR number" looked up, never refs/pull/N/head, which can lag a push (#975).
+    assert head["ref"] == "${{ steps.pr.outputs.head_sha }}"
 
     resolve = _workflow_step("Resolve PR number")["run"]
     assert "isCrossRepository" in resolve
@@ -1661,7 +1857,16 @@ record = {
 with (here / "calls.jsonl").open("a", encoding="utf-8") as log:
     log.write(json.dumps(record) + "\n")
 line = " ".join(argv)
-rule = next((rule for rule in config.get(name, []) if all(part in line for part in rule["match"])), None)
+# A rule marked "once" answers only its first match; later calls fall through to the next matching rule.
+used_path = here / "used.json"
+used = json.loads(used_path.read_text(encoding="utf-8")) if used_path.exists() else []
+index, rule = next(
+    ((i, rule) for i, rule in enumerate(config.get(name, []))
+     if f"{name}:{i}" not in used and all(part in line for part in rule["match"])),
+    (None, None),
+)
+if rule is not None and rule.get("once"):
+    used_path.write_text(json.dumps(used + [f"{name}:{index}"]), encoding="utf-8")
 if rule is None:
     sys.stderr.write(f"fake {name}: no response configured for: {line}\n")
     sys.exit(99)
@@ -1869,6 +2074,73 @@ def test_review_script_falls_back_to_claude_and_publishes_a_full_review(tmp_path
     request = json.loads(run.gh[-1]["stdin"])
     assert request == {"text": request["text"], "mode": "gfm", "context": "owner/repo"}
     assert request["text"].replace("\r\n", "\n") == run.body.rstrip().rsplit("\n\n", 1)[0]
+
+
+def test_review_script_refuses_before_reviewing_when_the_pr_head_moved_since_dispatch(tmp_path, fake_cli_launcher):
+    """REVIEW_HEAD_SHA is the head the check run was attached to; a marker for any other SHA would disagree with it."""
+    run = _run_review_script(
+        tmp_path,
+        fake_cli_launcher,
+        {
+            "gh": _gh_responses(head=HEAD_SHA),
+            "claude": [{"match": ["-p"], "stdout": "No significant findings.\nREVIEW_VERDICT: CLEAN\nREVIEW_STATUS: COMPLETE"}],
+        },
+        {"REVIEW_BACKEND": "claude", "REVIEW_HEAD_SHA": TIP_SHA},
+    )
+    assert run.result.returncode != 0
+    assert f"The PR head moved from {TIP_SHA} to {HEAD_SHA}" in run.text
+    assert [call["argv"] for call in run.gh] == [PR_VIEW_ARGV]
+    assert run.backends == [] and run.body is None and run.outputs is None
+
+
+def test_review_script_refuses_when_the_pr_head_moves_while_the_full_diff_is_fetched(tmp_path, fake_cli_launcher):
+    """`gh pr diff` always answers for the current head, so a push between the head lookup and the diff would put a
+    newer diff under the dispatched SHA's marker."""
+    rules = _gh_responses(head=TIP_SHA)
+    rules.insert(0, {"match": ["pr view 7"], "once": True,
+                     "stdout": json.dumps({"headRefOid": HEAD_SHA, "baseRefName": "main"})})
+    run = _run_review_script(
+        tmp_path,
+        fake_cli_launcher,
+        {
+            "gh": rules,
+            "claude": [{"match": ["-p"], "stdout": "No significant findings.\nREVIEW_VERDICT: CLEAN\nREVIEW_STATUS: COMPLETE"}],
+        },
+        {"REVIEW_BACKEND": "claude", "REVIEW_HEAD_SHA": HEAD_SHA},
+    )
+    assert run.result.returncode != 0
+    assert f"The PR head moved from {HEAD_SHA} to {TIP_SHA}" in run.text
+    assert [call["argv"] for call in run.gh] == [PR_VIEW_ARGV, REPO_COMMENTS_ARGV, ["pr", "diff", "7"], PR_VIEW_ARGV]
+    assert run.backends == [] and run.body is None and run.outputs is None
+
+
+def test_review_script_marker_names_the_pinned_pr_head(tmp_path, fake_cli_launcher):
+    run = _run_review_script(
+        tmp_path,
+        fake_cli_launcher,
+        {
+            "gh": _gh_responses(head=HEAD_SHA),
+            "claude": [{"match": ["-p"], "stdout": "No significant findings.\nREVIEW_VERDICT: CLEAN\nREVIEW_STATUS: COMPLETE"}],
+        },
+        {"REVIEW_BACKEND": "claude", "REVIEW_HEAD_SHA": HEAD_SHA.upper()},
+    )
+    assert run.result.returncode == 0, run.text
+    assert [call["argv"] for call in run.gh] == [
+        PR_VIEW_ARGV, REPO_COMMENTS_ARGV, ["pr", "diff", "7"], PR_VIEW_ARGV, MARKDOWN_ARGV,
+    ]
+    assert run.body.rstrip().endswith(f"<!-- agent-review: sha={HEAD_SHA} mode=full base=main -->")
+
+
+def test_review_script_rejects_a_malformed_pinned_head(tmp_path, fake_cli_launcher):
+    run = _run_review_script(
+        tmp_path,
+        fake_cli_launcher,
+        {"gh": _gh_responses(), "claude": [{"match": ["-p"], "stdout": "REVIEW_STATUS: COMPLETE"}]},
+        {"REVIEW_BACKEND": "claude", "REVIEW_HEAD_SHA": "4c895afe"},
+    )
+    assert run.result.returncode != 0
+    assert "REVIEW_HEAD_SHA must be a full commit SHA" in run.text
+    assert run.gh == [] and run.backends == [] and run.body is None
 
 
 def test_review_script_reviews_only_the_new_commits_when_a_bot_marker_allows_it(tmp_path, fake_cli_launcher):
