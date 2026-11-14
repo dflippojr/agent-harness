@@ -1060,6 +1060,7 @@ def test_member_git_clone_tool_refuses_private_and_local(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_member_git_clone_tool_stops_when_over_budget(tmp_path):
     async def body():
         src = tmp_path / "src"

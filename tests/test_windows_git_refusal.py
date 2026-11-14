@@ -230,8 +230,8 @@ def test_rewind_refuses_before_probing_the_workspace(refuse, ws):
         busy = plan
 
     checkpointer = object.__new__(Checkpointer)
-    checkpointer.db = SimpleNamespace(get_session=lambda sid: {"id": sid, "workspace": str(ws)})
-    checkpointer.checkpoint = lambda sid, turn: {"turn": turn, "sha": "0" * 40, "head": "", "branch": ""}
+    checkpointer.db = SimpleNamespace(get_session=lambda sid: {"id": sid, "workspace": str(ws), "branch": "agent/s1"})
+    checkpointer.checkpoint = lambda sid, turn: {"turn": turn, "sha": "0" * 40, "head": "", "branch": "agent/s1"}
     checkpointer.store = lambda s: Store()
     before = tree(ws)
     with pytest.raises(GitError, match=REFUSAL):
@@ -296,6 +296,7 @@ def test_repo_map_lists_git_files_through_the_isolated_wrapper(tmp_path, monkeyp
     (root / ".git").mkdir(parents=True)
     (root / "a.py").write_bytes(b"a = 1\n")
     (root / "b.py").write_bytes(b"b = 1\n")  # on disk but untracked: git leaves it out
+    monkeypatch.setattr(projects, "_REFUSE_HOST_GIT", False, raising=False)  # the routing, on every OS
     calls = []
 
     def fake_git(repo, *args, **_k):

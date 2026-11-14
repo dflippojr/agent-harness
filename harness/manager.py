@@ -1211,6 +1211,10 @@ class Manager:
         self._enforce_app_caps(app_id)
         self._check_free_space(False, owner_id != OWNER_USER_ID, "tower", owner_id, app_id)
         cp = self.runner.checkpointer
+        try:
+            await asyncio.to_thread(cp.refuse_host_git_fork, parent, int(turn))  # before a workspace is allocated
+        except projects.GitError as e:
+            raise HarnessError(e.status, str(e)) from e
         new_sid = uuid.uuid4().hex[:10]
         workspace = self._new_workspace(False, "tower", owner_id, new_sid, app_id=app_id)
         # A hosted parent's CLI state can't be forked, and another backend can't read the parent's saved context:
@@ -1355,7 +1359,10 @@ class Manager:
                 return {"repos": [], "secret_scan": {"status": "unavailable", "scanner": secret_scan.SCANNER,
                                                      "findings": [], "open": 0, "message": str(e)}}
             return await asyncio.to_thread(changes_from_diffs, data["diffs"], scan)
-        return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None, scan)
+        try:
+            return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None, scan)
+        except projects.GitError as e:  # the Windows refusal among them (#973): an error, never an empty diff
+            raise HarnessError(e.status, str(e)) from e
 
     def _remote_scan_supported(self, s: dict) -> bool:
         state = self.hub.state.get(s["target"])

@@ -216,6 +216,18 @@ class Checkpointer:
         return account_usage_bytes(self.cfg, uid) < limit
 
     # rewind -----------------------------------------------------------------------------------------------------
+    @staticmethod
+    def _git_backed(session: dict, ckpt: dict) -> bool:
+        """A git project's session (it has a branch) or a checkpoint recorded at a commit: from the database
+        records, which the agent can't change."""
+        return bool(session.get("branch") or ckpt.get("head"))
+
+    def refuse_host_git_fork(self, parent: dict, turn: int) -> None:
+        """Refuse on Windows (`projects.require_host_git`) a fork that would clone the parent's git workspace, so
+        the caller refuses before it allocates the fork's workspace."""
+        if self._git_backed(parent, self.checkpoint(parent["id"], turn)):
+            projects.require_host_git()
+
     def checkpoint(self, sid: str, turn: int) -> dict:
         for c in self.db.checkpoints(sid, hidden=None):
             if c["turn"] == turn:
@@ -232,8 +244,12 @@ class Checkpointer:
         s = self.db.get_session(sid)
         ckpt = self.checkpoint(sid, turn)
         store, workspace = self.store(s), Path(s["workspace"])
-        if (workspace / ".git").exists():  # git_state and reset_branch below would refuse, after busy() probed files
+        # Decided from the records, not from the workspace, which the agent can change while this runs: a git
+        # session refuses before anything is planned or probed, and a scratch one never reaches host git.
+        git_backed = self._git_backed(s, ckpt)
+        if git_backed:
             projects.require_host_git()
+        host_git = git_backed or not projects._REFUSE_HOST_GIT
         saved = store.load_turn(turn)
         with tempfile.TemporaryDirectory(prefix="harness-ckpt-") as tmp:
             plan = store.plan(workspace, ckpt["sha"], Path(tmp))
@@ -241,7 +257,7 @@ class Checkpointer:
             if locked:
                 raise GitError("nothing was rewound: files another program has open (close them and retry): "
                                + "; ".join(locked)[:600], 409)
-            before = git_state(workspace, ckpt["branch"])
+            before = git_state(workspace, ckpt["branch"]) if host_git else None
             store.hold(sid, plan.current)
             restored = False
             try:
@@ -303,10 +319,9 @@ class Checkpointer:
     def prepare_fork(self, parent: dict, turn: int, new_sid: str, workspace: Path) -> dict:
         """Build the fork's workspace at a checkpoint and import the checkpoint into the fork's own store, so it
         outlives pruning of the parent. Returns the git fields for the new session row."""
+        self.refuse_host_git_fork(parent, turn)  # before the workspace below is made
         ckpt = self.checkpoint(parent["id"], turn)
         clone = bool(ckpt["head"]) and (Path(parent["workspace"]) / ".git").exists()
-        if clone:  # _fork_clone would refuse, after the workspace below was made
-            projects.require_host_git()
         source = self.store(parent)
         git_fields: dict = {}
         workspace.mkdir(parents=True, exist_ok=True)
