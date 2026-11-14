@@ -2076,6 +2076,15 @@ def test_review_script_falls_back_to_claude_and_publishes_a_full_review(tmp_path
     assert request["text"].replace("\r\n", "\n") == run.body.rstrip().rsplit("\n\n", 1)[0]
 
 
+def _unwrapped_error(text: str) -> str:
+    """pwsh's error view for a script run with -File colours the message and wraps it at word boundaries on
+    `     | ` continuation lines; undo both so a test can match the whole message."""
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return re.sub(r"\n\s*\| ", " ", plain)
+
+
 def test_review_script_refuses_before_reviewing_when_the_pr_head_moved_since_dispatch(tmp_path, fake_cli_launcher):
     """REVIEW_HEAD_SHA is the head the check run was attached to; a marker for any other SHA would disagree with it."""
     run = _run_review_script(
@@ -2088,7 +2097,7 @@ def test_review_script_refuses_before_reviewing_when_the_pr_head_moved_since_dis
         {"REVIEW_BACKEND": "claude", "REVIEW_HEAD_SHA": TIP_SHA},
     )
     assert run.result.returncode != 0
-    assert f"The PR head moved from {TIP_SHA} to {HEAD_SHA}" in run.text
+    assert f"The PR head moved from {TIP_SHA} to {HEAD_SHA} since this run started" in _unwrapped_error(run.text)
     assert [call["argv"] for call in run.gh] == [PR_VIEW_ARGV]
     assert run.backends == [] and run.body is None and run.outputs is None
 
@@ -2109,7 +2118,7 @@ def test_review_script_refuses_when_the_pr_head_moves_while_the_full_diff_is_fet
         {"REVIEW_BACKEND": "claude", "REVIEW_HEAD_SHA": HEAD_SHA},
     )
     assert run.result.returncode != 0
-    assert f"The PR head moved from {HEAD_SHA} to {TIP_SHA}" in run.text
+    assert f"The PR head moved from {HEAD_SHA} to {TIP_SHA} since this run started" in _unwrapped_error(run.text)
     assert [call["argv"] for call in run.gh] == [PR_VIEW_ARGV, REPO_COMMENTS_ARGV, ["pr", "diff", "7"], PR_VIEW_ARGV]
     assert run.backends == [] and run.body is None and run.outputs is None
 

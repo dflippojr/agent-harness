@@ -2084,6 +2084,30 @@ function Get-PullRequestReviewRefs {
     }
 }
 
+function Resolve-ReviewExpectedHeadSha {
+    # REVIEW_HEAD_SHA: the PR head the workflow looked up when it started, checked out and attached its check run to
+    # (#975). Empty when an older workflow or a manual run does not pin one.
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Sha)
+
+    if ([string]::IsNullOrWhiteSpace($Sha)) { return '' }
+    $value = $Sha.Trim().ToLowerInvariant()
+    if (-not (Test-GitObjectId -Sha $value)) { throw 'REVIEW_HEAD_SHA must be a full commit SHA.' }
+    return $value
+}
+
+function Assert-ReviewHeadUnmoved {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$ExpectedHeadSha,
+        [Parameter(Mandatory = $true)][string]$HeadSha
+    )
+
+    if (-not [string]::IsNullOrEmpty($ExpectedHeadSha) -and $HeadSha -ne $ExpectedHeadSha) {
+        throw "The PR head moved from $ExpectedHeadSha to $HeadSha since this run started; not reviewing. Dispatch the review again."
+    }
+}
+
 function Resolve-ReviewSpecMode {
     [CmdletBinding()]
     param([AllowEmptyString()][string]$Spec)
@@ -2488,11 +2512,15 @@ function Get-ReviewCoverage {
         [Parameter(Mandatory = $true)][string]$PrNumber,
         [Parameter(Mandatory = $true)][string]$Workspace,
         [Parameter(Mandatory = $true)][string]$ScratchDirectory,
-        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
+        [AllowEmptyString()][string]$ExpectedHeadSha = $env:REVIEW_HEAD_SHA
     )
 
+    $expectedHead = Resolve-ReviewExpectedHeadSha -Sha $ExpectedHeadSha
     $refs = Get-PullRequestReviewRefs -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
     $headSha = [string]$refs.HeadSha
+    # The marker must name the commit the check run is on, so a pinned run reviews that head or nothing.
+    Assert-ReviewHeadUnmoved -ExpectedHeadSha $expectedHead -HeadSha $headSha
     $currentBaseRef = [string]$refs.BaseRef
     $lastReview = Get-LastReviewedSha -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Repository $Repository
     $lastSha = [string]$lastReview.Sha
@@ -2546,6 +2574,12 @@ function Get-ReviewCoverage {
         $diff = Get-ReviewDiff -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
         $aheadBy = 0
         $lineCount = 0
+        if (-not [string]::IsNullOrEmpty($expectedHead)) {
+            # gh pr diff answers for whatever the head is now; a push since the lookup would put a newer diff
+            # under this SHA's marker. The incremental diff above is already pinned to $headSha.
+            $after = Get-PullRequestReviewRefs -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+            Assert-ReviewHeadUnmoved -ExpectedHeadSha $expectedHead -HeadSha ([string]$after.HeadSha)
+        }
     }
 
     return [pscustomobject]@{
