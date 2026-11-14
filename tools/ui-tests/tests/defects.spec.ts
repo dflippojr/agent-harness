@@ -1,4 +1,4 @@
-import { test, expect, openSession, expectDone, selfSizingTest, onlyProjects, signIn } from './fixtures';
+import { test, expect, openSession, expectDone, selfSizingTest, signIn } from './fixtures';
 import type { Locator, Page } from '@playwright/test';
 
 async function expectHitTarget(target: Locator) {
@@ -507,8 +507,7 @@ test('#868 A later route supersedes one still waiting on /me', async ({ signedIn
 // #940: one boot /me lost to a network error (net::ERR_NO_BUFFER_SPACE on the Windows runner) left the app on the Offline
 // card beside a Live badge, since identity was asked again only on the browser's online event or Retry. Once the daemon
 // stream is live the server is reachable, so the app asks /me again and sign-in finishes. Only the first /me fails.
-test('#940 A boot /me lost to a network error recovers once the stream is live', async ({ page }, info) => {
-  onlyProjects(info, ['desktop-light']);
+test('#940 A boot /me lost to a network error recovers once the stream is live', async ({ page }) => {
   let identityRequests = 0;
   await page.route(/\/api\/admin\/v1\/me(\?|$)/, route => {
     if (route.request().method() !== 'GET') return route.continue();
