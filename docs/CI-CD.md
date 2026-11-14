@@ -198,6 +198,7 @@ conclusion follows the review verdict:
 | `REVIEW_VERDICT: FINDINGS n` | `failure` | `n findings` (plus the partial note when files were omitted) |
 | `CLEAN`, but the diff exceeded `REVIEW_MAX_DIFF_BYTES` | `neutral` | `Partial review: n files not reviewed` |
 | Every backend failed or gave no valid verdict, or the comment was not posted | `failure` | `Review did not complete` |
+| The publication scan withheld lines, so the posted review is incomplete and has no marker (#974) | `failure` | `Review did not complete` |
 | Run cancelled | `cancelled` | `Automated review cancelled` |
 
 **Spec review (review-v3, #725).** Before the backend runs, the job reads the pull request's title and description and
@@ -352,8 +353,19 @@ The CLI must support these flags (restricted mode requires v2.1.248 or later); a
 See [Claude permission rules](https://code.claude.com/docs/en/permissions) and the [CLI flag reference](https://code.claude.com/docs/en/cli-reference).
 The wrapper, rather than a model, writes the final comment file. Before writing `review-output.md`, it scans the
 public review body using the diagnostic redaction patterns (bearer values, named credentials, provider tokens and
-long tokens) plus two path rules. A match discards the whole body, removes any stale output and fails closed with
-`Review did not complete`; nothing is posted or copied into the check summary. The path rules never parse or
+long tokens) plus two path rules. When the body fails only on those path, credential and token rules, the wrapper
+withholds each line that holds a match, whether on its own or in the scan forms of the whole review, keeping only its list,
+quote and indent markers. Any of the fail-closed rules below (markup, math, Mermaid, bidi controls, line breaks,
+unknown entities) withholds nothing. A failing line goes whole, never only the match, because a match is often a prefix that the rest of the
+line continues. A note at the end of the review says how many lines were withheld, and the job log gives their numbers,
+never their text (#974). The result is scanned again in full, GitHub's rendering included. Only a result that
+passes is posted. It is incomplete, so it carries no `agent-review` marker or criteria summary. The job reports
+`verdict=incomplete` and `withheld_lines=N`, and the check reads `Review did not complete`, so readiness tools never
+count it and the next run reviews the whole PR again. Nothing is withheld if a rejected match crosses a line break, for example a
+`password =` label and its value on two lines, or if a scan form moves text between lines. If that happens, if the
+result fails again, if no single line fails on its own, or if only formatting would be left (headings, fences, rules or bare list markers), the wrapper removes any stale output and fails closed with `Review did not complete`. Nothing of the review
+is posted or copied into the check summary. Instead it posts a short notice on the PR, with no review text and no
+`agent-review` marker, saying that the review was not published and linking the run log. The path rules never parse or
 canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot hide one:
 
 - Any Windows absolute root is rejected, whatever follows it: a drive root (`C:\` or `C:/`), a UNC or extended

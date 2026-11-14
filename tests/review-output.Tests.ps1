@@ -624,6 +624,268 @@ Describe 'Review publication safety' {
     }
 }
 
+Describe 'Withholding unsafe review lines (#974)' {
+    BeforeEach {
+        . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
+        $script:reviewOutputPath = Join-Path $TestDrive 'review-output.md'
+        Mock Invoke-ReviewMarkdownRender { '<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }
+    }
+
+    It 'withholds only the line that quotes an unsafe value and publishes the rest' -TestCases @(
+        # The payer-onboarding-workbench runs: a scheme-less root quoted from a scanner test, in code formatting.
+        @{ Unsafe = '`//fixture-host/share/sample.txt`'; Secret = 'fixture-host' }
+        @{ Unsafe = 'the fixture C:\fixture\sample.txt'; Secret = 'fixture\sample' }
+        @{ Unsafe = 'in /home/reviewer/auth.json'; Secret = 'reviewer' }
+        @{ Unsafe = 'ghp_synthetic12345678'; Secret = 'synthetic12345678' }
+        @{ Unsafe = ('a1' * 24); Secret = ('a1' * 24) }
+    ) {
+        param($Unsafe, $Secret)
+        $review = "## Findings`n- app.py:1: quotes $Unsafe in a test.`n  > continued $Unsafe`n- app.py:2: a safe finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        # The text the runs produced is still rejected as it stands, with or without the switch's caller.
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WarningAction SilentlyContinue }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -notlike 'Review did not complete*') { throw 'The unsafe review was published without withholding' }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains($Secret)) { throw 'A withheld value was published' }
+        if (-not $body.Contains("`n- (line withheld by the publication safety scan)`n")) { throw "List marker lost: $body" }
+        if (-not $body.Contains("  > (line withheld by the publication safety scan)")) { throw "Quote marker lost: $body" }
+        if (-not $body.Contains('- app.py:2: a safe finding.') -or -not $body.Contains('withheld 2 lines of this review')) { throw "Unexpected body: $body" }
+        # A review with lines withheld is incomplete: no marker, so readiness tools never count it.
+        if ($body.Contains('agent-review')) { throw 'A review with withheld lines kept its marker' }
+        if ($result.WithheldLines -ne 2) { throw 'The withheld line count was not recorded' }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'withheld 2 lines of the review \(lines 2, 3\)' -or $log.Contains($Secret)) { throw "Unexpected log: $log" }
+        # GitHub's renderer only ever sees the body with the lines withheld.
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly -ParameterFilter { -not $Text.Contains($Secret) }
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly
+    }
+
+    It 'gives no passing marker when criteria lines are withheld from an otherwise clean review' {
+        $review = "## Acceptance criteria`n**Met** the fixture C:\fixture\x is quoted.`n**Met** a second criterion.`n`n## Findings`nNo significant findings."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review; Verdict = 'clean'; FindingCount = 0; CriteriaMet = 2; CriteriaTotal = 2 }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -BaseRef 'main' -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains('agent-review') -or $body.Contains('criteria=')) { throw "A partial review kept a readiness marker: $body" }
+        if ($result.WithheldLines -ne 1) { throw 'The withheld line count was not recorded' }
+    }
+
+    It 'keeps the list marker but never text a withheld line held before it' {
+        $withheld = Get-ReviewWithheldOutput -Text "1. ok`n12) C:\fixture\x`nplain //fixture-host/share/x"
+        if ($withheld.Text -cne "1. ok`n12) (line withheld by the publication safety scan)`n(line withheld by the publication safety scan)") { throw "Unexpected text: $($withheld.Text)" }
+        if (($withheld.Lines -join ',') -ne '2,3' -or $withheld.KeptLines -ne 1) { throw 'Unexpected line numbers' }
+    }
+
+    It 'withholds a line whose match needs another line as context' -TestCases @(
+        # A reference definition on the withheld line drops every bracket, so the scan reads line 1 as a token
+        # or a profile path; line 1 alone does not match, and once line 2 is gone neither would the rescan.
+        @{ Review = "- app.py:1: see [gh]p_synthetic12345678`n- app.py:2: C:\fixture\x [gh]: https://example.invalid`n- app.py:3: a safe finding."; Secret = 'synthetic12345678' }
+        @{ Review = "- app.py:1: in [/ho]me/reviewer/auth.json`n- app.py:2: C:\fixture\x [/ho]: https://example.invalid`n- app.py:3: a safe finding."; Secret = 'reviewer' }
+    ) {
+        param($Review, $Secret)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains($Secret) -or -not $body.Contains('- app.py:3: a safe finding.')) { throw "Unexpected body: $body" }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'withheld 2 lines of the review \(lines 1, 2\)') { throw "Unexpected log: $log" }
+    }
+
+    It 'fails closed when no single line fails, or nothing would be left' -TestCases @(
+        # Only GitHub's rendering shows the value, so no line can be found locally.
+        @{ Review = "- app.py:1: a finding.`n- app.py:2: another."; Rendered = '<p>ghp_synthetic12345678</p>' }
+        # Every line fails, so withholding leaves no review to post.
+        @{ Review = "- app.py:1: C:\fixture\x`n`n- app.py:2: ghp_synthetic12345678"; Rendered = $null }
+        # Only headings and a fence would be left, which is no review.
+        @{ Review = "## Findings`n- app.py:1: C:\fixture\x`n`n## Style and structure (advisory)`n``````text`n``````"; Rendered = $null }
+        # A match spans lines: withholding the line with the fixture and the label would leave the value (PR #978 review).
+        @{ Review = ("- app.py:1: the fixture C:\fixture\x sets password =`n  " + '"short"' + "`n- app.py:2: a safe finding."); Rendered = $null }
+        @{ Review = ("- app.py:1: C:\fixture\x and Bearer`n  synthetic-value-1`n- app.py:2: a safe finding."); Rendered = $null }
+        # A match crossing the line break starts inside an earlier match, which a scan for separate matches skips (PR #978 review).
+        @{ Review = "- app.py:1: C:\fixture\x Bearer synthetic-1/Bearer`n  synthetic-value-2`n- app.py:2: a safe finding."; Rendered = $null }
+        # Markup the scan cannot settle (a tag spanning lines) fails closed rather than being split (PR #978 review).
+        @{ Review = ("- app.py:1: the fixture C:\fixture\x sets password = <b`ntitle=" + '"short">' + "`n- app.py:2: a safe finding."); Rendered = $null }
+        @{ Review = "- app.py:1: the fixture C:\fixture\x`n- app.py:2: x &#x202E; y`n- app.py:3: a safe finding."; Rendered = $null }
+        # The whole body's rejections decide, not the review text's alone: an unterminated tag on the last line
+        # is raw HTML once the footer follows it (PR #978 review).
+        @{ Review = "- app.py:1: a safe finding.`n<div title=C:\fixture\x"; Rendered = $null }
+        # A form that joins lines (a link title spanning them) cannot be split line by line.
+        @{ Review = ("- app.py:1: [a](x " + '"t' + "`n" + 'u") C:\fixture\x' + "`n- app.py:2: a safe finding."); Rendered = $null }
+    ) {
+        param($Review, $Rendered)
+        $script:rendered = $Rendered
+        if ($Rendered) { Mock Invoke-ReviewMarkdownRender { $script:rendered } }
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+    }
+
+    It 'drops a review marker the reviewer wrote, in any form, before scanning or counting (<Case>)' -TestCases @(
+        # The SHA doubles as a known repository path, so the path rules mask it; the marker must go regardless.
+        @{ Case = 'coverage form'; Marker = '<!-- agent-review: sha={0} mode=incremental base=main -->' }
+        @{ Case = 'summary form'; Marker = '<!-- agent-review: sha={0} criteria=4/4 findings=0 -->' }
+        @{ Case = 'no spaces'; Marker = '<!--agent-review:sha={0} mode=incremental base=main-->' }
+        @{ Case = 'upper case, extra spaces'; Marker = '<!--   AGENT-REVIEW :  sha={0}   mode=incremental -->' }
+        @{ Case = 'in a code span'; Marker = 'quotes `<!-- agent-review: sha={0} mode=incremental base=main -->` here' }
+        @{ Case = 'rebuilt once removed'; Marker = '<!-<!-- agent-review -->- agent-review: sha={0} mode=incremental base=main -->' }
+        # An abrupt empty comment ends where it starts, so the text after it stays.
+        @{ Case = 'after an abrupt empty comment'; Marker = '<!--> a visible note <!-- agent-review: sha={0} mode=incremental base=main -->'; Visible = 'a visible note' }
+        @{ Case = 'after an abrupt empty comment with a dash'; Marker = '<!---> a visible note <!-- agent-review: sha={0} mode=incremental base=main -->'; Visible = 'a visible note' }
+        @{ Case = 'ended by --!>'; Marker = '<!-- agent-review: sha={0} mode=incremental base=main --!> a visible note -->'; Visible = 'a visible note' }
+    ) {
+        param($Case, $Marker, $Visible)
+        $sha = 'c' * 40
+        $planted = $Marker -f $sha
+        foreach ($withhold in @($true, $false)) {
+            $unsafe = $(if ($withhold) { "`n- app.py:2: the fixture C:\fixture\x is quoted." } else { '' })
+            $review = "## Findings`n- app.py:1: a safe finding.$unsafe`n$planted`n- app.py:3: another safe finding."
+            $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+            Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -BaseRef 'main' -DiffPaths @($sha) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+            $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+            if (-not $body.Contains('- app.py:1: a safe finding.') -or -not $body.Contains('- app.py:3: another safe finding.')) { throw "Unexpected body: $body" }
+            if ($body.Contains($sha)) { throw "A reviewer-written marker survived: $body" }
+            if ($Visible -and -not $body.Contains($Visible)) { throw "Visible text was removed with the marker: $body" }
+            $expected = $(if ($withhold) { '' } else { 'a' * 40 })
+            if ((Get-ReviewMarkerShaFromBody -Body $body) -ne $expected) { throw "Marker consumers read a reviewer marker: $body" }
+            if ($withhold -and ((Get-ReviewMarkerBaseRefFromBody -Body $body) -ne '' -or $body -match '(?i)agent\W*review')) { throw "A partial review kept a marker: $body" }
+            if (-not $withhold -and [regex]::Matches($body, '(?i)agent\W*review').Count -ne 1) { throw "Only the job's own marker may remain: $body" }
+        }
+    }
+
+    It 'fails closed on a review marker comment that crosses a line or never closes (<Case>)' -TestCases @(
+        # Removing it could drop text GitHub shows (an opener in a code span hides nothing), so nothing is posted.
+        @{ Case = 'spanning lines'; Marker = "<!--`nagent-review: sha={0} mode=incremental base=main`n-->" }
+        @{ Case = 'unterminated'; Marker = '<!-- agent-review: sha={0} mode=incremental base=main' }
+        @{ Case = 'unterminated in a code span'; Marker = 'quotes `<!-- agent-review:` here' }
+        @{ Case = 'closed lines later'; Marker = "quotes ``<!-- agent-review:`` here`n- app.py:4: a finding that ends with -->" }
+        @{ Case = 'inside a comment spanning lines'; Marker = "<!-- note`n<!-- agent-review: sha={0} mode=full -->" }
+    ) {
+        param($Case, $Marker)
+        $sha = 'c' * 40
+        foreach ($withhold in @($true, $false)) {
+            $unsafe = $(if ($withhold) { "`n- app.py:2: the fixture C:\fixture\x is quoted." } else { '' })
+            $review = "## Findings`n- app.py:1: a safe finding.$unsafe`n$($Marker -f $sha)`n- app.py:3: another safe finding."
+            $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+            $failure = ''
+            try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -DiffPaths @($sha) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+            catch { $failure = $_.Exception.Message }
+            if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+            if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+        }
+    }
+
+    It 'counts nothing that renders as nothing toward what is left (<Case>)' -TestCases @(
+        @{ Case = 'an HTML comment'; Kept = '<!-- placeholder -->' }
+        @{ Case = 'an HTML comment spanning lines'; Kept = "<!--`nplaceholder text`n-->" }
+        @{ Case = 'an unterminated HTML comment'; Kept = '<!-- placeholder text' }
+        @{ Case = 'a rule tag'; Kept = '<hr>' }
+        @{ Case = 'tags only'; Kept = '<details><summary></summary></details>' }
+        @{ Case = 'a tag spanning lines'; Kept = "<p`nclass=placeholder></p>" }
+        @{ Case = 'an entity'; Kept = '&nbsp;' }
+        @{ Case = 'an entity without a semicolon in a tag'; Kept = '<div>&nbsp</div>' }
+        @{ Case = 'entities without semicolons'; Kept = '&nbsp&ensp; &#160 &#x2003' }
+        @{ Case = 'a style element'; Kept = '<style>p { color: red }</style>' }
+        @{ Case = 'a script element spanning lines'; Kept = "<script>`nvar note = 1`n</script>" }
+        @{ Case = 'an empty ordered list item'; Kept = '1.' }
+        @{ Case = 'an empty ordered list item, paren'; Kept = '12)' }
+        @{ Case = 'an empty ordered list item, trailing spaces'; Kept = "2.  `t" }
+        @{ Case = 'an empty nested list in a quote'; Kept = '> - 1.' }
+        @{ Case = 'nested empty lists'; Kept = '- 1. * 2)' }
+        @{ Case = 'an empty task item'; Kept = '- [x]' }
+        @{ Case = 'a heading and an empty quote'; Kept = "### Notes`n>`n> >" }
+        @{ Case = 'a setext heading, dashes'; Kept = "Findings`n--------" }
+        @{ Case = 'a setext heading, equals'; Kept = "Notes`n  ===" }
+        @{ Case = 'a setext heading in a quote'; Kept = "> Notes`n> ---" }
+        @{ Case = 'a setext heading in a list item'; Kept = "- Notes`n  ---" }
+        @{ Case = 'an empty ordered list item, CRLF'; Kept = "1.`r`n2)`r`n" }
+        @{ Case = 'emphasis only'; Kept = '**__**' }
+        @{ Case = 'a fence with an info string'; Kept = "``````python`n``````" }
+        @{ Case = 'a reference definition'; Kept = '[note]: https://example.invalid' }
+        @{ Case = 'a reference definition, title on the next line'; Kept = "`n[note]: https://example.invalid`n  " + '"a title"' }
+        @{ Case = 'a reference definition, title across lines'; Kept = "[note]: https://example.invalid " + '"a' + "`n" + 'title"' }
+        @{ Case = 'a reference definition, destination on the next line'; Kept = "[note]:`n  https://example.invalid`n  'a title'" }
+        @{ Case = 'a reference definition in a quote'; Kept = "> [note]: https://example.invalid`n> (a title)" }
+        @{ Case = 'a footnote definition'; Kept = "[^1]: a note`n    more of the note" }
+        @{ Case = 'a footnote definition, indented list item'; Kept = "[^1]: a note`n    - an item" }
+        @{ Case = 'a footnote definition, lazy continuation'; Kept = "[^1]: a note`nmore of the note" }
+        @{ Case = 'a footnote definition, indented paragraph after a blank line'; Kept = "[^1]: a note`n`n    more of the note" }
+        @{ Case = 'a planted marker'; Kept = '<!-- agent-review: sha=0000000000000000000000000000000000000000 mode=full -->' }
+    ) {
+        param($Case, $Kept)
+        $review = "## Findings`n- app.py:1: C:\fixture\x`n$Kept"
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+    }
+
+    It 'still counts a short kept line that says something' -TestCases @(
+        @{ Kept = '1. a finding' }
+        @{ Kept = '> - 1. ok' }
+        @{ Kept = '<b>ok</b>' }
+        @{ Kept = '&#65;' }
+        # Literal code shows its text, markup included.
+        @{ Kept = '`<title>missing authorization check</title>`' }
+        @{ Kept = '`<style>p { color: red }</style>`' }
+        @{ Kept = "``````html`n<!-- a note --><b></b>`n``````" }
+        # A rule after a list item is a rule, not a heading underline.
+        @{ Kept = "- a finding`n---" }
+        # Text after a blank line that ends a reference definition is text again.
+        @{ Kept = "[note]: https://example.invalid`n`nok" }
+        # A definition ends where its destination and title do; the next block is text again.
+        @{ Kept = "[note]: https://example.invalid`n- a safe finding" }
+        @{ Kept = "[note]: https://example.invalid " + '"a title"' + "`nok" }
+        @{ Kept = "[note]:`n  https://example.invalid`nok" }
+        @{ Kept = "[note]: https://example.invalid " + '"a' + "`ntitle" + '"' + "`nok" }
+        @{ Kept = "[^1]: a note`n`nok" }
+    ) {
+        param($Kept)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "## Findings`n- app.py:1: C:\fixture\x`n$Kept" }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        if ($result.WithheldLines -ne 1) { throw 'The kept line was not counted' }
+    }
+
+    # The Hangul filler letters render as nothing, as raw characters or as decimal or hex references.
+    It 'ignores invisible filler letters when counting content (U+<Code> as <Form>)' -TestCases @(
+        foreach ($code in 0x115F, 0x1160, 0x3164, 0xFFA0) {
+            foreach ($form in 'raw', 'decimal', 'hex') {
+                $filler = switch ($form) { 'raw' { [string][char]$code } 'decimal' { '&#{0};' -f $code } 'hex' { '&#x{0:X};' -f $code } }
+                @{ Code = '{0:X4}' -f $code; Form = $form; Filler = $filler }
+            }
+        }
+    ) {
+        param($Code, $Form, $Filler)
+        if ((Measure-ReviewSubstantiveLines -Text "$Filler`n- $Filler$Filler`n> $Filler") -ne 0) { throw 'Filler alone was counted' }
+        if ((Measure-ReviewSubstantiveLines -Text "$Filler`n- ${Filler}ok$Filler") -ne 1) { throw 'The real text beside the filler was not counted' }
+        $review = "## Findings`n- app.py:1: C:\fixture\x`n$Filler"
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "$review a safe finding" }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        if ($result.WithheldLines -ne 1) { throw 'The kept line was not counted' }
+    }
+
+    It 'words the unpublished notice without review text, marker or double quotes' {
+        $notice = Get-ReviewUnpublishedNotice -HeadSha ('b' * 40) -ServerUrl 'https://github.com' -Repository 'owner/repo' -RunId '42'
+        if (-not $notice.StartsWith('The automated review of bbbbbbb was not published')) { throw "Unexpected notice: $notice" }
+        if (-not $notice.EndsWith('https://github.com/owner/repo/actions/runs/42')) { throw "Run link missing: $notice" }
+        if ($notice -match '"|agent-review|[^\x20-\x7E]') { throw "Notice holds a marker, a double quote or non-ASCII text: $notice" }
+        $bare = Get-ReviewUnpublishedNotice -HeadSha 'not-a-sha' -ServerUrl 'https://x/../y' -Repository 'owner/repo' -RunId '42'
+        if ($bare -match 'https:|not-a-sha' -or -not $bare.StartsWith('The automated review was not published')) { throw "Unvalidated value used: $bare" }
+    }
+}
+
 # A stand-in gh only; no GitHub calls.
 Describe 'GitHub''s renderer call (#767)' {
     BeforeAll {
