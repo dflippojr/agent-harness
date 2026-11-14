@@ -271,8 +271,9 @@ def _remove_tree(path: Path) -> None:
 def isolated_prepare(workspace: Path, source: Path | str, sid: str, root: Path,
                      max_bytes: int | None = None) -> dict:
     """Session checkout from a member-managed source, without owner git helpers."""
-    from .projects import AGENT_EMAIL, AGENT_NAME, branch_name
+    from .projects import AGENT_EMAIL, AGENT_NAME, branch_name, require_host_git
 
+    require_host_git()  # every later host git call on this workspace would refuse; clone nothing
     require_contained(workspace, root, allow_missing=True)
     workspace.mkdir(parents=True, exist_ok=True)
     src = str(source)

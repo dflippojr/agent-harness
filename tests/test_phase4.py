@@ -36,6 +36,7 @@ from waits import scaled
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "macrunner"))
 import harness_runner  # noqa: E402
+from host_git import needs_host_git
 
 
 def bash() -> str | None:
@@ -137,6 +138,7 @@ needs_bash = pytest.mark.skipif(bash() is None, reason="needs bash (Git Bash on 
 
 
 @needs_bash
+@needs_host_git
 def test_mac_session_edits_runs_saves_and_merges(tmp_path):
     projects_dir = tmp_path / "Projects"
     src = make_repo(projects_dir / "app")

@@ -16,6 +16,7 @@ from harness.runner import SYSTEM_PROMPT
 from harness.workspace_guidance import GUIDANCE_LIMIT, SECTION_CLOSE, SECTION_OPEN, apply_to_prompt, discover
 from test_daemon import Script, call, make_cfg, wait_status
 from test_phase3 import finished, make_repo, project_cfg, sh
+from host_git import needs_host_git
 
 
 def test_agents_md_wins_over_claude_md(tmp_path):
@@ -100,6 +101,7 @@ def _run(tmp_path, files: dict, instructions: str = "PROJECT-INSTRUCTIONS"):
     return chat.requests[0][0]["content"], s
 
 
+@needs_host_git
 def test_session_sees_agents_md_after_the_instructions(tmp_path):
     system, s = _run(tmp_path, {"AGENTS.md": "AGENTS-MARKER", "CLAUDE.md": "CLAUDE-MARKER"})
     assert system.startswith(SYSTEM_PROMPT.split("{")[0])

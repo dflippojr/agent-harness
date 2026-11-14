@@ -14,6 +14,7 @@ from harness.llm import Completion
 from harness.manager import Manager
 
 from test_daemon import Script, call, make_cfg
+from host_git import needs_host_git
 
 LOGIN = "me@example.com"
 PUBLIC = "https://tower.example.ts.net"
@@ -264,6 +265,7 @@ def test_approval_notification_and_token_buttons(tmp_path):
         assert done["click"].endswith(f"/#/s/{sid}")
 
 
+@needs_host_git
 def test_templates_rerun_and_changes(tmp_path):
     steps = [
         Completion(tool_calls=[call("write_file", 0, path="repo/new.txt", content="hello\n")]),
