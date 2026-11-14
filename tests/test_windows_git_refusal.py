@@ -201,6 +201,21 @@ def test_fork_refuses_before_creating_the_workspace(refuse, ws, tmp_path):
     assert not fork.exists()
 
 
+def test_prepare_fork_refuses_before_creating_the_workspace(refuse, ws, tmp_path):
+    """The fork entry point refuses a git checkpoint before it makes the fork's workspace or touches a store."""
+    checkpointer = object.__new__(Checkpointer)
+    head = sh(ws, "rev-parse", "HEAD").strip()
+    checkpointer.checkpoint = lambda sid, turn: {"turn": turn, "sha": "0" * 40, "head": head, "branch": "agent/s1"}
+    checkpointer.store = lambda s: pytest.fail("the fork opened a store before refusing")
+    parent = {"id": "s1", "workspace": str(ws), "base_branch": "main", "base_commit": ""}
+    fork = tmp_path / "workspaces" / "s2"
+    before = tree(ws)
+    with pytest.raises(GitError, match=REFUSAL):
+        checkpointer.prepare_fork(parent, 1, "s2", fork)
+    assert not fork.exists()
+    assert tree(ws) == before
+
+
 def test_rewind_refuses_before_probing_the_workspace(refuse, ws):
     """A rewind probes each file it would replace by renaming it aside and back (`Store.busy`); on a git workspace
     the refusal comes first, so no file is moved."""
