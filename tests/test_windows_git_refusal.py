@@ -248,8 +248,11 @@ def test_cleanup_keeps_a_workspace_it_cannot_check(refuse, ws, monkeypatch):
     maintenance.cfg = maintenance.db = None
     base = sh(ws, "rev-parse", "HEAD").strip()
     s = {"id": "s1", "workspace": str(ws), "project": "p", "base_commit": base, "branch": "agent/s1"}
+    before = tree(ws)
     assert REFUSAL in maintenance.unsaved_work({**s, "review": ""})         # never pushed: commits_ahead
+    assert tree(ws) == before
     assert REFUSAL in maintenance.unsaved_work({**s, "review": "pushed"})   # pushed: the unpushed check
+    assert tree(ws) == before
 
 
 def test_runner_cleanup_keeps_a_workspace_it_cannot_check(refuse, tmp_path):
