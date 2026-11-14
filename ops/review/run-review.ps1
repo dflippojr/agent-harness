@@ -2889,7 +2889,10 @@ function Measure-ReviewSubstantiveLines {
     $visible = [regex]::Replace($visible, '(?i)<(script|style|textarea|title|template)\b[\s\S]*?(?:</\1[^>]*>|\z)', '')
     $visible = [regex]::Replace($visible, '</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:"[^"]*"|''[^'']*''|[^<>"''])*)?/?>|<![A-Za-z\[][^>]*>|<\?[\s\S]*?(?:\?>|\z)', '')
     # Entities count by what they render (&nbsp is a space with or without its semicolon, &#65; a letter).
+    # Invisible characters, among them the Hangul filler letters (U+115F, U+1160, U+3164, U+FFA0), render
+    # as nothing, raw or as references, so they go once decoded.
     $visible = ConvertFrom-ReviewEntities -Text ([regex]::Replace($visible, '!?\[[ \t]*\]\([^)]*\)', ''))
+    $visible = $visible -replace $script:ReviewInvisiblePattern, ''
     $count = 0
     $definition = ''
     $lines = @($visible -split "`r?`n")
