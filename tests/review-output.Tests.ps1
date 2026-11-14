@@ -852,6 +852,30 @@ Describe 'Withholding unsafe review lines (#974)' {
         if ($result.WithheldLines -ne 1) { throw 'The kept line was not counted' }
     }
 
+    # The Hangul filler letters render as nothing, as raw characters or as decimal or hex references.
+    It 'ignores invisible filler letters when counting content (U+<Code> as <Form>)' -TestCases @(
+        foreach ($code in 0x115F, 0x1160, 0x3164, 0xFFA0) {
+            foreach ($form in 'raw', 'decimal', 'hex') {
+                $filler = switch ($form) { 'raw' { [string][char]$code } 'decimal' { '&#{0};' -f $code } 'hex' { '&#x{0:X};' -f $code } }
+                @{ Code = '{0:X4}' -f $code; Form = $form; Filler = $filler }
+            }
+        }
+    ) {
+        param($Code, $Form, $Filler)
+        if ((Measure-ReviewSubstantiveLines -Text "$Filler`n- $Filler$Filler`n> $Filler") -ne 0) { throw 'Filler alone was counted' }
+        if ((Measure-ReviewSubstantiveLines -Text "$Filler`n- ${Filler}ok$Filler") -ne 1) { throw 'The real text beside the filler was not counted' }
+        $review = "## Findings`n- app.py:1: C:\fixture\x`n$Filler"
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "$review a safe finding" }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        if ($result.WithheldLines -ne 1) { throw 'The kept line was not counted' }
+    }
+
     It 'words the unpublished notice without review text, marker or double quotes' {
         $notice = Get-ReviewUnpublishedNotice -HeadSha ('b' * 40) -ServerUrl 'https://github.com' -Repository 'owner/repo' -RunId '42'
         if (-not $notice.StartsWith('The automated review of bbbbbbb was not published')) { throw "Unexpected notice: $notice" }
