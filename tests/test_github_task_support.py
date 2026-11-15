@@ -14,6 +14,7 @@ from harness.manager import Manager
 from harness.projects import GitError
 from test_daemon import Script
 from test_phase3 import finished, make_repo, project_cfg, sh
+from host_git import needs_host_git
 
 
 class Rec(doctor.Report):
@@ -46,6 +47,7 @@ def test_doctor_github_token_states(tmp_path):
     assert all("secret-value" not in d and "missing" not in d for _, _, d in r.lines)
 
 
+@needs_host_git
 def test_prepare_reports_deleted_base_branch(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
@@ -57,6 +59,7 @@ def test_prepare_reports_deleted_base_branch(tmp_path):
     assert not any((tmp_path / "ws").iterdir())
 
 
+@needs_host_git
 def test_first_prepare_applies_github_base_branch(tmp_path):
     src = make_repo(tmp_path / "src")
     main_head = projects.head(src)

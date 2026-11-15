@@ -14,6 +14,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import projects
+
 log = logging.getLogger(__name__)
 
 DEFAULT_BUDGET_TOKENS = 1500
@@ -139,14 +141,16 @@ def list_source_files(root: Path) -> list[str]:
 
 
 def _git_files(root: Path) -> list[str] | None:
+    """`git ls-files` through the isolated host git wrapper (`projects.git`), or None to walk the tree instead.
+    Raises the Windows refusal (`projects.require_host_git`, #973), which `build_map` turns into no map."""
     if not (root / ".git").exists():
         return None
+    projects.require_host_git()  # outside the try below: a refusal must not fall back to the walk
     try:
-        proc = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(root), "ls-files", "-z"],
-                              capture_output=True, timeout=30, check=True)
-    except (OSError, subprocess.SubprocessError):
+        result = projects.git(root, "ls-files", "-z", timeout=30)
+    except (OSError, subprocess.SubprocessError, projects.GitError):
         return None
-    return [n for n in proc.stdout.decode("utf-8", "replace").split("\0") if n]
+    return [n for n in result.out.split("\0") if n]
 
 
 def _text(node, src: bytes) -> str:
@@ -320,7 +324,12 @@ def build_map(root: Path | str, budget_tokens: int = DEFAULT_BUDGET_TOKENS) -> s
     if not parsers:
         return ""
     root = Path(root)
-    parsed = [pf for rel in list_source_files(root) if (pf := parse_file(root, rel, parsers)) is not None]
+    try:
+        names = list_source_files(root)
+    except projects.GitError as e:  # host git refused (Windows, #973): no map rather than a failed run
+        log.info("repo map left out: %s", e)
+        return ""
+    parsed = [pf for rel in names if (pf := parse_file(root, rel, parsers)) is not None]
     return render(rank_files(parsed), budget_tokens)
 
 

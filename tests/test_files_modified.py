@@ -7,6 +7,7 @@ from pathlib import Path
 
 from harness.state import (FILES_MODIFIED_MAX, files_modified_since, name_status_paths, porcelain_paths,
                            snapshot_git_baseline)
+from host_git import needs_host_git
 
 
 def _sh(repo: Path, *args: str) -> None:
@@ -23,6 +24,7 @@ def _repo(path: Path) -> Path:
     return path
 
 
+@needs_host_git
 def test_edit_then_commit_lists_files(tmp_path):
     repo = _repo(tmp_path / "r")
     baseline = snapshot_git_baseline(repo)
@@ -36,6 +38,7 @@ def test_edit_then_commit_lists_files(tmp_path):
     assert "b.py" in paths
 
 
+@needs_host_git
 def test_edit_without_commit_lists_files(tmp_path):
     repo = _repo(tmp_path / "r")
     baseline = snapshot_git_baseline(repo)
@@ -48,6 +51,7 @@ def test_edit_without_commit_lists_files(tmp_path):
     assert "tracked.py" in paths
 
 
+@needs_host_git
 def test_baseline_dirty_only_if_content_changed(tmp_path):
     repo = _repo(tmp_path / "r")
     (repo / "stale.py").write_text("old\n", encoding="utf-8")
@@ -62,6 +66,7 @@ def test_baseline_dirty_only_if_content_changed(tmp_path):
     assert "stale.py" not in paths
 
 
+@needs_host_git
 def test_baseline_dirty_committed_unchanged_is_not_listed(tmp_path):
     repo = _repo(tmp_path / "r")
     (repo / "stale.py").write_text("old\n", encoding="utf-8")
@@ -73,6 +78,7 @@ def test_baseline_dirty_committed_unchanged_is_not_listed(tmp_path):
     assert "stale.py" not in paths
 
 
+@needs_host_git
 def test_baseline_records_a_file_deleted_before_the_run(tmp_path):
     repo = _repo(tmp_path / "r")
     (repo / "gone.py").write_text("g\n", encoding="utf-8")
@@ -84,6 +90,7 @@ def test_baseline_records_a_file_deleted_before_the_run(tmp_path):
     assert "gone.py" not in files_modified_since(repo, baseline)
 
 
+@needs_host_git
 def test_deleted_and_renamed_files(tmp_path):
     repo = _repo(tmp_path / "r")
     (repo / "gone.py").write_text("g\n", encoding="utf-8")
@@ -117,6 +124,7 @@ def test_non_git_workspace_returns_none(tmp_path):
     assert files_modified_since(tmp_path, {"head": None, "dirty": {}}) is None
 
 
+@needs_host_git
 def test_files_modified_is_length_capped(tmp_path):
     repo = _repo(tmp_path / "r")
     baseline = snapshot_git_baseline(repo)
@@ -127,6 +135,7 @@ def test_files_modified_is_length_capped(tmp_path):
     assert len(paths) == FILES_MODIFIED_MAX
 
 
+@needs_host_git
 def test_first_commit_from_unborn_head_is_listed(tmp_path):
     repo = tmp_path / "r"
     repo.mkdir()

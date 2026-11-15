@@ -250,6 +250,12 @@ class Workspace:
 
     async def git_clone(self, url: str, dest: str | None = None, branch: str | None = None) -> str:
         url, source, default_dest = self._clone_source(url.strip())
+        if source is not None or self.public_clone_only:  # host clones (the sandbox clone below runs git there)
+            from .projects import GitError, require_host_git
+            try:
+                require_host_git()
+            except GitError as e:
+                raise ToolError(str(e)) from e
         target = self.resolve(dest or default_dest)
         if target == self.root or target.exists() and any(target.iterdir()):
             raise ToolError(f"destination already exists and is not empty: {self.rel(target)}")

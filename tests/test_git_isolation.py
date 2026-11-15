@@ -16,6 +16,7 @@ from harness.changes import workspace_changes
 from harness.config import Project
 import harness.projects as _projects
 from harness.projects import GitError, _copy_git_state, git, prepare, publish_local, push, refresh_origin, snapshot
+from host_git import needs_host_git
 
 MARKER = "ISSUE104_GIT_EXEC_MARKER"
 
@@ -73,6 +74,7 @@ def _force_loose_ref(repo: Path, ref: str) -> Path:
     return path
 
 
+@needs_host_git
 def test_host_wrapper_status_does_not_run_fsmonitor(tmp_path):
     repo = make_repo(tmp_path / "repo")
     plant_fsmonitor(repo)
@@ -85,6 +87,7 @@ def test_host_wrapper_status_does_not_run_fsmonitor(tmp_path):
     assert not has_marker(result.out + result.err)
 
 
+@needs_host_git
 def test_snapshot_does_not_run_fsmonitor_or_hooks(tmp_path):
     repo = make_repo(tmp_path / "repo")
     flag = tmp_path / "hook.ran"
@@ -101,6 +104,7 @@ def test_snapshot_does_not_run_fsmonitor_or_hooks(tmp_path):
     assert not has_marker(result.out + result.err)
 
 
+@needs_host_git
 def test_wrapper_add_does_not_run_workspace_filter(tmp_path):
     repo = make_repo(tmp_path / "repo")
     plant_filter(repo)
@@ -113,6 +117,7 @@ def test_wrapper_add_does_not_run_workspace_filter(tmp_path):
     assert not has_marker(result.out + result.err)
 
 
+@needs_host_git
 def test_wrapper_and_changes_do_not_run_textconv(tmp_path):
     repo = make_repo(tmp_path / "repo")
     plant_textconv(repo)
@@ -128,6 +133,7 @@ def test_wrapper_and_changes_do_not_run_textconv(tmp_path):
     assert not has_marker(diff["diff"])
 
 
+@needs_host_git
 def test_include_path_cannot_restore_fsmonitor(tmp_path):
     repo = make_repo(tmp_path / "repo")
     extra = repo / "evil.gitconfig"
@@ -142,6 +148,7 @@ def test_include_path_cannot_restore_fsmonitor(tmp_path):
     assert not has_marker(result.out + result.err)
 
 
+@needs_host_git
 def test_external_gitdir_pointer_is_refused(tmp_path):
     outside = make_repo(tmp_path / "outside")
     plant_fsmonitor(outside)
@@ -156,6 +163,7 @@ def test_external_gitdir_pointer_is_refused(tmp_path):
         snapshot(workspace, "should not run")
 
 
+@needs_host_git
 def test_commondir_outside_workspace_is_refused(tmp_path):
     outside = make_repo(tmp_path / "outside")
     plant_fsmonitor(outside)
@@ -171,6 +179,7 @@ def test_commondir_outside_workspace_is_refused(tmp_path):
     assert not has_marker(result.out + result.err)
 
 
+@needs_host_git
 def test_remote_helper_url_is_not_copied_into_isolated_config(tmp_path):
     repo = make_repo(tmp_path / "repo")
     sh(repo, "remote", "add", "origin", "https://example.invalid/repo.git")
@@ -182,6 +191,7 @@ def test_remote_helper_url_is_not_copied_into_isolated_config(tmp_path):
 
 
 @pytest.mark.parametrize("key", ["url", "pushurl"])
+@needs_host_git
 def test_workspace_remote_urls_are_not_copied_into_isolated_config(tmp_path, key):
     repo = make_repo(tmp_path / "repo")
     sh(repo, "config", f"remote.origin.{key}", "https://example.invalid/repo.git")
@@ -204,6 +214,7 @@ def _workspace_remote_values(workspace: Path, other: Path) -> list[str]:
             "https://example.invalid/other.git"]
 
 
+@needs_host_git
 def test_refresh_origin_fetches_from_the_project_repository(tmp_path):
     src = make_repo(tmp_path / "src")
     other, other_head = _second_repo(tmp_path)
@@ -221,6 +232,7 @@ def test_refresh_origin_fetches_from_the_project_repository(tmp_path):
         assert sh(workspace, "cat-file", "-e", other_head, check=False).returncode != 0
 
 
+@needs_host_git
 def test_push_sends_the_branch_to_the_project_repository(tmp_path):
     src = make_repo(tmp_path / "src")
     sh(src, "config", "receive.denyCurrentBranch", "ignore")
@@ -243,6 +255,7 @@ def test_push_sends_the_branch_to_the_project_repository(tmp_path):
         sh(src, "branch", "-D", info["branch"])
 
 
+@needs_host_git
 def test_prepare_refresh_snapshot_and_publish_ignore_workspace_exec_config(tmp_path):
     src = make_repo(tmp_path / "src")
     workspace = tmp_path / "ws"
@@ -272,6 +285,7 @@ def test_prepare_refresh_snapshot_and_publish_ignore_workspace_exec_config(tmp_p
     assert sh(src, "show", f"{info['branch']}:app.py").stdout == "VALUE = 2\n"
 
 
+@needs_host_git
 def test_changes_shows_untracked_files_without_running_fsmonitor(tmp_path):
     repo = tmp_path / "nested"
     repo.mkdir()
@@ -287,6 +301,7 @@ def test_changes_shows_untracked_files_without_running_fsmonitor(tmp_path):
     assert not has_marker(diff["diff"])
 
 
+@needs_host_git
 def test_copy_git_state_drops_refs_removed_from_source(tmp_path):
     src, dst = tmp_path / "src", tmp_path / "dst"
     for root in (src, dst):
@@ -312,6 +327,7 @@ def test_copy_git_state_drops_refs_removed_from_source(tmp_path):
     assert (dst / "logs" / "HEAD").read_text(encoding="utf-8") == "headlog\n"
 
 
+@needs_host_git
 def test_fetch_prune_removes_loose_remote_tracking_ref(tmp_path):
     """refresh()/fetch --prune must drop loose origin refs, not only packed-refs."""
     src = make_repo(tmp_path / "src")
@@ -339,6 +355,7 @@ def test_fetch_prune_removes_loose_remote_tracking_ref(tmp_path):
     assert "origin/feature" not in listed
 
 
+@needs_host_git
 def test_trusted_source_operations_still_see_the_source_repo(tmp_path):
     """Isolation must not break reviewed merge inputs: the source still has its own identity."""
     src = make_repo(tmp_path / "src")
@@ -351,6 +368,7 @@ def test_trusted_source_operations_still_see_the_source_repo(tmp_path):
     assert info["branch"] in listed
 
 
+@needs_host_git
 def test_isolated_call_spawns_at_most_two_git_processes(tmp_path, monkeypatch):
     """The allowlisted config is injected through the environment, not replayed one `git config` per key (#403)."""
     import harness.projects as projects
@@ -365,6 +383,7 @@ def test_isolated_call_spawns_at_most_two_git_processes(tmp_path, monkeypatch):
     assert len(calls) <= 2, calls
 
 
+@needs_host_git
 def test_concurrent_git_calls_serialize_copy_run_copy(tmp_path, monkeypatch):
     """A reader copying back must not overwrite refs created by a concurrent call (#426)."""
     import harness.projects as projects
@@ -423,6 +442,7 @@ def test_git_state_lock_is_per_canonical_metadata_dir(tmp_path):
         other.release()
 
 
+@needs_host_git
 def test_git_state_lock_released_after_command_exception(tmp_path, monkeypatch):
     import harness.projects as projects
 
@@ -442,6 +462,7 @@ def test_git_state_lock_released_after_command_exception(tmp_path, monkeypatch):
         assert pool.submit(git, repo, "status", "--porcelain").result(timeout=10).code == 0
 
 
+@needs_host_git
 def test_push_records_the_pushed_commit_as_the_origin_tracking_ref(tmp_path):
     src = make_repo(tmp_path / "src")
     workspace = tmp_path / "ws"
@@ -465,6 +486,7 @@ def _tree_snapshot(root: Path) -> dict[str, bytes]:
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
 
 
+@needs_host_git
 def test_refresh_origin_refuses_a_symlinked_state_file(tmp_path):
     """A workspace state file that is a symlink is refused, never read or written through by host git (#966)."""
     src = make_repo(tmp_path / "src")
@@ -482,6 +504,7 @@ def test_refresh_origin_refuses_a_symlinked_state_file(tmp_path):
     assert outside.read_text(encoding="utf-8") == "unchanged\n"
 
 
+@needs_host_git
 def test_refresh_origin_refuses_a_symlinked_state_dir(tmp_path):
     """A workspace `logs` dir that is a symlink is refused, never read or written through by host git (#966)."""
     src = make_repo(tmp_path / "src")
@@ -503,6 +526,7 @@ def test_refresh_origin_refuses_a_symlinked_state_dir(tmp_path):
     assert _tree_snapshot(outside) == before
 
 
+@needs_host_git
 def test_copy_git_state_refuses_a_symlinked_source_entry(tmp_path):
     src, dst = tmp_path / "src", tmp_path / "dst"
     (src / "refs" / "heads").mkdir(parents=True)
@@ -517,6 +541,7 @@ def test_copy_git_state_refuses_a_symlinked_source_entry(tmp_path):
     assert not (dst / "refs" / "heads" / "main").exists()
 
 
+@needs_host_git
 def test_copy_git_state_replaces_symlinked_destination_entries(tmp_path):
     src, dst = tmp_path / "src", tmp_path / "dst"
     (src / "refs" / "heads").mkdir(parents=True)
@@ -554,6 +579,7 @@ def _state_dirs(tmp_path: Path) -> tuple[Path, Path]:
     return src, dst
 
 
+@needs_host_git
 def test_copy_git_state_refuses_state_entries_of_the_wrong_type(tmp_path):
     src, dst = _state_dirs(tmp_path)
     (src / "FETCH_HEAD").mkdir()
@@ -566,6 +592,7 @@ def test_copy_git_state_refuses_state_entries_of_the_wrong_type(tmp_path):
         _copy_git_state(src, dst)
 
 
+@needs_host_git
 def test_copy_git_state_temp_names_stay_short_whatever_the_ref_name(tmp_path, monkeypatch):
     """The copy's temp file sits beside the ref it replaces, so its name must not grow with the ref's: git allows a
     245-byte ref component, and the name limit is 255."""
@@ -606,6 +633,7 @@ def _require_symlinks(tmp_path: Path, target: Path) -> None:
     probe.unlink()
 
 
+@needs_host_git
 def test_copy_git_state_does_not_follow_a_directory_swapped_for_a_link_mid_copy(tmp_path, monkeypatch):
     """A destination directory replaced by a link after the copy opened it: nothing lands where the link points (#966).
     POSIX keeps writing through the directory descriptor; Windows holds the directory so it cannot be replaced."""
@@ -630,6 +658,7 @@ def test_copy_git_state_does_not_follow_a_directory_swapped_for_a_link_mid_copy(
     assert list(outside.iterdir()) == []
 
 
+@needs_host_git
 def test_copy_git_state_does_not_follow_an_ancestor_swapped_for_a_link_mid_copy(tmp_path, monkeypatch):
     """A directory above the git dir (a workspace holding a nested git dir) replaced by a link mid-copy (#966)."""
     src, _ = _state_dirs(tmp_path)
@@ -673,6 +702,7 @@ def _at_file_open(monkeypatch, name: str, action) -> None:
         monkeypatch.setattr(_projects, "_win_open", wrap(_projects._win_open))
 
 
+@needs_host_git
 def test_copy_git_state_reads_no_source_through_a_directory_swapped_at_open(tmp_path, monkeypatch):
     """The source directory is swapped for a link to outside content right before the file open (#966): the copy
     still reads only the workspace's own file. POSIX opens relative to the held directory descriptor; Windows holds
@@ -710,6 +740,7 @@ def test_copy_git_state_reads_no_source_file_swapped_for_a_link_at_open(tmp_path
     assert not (dst / "refs" / "heads" / "main").exists()
 
 
+@needs_host_git
 def test_copy_git_state_fails_closed_without_descriptor_or_handle_access(tmp_path, monkeypatch):
     monkeypatch.setattr(_projects, "_FD_OPS", False)
     monkeypatch.setattr(_projects, "_WIN_HANDLES", False)
@@ -731,6 +762,7 @@ def test_copy_git_state_creates_nothing_through_a_linked_destination_path(tmp_pa
     assert list(outside.iterdir()) == []
 
 
+@needs_host_git
 def test_copy_git_state_completes_short_writes(tmp_path, monkeypatch):
     src, dst = _state_dirs(tmp_path)
     content = b"# pack-refs with: peeled fully-peeled sorted\n" + b"a" * 40 + b" refs/heads/main\n"
@@ -756,6 +788,7 @@ def test_copy_git_state_refuses_a_link_swapped_into_its_path(tmp_path):
     assert list(outside.iterdir()) == []
 
 
+@needs_host_git
 def test_copy_git_state_replaces_a_directory_link_at_a_file_name(tmp_path, monkeypatch):
     """A directory link (a junction on Windows) at a state file's name is removed itself, then replaced. The rename
     here refuses a directory-link target, as Windows' MoveFileEx does, so the link must be gone first (#966)."""
@@ -823,6 +856,7 @@ def _spy_filesystem(monkeypatch) -> list[str]:
     MARKER_DIR + "\0x",
 ])
 @pytest.mark.parametrize("pointer", ["gitdir", "commondir"])
+@needs_host_git
 def test_rejected_pointer_targets_never_reach_the_filesystem(tmp_path, monkeypatch, target, pointer):
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -841,6 +875,7 @@ def test_rejected_pointer_targets_never_reach_the_filesystem(tmp_path, monkeypat
     assert touched == []
 
 
+@needs_host_git
 def test_a_pointer_through_a_link_inside_the_workspace_is_refused_unresolved(tmp_path, monkeypatch):
     workspace = make_repo(tmp_path / "ws")
     shutil.move(str(workspace / ".git"), str(workspace / ".gitdata"))
@@ -856,6 +891,7 @@ def test_a_pointer_through_a_link_inside_the_workspace_is_refused_unresolved(tmp
     assert not any(MARKER_DIR in path for path in resolved)
 
 
+@needs_host_git
 def test_a_relative_gitdir_pointer_inside_the_workspace_still_works(tmp_path):
     workspace = make_repo(tmp_path / "ws")
     shutil.move(str(workspace / ".git"), str(workspace / ".gitdata"))
@@ -892,6 +928,7 @@ def _swap_file_for_link(path: Path, target: Path) -> None:
 
 
 @pytest.mark.parametrize("pointer", [".git", "commondir"])
+@needs_host_git
 def test_a_pointer_file_swapped_for_a_link_at_its_read_is_refused(tmp_path, monkeypatch, pointer):
     """The pointer file is replaced by a link to an outside file between its check and its read: the read refuses
     the link instead of returning the outside file's text (#966)."""
@@ -916,6 +953,7 @@ def test_a_pointer_file_swapped_for_a_link_at_its_read_is_refused(tmp_path, monk
     assert reads == [1]
 
 
+@needs_host_git
 def test_a_pointer_target_ancestor_swapped_during_the_walk_is_not_followed(tmp_path, monkeypatch):
     """A directory on the pointer's target path is replaced by a link to an outside tree after the walk passed it:
     later steps keep using the held directory, so nothing outside is read (#966)."""
@@ -939,6 +977,7 @@ def test_a_pointer_target_ancestor_swapped_during_the_walk_is_not_followed(tmp_p
 
 
 @pytest.mark.parametrize("name", ["CON", "aux.lock", "com1", "name.", "name "])
+@needs_host_git
 def test_copy_git_state_refuses_ambiguous_windows_entry_names(tmp_path, monkeypatch, name):
     """A state entry whose name Windows would rewrite when it is used as a path (a device name, a trailing dot or
     space) is refused before it is touched (#966). On Windows the fixture is a native NTFS name."""
@@ -960,6 +999,7 @@ def test_copy_git_state_refuses_ambiguous_windows_entry_names(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("name", ["HEAD", "FETCH_HEAD"])
+@needs_host_git
 def test_copy_git_state_refuses_a_directory_at_a_top_level_state_file(tmp_path, name):
     """Git never turns a top-level state file into a directory, so one found there is refused and kept, not deleted
     with its contents (#972). Directory/file switches happen only in the refs and logs trees."""

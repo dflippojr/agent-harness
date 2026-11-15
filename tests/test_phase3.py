@@ -19,6 +19,7 @@ from harness.manager import HarnessError, Manager
 from harness.tools import ToolError
 
 from test_daemon import Script, call, events, make_cfg, wait_status
+from host_git import needs_host_git
 
 
 def sh(repo: Path, *args: str) -> str:
@@ -58,6 +59,7 @@ async def finished(m: Manager, sid: str) -> dict:
 
 
 # git projects
+@needs_host_git
 def test_session_branch_saved_and_squash_merged(tmp_path):
     src = make_repo(tmp_path / "src")
     cfg = project_cfg(tmp_path, str(src))
@@ -95,6 +97,7 @@ def test_session_branch_saved_and_squash_merged(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_merge_refusals_leave_source_clean(tmp_path):
     src = make_repo(tmp_path / "src")
     cfg = project_cfg(tmp_path, str(src))
@@ -120,6 +123,7 @@ def test_merge_refusals_leave_source_clean(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_review_cancelled_mid_write_still_rewrites_the_transcript(tmp_path):
     """The review request is cancelled while its result commits: the transcript still gets the review (#294)."""
     import threading
@@ -160,6 +164,7 @@ def test_review_cancelled_mid_write_still_rewrites_the_transcript(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_bare_source_merge_and_discard(tmp_path):
     src = make_repo(tmp_path / "bare.git", bare=True)
     cfg = project_cfg(tmp_path, str(src))
@@ -187,6 +192,7 @@ def test_bare_source_merge_and_discard(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_url_project_push_and_policy(tmp_path):
     remote = make_repo(tmp_path / "remote.git", bare=True)
     cfg = project_cfg(tmp_path, remote.as_uri())  # file:// URL: same code path as https
@@ -247,6 +253,7 @@ def test_quota_stops_growth_but_allows_cleanup(tmp_path):
 
 
 # cleanup
+@needs_host_git
 def test_cleanup_removes_old_workspaces_keeps_unsaved(tmp_path, monkeypatch):
     async def no_docker(args, timeout=60, input_=None):
         return 0, "", ""

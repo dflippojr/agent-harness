@@ -12,6 +12,7 @@ import pytest
 
 from harness import checkpoints, projects
 from harness.projects import GitError
+from host_git import needs_host_git
 
 BRANCHES = ["", "agent/x"]
 
@@ -66,6 +67,7 @@ def _tree(root: Path) -> dict[str, bytes]:
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_refuses_a_link_at_head(ws, tmp_path, branch):
     state = _state(ws, branch)
     outside = tmp_path / "outside-head"
@@ -80,6 +82,7 @@ def test_put_git_state_refuses_a_link_at_head(ws, tmp_path, branch):
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_refuses_a_link_at_the_index(ws, tmp_path, branch):
     state = _state(ws, branch)
     outside = tmp_path / "outside-index"
@@ -94,6 +97,7 @@ def test_put_git_state_refuses_a_link_at_the_index(ws, tmp_path, branch):
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_refuses_removing_the_index_through_a_link(ws, tmp_path, branch):
     """A checkpoint taken before the first `git add` has no index: putting it back removes the index, but never a
     file a link at that name points to."""
@@ -129,6 +133,7 @@ def _swap_git_dir_after_last_check(monkeypatch, ws: Path, branch: str, outside: 
 
 @pytest.mark.parametrize("branch", BRANCHES)
 @pytest.mark.parametrize("index", ["kept", "none"])
+@needs_host_git
 def test_put_git_state_refuses_a_git_dir_swapped_for_a_link(ws, tmp_path, monkeypatch, branch, index):
     state = _state(ws, branch)
     if index == "none":
@@ -145,6 +150,7 @@ def test_put_git_state_refuses_a_git_dir_swapped_for_a_link(ws, tmp_path, monkey
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_refuses_a_directory_at_the_index(ws, branch):
     state = _state(ws, branch)
     (ws / ".git" / "index").unlink()
@@ -156,6 +162,7 @@ def test_put_git_state_refuses_a_directory_at_the_index(ws, branch):
     assert (ws / ".git" / "index").is_dir()
 
 
+@needs_host_git
 def test_put_git_state_fails_closed_without_link_safe_file_access(ws, monkeypatch):
     """A platform with neither descriptor-relative calls nor Windows handles cannot check the path: refuse."""
     state = _state(ws, "")
@@ -170,6 +177,7 @@ def test_put_git_state_fails_closed_without_link_safe_file_access(ws, monkeypatc
     assert (ws / ".git" / "index").read_bytes() == index
 
 
+@needs_host_git
 def test_put_git_state_reports_a_failed_write_as_a_git_error(ws, monkeypatch):
     state = _state(ws, "")
     head = (ws / ".git" / "HEAD").read_bytes()
@@ -186,6 +194,7 @@ def test_put_git_state_reports_a_failed_write_as_a_git_error(ws, monkeypatch):
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_writes_head_and_index_back(ws, branch):
     state = _state(ws, branch)
 
@@ -200,6 +209,7 @@ def test_put_git_state_writes_head_and_index_back(ws, branch):
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_removes_an_index_the_checkpoint_did_not_have(ws, branch):
     state = {**_state(ws, branch), "index": None}
 
@@ -214,6 +224,7 @@ def test_put_git_state_removes_an_index_the_checkpoint_did_not_have(ws, branch):
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_never_removes_a_directory_raced_in_at_the_index(ws, monkeypatch, branch):
     """Putting back an absent index removes a regular file only: a directory that replaces the index right after the
     type check is refused, not removed with its contents."""
@@ -240,6 +251,7 @@ def test_put_git_state_never_removes_a_directory_raced_in_at_the_index(ws, monke
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_keeps_an_owner_only_mode(ws, branch):
     state = _state(ws, branch)
     for name in ("HEAD", "index"):
@@ -253,6 +265,7 @@ def test_put_git_state_keeps_an_owner_only_mode(ws, branch):
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_fills_owner_only_temp_files(ws, monkeypatch, branch):
     """The temp file is owner-only while the content goes in; the destination's mode is applied after, and a file
     that did not exist stays owner-only."""
@@ -276,6 +289,7 @@ def test_put_git_state_fills_owner_only_temp_files(ws, monkeypatch, branch):
         assert (ws / ".git" / "index").stat().st_mode & 0o777 == 0o600
 
 
+@needs_host_git
 def test_put_git_state_refuses_removing_a_directory_at_the_index(ws):
     state = {**_state(ws, ""), "index": None}
     index = ws / ".git" / "index"
@@ -290,6 +304,7 @@ def test_put_git_state_refuses_removing_a_directory_at_the_index(ws):
 
 
 @pytest.mark.parametrize("branch", BRANCHES)
+@needs_host_git
 def test_put_git_state_keeps_a_directory_that_took_the_temp_name_after_a_failed_replace(ws, monkeypatch, branch):
     """When renaming the temp file over HEAD fails, cleanup removes the temp file only: a directory that took the
     temp name keeps its contents, and the original error is the one reported."""
@@ -321,6 +336,7 @@ def test_put_git_state_keeps_a_directory_that_took_the_temp_name_after_a_failed_
     assert (taken[0] / "keep").read_bytes() == b"keep\n"
 
 
+@needs_host_git
 def test_state_dir_remove_never_removes_a_directory(tmp_path):
     (tmp_path / "d").mkdir()
     (tmp_path / "d" / "keep").write_bytes(b"keep\n")
@@ -336,6 +352,7 @@ def test_state_dir_remove_never_removes_a_directory(tmp_path):
     assert not (tmp_path / "f").exists()
 
 
+@needs_host_git
 def test_copy_git_state_turns_a_ref_directory_into_a_ref_file(tmp_path):
     """Git's directory/file switch (refs/heads/a/b deleted, refs/heads/a created) still reaches the workspace: the
     stale ref directory is removed on purpose, through `remove_tree`."""

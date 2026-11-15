@@ -20,6 +20,7 @@ from harness.manager import Manager
 from test_daemon import Script, call, make_cfg
 from test_fake_model import fail_on_docker, wait_session
 from test_phase3 import finished
+from host_git import needs_host_git
 
 STATE = {"goal": "fix the parser", "plan": "1. read parser.py\n2. fix the off-by-one\n3. run the tests",
          "errors": [], "next_step": "run pytest tests/test_parser.py", "notes": ""}
@@ -317,6 +318,7 @@ def test_with_prompt_adds_the_sentence_once_and_removes_it():
     assert planning.with_prompt(on, False) == "SYSTEM" and planning.with_prompt("SYSTEM", False) == "SYSTEM"
 
 
+@needs_host_git
 def test_a_fork_has_the_sentence_only_where_it_runs_natively(tmp_path):
     """A fork inherits its parent's prompt; the sentence follows the backend the fork runs on, in its context and in
     its saved checkpoint."""

@@ -9,6 +9,7 @@ from harness.llm import Completion
 
 from test_api import make_client, wait_for
 from test_daemon import call
+from host_git import needs_host_git
 
 DIFF = """diff --git a/a.txt b/a.txt
 index 111..222 100644
@@ -74,6 +75,7 @@ def test_deleted_range_round_trips_and_stale_is_flagged():
     assert rc.current_quote(_comment(path="missing.txt"), repos)[0]
 
 
+@needs_host_git
 def test_draft_survives_restart_and_sends_one_followup(tmp_path):
     steps = [Completion(tool_calls=[call("write_file", 0, path="repo/new.txt", content="hello\nworld\n")]),
              Completion(content="wrote it"), Completion(content="fixed")]

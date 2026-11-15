@@ -23,6 +23,7 @@ from harness.policy import ALLOW, ASK, Policy
 from harness.runner import END_PENDING, INTERRUPTED
 from harness.scheduler import GpuScheduler
 from waits import scaled
+from host_git import needs_host_git
 
 
 # The real-environment lane (#731, scripts/real_env_lane.py) points this at the image built from the tested commit.
@@ -687,6 +688,7 @@ docker_ok = shutil.which("docker") and subprocess.run(
 
 @pytest.mark.docker
 @pytest.mark.skipif(not docker_ok, reason="needs Docker and the sandbox image")
+@needs_host_git
 def test_sandbox_shell_local_clone_and_network_gate(tmp_path):
     repos = tmp_path / "repos"
     src = repos / "demo"

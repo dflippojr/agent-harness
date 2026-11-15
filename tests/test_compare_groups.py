@@ -16,6 +16,7 @@ from harness.runner import ACTIVE
 
 from test_daemon import Script, call, make_cfg, wait_status
 from test_phase3 import make_repo, sh
+from host_git import needs_host_git
 
 
 def make_manager(tmp_path):
@@ -385,6 +386,7 @@ def assert_gone(src, m, *sids):
     assert not m.runner.user_cancelled
 
 
+@needs_host_git
 def test_pick_finished_winner_cancels_and_discards_running_losers(tmp_path, monkeypatch):
     async def body():
         src, m, group, a, b, c = await running_group(tmp_path, monkeypatch)
@@ -397,6 +399,7 @@ def test_pick_finished_winner_cancels_and_discards_running_losers(tmp_path, monk
     asyncio.run(body())
 
 
+@needs_host_git
 def test_group_discard_cancels_a_fully_running_group(tmp_path):
     async def body():
         src, m = real_manager(tmp_path)
@@ -411,6 +414,7 @@ def test_group_discard_cancels_a_fully_running_group(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_member_that_finishes_before_the_cancel_lands_is_still_discarded(tmp_path, monkeypatch):
     async def body():
         src, m, group, a, b, c = await running_group(tmp_path, monkeypatch)
@@ -432,6 +436,7 @@ def test_member_that_finishes_before_the_cancel_lands_is_still_discarded(tmp_pat
     asyncio.run(body())
 
 
+@needs_host_git
 def test_pick_of_a_running_winner_cancels_and_discards_nobody(tmp_path, monkeypatch):
     async def body():
         src, m, group, a, b, c = await running_group(tmp_path, monkeypatch)
@@ -448,6 +453,7 @@ def test_pick_of_a_running_winner_cancels_and_discards_nobody(tmp_path, monkeypa
     asyncio.run(body())
 
 
+@needs_host_git
 def test_discard_retry_after_a_failure_finishes_the_group(tmp_path, monkeypatch):
     async def body():
         src, m, group, a, b, c = await running_group(tmp_path, monkeypatch)
@@ -524,6 +530,7 @@ def test_rollback_stops_members_that_never_ran_and_leaves_none_resumable(tmp_pat
     asyncio.run(body())
 
 
+@needs_host_git
 def test_cancel_during_clone_leaves_no_workspace_or_branch(tmp_path, monkeypatch):
     cloning, gate = threading.Event(), threading.Event()
 
@@ -554,6 +561,7 @@ def test_cancel_during_clone_leaves_no_workspace_or_branch(tmp_path, monkeypatch
     asyncio.run(body())
 
 
+@needs_host_git
 def test_concurrent_picks_and_discards_on_one_group_run_one_at_a_time(tmp_path, monkeypatch):
     async def body():
         src, m, group, a, b, c = await running_group(tmp_path, monkeypatch)
