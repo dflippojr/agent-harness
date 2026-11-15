@@ -33,9 +33,14 @@ $script:MaxIssueCommentPages = 10
 $script:MaxIssueComments = 100 * $script:MaxIssueCommentPages
 $script:ReviewSpecModes = @('off', 'on')
 $script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
+$script:ReviewPublicationFailure = 'Review did not complete: output failed the publication safety scan.'
+$script:ReviewWithheldLine = '(line withheld by the publication safety scan)'
 $script:ReviewVerdictPattern = '^`?REVIEW_VERDICT:\s*(?:(CLEAN)|FINDINGS\s+([1-9][0-9]{0,3}))\s*`?$'
 $script:ReviewCriteriaPattern = '^`?REVIEW_CRITERIA:\s*([0-9]{1,3})\s*/\s*([0-9]{1,3})\s*`?$'
 $script:ReviewRepositoryPattern = '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+# An HTML comment as Get-ReviewHtmlToken reads one: <!--> and <!---> are empty, any other ends at the first --> or
+# --!>, and one that never ends runs to the end of the text.
+$script:ReviewHtmlCommentPattern = '<!--(?:-?>|[\s\S]*?(?:--!?>|\z))'
 $script:ReviewMarkerPattern = '(?i)<!-- agent-review: sha=([0-9a-f]{40}) mode=(full|incremental)(?: base=([A-Za-z0-9._/\-]+))? -->'
 $script:UntrustedAgentConfigDirectories = @('.claude', '.cursor', '.codex', '.agents')
 $script:UntrustedAgentConfigFiles = @('.mcp.json', '.cursorrules', 'CLAUDE.md', 'AGENTS.md')
@@ -1129,32 +1134,23 @@ function Get-ReviewGitHubFormHits {
     Get-ReviewRuleHits -Text $text -KnownPaths $KnownPaths -PlainText -FormPrefix 'github'
 }
 
-function Assert-ReviewOutputSafe {
-    [CmdletBinding()]
+function Get-ReviewLocalScanHits {
     param(
         [AllowEmptyString()][string]$Text,
-        [AllowEmptyString()][string]$Workspace = '',
-        [string[]]$DiffPaths = @(),
-        # The context GitHub's renderer resolves references against.
-        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
-        # For validated metadata such as a branch name: credential patterns only, no path or long-token rules.
+        [string[]]$KnownPaths = @(),
         [switch]$CredentialsOnly
     )
 
-    $knownPaths = @()
-    if ($Workspace -or $DiffPaths.Count -gt 0) {
-        $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
-    }
-    # Each hit is logged by rule, scan form and offset so a rejection can be diagnosed. Never log the
-    # matched text or its surroundings: they are what the scan withholds.
+    # Every check of the publication gate that runs here, without GitHub's renderer, as one log line per
+    # hit: rule, scan form, offset and length. Never the matched text or its surroundings: they are what
+    # the scan withholds. Offsets for the first rules count in the raw text, or in the entity-decoded
+    # text before format characters are removed.
     $hits = New-Object System.Collections.Generic.List[string]
     $check = {
         param([string]$RuleName, [string]$FormName, [string]$FormText, [string]$Pattern)
         $match = [regex]::Match($FormText, $Pattern)
         if ($match.Success) { $hits.Add("rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length))") }
     }
-    # Offsets for these rules count in the raw text, or in the entity-decoded text before format
-    # characters are removed.
     $entityDecoded = ConvertFrom-ReviewEntities -Text $Text
     & $check 'bidi-control' 'raw' $Text $script:ReviewBidiPattern
     & $check 'bidi-control' 'decoded' $entityDecoded $script:ReviewBidiPattern
@@ -1171,7 +1167,28 @@ function Assert-ReviewOutputSafe {
             if ($renderer) { $hits.Add("rule $($renderer.Rule) matched the $($form.Name) form at offset $($renderer.Offset) (length $($renderer.Length))") }
         }
     }
-    foreach ($hit in @(Get-ReviewRuleHits -Text $Text -KnownPaths $knownPaths -CredentialsOnly:$CredentialsOnly)) { $hits.Add($hit) }
+    foreach ($hit in @(Get-ReviewRuleHits -Text $Text -KnownPaths $KnownPaths -CredentialsOnly:$CredentialsOnly)) { $hits.Add($hit) }
+    return , $hits
+}
+
+function Assert-ReviewOutputSafe {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$Text,
+        [AllowEmptyString()][string]$Workspace = '',
+        [string[]]$DiffPaths = @(),
+        # The context GitHub's renderer resolves references against.
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
+        # For validated metadata such as a branch name: credential patterns only, no path or long-token rules.
+        [switch]$CredentialsOnly
+    )
+
+    $knownPaths = @()
+    if ($Workspace -or $DiffPaths.Count -gt 0) {
+        $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
+    }
+    # Each hit is logged by rule, scan form and offset so a rejection can be diagnosed.
+    $hits = Get-ReviewLocalScanHits -Text $Text -KnownPaths $knownPaths -CredentialsOnly:$CredentialsOnly
     # GitHub's own rendering is scanned too, never instead: only once every form above passes, so a body
     # they reject is never sent anywhere. A failed or timed-out call fails closed (markdown-render).
     if (-not $CredentialsOnly -and $hits.Count -eq 0) {
@@ -1189,7 +1206,7 @@ function Assert-ReviewOutputSafe {
     }
     if ($hits.Count -gt 0) {
         foreach ($hit in (Get-ReviewOrdinalUnique -Values $hits.ToArray())) { Write-Warning "Publication safety scan: $hit." }
-        throw 'Review did not complete: output failed the publication safety scan.'
+        throw $script:ReviewPublicationFailure
     }
 }
 
@@ -2766,6 +2783,276 @@ function Add-ReviewDiffContext {
     return (Format-ReviewDiffPrompt -Prompt $Prompt -Embedding $embedding)
 }
 
+function Get-ReviewRuleHitLines {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+
+    # The 0-based lines of $Text that hold a match of a path, credential or token rule in any scan form of
+    # the whole text, as Get-ReviewRuleHits reads it: the same forms, masking and URL segmenting, split line
+    # by line. A match may need context from another line (a reference definition anywhere drops every
+    # bracket), so scanning each line alone can miss it. Returns $null when a form does not keep the raw
+    # text's lines, since a form line then does not name a raw line. A line tested on its own loses only
+    # what lies before it, which can add a match but never hide one.
+    $lineCount = @($Text -split "`n").Count
+    $hitLines = New-Object 'System.Collections.Generic.HashSet[int]'
+    $rules = @(Get-ReviewRedactionRules)
+    $mark = {
+        param([string]$FormText, [string[]]$Patterns)
+        $formLines = @($FormText -split "`n")
+        if ($formLines.Count -ne $lineCount) { return $false }
+        for ($i = 0; $i -lt $formLines.Count; $i++) {
+            foreach ($pattern in $Patterns) { if ([regex]::IsMatch($formLines[$i], $pattern)) { [void]$hitLines.Add($i); break } }
+        }
+        return $true
+    }
+    $unmasked = @($script:ReviewAbsoluteRootPattern) + @($rules | Where-Object { -not $_.Maskable } | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
+    $maskable = @($rules | Where-Object { $_.Maskable } | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
+    foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
+        if (-not (& $mark $form.Text $unmasked)) { return $null }
+    }
+    $maskedText = Remove-ReviewRepositoryCitations -Text $Text -Paths $KnownPaths
+    foreach ($form in (Get-ReviewNamedScanForms -Text $maskedText)) {
+        if (-not (& $mark (Remove-ReviewRepositoryCitations -Text $form.Text -Paths $KnownPaths) @($script:ReviewProfileSegmentPattern))) { return $null }
+    }
+    $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
+    foreach ($form in (Get-ReviewNamedScanForms -Text $segmented)) {
+        if (-not (& $mark (Remove-ReviewRepositoryCitations -Text $form.Text -Paths $KnownPaths) $maskable)) { return $null }
+    }
+    return , $hitLines
+}
+
+function Remove-ReviewSuppliedMarkers {
+    param([AllowEmptyString()][string]$Text)
+
+    # The review text with every HTML comment that names agent-review removed, in any spelling, case or
+    # spacing, in a code span or not. Only the job writes review markers (Write-ReviewResult), so nothing
+    # the reviewer wrote can be read back as one, whatever the scan makes of it. Removal repeats until
+    # nothing changes, so pieces left around a removed comment cannot join into a new one. Only a comment
+    # that opens and closes on one line is removed. One that crosses a line or never closes fails closed:
+    # its opener may sit in a code span, where GitHub shows it and everything after it, so removing it
+    # could silently drop findings from a review published as complete.
+    $marker = '(?i)agent\W*review'
+    $comment = [regex]$script:ReviewHtmlCommentPattern
+    do {
+        $before = $Text
+        $Text = $comment.Replace($Text, { param($m) if ($m.Value -match $marker -and $m.Value -notmatch '[\r\n]' -and $m.Value -match '--!?>\z') { '' } else { $m.Value } })
+    } while ($Text -cne $before)
+    foreach ($m in $comment.Matches($Text)) {
+        if ($m.Value -match $marker) {
+            Write-Warning 'Publication safety scan: a review marker comment in the review text crosses a line or never closes, so it cannot be removed.'
+            throw $script:ReviewPublicationFailure
+        }
+    }
+    return $Text
+}
+
+function Get-ReviewDefinitionState {
+    param([AllowEmptyString()][string]$Rest)
+
+    # What may follow a link reference definition whose destination, and maybe a title, is $Rest:
+    # 'maybe-title' (a title may come on the next line), 'title:<close>' (a title is still open) or ''
+    # (the definition is complete).
+    $parts = [regex]::Match($Rest, '^[ \t]*(?:<[^>]*>|\S+)(?:[ \t]+(["''(])(.*))?$')
+    if (-not $parts.Success -or -not $parts.Groups[1].Success) { return 'maybe-title' }
+    $close = $(if ($parts.Groups[1].Value -eq '(') { ')' } else { $parts.Groups[1].Value })
+    if ($parts.Groups[2].Value.TrimEnd().EndsWith($close)) { return '' }
+    return "title:$close"
+}
+
+function Measure-ReviewSubstantiveLines {
+    param([AllowEmptyString()][string]$Text)
+
+    # The number of lines of $Text that say something a reader can see. Outside literal code, HTML
+    # comments, tags and elements GitHub never shows with their text (script, style and the like) go first,
+    # across lines, entities are decoded, then on each line every container marker (quote, list and task
+    # markers, nested and empty, with or without text after them). A line left as a heading (# or
+    # underlined), a fence delimiter or part of a link reference or footnote definition says nothing; any
+    # other line counts when it still holds a letter or digit. A review left with only formatting (rules,
+    # table delimiters, emphasis, empty lists) is no review.
+    # Literal code shows its text, markup included, so its <, > and & become spaces before markup goes:
+    # every line inside a fenced block, and each inline code span on one line (an opener after a
+    # backslash opens none).
+    $literal = New-Object System.Collections.Generic.List[string]
+    $fence = ''
+    foreach ($line in ($Text -split "`r?`n")) {
+        $open = [regex]::Match($line, '^[ \t]*(?:(?:>|[-*+]|[0-9]{1,9}[.)])[ \t]*)*(`{3,}|~{3,})')
+        if ($fence) {
+            if ($open.Success -and $open.Groups[1].Value[0] -eq $fence[0] -and $open.Groups[1].Length -ge $fence.Length -and $line -match '^[^`~]*[`~]+[ \t]*$') { $fence = '' }
+            else { $line = $line -replace '[<>&]', ' ' }
+        } elseif ($open.Success -and -not ($open.Groups[1].Value[0] -eq '`' -and $line.Substring($open.Index + $open.Length).Contains('`'))) {
+            $fence = $open.Groups[1].Value
+        } else {
+            $line = [regex]::Replace($line, '(?<![\\`])(`+)(?!`)(.+?)(?<!`)\1(?!`)', { param($m) $m.Groups[1].Value + ($m.Groups[2].Value -replace '[<>&]', ' ') + $m.Groups[1].Value })
+        }
+        $literal.Add($line)
+    }
+    $visible = [regex]::Replace(($literal -join "`n"), $script:ReviewHtmlCommentPattern, '')
+    $visible = [regex]::Replace($visible, '(?i)<(script|style|textarea|title|template)\b[\s\S]*?(?:</\1[^>]*>|\z)', '')
+    $visible = [regex]::Replace($visible, '</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:"[^"]*"|''[^'']*''|[^<>"''])*)?/?>|<![A-Za-z\[][^>]*>|<\?[\s\S]*?(?:\?>|\z)', '')
+    # Entities count by what they render (&nbsp is a space with or without its semicolon, &#65; a letter).
+    # Invisible characters, among them the Hangul filler letters (U+115F, U+1160, U+3164, U+FFA0), render
+    # as nothing, raw or as references, so they go once decoded.
+    $visible = ConvertFrom-ReviewEntities -Text ([regex]::Replace($visible, '!?\[[ \t]*\]\([^)]*\)', ''))
+    $visible = $visible -replace $script:ReviewInvisiblePattern, ''
+    $count = 0
+    $definition = ''
+    $lines = @($visible -split "`r?`n")
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        # A line over an = or - underline is a setext heading, in a quote or a list item too. Only a list
+        # item over an unindented dash line is not: that line is a rule after the list.
+        if ($i + 1 -lt $lines.Count) {
+            $current = $line -replace '^(?:[ \t]*>)+', ''
+            $next = $lines[$i + 1] -replace '^(?:[ \t]*>)+', ''
+            if ($current -match '\S' -and $next -match '^[ \t]*(?:=+|-+)[ \t]*$') {
+                $listItem = $current -match '^[ \t]*(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)'
+                if (-not ($listItem -and $next -match '^[-=]')) { continue }
+            }
+        }
+        $indented = ($line -replace '^(?:[ \t]{0,3}>)+', '') -match '^(?: {4}|\t)'
+        do {
+            $before = $line
+            $line = $line -replace '^[ \t]*(?:>|[-*+](?=[ \t]|$)|[0-9]{1,9}[.)](?=[ \t]|$)|\[[ xX]\](?=[ \t]|$))', ''
+        } while ($line -cne $before)
+        # A link reference or footnote definition says nothing, and neither do the lines that continue it.
+        # A link reference definition goes on with a destination or a title on the next line, or the rest
+        # of a title spanning lines, and ends there, at a blank line, or at any other line, which is text.
+        # A footnote goes on with every line up to a blank line (a lazy continuation needs no indent), and
+        # after blank lines with every line indented as its content. It counts as nothing, referenced or not.
+        if ($line -notmatch '\S') { $definition = $(if ($definition -like 'footnote*') { 'footnote-gap' } else { '' }); continue }
+        if ($definition -eq 'footnote' -or ($definition -eq 'footnote-gap' -and $indented)) { continue }
+        if ($definition -like 'title:*') {
+            if ($line.Contains($definition.Substring(6))) { $definition = '' }
+            continue
+        }
+        if ($definition -eq 'destination') { $definition = Get-ReviewDefinitionState -Rest $line; continue }
+        if ($definition -eq 'maybe-title' -and $line -match '^[ \t]*["''(]') {
+            $definition = Get-ReviewDefinitionState -Rest ('<> ' + $line.Trim())
+            continue
+        }
+        $definition = ''
+        if ($line -match '^[ \t]*\[([^\]]*)\]:(.*)$') {
+            $label = $Matches[1]
+            $rest = $Matches[2]
+            $definition = $(if ($label.StartsWith('^')) { 'footnote' } elseif ($rest -notmatch '\S') { 'destination' } else { Get-ReviewDefinitionState -Rest $rest })
+            continue
+        }
+        if ($line -match '^[ \t]*(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,})') { continue }
+        if ($line -match '[\p{L}\p{N}]') { $count++ }
+    }
+    return $count
+}
+
+function Get-ReviewWithheldOutput {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+
+    # Each line of the review that a path, credential or token rule rejects, replaced whole (#974): a line
+    # that fails on its own, and a line that holds a match in the whole text's scan forms. A match is often
+    # only a prefix (a root or one segment), and the rest of the line may continue what it names, so the
+    # matched span alone is never enough. A list marker, quote marker and indentation are kept so the
+    # review keeps its shape. Call it only once Test-ReviewLinesCanBeWithheld passes, so no match crosses a
+    # line; the caller scans the whole result again, so nothing that fails is ever published. Returns
+    # $null when the lines cannot be told apart (Get-ReviewRuleHitLines).
+    $contextLines = Get-ReviewRuleHitLines -Text $Text -KnownPaths $KnownPaths
+    if ($null -eq $contextLines) { return $null }
+    $lines = @($Text -split "`r?`n")
+    $withheld = New-Object System.Collections.Generic.List[int]
+    $kept = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ([string]::IsNullOrWhiteSpace($lines[$i])) { $kept.Add(''); continue }
+        if (-not $contextLines.Contains($i) -and @(Get-ReviewRuleHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) {
+            $kept.Add($lines[$i])
+            continue
+        }
+        $kept.Add('')
+        $prefix = [regex]::Match($lines[$i], '^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?').Value
+        $lines[$i] = $prefix + $script:ReviewWithheldLine
+        $withheld.Add($i + 1)
+    }
+    # KeptLines counts only the kept lines that say something, read together (Measure-ReviewSubstantiveLines).
+    $keptCount = Measure-ReviewSubstantiveLines -Text ($kept -join "`n")
+    return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $keptCount }
+}
+
+function Test-ReviewLinesCanBeWithheld {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @(), [AllowEmptyString()][string]$Body = '')
+
+    # True when withholding whole lines can remove every rejection in $Text. Each rejection must come from
+    # a path, credential or token rule: the other rules reject markup or characters whose reading the scan
+    # cannot settle (a tag spanning lines, math, a bidi control), so a review holding any fails closed.
+    # Each scan form must keep the raw text's lines (a link title spanning lines, or an encoded line
+    # break, would move text between them), and no rule match in any form may cross a line break. A label
+    # and its value on two lines (password = then a quoted value) cross one, so withholding either line
+    # alone would leave the other.
+    # Listing matches is not enough: they never overlap, so a crossing match that starts inside an earlier
+    # one is skipped. Instead, for each line break, one anchored search asks whether any match can start
+    # on the line before it and end past it, and backtracking tries every start and every way to match.
+    # A match that crosses lines crosses its first line break, so the line before it holds the start.
+    # The search reads from that line's start, so the rule sees no text before it: that can only add
+    # matches, never hide one.
+    $contentRules = @('absolute-root', 'profile-segment') + @(Get-ReviewRedactionRules | ForEach-Object { $_.Name })
+    # The published body adds lines around the review, and text after it can change what a rule reads (an
+    # unterminated tag on the last line is raw HTML once more text follows), so its rejections count too.
+    foreach ($scanned in @($Text, $Body)) {
+        if ([string]::IsNullOrEmpty($scanned)) { continue }
+        foreach ($hit in (Get-ReviewLocalScanHits -Text $scanned -KnownPaths $KnownPaths)) {
+            if ($hit -notmatch '^rule (\S+) ' -or $contentRules -notcontains $Matches[1]) { return $false }
+        }
+    }
+    $patterns = @($script:ReviewAbsoluteRootPattern, $script:ReviewProfileSegmentPattern) + @(Get-ReviewRedactionRules | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
+    $lineCount = @($Text -split "`n").Count
+    $crossing = @($patterns | ForEach-Object { '\A[^\n]*?(?:' + $_ + ')(?<=\n[\s\S]*)' })
+    foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
+        if (@($form.Text -split "`n").Count -ne $lineCount) { return $false }
+        $start = 0
+        while (($break = $form.Text.IndexOf("`n", $start)) -ge 0) {
+            $rest = $form.Text.Substring($start)
+            foreach ($pattern in $crossing) { if ([regex]::IsMatch($rest, $pattern)) { return $false } }
+            $start = $break + 1
+        }
+    }
+    return $true
+}
+
+function Get-ReviewUnpublishedNotice {
+    param(
+        [AllowEmptyString()][string]$HeadSha = '',
+        [AllowEmptyString()][string]$ServerUrl = $env:GITHUB_SERVER_URL,
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
+        [AllowEmptyString()][string]$RunId = $env:GITHUB_RUN_ID
+    )
+
+    # The PR comment for a review that cannot be published (#974). It carries no review text and no
+    # agent-review marker, so readiness tools never count it as a review. Only validated values go in,
+    # and it holds no double quote, which Windows PowerShell drops from a native argument.
+    $subject = 'The automated review'
+    if (Test-GitObjectId -Sha $HeadSha.Trim()) { $subject = "$subject of $($HeadSha.Trim().Substring(0, 7))" }
+    $notice = "$subject was not published: its text failed the publication safety scan, which never posts absolute paths, credentials or long tokens, even with the lines it flagged withheld. No verdict was posted for this commit."
+    if ($ServerUrl -match '^https://[A-Za-z0-9.-]+$' -and $Repository -match $script:ReviewRepositoryPattern -and $RunId -match '^[0-9]{1,20}$') {
+        $notice = "$notice The workflow run log names each rule, scan form and offset: $ServerUrl/$Repository/actions/runs/$RunId"
+    }
+    return $notice
+}
+
+function Send-ReviewUnpublishedNotice {
+    param(
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [AllowEmptyString()][string]$HeadSha = '',
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory
+    )
+
+    # A failed post is only a warning: the job fails on the scan either way.
+    if ($PrNumber -notmatch '^[0-9]{1,10}$') { Write-Warning 'No notice was posted: the pull request number is not valid.'; return }
+    $notice = Get-ReviewUnpublishedNotice -HeadSha $HeadSha
+    try {
+        $attempt = Invoke-ReviewGitHubCli -Arguments @('pr', 'comment', $PrNumber, '--body', $notice) -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'review-notice'
+        if ([int]$attempt.ExitCode -eq 0) { Write-Host 'Posted a notice on the pull request that the review was not published.' }
+        else { Write-Warning "Could not post the notice that the review was not published (gh exited with code $($attempt.ExitCode))." }
+    } catch {
+        Write-Warning 'Could not post the notice that the review was not published.'
+    }
+}
+
 function Write-ReviewResult {
     [CmdletBinding()]
     param(
@@ -2778,7 +3065,9 @@ function Write-ReviewResult {
         [AllowEmptyString()][string]$Workspace = '',
         [string[]]$DiffPaths = @(),
         [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
-        [bool]$PublishMarker = $true
+        [bool]$PublishMarker = $true,
+        # When the body fails the scan, withhold each line that fails on its own and scan the rest again (#974).
+        [switch]$WithholdUnsafeLines
     )
 
     # Remove a stale body before checking this attempt. The workflow skips posting on failure.
@@ -2809,8 +3098,51 @@ function Write-ReviewResult {
             $marker += "`r`n<!-- agent-review: sha=$($HeadSha.Trim()) criteria=$([int]$met)/$([int]$total) findings=$([int]$Result.FindingCount) -->"
         }
     }
-    $body = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**." -f $CoverageLine.Trim(), $Result.Output.Trim(), $label
-    Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+    $format = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**."
+    # Only this function writes review markers: any the reviewer's text carries go before the scan (#974).
+    $output = Remove-ReviewSuppliedMarkers -Text $Result.Output
+    if ($output -cne $Result.Output) { Write-Host 'Removed review markers from the review text; only the job writes them.' }
+    $output = $output.Trim()
+    if ($WithholdUnsafeLines) { $Result | Add-Member -NotePropertyName WithheldLines -NotePropertyValue 0 -Force }
+    $body = $format -f $CoverageLine.Trim(), $output, $label
+    try {
+        Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+    } catch {
+        if (-not $WithholdUnsafeLines -or $_.Exception.Message -ne $script:ReviewPublicationFailure) { throw }
+        $knownPaths = @()
+        if ($Workspace -or $DiffPaths.Count -gt 0) { $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths) }
+        if (-not (Test-ReviewLinesCanBeWithheld -Text $output -KnownPaths $knownPaths -Body $body)) {
+            Write-Warning 'Publication safety scan: a rejection is not a path, credential or token on one line, so no line can be withheld.'
+            throw
+        }
+        $withheld = Get-ReviewWithheldOutput -Text $output -KnownPaths $knownPaths
+        if ($null -eq $withheld) {
+            Write-Warning 'Publication safety scan: a scan form moves text between lines, so no line can be withheld.'
+            throw
+        }
+        $count = $withheld.Lines.Count
+        if ($count -eq 0) {
+            Write-Warning 'Publication safety scan: no single line of the review fails on its own, so none could be withheld.'
+            throw
+        }
+        $numbers = $withheld.Lines -join ', '
+        $described = $(if ($count -eq 1) { "1 line of the review (line $numbers)" } else { "$count lines of the review (lines $numbers)" })
+        if ($withheld.KeptLines -eq 0) {
+            Write-Warning "Publication safety scan: withholding $described would leave no review content, so it is not published."
+            throw
+        }
+        Write-Host "Publication safety scan: withheld $described; scanning the rest again."
+        $note = $(if ($count -eq 1) { '1 line' } else { "$count lines" })
+        $output = "$($withheld.Text)`n`n_The publication safety scan withheld $note of this review that held text it never posts, such as an absolute path, a credential or a long token. The workflow run log gives the line numbers. With lines withheld this review is incomplete, so it carries no review marker and readiness tools do not count it._"
+        $body = $format -f $CoverageLine.Trim(), $output, $label
+        Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+        Write-Host "Publication safety scan: the rest of the review passed and is posted with $note withheld, as incomplete and without its marker."
+        # Withheld lines may hold criteria or findings, so the counts in the markers no longer describe what
+        # is published. Without a marker, readiness tools never count the review and the next run reviews
+        # the whole PR again.
+        $marker = ''
+        $Result | Add-Member -NotePropertyName WithheldLines -NotePropertyValue $count -Force
+    }
     # The marker contains validated Git metadata; its SHA intentionally resembles a long token.
     $body += $marker
     $body | Out-File -LiteralPath $OutputPath -Encoding utf8
@@ -2860,16 +3192,30 @@ function Invoke-ReviewMain {
     $publishMarker = (@($embedding.OmittedFiles).Count -eq 0)
     $coverageLine = $coverage.CoverageLine
     if (-not $publishMarker) { $coverageLine = Get-ReviewOmissionCoverageLine -Embedding $embedding }
-    Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -Workspace $Workspace -DiffPaths @($embedding.FilePaths) -PublishMarker:$publishMarker
+    try {
+        Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -Workspace $Workspace -DiffPaths @($embedding.FilePaths) -PublishMarker:$publishMarker -WithholdUnsafeLines
+    } catch {
+        # The job posts nothing once this step fails, so the PR is told here why no review came (#974).
+        if ($_.Exception.Message -eq $script:ReviewPublicationFailure) {
+            Send-ReviewUnpublishedNotice -PrNumber $PrNumber -HeadSha $coverage.HeadSha -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+        }
+        throw
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         $verdictValue = if ($result.PSObject.Properties['Verdict']) { [string]$result.Verdict } else { '' }
+        # A review published with lines withheld is incomplete: never report its clean or findings verdict.
+        $withheldLines = if ($result.PSObject.Properties['WithheldLines']) { [int]$result.WithheldLines } else { 0 }
+        if ($withheldLines -gt 0) {
+            $verdictValue = 'incomplete'
+            "withheld_lines=$withheldLines" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        }
         $findingValue = if ($result.PSObject.Properties['FindingCount']) { [string]$result.FindingCount } else { '' }
         "verdict=$verdictValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "findings=$findingValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "omitted_files=$(@($embedding.OmittedFiles).Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-        if ($result.PSObject.Properties['CriteriaTotal'] -and $null -ne $result.CriteriaTotal) {
+        if ($withheldLines -eq 0 -and $result.PSObject.Properties['CriteriaTotal'] -and $null -ne $result.CriteriaTotal) {
             "criteria=$([int]$result.CriteriaMet)/$([int]$result.CriteriaTotal)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         }
         if (-not [string]::IsNullOrWhiteSpace([string]$result.Model)) {
