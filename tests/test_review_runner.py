@@ -2313,6 +2313,49 @@ def test_review_script_withholds_a_line_that_quotes_a_scanner_fixture_and_posts_
     assert not _pr_comment_calls(run)
 
 
+def test_review_script_escapes_a_quoted_entity_reference_and_posts_a_complete_review(tmp_path, fake_cli_launcher):
+    """#998: a review of a pull request about HTML entities quotes them. A reference the scan does not decode is
+    escaped in place as plain text instead of rejecting the whole review. Only its spelling changes, so the review
+    keeps its marker and verdict, and the log gives the line, never the reference."""
+    review = (
+        "## Findings\n"
+        "- src/app.py:1: the template writes `&NoBreak;` and `&amp;nbsp;` where a plain space would do.\n"
+        "- src/app.py:1: a second synthetic finding with nothing unsafe in it.\n"
+        "REVIEW_VERDICT: FINDINGS 2\nREVIEW_STATUS: COMPLETE"
+    )
+    run = _run_review_script(
+        tmp_path,
+        fake_cli_launcher,
+        {"gh": [{"match": ["pr comment 7"], "stdout": ""}] + _gh_responses(), "claude": [{"match": ["-p"], "stdout": review}]},
+        NOTICE_ENV,
+    )
+    assert run.result.returncode == 0, run.text
+    assert "escaped 2 entity references (line 2)" in run.text
+    assert "NoBreak" not in run.text
+    assert "the template writes `(entity: NoBreak)` and `(entity: nbsp)` where a plain space would do." in run.body
+    assert "a second synthetic finding with nothing unsafe in it." in run.body
+    assert "&NoBreak;" not in run.body and "&amp;nbsp;" not in run.body
+    assert f"<!-- agent-review: sha={HEAD_SHA} mode=full" in run.body
+    assert run.outputs["verdict"] == "findings" and "withheld_lines" not in run.outputs
+    assert run.outputs["escaped_entities"] == "2"
+    renders = [call for call in run.gh if call["argv"] == MARKDOWN_ARGV]
+    assert renders and all("NoBreak;" not in call["stdin"] for call in renders)
+    assert not _pr_comment_calls(run)
+
+
+def test_review_html5_entity_table_matches_the_html_standard_names():
+    """#998: escaping reads each named reference as the characters HTML5 renders it as. The table it loads is
+    Python's html.entities.html5 (the HTML Standard's names), one `name<TAB>hex code points` line per name: with its
+    semicolon, or without one for the legacy names HTML5 also decodes as a prefix."""
+    import html.entities
+
+    expected = "".join(
+        f"{name}\t{' '.join(f'{ord(c):X}' for c in text)}\n" for name, text in sorted(html.entities.html5.items())
+    )
+    table = ROOT / "ops" / "review" / "html5-entities.tsv"
+    assert table.read_bytes().decode("ascii") == expected
+
+
 def test_review_script_drops_markers_in_the_review_text_before_withholding(tmp_path, fake_cli_launcher):
     """#974: only the job writes review markers. Markers in the reviewer's text, in both forms, are removed before
     the scan, so they are neither withheld as lines nor published, and the readiness parser finds no summary."""
