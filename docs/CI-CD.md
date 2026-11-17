@@ -378,9 +378,11 @@ which GitHub cannot render as anything the scan does not read. A note at the end
 were escaped, and the job log gives their line numbers, never the names. The result is scanned again in full, GitHub's
 rendering included. Only the spelling of a reference changes, never a finding or criterion, so a review that passes
 keeps its `agent-review` marker and verdict and the job reports `escaped_entities=N`. If it still fails only on path,
-credential and token rules, lines are withheld as above. Before escaping, the wrapper also reads the review as GitHub
-would render it, with each reference as the characters the HTML Standard gives it (the table is
-`ops/review/html5-entities.tsv`, Python's `html.entities.html5`) and with each reference removed. Every line a path,
+credential and token rules, lines are withheld as above. Escaping runs only when every rejection of the body is
+`unknown-entity` or a path, credential or token rule, since escaping can change how other text reads. Before escaping,
+the wrapper also reads the review as GitHub would render it, with each reference as HTML5 renders it in text (the
+standard's name, or else the longest legacy name that starts it, from `ops/review/html5-entities.tsv`, Python's
+`html.entities.html5`) and with each reference removed. Every line a path,
 credential or token rule matches in either reading must still match once escaped, so it is withheld whole, and no
 match may cross a line break; the escaped span must cover exactly the raw text of the reference. Otherwise nothing is
 escaped and the review fails closed as before, as it does when another fail-closed rule matches. The path rules never parse or
