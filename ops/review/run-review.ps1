@@ -431,6 +431,9 @@ $script:ReviewHtml5Entities = @{
 $script:ReviewUnknownEntityPattern = '&[A-Za-z][A-Za-z0-9]*;'
 # What a review shows in place of such a reference once publication escapes it (#998): its name as text.
 $script:ReviewEscapedEntityFormat = '(entity: {0})'
+# The HTML Standard's named references, which escaping reads a reference as (Get-ReviewHtml5EntityTable).
+$script:ReviewHtml5EntityTablePath = Join-Path $PSScriptRoot 'html5-entities.tsv'
+$script:ReviewHtml5EntityTable = $null
 # HTML5 decodes these names even without a semicolon (gh&shyp_ is gh, a soft hyphen, p_), longest first.
 $script:ReviewLegacyEntities = @(
     'AElig AMP Aacute Acirc Agrave Aring Atilde Auml COPY Ccedil ETH Eacute Ecirc Egrave Euml GT Iacute Icirc Igrave',
@@ -548,18 +551,29 @@ function Get-ReviewEntityDecodedMap {
     param([AllowEmptyString()][string]$Text)
 
     # ConvertFrom-ReviewEntities, with the raw span each decoded character came from (#998): Starts[i] and
-    # Ends[i] bound the raw text that decoded character i was spelled with. Percent escapes are decoded one
-    # run at a time and each reference as a whole, so every character of a run or reference maps to all of
-    # it. The result is checked against ConvertFrom-ReviewEntities itself; $null when the two differ, so a
-    # caller never acts on a map that does not describe what the scan read.
+    # Ends[i] bound the raw text that decoded character i was spelled with. A percent escape maps to its own
+    # three characters, or a UTF-8 sequence of escapes to all of them, and a character reference to the
+    # whole reference, so a span never takes in text that decoded to a neighbouring character. The result
+    # is checked against ConvertFrom-ReviewEntities itself; $null when the two differ, so a caller never
+    # acts on a map that does not describe what the scan read.
     $starts = New-Object System.Collections.Generic.List[int]
     $ends = New-Object System.Collections.Generic.List[int]
     $builder = New-Object System.Text.StringBuilder
     $position = 0
     foreach ($run in [regex]::Matches($Text, '(?:%[0-9A-Fa-f]{2})+')) {
         for ($i = $position; $i -lt $run.Index; $i++) { [void]$builder.Append($Text[$i]); $starts.Add($i); $ends.Add($i + 1) }
-        foreach ($character in [Uri]::UnescapeDataString($run.Value).ToCharArray()) {
-            [void]$builder.Append($character); $starts.Add($run.Index); $ends.Add($run.Index + $run.Length)
+        $escapes = $run.Length / 3
+        $index = 0
+        while ($index -lt $escapes) {
+            # A UTF-8 lead byte says how many escapes spell one character; anything else is one escape.
+            $lead = [Convert]::ToInt32($run.Value.Substring($index * 3 + 1, 2), 16)
+            $count = $(if ($lead -ge 0xF0 -and $lead -le 0xF4) { 4 } elseif ($lead -ge 0xE0 -and $lead -le 0xEF) { 3 } elseif ($lead -ge 0xC2 -and $lead -le 0xDF) { 2 } else { 1 })
+            $count = [Math]::Min($count, $escapes - $index)
+            $piece = [Uri]::UnescapeDataString($run.Value.Substring($index * 3, $count * 3))
+            if ($count -gt 1 -and $piece.StartsWith('%')) { $count = 1; $piece = [Uri]::UnescapeDataString($run.Value.Substring($index * 3, 3)) }
+            $start = $run.Index + $index * 3
+            foreach ($character in $piece.ToCharArray()) { [void]$builder.Append($character); $starts.Add($start); $ends.Add($start + $count * 3) }
+            $index += $count
         }
         $position = $run.Index + $run.Length
     }
@@ -573,12 +587,15 @@ function Get-ReviewEntityDecodedMap {
     $position = 0
     foreach ($reference in [regex]::Matches($unescaped, $script:ReviewCharacterReferencePattern)) {
         for ($i = $position; $i -lt $reference.Index; $i++) { [void]$builder.Append($unescaped[$i]); $decodedStarts.Add($starts[$i]); $decodedEnds.Add($ends[$i]) }
+        $decodedReference = ConvertFrom-ReviewCharacterReference -Match $reference
+        $position = $reference.Index + $reference.Length
+        # A reference left as it is (an unknown name, or AT&T) keeps each character's own span.
+        if ($decodedReference -ceq $reference.Value) { $position = $reference.Index; continue }
         $start = $starts[$reference.Index]
         $end = $ends[$reference.Index + $reference.Length - 1]
-        foreach ($character in (ConvertFrom-ReviewCharacterReference -Match $reference).ToCharArray()) {
+        foreach ($character in $decodedReference.ToCharArray()) {
             [void]$builder.Append($character); $decodedStarts.Add($start); $decodedEnds.Add($end)
         }
-        $position = $reference.Index + $reference.Length
     }
     for ($i = $position; $i -lt $unescaped.Length; $i++) { [void]$builder.Append($unescaped[$i]); $decodedStarts.Add($starts[$i]); $decodedEnds.Add($ends[$i]) }
     $decoded = $builder.ToString()
@@ -3061,80 +3078,38 @@ function Get-ReviewWithheldOutput {
     return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $keptCount }
 }
 
-function Get-ReviewEscapedEntityOutput {
-    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
-
-    # $Text with each named reference the unknown-entity rule rejects rewritten as plain text (#998). A
-    # review of a pull request about HTML entities quotes them (`&NoBreak;`, or `&amp;nbsp;`, which decodes
-    # to one), and GitHub may render such a reference as characters the scan never sees, so the rule
-    # rejects it. Escaped, the raw text that spelled the reference becomes (entity: NoBreak), which every
-    # form reads as it is, so nothing is left for GitHub to render differently. Returns the text, the
-    # count, and the line numbers that held one; Count is 0 when nothing matched. Returns $null, so the
-    # caller fails closed as before, when the scan's decoding cannot be mapped back to the raw text, or when
-    # a line would read as a path, credential or token with a reference removed or spelled out (the text
-    # around it may continue what it hides: gh&ZeroWidthSpace;p_) but not once it is escaped, which would
-    # print the pieces. A line that fails those rules escaped is withheld whole afterwards (#974).
-    $map = Get-ReviewEntityDecodedMap -Text $Text
-    if ($null -eq $map) { return $null }
-    $found = [regex]::Matches($map.Text, $script:ReviewUnknownEntityPattern)
-    if ($found.Count -eq 0) { return [pscustomobject]@{ Text = $Text; Count = 0; Lines = @() } }
-    $escaped = New-Object System.Text.StringBuilder
-    $joined = New-Object System.Text.StringBuilder
-    $named = New-Object System.Text.StringBuilder
-    $lineNumbers = New-Object System.Collections.Generic.SortedSet[int]
-    $position = 0
-    foreach ($reference in $found) {
-        $start = $map.Starts[$reference.Index]
-        $end = $map.Ends[$reference.Index + $reference.Length - 1]
-        # One raw span spelling two references, or a reference spelled across a line, is not escaped.
-        if ($start -lt $position -or $Text.Substring($start, $end - $start).Contains("`n")) { return $null }
-        $name = $reference.Value.Substring(1, $reference.Length - 2)
-        $before = $Text.Substring($position, $start - $position)
-        [void]$escaped.Append($before).Append($script:ReviewEscapedEntityFormat -f $name)
-        [void]$joined.Append($before)
-        [void]$named.Append($before).Append($name)
-        [void]$lineNumbers.Add($Text.Substring(0, $start).Split("`n").Count)
-        $position = $end
+function Get-ReviewHtml5EntityTable {
+    # The HTML Standard's named references (html5-entities.tsv beside this script, Python's
+    # html.entities.html5), name to the characters HTML5 renders, loaded once. $null when the file cannot
+    # be read, so a caller that needs it fails closed.
+    if ($null -eq $script:ReviewHtml5EntityTable) {
+        try {
+            $table = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+            foreach ($line in [System.IO.File]::ReadAllLines($script:ReviewHtml5EntityTablePath)) {
+                $fields = $line.TrimEnd("`r").Split("`t")
+                if ($fields.Count -ne 2) { throw 'malformed entity table' }
+                $table[$fields[0]] = -join @($fields[1].Split(' ') | ForEach-Object { [char]::ConvertFromUtf32([Convert]::ToInt32($_, 16)) })
+            }
+            if ($table.Count -eq 0) { throw 'empty entity table' }
+            $script:ReviewHtml5EntityTable = $table
+        } catch {
+            return $null
+        }
     }
-    $rest = $Text.Substring($position)
-    $escapedText = $escaped.Append($rest).ToString()
-    $escapedLines = @($escapedText -split "`n")
-    $joinedLines = @($joined.Append($rest).ToString() -split "`n")
-    $namedLines = @($named.Append($rest).ToString() -split "`n")
-    foreach ($number in $lineNumbers) {
-        $index = $number - 1
-        $probeHits = @(Get-ReviewRuleHits -Text $joinedLines[$index] -KnownPaths $KnownPaths) + @(Get-ReviewRuleHits -Text $namedLines[$index] -KnownPaths $KnownPaths)
-        if ($probeHits.Count -gt 0 -and @(Get-ReviewRuleHits -Text $escapedLines[$index] -KnownPaths $KnownPaths).Count -eq 0) { return $null }
-    }
-    if ((ConvertFrom-ReviewEntities -Text $escapedText) -cmatch $script:ReviewUnknownEntityPattern) { return $null }
-    return [pscustomobject]@{ Text = $escapedText; Count = $found.Count; Lines = @($lineNumbers) }
+    return , $script:ReviewHtml5EntityTable
 }
 
-function Test-ReviewLinesCanBeWithheld {
-    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @(), [AllowEmptyString()][string]$Body = '')
+function Test-ReviewRuleMatchesStayOnLines {
+    param([AllowEmptyString()][string]$Text)
 
-    # True when withholding whole lines can remove every rejection in $Text. Each rejection must come from
-    # a path, credential or token rule: the other rules reject markup or characters whose reading the scan
-    # cannot settle (a tag spanning lines, math, a bidi control), so a review holding any fails closed.
-    # Each scan form must keep the raw text's lines (a link title spanning lines, or an encoded line
-    # break, would move text between them), and no rule match in any form may cross a line break. A label
-    # and its value on two lines (password = then a quoted value) cross one, so withholding either line
-    # alone would leave the other.
+    # True when every scan form keeps the raw text's lines and no path, credential or token rule match in
+    # any form crosses a line break (Test-ReviewLinesCanBeWithheld).
     # Listing matches is not enough: they never overlap, so a crossing match that starts inside an earlier
     # one is skipped. Instead, for each line break, one anchored search asks whether any match can start
     # on the line before it and end past it, and backtracking tries every start and every way to match.
     # A match that crosses lines crosses its first line break, so the line before it holds the start.
     # The search reads from that line's start, so the rule sees no text before it: that can only add
     # matches, never hide one.
-    $contentRules = @('absolute-root', 'profile-segment') + @(Get-ReviewRedactionRules | ForEach-Object { $_.Name })
-    # The published body adds lines around the review, and text after it can change what a rule reads (an
-    # unterminated tag on the last line is raw HTML once more text follows), so its rejections count too.
-    foreach ($scanned in @($Text, $Body)) {
-        if ([string]::IsNullOrEmpty($scanned)) { continue }
-        foreach ($hit in (Get-ReviewLocalScanHits -Text $scanned -KnownPaths $KnownPaths)) {
-            if ($hit -notmatch '^rule (\S+) ' -or $contentRules -notcontains $Matches[1]) { return $false }
-        }
-    }
     $patterns = @($script:ReviewAbsoluteRootPattern, $script:ReviewProfileSegmentPattern) + @(Get-ReviewRedactionRules | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
     $lineCount = @($Text -split "`n").Count
     $crossing = @($patterns | ForEach-Object { '\A[^\n]*?(?:' + $_ + ')(?<=\n[\s\S]*)' })
@@ -3148,6 +3123,104 @@ function Test-ReviewLinesCanBeWithheld {
         }
     }
     return $true
+}
+
+function Get-ReviewEscapeHitLines {
+    param([AllowEmptyString()][string]$Text, [int[]]$Lines, [string[]]$KnownPaths = @())
+
+    # The 0-based lines of $Text a path, credential or token rule matches, read as Get-ReviewWithheldOutput
+    # reads them: in the whole text's scan forms, and each of $Lines (1-based) on its own. $null when the
+    # forms do not keep the raw text's lines.
+    $hitLines = Get-ReviewRuleHitLines -Text $Text -KnownPaths $KnownPaths
+    if ($null -eq $hitLines) { return $null }
+    $textLines = @($Text -split "`n")
+    foreach ($number in $Lines) {
+        if (@(Get-ReviewRuleHits -Text $textLines[$number - 1] -KnownPaths $KnownPaths).Count -gt 0) { [void]$hitLines.Add($number - 1) }
+    }
+    return , $hitLines
+}
+
+function Get-ReviewEscapedEntityOutput {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+
+    # $Text with each named reference the unknown-entity rule rejects rewritten as plain text (#998). A
+    # review of a pull request about HTML entities quotes them (`&NoBreak;`, or `&amp;nbsp;`, which decodes
+    # to one), and GitHub may render such a reference as characters the scan never sees, so the rule
+    # rejects it. Escaped, the raw text that spelled the reference becomes (entity: NoBreak), which every
+    # form reads as it is, so nothing is left for GitHub to render differently. Returns the text, the
+    # count, and the line numbers that held one; Count is 0 when nothing matched.
+    # Escaping must never print pieces of what the reference sat in, so the text is first read as GitHub
+    # would render it: each reference as the characters the HTML Standard gives it (a name it lacks shows as
+    # written), and, as a second reading, as nothing. Every line a path, credential or token rule matches in
+    # either reading, in the whole text or on its own, must still match once escaped, so that it is
+    # withheld whole afterwards (#974), and no match in either reading may cross a line break.
+    # Returns $null, so the caller fails closed as before, when one does not hold, when the entity table
+    # cannot be read, or when the scan's decoding cannot be mapped back to the raw text exactly.
+    $map = Get-ReviewEntityDecodedMap -Text $Text
+    if ($null -eq $map) { return $null }
+    $found = [regex]::Matches($map.Text, $script:ReviewUnknownEntityPattern)
+    if ($found.Count -eq 0) { return [pscustomobject]@{ Text = $Text; Count = 0; Lines = @() } }
+    $entities = Get-ReviewHtml5EntityTable
+    if ($null -eq $entities) { return $null }
+    $escaped = New-Object System.Text.StringBuilder
+    $rendered = New-Object System.Text.StringBuilder
+    $removed = New-Object System.Text.StringBuilder
+    $lineNumbers = New-Object System.Collections.Generic.SortedSet[int]
+    $position = 0
+    foreach ($reference in $found) {
+        $first = $reference.Index
+        $last = $reference.Index + $reference.Length - 1
+        $start = $map.Starts[$first]
+        $end = $map.Ends[$last]
+        # The raw span must spell this reference and nothing beside it: not a neighbouring character, not a
+        # second reference, and not a line break.
+        if ($start -lt $position -or ($first -gt 0 -and $map.Ends[$first - 1] -gt $start) -or ($last + 1 -lt $map.Text.Length -and $map.Starts[$last + 1] -lt $end)) { return $null }
+        if ($Text.Substring($start, $end - $start).Contains("`n")) { return $null }
+        $name = $reference.Value.Substring(1, $reference.Length - 2)
+        $meaning = $reference.Value
+        if ($entities.ContainsKey($name)) { $meaning = $entities[$name] }
+        $before = $Text.Substring($position, $start - $position)
+        [void]$escaped.Append($before).Append($script:ReviewEscapedEntityFormat -f $name)
+        [void]$rendered.Append($before).Append($meaning)
+        [void]$removed.Append($before)
+        [void]$lineNumbers.Add($Text.Substring(0, $start).Split("`n").Count)
+        $position = $end
+    }
+    $rest = $Text.Substring($position)
+    $escapedText = $escaped.Append($rest).ToString()
+    $lines = @($lineNumbers)
+    $escapedHits = Get-ReviewEscapeHitLines -Text $escapedText -Lines $lines -KnownPaths $KnownPaths
+    if ($null -eq $escapedHits) { return $null }
+    foreach ($reading in @($rendered.Append($rest).ToString(), $removed.Append($rest).ToString())) {
+        if (-not (Test-ReviewRuleMatchesStayOnLines -Text $reading)) { return $null }
+        $readingHits = Get-ReviewEscapeHitLines -Text $reading -Lines $lines -KnownPaths $KnownPaths
+        if ($null -eq $readingHits) { return $null }
+        foreach ($line in $readingHits) { if (-not $escapedHits.Contains($line)) { return $null } }
+    }
+    if ((ConvertFrom-ReviewEntities -Text $escapedText) -cmatch $script:ReviewUnknownEntityPattern) { return $null }
+    return [pscustomobject]@{ Text = $escapedText; Count = $found.Count; Lines = $lines }
+}
+
+function Test-ReviewLinesCanBeWithheld {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @(), [AllowEmptyString()][string]$Body = '')
+
+    # True when withholding whole lines can remove every rejection in $Text. Each rejection must come from
+    # a path, credential or token rule: the other rules reject markup or characters whose reading the scan
+    # cannot settle (a tag spanning lines, math, a bidi control), so a review holding any fails closed.
+    # Each scan form must keep the raw text's lines (a link title spanning lines, or an encoded line
+    # break, would move text between them), and no rule match in any form may cross a line break. A label
+    # and its value on two lines (password = then a quoted value) cross one, so withholding either line
+    # alone would leave the other (Test-ReviewRuleMatchesStayOnLines).
+    $contentRules = @('absolute-root', 'profile-segment') + @(Get-ReviewRedactionRules | ForEach-Object { $_.Name })
+    # The published body adds lines around the review, and text after it can change what a rule reads (an
+    # unterminated tag on the last line is raw HTML once more text follows), so its rejections count too.
+    foreach ($scanned in @($Text, $Body)) {
+        if ([string]::IsNullOrEmpty($scanned)) { continue }
+        foreach ($hit in (Get-ReviewLocalScanHits -Text $scanned -KnownPaths $KnownPaths)) {
+            if ($hit -notmatch '^rule (\S+) ' -or $contentRules -notcontains $Matches[1]) { return $false }
+        }
+    }
+    return (Test-ReviewRuleMatchesStayOnLines -Text $Text)
 }
 
 function Get-ReviewUnpublishedNotice {

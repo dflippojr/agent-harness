@@ -378,10 +378,12 @@ which GitHub cannot render as anything the scan does not read. A note at the end
 were escaped, and the job log gives their line numbers, never the names. The result is scanned again in full, GitHub's
 rendering included. Only the spelling of a reference changes, never a finding or criterion, so a review that passes
 keeps its `agent-review` marker and verdict and the job reports `escaped_entities=N`. If it still fails only on path,
-credential and token rules, lines are withheld as above. A reference is never escaped, and the review fails closed as
-before, if its line would read as a path, credential or token with the reference removed or spelled out by name but
-not once it is escaped: the text around it may continue what it hides (`gh&ZeroWidthSpace;p_` and the rest of a
-token), and escaping it would print the pieces. A reference beside any other fail-closed rule fails closed too. The path rules never parse or
+credential and token rules, lines are withheld as above. Before escaping, the wrapper also reads the review as GitHub
+would render it, with each reference as the characters the HTML Standard gives it (the table is
+`ops/review/html5-entities.tsv`, Python's `html.entities.html5`) and with each reference removed. Every line a path,
+credential or token rule matches in either reading must still match once escaped, so it is withheld whole, and no
+match may cross a line break; the escaped span must cover exactly the raw text of the reference. Otherwise nothing is
+escaped and the review fails closed as before, as it does when another fail-closed rule matches. The path rules never parse or
 canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot hide one:
 
 - Any Windows absolute root is rejected, whatever follows it: a drive root (`C:\` or `C:/`), a UNC or extended
