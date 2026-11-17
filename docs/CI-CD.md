@@ -359,8 +359,8 @@ The wrapper, rather than a model, writes the final comment file. Before writing 
 public review body using the diagnostic redaction patterns (bearer values, named credentials, provider tokens and
 long tokens) plus two path rules. When the body fails only on those path, credential and token rules, the wrapper
 withholds each line that holds a match, whether on its own or in the scan forms of the whole review, keeping only its list,
-quote and indent markers. Any of the fail-closed rules below (markup, math, Mermaid, bidi controls, line breaks,
-unknown entities) withholds nothing. A failing line goes whole, never only the match, because a match is often a prefix that the rest of the
+quote and indent markers. Any of the fail-closed rules below (markup, math, Mermaid, bidi controls, line breaks)
+withholds nothing. A failing line goes whole, never only the match, because a match is often a prefix that the rest of the
 line continues. A note at the end of the review says how many lines were withheld, and the job log gives their numbers,
 never their text (#974). The result is scanned again in full, GitHub's rendering included. Only a result that
 passes is posted. It is incomplete, so it carries no `agent-review` marker or criteria summary. The job reports
@@ -369,7 +369,19 @@ count it and the next run reviews the whole PR again. Nothing is withheld if a r
 `password =` label and its value on two lines, or if a scan form moves text between lines. If that happens, if the
 result fails again, if no single line fails on its own, or if only formatting would be left (headings, fences, rules or bare list markers), the wrapper removes any stale output and fails closed with `Review did not complete`. Nothing of the review
 is posted or copied into the check summary. Instead it posts a short notice on the PR, with no review text and no
-`agent-review` marker, saying that the review was not published and linking the run log. The path rules never parse or
+`agent-review` marker, saying that the review was not published and linking the run log.
+
+Before any line is withheld, the wrapper escapes the entity references the `unknown-entity` rule rejects (#998). A
+review of a pull request about HTML entities quotes them, such as `&NoBreak;`, or `&amp;nbsp;`, which decodes to one.
+The raw text that spelled each reference, however it was encoded, becomes its name as plain text, `(entity: NoBreak)`,
+which GitHub cannot render as anything the scan does not read. A note at the end of the review says how many references
+were escaped, and the job log gives their line numbers, never the names. The result is scanned again in full, GitHub's
+rendering included. Only the spelling of a reference changes, never a finding or criterion, so a review that passes
+keeps its `agent-review` marker and verdict and the job reports `escaped_entities=N`. If it still fails only on path,
+credential and token rules, lines are withheld as above. A reference is never escaped, and the review fails closed as
+before, if its line would read as a path, credential or token with the reference removed or spelled out by name but
+not once it is escaped: the text around it may continue what it hides (`gh&ZeroWidthSpace;p_` and the rest of a
+token), and escaping it would print the pieces. A reference beside any other fail-closed rule fails closed too. The path rules never parse or
 canonicalize a path, so dot segments, quoting, whitespace and punctuation cannot hide one:
 
 - Any Windows absolute root is rejected, whatever follows it: a drive root (`C:\` or `C:/`), a UNC or extended
@@ -383,7 +395,7 @@ The rules run on the raw body and on what a reader would see: percent escapes, H
 parser reads them (numeric references and legacy names such as `&shy` need no semicolon, as in a raw HTML block;
 HTML5 names for ASCII punctuation such as `&sol;` and `&lsqb;`, which .NET does not decode, are decoded too; any other
 named entity with a semicolon left undecoded, such as `&fjlig;` or `&ZeroWidthSpace;`, fails closed as rule
-`unknown-entity`), characters a reader may not see (controls other than whitespace, noncharacters and Unicode's
+`unknown-entity` unless publication can escape it as described above), characters a reader may not see (controls other than whitespace, noncharacters and Unicode's
 default-ignorable code points, such as format characters, the soft hyphen and Hangul fillers), Unicode compatibility forms and Markdown backslash escapes are decoded first. Three
 approximate renderings then read markup from the raw text, so an escaped or entity-encoded bracket stays text:
 `rendered` drops the raw HTML that CommonMark passes through (tags, comments, processing instructions, declarations,
@@ -610,6 +622,12 @@ instead of Windows PowerShell 5.1, which Linux does not have, and the default la
 commit for Windows-only callers. The owner creates review-v4 at the merge commit of #806 on `main` after a dispatched
 review has passed on a Linux runner; each caller then moves its `uses` ref, `tooling_ref` and `runs_on` OS label in one
 change. Callers pin it as shown above and need no tag of their own.
+
+review-v5.1 (#998) is review-v5 plus the entity escaping in the publication scan: a review that quotes an entity
+reference the scan cannot decode is posted with the reference escaped, where review-v5 rejected the whole review. The
+caller contract is unchanged, so a caller moves its `uses` ref and `tooling_ref` from review-v5 to review-v5.1 in one
+change. review-v6 is reserved for the Python port (#993). The owner creates review-v5.1 at the merge commit of #998's
+pull request on `main` after a dispatched review has passed there.
 
 **Gate guard required check (owner step).** The `main` ruleset must require `gate-guard-target / gate-guard` next to `gate`.
 That check is the job `gate-guard-target` in `.github/workflows/gate-guard-target.yml`, which runs from `main`, so it appears

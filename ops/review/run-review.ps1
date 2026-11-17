@@ -429,6 +429,8 @@ $script:ReviewHtml5Entities = @{
 # A named entity reference the decoders leave in place. GitHub may render it as a character the scan
 # never sees (&fjlig; is two letters, &ZeroWidthSpace; an invisible split), so it fails closed.
 $script:ReviewUnknownEntityPattern = '&[A-Za-z][A-Za-z0-9]*;'
+# What a review shows in place of such a reference once publication escapes it (#998): its name as text.
+$script:ReviewEscapedEntityFormat = '(entity: {0})'
 # HTML5 decodes these names even without a semicolon (gh&shyp_ is gh, a soft hyphen, p_), longest first.
 $script:ReviewLegacyEntities = @(
     'AElig AMP Aacute Acirc Agrave Aring Atilde Auml COPY Ccedil ETH Eacute Ecirc Egrave Euml GT Iacute Icirc Igrave',
@@ -498,6 +500,37 @@ function Get-ReviewNamedEntityText {
     return $null
 }
 
+# One character reference as an HTML5 parser reads text: a numeric reference, or a name with or without
+# its semicolon.
+$script:ReviewCharacterReferencePattern = '&(?:#(?:[xX](?<hex>[0-9A-Fa-f]+)|(?<dec>[0-9]+));?|(?<name>[A-Za-z][A-Za-z0-9]*)(?<semi>;)?)'
+
+function ConvertFrom-ReviewCharacterReference {
+    param([Parameter(Mandatory = $true)][System.Text.RegularExpressions.Match]$Match)
+
+    # The text one match of ReviewCharacterReferencePattern decodes to (ConvertFrom-ReviewEntities).
+    $name = $Match.Groups['name'].Value
+    if ($name) {
+        if ($Match.Groups['semi'].Success) {
+            $entity = Get-ReviewNamedEntityText -Name $name
+            if ($null -ne $entity) { return $entity }
+            return $Match.Value
+        }
+        foreach ($legacy in $script:ReviewLegacyEntities) {
+            if ($name.StartsWith($legacy, [StringComparison]::Ordinal)) {
+                return (Get-ReviewNamedEntityText -Name $legacy) + $name.Substring($legacy.Length)
+            }
+        }
+        return $Match.Value
+    }
+    $digits, $base = if ($Match.Groups['hex'].Success) { $Match.Groups['hex'].Value, 16 } else { $Match.Groups['dec'].Value, 10 }
+    $digits = $digits.TrimStart('0')
+    # Zero, surrogates and values past U+10FFFF decode to the replacement character.
+    $code = if (-not $digits) { 0 } elseif ($digits.Length -gt 7) { 0x110000 } else { [Convert]::ToInt32($digits, $base) }
+    if ($code -eq 0 -or $code -gt 0x10FFFF -or ($code -ge 0xD800 -and $code -le 0xDFFF)) { return [string][char]0xFFFD }
+    if ($script:ReviewC1References.ContainsKey($code)) { $code = $script:ReviewC1References[$code] }
+    return [char]::ConvertFromUtf32($code)
+}
+
 function ConvertFrom-ReviewEntities {
     param([AllowEmptyString()][string]$Text)
 
@@ -505,31 +538,52 @@ function ConvertFrom-ReviewEntities {
     # references and legacy names need no semicolon, so a raw HTML block can spell gh&#112_ or
     # gh&shyp_. A named reference with a semicolon that the scan does not know stays for the
     # unknown-entity rule. An ampersand that starts no reference (AT&T) stays as it is.
-    $pattern = '&(?:#(?:[xX](?<hex>[0-9A-Fa-f]+)|(?<dec>[0-9]+));?|(?<name>[A-Za-z][A-Za-z0-9]*)(?<semi>;)?)'
-    return [regex]::Replace([Uri]::UnescapeDataString($Text), $pattern, {
+    return [regex]::Replace([Uri]::UnescapeDataString($Text), $script:ReviewCharacterReferencePattern, {
             param($match)
-            $name = $match.Groups['name'].Value
-            if ($name) {
-                if ($match.Groups['semi'].Success) {
-                    $entity = Get-ReviewNamedEntityText -Name $name
-                    if ($null -ne $entity) { return $entity }
-                    return $match.Value
-                }
-                foreach ($legacy in $script:ReviewLegacyEntities) {
-                    if ($name.StartsWith($legacy, [StringComparison]::Ordinal)) {
-                        return (Get-ReviewNamedEntityText -Name $legacy) + $name.Substring($legacy.Length)
-                    }
-                }
-                return $match.Value
-            }
-            $digits, $base = if ($match.Groups['hex'].Success) { $match.Groups['hex'].Value, 16 } else { $match.Groups['dec'].Value, 10 }
-            $digits = $digits.TrimStart('0')
-            # Zero, surrogates and values past U+10FFFF decode to the replacement character.
-            $code = if (-not $digits) { 0 } elseif ($digits.Length -gt 7) { 0x110000 } else { [Convert]::ToInt32($digits, $base) }
-            if ($code -eq 0 -or $code -gt 0x10FFFF -or ($code -ge 0xD800 -and $code -le 0xDFFF)) { return [string][char]0xFFFD }
-            if ($script:ReviewC1References.ContainsKey($code)) { $code = $script:ReviewC1References[$code] }
-            return [char]::ConvertFromUtf32($code)
+            ConvertFrom-ReviewCharacterReference -Match $match
         })
+}
+
+function Get-ReviewEntityDecodedMap {
+    param([AllowEmptyString()][string]$Text)
+
+    # ConvertFrom-ReviewEntities, with the raw span each decoded character came from (#998): Starts[i] and
+    # Ends[i] bound the raw text that decoded character i was spelled with. Percent escapes are decoded one
+    # run at a time and each reference as a whole, so every character of a run or reference maps to all of
+    # it. The result is checked against ConvertFrom-ReviewEntities itself; $null when the two differ, so a
+    # caller never acts on a map that does not describe what the scan read.
+    $starts = New-Object System.Collections.Generic.List[int]
+    $ends = New-Object System.Collections.Generic.List[int]
+    $builder = New-Object System.Text.StringBuilder
+    $position = 0
+    foreach ($run in [regex]::Matches($Text, '(?:%[0-9A-Fa-f]{2})+')) {
+        for ($i = $position; $i -lt $run.Index; $i++) { [void]$builder.Append($Text[$i]); $starts.Add($i); $ends.Add($i + 1) }
+        foreach ($character in [Uri]::UnescapeDataString($run.Value).ToCharArray()) {
+            [void]$builder.Append($character); $starts.Add($run.Index); $ends.Add($run.Index + $run.Length)
+        }
+        $position = $run.Index + $run.Length
+    }
+    for ($i = $position; $i -lt $Text.Length; $i++) { [void]$builder.Append($Text[$i]); $starts.Add($i); $ends.Add($i + 1) }
+    $unescaped = $builder.ToString()
+    if ($unescaped -cne [Uri]::UnescapeDataString($Text)) { return $null }
+
+    $decodedStarts = New-Object System.Collections.Generic.List[int]
+    $decodedEnds = New-Object System.Collections.Generic.List[int]
+    $builder = New-Object System.Text.StringBuilder
+    $position = 0
+    foreach ($reference in [regex]::Matches($unescaped, $script:ReviewCharacterReferencePattern)) {
+        for ($i = $position; $i -lt $reference.Index; $i++) { [void]$builder.Append($unescaped[$i]); $decodedStarts.Add($starts[$i]); $decodedEnds.Add($ends[$i]) }
+        $start = $starts[$reference.Index]
+        $end = $ends[$reference.Index + $reference.Length - 1]
+        foreach ($character in (ConvertFrom-ReviewCharacterReference -Match $reference).ToCharArray()) {
+            [void]$builder.Append($character); $decodedStarts.Add($start); $decodedEnds.Add($end)
+        }
+        $position = $reference.Index + $reference.Length
+    }
+    for ($i = $position; $i -lt $unescaped.Length; $i++) { [void]$builder.Append($unescaped[$i]); $decodedStarts.Add($starts[$i]); $decodedEnds.Add($ends[$i]) }
+    $decoded = $builder.ToString()
+    if ($decoded -cne (ConvertFrom-ReviewEntities -Text $Text)) { return $null }
+    return [pscustomobject]@{ Text = $decoded; Starts = $decodedStarts.ToArray(); Ends = $decodedEnds.ToArray() }
 }
 
 function Get-ReviewScanForms {
@@ -3007,6 +3061,55 @@ function Get-ReviewWithheldOutput {
     return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $keptCount }
 }
 
+function Get-ReviewEscapedEntityOutput {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+
+    # $Text with each named reference the unknown-entity rule rejects rewritten as plain text (#998). A
+    # review of a pull request about HTML entities quotes them (`&NoBreak;`, or `&amp;nbsp;`, which decodes
+    # to one), and GitHub may render such a reference as characters the scan never sees, so the rule
+    # rejects it. Escaped, the raw text that spelled the reference becomes (entity: NoBreak), which every
+    # form reads as it is, so nothing is left for GitHub to render differently. Returns the text, the
+    # count, and the line numbers that held one; Count is 0 when nothing matched. Returns $null, so the
+    # caller fails closed as before, when the scan's decoding cannot be mapped back to the raw text, or when
+    # a line would read as a path, credential or token with a reference removed or spelled out (the text
+    # around it may continue what it hides: gh&ZeroWidthSpace;p_) but not once it is escaped, which would
+    # print the pieces. A line that fails those rules escaped is withheld whole afterwards (#974).
+    $map = Get-ReviewEntityDecodedMap -Text $Text
+    if ($null -eq $map) { return $null }
+    $found = [regex]::Matches($map.Text, $script:ReviewUnknownEntityPattern)
+    if ($found.Count -eq 0) { return [pscustomobject]@{ Text = $Text; Count = 0; Lines = @() } }
+    $escaped = New-Object System.Text.StringBuilder
+    $joined = New-Object System.Text.StringBuilder
+    $named = New-Object System.Text.StringBuilder
+    $lineNumbers = New-Object System.Collections.Generic.SortedSet[int]
+    $position = 0
+    foreach ($reference in $found) {
+        $start = $map.Starts[$reference.Index]
+        $end = $map.Ends[$reference.Index + $reference.Length - 1]
+        # One raw span spelling two references, or a reference spelled across a line, is not escaped.
+        if ($start -lt $position -or $Text.Substring($start, $end - $start).Contains("`n")) { return $null }
+        $name = $reference.Value.Substring(1, $reference.Length - 2)
+        $before = $Text.Substring($position, $start - $position)
+        [void]$escaped.Append($before).Append($script:ReviewEscapedEntityFormat -f $name)
+        [void]$joined.Append($before)
+        [void]$named.Append($before).Append($name)
+        [void]$lineNumbers.Add($Text.Substring(0, $start).Split("`n").Count)
+        $position = $end
+    }
+    $rest = $Text.Substring($position)
+    $escapedText = $escaped.Append($rest).ToString()
+    $escapedLines = @($escapedText -split "`n")
+    $joinedLines = @($joined.Append($rest).ToString() -split "`n")
+    $namedLines = @($named.Append($rest).ToString() -split "`n")
+    foreach ($number in $lineNumbers) {
+        $index = $number - 1
+        $probeHits = @(Get-ReviewRuleHits -Text $joinedLines[$index] -KnownPaths $KnownPaths) + @(Get-ReviewRuleHits -Text $namedLines[$index] -KnownPaths $KnownPaths)
+        if ($probeHits.Count -gt 0 -and @(Get-ReviewRuleHits -Text $escapedLines[$index] -KnownPaths $KnownPaths).Count -eq 0) { return $null }
+    }
+    if ((ConvertFrom-ReviewEntities -Text $escapedText) -cmatch $script:ReviewUnknownEntityPattern) { return $null }
+    return [pscustomobject]@{ Text = $escapedText; Count = $found.Count; Lines = @($lineNumbers) }
+}
+
 function Test-ReviewLinesCanBeWithheld {
     param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @(), [AllowEmptyString()][string]$Body = '')
 
@@ -3137,7 +3240,10 @@ function Write-ReviewResult {
     $output = Remove-ReviewSuppliedMarkers -Text $Result.Output
     if ($output -cne $Result.Output) { Write-Host 'Removed review markers from the review text; only the job writes them.' }
     $output = $output.Trim()
-    if ($WithholdUnsafeLines) { $Result | Add-Member -NotePropertyName WithheldLines -NotePropertyValue 0 -Force }
+    if ($WithholdUnsafeLines) {
+        $Result | Add-Member -NotePropertyName WithheldLines -NotePropertyValue 0 -Force
+        $Result | Add-Member -NotePropertyName EscapedEntities -NotePropertyValue 0 -Force
+    }
     $body = $format -f $CoverageLine.Trim(), $output, $label
     try {
         Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
@@ -3145,6 +3251,28 @@ function Write-ReviewResult {
         if (-not $WithholdUnsafeLines -or $_.Exception.Message -ne $script:ReviewPublicationFailure) { throw }
         $knownPaths = @()
         if ($Workspace -or $DiffPaths.Count -gt 0) { $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths) }
+        # Entity references the scan cannot decode are escaped as plain text first (#998). Only their spelling
+        # changes, never a finding or criterion, so a review that then passes keeps its marker and verdict.
+        $escapedNote = ''
+        $escape = Get-ReviewEscapedEntityOutput -Text $output -KnownPaths $knownPaths
+        if ($null -ne $escape -and $escape.Count -gt 0) {
+            $references = $(if ($escape.Count -eq 1) { '1 entity reference' } else { "$($escape.Count) entity references" })
+            $where = $(if ($escape.Lines.Count -eq 1) { "line $($escape.Lines[0])" } else { "lines $($escape.Lines -join ', ')" })
+            Write-Host "Publication safety scan: escaped $references ($where) as plain text; scanning the review again."
+            $output = $escape.Text
+            $escapedNote = "`n`n_The publication safety scan escaped $references in this review as plain text, shown as (entity: name), because GitHub could render them as characters the scan cannot check._"
+            $Result | Add-Member -NotePropertyName EscapedEntities -NotePropertyValue $escape.Count -Force
+            $body = $format -f $CoverageLine.Trim(), "$output$escapedNote", $label
+            try {
+                Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+                Write-Host "Publication safety scan: the review passed with $references escaped and is posted with its marker."
+                $body += $marker
+                $body | Out-File -LiteralPath $OutputPath -Encoding utf8
+                return
+            } catch {
+                if ($_.Exception.Message -ne $script:ReviewPublicationFailure) { throw }
+            }
+        }
         if (-not (Test-ReviewLinesCanBeWithheld -Text $output -KnownPaths $knownPaths -Body $body)) {
             Write-Warning 'Publication safety scan: a rejection is not a path, credential or token on one line, so no line can be withheld.'
             throw
@@ -3167,7 +3295,7 @@ function Write-ReviewResult {
         }
         Write-Host "Publication safety scan: withheld $described; scanning the rest again."
         $note = $(if ($count -eq 1) { '1 line' } else { "$count lines" })
-        $output = "$($withheld.Text)`n`n_The publication safety scan withheld $note of this review that held text it never posts, such as an absolute path, a credential or a long token. The workflow run log gives the line numbers. With lines withheld this review is incomplete, so it carries no review marker and readiness tools do not count it._"
+        $output = "$($withheld.Text)$escapedNote`n`n_The publication safety scan withheld $note of this review that held text it never posts, such as an absolute path, a credential or a long token. The workflow run log gives the line numbers. With lines withheld this review is incomplete, so it carries no review marker and readiness tools do not count it._"
         $body = $format -f $CoverageLine.Trim(), $output, $label
         Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
         Write-Host "Publication safety scan: the rest of the review passed and is posted with $note withheld, as incomplete and without its marker."
@@ -3245,6 +3373,8 @@ function Invoke-ReviewMain {
             $verdictValue = 'incomplete'
             "withheld_lines=$withheldLines" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         }
+        $escapedEntities = if ($result.PSObject.Properties['EscapedEntities']) { [int]$result.EscapedEntities } else { 0 }
+        if ($escapedEntities -gt 0) { "escaped_entities=$escapedEntities" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8 }
         $findingValue = if ($result.PSObject.Properties['FindingCount']) { [string]$result.FindingCount } else { '' }
         "verdict=$verdictValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "findings=$findingValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
