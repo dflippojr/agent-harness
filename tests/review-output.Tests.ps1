@@ -886,6 +886,107 @@ Describe 'Withholding unsafe review lines (#974)' {
     }
 }
 
+Describe 'Escaping entity references the scan cannot decode (#998)' {
+    BeforeEach {
+        . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
+        $script:reviewOutputPath = Join-Path $TestDrive 'review-output.md'
+        Mock Invoke-ReviewMarkdownRender { '<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }
+    }
+
+    It 'publishes a review that quotes an entity reference, with the reference escaped (<Case>)' -TestCases @(
+        # A review of a pull request about HTML entities quotes them: the personal-website run matched one of
+        # nine characters in the decoded form.
+        @{ Case = 'unknown name in a code span'; Quote = '`&NoBreak;`'; Escaped = '`(entity: NoBreak)`'; Name = 'NoBreak' }
+        @{ Case = 'double-encoded name in a code span'; Quote = '`&amp;nbsp;`'; Escaped = '`(entity: nbsp)`'; Name = 'nbsp' }
+        @{ Case = 'unknown name in plain text'; Quote = 'the &ZeroWidthSpace; reference'; Escaped = 'the (entity: ZeroWidthSpace) reference'; Name = 'ZeroWidthSpace' }
+        @{ Case = 'percent-encoded'; Quote = 'x %26fjlig%3B y'; Escaped = 'x (entity: fjlig) y'; Name = 'fjlig' }
+        @{ Case = 'spelled with numeric references'; Quote = 'x &#38;fjlig&#59; y'; Escaped = 'x (entity: fjlig) y'; Name = 'fjlig' }
+    ) {
+        param($Case, $Quote, $Escaped, $Name)
+        $review = "## Findings`n- index.html:1: the page uses $Quote where a plain space would do.`n- index.html:2: a second finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review; Verdict = 'findings'; FindingCount = 2; CriteriaMet = 1; CriteriaTotal = 1 }
+        # Without the switch the text is still rejected as it stands: what the scan blocks is unchanged.
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WarningAction SilentlyContinue }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -notlike 'Review did not complete*') { throw 'The review was published without escaping' }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -BaseRef 'main' -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if (-not $body.Contains("- index.html:1: the page uses $Escaped where a plain space would do.")) { throw "Reference not escaped in place: $body" }
+        if (-not $body.Contains('- index.html:2: a second finding.')) { throw "Finding lost: $body" }
+        if ((ConvertFrom-ReviewEntities -Text $body) -cmatch $script:ReviewUnknownEntityPattern) { throw "An entity reference was published: $body" }
+        if (-not $body.Contains('escaped 1 entity reference')) { throw "No note says a reference was escaped: $body" }
+        # Only entity spelling changed, never a finding or criterion, so the review stays complete: marker and summary kept.
+        if ((Get-ReviewMarkerShaFromBody -Body $body) -ne ('a' * 40)) { throw "The review marker was dropped: $body" }
+        if (-not $body.Contains('criteria=1/1 findings=2')) { throw "The criteria summary was dropped: $body" }
+        if ($result.WithheldLines -ne 0) { throw 'Lines were counted as withheld' }
+        if ($result.EscapedEntities -ne 1) { throw 'The escaped reference count was not recorded' }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'escaped 1 entity reference \(line 2\)' -or $log.Contains($Name)) { throw "Unexpected log: $log" }
+        # GitHub's renderer only ever sees the escaped body.
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly
+    }
+
+    It 'escapes every reference on a line and counts them' {
+        $review = "## Findings`n- a.html:1: replace ``&amp;hellip;`` and ``&NoBreak;`` with text.`n- a.html:2: and &fjlig; too."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if (-not $body.Contains('- a.html:1: replace `(entity: hellip)` and `(entity: NoBreak)` with text.')) { throw "Unexpected body: $body" }
+        if (-not $body.Contains('- a.html:2: and (entity: fjlig) too.') -or -not $body.Contains('escaped 3 entity references')) { throw "Unexpected body: $body" }
+        if ($result.EscapedEntities -ne 3) { throw 'The escaped reference count was not recorded' }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'escaped 3 entity references \(lines 2, 3\)') { throw "Unexpected log: $log" }
+    }
+
+    It 'withholds a line whose escaped reference still fails a token rule, as an incomplete review' {
+        # The entity name itself is a long token once it is plain text, so its line goes as in #974.
+        $token = 'a1' * 24
+        $review = "## Findings`n- a.html:1: quotes &$token; here.`n- a.html:2: a safe finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains($token) -or -not $body.Contains('- (line withheld by the publication safety scan)')) { throw "Unexpected body: $body" }
+        if (-not $body.Contains('- a.html:2: a safe finding.') -or $body.Contains('agent-review')) { throw "Unexpected body: $body" }
+        if ($result.WithheldLines -ne 1) { throw 'The withheld line count was not recorded' }
+    }
+
+    It 'never escapes a reference whose removal would join a path, credential or token (<Payload>)' -TestCases @(
+        # GitHub may render the reference as nothing or as letters, so the text around it may be one token or
+        # path; escaping would print its pieces. The line fails closed or goes whole, never with the rest shown.
+        @{ Payload = 'gh&ZeroWidthSpace;p_synthetic12345678'; Secret = 'p_synthetic12345678' }
+        @{ Payload = 'gh&amp;ZeroWidthSpace;p_synthetic12345678'; Secret = 'p_synthetic12345678' }
+        @{ Payload = 'gh%26ZeroWidthSpace%3Bp_synthetic12345678'; Secret = 'p_synthetic12345678' }
+        @{ Payload = 'ghp_ab&fjlig;12345678'; Secret = '12345678' }
+        @{ Payload = 'in /ho&ZeroWidthSpace;me/reviewer/auth.json'; Secret = 'reviewer' }
+        @{ Payload = 'see C&NegativeThinSpace;:/temp/config.py'; Secret = 'temp/config' }
+        @{ Payload = (('a1' * 12) + '&fjlig;' + ('b2' * 12)); Secret = ('b2' * 12) }
+    ) {
+        param($Payload, $Secret)
+        $review = "## Findings`n- a.py:1: $Payload is quoted.`n- a.py:2: a safe finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { if ($_.Exception.Message -ne 'Review did not complete: output failed the publication safety scan.') { throw } }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) {
+            $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+            if ($body.Contains($Secret) -or $body.Contains('(entity:')) { throw "Pieces of a joined value were published: $body" }
+        }
+    }
+
+    It 'still fails closed when another fail-closed rule matches beside a reference' -TestCases @(
+        @{ Review = "- a.html:1: quotes &NoBreak; here.`n- a.html:2: x &#x202E; y" }
+        @{ Review = "- a.html:1: quotes &NoBreak; here <b`ntitle=x>.`n- a.html:2: a safe finding." }
+    ) {
+        param($Review)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+    }
+}
+
 # A stand-in gh only; no GitHub calls.
 Describe 'GitHub''s renderer call (#767)' {
     BeforeAll {
