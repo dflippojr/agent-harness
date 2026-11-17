@@ -973,6 +973,36 @@ Describe 'Escaping entity references the scan cannot decode (#998)' {
         }
     }
 
+    It 'keeps encoded text beside a reference when it escapes it' {
+        $review = "## Findings`n- a.html:1: x%20%26NoBreak%3B%20y here.`n- a.html:2: a safe finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if (-not $body.Contains('- a.html:1: x%20(entity: NoBreak)%20y here.')) { throw "Text beside the reference changed: $body" }
+    }
+
+    It 'maps each decoded character to the raw text that spelled it' {
+        $map = Get-ReviewEntityDecodedMap -Text 'a%3D%26b%C3%A9&#59;c'
+        if ($map.Text -cne ('a=&b' + [char]0xE9 + ';c')) { throw "Unexpected text: $($map.Text)" }
+        if (($map.Starts -join ',') -ne '0,1,4,7,8,14,19' -or ($map.Ends -join ',') -ne '1,4,7,8,14,19,20') { throw "Unexpected spans: $($map.Starts -join ',') / $($map.Ends -join ',')" }
+    }
+
+    It 'entity-escape hardening: never publishes the value (<Case>)' -TestCases @(
+        @{ Case = 'shape 1'; Review = "- a.py:1: password%3D%26NoBreak%3Bsynthetic-value-1 is quoted.`n- a.py:2: a safe finding."; Secret = 'synthetic-value-1' }
+        @{ Case = 'shape 2'; Review = "- a.py:1: password=&NoBreak;`n  synthetic-value-1`n- a.py:2: a safe finding."; Secret = 'synthetic-value-1' }
+        @{ Case = 'shape 3'; Review = "- a.py:1: Bearer&ThickSpace;synthetic-value-1 is quoted.`n- a.py:2: a safe finding."; Secret = 'synthetic-value-1' }
+        @{ Case = 'shape 4'; Review = "- a.py:1: g&hopf;p_synthetic12345678 is quoted.`n- a.py:2: a safe finding."; Secret = 'synthetic12345678' }
+    ) {
+        param($Case, $Review, $Secret)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { if ($_.Exception.Message -ne 'Review did not complete: output failed the publication safety scan.') { throw } }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) {
+            $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+            if ($body.Contains($Secret)) { throw "The value was published: $body" }
+        }
+    }
+
     It 'still fails closed when another fail-closed rule matches beside a reference' -TestCases @(
         @{ Review = "- a.html:1: quotes &NoBreak; here.`n- a.html:2: x &#x202E; y" }
         @{ Review = "- a.html:1: quotes &NoBreak; here <b`ntitle=x>.`n- a.html:2: a safe finding." }
