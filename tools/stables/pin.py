@@ -4,12 +4,14 @@ Stables, the browser client, lives in dflippojr/stables. This directory records 
 
 - `pin.json`: the repository, tag and commit. The tower deploy (`ops/harness/deploy-ci.ps1`) serves that commit, and
   the Playwright journeys (`tools/ui-tests`) run against it.
-- `api-calls.json`: every `api(...)` call in that release's `public/`, plus its browser storage keys. The
-  management-parity test (`tests/test_management_parity.py`) reads it instead of the client's source.
+- `api-calls.json`: every `api(...)` call in that release's `public/`, plus its browser storage keys and build id.
+  The management-parity test (`tests/test_management_parity.py`) reads it instead of the client's source.
+- `harness/compat.py`'s `WEB_BUILD_ID`: the release's build id, which the Server advertises (#996). Pinning writes
+  it, so a re-pin can't leave it stale.
 
     python tools/stables/pin.py <stables checkout>           pin the checkout's tagged commit
     python tools/stables/pin.py --check <stables checkout>   fail unless the checkout is the pinned commit and the
-                                                             call list matches it
+                                                             call list and compat.py's build id match it
 """
 
 from __future__ import annotations
@@ -23,7 +25,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PIN = HERE / "pin.json"
 CALLS = HERE / "api-calls.json"
+COMPAT = HERE.parents[1] / "harness" / "compat.py"
 REPOSITORY = "dflippojr/stables"
+# A build id goes into a Python string literal in compat.py, so it is only ever a plain dotted id: a date build
+# (2026.10.10.1) or a release version (0.1.3).
+BUILD_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+-]{0,63}")
+_COMPAT_BUILD_ID = re.compile(rb'^(WEB_BUILD_ID = ")([^"\r\n]*)(")', re.M)
 
 
 def _skip_string(text: str, i: int) -> int:
@@ -162,15 +169,36 @@ def _dump(value: dict) -> str:
     return json.dumps(value, indent=2) + "\n"
 
 
+def _compat_build_id(text: bytes) -> str | None:
+    """compat.py's WEB_BUILD_ID, or None when the file has no single such line."""
+    found = _COMPAT_BUILD_ID.findall(text)
+    return found[0][1].decode("utf-8") if len(found) == 1 else None
+
+
+def _with_build_id(text: bytes, build_id: str | None) -> bytes:
+    """compat.py's bytes with WEB_BUILD_ID set to `build_id`; every other byte, line endings included, unchanged."""
+    if not build_id:
+        raise SystemExit("the release has no WEB_BUILD_ID in public/client.mjs")
+    if not BUILD_ID.fullmatch(build_id):
+        raise SystemExit(f"the release's WEB_BUILD_ID {build_id!r} is not a build id (like 2026.10.10.1 or 0.1.3)")
+    if _compat_build_id(text) is None:
+        raise SystemExit(f"{COMPAT} needs exactly one line WEB_BUILD_ID = \"...\" for pin.py to write")
+    return _COMPAT_BUILD_ID.sub(lambda m: m[1] + build_id.encode("ascii") + m[3], text)
+
+
 def pin(checkout: Path) -> dict:
-    """Pin the checkout's commit, which must carry a release tag."""
+    """Pin the checkout's commit, which must carry a release tag, and write its build id into compat.py. Nothing is
+    written unless all three files can be."""
     commit = _git(checkout, "rev-parse", "HEAD")
     tags = sorted(t for t in _git(checkout, "tag", "--points-at", "HEAD").split() if re.fullmatch(r"v\d+\.\d+\.\d+", t))
     if not tags:
         raise SystemExit(f"{checkout} is not at a release tag (vX.Y.Z); tag the release first")
     record = {"repository": REPOSITORY, "tag": tags[-1], "commit": commit}
+    calls = call_list(checkout)
+    compat = _with_build_id(COMPAT.read_bytes(), calls["build_id"])
     PIN.write_text(_dump(record), encoding="utf-8", newline="\n")
-    CALLS.write_text(_dump(call_list(checkout)), encoding="utf-8", newline="\n")
+    CALLS.write_text(_dump(calls), encoding="utf-8", newline="\n")
+    COMPAT.write_bytes(compat)
     return record
 
 
@@ -181,8 +209,13 @@ def check(checkout: Path) -> list[str]:
     commit = _git(checkout, "rev-parse", "HEAD")
     if commit != pinned["commit"]:
         problems.append(f"{checkout} is at {commit}, but pin.json pins {pinned['tag']} at {pinned['commit']}")
-    if CALLS.read_text(encoding="utf-8") != _dump(call_list(checkout)):
+    calls = call_list(checkout)
+    if CALLS.read_text(encoding="utf-8") != _dump(calls):
         problems.append("api-calls.json does not match the checkout: run python tools/stables/pin.py <checkout>")
+    compat = _compat_build_id(COMPAT.read_bytes())
+    if compat != calls["build_id"]:
+        problems.append(f"compat.py's WEB_BUILD_ID is {compat}, but the release's is {calls['build_id']}: "
+                        "run python tools/stables/pin.py <checkout>")
     return problems
 
 

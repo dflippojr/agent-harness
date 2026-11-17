@@ -449,4 +449,4 @@ def test_server_advertises_the_pinned_stables_build():
     """The Server's compatibility answer names the build of the Stables release it serves (tools/stables/pin.json).
     Stables checks its own side (client.mjs and sw.js share the id) in its tests/client_contracts.mjs."""
     from stables_pin import FACTS
-    assert FACTS["build_id"] == compat.WEB_BUILD_ID
+    assert FACTS["build_id"] == compat.WEB_BUILD_ID, "re-pin with python tools/stables/pin.py <checkout> (#996)"

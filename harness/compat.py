@@ -13,6 +13,8 @@ import re
 
 RELEASE = "0.9.0"
 BUILD_ID = os.environ.get("HARNESS_BUILD_ID", "2026.09.17.1")
+# The pinned Stables release's build id. tools/stables/pin.py writes it with tools/stables/api-calls.json (#996);
+# a test fails when the two differ, so re-pin rather than edit it here.
 WEB_BUILD_ID = "2026.10.10.1"
 MAC_CLIENT_VERSION = "4.3"
 
