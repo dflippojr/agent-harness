@@ -2345,13 +2345,12 @@ def test_review_script_escapes_a_quoted_entity_reference_and_posts_a_complete_re
 
 def test_review_html5_entity_table_matches_the_html_standard_names():
     """#998: escaping reads each named reference as the characters HTML5 renders it as. The table it loads is
-    Python's html.entities.html5 (the HTML Standard's names), one `name<TAB>hex code points` line per name."""
+    Python's html.entities.html5 (the HTML Standard's names), one `name<TAB>hex code points` line per name: with its
+    semicolon, or without one for the legacy names HTML5 also decodes as a prefix."""
     import html.entities
 
     expected = "".join(
-        f"{name[:-1]}\t{' '.join(f'{ord(c):X}' for c in text)}\n"
-        for name, text in sorted(html.entities.html5.items())
-        if name.endswith(";")
+        f"{name}\t{' '.join(f'{ord(c):X}' for c in text)}\n" for name, text in sorted(html.entities.html5.items())
     )
     table = ROOT / "ops" / "review" / "html5-entities.tsv"
     assert table.read_bytes().decode("ascii") == expected

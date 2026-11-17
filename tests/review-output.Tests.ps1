@@ -992,6 +992,8 @@ Describe 'Escaping entity references the scan cannot decode (#998)' {
         @{ Case = 'shape 2'; Review = "- a.py:1: password=&NoBreak;`n  synthetic-value-1`n- a.py:2: a safe finding."; Secret = 'synthetic-value-1' }
         @{ Case = 'shape 3'; Review = "- a.py:1: Bearer&ThickSpace;synthetic-value-1 is quoted.`n- a.py:2: a safe finding."; Secret = 'synthetic-value-1' }
         @{ Case = 'shape 4'; Review = "- a.py:1: g&hopf;p_synthetic12345678 is quoted.`n- a.py:2: a safe finding."; Secret = 'synthetic12345678' }
+        @{ Case = 'shape 5'; Review = "- a.py:1: a finding.`n<div>`nBearer&nbspsyntheticvalue1; is quoted.`n</div>`n- a.py:2: a safe finding."; Secret = 'syntheticvalue1' }
+        @{ Case = 'shape 6'; Review = "- a.py:1: password=&nbspsyntheticvalue1; is quoted.`n- a.py:2: a safe finding."; Secret = 'syntheticvalue1' }
     ) {
         param($Case, $Review, $Secret)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
@@ -1006,6 +1008,8 @@ Describe 'Escaping entity references the scan cannot decode (#998)' {
     It 'still fails closed when another fail-closed rule matches beside a reference' -TestCases @(
         @{ Review = "- a.html:1: quotes &NoBreak; here.`n- a.html:2: x &#x202E; y" }
         @{ Review = "- a.html:1: quotes &NoBreak; here <b`ntitle=x>.`n- a.html:2: a safe finding." }
+        # Escaping must not change whether another rule rejects the text: here it would end the tag.
+        @{ Review = "- a.html:1: quotes <b title=&NoBreak;x`nclass=y>text</b> here.`n- a.html:2: a safe finding." }
     ) {
         param($Review)
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
