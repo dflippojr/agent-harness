@@ -492,6 +492,8 @@ def test_the_wheels_install_and_run_the_server_without_the_checkout(built, tmp_p
         assert server.get("/")[0] == 404  # no Stables: the API runs alone
         assert server.json("/api/v1")["server"] == "agent-harness"
         assert "workspaces" in server.json("/maintenance")
+        # The installed CLI finds this install's port (not 8100) and local token by itself (the review of #1001).
+        assert env.run(env.script("harness"), "list").returncode == 0
         paths = set(server.json("/openapi.json")["paths"])
         assert paths and not paths & _module_paths()
         for path in ("/jobs", "/mac-client/install.sh", "/api/admin/v1/hub"):
