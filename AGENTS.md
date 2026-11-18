@@ -28,6 +28,7 @@ replace its own judge. Require both checks, `gate` and `gate-guard-target / gate
 | `review-linux` | On Linux with `pwsh` 7.5+ and Pester 5 on PATH, after installing `requirements.txt`, `requirements-repomap.txt` and `requirements-telemetry.txt`: `REVIEW_TESTS_REQUIRE_PWSH=1 python -m pytest tests/test_review_runner.py tests/test_runner_install.py -q -rs -p no:cacheprovider`. |
 | `unix-installers` | On Linux or macOS with bash, after installing `requirements.txt`, `requirements-repomap.txt` and `requirements-telemetry.txt`: `python -m pytest tests/test_unix_installers.py -q -rs -p no:cacheprovider`. |
 | `deploy-linux` | On Linux with `pwsh` 7 on PATH: `python -m pytest tests/test_deploy_ci_linux.py -q -p no:xdist --noconftest`. The module skips elsewhere. |
+| `server-image` | With Docker: `docker build -t agent-harness-server .`, then `python scripts/server_image_smoke.py agent-harness-server`. |
 | `sonar` | CI only (SonarCloud). On a PR, list its new issues at `https://sonarcloud.io/api/issues/search?componentKeys=dflippojr_agent-harness&pullRequest=<PR>&resolved=false`. |
 | `changes`, `gate` | CI only (`scripts/ci_gate.py`). A change touching only the files in `CI_SKIP_UNREAD_PATHS` skips the test jobs, and `gate` still passes. |
 

@@ -12,6 +12,7 @@ name: CI
 #   ui-tests  - Playwright journeys of the pinned Stables release (tools/stables/pin.json) against a fake-model Server
 #   hub-contract - the pinned Hub's (dflippojr/agent-harness-hub) contract suite against this daemon in fake-model mode
 #   deploy-linux - the tower's Linux deployment path (deploy-ci.ps1 under pwsh, run-daemon.sh) on Linux (#812)
+#   server-image - builds the Server image (Dockerfile) and checks a container started from it (#334)
 #   lint      - ruff, and pyright against tools/lint/pyright-baseline.json; runs on every change
 #   changes   - lists the changed files; the test jobs skip when every one is on the skip list
 #   gate-guard - the shared gate guard (dflippojr/.github) on pull requests: an early signal, not the judge (#727)
@@ -31,8 +32,8 @@ name: CI
 # The workflow always runs, so `gate` always reports and a ruleset can require it
 # (#726, dflippojr/agent-ops#48). The docs-only skip lives in the `changes` job:
 # CI_SKIP_UNREAD_PATHS is an allow-list of files no pytest currently reads, and
-# `test`, `test-linux`, `test-py313`, `review-linux`, `openapi`, `ui-tests`, `hub-contract` and `deploy-linux` skip only
-# when every changed file is on it.
+# `test`, `test-linux`, `test-py313`, `review-linux`, `openapi`, `ui-tests`, `hub-contract`, `deploy-linux` and
+# `server-image` skip only when every changed file is on it.
 # Entries are exact paths, not globs. Do not add `**.md` or `docs/**`: README.md and docs/web.md, control-center.md,
 # INSTALL.md, admin-api.md, app-api.md, mac-client.md, and service-profile.md
 # are asserted by tests/test_product_naming.py, which also reads every tracked docs/*.md its history regex doesn't
@@ -520,6 +521,27 @@ jobs:
       - name: Linux deployment tests
         run: python -m pytest tests/test_deploy_ci_linux.py -v -p no:xdist --noconftest
 
+  server-image:
+    # The Server image (#334 stage e): build the root Dockerfile from this checkout, then start a container from it with
+    # no network and check it with scripts/server_image_smoke.py: GET /health, an unprivileged daemon listening on
+    # loopback only, its config, data and owner token in the volume, and no token, secret or config in a fresh
+    # container. The script uses the standard library only and removes what it starts. ubuntu-latest ships Docker.
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build the Server image
+        run: docker build -t agent-harness-server:ci .
+      - name: Check a container started from it
+        run: python scripts/server_image_smoke.py agent-harness-server:ci
+
   lint:
     # Static checks (#729): ruff's small rule set (F, E9, B, PLE) everywhere, and pyright in basic mode over the shipped
     # packages. Pyright fails only on errors that tools/lint/pyright-baseline.json does not record, so a later change
@@ -604,11 +626,11 @@ jobs:
 
   gate:
     # The required check. It always runs and needs every job above, so it reports on docs-only changes too
-    # (`test`, `test-py313`, `review-linux`, `openapi`, `ui-tests`, `hub-contract` and `deploy-linux` skipped by
-    # `changes`). Any needed job failed or cancelled fails it; see scripts/ci_gate.py for the rules. Add every new job
+    # (`test`, `test-py313`, `review-linux`, `openapi`, `ui-tests`, `hub-contract`, `deploy-linux` and `server-image`
+    # skipped by `changes`). Any needed job failed or cancelled fails it; see scripts/ci_gate.py for the rules. Add every new job
     # here.
     if: always()
-    needs: [changes, lint, test, test-linux, coverage, test-py313, review-linux, unix-installers, sonar, openapi, ui-tests, hub-contract, deploy-linux, gate-guard]
+    needs: [changes, lint, test, test-linux, coverage, test-py313, review-linux, unix-installers, sonar, openapi, ui-tests, hub-contract, deploy-linux, server-image, gate-guard]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
