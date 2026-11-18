@@ -29,8 +29,12 @@ RUN pip install --no-cache-dir --disable-pip-version-check /tmp/wheels/*.whl \
 RUN useradd --system --uid 10001 --user-group --create-home --home-dir /home/harness harness \
     && mkdir -p /var/lib/agent-harness \
     && chown 10001:10001 /var/lib/agent-harness
+# XDG_DATA_HOME makes the per-user install's root, $XDG_DATA_HOME/agent-harness, the volume itself, so every location
+# the daemon picks by default (the image work and log dirs, the memory library clone, ...) persists with it, not only
+# config/ and data/.
 ENV HARNESS_CONFIG_DIR=/var/lib/agent-harness/config \
     HARNESS_DATA_DIR=/var/lib/agent-harness/data \
+    XDG_DATA_HOME=/var/lib \
     PYTHONUNBUFFERED=1
 VOLUME ["/var/lib/agent-harness"]
 USER 10001:10001

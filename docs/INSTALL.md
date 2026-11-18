@@ -283,7 +283,9 @@ docker exec agent-harness harness --help   # Agent Harness CLI, with this instal
 ```
 
 The first start writes a service-profile config into `/var/lib/agent-harness/config`, and later starts keep whatever
-you change there. `-e HARNESS_PORT=8200` sets that first config's port, and `-e HARNESS_ENABLE_MODULES=jobs,backup`
+you change there. Everything else the Server keeps by default (data, the image work dir and logs, the memory library
+clone) is in the volume too: the image sets `XDG_DATA_HOME=/var/lib`, which makes the volume the install's root. A
+named volume takes the image's ownership; a bind-mounted host folder must be writable by uid 10001. `-e HARNESS_PORT=8200` sets that first config's port, and `-e HARNESS_ENABLE_MODULES=jobs,backup`
 its modules. The image holds every module's wheel, and a module stays absent until the profile switches it on.
 
 The daemon listens on 127.0.0.1 only. With `--network host`, which Docker Desktop must have turned on, that is the

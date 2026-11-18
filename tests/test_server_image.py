@@ -14,6 +14,7 @@ The real build and run are the smoke script against a built image: the CI image 
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shlex
 import shutil
@@ -71,6 +72,7 @@ def test_the_image_runs_unprivileged_with_its_state_in_one_volume():
     assert args["VOLUME"] == [f'["{VOLUME}"]']
     env = dict(item.split("=", 1) for item in shlex.split(" ".join(args["ENV"])))
     assert env["HARNESS_CONFIG_DIR"] == f"{VOLUME}/config" and env["HARNESS_DATA_DIR"] == f"{VOLUME}/data"
+    assert f"{env['XDG_DATA_HOME']}/agent-harness" == VOLUME  # the install root, and every default under it
     assert json.loads(args["ENTRYPOINT"][0]) == ["python", "-m", "harness.container"]
     assert args["HEALTHCHECK"][0].endswith('CMD ["python", "-m", "harness.container", "--health"]')
     # The account owns the volume, and nothing runs as root after USER.
@@ -175,6 +177,38 @@ def test_the_first_start_writes_the_config_once_and_later_starts_keep_it(volume,
     assert yaml.safe_load((volume / "config" / "harness.yaml").read_text(encoding="utf-8"))["listen"]["port"] == 8111
 
 
+def test_every_location_the_daemon_picks_is_in_the_volume(tmp_path, monkeypatch):
+    """The review of #1002: HARNESS_DATA_DIR moves data/, but the image work dir, its logs and the memory library clone
+    default under the XDG data dir. The image sets XDG_DATA_HOME so that dir's agent-harness is the volume; this loads
+    a first-start config there, with modules that keep files switched on, and finds no absolute path outside it."""
+    from harness import config
+    lib = tmp_path / "lib"
+    volume = lib / "agent-harness"
+    monkeypatch.setattr(sys, "platform", "linux")  # the image's platform
+    monkeypatch.setattr(config, "CHECKOUT", None)  # installed from the wheels
+    monkeypatch.setattr(config, "_apply_managed_overlay", lambda cfg: None)
+    for name, value in {"XDG_DATA_HOME": lib, "HARNESS_CONFIG_DIR": volume / "config", "HARNESS_DATA_DIR": volume / "data",
+                        "HARNESS_ENABLE_MODULES": "jobs,backup,images,memory_library,homelab"}.items():
+        monkeypatch.setenv(name, str(value))
+    monkeypatch.delenv("HARNESS_PORT", raising=False)
+    container.prepare()
+    cfg = config.load()
+    found = []
+
+    def walk(value, where):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                walk(item, f"{where}.{key}")
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item, where)
+        elif isinstance(value, (str, Path)) and str(value) and Path(str(value)).is_absolute():
+            found.append((where, Path(str(value))))
+    walk(dataclasses.asdict(cfg), "cfg")
+    assert {where for where, _ in found} >= {"cfg.data_dir", "cfg.images.work_dir", "cfg.memory_library.clone_dir"}
+    assert [(where, str(path)) for where, path in found if not path.is_relative_to(volume)] == []
+
+
 def test_the_volume_must_be_named(volume, monkeypatch):
     monkeypatch.delenv("HARNESS_DATA_DIR")
     with pytest.raises(SystemExit, match="HARNESS_DATA_DIR"):
@@ -257,6 +291,8 @@ class FakeDocker:
                 return out(json.dumps(self.broken.get("listening", ["0100007F:1FA4"])))
             if "Uid:" in code:
                 return out(self.broken.get("uid", "10001") + "\n")
+            if "install_home" in code:
+                return out(self.broken.get("home", VOLUME) + "\n")
             return out(json.dumps(self.broken.get("files", {"config/harness.yaml": 10001,
                                                             "data/harness.sqlite3": 10001,
                                                             "data/local-owner.token": 10001})))
@@ -273,7 +309,7 @@ def test_a_healthy_image_passes_every_check_and_leaves_nothing_behind():
     fake = FakeDocker()
     assert _verdicts(fake) == dict.fromkeys(["unprivileged user", "volume", "no published port",
                                              "no secrets in the image", "GET /health", "daemon is unprivileged",
-                                             "loopback only", "state in the volume"], True)
+                                             "loopback only", "state in the volume", "defaults in the volume"], True)
     started = next(c for c in fake.calls if c[:2] == ["run", "-d"])
     assert started[started.index("--network") + 1] == "none"
     name, volume_name = started[started.index("--name") + 1], started[started.index("-v") + 1].split(":")[0]
@@ -288,6 +324,7 @@ def test_a_healthy_image_passes_every_check_and_leaves_nothing_behind():
     ({"listening": ["00000000:1FA4"]}, "loopback only"),
     ({"listening": ["00000000000000000000000000000000:1FA4"]}, "loopback only"),
     ({"files": {"config/harness.yaml": 0}}, "state in the volume"),
+    ({"home": "/home/harness/.local/share/agent-harness"}, "defaults in the volume"),
 ])
 def test_each_property_the_image_promises_fails_its_own_check(broken, failing):
     verdicts = _verdicts(FakeDocker(**broken))
