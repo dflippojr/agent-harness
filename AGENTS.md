@@ -2,6 +2,8 @@
 
 With project Python dependencies and `tools/openapi/requirements.txt` installed, run `python tools/openapi/export_schema.py --check` to verify the committed OpenAPI document.
 
+`python scripts/packaging/agent_harness_build.py --out dist` builds the core wheel and one wheel per module (#334, stage e; standard library only, no network). `tests/test_packaging.py` installs them in a new virtual environment and runs the Server from it. A new non-`.py` file in a package must be listed in `pyproject.toml` (`[tool.agent-harness]`), and nothing may resolve a file against the folder above a package (`tests/test_checkout_paths.py`).
+
 Stables, the browser client, lives in its own repository, dflippojr/stables (#334). After changing API routes or models, regenerate the document with `python tools/openapi/export_schema.py --write` and commit it; Stables pins a copy. This repository pins a Stables release in `tools/stables/pin.json` (see `tools/stables/README.md`): the tower deploys it, the Playwright journeys in `tools/ui-tests` run against it, and the management-parity tests read its API calls from `tools/stables/api-calls.json`. The Server's own tests serve a stand-in shell (`tests/fixtures/stables_shell`).
 
 # How to prove a change works

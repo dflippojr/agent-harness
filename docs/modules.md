@@ -50,15 +50,16 @@ Without the key the list is every package under the `harness_modules` namespace,
 its package there and uninstalling it is removing it. A listed package that fails to import is logged and skipped:
 a broken add-on never stops the core.
 
-Why a list and not Python entry points: the Server runs from a checkout (`python -m harness`, deployed by
-fast-forwarding the live checkout), not from an installed distribution, so there is no package metadata for entry
-points to read. A list is explicit, ordered and testable (tests pass their own), and the namespace default needs no
-configuration for an ordinary install.
+Why a list and not Python entry points: the Server also runs from a checkout (`python -m harness`, deployed by
+fast-forwarding the live checkout), where there is no package metadata for entry points to read. A list is explicit,
+ordered and testable (tests pass their own), and the namespace default needs no configuration for an ordinary
+install. Installed from wheels ([Packaging](#packaging)), the same namespace scan finds every module wheel, because
+each one adds its own package to `harness_modules`.
 
 ## Layout
 
 ```
-harness/                 the core (moves to its own repository in stage f)
+harness/                 the core (moves to its own repository in stage f); a regular package
   modules.py             the interface, discovery and ModuleHost
 harness_modules/         a PEP 420 namespace package: no __init__.py, so separate distributions can each add one
   images/
@@ -104,6 +105,31 @@ Resource wiring runs in `ModuleRuntime.after_init()` after every runtime has ini
 admission and lazy loading regardless of discovery order. Exclusive GPU consumers request server control through
 `ModuleHost.model_control()` / `ModuleRuntime.model_control()` rather than importing another module. Only the
 local-model module supplies that control. Images requires it when actually taking the GPU.
+
+## Packaging
+
+Stage (e) of #334 builds wheels with the in-tree backend `scripts/packaging/agent_harness_build.py`, which uses the
+standard library only. `pyproject.toml` declares the layout ([INSTALL.md](INSTALL.md#install-the-server-from-wheels-pip)
+has the commands):
+
+- **The core wheel**, `agent-harness`, holds the `harness` package (a regular package, so an installed copy never
+  merges with another `harness` folder on the path) and the SDK as the top-level module `harness_client`. Its
+  dependencies are `requirements.txt`'s lines, with pytest under the `test` extra because the daemon never imports it.
+- **One add-on wheel per module**, `agent-harness-module-<name>`, holding `harness_modules/<name>/` and requiring the
+  exact core release. A module is already the unit the interface adds and removes: installing its wheel puts its
+  package in the namespace, where discovery finds it, and `pip uninstall` makes it absent. Modules never import each
+  other, so each wheel needs only the core, and an install takes only the modules it wants. No wheel ships a
+  `harness_modules/__init__.py`, so the namespace stays open to all of them.
+
+A wheel holds the `.py` sources of its package plus the files `pyproject.toml` lists, nothing else, so an untracked or
+private file in a package folder never ships. A module's own data files go in `package-data` (`images` lists
+`flux_fast.json`). A module that reads a repository file outside its package (the hub's manifest schema in `docs/`,
+the runners' Mac bundle in `macrunner/`) lists it under `[tool.agent-harness.addons.repo-files]` and reads it with
+`harness.modules.repo_file(__package__, "<path>")`. That is the checkout's file when the Server runs from one, and the
+copy the wheel carries in `<package>/_repo_files/` when it is installed. Nothing may resolve against the folder above
+the package, which is site-packages once installed: `tests/test_checkout_paths.py` fails on it, and the core names the
+checkout only through `harness.config.CHECKOUT` (None when installed). `tests/test_packaging.py` installs the wheels in
+a new virtual environment and runs the Server from it, with the core alone and then with the add-ons.
 
 ## What a module contributes
 
@@ -181,6 +207,9 @@ with personal context withhold it from Apps. These hooks contribute nothing by d
 4. Add one row to the table in `tests/test_module_lifecycle.py`: its probe route, settings keys, capability, routes,
    CLI row, metrics and tools. The table runs every module on, off, absent and uninstalled through `create_app`, so the
    lifecycle needs no test file of its own. Add tests next to the module's behaviour for the rest.
+5. The package becomes its own wheel with no further setup. List any data file that isn't a `.py` source in
+   `pyproject.toml` (`package-data`, or `repo-files` for a repository file outside the package; see
+   [Packaging](#packaging)); `tests/test_packaging.py` fails on a tracked file that no wheel ships.
 
 ## What stage (b) leaves in the core
 

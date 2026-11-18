@@ -275,7 +275,12 @@ class Manager:
         store = canary.CanaryStore(self.db)
 
         async def run_suite(sha: str, only: list[str] | None) -> canary.Report:
-            from bakeoff.canary import CanaryRunner  # dev-side package, imported only when the canary is on
+            # bakeoff/ is dev-side benchmark tooling that only a checkout has, imported only when the canary is on. The
+            # config loader turns the canary off without it (#334); this covers it going missing after the start.
+            try:
+                from bakeoff.canary import CanaryRunner
+            except ImportError as e:
+                raise canary.CanaryConfigError(f"the canary's task runner did not load: {e}") from None
             return await CanaryRunner(self, self.cfg.canary, Path(self.cfg.canary.fixture_dir)).run(sha, only)
 
         runner = canary.Canary(store, run_suite, self.cfg.canary, self.notifier.send, self.cfg.notify.topic)

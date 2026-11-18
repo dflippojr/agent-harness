@@ -182,7 +182,7 @@ def fake_download(monkeypatch, *, bad_hash: bool = False):
 
 
 def packaged_plist_text(home: Path, base: Path) -> str:
-    raw = (Path(mac_client.ROOT) / "macrunner/dev.agent-harness.runner.plist").read_text(encoding="utf-8")
+    raw = mac_client.source("macrunner/dev.agent-harness.runner.plist").read_text(encoding="utf-8")
     return raw.replace("__HOME__", str(home)).replace("__PYTHON__", str(base / "venv" / "bin" / "python"))
 
 
