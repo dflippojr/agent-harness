@@ -40,7 +40,8 @@ build-backend = "agent_harness_build"
 backend-path = ["scripts/packaging"]
 
 # The core wheel: the harness package, its data files, and the one-file SDK as the top-level module harness_client
-# (its documented import). A wheel holds .py sources and the files listed here, nothing else.
+# (its documented import). A wheel holds .py sources and the files listed here, nothing else; from a git checkout,
+# only files git tracks.
 [tool.agent-harness.build]
 version-from = "harness/compat.py"
 packages = ["harness"]
@@ -53,7 +54,7 @@ package-data = [
     "harness/mcp_relay.js",
 ]
 # Besides pyproject.toml and the packages: what building the wheel again from the source distribution needs.
-sdist = ["README.md", "LICENSE", "scripts/packaging/agent_harness_build.py", "sdk/harness_client.py"]
+sdist = ["README.md", "scripts/packaging/agent_harness_build.py", "sdk/harness_client.py"]
 
 # The add-ons: each package under the namespace is its own wheel, requiring the same core version.
 [tool.agent-harness.addons]

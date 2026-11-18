@@ -29,6 +29,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 from harness import compat, config, modules
 
@@ -47,11 +48,11 @@ def _requirements(path: Path) -> list[str]:
             if line.strip() and not line.strip().startswith("#")]
 
 
-def _git_files(*paths: str, untracked: bool = False) -> set[str]:
-    """Tracked files under `paths`, or with `untracked` also the untracked ones git doesn't ignore."""
-    args = ["git", "-C", str(ROOT), "ls-files", "-z", *(["-co", "--exclude-standard"] if untracked else []), "--"]
-    out = subprocess.run([*args, *paths], capture_output=True, check=True).stdout.decode("utf-8")
-    return {name for name in out.split("\0") if name and (ROOT / name).is_file()}
+def _git_files(*paths: str) -> set[str]:
+    """The files git tracks under `paths`."""
+    out = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z", "--", *paths], capture_output=True,
+                         check=True).stdout.decode("utf-8")
+    return {name for name in out.split("\0") if name}
 
 
 def _payload(wheel: Path) -> dict[str, bytes]:
@@ -98,9 +99,9 @@ def test_the_build_needs_nothing_installed():
 def test_the_core_wheel_holds_the_core_package_and_the_sdk_module(built):
     payload = _payload(built[CORE_WHEEL])
     package = set(payload) - {"harness_client.py"}
-    # Every tracked file of the package ships (a new data file must be listed in pyproject.toml), and nothing git
-    # ignores or that sits outside the package does.
-    assert _git_files("harness") <= package <= _git_files("harness", untracked=True)
+    # Exactly the package's tracked files: a new data file must be listed in pyproject.toml, and nothing untracked or
+    # ignored ships (test_from_a_checkout_only_tracked_files_ship).
+    assert package == _git_files("harness")
     assert payload["harness_client.py"] == (ROOT / "sdk" / "harness_client.py").read_bytes()
     assert all(payload[name] == (ROOT / name).read_bytes() for name in package)
     assert "harness/__init__.py" in payload  # a regular package: never merged with another harness folder
@@ -147,7 +148,7 @@ def test_each_module_is_an_add_on_wheel_of_its_own_on_this_core(built):
         payload = _payload(wheel)
         carried = {n for n in payload if n.startswith(f"{package}/{modules.REPO_FILES}/")}
         own = set(payload) - carried
-        assert _git_files(package) <= own <= _git_files(package, untracked=True), name
+        assert own == _git_files(package), name
         assert all(payload[n] == (ROOT / n).read_bytes() for n in own)
         assert {n.removeprefix(f"{package}/{modules.REPO_FILES}/") for n in carried} == set(repo_files.get(name, []))
         assert all(payload[n] == (ROOT / n.removeprefix(f"{package}/{modules.REPO_FILES}/")).read_bytes()
@@ -195,10 +196,8 @@ def test_pip_builds_the_core_wheel_through_the_backend_offline(built, tmp_path):
 
 
 def test_a_bad_layout_is_refused_with_its_name(tmp_path):
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "1.0"\n'
-                                             '[tool.agent-harness.build]\npackages = ["pkg"]\n'
-                                             'package-data = ["pkg/*.json"]\n', encoding="utf-8")
-    (tmp_path / "pkg").mkdir()
+    _layout(tmp_path, 'package-data = ["pkg/*.json"]\n')
+    (tmp_path / "pkg" / "__init__.py").unlink()
     with pytest.raises(build.BuildError, match="no __init__.py"):
         build.core_distribution(tmp_path)
     (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
@@ -213,29 +212,116 @@ def test_a_bad_layout_is_refused_with_its_name(tmp_path):
     assert build.main(["--source", str(tmp_path), "--out", str(tmp_path / "out")]) == 1
 
 
-def test_links_and_paths_outside_the_tree_are_refused(tmp_path):
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "1.0"\n'
-                                             '[tool.agent-harness.build]\npackages = ["pkg"]\n'
-                                             'modules = { other = "../outside.py" }\n', encoding="utf-8")
-    (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
-    with pytest.raises(build.BuildError, match="inside the repository"):
-        build.core_distribution(tmp_path)
-    (tmp_path / "secret.txt").write_text("not for a wheel", encoding="utf-8")
+def _layout(root: Path, extra: str = "") -> Path:
+    """A one-package project: pkg/__init__.py and a pyproject.toml naming it."""
+    (root / "pkg").mkdir(parents=True, exist_ok=True)
+    (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "1.0"\n'
+                                         f'[tool.agent-harness.build]\npackages = ["pkg"]\n{extra}', encoding="utf-8")
+    return root
+
+
+def _link(link: Path, target: Path) -> Path:
+    """Make `link` point at `target` and return the path to read through it. Windows makes a symlink only with a
+    privilege; without it a folder gets a junction (no privilege needed), and a file is reached through one."""
     try:
-        (tmp_path / "pkg" / "leak.py").symlink_to(tmp_path / "secret.txt")
-    except OSError:  # Windows without the symlink privilege: a copy shows the file is otherwise packaged
-        (tmp_path / "pkg" / "leak.py").write_text("x = 1\n", encoding="utf-8")
-        expected = "pkg/leak.py"
-    else:
-        expected = "is not a regular file"
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\nversion = "1.0"\n'
-                                             '[tool.agent-harness.build]\npackages = ["pkg"]\n', encoding="utf-8")
-    if expected == "pkg/leak.py":
-        assert expected in build.core_distribution(tmp_path).files
-    else:
-        with pytest.raises(build.BuildError, match=expected):
-            build.core_distribution(tmp_path)
+        link.symlink_to(target, target_is_directory=target.is_dir())
+        return link
+    except OSError:
+        if os.name != "nt":
+            raise
+    import _winapi
+    folder = target if target.is_dir() else target.parent
+    _winapi.CreateJunction(str(folder), str(link))
+    return link if target.is_dir() else link / target.name
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+
+def test_a_path_outside_the_tree_is_refused(tmp_path):
+    with pytest.raises(build.BuildError, match="inside the repository"):
+        build.core_distribution(_layout(tmp_path, 'modules = { other = "../outside.py" }\n'))
+
+
+@pytest.mark.parametrize("where", ["file", "folder", "package root"])
+def test_a_link_anywhere_on_a_path_is_refused(tmp_path, where):
+    """The review of #1001: a linked folder or package root used to be walked, shipping files from outside the tree."""
+    root = _layout(tmp_path / "project")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "__init__.py").write_text("", encoding="utf-8")
+    (outside / "secret.py").write_text("TOKEN = 'not for a wheel'\n", encoding="utf-8")
+    if where == "file":  # named in pyproject.toml, or listed by git: read directly
+        read = _link(root / "pkg" / "leak.py", outside / "secret.py").relative_to(root).as_posix()
+        with pytest.raises(build.BuildError, match="goes through a link"):
+            build.Tree(root).read(read)
+    elif where == "folder":  # met while walking a package
+        _link(root / "pkg" / "sub", outside)
+        with pytest.raises(build.BuildError, match="is a link to a folder"):
+            build.core_distribution(root)
+    else:  # the package itself
+        for child in (root / "pkg").iterdir():
+            child.unlink()
+        (root / "pkg").rmdir()
+        _link(root / "pkg", outside)
+        with pytest.raises(build.BuildError, match="goes through a link"):
+            build.core_distribution(root)
+
+
+def test_from_a_checkout_only_tracked_files_ship(tmp_path):
+    """The review of #1001: an untracked file, or one git ignores, in a package folder must not reach the wheel."""
+    root = _layout(tmp_path, 'package-data = ["pkg/*.json"]\nmodules = { notes = "notes.py" }\n')
+    (root / "pkg" / "data.json").write_text("{}", encoding="utf-8")
+    (root / "notes.py").write_text("", encoding="utf-8")
+    (root / ".gitignore").write_text("runs/\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "add", "pyproject.toml", ".gitignore", "pkg/__init__.py", "pkg/data.json", "notes.py")
+    (root / "pkg" / "untracked.py").write_text("SECRET = 1\n", encoding="utf-8")
+    (root / "pkg" / "stray.json").write_text("{}", encoding="utf-8")
+    (root / "pkg" / "runs").mkdir()
+    (root / "pkg" / "runs" / "private_settings.py").write_text("TOKEN = 'x'\n", encoding="utf-8")
+    assert set(build.core_distribution(root).files) == {"pkg/__init__.py", "pkg/data.json", "notes.py"}
+    (root / "pyproject.toml").write_text((root / "pyproject.toml").read_text(encoding="utf-8").replace(
+        'notes = "notes.py"', 'notes = "pkg/untracked.py"'), encoding="utf-8")
+    with pytest.raises(build.BuildError, match="not tracked by git"):  # a file named in pyproject.toml, too
+        build.core_distribution(root)
+
+
+def test_a_checkout_whose_files_git_cannot_list_is_refused(tmp_path, monkeypatch):
+    root = _layout(tmp_path)
+    (root / ".git").mkdir()
+
+    def no_git(*args, **kwargs):
+        raise OSError("git: not found")
+    monkeypatch.setattr(build.subprocess, "run", no_git)
+    with pytest.raises(build.BuildError, match="could not list its tracked files"):
+        build.core_distribution(root)
+
+
+def test_the_readme_has_the_same_line_ends_on_every_checkout(tmp_path):
+    root = _layout(tmp_path, "")
+    text = (root / "pyproject.toml").read_text(encoding="utf-8").replace('version = "1.0"', 'version = "1.0"\nreadme = "README.md"')
+    (root / "pyproject.toml").write_text(text, encoding="utf-8")
+    (root / "README.md").write_bytes(b"# Title\r\n\r\nBody\r\n")  # as a Windows clone with autocrlf has it
+    assert build.core_distribution(root).readme == "# Title\n\nBody\n"
+
+
+def test_nothing_the_build_reads_is_on_the_ci_skip_list():
+    """A file on CI_SKIP_UNREAD_PATHS can change without any test job running, so no build input may be one. The
+    skip-list scan (tests/test_ci_skip_list.py) reads code, not pyproject.toml, so this checks the paths
+    pyproject.toml hands the backend: the review of #1001 found the sdist list naming one."""
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    step = next(s for s in workflow["jobs"]["changes"]["steps"] if s.get("id") == "filter")
+    skipped = set(step["env"]["CI_SKIP_UNREAD_PATHS"].split())
+    project, settings = PYPROJECT["project"], PYPROJECT["tool"]["agent-harness"]
+    files = {"pyproject.toml", settings["build"]["version-from"], project.get("readme", ""),
+             *project.get("license-files", []), *settings["build"]["sdist"], *settings["build"]["modules"].values(),
+             *(path for paths in settings["addons"]["repo-files"].values() for path in paths)}
+    folders = [*settings["build"]["packages"], settings["addons"]["namespace"]]
+    assert skipped and not files & skipped
+    assert not [path for path in skipped if any(path.startswith(f"{folder}/") for folder in folders)]
 
 
 # ------------------------------------------------------------------------------------------------ installed, for real

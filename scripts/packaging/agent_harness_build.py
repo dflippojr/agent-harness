@@ -13,9 +13,11 @@ The layout comes from pyproject.toml's `[tool.agent-harness]` tables:
   which requires the same core version. A module is the unit the module interface adds or removes
   (docs/modules.md), and no module imports another, so a module's wheel needs only the core.
   The namespace has no `__init__.py` in any wheel, so each wheel adds its own package to it.
-- A wheel holds the `.py` sources of its packages and the files the tables list, nothing else, so an untracked or
-  private file in a package folder never ships. Repository files an add-on reads from outside its package
-  (`repo-files`) go into the package's `_repo_files/`, where `harness.modules.repo_file` finds them.
+- A wheel holds the `.py` sources of its packages and the files the tables list, nothing else. From a git checkout
+  the build reads only files git tracks, so an untracked or ignored file in a package folder never ships; a source
+  distribution holds only what such a build selected. Every read refuses a link anywhere on its path. Repository files
+  an add-on reads from outside its package (`repo-files`) go into the package's `_repo_files/`, where
+  `harness.modules.repo_file` finds them.
 
 Builds need no network and no setuptools, and are reproducible: the same tree gives the same bytes (entries are
 sorted, and timestamps come from SOURCE_DATE_EPOCH or a fixed date).
@@ -33,6 +35,7 @@ import io
 import os
 import re
 import stat
+import subprocess
 import sys
 import tarfile
 import time
@@ -82,9 +85,71 @@ class Distribution:
         return f"{self.escaped}-{self.version}-{TAG}.whl"
 
 
-def load_pyproject(source: Path) -> dict:
+class Tree:
+    """The files a build may read, and the one way it reads them.
+
+    From a git checkout these are the files git tracks (staged ones included), so nothing untracked or ignored can
+    reach a wheel. A source distribution has no .git and holds only what such a build selected, so it, like any other
+    tree, is taken as it is. Hidden files and folders and __pycache__ are never candidates. `read` refuses a link
+    anywhere on the path: a linked file, folder or package root could lead anywhere on the building machine."""
+
+    def __init__(self, source: Path | Tree):
+        self.source = source.source if isinstance(source, Tree) else Path(source)
+        self.tracked = source.tracked if isinstance(source, Tree) else _git_tracked(self.source)
+
+    def files(self, top: str) -> list[str]:
+        """The candidate files under the folder `top`, as repository-relative posix paths."""
+        prefix = f"{_relative(top, 'folder')}/"
+        if self.tracked is not None:
+            found = [name for name in self.tracked if name.startswith(prefix)]
+        else:
+            found = []
+            for dirpath, dirnames, filenames in os.walk(self.source / top):
+                dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d != "__pycache__")
+                for name in dirnames:  # the walk wouldn't enter one; say so rather than leave its files out quietly
+                    folder = Path(dirpath) / name
+                    if folder.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(folder):
+                        where = folder.relative_to(self.source).as_posix()
+                        raise BuildError(f"{where} is a link to a folder (links are not packaged)")
+                found += [(Path(dirpath) / name).relative_to(self.source).as_posix() for name in filenames]
+        return sorted(name for name in found
+                      if not any(part.startswith(".") or part == "__pycache__" for part in name.split("/")))
+
+    def read(self, path: str) -> bytes:
+        rel = _relative(path, "file")
+        if self.tracked is not None and rel.as_posix() not in self.tracked:
+            raise BuildError(f"{path} is not tracked by git (a build from a checkout ships tracked files only)")
+        current, mode = self.source, 0
+        for part in rel.parts:
+            current = current / part
+            try:
+                mode = os.lstat(current).st_mode
+            except OSError:
+                raise BuildError(f"{path} is missing") from None
+            if stat.S_ISLNK(mode) or getattr(os.path, "isjunction", lambda _: False)(current):
+                where = current.relative_to(self.source).as_posix()
+                raise BuildError(f"{path} goes through a link at {where} (links are not packaged)")
+        if not stat.S_ISREG(mode):
+            raise BuildError(f"{path} is not a regular file")
+        return current.read_bytes()
+
+
+def _git_tracked(source: Path) -> frozenset[str] | None:
+    """The tracked files of the checkout at `source`, or None when it isn't one (no .git)."""
+    if not (source / ".git").exists():
+        return None
     try:
-        return tomllib.loads((source / "pyproject.toml").read_text(encoding="utf-8"))
+        out = subprocess.run(["git", "-C", str(source), "ls-files", "-z", "--cached"], capture_output=True,
+                             check=True, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        raise BuildError(f"{source} is a git checkout, but git could not list its tracked files: {e}") from None
+    return frozenset(name for name in out.decode("utf-8").split("\0") if name)
+
+
+def load_pyproject(source: Path | Tree) -> dict:
+    root = source.source if isinstance(source, Tree) else Path(source)
+    try:
+        return tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as e:
         raise BuildError(f"pyproject.toml: {e}") from None
 
@@ -96,14 +161,14 @@ def _settings(pyproject: dict) -> dict:
     return settings
 
 
-def project_version(source: Path, pyproject: dict) -> str:
+def project_version(source: Path | Tree, pyproject: dict) -> str:
     """The static [project] version, or the Server's release (harness/compat.py RELEASE) when version is dynamic."""
     project = pyproject.get("project", {})
     if "version" in project:
         version = str(project["version"])
     elif "version" in project.get("dynamic", []):
         origin = _settings(pyproject).get("build", {}).get("version-from", "")
-        match = RELEASE.search(_read(source, origin).decode("utf-8")) if origin else None
+        match = RELEASE.search(Tree(source).read(origin).decode("utf-8")) if origin else None
         if match is None:
             raise BuildError(f"no RELEASE = \"x.y.z\" in {origin or 'tool.agent-harness.build.version-from'}")
         version = match.group(1)
@@ -121,43 +186,20 @@ def _relative(path: str, what: str) -> PurePosixPath:
     return rel
 
 
-def _read(source: Path, path: str) -> bytes:
-    """A regular file of the tree. A link is refused: its target could be anything on the building machine."""
-    full = source / _relative(path, "file")
-    try:
-        mode = os.lstat(full).st_mode
-    except OSError:
-        raise BuildError(f"{path} is missing") from None
-    if not stat.S_ISREG(mode):
-        raise BuildError(f"{path} is not a regular file (links are not packaged)")
-    return full.read_bytes()
-
-
 def _matches(rel: str, pattern: str) -> bool:
     """Glob match by path segment: `*` stays within one folder, and the whole path must match."""
     parts, globs = rel.split("/"), pattern.split("/")
     return len(parts) == len(globs) and all(fnmatch.fnmatchcase(p, g) for p, g in zip(parts, globs, strict=True))
 
 
-def _package_files(source: Path, package: str, data_globs: list[str]) -> dict[str, bytes]:
-    """Every .py source under `package` and the files matching `data_globs` (relative to the repository root).
-    Hidden files and folders and __pycache__ are never visited."""
-    root = source / _relative(package, "package")
-    if not (root / "__init__.py").is_file():
+def _package_files(tree: Tree, package: str, data_globs: list[str]) -> dict[str, bytes]:
+    """Every .py source under `package` and the candidate files matching `data_globs` (relative to the repository
+    root), read through `tree`, which refuses links."""
+    candidates = tree.files(package)
+    if f"{_relative(package, 'package')}/__init__.py" not in candidates:
         raise BuildError(f"{package}/ is not a package (no __init__.py)")
-    files: dict[str, bytes] = {}
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d != "__pycache__")
-        for name in dirnames:
-            if os.path.islink(os.path.join(dirpath, name)):
-                raise BuildError(f"{(Path(dirpath) / name).relative_to(source).as_posix()} is a link to a folder "
-                                 "(links are not packaged)")
-        for name in sorted(filenames):
-            rel = (Path(dirpath) / name).relative_to(source).as_posix()
-            if name.startswith("."):
-                continue
-            if name.endswith(".py") or any(_matches(rel, pattern) for pattern in data_globs):
-                files[rel] = _read(source, rel)
+    files = {rel: tree.read(rel) for rel in candidates
+             if rel.endswith(".py") or any(_matches(rel, pattern) for pattern in data_globs)}
     for pattern in data_globs:
         if not any(_matches(rel, pattern) for rel in files):
             raise BuildError(f"package data {pattern!r} matches no file under {package}/")
@@ -174,9 +216,10 @@ def _requirement_names(requirements: list[str]) -> list[str]:
     return names
 
 
-def core_distribution(source: Path, pyproject: dict | None = None) -> Distribution:
+def core_distribution(source: Path | Tree, pyproject: dict | None = None) -> Distribution:
     """The `agent-harness` wheel: the harness package and the SDK module."""
-    pyproject = pyproject or load_pyproject(source)
+    tree = Tree(source)
+    pyproject = pyproject or load_pyproject(tree)
     project = pyproject.get("project", {})
     build = _settings(pyproject).get("build", {})
     name = project.get("name")
@@ -188,11 +231,11 @@ def core_distribution(source: Path, pyproject: dict | None = None) -> Distributi
               for extra, items in project.get("optional-dependencies", {}).items()}
     files: dict[str, bytes] = {}
     for package in build.get("packages", []):
-        files.update(_package_files(source, package, list(build.get("package-data", []))))
+        files.update(_package_files(tree, package, list(build.get("package-data", []))))
     for module, path in build.get("modules", {}).items():
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module) or not path.endswith(".py"):
             raise BuildError(f"tool.agent-harness.build.modules: {module} = {path!r} is not a module and a .py file")
-        files[f"{module}.py"] = _read(source, path)
+        files[f"{module}.py"] = tree.read(path)
     if not files:
         raise BuildError("tool.agent-harness.build lists no packages or modules")
     readme, license = project.get("readme", ""), project.get("license", "")
@@ -200,20 +243,24 @@ def core_distribution(source: Path, pyproject: dict | None = None) -> Distributi
         raise BuildError("pyproject.toml: readme and license must be strings (a file name, an SPDX expression)")
     license_files = project.get("license-files", [])
     return Distribution(
-        name=name, version=project_version(source, pyproject), summary=project.get("description", ""),
+        name=name, version=project_version(tree, pyproject), summary=project.get("description", ""),
         requires_python=project.get("requires-python", ""), requires=requires, files=files, license=license,
-        license_files={str(_relative(path, "license file")): _read(source, path) for path in license_files},
-        readme=_read(source, readme).decode("utf-8") if readme else "", extras=extras,
+        license_files={str(_relative(path, "license file")): tree.read(path) for path in license_files},
+        # Text, so the same on every checkout: a Windows clone has CRLF line ends in README.md.
+        readme=tree.read(readme).decode("utf-8").replace("\r\n", "\n") if readme else "", extras=extras,
         scripts={str(k): str(v) for k, v in project.get("scripts", {}).items()})
 
 
-def addon_names(source: Path, pyproject: dict | None = None) -> list[str]:
-    """The packages under the add-on namespace, by name."""
-    namespace = _settings(pyproject or load_pyproject(source)).get("addons", {}).get("namespace", "")
-    root = source / _relative(namespace, "tool.agent-harness.addons.namespace")
-    if (root / "__init__.py").exists():
+def addon_names(source: Path | Tree, pyproject: dict | None = None) -> list[str]:
+    """The packages under the add-on namespace, by name: each folder whose __init__.py is a candidate file."""
+    tree = Tree(source)
+    namespace = _settings(pyproject or load_pyproject(tree)).get("addons", {}).get("namespace", "")
+    prefix = f"{_relative(namespace, 'tool.agent-harness.addons.namespace')}/"
+    candidates = tree.files(namespace)
+    if f"{prefix}__init__.py" in candidates:
         raise BuildError(f"{namespace}/__init__.py exists: the add-on namespace must stay a PEP 420 namespace")
-    return sorted(p.name for p in root.iterdir() if (p / "__init__.py").is_file() and not p.name.startswith("."))
+    return sorted({rel.removeprefix(prefix).split("/")[0] for rel in candidates
+                   if rel.count("/") == prefix.count("/") + 1 and rel.endswith("/__init__.py")})
 
 
 def _module_title(init: bytes) -> str:
@@ -226,17 +273,18 @@ def _module_title(init: bytes) -> str:
     return ""
 
 
-def addon_distribution(source: Path, name: str, pyproject: dict | None = None,
+def addon_distribution(source: Path | Tree, name: str, pyproject: dict | None = None,
                        core: Distribution | None = None) -> Distribution:
     """The `agent-harness-module-<name>` wheel: one harness_modules package, requiring exactly this core version."""
-    pyproject = pyproject or load_pyproject(source)
+    tree = Tree(source)
+    pyproject = pyproject or load_pyproject(tree)
     addons = _settings(pyproject).get("addons", {})
-    core = core or core_distribution(source, pyproject)
+    core = core or core_distribution(tree, pyproject)
     package = f"{addons.get('namespace', '')}/{name}"
     data = [f"{package}/{pattern}" for pattern in addons.get("package-data", {}).get(name, [])]
-    files = _package_files(source, package, data)
+    files = _package_files(tree, package, data)
     for path in addons.get("repo-files", {}).get(name, []):
-        files[f"{package}/{REPO_FILES}/{_relative(path, 'repo file')}"] = _read(source, path)
+        files[f"{package}/{REPO_FILES}/{_relative(path, 'repo file')}"] = tree.read(path)
     title = _module_title(files[f"{package}/__init__.py"]) or name
     return Distribution(
         name=str(addons.get("distribution", "agent-harness-module-{name}")).format(name=name.replace("_", "-")),
@@ -245,7 +293,7 @@ def addon_distribution(source: Path, name: str, pyproject: dict | None = None,
         license=core.license, license_files=core.license_files)
 
 
-def unknown_repo_file_addons(source: Path, pyproject: dict | None = None) -> list[str]:
+def unknown_repo_file_addons(source: Path | Tree, pyproject: dict | None = None) -> list[str]:
     """`repo-files` or `package-data` entries naming a package that isn't under the namespace (a typo ships nothing)."""
     pyproject = pyproject or load_pyproject(source)
     addons = _settings(pyproject).get("addons", {})
@@ -333,14 +381,15 @@ def write_wheel(dist: Distribution, out: Path) -> Path:
     return target
 
 
-def write_sdist(source: Path, dist: Distribution, pyproject: dict, out: Path) -> Path:
+def write_sdist(source: Path | Tree, dist: Distribution, pyproject: dict, out: Path) -> Path:
     """The core's source distribution: what building its wheel again needs, under <name>-<version>/."""
+    tree = Tree(source)
     sdist = [*_settings(pyproject).get("build", {}).get("sdist", []), *dist.license_files]
     base = f"{dist.escaped}-{dist.version}"
     entries = {f"{base}/{rel}": data for rel, data in dist.files.items() if rel.startswith(tuple(
         f"{package}/" for package in _settings(pyproject).get("build", {}).get("packages", [])))}
     for path in ["pyproject.toml", *sdist]:
-        entries[f"{base}/{_relative(path, 'sdist file')}"] = _read(source, path)
+        entries[f"{base}/{_relative(path, 'sdist file')}"] = tree.read(path)
     entries[f"{base}/PKG-INFO"] = _metadata(dist)
     out.mkdir(parents=True, exist_ok=True)
     target = out / f"{base}.tar.gz"
@@ -357,15 +406,16 @@ def write_sdist(source: Path, dist: Distribution, pyproject: dict, out: Path) ->
     return target
 
 
-def build_all(source: Path, out: Path) -> list[Path]:
+def build_all(source: Path | Tree, out: Path) -> list[Path]:
     """The core wheel, then one wheel per add-on module, in `out`."""
-    pyproject = load_pyproject(source)
-    stray = unknown_repo_file_addons(source, pyproject)
+    tree = Tree(source)
+    pyproject = load_pyproject(tree)
+    stray = unknown_repo_file_addons(tree, pyproject)
     if stray:
         raise BuildError(f"tool.agent-harness.addons names packages that don't exist: {', '.join(stray)}")
-    core = core_distribution(source, pyproject)
-    return [write_wheel(core, out)] + [write_wheel(addon_distribution(source, name, pyproject, core), out)
-                                       for name in addon_names(source, pyproject)]
+    core = core_distribution(tree, pyproject)
+    return [write_wheel(core, out)] + [write_wheel(addon_distribution(tree, name, pyproject, core), out)
+                                       for name in addon_names(tree, pyproject)]
 
 
 # ------------------------------------------------------------------------------------------------- PEP 517 hooks
@@ -392,9 +442,9 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None) 
 
 
 def build_sdist(sdist_directory, config_settings=None) -> str:
-    source = Path.cwd()
-    pyproject = load_pyproject(source)
-    return write_sdist(source, core_distribution(source, pyproject), pyproject, Path(sdist_directory)).name
+    tree = Tree(Path.cwd())
+    pyproject = load_pyproject(tree)
+    return write_sdist(tree, core_distribution(tree, pyproject), pyproject, Path(sdist_directory)).name
 
 
 def main(argv: list[str] | None = None) -> int:
