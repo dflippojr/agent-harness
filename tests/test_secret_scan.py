@@ -104,6 +104,7 @@ def test_workspace_gitleaks_config_has_no_effect(gitleaks_tools, tmp_path, monke
     assert [(f["file"], f["rule"]) for f in result["findings"]] == [("creds.py", "aws-access-token")]
 
 
+@needs_host_git
 def test_untracked_names_git_would_quote_are_diffed(tmp_path):
     repo = make_repo(tmp_path / "ws")
     names = ["my notes.txt", 'q"x.txt', "tab\there.txt"] if sys.platform != "win32" else ["my notes.txt"]
