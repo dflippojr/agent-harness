@@ -209,6 +209,14 @@ def doctor_get(ctx: Ctx):
     return doctor._get(SimpleNamespace(data_dir=ctx.tmp), "http://127.0.0.1:8100/health", timeout=5)
 
 
+def container_health(ctx: Ctx):
+    """The Server image's HEALTHCHECK (harness/container.py), against the stub as the configured listener."""
+    from harness import container
+    (ctx.tmp / "harness.yaml").write_text(f"listen: {{host: 127.0.0.1, port: {ctx.port}}}\n", encoding="utf-8")
+    ctx.monkeypatch.setenv("HARNESS_CONFIG_DIR", str(ctx.tmp))
+    return container.healthy(timeout=5)
+
+
 def doctor_optional(ctx: Ctx):
     from harness import doctor, modules
     ctx.monkeypatch.setattr(modules, "present", lambda cfg: [])
@@ -613,6 +621,7 @@ REGISTRY: list[Outbound] = [
     Outbound("harness/cli.py::_iter_sse", "CLI: `harness watch` event stream", cli_watch, raised(SystemExit),
              attempts=3, secret=True,
              unbounded="an event stream waits between events; the daemon sends keepalives while a run is quiet"),
+    Outbound("harness/container.py::healthy", "Server image: the health check", container_health, returned(False)),
     Outbound("harness/doctor.py::_get", "doctor: daemon status as the local owner", doctor_get, secret=True),
     Outbound("harness/doctor.py::check_optional", "doctor: SearXNG web search", doctor_optional,
              flagged("Web search")),

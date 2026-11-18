@@ -213,7 +213,7 @@ def test_health_follows_the_configured_listen_host(volume, monkeypatch):
             seen.append((method, path, headers))
 
         def getresponse(self):
-            return SimpleNamespace(status=200)
+            return SimpleNamespace(status=200, read=lambda: b'{"ok": true, "profile": "service"}')
 
         def close(self):
             pass
@@ -275,8 +275,11 @@ def test_health_asks_the_configured_loopback_port(volume, monkeypatch):
     class Health(BaseHTTPRequestHandler):
         def do_GET(self):
             answers.append(self.path)
+            body = b'{"ok": true}' if self.path == "/health" else b"{}"
             self.send_response(200 if self.path == "/health" else 404)
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
 
         def log_message(self, *args):
             pass

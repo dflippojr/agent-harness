@@ -15,6 +15,7 @@ start cut short is finished by the next one.
 from __future__ import annotations
 
 import http.client
+import json
 import os
 import sys
 from pathlib import Path
@@ -70,7 +71,8 @@ def probe_address(host: str) -> str:
 
 
 def healthy(timeout: float = 5.0) -> bool:
-    """Whether the daemon this container runs answers /health where its configuration says it listens."""
+    """Whether the daemon this container runs answers /health, where its configuration says it listens, with its
+    health document ({"ok": true}): an error status, a cut-off body or one that isn't that document is not healthy."""
     from .config import resolve_listen
     try:
         host, port = resolve_listen()
@@ -80,8 +82,10 @@ def healthy(timeout: float = 5.0) -> bool:
     try:
         # The daemon answers only a loopback Host (harness/api.py, _host_allowed), whatever address it listens on.
         connection.request("GET", "/health", headers={"Host": f"127.0.0.1:{port}"})
-        return connection.getresponse().status == 200
-    except (OSError, http.client.HTTPException):
+        response = connection.getresponse()
+        body = response.read()
+        return response.status == 200 and json.loads(body).get("ok") is True
+    except (OSError, http.client.HTTPException, ValueError, AttributeError):  # no answer, or not the document
         return False
     finally:
         connection.close()
