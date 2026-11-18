@@ -282,8 +282,10 @@ docker run -d --name agent-harness --restart unless-stopped --network host \
 docker exec agent-harness harness --help   # Agent Harness CLI, with this install's port and local token
 ```
 
-The first start writes a service-profile config into `/var/lib/agent-harness/config`, and later starts keep whatever
-you change there. Everything else the Server keeps by default (data, the image work dir and logs, the memory library
+The first start writes a service-profile config into `/var/lib/agent-harness/config` (`harness.yaml`, `projects.yaml`
+and `profile.yaml`). A start that finds one of them missing, as an interrupted first start leaves it, sets the config up
+again: it keeps an existing `harness.yaml` and `projects.yaml` and writes `profile.yaml` afresh. Once all three
+exist, later starts keep whatever you change there. Everything else the Server keeps by default (data, the image work dir and logs, the memory library
 clone) is in the volume too: the image sets `XDG_DATA_HOME=/var/lib`, which makes the volume the install's root. A
 named volume takes the image's ownership; a bind-mounted host folder must be writable by uid 10001. `-e HARNESS_PORT=8200` sets that first config's port, and `-e HARNESS_ENABLE_MODULES=jobs,backup`
 its modules. The image holds every module's wheel, and a module stays absent until the profile switches it on.

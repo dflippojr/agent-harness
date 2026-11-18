@@ -5,7 +5,7 @@
 
 It starts a container from the image with no network and a new volume, and checks five things:
 
-1. The container answers GET /health.
+1. The container answers GET /health, and the image's own HEALTHCHECK command says so too.
 2. The daemon runs as the image's unprivileged account.
 3. Nothing listens beyond 127.0.0.1.
 4. The config, data and local owner token are in the volume, and so is the root every other default is under.
@@ -117,7 +117,10 @@ def running(run: Runner, name: str) -> list[Check]:
     owned = json.loads(files or "{}")
     wanted = {"config/harness.yaml", "data/harness.sqlite3", "data/local-owner.token"}
     home = run(["exec", name, "python", "-c", "from harness.config import install_home; print(install_home())"]).stdout
+    probe = run(["exec", name, "python", "-m", "harness.container", "--health"])  # what the HEALTHCHECK runs
     return [
+        Check("health check command", probe.returncode == 0, f"python -m harness.container --health: exit "
+                                                                 f"{probe.returncode}"),
         Check("daemon is unprivileged", uid == UID, f"PID 1 runs as uid {uid or '?'}"),
         Check("loopback only", bool(listening) and all(a.startswith(LOOPBACK) for a in listening),
               f"listening on {listening}"),

@@ -1180,6 +1180,12 @@ def resolve_port(config_dir: Path | None = None) -> int:
     return int((_read_raw_config(config_dir).get("listen") or {}).get("port", 8100))
 
 
+def resolve_listen(config_dir: Path | None = None) -> tuple[str, int]:
+    """This daemon's listen host and port, read without validating unrelated runtime configuration."""
+    listen = _read_raw_config(resolve_config_dir(config_dir)).get("listen") or {}
+    return str(listen.get("host", "127.0.0.1")), int(listen.get("port", 8100))
+
+
 def resolve_data_dir(config_dir: Path | None = None) -> Path:
     """The data_dir `load` would use, without building the whole Config (the local CLI reads its token from here)."""
     config_dir = resolve_config_dir(config_dir)

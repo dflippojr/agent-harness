@@ -177,6 +177,50 @@ def test_the_first_start_writes_the_config_once_and_later_starts_keep_it(volume,
     assert yaml.safe_load((volume / "config" / "harness.yaml").read_text(encoding="utf-8"))["listen"]["port"] == 8111
 
 
+def test_a_first_start_cut_short_is_finished_by_the_next(volume):
+    """The review of #1002: harness.yaml written but profile.yaml not, and every later start loaded the full profile
+    with no model. The volume counts as set up only once the last file setup_config writes is there."""
+    from harness import config
+    assert container.prepare() is True
+    (volume / "config" / "profile.yaml").unlink()  # as a start killed between setup_config's writes leaves it
+    (volume / "config" / "harness.yaml").write_text(
+        (volume / "config" / "harness.yaml").read_text(encoding="utf-8").replace("8100", "8112"), encoding="utf-8")
+    assert container.prepare() is True
+    cfg = config.load()
+    assert (cfg.profile, cfg.port) == ("service", 8112)  # finished, and the file that existed was kept
+    assert container.prepare() is False
+
+
+@pytest.mark.parametrize("host, address", [("127.0.0.1", "127.0.0.1"), ("", "127.0.0.1"), ("0.0.0.0", "127.0.0.1"),
+                                           ("::", "::1"), ("::1", "::1"), ("[::1]", "::1"), ("localhost", "localhost"),
+                                           ("10.0.0.5", "10.0.0.5")])
+def test_the_health_probe_goes_where_the_daemon_listens(host, address):
+    assert container.probe_address(host) == address
+
+
+def test_health_follows_the_configured_listen_host(volume, monkeypatch):
+    """The review of #1002: listen.host ::1 is served over IPv6, and an IPv4-only probe marked it unhealthy."""
+    container.prepare()
+    (volume / "config" / "harness.local.yaml").write_text("listen: {host: '::1', port: 8113}\n", encoding="utf-8")
+    seen = []
+
+    class Connection:
+        def __init__(self, host, port, timeout):
+            seen.append((host, port))
+
+        def request(self, method, path, headers):
+            seen.append((method, path, headers))
+
+        def getresponse(self):
+            return SimpleNamespace(status=200)
+
+        def close(self):
+            pass
+    monkeypatch.setattr(container.http.client, "HTTPConnection", Connection)
+    assert container.healthy() is True
+    assert seen == [("::1", 8113), ("GET", "/health", {"Host": "127.0.0.1:8113"})]  # the Host the daemon accepts
+
+
 def test_every_location_the_daemon_picks_is_in_the_volume(tmp_path, monkeypatch):
     """The review of #1002: HARNESS_DATA_DIR moves data/, but the image work dir, its logs and the memory library clone
     default under the XDG data dir. The image sets XDG_DATA_HOME so that dir's agent-harness is the volume; this loads
@@ -280,6 +324,8 @@ class FakeDocker:
             return out(json.dumps(self.broken.get("secrets", [])))
         if args[:2] == ["run", "-d"]:
             return out("container-id\n")
+        if args[0] == "exec" and args[-1] == "--health":
+            return out(code=1 if "probe" in self.broken else 0)
         if args[0] == "exec":
             code = args[-1] if args[-1] != VOLUME else args[-2]
             if code == smoke.HEALTH:
@@ -308,7 +354,8 @@ def _verdicts(fake: FakeDocker) -> dict[str, bool]:
 def test_a_healthy_image_passes_every_check_and_leaves_nothing_behind():
     fake = FakeDocker()
     assert _verdicts(fake) == dict.fromkeys(["unprivileged user", "volume", "no published port",
-                                             "no secrets in the image", "GET /health", "daemon is unprivileged",
+                                             "no secrets in the image", "GET /health", "health check command",
+                                             "daemon is unprivileged",
                                              "loopback only", "state in the volume", "defaults in the volume"], True)
     started = next(c for c in fake.calls if c[:2] == ["run", "-d"])
     assert started[started.index("--network") + 1] == "none"
@@ -325,6 +372,7 @@ def test_a_healthy_image_passes_every_check_and_leaves_nothing_behind():
     ({"listening": ["00000000000000000000000000000000:1FA4"]}, "loopback only"),
     ({"files": {"config/harness.yaml": 0}}, "state in the volume"),
     ({"home": "/home/harness/.local/share/agent-harness"}, "defaults in the volume"),
+    ({"probe": True}, "health check command"),
 ])
 def test_each_property_the_image_promises_fails_its_own_check(broken, failing):
     verdicts = _verdicts(FakeDocker(**broken))
