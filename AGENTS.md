@@ -2,7 +2,7 @@
 
 With project Python dependencies and `tools/openapi/requirements.txt` installed, run `python tools/openapi/export_schema.py --check` to verify the committed OpenAPI document.
 
-`python scripts/packaging/agent_harness_build.py --out dist` builds the core wheel and one wheel per module (#334, stage e; standard library only, no network). `tests/test_packaging.py` installs them in a new virtual environment and runs the Server from it. A new non-`.py` file in a package must be listed in `pyproject.toml` (`[tool.agent-harness]`), and nothing may resolve a file against the folder above a package (`tests/test_checkout_paths.py`).
+`python scripts/packaging/agent_harness_build.py --out dist` builds the core wheel and one wheel per module (#334, stage e; standard library only, no network). `tests/test_packaging.py` installs them in a new virtual environment and runs the Server from it. A new non-`.py` file in a package must be listed in `pyproject.toml` (`[tool.agent-harness]`), and nothing may resolve a file against the folder above a package (`tests/test_checkout_paths.py`). In the backend only `Tree` reads (tracked files, never through a link) and only `Out` writes: `tests/test_packaging.py` fails on any other disk access.
 
 With Docker, `docker build -t agent-harness-server .` builds the Server image and `python scripts/server_image_smoke.py agent-harness-server` checks it: `/health`, an unprivileged daemon on loopback only, state in the volume, no secret in the image. It runs offline and removes the container and the volume it made. `tests/test_server_image.py` checks the `Dockerfile`, the `.dockerignore` allowlist and the smoke script without Docker.
 
