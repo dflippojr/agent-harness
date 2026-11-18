@@ -22,7 +22,6 @@ import asyncio
 import logging
 import re
 import time
-from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -33,7 +32,9 @@ from .api_models import ApprovalResponse, SessionResponse
 from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
+from .origins import check_key_origin, daemon_origins, normalize_origin
 from .policy import TOOLS_ONLY
+from .request_body import json_body
 from . import audit_context, catalog_ids, compat, credential_audit, idempotency, namespace_audit
 
 NO_SUCH_SESSION = "no session matches that id"
@@ -56,37 +57,6 @@ DEFAULT_TOOL_TIMEOUT = 600
 HOLD_SLOT_SECONDS = 3      # an app answering faster than this keeps the session on the GPU
 PAIRING_TTL_SECONDS = 10 * 60
 STREAM_TICKET_TTL_SECONDS = 60
-
-
-def normalize_origin(value: str) -> str:
-    """Return a canonical web origin, or raise ValueError for URLs that are not origins."""
-    value = (value or "").strip()
-    try:
-        parsed = urlsplit(value)
-        port = parsed.port
-    except ValueError as e:
-        raise ValueError("origin must be a valid http(s) origin") from e
-    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password
-            or parsed.query or parsed.fragment or parsed.path not in ("", "/")):
-        raise ValueError("origin must contain only an http(s) scheme, host, and optional port")
-    host = parsed.hostname.lower()
-    if parsed.scheme == "http" and host not in ("localhost", "127.0.0.1", "::1"):
-        raise ValueError("browser origins must use https (http is allowed only for loopback development)")
-    if ":" in host:
-        host = f"[{host}]"
-    default_port = (parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443)
-    return f"{parsed.scheme}://{host}{f':{port}' if port is not None and not default_port else ''}"
-
-
-def daemon_origins(cfg) -> set[str]:
-    values = [cfg.public_url, f"http://127.0.0.1:{cfg.port}", f"http://localhost:{cfg.port}"]
-    out = set()
-    for value in values:
-        try:
-            out.add(normalize_origin(value))
-        except ValueError:
-            pass
-    return out
 
 
 def cors_origin_allowed(m, request: Request, origin: str) -> bool:
@@ -440,17 +410,6 @@ def _bundled_identity(request: Request, m, token: str) -> dict:
     raise HarnessError(401, "missing or invalid app token")
 
 
-def _check_token_origin(request: Request, m, key: dict) -> None:
-    raw_origin = request.headers.get("origin", "")
-    if raw_origin:
-        try:
-            origin = normalize_origin(raw_origin)
-        except ValueError as e:
-            raise HarnessError(403, str(e)) from e
-        if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
-            raise HarnessError(403, "this app token is not approved for this origin")
-
-
 def auth(request: Request, scope: str) -> dict:
     m = mgr(request)
     header = request.headers.get("authorization", "")
@@ -462,7 +421,7 @@ def auth(request: Request, scope: str) -> dict:
     if (not owner_key(key) and scope not in scopes
             and not (scope == "sessions" and SESSIONS_ALL in scopes and request.method == "GET")):
         raise HarnessError(403, f"this token lacks the {scope!r} scope")
-    _check_token_origin(request, m, key)
+    check_key_origin(request, m, key, noun="app")
     key["scope_set"] = scopes
     request.state.authenticated_key_id = key["id"]
     return key
@@ -651,16 +610,18 @@ async def api_root(request: Request):
 
 @route_table.get("/api/v1/backends", response_model=list[BackendResponse])
 async def backends(request: Request):
-    """Each configured backend's availability, login state, limits and usage; some callers see only the local backend."""
+    """The local model and each configured backend: availability, login state, limits and usage; members see only the local model."""
     m = mgr(request)
     key = auth(request, "sessions")
+    from .backend_state import local_view, view as backend_view
     if key.get("kind") == "member":
-        from .backend_state import local_view
         return [local_view(m)]
+    # Every App and device may start `local` sessions with no grant, so the list shows it first, as discovery's
+    # app_tools_only_backends and the admin list do (#946).
     app_id = None if owner_key(key) else key["id"]
-    from .backend_state import view as backend_view
-    return list(await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, True, app_id, True)
-                                       for name in m.cfg.backends]))
+    hosted = await asyncio.gather(*[asyncio.to_thread(backend_view, m, name, True, app_id, True)
+                                    for name in m.cfg.backends])
+    return [local_view(m), *hosted]
 
 
 def _member_me(m, key: dict, ident) -> dict:
@@ -826,10 +787,7 @@ async def api_member_keys(request: Request):
 async def api_member_key_set(backend: str, request: Request):
     """Store or replace the key. The body is read by hand, so a validation error can never echo the key back."""
     m, uid = _github_member(request, mutate=True, what="API keys")
-    try:
-        body = await request.json()
-    except ValueError:
-        body = None
+    body = await json_body(request)
     key = body.get("key") if isinstance(body, dict) else None
     out = await asyncio.to_thread(m.member_key_set, uid, backend, key if isinstance(key, str) else "",
                                   credential_audit.member_context(uid))
@@ -1142,10 +1100,7 @@ async def submit_end_user_login_code(end_user: str, backend: str, attempt_id: st
     """Pass the one-time code the person pasted into the popup (Claude) straight to the waiting login. The body is
     read by hand, so a validation error can never echo the code back."""
     m, app_id = end_user_app(request)
-    try:
-        body = await request.json()
-    except ValueError:
-        body = None
+    body = await json_body(request)
     code = body.get("code") if isinstance(body, dict) else None
     out = await m.end_user_login_code(app_id, end_user, backend, attempt_id, code,
                                     context=namespace_audit.key_context(auth(request, "sessions")))

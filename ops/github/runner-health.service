@@ -1,0 +1,12 @@
+# A systemd user unit of the user the deploy runner runs as, started by runner-health.timer (#814).
+# docs/CI-CD.md ("Applying this on the tower") installs it and describes the settings file.
+[Unit]
+Description=Check the deploy runner and raise an ntfy alert when it stops working
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/agent-harness/runner-health.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/Projects/agent-harness/ops/github/runner-health.sh
+UMask=0077
+TimeoutStartSec=4min

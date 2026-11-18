@@ -1,30 +1,12 @@
 """Optional llama-server supervision, warm-up, GPU holds and RAM admission guard."""
-from harness.modules import Module
-
-def _runtime(manager, module):
-    from .runtime import LocalModelRuntime
-    return LocalModelRuntime(manager, module)
-
-def _owner_routes():
-    from .routes import owner_routes
-    return owner_routes
-
-def _app_routes():
-    from .routes import app_routes
-    return app_routes
-
-def _settings():
-    from .settings import specs
-    return specs()
-
-def _doctor(report, cfg):
-    from .doctor import run
-    run(report, cfg)
+from harness.modules import Module, lazy
 
 MODULE = Module(
     name="local_model", switches=("local_model", "gpu_guard"), title="Local model supervision",
-    runtime=_runtime, runtime_enabled=lambda cfg, switch: switch == "local_model" or cfg.gpu_guard.enabled,
-    owner_routes=_owner_routes, app_routes=_app_routes, settings=_settings, doctor=_doctor,
+    runtime=lazy(".runtime", "LocalModelRuntime", call=True),
+    runtime_enabled=lambda cfg, switch: switch == "local_model" or cfg.gpu_guard.enabled,
+    owner_routes=lazy(".routes", "owner_routes"), app_routes=lazy(".routes", "app_routes"),
+    settings=lazy(".settings", "specs", call=True), doctor=lazy(".doctor", "run", call=True),
     app_scopes={"models:warm": "start loading the local model ahead of a chat (refused while the GPU or RAM guard says no)"},
     admin_paths=frozenset({"/models/status", "/models/warm", "/gpu", "/gpu/{action}",
                            "/resources", "/resources/diagnostics", "/resources/{action}"}),

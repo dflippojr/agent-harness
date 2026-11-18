@@ -28,7 +28,7 @@ from harness_modules.skills.skill_validate import (
     validate_dir,
 )
 from harness_modules.skills.service import SkillError, SkillStore, in_process_sandbox, session_eligible, skill_instructions, _safe_join
-from test_daemon import Script, call, make_cfg, wait_status
+from test_daemon import SANDBOX_IMAGE, Script, call, make_cfg, wait_status
 from waits import scaled
 
 SKILL_MD = "# Commit messages\nWrite conventional commits: `type: summary`.\nKeep the first line under 72 characters.\n"
@@ -59,10 +59,10 @@ def bundle(**overrides):
     return data
 
 
-def store_for(tmp: Path, cfg=None) -> SkillStore:
+def store_for(tmp: Path, cfg=None, image: str = "agent-harness-sandbox:py312") -> SkillStore:
     db = Database(tmp / "harness.sqlite3")
     skills_cfg = cfg or SkillsConfig(enabled=True, local_review=False)
-    return SkillStore(skills_cfg, db, tmp, "agent-harness-sandbox:py312", run_sandbox=in_process_sandbox)
+    return SkillStore(skills_cfg, db, tmp, image, run_sandbox=in_process_sandbox)
 
 
 def enable_skills(cfg):
@@ -243,11 +243,107 @@ def test_sandbox_argv_is_isolated(tmp_path):
     assert argv[argv.index("--workdir") + 1] not in ("/tmp", "/var/tmp")
     assert f"{SANDBOX_WORK}:rw,noexec,nosuid,size=16m" in argv
     assert f"TMPDIR={SANDBOX_WORK}" in argv
-    joined = " ".join(argv)
+    # What the command adds on its own, whatever directory the test temp folder happens to sit under (#861).
+    joined = " ".join(argv).replace(str(tmp_path.resolve()), "")
     for needle in ("docker.sock", "/workspace", "harness-auth", "/secrets", "memory-library"):
         assert needle not in joined
     bad = argv + ["--mount", "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock"]
     assert sandbox_command_is_isolated(bad)
+
+
+@pytest.mark.parametrize("component", [
+    "workspaces", "WORKSPACES", "workspace-old", "workspace_2", "workspace.bak", "workspace2",
+    "workspace#2", "workspace!", "workspace(2)", "workspace=x", "workspace+x", "workspace~", "workspace@x", "workspace^",
+    "workspace 2", "workspace$x", "workspace%x%", "workspace;x", "workspace&", "workspace[1]",
+])
+def test_sandbox_allows_install_path_with_longer_component(tmp_path, component):
+    install = tmp_path / "orca" / component / "agent-harness"
+    proposal = install / "proposal"
+    proposal.mkdir(parents=True)
+    validator = install / "validate.py"
+    validator.write_text("print(1)\n", encoding="utf-8")
+    assert sandbox_command_is_isolated(sandbox_command("image", proposal, validator)) == []
+
+
+@pytest.mark.parametrize("arg", [
+    "type=bind,source=/workspace,target=/x",
+    "type=bind,source=/workspace/,target=/x",
+    "type=bind,source=/workspace/repo,target=/x",
+    "type=bind,source=/x,target=/workspace",
+    "type=bind,source=/x,target=/workspace,readonly",
+    "/workspace",
+    "/workspace:/x",
+    "/workspace:/x:ro",
+    "--volume=/workspace:/x",
+    "/WORKSPACE/repo",
+    "/Workspace",
+    "/workspace/../etc",
+    "/x/../workspace",
+    "//workspace",
+    "/./workspace",
+    "/workspaces/../workspace",
+    "/home/owner/workspace/repo",
+    "C:/workspace/repo",
+    "/workspace\\repo",
+    "\"/workspace\"",
+    "/workspace.",
+    "/workspace./repo",
+    "/workspace*",
+    "/workspace?",
+    "/workspace 2",
+    "/workspace$x",
+    "/workspace%x%",
+    "/workspace[1]",
+    "/workspace{a,b}",
+    "(/workspace)",
+    "/workspace;",
+    "/workspace..",
+    "/workspace|x",
+    "type=bind,src=/workspace,target=/x",
+    "type=bind,SOURCE=/workspace,target=/x",
+    "type=bind,source=/home/owner/workspace/repo,target=/x",
+    "type=bind,source=/WORKSPACE,target=/x",
+    "type=bind,source=/workspace.,target=/x",
+    "type=bind,source=/workspace /repo,target=/x",
+    "type=bind,source=\"/workspace\",target=/x",
+    "\"type=bind,source=/workspace,target=/x\"",
+    "type=bind,source=/workspace\\repo,target=/x",
+    "type=bind,source=/workspaces/../workspace,target=/x",
+    "type=bind,source=C:/workspace/repo,target=/x",
+    "type=bind,source=C:\\workspace\\repo,target=/x",
+    "type=bind,source=C:/workspaces\\workspace,target=/x",
+    "C:\\workspace\\repo",
+    "C:/workspaces\\workspace",
+])
+def test_sandbox_refuses_a_command_reaching_workspace(tmp_path, arg):
+    proposal = tmp_path / "proposal"
+    proposal.mkdir()
+    validator = tmp_path / "validate.py"
+    validator.write_text("print(1)\n", encoding="utf-8")
+    argv = sandbox_command("image", proposal, validator)
+    assert "forbidden mount or path /workspace" in sandbox_command_is_isolated(argv + ["--mount", arg])
+    assert "forbidden mount or path /workspace" in sandbox_command_is_isolated(argv[:-1] + [arg])
+
+
+def test_sandbox_reads_a_mount_source_as_one_literal_path(tmp_path):
+    proposal = tmp_path / "proposal"
+    proposal.mkdir()
+    validator = tmp_path / "validate.py"
+    validator.write_text("print(1)\n", encoding="utf-8")
+    argv = sandbox_command("image", proposal, validator)
+    # Windows can't create this directory, so the string goes straight to the check.
+    glob_name = ["--mount", "type=bind,source=/orca/workspace*/proposal,target=/x"]
+    assert "forbidden mount or path /workspace" not in sandbox_command_is_isolated(argv + glob_name)
+
+
+def test_sandbox_refuses_workspace_mount_beside_a_longer_component(tmp_path):
+    proposal = tmp_path / "workspaces" / "proposal"
+    proposal.mkdir(parents=True)
+    validator = tmp_path / "workspaces" / "validate.py"
+    validator.write_text("print(1)\n", encoding="utf-8")
+    argv = sandbox_command("image", proposal, validator)
+    assert sandbox_command_is_isolated(argv) == []
+    assert "forbidden mount or path /workspace" in sandbox_command_is_isolated(argv + ["-v", "/workspace:/x"])
 
 
 def test_extract_json_strips_markdown_fences_without_regex():
@@ -1172,6 +1268,7 @@ def test_skill_instructions_cannot_override_system():
     assert "hash abcd1234" in text
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(os.environ.get("HARNESS_LIVE_DOCKER") != "1", reason="optional live docker isolation check")
 def test_live_docker_validator_isolation(tmp_path):
     root = tmp_path / "proposal"
@@ -1182,6 +1279,12 @@ def test_live_docker_validator_isolation(tmp_path):
         "purpose": "Keep git commit messages conventional and short.",
         "examples": EXAMPLES,
     }), encoding="utf-8")
-    store = store_for(tmp_path)
+    # The selected image (the real-environment lane points HARNESS_TEST_SANDBOX_IMAGE at the commit's own), and a
+    # validation that really ran in it: Docker errors also come back as {"ok": False, "findings": [...]}, but without
+    # the validator's own fields, so the container's answer must equal the same validator run in-process.
+    store = store_for(tmp_path, image=SANDBOX_IMAGE)
+    assert SANDBOX_IMAGE in store.sandbox_argv(root)
+    expected = validate_dir(root)
+    assert expected["ok"] and expected["content_hash"], expected   # a valid proposal: only the container can fail it
     result = store._docker_validate(root)
-    assert "findings" in result
+    assert result == expected, result

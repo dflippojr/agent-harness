@@ -18,6 +18,7 @@ from test_phase3 import make_repo, sh
 from test_phase4 import FakeRunner, executor, harness_runner, mac_cfg, settle
 from test_secret_scan import KEY, _commit_then_remove_key, _leaks
 from waits import scaled
+from host_git import needs_host_git
 
 
 @asynccontextmanager
@@ -45,6 +46,7 @@ async def runner_online(m, name="macbook"):
 
 
 @pytest.mark.parametrize("action", ["merge", "push"])
+@needs_host_git
 def test_remote_gate_dismissal_masking_and_fix(tmp_path, action, caplog):
     caplog.set_level(logging.DEBUG)
 
@@ -79,6 +81,7 @@ def test_remote_gate_dismissal_masking_and_fix(tmp_path, action, caplog):
 
 
 @pytest.mark.parametrize("action", ["merge", "push"])
+@needs_host_git
 def test_remote_history_matrix(tmp_path, action):
     async def body():
         async with session(tmp_path, url=action == "push") as (m, s, ws, src, ex, runner):
@@ -105,6 +108,7 @@ def test_remote_history_matrix(tmp_path, action):
     *((failure, "push") for failure in ("offline", "timeout", "deadline", "old", "unknown_op", "cap", "malformed")),
     ("timeout", "merge"),
 ])
+@needs_host_git
 def test_remote_scan_failures_close_gate_but_not_discard(tmp_path, monkeypatch, failure, action):
     async def body():
         async with session(tmp_path, url=action == "push") as (m, s, ws, src, ex, runner):
@@ -153,6 +157,7 @@ def test_remote_scan_failures_close_gate_but_not_discard(tmp_path, monkeypatch, 
     asyncio.run(body())
 
 
+@needs_host_git
 def test_scan_input_fails_on_git_errors_and_changes_during_collection(tmp_path, monkeypatch):
     ex = executor(tmp_path, [tmp_path])
     sid = "0123456789"
@@ -175,6 +180,7 @@ def test_scan_input_fails_on_git_errors_and_changes_during_collection(tmp_path, 
     assert error.value.kind == "head_changed"
 
 
+@needs_host_git
 def test_runner_requires_expected_head(tmp_path):
     ex = executor(tmp_path, [tmp_path])
     ws = make_repo(ex.workspace("0123456789"))
@@ -189,6 +195,7 @@ def test_runner_published_rejects_path_escape(tmp_path):
         ex.op_secret_published({"session": "0123456789", "path": "../outside", "commit": "abc", "tips": []})
 
 
+@needs_host_git
 def test_strict_diffs_include_untracked_and_refuse_failed_reads(tmp_path, monkeypatch):
     ws = make_repo(tmp_path / "repo")
     (ws / "new.txt").write_text("untracked content\n")
@@ -206,6 +213,7 @@ def test_strict_diffs_include_untracked_and_refuse_failed_reads(tmp_path, monkey
 
 
 @pytest.mark.parametrize("action", ["push", "merge"])
+@needs_host_git
 def test_publication_uses_scanned_commit_even_after_head_check(tmp_path, monkeypatch, action):
     ex = executor(tmp_path, [tmp_path])
     sid = "0123456789"
@@ -233,6 +241,7 @@ def test_publication_uses_scanned_commit_even_after_head_check(tmp_path, monkeyp
 
 @pytest.mark.parametrize("action", ["merge", "push"])
 @pytest.mark.parametrize("committed", [False, True])
+@needs_host_git
 def test_remote_head_change_refuses_publication(tmp_path, monkeypatch, action, committed):
     async def body():
         async with session(tmp_path, url=action == "push") as (m, s, ws, src, ex, runner):
@@ -270,6 +279,7 @@ def test_remote_head_change_refuses_publication(tmp_path, monkeypatch, action, c
     asyncio.run(body())
 
 
+@needs_host_git
 def test_scan_input_caps_return_no_partial_diffs(tmp_path, monkeypatch):
     async def body():
         async with session(tmp_path) as (m, s, ws, src, ex, runner):
@@ -283,6 +293,7 @@ def test_scan_input_caps_return_no_partial_diffs(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("pushed", [True, False])
+@needs_host_git
 def test_remote_history_fix_respects_publication(tmp_path, monkeypatch, caplog, pushed):
     async def body():
         async with session(tmp_path, url=True) as (m, s, ws, src, ex, runner):

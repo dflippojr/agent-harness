@@ -1,0 +1,34 @@
+# The App API (/api/v1) of the loopback-bound harness daemon, for containers on the harness-app-api Docker network
+# only (#909). Install and check it as docs/CI-CD.md "App API for containers" says. A system unit beside
+# harness-metrics-proxy.service: DynamicUser and ProtectHome keep it away from the daemon's data_dir (the local owner
+# token), and it holds no credential of its own.
+[Unit]
+Description=App API (/api/v1) of the harness daemon (8100) for the harness-app-api Docker network only
+After=docker.service
+Requires=docker.service
+
+[Service]
+DynamicUser=yes
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/harness-app-api-proxy --network 192.168.240.0/29 --listen 192.168.240.1 --device harness-api0 --port 8100 --upstream-port 8100
+# The bridge exists once the network does; until then the bind fails and systemd tries again.
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1 192.168.240.0/29
+
+[Install]
+WantedBy=multi-user.target

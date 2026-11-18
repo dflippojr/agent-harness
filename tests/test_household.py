@@ -31,6 +31,7 @@ from harness.tools import ToolError, Workspace
 from test_cli_print_mode import opencode_backend
 from test_daemon import Script, make_cfg
 from waits import scaled
+from host_git import needs_host_git
 
 OWNER = "me@example.com"
 ALICE = "alice@example.com"
@@ -497,6 +498,7 @@ def test_member_clone_allows_only_public_https(tmp_path):
             clone_mod.clone_public = orig
 
 
+@needs_host_git
 def test_isolated_prepare_stops_when_clone_exceeds_max_bytes(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
@@ -777,6 +779,7 @@ def test_disable_member_cancelled_mid_write_still_cancels_all_its_work(tmp_path)
     asyncio.run(body())
 
 
+@needs_host_git
 def test_isolated_refresh_origin_fetches_the_recorded_source(tmp_path):
     client, m = household(tmp_path)
     with client:
@@ -809,6 +812,7 @@ def test_isolated_refresh_origin_fetches_the_recorded_source(tmp_path):
         assert "account-local" in isolated_refresh_origin(ws, "git@github.com:octocat/Hello-World.git", root)
 
 
+@needs_host_git
 def test_isolated_refresh_origin_runs_nothing_from_the_workspace(tmp_path):
     """#529: planted hooks, fsmonitor and remote config in a member workspace never run on the host."""
     root = tmp_path / "user"
@@ -858,6 +862,7 @@ def test_isolated_refresh_origin_runs_nothing_from_the_workspace(tmp_path):
     assert fetched == head
 
 
+@needs_host_git
 def test_isolated_refresh_origin_stops_when_fetch_exceeds_max_bytes(tmp_path):
     """A later fetch must not grow a member workspace past remaining quota (same class as clone caps)."""
     from harness.fileops import dir_size
@@ -884,6 +889,7 @@ def test_isolated_refresh_origin_stops_when_fetch_exceeds_max_bytes(tmp_path):
     assert (dest / "small.txt").exists()
 
 
+@needs_host_git
 def test_isolated_refresh_origin_counts_fetched_refs_against_quota(tmp_path):
     """#529: refs land in the temp git dir first; an over-quota fetch keeps the workspace refs unchanged."""
     from harness.fileops import dir_size
@@ -1055,6 +1061,7 @@ def test_member_git_clone_tool_refuses_private_and_local(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_member_git_clone_tool_stops_when_over_budget(tmp_path):
     async def body():
         src = tmp_path / "src"

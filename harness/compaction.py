@@ -121,6 +121,23 @@ def mask_used_results(messages: list[dict], outcomes: dict, minimum: int,
     return out, artifacts, saved
 
 
+MASK_BATCH_MIN_SHARE = 0.10  # of the window: a smaller batch waits, or a context held above the threshold by results
+                             # masking can't touch would mask every turn again (docs/compaction.md)
+
+
+def mask_due(before: int, n: int, batch_at: float, elide_at: float) -> bool:
+    """Whether this pass looks for results to mask: always with `compaction.mask_batch_at` off (0), otherwise once the
+    context estimate `before` reaches that share of the window `n`. `elide_at` is a live setting, so it can move below
+    `batch_at`; trim and elide must still find the results masked."""
+    return not batch_at or before >= min(batch_at, elide_at) * n
+
+
+def mask_batch_worthwhile(saved_tokens: float, before: int, n: int, batch_at: float, elide_at: float) -> bool:
+    """Whether a pass that mask_due let through rewrites the prompt: a batch must free enough to be worth the re-read,
+    except at `elide_at`, where masking goes first so that it can head off a lossy elide or a summary."""
+    return not batch_at or before >= elide_at * n or saved_tokens >= MASK_BATCH_MIN_SHARE * n
+
+
 def elide(messages: list[dict], keep_last: int = 6, max_chars: int = 1500) -> tuple[list[dict], int]:
     """Tier 1. Returns (new messages, characters saved)."""
     out = copy.deepcopy(messages)

@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
-import hashlib
 import json
 import queue
 import secrets
@@ -25,6 +24,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import migrations as migrations_mod
+from .digests import sha256_hex
 from .migrations.baseline import BASELINE_VERSION, LEGACY_COLUMNS
 
 from .telemetry import TimedLock
@@ -1563,23 +1563,31 @@ class Database:
     @_writes
     def create_api_key(self, name: str, scopes: str = "inference", kind: str = "device",
                        origins: list[str] | None = None, catalog_app_id: str = "") -> tuple[dict, str]:
-        import hashlib
-        prefix = {"app": "ha-", "owner": "ho-"}.get(kind, "hk-")
-        key = prefix + secrets.token_urlsafe(32)
-        row = {"id": "k-" + secrets.token_hex(4), "name": name, "prefix": key[:10], "created_at": time.time(),
-               "scopes": scopes, "kind": kind, "origins": origins or [], "catalog_app_id": catalog_app_id}
         with self.lock:
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
-                              "catalog_app_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                              (row["id"], name, row["prefix"], hashlib.sha256(key.encode()).hexdigest(),
-                               row["created_at"], scopes, kind, json.dumps(row["origins"]), catalog_app_id))
-        return row, key
+            return self._insert_api_key(name, scopes, kind, origins or [], time.time(), catalog_app_id)
+
+    def _insert_api_key(self, name: str, scopes: str, kind: str, origins: list[str], now: float,
+                        catalog_app_id: str | None = "", role: str = "") -> tuple[dict, str]:
+        """Mint a `kind` key and write its row, the one api_keys insert for every minting path (#843). The caller
+        holds the lock or its transaction. Returns (key row, secret); the row names `role` only when one is set and
+        leaves out `catalog_app_id` when it is None, which a runner's owner key stores as NULL."""
+        secret = {"app": "ha-", "owner": "ho-"}.get(kind, "hk-") + secrets.token_urlsafe(32)
+        key = {"id": "k-" + secrets.token_hex(4), "name": name, "prefix": secret[:10], "created_at": now,
+               "scopes": scopes, "kind": kind, "origins": origins}
+        if catalog_app_id is not None:
+            key["catalog_app_id"] = catalog_app_id
+        if role:
+            key["role"] = role
+        self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
+                          "catalog_app_id, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (key["id"], name, key["prefix"], sha256_hex(secret), now, scopes, kind,
+                           json.dumps(origins), catalog_app_id, role))
+        return key, secret
 
     # browser pairing and EventSource tickets
     @_writes
     def create_pairing_code(self, name: str, origin: str, scopes: str, ttl_seconds: int,
                             catalog_app_id: str = "") -> tuple[dict, str]:
-        import hashlib
         now = time.time()
         code = "hp-" + secrets.token_urlsafe(18)
         row = {"id": "p-" + secrets.token_hex(4), "name": name, "origin": origin, "scopes": scopes,
@@ -1588,7 +1596,7 @@ class Database:
         with self.lock:
             self.conn.execute("INSERT INTO pairing_codes (id, hash, name, origin, scopes, catalog_app_id, created_at, "
                               "expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                              (row["id"], hashlib.sha256(code.encode()).hexdigest(), name, origin, scopes,
+                              (row["id"], sha256_hex(code), name, origin, scopes,
                                catalog_app_id, now, row["expires_at"]))
         return row, code
 
@@ -1622,8 +1630,7 @@ class Database:
     @_writes
     def redeem_pairing_code(self, code: str, origin: str) -> tuple[dict | None, str, str]:
         """Atomically redeem a bootstrap code. Returns (key row, secret, error)."""
-        import hashlib
-        digest, now = hashlib.sha256(code.encode()).hexdigest(), time.time()
+        digest, now = sha256_hex(code), time.time()
         with self._tx():
             pairing = self.conn.execute("SELECT * FROM pairing_codes WHERE hash = ?", (digest,)).fetchone()
             if pairing is None:
@@ -1634,14 +1641,8 @@ class Database:
                 return None, "", "pairing code expired"
             if pairing["origin"] != origin:
                 return None, "", "pairing code is not approved for this origin"
-            secret = "ha-" + secrets.token_urlsafe(32)
-            key = {"id": "k-" + secrets.token_hex(4), "name": pairing["name"], "prefix": secret[:10],
-                   "created_at": now, "scopes": pairing["scopes"], "kind": "app", "origins": [origin],
-                   "catalog_app_id": pairing["catalog_app_id"] or ""}
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
-                              "catalog_app_id) VALUES (?, ?, ?, ?, ?, ?, 'app', ?, ?)",
-                              (key["id"], key["name"], key["prefix"], hashlib.sha256(secret.encode()).hexdigest(),
-                               now, key["scopes"], json.dumps(key["origins"]), key["catalog_app_id"]))
+            key, secret = self._insert_api_key(pairing["name"], pairing["scopes"], "app", [origin], now,
+                                               pairing["catalog_app_id"] or "")
             self.conn.execute("UPDATE pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
                               (now, key["id"], pairing["id"]))
         return key, secret, ""
@@ -1770,20 +1771,14 @@ class Database:
     @_writes
     def redeem_pairing_request(self, rid: str, now: float) -> tuple[dict | None, str]:
         """Mint the request's `ha-` App key and mark it redeemed, if it is still approved. Returns (key row, secret)."""
-        import hashlib
         with self._tx():
             req = self.conn.execute("SELECT * FROM pairing_requests WHERE id = ? AND kind = 'app' "
                                     "AND state = 'approved' AND expires_at > ?", (rid, now)).fetchone()
             if req is None:
                 return None, ""
-            secret = "ha-" + secrets.token_urlsafe(32)
-            key = {"id": "k-" + secrets.token_hex(4), "name": req["name"], "prefix": secret[:10], "created_at": now,
-                   "scopes": req["scopes"], "kind": "app", "origins": [req["origin"]] if req["origin"] else [],
-                   "catalog_app_id": req["catalog_app_id"] or ""}
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
-                              "catalog_app_id) VALUES (?, ?, ?, ?, ?, ?, 'app', ?, ?)",
-                              (key["id"], key["name"], key["prefix"], hashlib.sha256(secret.encode()).hexdigest(),
-                               now, key["scopes"], json.dumps(key["origins"]), key["catalog_app_id"]))
+            key, secret = self._insert_api_key(req["name"], req["scopes"], "app",
+                                               [req["origin"]] if req["origin"] else [], now,
+                                               req["catalog_app_id"] or "")
             self.conn.execute("UPDATE pairing_requests SET state = 'redeemed', finished_at = ?, key_id = ? "
                               "WHERE id = ?", (now, key["id"], rid))
         return key, secret
@@ -1800,7 +1795,6 @@ class Database:
     def redeem_hub_claim(self, rid: str, now: float) -> tuple[dict | None, str, str]:
         """Mint the Hub's key (owner kind, admin scope, role `hub`), record it as the one Hub and mark the request
         redeemed, if the request is still approved and no Hub is recorded. Returns (key row, secret, error)."""
-        import hashlib
         with self._tx():
             req = self.conn.execute("SELECT * FROM pairing_requests WHERE id = ? AND kind = 'hub' "
                                     "AND state = 'approved' AND expires_at > ?", (rid, now)).fetchone()
@@ -1808,14 +1802,9 @@ class Database:
                 return None, "", "used"
             if self.conn.execute("SELECT 1 FROM hub_claim WHERE slot = 1").fetchone():
                 return None, "", "claimed"
-            secret = "ho-" + secrets.token_urlsafe(32)
-            key = {"id": "k-" + secrets.token_hex(4), "name": req["name"], "prefix": secret[:10], "created_at": now,
-                   "scopes": "admin", "kind": "owner", "role": "hub",
-                   "origins": [req["origin"]] if req["origin"] else [], "catalog_app_id": req["catalog_app_id"] or ""}
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins, "
-                              "catalog_app_id, role) VALUES (?, ?, ?, ?, ?, 'admin', 'owner', ?, ?, 'hub')",
-                              (key["id"], key["name"], key["prefix"], hashlib.sha256(secret.encode()).hexdigest(),
-                               now, json.dumps(key["origins"]), key["catalog_app_id"]))
+            key, secret = self._insert_api_key(req["name"], "admin", "owner",
+                                               [req["origin"]] if req["origin"] else [], now,
+                                               req["catalog_app_id"] or "", role="hub")
             self.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, origin, request_id, claimed_at) "
                               "VALUES (1, ?, ?, ?, ?, ?, ?)",
                               (key["id"], key["name"], "browser" if req["origin"] else "native", req["origin"], rid,
@@ -1854,7 +1843,6 @@ class Database:
     # the runner token remains in its configured owner file and never enters SQLite.
     @_writes
     def create_runner_pairing_code(self, name: str, runner: str, ttl_seconds: int) -> tuple[dict, str]:
-        import hashlib
         now = time.time()
         code = "hrp-" + secrets.token_urlsafe(18)
         row = {"id": "rp-" + secrets.token_hex(4), "name": name, "runner": runner,
@@ -1862,7 +1850,7 @@ class Database:
         with self.lock:
             self.conn.execute("INSERT INTO runner_pairing_codes "
                               "(id, hash, name, runner, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                              (row["id"], hashlib.sha256(code.encode()).hexdigest(), name, runner, now,
+                              (row["id"], sha256_hex(code), name, runner, now,
                                row["expires_at"]))
         return row, code
 
@@ -1884,8 +1872,7 @@ class Database:
     @_writes
     def redeem_runner_pairing_code(self, code: str) -> tuple[dict | None, dict | None, str, str]:
         """Atomically redeem a native-client code. Returns (pairing, owner key, secret, error)."""
-        import hashlib
-        digest, now = hashlib.sha256(code.encode()).hexdigest(), time.time()
+        digest, now = sha256_hex(code), time.time()
         with self._tx():
             pairing = self.conn.execute("SELECT * FROM runner_pairing_codes WHERE hash = ?", (digest,)).fetchone()
             if pairing is None:
@@ -1894,13 +1881,7 @@ class Database:
                 return None, None, "", "runner pairing code already used"
             if pairing["expires_at"] <= now:
                 return None, None, "", "runner pairing code expired"
-            secret = "ho-" + secrets.token_urlsafe(32)
-            key = {"id": "k-" + secrets.token_hex(4), "name": pairing["name"], "prefix": secret[:10],
-                   "created_at": now, "scopes": "admin", "kind": "owner", "origins": []}
-            self.conn.execute("INSERT INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins) "
-                              "VALUES (?, ?, ?, ?, ?, 'admin', 'owner', '[]')",
-                              (key["id"], key["name"], key["prefix"], hashlib.sha256(secret.encode()).hexdigest(),
-                               now))
+            key, secret = self._insert_api_key(pairing["name"], "admin", "owner", [], now, catalog_app_id=None)
             self.conn.execute("UPDATE runner_pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
                               (now, key["id"], pairing["id"]))
         return dict(pairing), key, secret, ""
@@ -1919,20 +1900,18 @@ class Database:
     @_writes
     def create_stream_ticket(self, key_id: str, session_id: str, origin: str,
                              ttl_seconds: int = 60) -> tuple[str, float]:
-        import hashlib
         now = time.time()
         ticket = "hs-" + secrets.token_urlsafe(24)
         with self.lock:
             self.conn.execute("DELETE FROM stream_tickets WHERE expires_at <= ?", (now,))
             self.conn.execute("INSERT INTO stream_tickets "
                               "(hash, key_id, session_id, origin, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                              (hashlib.sha256(ticket.encode()).hexdigest(), key_id, session_id, origin, now,
+                              (sha256_hex(ticket), key_id, session_id, origin, now,
                                now + ttl_seconds))
         return ticket, now + ttl_seconds
 
     @_reads
     def stream_ticket_key(self, ticket: str, session_id: str, origin: str) -> dict | None:
-        import hashlib
         if not ticket or not origin:
             return None
         with self.lock:
@@ -1940,19 +1919,18 @@ class Database:
                 "SELECT k.* FROM stream_tickets t JOIN api_keys k ON k.id = t.key_id "
                 "WHERE t.hash = ? AND t.session_id = ? AND t.origin = ? AND t.expires_at > ? "
                 "AND k.revoked_at IS NULL",
-                (hashlib.sha256(ticket.encode()).hexdigest(), session_id, origin, time.time())).fetchone()
+                (sha256_hex(ticket), session_id, origin, time.time())).fetchone()
         return _row(row)
 
     @_reads
     def stream_ticket_origin_active(self, ticket: str, origin: str) -> bool:
-        import hashlib
         if not ticket or not origin:
             return False
         with self.lock:
             row = self.conn.execute(
                 "SELECT 1 FROM stream_tickets t JOIN api_keys k ON k.id = t.key_id "
                 "WHERE t.hash = ? AND t.origin = ? AND t.expires_at > ? AND k.revoked_at IS NULL LIMIT 1",
-                (hashlib.sha256(ticket.encode()).hexdigest(), origin, time.time())).fetchone()
+                (sha256_hex(ticket), origin, time.time())).fetchone()
         return row is not None
 
     # app tool calls
@@ -1989,12 +1967,11 @@ class Database:
 
     @_reads
     def api_key_by_secret(self, key: str) -> dict | None:
-        import hashlib
         if not key:
             return None
         with self.lock:
             row = self.conn.execute("SELECT * FROM api_keys WHERE hash = ? AND revoked_at IS NULL AND kind != 'web'",
-                                    (hashlib.sha256(key.encode()).hexdigest(),)).fetchone()
+                                    (sha256_hex(key),)).fetchone()
         return _row(row)
 
     @_reads
@@ -2030,12 +2007,11 @@ class Database:
     def ensure_web_app(self, app_id: str) -> None:
         """Register Stables in the App registry (#330 decision 4) under its reserved id, once. It has no
         token: its hash is of a random secret nobody is given, and `api_key_by_secret` never matches its kind."""
-        import hashlib
         with self.lock:
             self.conn.execute(
                 "INSERT OR IGNORE INTO api_keys (id, name, prefix, hash, created_at, scopes, kind, origins) "
                 "VALUES (?, 'Stables', '', ?, ?, '', 'web', '[]')",
-                (app_id, hashlib.sha256(("web:" + secrets.token_urlsafe(32)).encode()).hexdigest(), time.time()))
+                (app_id, sha256_hex("web:" + secrets.token_urlsafe(32)), time.time()))
 
     @_writes
     def revoke_api_key(self, kid: str) -> bool:
@@ -2059,7 +2035,6 @@ class Database:
     def restore_api_key(self, kid: str) -> tuple[dict, str] | None:
         """Undo a revoke during its erasure grace: the App keeps its id, store and folder, and gets a new token
         (shown once; the revoked one stays dead). None when `kid` has no pending erasure."""
-        import hashlib
         with self.lock:
             row = self.conn.execute("SELECT * FROM api_keys WHERE id = ? AND revoked_at IS NOT NULL AND erased_at "
                                     "IS NULL AND erase_after > ?", (kid, time.time())).fetchone()
@@ -2068,7 +2043,7 @@ class Database:
             prefix = {"app": "ha-", "owner": "ho-"}.get(row["kind"], "hk-")
             key = prefix + secrets.token_urlsafe(32)
             self.conn.execute("UPDATE api_keys SET hash = ?, prefix = ?, revoked_at = NULL, erase_after = NULL "
-                              "WHERE id = ?", (hashlib.sha256(key.encode()).hexdigest(), key[:10], kid))
+                              "WHERE id = ?", (sha256_hex(key), key[:10], kid))
         return self.get_api_key_listing(kid), key
 
     @_reads
@@ -2541,7 +2516,7 @@ class Database:
         values = (now, namespace, session_id, context.actor_id, context.actor_kind, context.key_id, context.source,
                   target, kind, action, outcome, json.dumps(metadata, sort_keys=True, separators=(',', ':')),
                   None if session_id else now + min(30, days) * 86400)
-        checksum = hashlib.sha256(json.dumps(values, separators=(',', ':')).encode()).hexdigest()
+        checksum = sha256_hex(json.dumps(values, separators=(',', ':')))
         with self.lock:
             self.conn.execute(
                 "INSERT INTO namespace_audit (ts, namespace, session_id, actor_id, actor_kind, key_id, source, "

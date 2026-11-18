@@ -1453,12 +1453,6 @@
   },
   {
     "file": "harness_modules/endpoint/service.py",
-    "rule": "reportAttributeAccessIssue",
-    "message": "Cannot access attribute \"release\" for class \"object\"\n  Attribute \"release\" is unknown",
-    "count": 2
-  },
-  {
-    "file": "harness_modules/endpoint/service.py",
     "rule": "reportOptionalMemberAccess",
     "message": "\"get\" is not a known attribute of \"None\"",
     "count": 2

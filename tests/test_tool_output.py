@@ -102,6 +102,9 @@ def test_invalid_project_override_falls_back_to_global_not_package_default(tmp_p
     ("mask_min_chars", 5000, lambda c: c.mask_min_chars, 5000),
     ("mask_min_chars", 0, lambda c: c.mask_min_chars, None),
     ("mask_min_chars", "many", lambda c: c.mask_min_chars, None),
+    ("mask_batch_at", 0.45, lambda c: c.mask_batch_at, 0.45),
+    ("mask_batch_at", "soon", lambda c: c.mask_batch_at, 0.0),
+    ("mask_batch_at", 0.55, lambda c: c.mask_batch_at, 0.0),
     ("read_file_lines", "nope", lambda c: c.tool_output.read_file_lines, None),
     ("search_matches", 12, lambda c: c.tool_output.search_matches, 12),
     ("result_chars", 3000, lambda c: c.tool_output.result_chars, 3000),
@@ -109,7 +112,7 @@ def test_invalid_project_override_falls_back_to_global_not_package_default(tmp_p
     ("reset_at", "no", lambda c: c.reset_at, None),
     ("state_max_chars", 12, lambda c: c.state_max_chars, None),
     (None, None, lambda c: c.tool_output, config.ToolOutputConfig()),
-], ids=["mask-set", "mask-zero", "mask-text", "read-lines-text", "search-set", "result-chars-set", "result-chars-text",
+], ids=["mask-set", "mask-zero", "mask-text", "batch-set", "batch-text", "batch-at-elide", "read-lines-text", "search-set", "result-chars-set", "result-chars-text",
         "reset-at-text", "state-chars-low", "tool-output-defaults"])
 def test_harness_yaml_keys_reach_the_loaded_config(tmp_path, key, value, read, expected):
     """A valid value reaches the loaded config; an invalid one falls back to the shipped value (`expected` None)."""

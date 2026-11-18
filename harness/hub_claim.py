@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, ValidationError
 from . import audit_context, credential_audit
 from .local_owner import HUB_HEADER as HEADER
 from .manager import HarnessError
+from .request_body import BODY_PARSE_ERRORS
 
 ROLE = "hub"
 RELEASE_COMMAND = "harness hub release --confirm"
@@ -76,7 +77,7 @@ async def _parse(request: Request, model: type[BaseModel], m, ctx, action: str):
     raw = await request.body()
     try:
         return model.model_validate(json.loads(raw) if raw.strip() else {})
-    except (ValueError, ValidationError):
+    except (*BODY_PARSE_ERRORS, ValidationError):
         await m.db.main.awrite(credential_audit.record, m.db, ctx, action, "", "denied", "hub_claim",
                                {"reason": "invalid_request"})
         raise HarnessError(400, f"the request body is not a valid {model.__name__}") from None

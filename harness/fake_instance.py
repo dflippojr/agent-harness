@@ -194,7 +194,7 @@ def summary(state: dict, token: str, local_token: str, keep: bool) -> str:
 async def serve(args, root: Path) -> None:
     from . import config as config_mod
     from .api import create_app
-    from .apps import normalize_origin
+    from .origins import normalize_origin
     from .manager import Manager
 
     port, web_port = available_port(args.port), available_port(args.web_port)

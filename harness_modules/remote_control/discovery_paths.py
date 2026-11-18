@@ -11,7 +11,7 @@ import os
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict
-from pathlib import Path
+from pathlib import PureWindowsPath  # Windows path semantics on any host, so tests run on Linux too
 
 
 class DiscoveryError(ValueError):
@@ -63,23 +63,23 @@ def sensitive_paths(cfg) -> list[str]:
     paths = [str(cfg.data_dir), str(cfg.config_dir), cfg.homelab.docker_root, cfg.images.log_dir]
     if cfg.backup.dir:
         paths.append(cfg.backup.dir)
-    paths += [str(Path(p).parent) for p in cfg.provider_secret_files.values() if p]
+    paths += [str(PureWindowsPath(p).parent) for p in cfg.provider_secret_files.values() if p]
     # Runner and provider credential files live under daemon data/config. Also
     # cover owner-registered credential paths outside those directories.
     for backend in cfg.backends.values():
         for field in ('api_key_file', 'token_file'):
             value = getattr(backend, field, '')
             if value:
-                paths.append(str(Path(value).parent))
+                paths.append(str(PureWindowsPath(value).parent))
     if cfg.notify.token_file:
-        paths.append(str(Path(cfg.notify.token_file).parent))
+        paths.append(str(PureWindowsPath(cfg.notify.token_file).parent))
     if cfg.skills.reviewer_api_key_file:
-        paths.append(str(Path(cfg.skills.reviewer_api_key_file).parent))
+        paths.append(str(PureWindowsPath(cfg.skills.reviewer_api_key_file).parent))
     for runner in cfg.runners.values():
         if runner.token_file:
-            paths.append(str(Path(runner.token_file).parent))
+            paths.append(str(PureWindowsPath(runner.token_file).parent))
     if cfg.github.token_file:
-        paths.append(str(Path(cfg.github.token_file).parent))
+        paths.append(str(PureWindowsPath(cfg.github.token_file).parent))
     expanded = [os.path.expandvars(os.path.expanduser(p)) for p in paths if p]
     return list(dict.fromkeys([*expanded, *(os.path.realpath(p) for p in expanded)]))
 

@@ -1,6 +1,6 @@
 # Tempo + Grafana for session traces (#259)
 
-These files add Grafana Tempo to the external observability stack (`D:\Docker\observability-stack`, see
+These files add Grafana Tempo to the external observability stack (`/srv/docker/observability-stack` on the Ubuntu tower, `D:\Docker\observability-stack` on Windows; see
 `docs/phase5-results.md`) so harness session traces show up in Grafana next to the Prometheus metrics. The repo
 can't edit that stack. Applying them is an owner step. What the harness sends, and how to turn it on, is in
 [`docs/observability.md`](../../docs/observability.md).

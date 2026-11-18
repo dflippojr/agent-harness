@@ -155,6 +155,23 @@ def test_sandbox_validator_failure_is_closed(tmp_path, monkeypatch, result, code
         assert checked["findings"][0]["code"] == code
 
 
+def test_sandbox_validation_succeeds_at_an_install_path_with_longer_component(tmp_path, monkeypatch):
+    from harness_modules.skills import service
+    m = make(tmp_path / "data")
+    install = tmp_path / "orca" / "workspaces" / "agent-harness"
+    proposal = install / "proposal"
+    proposal.mkdir(parents=True)
+    monkeypatch.setattr(service, "__file__", str(install / "service.py"))
+    argvs = []
+    def run(argv):
+        argvs.append(argv)
+        return 0, '{"ok": true}', ""
+    monkeypatch.setattr(service, "_run_docker_sync", run)
+    assert m.skills._docker_validate(proposal) == {"ok": True}
+    assert any(f"source={proposal.resolve()}," in a for a in argvs[0])
+    assert any(f"source={(install / 'skill_validate.py').resolve()}," in a for a in argvs[0])
+
+
 @pytest.mark.parametrize("change,code", [
     ({"files": []}, "skill-md"),
     ({"files": ["invalid"]}, "files"),

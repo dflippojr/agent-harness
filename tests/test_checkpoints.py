@@ -19,6 +19,7 @@ from harness.manager import HarnessError, Manager
 from test_daemon import Script, call, events, make_cfg, wait_status
 from test_phase3 import finished, make_repo, project_cfg, sh
 from waits import scaled
+from host_git import needs_host_git
 
 
 def two_edits() -> Script:
@@ -63,6 +64,7 @@ def rewound(tmp_path_factory, module_isolation):
     yield from _module_session(tmp_path_factory, "rewound", rewind_to=1)
 
 
+@needs_host_git
 def test_checkpoint_per_mutating_turn_and_rewind(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -100,6 +102,7 @@ def test_checkpoint_per_mutating_turn_and_rewind(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_next_mutating_turn_replaces_hidden_checkpoints(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -114,6 +117,7 @@ def test_next_mutating_turn_replaces_hidden_checkpoints(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_fork_runs_independently_with_its_own_branch(tmp_path):
     async def body():
         script = two_edits()
@@ -161,6 +165,7 @@ def test_scratch_session_checkpoints_and_rewinds(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_agent_tampering_with_git_refs_cannot_touch_checkpoints(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -178,6 +183,7 @@ def test_agent_tampering_with_git_refs_cannot_touch_checkpoints(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_hosted_session_is_fork_only(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -196,6 +202,7 @@ def test_hosted_session_is_fork_only(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_cap_prunes_oldest(tmp_path, monkeypatch):
     monkeypatch.setattr("harness.checkpointer.CAP", 1)
 
@@ -234,6 +241,7 @@ def test_over_quota_prunes_then_skips_without_failing_the_turn(shared, monkeypat
     assert cp._within_quota(member, store, sid, keep=2) is False
 
 
+@needs_host_git
 def test_disk_view_and_usage_count_checkpoints_and_cleanup_removes_them(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -272,6 +280,7 @@ def test_rewind_and_fork_refuse_active_and_runner_sessions(shared):
         m.db.update_session(sid, status=s["status"], target=s["target"])
 
 
+@needs_host_git
 def test_rewind_after_compaction_restores_the_saved_context(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -284,6 +293,7 @@ def test_rewind_after_compaction_restores_the_saved_context(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_take_reports_a_reason_code_never_the_reason_text(shared, monkeypatch):
     m, s = shared.m, shared.s
     secret = str(Path(s["workspace"]) / "private-path")
@@ -297,6 +307,7 @@ def test_take_reports_a_reason_code_never_the_reason_text(shared, monkeypatch):
     assert stats == {"turn": 3, "skipped": "snapshot_failed"}            # the trace span does not
 
 
+@needs_host_git
 def test_fork_writes_through_the_writer_without_blocking_the_loop(tmp_path, monkeypatch):
     async def body():
         m, s = await started(tmp_path)
@@ -318,6 +329,7 @@ def test_fork_writes_through_the_writer_without_blocking_the_loop(tmp_path, monk
     asyncio.run(body())
 
 
+@needs_host_git
 def test_rewind_restores_a_detached_head_without_moving_the_branch(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -345,6 +357,7 @@ def test_rewind_restores_a_detached_head_without_moving_the_branch(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_nested_repositories_are_checkpointed_as_files_and_rewound(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -419,6 +432,7 @@ async def later_work(tmp_path):
     return m, sid, ws, state
 
 
+@needs_host_git
 def test_rewind_that_fails_midway_puts_everything_back(tmp_path, monkeypatch):
     async def body():
         m, sid, ws, state = await later_work(tmp_path)
@@ -446,6 +460,7 @@ def test_rewind_that_fails_midway_puts_everything_back(tmp_path, monkeypatch):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_rewind_whose_record_fails_puts_the_files_back(tmp_path, monkeypatch):
     async def body():
         m, sid, ws, state = await later_work(tmp_path)
@@ -476,6 +491,7 @@ def test_rewind_whose_record_fails_puts_the_files_back(tmp_path, monkeypatch):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_rewind_that_can_neither_record_nor_undo_blocks_sends_until_a_rewind(tmp_path, monkeypatch):
     from harness import checkpointer
 
@@ -518,6 +534,7 @@ def test_rewind_that_can_neither_record_nor_undo_blocks_sends_until_a_rewind(tmp
     asyncio.run(body())
 
 
+@needs_host_git
 def test_fork_whose_record_fails_leaves_no_child(tmp_path, monkeypatch):
     async def body():
         m, s = await started(tmp_path)
@@ -548,6 +565,7 @@ def test_fork_whose_record_fails_leaves_no_child(tmp_path, monkeypatch):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_rewind_refuses_up_front_when_a_file_is_locked(tmp_path, monkeypatch):
     async def body():
         m, sid, ws, state = await later_work(tmp_path)
@@ -574,6 +592,7 @@ def objects(store) -> list[str]:
     return store._git(None, None, "cat-file", "--batch-all-objects", "--batch-check").out.splitlines()
 
 
+@needs_host_git
 def test_unchanged_hosted_runs_write_no_objects(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -592,6 +611,7 @@ def test_unchanged_hosted_runs_write_no_objects(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_unrecorded_snapshot_objects_are_reclaimed(shared, monkeypatch):
     m, s = shared.m, shared.s
     cp = m.runner.checkpointer
@@ -625,6 +645,7 @@ def assert_not_checkpointed(m, s):
 
 
 @pytest.mark.parametrize("failing", ["context-write", "record"])
+@needs_host_git
 def test_a_failed_checkpoint_write_does_not_fail_the_turn(tmp_path, monkeypatch, failing):
     from harness.checkpointer import Checkpointer
     write_bytes, record = Path.write_bytes, Checkpointer._record
@@ -650,6 +671,7 @@ def test_a_failed_checkpoint_write_does_not_fail_the_turn(tmp_path, monkeypatch,
     asyncio.run(body())
 
 
+@needs_host_git
 def test_a_failed_quota_check_after_keeping_keeps_the_turn(tmp_path, monkeypatch):
     from harness.checkpointer import Checkpointer
 
@@ -670,6 +692,7 @@ def test_a_failed_quota_check_after_keeping_keeps_the_turn(tmp_path, monkeypatch
     asyncio.run(body())
 
 
+@needs_host_git
 def test_a_write_that_trips_the_quota_stop_is_still_checkpointed(tmp_path, monkeypatch):
     from harness.runner import Runner
 
@@ -693,6 +716,7 @@ def test_a_write_that_trips_the_quota_stop_is_still_checkpointed(tmp_path, monke
     asyncio.run(body())
 
 
+@needs_host_git
 def test_a_mutating_call_the_policy_blocked_is_not_checkpointed(tmp_path, monkeypatch):
     from harness.policy import DENY, Decision
     from harness.runner import Runner
@@ -709,6 +733,7 @@ def test_a_mutating_call_the_policy_blocked_is_not_checkpointed(tmp_path, monkey
 
 
 @pytest.mark.parametrize("failing", ["context", "publish", "record", "quota"])
+@needs_host_git
 def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoable(rewound, monkeypatch, failing):
     write_bytes, replace = Path.write_bytes, os.replace
 
@@ -765,6 +790,7 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
             rewound.run(m.rewind(sid, 1))
 
 
+@needs_host_git
 def test_a_take_after_a_rewind_replaces_the_rewound_past_checkpoint_of_its_turn(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -791,6 +817,7 @@ def test_a_take_after_a_rewind_replaces_the_rewound_past_checkpoint_of_its_turn(
 
 
 @pytest.mark.parametrize("outcome", ["restored", "failed"])
+@needs_host_git
 def test_a_send_or_review_during_a_rewind_is_refused_until_it_ends(tmp_path, outcome):
     async def body():
         m, s = await started(tmp_path)
@@ -841,6 +868,7 @@ def stateful_edits() -> Script:
     ])
 
 
+@needs_host_git
 def test_rewind_restores_the_agent_state_of_the_checkpoint(tmp_path):
     from harness.runner import new_run
 
@@ -858,6 +886,7 @@ def test_rewind_restores_the_agent_state_of_the_checkpoint(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_fork_starts_from_the_agent_state_of_the_checkpoint(tmp_path):
     async def body():
         m, s = await started(tmp_path, script=stateful_edits())
@@ -870,6 +899,7 @@ def test_fork_starts_from_the_agent_state_of_the_checkpoint(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_rewind_to_a_checkpoint_without_saved_state_clears_it(tmp_path):
     import gzip
     import json
@@ -911,6 +941,7 @@ def test_reclaim_waits_for_every_tenth_checkpoint_and_the_run_end(tmp_path, monk
     asyncio.run(body())
 
 
+@needs_host_git
 def test_the_next_model_call_does_not_wait_for_the_checkpoint(tmp_path, monkeypatch):
     script = two_edits()
     second_call, calls, steps = threading.Event(), [], []

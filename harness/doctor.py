@@ -19,10 +19,12 @@ GREEN, YELLOW, RED, RESET = "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 
 
 class Report:
-    def __init__(self, *, not_started: bool = False):
+    def __init__(self, *, not_started: bool = False, instance: str = "", existing_server: bool = False):
         self.failed = 0
         self.warned = 0
         self.not_started = not_started
+        self.instance = instance  # module checks that read per-instance files (the llama unit, #832)
+        self.existing_server = existing_server
 
     def ok(self, name: str, detail: str = "") -> None:
         print(f"{GREEN}[ OK ]{RESET} {name}  {detail}")
@@ -297,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--not-started", action="store_true",
                     help="check an install whose startup was disabled; skip live daemon and optional service probes")
     args = ap.parse_args(argv)
-    r = Report(not_started=args.not_started)
+    r = Report(not_started=args.not_started, instance=args.instance, existing_server=args.existing_server)
 
     from . import config as config_mod
     try:

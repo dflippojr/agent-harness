@@ -1,6 +1,6 @@
 # The pinned Stables release
 
-Stables, the browser client, lives in [dflippojr/stables](https://github.com/dflippojr/stables) (#334). This
+Stables, the browser client, is the owner's private add-on and lives in its own private repository (#334). This
 directory pins the release the Server uses:
 
 - `pin.json`: the repository, tag and commit.
@@ -11,6 +11,9 @@ directory pins the release the Server uses:
   call and path literal in `public/`, the browser storage keys, the build id and the snippet languages. The
   management-parity tests (`tests/test_management_parity.py`, `tests/test_web_no_daemon_admin.py`), the snippet
   languages check and the build-id check read it through `tests/stables_pin.py`.
+- `harness/compat.py`'s `WEB_BUILD_ID`: the build id the Server advertises to browsers. Pinning writes it from the
+  release's `public/client.mjs`, the same value `api-calls.json` records, so a re-pin can't leave it stale (#996).
+  Don't edit it by hand: `tests/test_version_compat.py` fails when the two differ.
 
 Both CI and the deploy job read the private repository with `STABLES_DEPLOY_KEY`, a read-only deploy key on
 dflippojr/stables. It is stored in this repository's Actions and Dependabot secrets.
@@ -24,8 +27,9 @@ dflippojr/stables. It is stored in this repository's Actions and Dependabot secr
    python tools/stables/pin.py <path to the Stables checkout>
    ```
 
-3. Commit `pin.json` and `api-calls.json`. When the client calls a new owner endpoint, the parity tests name it, and
-   `docs/management-parity.md` needs its row.
+3. Commit `pin.json`, `api-calls.json` and `harness/compat.py`. When the client calls a new owner endpoint, the
+   parity tests name it, and `docs/management-parity.md` needs its row.
 
 CI runs `python tools/stables/pin.py --check stables-release` against its checkout of the tag. It fails when the
-tag no longer points at the pinned commit, or when `api-calls.json` does not match the release.
+tag no longer points at the pinned commit, or when `api-calls.json` or compat.py's build id does not match the
+release.

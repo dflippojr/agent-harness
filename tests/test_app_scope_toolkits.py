@@ -16,6 +16,7 @@ from harness_modules.memory_library.runtime import MEMORY_PROMPT
 from test_admin import bearer
 from test_config_registry import _client, _Toolkit
 from test_phase3 import edit_steps, finished, make_repo, project_cfg, sh
+from host_git import needs_host_git
 
 MEMORY_TOOLS = {"memory_index", "memory_search", "memory_read"}
 HOMELAB_TOOLS = {"homelab_services", "container_logs", "read_service_config", "prometheus_query",
@@ -123,6 +124,7 @@ def _has_object(repo: Path, sha: str) -> bool:
     return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", sha], capture_output=True).returncode == 0
 
 
+@needs_host_git
 def test_base_only_clone_holds_just_the_base_branch(tmp_path):
     src, other = _source_with_session_branch(tmp_path)
     project = Project(name="proj", repo=str(src))
@@ -139,6 +141,7 @@ def test_base_only_clone_holds_just_the_base_branch(tmp_path):
     assert not _has_object(ws, other)
 
 
+@needs_host_git
 def test_default_clone_still_sees_every_branch(tmp_path):
     src, other = _source_with_session_branch(tmp_path)
     ws = tmp_path / "ws"
@@ -151,6 +154,7 @@ def test_default_clone_still_sees_every_branch(tmp_path):
 APP = {"id": "ha-test", "name": "test app", "kind": "app", "scopes": "sessions", "scope_set": {"sessions"}}
 
 
+@needs_host_git
 def test_app_session_clone_and_erase_stay_within_its_branch(tmp_path):
     src, other = _source_with_session_branch(tmp_path)
     cfg = project_cfg(tmp_path, str(src))
@@ -170,6 +174,7 @@ def test_app_session_clone_and_erase_stay_within_its_branch(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_owner_session_erase_keeps_its_branch(tmp_path):
     src = make_repo(tmp_path / "src")
     cfg = project_cfg(tmp_path, str(src))
@@ -184,6 +189,7 @@ def test_owner_session_erase_keeps_its_branch(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_runner_base_only_prepare_and_refresh_hold_just_the_base_branch(tmp_path):
     from test_phase4 import executor
 
@@ -231,6 +237,7 @@ def test_erasing_an_app_session_on_a_runner_discards_its_branch_there(tmp_path, 
     assert calls == [("s1", "discard", "agent/s1"), ("asleep", "discard", "agent/s1")]
 
 
+@needs_host_git
 def test_erase_continues_when_the_local_branch_cannot_be_deleted(tmp_path, monkeypatch):
     src = make_repo(tmp_path / "src")
 

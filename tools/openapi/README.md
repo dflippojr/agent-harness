@@ -3,6 +3,8 @@
 `export_schema.py` exports Agent Harness Server's full-profile OpenAPI document. It builds a throwaway configuration
 and database, never reads local daemon settings, and never starts the application lifespan or services.
 `requirements.txt` pins FastAPI and Pydantic so the output is byte-for-byte reproducible on developer machines and CI.
+Dependabot bumps the FastAPI pin and the floor in the root `requirements.txt` in one PR, and
+`tests/test_dependabot_config.py` fails if they differ. When a bump changes the document, `--write` and commit it on that PR.
 
 ```sh
 python tools/openapi/export_schema.py --write   # rewrite openapi.json after changing routes or models

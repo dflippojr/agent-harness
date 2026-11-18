@@ -1,15 +1,116 @@
 # Resource guard (#311)
 
-The tower has 31.8 GB of RAM and a 16 GB GPU, shared with Docker/WSL, Plex, games, several Claude/Codex sessions and a
+The tower has 31.8 GB of RAM and a 16 GB GPU, shared with Docker, Plex, games, several Claude/Codex sessions and a
 browser. The local model (Qwen3.6-35B-A3B, a MoE whose expert tensors stay in system RAM) costs about 14 GB of RAM when
 loaded. The resource guard (formerly the GPU guard, `harness_modules/local_model/service.py`) makes the harness share that better. It
-covers the VRAM triggers (games, Plex transcodes), a free-memory threshold, the manual hold, and manual load/unload in
+covers the VRAM triggers (games, Plex transcodes, a free-VRAM floor), a free-memory threshold, the manual hold, and manual load/unload in
 one place: **Actions → Resources**.
+
+On Linux, how the model's VRAM can share the card with one Plex transcode and a Sunshine stream, and which guard
+thresholds follow from that, is designed in `docs/gpu-vram-budget.md` (#823).
+
+The supervisor details below (`ops/llama-server/run-qwen.ps1`, `C:/AI/...` paths, logon tasks) describe the Windows
+tower. Since 2026-10-26 the tower runs Ubuntu: llama-server runs as the `agent-harness-main-llama.service` user unit
+through `install/run-server.sh`, and its pause flag is `~/.local/share/agent-harness/llama-server.paused`. The
+Windows text applies to a Windows boot only. The measurements further down are records from the Windows tower.
+
+Plex detection on Linux takes no Plex credential (#830). With no registry token, the guard runs `nvidia-smi
+--query-compute-apps=pid,process_name,used_memory` each poll and counts one signal per `Plex Transcoder` process
+(whether those park the model depends on `gpu_guard.plex_transcodes_allowed`, below).
+Plex Media Server itself doesn't count, and a software transcode isn't on the GPU, so it doesn't either. If
+`nvidia-smi` fails, `plex_error` in `GET /resources` says so and `doctor` warns: the guard is blind to Plex until it
+works again. Windows keeps asking Plex's API while the registry holds a token, and the two sources are never added
+together. Whether an NVENC-only transcode appears in that query has not been checked against a real transcode yet;
+`nvidia-smi pmon -c 1` shows per-process encoder use if it turns out not to.
+
+Game detection is Windows-only: on Linux `process_paths()` and `window_titles()` return nothing, so a game or a
+Big Picture window doesn't trigger the guard there (`docs/gpu-vram-budget.md`, follow-up 5).
+
+## Plex transcode allowance (#828)
+
+`gpu_guard.plex_transcodes_allowed` is how many Plex hardware transcodes the model shares the card with. The guard
+parks the model only when the count is **above** it. The shipped default is `0`: the first transcode parks, as before.
+The range is 0 to 4, and Settings and `harness.yaml` both refuse anything else. The tower's intended value is **1**,
+which fits beside the model with `--fit-target 2048` (`docs/gpu-vram-budget.md`, option B); the owner or liaison sets
+that on the tower, and this repository doesn't.
+
+- **What counts.** One signal per hardware transcode, from whichever source the platform has: Plex's API on Windows
+  with a token, `Plex Transcoder` processes in `nvidia-smi` on Linux. The count is all the guard compares.
+- **Within the allowance** the transcodes drop out of `signals` altogether: they don't park the model, and they don't
+  show among the `reasons` of a pause something else started (a game, the floor, a manual hold).
+- **Over it** every transcode is a trigger, not only the newest, so `reasons` lists them all. When the count falls back
+  to the allowance the transcodes stop counting and `resume_after_seconds` starts, as for any trigger ending.
+- ***Resume anyway*** over the allowance ignores the transcodes running then. It ends when the set changes: a new
+  transcode pauses again, and so does the same set returning after the count dipped to the allowance in between.
+- **Applies live.** Each check reads the value, so a Settings write takes effect on the next poll.
+- **Metrics.** `harness_gpu_guard_triggers{kind="plex"}` counts transcodes only while they are triggers: it reads
+  `0` while the count is within the allowance.
+- **Count only (owner decision, 2026-11-06).** No code reads a transcode's source resolution or HDR flag, and there is
+  no per-process VRAM threshold or Plex token for it. On Linux `nvidia-smi` has no such input anyway. A heavy
+  transcode inside the allowance, such as a 4K HDR source with tone mapping (~1,400 MiB, over the budget), is caught by
+  the free-VRAM floor below: with the tower's 256 MiB it parks the model once free VRAM has stayed under that for two
+  polls. With the floor at `0` nothing catches it, so turn the floor on before raising the allowance.
+
+## Free-VRAM floor (#829)
+
+Every VRAM figure in `docs/gpu-vram-budget.md` is an estimate. `gpu_guard.min_free_vram_mib` is the backstop for one
+being wrong: a second stream, a 4K source, an unknown CUDA app. The shipped default is `0`, which turns it off, and then
+`nvidia-smi` isn't asked for it. The tower's intended value is **256**; the owner or liaison sets that on the tower, and
+this repository doesn't.
+
+- **When it fires.** Each poll takes a fresh `nvidia-smi` reading, never the 10 s one `/metrics` caches. Free VRAM under
+  the floor on two polls in a row raises one signal: key `vram:low`, kind `vram`, and a detail with both figures in MiB.
+  The key holds no reading, so a changing figure can't look like a new trigger.
+- **What resets the count.** A reading at or above the floor, a failed reading, or a reading whose free-VRAM field the
+  driver reports as `[N/A]`. A failed reading raises no signal.
+- **Only while the model's server is meant to be up.** With the pause flag there, the count resets and `nvidia-smi`
+  isn't asked: low VRAM then belongs to something else, an Images batch included, and parking would free nothing. A
+  flag that appears while the reading runs discards that reading too.
+- **Its drain.** When this signal alone starts a pause, the current turn gets `gpu_guard.vram_drain_timeout_seconds`
+  (default 30) instead of `drain_timeout_seconds`, because something is already short of memory. A pause with any other
+  trigger present, and a manual hold, keep `drain_timeout_seconds`. *Decision:* the drain is chosen when the pause
+  starts, so a trigger that arrives during a drain doesn't move its deadline.
+- **After the park.** The flag stops the count, so the signal clears, and `resume_after_seconds` and `lazy_load` apply
+  as for any trigger. With nothing queued, the guard goes back to clear and the model stays parked. If something keeps
+  VRAM low and a turn is waiting, or a new one asks for the model, the load's memory goes back on the card and the floor
+  can park it again, after two polls: the floor doesn't look at what else holds VRAM.
+- ***Resume anyway*.** Pressed any time during a pause the floor was part of (the drain, the parked cooldown, or a RAM
+  wait that followed), it acknowledges the floor. The model can then reload and run under the floor: `vram:low` still
+  shows in `signals`, but it doesn't pause anything. The park hides the signal and the count restarts after a reload,
+  so neither of those ends it. It ends when:
+  - a reading is at or above the floor with the model loaded and awake both before and after the read, no turn holding
+    the guard's lease or an unleased request (a skill review, keepalive ping or tokenizer call) still outstanding at
+    either end, and no load, park or inference request begun or ended between them. llama-server sleeps by
+    itself and a request reloads it, so being ready on both sides isn't enough. A high reading while the model is
+    loading or asleep doesn't count, because the model isn't on the card then, and neither does a failed reading. A
+    client that calls llama-server directly, past the harness, isn't seen; a reload takes about a minute and the read
+    at most 5 seconds, so it would have to finish inside one read to matter;
+  - a new trigger appears, such as a game: that pauses as usual, and the floor counts again afterwards;
+  - a manual hold is resumed, the floor is set to 0, or the daemon restarts.
+
+`harness_gpu_guard_triggers{kind="vram"}` counts it, and `reasons` in `GET /resources` shows its detail. A floor above
+what the card can ever have free would park every load; `doctor` warns about that (below).
+
+## Doctor checks for the margin (#832)
+
+Both settings depend on llama-server's `--fit-target`, the VRAM its `--fit` leaves free, which the daemon never sees.
+`doctor` reads it from the `ExecStart=` of `agent-harness-<instance>-llama.service` in the user's systemd unit
+directory, the unit `install/install.sh` writes (`--vram-headroom-mib` sets it). With the guard on and either setting
+above 0, it warns:
+
+- when `plex_transcodes_allowed` is above 0 and the unit has no `--fit-target`, or one below `700 × allowed + 500 +
+  256` MiB (1,456 for one transcode). The warning names the setting, the value found and the value needed;
+- when `min_free_vram_mib` is above 0 and not below the `--fit-target` (llama-server's default of 1024 when the unit
+  sets none): the guard would park the model right after every load.
+
+With no unit to read (an existing server, Windows or macOS, a missing or unreadable file, a value that isn't a whole
+number), `doctor` says the check wasn't possible and warns about neither. It reads the unit for `--instance`, or for
+`Main` without one, and doesn't read systemd drop-ins: a margin set in an override isn't seen.
 
 ## When the model loads
 
 llama-server loads the model whenever its process starts, so the harness controls loading through the supervisor's
-pause flag (`gpu_guard.pause_flag`, `C:/AI/llama-server.paused`). While the flag exists the supervisor
+pause flag (`gpu_guard.pause_flag`, by default `C:/AI/llama-server.paused` on Windows). While the flag exists the supervisor
 (`ops/llama-server/run-qwen.ps1`) doesn't start the server. The model is **parked**: unloaded, with the server
 process not running.
 
@@ -52,6 +153,22 @@ These **don't** load the model:
   the flag after launching; the supervisor is unchanged. The flag is written first, so it won't start another. A
   server started in the instant between the process listing and the supervisor's flag check is the only window left.
 
+- **Linux page-out (#835).** On Linux, `install/run-server.sh` runs llama-server in the
+  `agent-harness-<instance>-llama` Docker container. The daemon can't signal that container's root process, and
+  psutil gives no pid for another user's socket. So while the container runs, the supervisor polls the pause flag every
+  5 s (`HARNESS_PAUSE_POLL_SECONDS`). When the flag appears it runs `docker stop -t 10` on the container, so the VRAM
+  comes free within 15 s. Then it waits, without the usual 15 s restart delay, until `ServerControl.start()` removes
+  the flag. `ServerControl.stop()` on Linux finds the port's listeners with `psutil.net_connections(kind="tcp")` instead
+  of `netstat -ano`, and stops a native llama-server it may signal with SIGTERM (SIGKILL after 10 s) instead of
+  `taskkill`. *Decision:* the supervisor watches the flag, rather than the daemon running `docker stop`. The
+  supervisor already owns the container's name and its `docker stop` trap, and the daemon then needs neither the
+  instance name nor Docker access. Windows is unchanged.
+
+- **Container health (#858).** Docker's status for `agent-harness-<instance>-llama` comes from a `--health-cmd` that
+  `run-server.sh` passes: `curl -f` on `/health` at the port it started llama-server on. The image's own HEALTHCHECK
+  probes port 8080, so it reported `unhealthy` while the server answered. The check's start period is 300 s, so a slow
+  model load does not read as unhealthy.
+
 `lazy_load: false` in `config/harness.yaml` restores the old eager reload after holds and image batches.
 
 **Unload now** (Actions → Resources, `POST /resources/unload`) parks the model straight away without holding the queue.
@@ -90,7 +207,68 @@ and then pushed available RAM to 0.17 GB for 2 to 4 minutes. Worker containers a
 number. The wait polls every `MEMORY_POLL_SECONDS` and the session shows `waiting_memory` with the reason
 "the model load needs 14 GB and 4 GB must stay free".
 
+When RAM alone keeps a wanted resume parked, the guard stays `paused` and its status names that: `reasons` holds one
+entry with the key `memory_hold` and a detail that starts `memory:`, and `manual` is false. It replaces the reason that
+began the pause, so the app doesn't call a memory wait "paused from the app" (#873). A hand pause or a new trigger
+replaces it in turn.
+
 Work already running isn't stopped. If nothing can be read (no psutil), work isn't blocked.
+
+### What a load costs on the Ubuntu tower (#873, 2026-11-01)
+
+`model_ram_gb` dates from the Windows host. On Ubuntu llama-server maps the GGUF, so most of what `VmHWM` reports (10,780
+to 12,958 MiB in #827's runs) is file-backed. The split below uses existing data only: #827's runs, and Prometheus and
+cAdvisor from 2026-10-26 to 2026-11-01. No model was loaded for it.
+
+| Part of the load | Size | Source |
+| --- | --- | --- |
+| Anonymous memory, the part nothing can reclaim with swap full | 553 to 562 MiB in #827's runs; **1,194 MiB** peak on prod | VmRSS split; `container_memory_rss` |
+| Weights the CPU reads on every token: GGUF minus the GPU buffer | 8,229 MiB at the default margin; **9,157 MiB** at `--fit-target 2048` | 21,325 MiB file; CUDA0 buffer 13,096 and 12,168 MiB |
+| Mapped pages at their peak, which also include GPU layers faulted in for the upload | 9,836 MiB on prod; 11,906 MiB in #827's runs | `container_memory_mapped_file` |
+
+**The fall in available RAM is not the cost to plan for.** On the quietest load (2026-10-30 16:45 EST, other containers
++13 MiB), the mapped pages rose 9,234 MiB and the container's anonymous memory 716 MiB, while `MemAvailable` fell only
+637 MiB. It counts mapped file pages as reclaimable. Those pages include the weights the CPU reads on every token, so
+reclaiming them means reading them back from disk. Other loads fell further (1.6 to 4.8 GiB), but host work moved
+during those, so the falls aren't the model's alone.
+
+**Recommendation for the tower: `model_ram_gb: 11`.** Anonymous peak plus CPU-read weights at `--fit-target 2048` is
+1,194 + 9,157 = 10,351 MiB, or 10.1 GiB. Rounding up gives 11, so a load with `min_available_ram_gb: 2` needs 13 GiB
+available. That is not the 8 first planned: at 10 GiB available the model alone would want all of it, with nothing
+left for the 2 GiB the gate promises. It may well run there, but no measured load started below 15.4 GiB, and the
+lowest available RAM during a measured decode was 12.5 GiB, so 8 is untested.
+
+Time a load would have waited, over those six days (8,542 minutes, sampled each minute):
+
+| `model_ram_gb` + `min_available_ram_gb` | Needs | Would wait |
+| --- | --- | --- |
+| 14 + 4 (today) | 18 GiB | 35.6% |
+| 14 + 2 | 16 GiB | 6.8% |
+| 11 + 4 | 15 GiB | 4.1% |
+| **11 + 2** | **13 GiB** | **1.6%** |
+| 8 + 2 | 10 GiB | 0.3% |
+
+These values aren't applied. They go on one owner card with `--fit-target 2048` (#881). The shipped default stays 14: the
+reason it was set still holds on Windows, where `--load-mode none` makes the weights private memory (see below) and
+the 08:00 load once pushed available RAM to 0.17 GB.
+
+**What `min_available_ram_gb: 2` changes for the plain check** (worker containers, ComfyUI):
+
+- **Nothing that has happened so far.** On Ubuntu, available RAM never went below 4.34 GB in those six days, so neither
+  4 nor 2 would have held anything. `harness_resource_memory_low` was last set on 2026-10-09, on the Windows host.
+- **Worker containers keep less room.** Swap was full in 40.2% of those minutes, and then anonymous memory has nowhere
+  to go: what's available is the whole remaining cushion. A worker's `--memory 2g` limit equals the new margin, so one
+  worker at its limit could use all of it, where 4 left room for two. Workers actually peaked at 0.13 GB across 355
+  containers. The check reserves nothing, so several can start at once on the same reading. Past the margin the kernel
+  reclaims file pages first, the model's weights among them, so decode slows from disk reads; once those run out, the
+  OOM killer acts. That follows from how the kernel reclaims memory; it wasn't provoked here. CI runners (3 to 4 GB
+  each) aren't gated by this check at all.
+- **ComfyUI: nothing today.** `images` is disabled in the tower's overlay, and no image job ran in the 30 days Prometheus
+  keeps. If it's enabled, neither number says much: the `quality` model is 19.5 GB partly streamed from RAM, and the
+  check only runs before ComfyUI starts. Its peak RAM on Ubuntu hasn't been measured, so measure it before relying on
+  the check.
+
+The load gate is where the lower number matters, and most of that gain comes from `model_ram_gb` (see the table).
 
 ### Inventory (read-only, 2026-10-06)
 
@@ -117,7 +295,8 @@ count samples under 1 GB. The target after this change is 0 over 7 mornings.
 
 Actions → Resources shows a diagnostics card styled like Actions → Disk:
 
-- VRAM used and total, plus which harness process holds it
+- VRAM used and total, plus which harness process holds it, and VRAM per process from `nvidia-smi`
+  (`vram.processes` in the API and `harness resources diagnostics`; the page needs a Stables release to show it, #830)
 - RAM available, total and commit, plus the harness's share (daemon, llama-server, `harness-*` containers)
 - GPU load and CPU load
 - model state (unloaded, waking, loaded, or "loaded until HH:MM")
@@ -133,6 +312,9 @@ available RAM sampled during the most recent model load, every 2 s while it wait
   `_ram_threshold_bytes`
 - `harness_resource_memory_low`, `harness_model_parked`, `harness_model_pinned_until_seconds`
 - `harness_resource_vram_used_bytes` / `_vram_total_bytes` / `_gpu_load_percent` (from nvidia-smi, cached for 10 s)
+- `harness_resource_vram_free_bytes` (nvidia-smi `memory.free`) and `harness_resource_nvenc_sessions` (nvidia-smi
+  `encoder.stats.sessionCount`, the NVENC sessions open on the GPU), read with the same cached reading (#833). If the
+  driver reports either as `[N/A]`, only that series is left out.
 - `harness_resource_cpu_load_percent`
 
 The `harness_gpu_guard_*` series are unchanged.

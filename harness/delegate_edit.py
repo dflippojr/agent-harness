@@ -10,12 +10,12 @@ whole proposal, or nothing, through the same preview and approval path as `edit_
 from __future__ import annotations
 
 import difflib
-import hashlib
 import json
 import posixpath
 import uuid
 from pathlib import Path
 
+from .digests import sha256_hex
 from .fileops import FileOps, ToolError, normalize_path, truncate_middle
 
 PROPOSE = "delegate_edit"
@@ -69,7 +69,7 @@ SYSTEM_PROMPT = (
 
 def text_digest(text: str) -> str:
     """sha256 of a file's decoded UTF-8 text, the convention #155 receipts use."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return sha256_hex(text)
 
 
 def edit_key(paths: list[str], task_id: str | None = None) -> str:

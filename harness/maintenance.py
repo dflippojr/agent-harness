@@ -233,10 +233,14 @@ class Maintenance:
             except projects.GitError as e:
                 return f"could not save the branch: {e}"
             return ""
-        if s["review"] in ("pushed", "discarded"):
-            unpushed = projects.git(ws, "log", "--oneline", f"origin/{s['branch']}..HEAD", check=False)
-            return "" if unpushed.code == 0 and not unpushed.out.strip() else "branch has commits that weren't pushed"
-        return "" if not projects.commits_ahead(ws, s["base_commit"]) else "branch was never pushed"
+        try:
+            if s["review"] in ("pushed", "discarded"):
+                unpushed = projects.git(ws, "log", "--oneline", f"origin/{s['branch']}..HEAD", check=False)
+                return ("" if unpushed.code == 0 and not unpushed.out.strip()
+                        else "branch has commits that weren't pushed")
+            return "" if not projects.commits_ahead(ws, s["base_commit"]) else "branch was never pushed"
+        except projects.GitError as e:  # the branch can't be checked (on Windows, say): keep the workspace
+            return f"could not check the branch: {e}"
 
     def remove_workspace(self, sid: str) -> None:
         from . import storage

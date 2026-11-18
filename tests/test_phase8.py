@@ -329,6 +329,22 @@ def test_remote_control_refuses_untrusted_and_reports_failures(tmp_path):
     asyncio.run(failing())
 
 
+def _pretend_windows(monkeypatch, rc_module) -> None:
+    """Make only the Remote Control service see Windows: its own `sys` reports win32 (patching `sys.platform` itself
+    would send every module in the process down its Windows path) and `subprocess` carries the console flags that
+    exist only on Windows, so these tests run on Linux too (#973)."""
+
+    class _WindowsSys:
+        platform = "win32"
+
+        def __getattr__(self, name):
+            return getattr(_sys, name)
+
+    monkeypatch.setattr(rc_module, "sys", _WindowsSys())
+    for flag, value in (("CREATE_NEW_CONSOLE", 0x10), ("CREATE_NEW_PROCESS_GROUP", 0x200), ("CREATE_NO_WINDOW", 0x8000000)):
+        monkeypatch.setattr(rc_module.subprocess, flag, getattr(rc_module.subprocess, flag, value), raising=False)
+
+
 def test_remote_control_opens_trust_prompt_in_exact_folder(tmp_path, monkeypatch):
     import harness_modules.remote_control.service as rc_module
 
@@ -349,7 +365,7 @@ def test_remote_control_opens_trust_prompt_in_exact_folder(tmp_path, monkeypatch
         return process
 
     rc.popen = fake_popen
-    monkeypatch.setattr(rc_module.sys, "platform", "win32")
+    _pretend_windows(monkeypatch, rc_module)
     monkeypatch.setattr(rc_module.shutil, "which", lambda name: "C:\\Windows\\powershell.exe" if name == "powershell.exe" else None)
 
     view = rc.open_trust_prompt("repo")
@@ -384,7 +400,7 @@ def test_remote_control_trust_web_endpoint(tmp_path, monkeypatch):
             return None
 
     rc.popen = lambda command, **kwargs: FakeProcess()
-    monkeypatch.setattr(rc_module.sys, "platform", "win32")
+    _pretend_windows(monkeypatch, rc_module)
     monkeypatch.setattr(rc_module.shutil, "which", lambda name: "powershell.exe")
     manager = Manager(rc.cfg, chat=Script([Completion(content="unused")]))
     manager.remote_control = rc
@@ -740,9 +756,12 @@ def test_pending_user_cancel_recorded_when_cli_dies(tmp_path):
         assert finished
         assert finished[-1]["status"] == "failed"
         assert m.summary(s).get("failure") == s["run"]["failure"]
+        # A failed run answers the calls it leaves and cancels its approvals too, as a cancel does (#924).
         results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg.get("role") == "tool"}
-        assert results == {}
-        assert m.db.pending_approvals(sid)
+        assert results == {"tool-running": "Stopped: the run failed while this ran; its effects are unknown.",
+                           "tool-queued": "Not run: the run failed."}
+        assert m.db.pending_approvals(sid) == []
+        assert m.db.approvals(sid)[0]["status"] == "cancelled"
         await m.stop()
 
     async def already_cancelled_does_not_record_again():
@@ -901,6 +920,43 @@ def test_claude_cli_restart_resumes_and_keeps_pending_approval(tmp_path):
     asyncio.run(body())
 
 
+def test_claude_restart_binds_to_pending_approval_despite_decided_twin(tmp_path):
+    """#925: the same command asked and decided earlier in the session must not block the restart binding."""
+    async def body():
+        m1, _, state = _claude_manager(tmp_path, "ask")
+        await m1.start()
+        sid = m1.create("run it", backend="claude")["id"]
+        await wait_status(m1, sid, "waiting_approval")
+        aid = m1.db.pending_approvals(sid)[0]["id"]
+        m1.db.insert_approval({"id": "a-earlier1", "session_id": sid, "tool_call_id": "tool-0", "tool": "Bash",
+                               "args": {"command": "python build.py"}, "reason": "runs a Claude Code shell command",
+                               "status": "denied"})
+        await m1.stop()
+        m1.db.close()
+
+        m2, made, _ = _claude_manager(tmp_path, "ask", state=state)
+        await m2.start()
+        for _ in range(500):
+            if made:
+                break
+            await asyncio.sleep(0.02)
+        assert made
+        await wait_status(m2, sid, "waiting_approval")
+        for _ in range(500):  # the regenerated request waits on an approval: the bound one or a new one
+            if m2.runner.approval_events:
+                break
+            await asyncio.sleep(0.02)
+        assert m2.runner.approval_events
+        pending = [a["id"] for a in m2.db.pending_approvals(sid)]
+        assert pending == [aid], f"pending approvals after the restart: {pending} (expected only {aid})"
+        m2.decide(sid, aid, approve=True)
+        s = await wait_status(m2, sid, "done")
+        assert s["answer"] == "allow"
+        assert [a["id"] for a in m2.db.approvals(sid) if a["status"] == "pending"] == []
+        await m2.stop()
+    asyncio.run(body())
+
+
 def test_claude_backend_validation_and_policy(tmp_path):
     cfg = make_cfg(tmp_path)
     cfg.backends["claude"] = BackendConfig(enabled=False)
@@ -950,7 +1006,8 @@ def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
             token = client.post("/keys", json={"name": "app", "kind": "app", "scopes": ["sessions"]}).json()["key"]
             headers = {"Authorization": f"Bearer {token}"}
             # App status is attributed to that app; owner and other-app usage is not exposed.
-            assert client.get("/api/v1/backends", headers=headers).json()[0]["week"]["cost_usd"] == 0
+            rows = {row["name"]: row for row in client.get("/api/v1/backends", headers=headers).json()}
+            assert rows["claude"]["week"]["cost_usd"] == 0
             assert client.get("/api/v1").json()["backends"][0]["notice"]
     asyncio.run(body())
 

@@ -3,16 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
+import weakref
+from pathlib import Path
 
 import pytest
 
 from harness import sandbox
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
+# Prints a grandchild's pid and exits while that grandchild still holds stdout and stderr.
+DETACHES_A_CHILD = [sys.executable, "-c",
+                    "import subprocess, sys; print(subprocess.Popen("
+                    "[sys.executable, '-c', 'import time; time.sleep(67)'], stdin=subprocess.DEVNULL, "
+                    "stdout=sys.stdout.fileno(), stderr=sys.stderr.fileno()).pid)"]
 
 
 @pytest.fixture
@@ -184,18 +196,154 @@ def test_run_cmd_returns_when_detached_child_holds_the_pipe(tmp_path, monkeypatc
                            timeout=5, check=False)
 
 
-def test_unblock_read_cancels_pending_io_then_closes(monkeypatch):
+def test_a_descriptor_number_reused_after_the_first_close_stays_open(tmp_path, monkeypatch):
+    """#877: any close of a read end underneath its live stream frees the number while the stream still means to close
+    it. This hands the number to another file at that moment, as another thread's open() would."""
+    other = tmp_path / "other"
+    other.touch()
+    read_ends, read_end_fds, reused = [], set(), []
+    real_spawn, real_close = sandbox._spawn, os.close
+
+    def recording(*args, **kwargs):
+        proc = real_spawn(*args, **kwargs)
+        read_ends.extend([weakref.ref(proc.stdout), weakref.ref(proc.stderr)])
+        read_end_fds.update([proc.stdout.fileno(), proc.stderr.fileno()])
+        return proc
+
+    def finished():
+        gc.collect()
+        return all(ref() is None or ref().closed for ref in read_ends)
+
+    monkeypatch.setattr(sandbox, "_spawn", recording)
+    with other.open("rb") as file:
+        def close_then_reuse(fd):
+            real_close(fd)
+            if fd in read_end_fds:
+                os.dup2(file.fileno(), fd, inheritable=False)
+                reused.append(fd)
+
+        monkeypatch.setattr(sandbox.os, "close", close_then_reuse)
+        code, out, err = asyncio.run(sandbox.run_cmd(DETACHES_A_CHILD, timeout=30))
+        try:
+            assert code == 0, err
+        finally:
+            os.kill(int(out), signal.SIGTERM)
+        assert _wait_until(finished, 30), "run_cmd's read ends were never closed"
+        monkeypatch.setattr(sandbox.os, "close", real_close)
+        closed = []
+        for fd in reused:
+            try:
+                assert os.path.sameopenfile(fd, file.fileno())
+                real_close(fd)
+            except OSError:
+                closed.append(fd)
+    assert not closed, f"descriptor(s) {closed} now belonging to another file were closed underneath it"
+
+
+def test_the_detached_child_path_finalizes_its_streams_without_an_error():
+    """#877: a stream whose descriptor was closed underneath it reports `OSError: [Errno 9] Bad file descriptor` from
+    its finalizer. Dev mode is what makes every supported Python report it, so this runs in a process of its own."""
+    script = f"""
+import asyncio, os, signal, threading, time
+from harness import sandbox
+code, out, err = asyncio.run(sandbox.run_cmd({DETACHES_A_CHILD!r}, timeout=30))
+os.kill(int(out), signal.SIGTERM)
+deadline = time.monotonic() + 30
+while threading.active_count() > 1 and time.monotonic() < deadline:
+    time.sleep(0.05)
+print(code)
+"""
+    result = subprocess.run([sys.executable, "-X", "dev", "-c", script], cwd=REPO_ROOT, capture_output=True, text=True,
+                            timeout=90, check=False)
+    assert result.stdout.strip() == "0", result.stderr
+    assert "Bad file descriptor" not in result.stderr
+    assert "unclosed file <_io.BufferedReader" not in result.stderr
+
+
+def test_run_cmd_closes_its_read_ends_when_the_command_exits(spawned):
+    code, _, err = asyncio.run(sandbox.run_cmd([sys.executable, "-c", "print('done')"]))
+    assert code == 0, err
+    assert spawned[0].stdout.closed and spawned[0].stderr.closed
+
+
+def test_wake_pumps_cancels_until_a_pump_between_reads_returns_and_closes_nothing(monkeypatch):
+    """Windows' path: the first cancel finds nothing pending, as when the pump has not re-entered read() yet."""
     cancelled, closed = [], []
-    monkeypatch.setattr(sandbox, "_CancelIoEx", lambda handle, overlapped: cancelled.append(handle) or 1)
-    monkeypatch.setattr(sandbox.os, "close", lambda fd: closed.append(fd))
-    sandbox._unblock_read(7, 99)
-    assert cancelled == [99] and closed == [7]
+    second_cancel = threading.Event()
+
+    def cancel(handle, overlapped):
+        cancelled.append(handle)
+        if len(cancelled) == 2:
+            second_cancel.set()
+        return 1
+
+    monkeypatch.setattr(sandbox, "_CancelIoEx", cancel)
+    monkeypatch.setattr(sandbox.os, "close", closed.append)
+    pump = threading.Thread(target=second_cancel.wait, daemon=True)
+    pump.start()
+    sandbox._wake_pumps([pump], None, [99, None])
+    assert not pump.is_alive()
+    assert cancelled[:2] == [99, 99]
+    assert closed == []
 
 
-def test_read_end_captures_fd_and_native_handle(monkeypatch):
+def test_closing_the_wake_pipe_wakes_a_blocked_read(monkeypatch):
+    """POSIX's path, on a real pipe, so every platform's run covers it."""
+    monkeypatch.setattr(sandbox, "_CancelIoEx", None)
+    with sandbox._wake_pipe() as (wake_read, wake_write):
+        woken = []
+        pump = threading.Thread(target=lambda: woken.append(os.read(wake_read.fileno(), 1)), daemon=True)
+        pump.start()
+        sandbox._wake_pumps([pump], wake_write, [None, None])
+        assert woken == [b""]
+    assert wake_read.closed and wake_write.closed
+
+
+def test_wake_pipe_is_only_made_where_a_pipe_can_be_polled(monkeypatch):
+    monkeypatch.setattr(sandbox, "_CancelIoEx", lambda handle, overlapped: 1)
+    with sandbox._wake_pipe() as ends:
+        assert ends == (None, None)
+
+
+def test_wakeable_read_returns_data_until_the_wake_pipe_fires(monkeypatch):
+    """Scripted poll results, because Windows has no select.poll; the detached-child tests run the real one on POSIX."""
+    class Poll:
+        events = [[(5, 1)], [(6, 1)], [(5, 1), (6, 1)]]
+
+        def register(self, fd, mask):
+            assert fd in (5, 6) and mask == 1
+
+        def poll(self):
+            return self.events.pop(0)
+
+    class End:
+        def __init__(self, fd):
+            self.fd = fd
+
+        def fileno(self):
+            return self.fd
+
+    class Stream(End):
+        def read1(self, size):
+            return b"data"
+
+    monkeypatch.setattr(sandbox.select, "poll", Poll, raising=False)
+    monkeypatch.setattr(sandbox.select, "POLLIN", 1, raising=False)
+    reader = sandbox._WakeableRead(Stream(5), End(6))
+    assert reader.read1(65536) == b"data"
+    assert reader.read1(65536) == b""
+    assert reader.read1(65536) == b"", "a wake must end the read even while a grandchild keeps writing"
+
+
+def test_read_handle_captures_the_native_handle(monkeypatch):
     class Stream:
         def fileno(self):
             return 3
     monkeypatch.setattr(sandbox, "msvcrt", type("M", (), {"get_osfhandle": staticmethod(lambda fd: 123)})())
-    assert sandbox._read_end(Stream()) == (3, 123)
-    assert sandbox._read_end(None) == (None, None)
+    assert sandbox._read_handle(Stream()) == 123
+    assert sandbox._read_handle(None) is None
+
+    def closed_handle(fd):
+        raise OSError(9, "Bad file descriptor")
+    monkeypatch.setattr(sandbox, "msvcrt", type("M", (), {"get_osfhandle": staticmethod(closed_handle)})())
+    assert sandbox._read_handle(Stream()) is None

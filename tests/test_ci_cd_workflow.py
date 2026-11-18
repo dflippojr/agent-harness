@@ -119,3 +119,18 @@ def test_publish_and_deploy_require_a_successful_main_push_ci_run():
             assert required in condition, (name, required)
         # Every term must be ANDed: an `||` would let one of them stand alone.
         assert "||" not in condition, name
+
+
+def test_deploy_runs_with_pwsh_on_the_linux_production_runner():
+    # #812: the tower runs Ubuntu, so the Windows runner label (agent-harness-tower) is retired.
+    deploy = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]["deploy-tower"]
+    assert deploy["runs-on"] == ["self-hosted", "Linux", "X64", "agent-harness-tower-linux"]
+    assert deploy["environment"] == "tower-production"
+    shells = [step["shell"] for step in deploy["steps"] if "run" in step]
+    assert shells and set(shells) == {"pwsh"}
+    assert "deploy-ci.ps1" in deploy["steps"][-1]["run"] and "\\" not in deploy["steps"][-1]["run"]
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        jobs = yaml.safe_load(path.read_text(encoding="utf-8")).get("jobs", {})
+        for name, job in jobs.items():
+            labels = job.get("runs-on", [])
+            assert "agent-harness-tower" not in ([labels] if isinstance(labels, str) else labels), (path.name, name)

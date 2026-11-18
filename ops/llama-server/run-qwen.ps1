@@ -79,7 +79,7 @@ function Get-ServerArgs {
 
 # The harness daemon's resource guard (harness/gpu_guard.py) creates this file and stops the server while a game or
 # a Plex hardware transcode needs the GPU, and leaves it in place afterwards until something needs the model.
-# Don't start the server until the file is gone. Keep in sync with gpu_guard.pause_flag in config/harness.yaml.
+# Don't start the server until the file is gone. Keep in sync with gpu_guard.pause_flag in harness/config.py.
 $pauseFlag = 'C:\AI\llama-server.paused'
 $loggedPause = $false
 

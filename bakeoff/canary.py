@@ -8,6 +8,11 @@ The daemon calls `CanaryRunner.run` from its nightly trigger (harness/canary.py)
     python -m bakeoff.canary --tasks sqlite_report --repeats 1
     python -m bakeoff.canary --heldout --repeats 3  # #674 calibration: the held-out tasks, never the nightly set
     python -m bakeoff.canary --plan-reinject        # #641: the set with planning.reinject on (docs/compaction.md)
+    python -m bakeoff.canary --mask-batch-at 0.45   # #855: the set with batched masking on (docs/compaction.md)
+    python -m bakeoff.canary --xy --system-line "..."  # #773: XY-problem variants, an extra project-instructions line
+    python -m bakeoff.canary --tasks log_correlation --repeats 1 --keep-metrics runs/m.json --capture-prompts runs/p.jsonl
+                                                    # #774: per-turn cache reuse and the exact prompts (prefix study)
+    python -m bakeoff.canary --driver pi            # #942: the hard tasks driven by the Pi coding agent (pi_driver.py)
 
 Hard tasks are written into the session's workspace and graded by their existing hidden checkers (Docker sandbox, as
 in the bake-off). Web tasks replay the recorded web (web_suite.py) through a per-session WebTools.
@@ -21,6 +26,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import inspect
 import json
 import shutil
 import sys
@@ -32,6 +38,7 @@ from typing import Callable
 import yaml
 
 from harness.canary import HARD_PROJECT, WALL_LIMIT, WEB_PROJECT, CanaryConfigError, Report
+from harness.config import _mask_batch_at
 
 from .tasks import Context, hash_tree, materialize
 from .tasks_hard import HARD_TASKS
@@ -39,8 +46,10 @@ from .web_suite import DEFAULT_FIXTURE, TASKS as WEB_TASKS, ungrounded_quotes
 
 ROOT = Path(__file__).resolve().parent.parent
 SUITE = Path(__file__).with_name("canary.yaml")
+WEB_WALL_LIMIT = 1500  # seconds of GPU time a web task attempt may use (hard tasks carry their own)
 MAX_RESTARTS = 2  # a task attempt that was suspended mid-way restarts, up to this many times
 DONE = ("done", "failed", "cancelled")
+DRIVERS = ("native", "pi")  # #942: --driver on the manual runner; the nightly path builds CanaryRunner (native) only
 
 
 def load_suite(path: Path = SUITE) -> dict:
@@ -62,11 +71,18 @@ def heldout_suite(repeats: int) -> dict:
     return {"repeats": repeats, "hard": list(HELDOUT_TASKS), "web": []}
 
 
+def xy_suite(repeats: int) -> dict:
+    """The #773 XY-problem variants (bakeoff/tasks_xy.py): hard tasks with a wrong user suggestion, by hand only."""
+    from .tasks_xy import XY_TASKS
+    return {"repeats": repeats, "hard": list(XY_TASKS), "web": []}
+
+
 def heldout_cap_seconds(suite: dict, only: list[str] | None) -> int:
     """Room for every selected attempt to use its whole wall-clock limit, plus a minute each for setup and grading.
     The nightly `total_cap_seconds` (45 min) would cut a calibration off after two slow attempts."""
-    tasks = [t for t in suite["hard"] if not only or t.id in only]
-    return int(sum(t.wall_limit + 60 for t in tasks) * suite["repeats"])
+    limits = [t.wall_limit for t in suite["hard"] if not only or t.id in only]
+    limits += [WEB_WALL_LIMIT for t in suite["web"] if not only or t.id in only]
+    return int(sum(limit + 60 for limit in limits) * suite["repeats"])
 
 
 class CanaryRunner:
@@ -74,8 +90,12 @@ class CanaryRunner:
 
     def __init__(self, manager, cfg, fixture: Path = DEFAULT_FIXTURE, suite: dict | None = None,
                  poll_seconds: float = 5, clock: Callable[[], float] = time.monotonic, sleep=asyncio.sleep,
-                 grade_hard: Callable | None = None, prepare_hard: Callable | None = None):
+                 grade_hard: Callable | None = None, prepare_hard: Callable | None = None, system_line: str = "",
+                 measure: Callable[[dict, list[dict], set[str]], dict] | None = None):
         self.m, self.cfg, self.fixture = manager, cfg, fixture
+        self.system_line = system_line  # #773, by hand only: the canary projects' instructions (production has none)
+        # #942, by hand only: extra per-attempt measures for a hard task (session, events, files it started with)
+        self._measure = measure
         self.suite = suite or load_suite(Path(ROOT / cfg.suite) if cfg.suite else SUITE)
         self.poll, self.clock, self.sleep = poll_seconds, clock, sleep
         self._grade_hard = grade_hard or grade_hard_task
@@ -119,10 +139,10 @@ class CanaryRunner:
             # without it every search misses and each web task fails: a false regression, not a result
             raise CanaryConfigError(f"canary web fixture {self.fixture} has no manifest.json")
         projects = self.m.cfg.projects
-        projects[HARD_PROJECT] = Project(name=HARD_PROJECT, web=False, memory_library=False, images=False,
-                                         session_search=False)
-        projects[WEB_PROJECT] = Project(name=WEB_PROJECT, web=True, memory_library=False, images=False,
-                                        session_search=False)
+        projects[HARD_PROJECT] = Project(name=HARD_PROJECT, instructions=self.system_line, web=False,
+                                         memory_library=False, images=False, session_search=False)
+        projects[WEB_PROJECT] = Project(name=WEB_PROJECT, instructions=self.system_line, web=True,
+                                        memory_library=False, images=False, session_search=False)
         web = WebTools(WebConfig(enabled=True, page_chars=self.m.cfg.web.page_chars, fixture_dir=str(self.fixture)))
         outcomes: list[dict] = []
         try:
@@ -172,7 +192,7 @@ class CanaryRunner:
             # The limit counts only time the canary had the GPU: never time queued behind a real session (even
             # before its first turn), stepped aside, paused by the guard, or held up by an image batch that took the
             # GPU over. A wait that outlasts the run's cap is no verdict on the agent: stopped, excluded as suspended.
-            limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else 1500), 0.0, False, False
+            limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else WEB_WALL_LIMIT), 0.0, False, False
             while m.db.get_session(sid)["status"] not in DONE:
                 held, before = self._has_gpu(sid), self.clock()
                 await self.sleep(1 if self.poll > 1 else self.poll)
@@ -202,10 +222,13 @@ class CanaryRunner:
             if starved:  # excluded as it is: restarting would only wait past the cap again
                 note, suspended = f"{note}; still waiting for the GPU at the run's cap", False
             totals = final["totals"]
-            return {"task": task.id, "repeat": repeat, "ok": bool(ok and status == "done"), "note": note,
-                    "status": status, "turns": totals.get("turns", 0),
-                    "prompt_tokens": totals.get("prompt_tokens", 0), "seconds": round(ran, 1),
-                    "suspended": suspended}
+            res = {"task": task.id, "repeat": repeat, "ok": bool(ok and status == "done"), "note": note,
+                   "status": status, "turns": totals.get("turns", 0),
+                   "prompt_tokens": totals.get("prompt_tokens", 0), "seconds": round(ran, 1),
+                   "suspended": suspended}
+            if self._measure is not None and kind == "hard":
+                res.update(self._measure(final, m.db.events(sid), set(baseline)))
+            return res
         except BaseException:  # setup failed (Docker down) or the run was cancelled: leave no canary on the GPU
             await self._stop(sid)
             raise
@@ -257,18 +280,87 @@ def grade_hard_task(task, ws: Path, answer: str, baseline: dict[str, str]) -> tu
         return False, f"checker error: {e}"
 
 
+# #774 (docs/prefix-cache-study.md): debug output for the prefix-cache study, off unless asked for
+class PromptCapture:
+    """Wraps llm.chat and appends one JSON line per call: the exact messages and tools sent, in order, with the
+    session holding the GPU and what the server reported (prompt and cached tokens, prompt_ms). Consecutive lines are
+    what docs/prefix-cache-study/prefix_diff.py compares."""
+
+    def __init__(self, path: Path, chat=None, holder: Callable[[], str | None] = lambda: None):
+        from harness import llm
+        self.path, self.chat, self.holder, self.seq = path, chat or llm.chat, holder, 0
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+
+    async def __call__(self, model, messages, tools=None, *args, **kwargs):
+        self.seq += 1
+        # Serialized before the call: the runner keeps changing its context lists afterwards.
+        row = {"seq": self.seq, "session": self.holder(), "model": getattr(model, "name", ""),
+               "caller": [f.function for f in inspect.stack(0)[1:6]],
+               "messages": json.loads(json.dumps(messages)), "tools": json.loads(json.dumps(tools)),
+               # what llm._payload merges into the request, so a render uses the same template options
+               "extra": {**(getattr(model, "sampling", None) or {}),
+                         **(kwargs.get("extra", args[2] if len(args) > 2 else None) or {})}}
+        try:
+            completion = await self.chat(model, messages, tools, *args, **kwargs)
+        except BaseException as e:
+            row["error"] = f"{type(e).__name__}: {e}"[:300]
+            self._write(row)
+            raise
+        row.update(prompt_tokens=completion.prompt_tokens, cache_tokens=completion.cache_tokens,
+                   prompt_ms=completion.prompt_ms, completion_tokens=completion.completion_tokens,
+                   decode_ms=completion.decode_ms, finish_reason=completion.finish_reason,
+                   # what the server's cache holds after this call, past the prompt: the next prompt re-renders it
+                   reply={"content": completion.content, "reasoning": completion.reasoning,
+                          "tool_calls": completion.tool_calls})
+        self._write(row)
+        return completion
+
+    def _write(self, row: dict) -> None:
+        with self.path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+
+
+def turn_metrics_by_session(db) -> list[dict]:
+    """Every finished session's persisted `turn_metrics` rows, oldest session first (--keep-metrics)."""
+    return [{"session": s["id"], "title": s["title"], "status": s["status"],
+             "turns": [e["data"] for e in db.events(s["id"]) if e["type"] == "turn_metrics"]}
+            for s in db.sessions_with_status(*DONE)]
+
+
 # by hand, daemon stopped
+def manual_suite(repeats: int | None, heldout: bool = False, xy: bool = False) -> dict:
+    suite = heldout_suite(3) if heldout else xy_suite(2) if xy else load_suite()
+    if repeats:
+        suite["repeats"] = repeats
+    return suite
+
+
+def run_pi(task_ids: list[str], repeats: int | None, heldout: bool = False, xy: bool = False) -> Path:
+    """#942: the hard tasks driven by the Pi coding agent (bakeoff/pi_driver.py). No Manager: Pi talks to llama-server
+    itself. Plain blocking code, called outside asyncio.run: there Ctrl-C (SIGINT) would only cancel the main task,
+    which blocking code never yields to, and the attempts would go on; here it raises KeyboardInterrupt at once."""
+    from . import pi_driver
+    return pi_driver.run_standalone(manual_suite(repeats, heldout, xy), task_ids or None,
+                                    "heldout" if heldout else "xy" if xy else "canary")
+
+
 async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path, heldout: bool = False,
-                         plan_reinject: bool = False) -> Path:
+                         plan_reinject: bool = False, xy: bool = False, system_line: str = "",
+                         keep_metrics: Path | None = None, capture_prompts: Path | None = None,
+                         mask_batch_at: float = 0.0) -> Path:
+    """The native driver by hand (the Pi driver is run_pi)."""
     from harness import config as config_mod
     from harness.manager import Manager
 
+    from .run_measures import native_measures
+
+    suite = manual_suite(repeats, heldout, xy)
     base = config_mod.load()
-    suite = heldout_suite(3) if heldout else load_suite()
-    if repeats:
-        suite["repeats"] = repeats
     canary_cfg = base.canary
-    if heldout:
+    # An experiment (a separate set, a prompt line or named tasks) gets room for every attempt, so its conditions are
+    # judged alike; only the whole nightly set by hand keeps the nightly cap.
+    if heldout or xy or system_line or task_ids:
         canary_cfg = dataclasses.replace(canary_cfg, total_cap_seconds=heldout_cap_seconds(suite, task_ids or None))
     tmp = Path(tempfile.mkdtemp(prefix="canary-"))
     cfg = config_mod.Config(host="127.0.0.1", port=0, data_dir=tmp, repos_dir=tmp / "repos",
@@ -276,19 +368,29 @@ async def run_standalone(task_ids: list[str], repeats: int | None, fixture: Path
                             projects={"scratch": config_mod.Project(name="scratch")}, canary=canary_cfg,
                             web=config_mod.WebConfig(enabled=True, page_chars=base.web.page_chars,
                                                      fixture_dir=str(fixture)),
-                            planning=config_mod.PlanningConfig(reinject=plan_reinject or base.planning.reinject))
-    m = Manager(cfg)
+                            planning=config_mod.PlanningConfig(reinject=plan_reinject or base.planning.reinject),
+                            mask_batch_at=mask_batch_at)
+    capture = PromptCapture(capture_prompts) if capture_prompts else None
+    m = Manager(cfg, chat=capture) if capture else Manager(cfg)
+    if capture:
+        capture.holder = lambda: m.scheduler.holder
     await m.start(maintenance=False)
     try:
-        report = await CanaryRunner(m, cfg.canary, fixture, suite).run("manual", task_ids or None)
+        runner = CanaryRunner(m, cfg.canary, fixture, suite, system_line=system_line, measure=native_measures)
+        report = await runner.run("manual", task_ids or None)
     finally:
         await m.stop()
+        if keep_metrics:  # the data dir goes next
+            keep_metrics.parent.mkdir(parents=True, exist_ok=True)
+            keep_metrics.write_text(json.dumps(turn_metrics_by_session(m.db), indent=1), encoding="utf-8")
         m.db.close()
         shutil.rmtree(tmp, ignore_errors=True)
-    name = ("heldout" if heldout else "canary") + ("-plan" if cfg.planning.reinject else "")
+    name = ("heldout" if heldout else "xy" if xy else "canary") + ("-plan" if cfg.planning.reinject else "") + (
+        "-line" if system_line else "") + ("-mask-batch" if mask_batch_at else "")
     out = ROOT / "runs" / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.json"
     out.parent.mkdir(exist_ok=True)
-    out.write_text(json.dumps({"status": report.status, "outcomes": report.outcomes}, indent=1), encoding="utf-8")
+    out.write_text(json.dumps({"status": report.status, "xy": xy, "system_line": system_line,
+                               "outcomes": report.outcomes}, indent=1), encoding="utf-8")
     passed = sum(o["ok"] for o in report.outcomes)
     print(f"{report.status}: {passed}/{len(report.outcomes)} passed · results in {out}")
     return out
@@ -302,9 +404,44 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--heldout", action="store_true", help="the #673 held-out tasks (3 repeats unless --repeats)")
     parser.add_argument("--plan-reinject", action="store_true",
                         help="#641: re-inject the saved plan every turn (planning.reinject), whatever harness.yaml says")
+    parser.add_argument("--mask-batch-at", type=float, default=0.0, metavar="SHARE",
+                        help="#855: batch observation masking at this share of the window (below elide_at, 0.55)")
+    parser.add_argument("--xy", action="store_true",
+                        help="#773: the XY-problem variants (bakeoff/tasks_xy.py; 2 repeats unless --repeats)")
+    parser.add_argument("--system-line", default="", metavar="TEXT",
+                        help="#773: add TEXT to the canary sessions' system prompt as project instructions")
+    parser.add_argument("--keep-metrics", type=Path, metavar="PATH",
+                        help="#774: write each session's turn_metrics rows to this JSON file before the data dir goes")
+    parser.add_argument("--capture-prompts", type=Path, metavar="PATH",
+                        help="#774: append the exact messages and tools of every model call to this JSONL file")
+    parser.add_argument("--driver", choices=DRIVERS, default="native",
+                        help="#942: who drives the hard tasks: the native session loop or the Pi coding agent "
+                             "(by hand only; the nightly canary is always native)")
     args = parser.parse_args(argv)
-    asyncio.run(run_standalone([t for t in args.tasks.split(",") if t], args.repeats or None, args.fixture,
-                               heldout=args.heldout, plan_reinject=args.plan_reinject))
+    if args.heldout and args.xy:
+        parser.error("--heldout and --xy are separate task sets; pick one")
+    if args.driver == "pi":
+        native_only = [flag for flag, on in (("--plan-reinject", args.plan_reinject),
+                                             ("--mask-batch-at", args.mask_batch_at),
+                                             ("--system-line", args.system_line.strip()),
+                                             ("--keep-metrics", args.keep_metrics),
+                                             ("--capture-prompts", args.capture_prompts)) if on]
+        if native_only:
+            parser.error(f"{', '.join(native_only)} change the native session loop; they don't apply to --driver pi")
+        web = sorted({t.id for t in WEB_TASKS} & set(args.tasks.split(",")))
+        if web:
+            parser.error(f"--driver pi runs the hard tasks only; {', '.join(web)} are web tasks")
+    if args.mask_batch_at and not _mask_batch_at(args.mask_batch_at):
+        parser.error("--mask-batch-at must be a share of the window below elide_at (0.55)")
+    task_ids = [t for t in args.tasks.split(",") if t]
+    if args.driver == "pi":  # outside asyncio.run, so Ctrl-C stops it (run_pi)
+        run_pi(task_ids, args.repeats or None, heldout=args.heldout, xy=args.xy)
+        return 0
+    debug = {k: v for k, v in (("keep_metrics", args.keep_metrics), ("capture_prompts", args.capture_prompts),
+                               ("mask_batch_at", args.mask_batch_at)) if v}
+    asyncio.run(run_standalone(task_ids, args.repeats or None, args.fixture,
+                               heldout=args.heldout, plan_reinject=args.plan_reinject, xy=args.xy,
+                               system_line=args.system_line.strip(), **debug))
     return 0
 
 

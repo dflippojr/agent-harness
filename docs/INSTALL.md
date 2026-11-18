@@ -1,12 +1,12 @@
 # Installing Agent Harness
 
-Run AI agents on Windows, Linux, or Apple Silicon macOS and drive them from a browser or your phone. Use either a
+Run AI agents on Windows, Linux, or Apple Silicon macOS and drive them from the `harness` CLI, from apps, or, with the owner's private Stables add-on, from a browser or your phone. Use either a
 local model or your own hosted-provider CLI subscriptions. Agents work in Docker sandboxes and ask before risky
 actions.
 
-The installer sets up **Agent Harness Server**, which hosts the APIs and serves **Stables** when it finds a copy.
-Stables lives in its own repository, [dflippojr/stables](https://github.com/dflippojr/stables); clone it into the checkout as `stables/` (or set
-`HARNESS_STABLES_DIR`) to serve it, as [the guide](web.md#where-the-server-finds-stables) describes. An
+The installer sets up **Agent Harness Server**, which hosts the APIs. **Stables**, the browser client and installable PWA,
+is the owner's private add-on. The public installers don't fetch it, and the install works without it: without Stables
+the server answers the APIs, the `harness` CLI and the SDK as documented, and `/` returns 404 instead of a web page. An
 **Agent Harness App** is a third-party API integration. **Agent Harness for Mac** installs the `harness` command
 (**Agent Harness CLI**) and a **Mac Runner** together; the Python library in `sdk/` is **Agent Harness SDK**.
 
@@ -20,6 +20,12 @@ when stdin is a terminal and no Hub flag was supplied. `--with-hub` / `--no-hub`
 decide without prompting. With redirected stdin, the default is no Hub. Every Hub action is also available through
 `harness --help`; see [management-parity.md](management-parity.md). Add the Hub later by rerunning the daemon installer
 with `--with-hub` / `-WithHub`. Web and other Apps keep their normal App pairing flow and never make this offer.
+
+On Linux, `install/install.sh` writes the `harness` command to `~/.local/bin/harness`, and says to add that folder to
+`PATH` if it is missing. The command runs the CLI with the install's venv, app directory, configuration and port; set
+`HARNESS_URL` or `HARNESS_CONFIG_DIR` to point one call elsewhere. With several installs, it runs the last one
+installed. The installer keeps an existing `~/.local/bin/harness` it did not write and says so. On macOS the
+[Mac client](mac-client.md) provides this command instead.
 
 The Hub distribution is pending #546. Until a release exists, set `HARNESS_HUB_PACKAGE` to the released pip
 distribution or `HARNESS_HUB_IMAGE` to the released image; there is no default placeholder package or image.
@@ -108,7 +114,7 @@ Docker (Docker Desktop on Windows/macOS) and at least one provider login are the
 and Cursor adapters; an unused provider can remain logged out. Add modules with a PowerShell array, for example
 `-EnableModules jobs,backup`. `endpoint`, `images`, `image_edit`, and `gpu_guard` automatically opt into `local_model` and restore
 the GPU/model requirements. `image_edit` is a separate ~20 GB Qwen-Image-Edit download; ordinary installs and daemon
-upgrades never fetch it. Those weights go in `images.models_dir` (default `C:/AI/comfy-models`, the same root as
+upgrades never fetch it. Those weights go in `images.models_dir` (default `C:/AI/comfy-models` on Windows, the same root as
 Z-Image/quality). If that directory is missing, the installer uses `<InstallDir>/comfy-models` and writes
 `images.models_dir` into the generated config so `python -m harness.doctor` and the daemon look in the same place.
 The complete module catalog and security boundary are in
@@ -145,7 +151,7 @@ config (`-Force` rewrites it).
 Useful options: `-Profile Service`, `-EnableModules jobs,backup`, `-Model gpt-oss`, `-InstallDir D:\agent-harness`, `-DataDir D:\agents`, `-ModelPath <existing .gguf>`,
 `-LlamaDir <existing llama.cpp>`, `-Port 8100`, `-NoTasks`, `-DryRun`. See `Get-Help .\install\install.ps1 -Full`.
 
-Then open **http://127.0.0.1:8100** in Stables. The first model load takes a minute or two.
+Then check the install with **`python -m harness.doctor`**, or request **http://127.0.0.1:8100/health**. The first model load takes a minute or two. With the owner's Stables add-on installed, the browser UI is at **http://127.0.0.1:8100/**.
 
 > **Antivirus:** some engines flag `uv.exe` (Astral's Rust-based Python manager) as suspicious because it's unsigned
 > and downloads packages. It's a false positive; allow the `%LOCALAPPDATA%\agent-harness\bin` folder. You can check
@@ -169,10 +175,30 @@ registers `systemd --user` services for llama.cpp and Agent Harness Server. llam
 If the Docker GPU check fails, install NVIDIA Container Toolkit and restart Docker before rerunning the installer.
 On a headless host, an administrator may need to enable user lingering with `loginctl enable-linger <user>`.
 
+**A host that logs in automatically keeps its GNOME keyring locked** (the tower under GDM autologin). Any Secret
+Service call then waits for an unlock prompt that nobody answers, from an ssh session, a user unit or an agent alike:
+D-Bus clients find `$XDG_RUNTIME_DIR/bus` even when `DBUS_SESSION_BUS_ADDRESS` is unset. Keep each CLI login in its
+own file store at mode 600: gh with `--insecure-storage`, Claude Code's `.credentials.json`, Codex's `auth.json`.
+For a single command that might still reach the keyring, cut the bus off:
+`DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent timeout 60 <command>`. In a unit, set only the variable,
+`Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`. Bound the run with `TimeoutStartSec=` in a
+`Type=oneshot` unit, or with `RuntimeMaxSec=` in any other type (the installer's units are `Type=simple`, which
+`TimeoutStartSec=` doesn't limit once started).
+Never set it in a profile, `environment.d` or the user manager's environment, because it breaks the whole session
+bus. Never use it to store a credential either: the keyring write fails instead of hanging. Don't unlock the keyring
+with an empty password or a typed-in secret. Once it is unlocked, every process of that user can read all of it. The
+tower's tool-by-tool finding is in agent-ops `docs/tower-keyring.md` (agent-ops#280).
+
 Useful options include `--profile service`, `--enable-modules jobs,backup`, `--model gpt-oss`,
 `--install-dir /srv/agent-harness`, `--data-dir /srv/agents`, `--model-path /models/model.gguf`,
-`--existing-server http://127.0.0.1:8090`, `--no-start`, and `--dry-run`. Run `install/install.sh --help` for the
-complete list. The installer is idempotent and does not overwrite base config unless `--force` is passed.
+`--existing-server http://127.0.0.1:8090`, `--vram-headroom-mib 2048`, `--no-start`, and `--dry-run`. Run
+`install/install.sh --help` for the complete list. The installer is idempotent and does not overwrite base config unless
+`--force` is passed.
+
+`--vram-headroom-mib N` adds `--fit-target N` to the Qwen arguments in the llama-server unit, so `--fit` leaves N MiB of
+VRAM free for Plex transcodes or a Sunshine stream ([`gpu-vram-budget.md`](gpu-vram-budget.md) has the budget). The
+default, 0, leaves llama-server's own margin. The installer rewrites the unit on every run, so pass the flag again when
+you rerun it. The Windows installer has no such flag.
 
 ## Install on Apple Silicon macOS
 
@@ -210,7 +236,10 @@ Logs are under `%LOCALAPPDATA%\agent-harness\logs` on Windows and
 
 ## Use Stables from your phone
 
-Agent Harness Server listens only on localhost. To reach Stables from other devices, use
+Stables is the owner's private add-on. Steps 1–4 expose the server's API to your tailnet with or without it; step 5
+applies only when the add-on is installed.
+
+Agent Harness Server listens only on localhost. To reach the server from other devices, use
 [Tailscale](https://tailscale.com):
 
 1. Install Tailscale on the PC and your phone, and sign in to both with the same account.
@@ -229,7 +258,7 @@ Agent Harness Server listens only on localhost. To reach Stables from other devi
    or with `harness github-member-auth set true`; see [`member-github-auth.md`](member-github-auth.md).
    For a shared household device whose tailnet login is no single member, configure `google_signin` so members
    identify themselves with their linked Google account; see [`google-signin.md`](google-signin.md).
-5. Open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Stables icon is
+5. With Stables installed, open the URL on the phone, then choose **Share → Add to Home Screen**. The installed Stables icon is
    labeled **Harness**. iOS may retain an older label until you remove that icon and add it again; no server or
    browser data migration is required. See [`web.md`](web.md).
 
@@ -251,7 +280,7 @@ Each is a section in `config\harness.yaml`, documented in the repository's `conf
 
 | Feature | Section | Needs |
 | --- | --- | --- |
-| Projects backed by git repos, with review branches | `config\projects.yaml` | a local repo path |
+| Projects backed by git repos, with review branches | `config\projects.yaml` | a local repo path, on a Linux or macOS host: a Windows host refuses git operations on session workspaces for now (#973) |
 | Pause for games / Plex transcodes | `gpu_guard` (on by default) | nothing |
 | Web search for agents | `web` | SearXNG container (`docs/phase6b-results.md`) |
 | OpenAI/Anthropic-compatible endpoint | `endpoint` (on by default) | a key from Settings → Inference endpoint |
@@ -286,7 +315,16 @@ git pull
 powershell -ExecutionPolicy Bypass -File install\install.ps1
 ```
 
+On Linux and macOS, `git pull`, then run `install/install.sh` again. The tower's production checkout is updated by
+`deploy-tower` instead ([CI-CD.md](CI-CD.md#tower-runner)).
+
 ## Switch the local model (tower)
+
+This section describes the Windows tower (`run-qwen.ps1`, `C:/AI/...`). Since 2026-10-26 the tower runs Ubuntu. There
+the model file is fixed in the `agent-harness-main-llama.service` user unit's `ExecStart` (`install/run-server.sh`
+with `~/.local/share/agent-harness/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`), and the Qwen3.8 distill file is not
+on that disk, so the `default_model` line alone does not switch it. Changing the unit is an owner step, and the
+manual GPU hold is on.
 
 `config/harness.yaml` lists two local models on the same llama-server (127.0.0.1:8090): `qwen3.6-35b-a3b` (the
 default) and `qwen3.8-35b-a3b-distill` (empero-ai's distill, adopted in #413 from the
@@ -319,6 +357,10 @@ sends, not the file the server loads.
 
 With the `backup` module on (the default), the daemon writes `backup.dir/<YYYY-MM-DD>/` every night at `backup.at`
 and deletes dated folders older than `backup.keep_days`. `harness maintenance backup` takes one now.
+Unless `backup.dir` is set, it is `D:\My Backups\agent-harness` on Windows and `$XDG_DATA_HOME/agent-harness/backups`
+(`~/.local/share/agent-harness/backups` when `XDG_DATA_HOME` is unset) elsewhere. `config/harness.yaml` sets no machine
+path (#854): the others work the same way, with defaults in `harness/config.py`, and `harness.local.yaml` overrides any of
+them. Off Windows, `data_dir` defaults to the checkout's `data/`, and key and token files have no default.
 
 A backup folder holds exactly:
 
@@ -415,9 +457,11 @@ powershell -ExecutionPolicy Bypass -File install\uninstall.ps1 -RemoveFiles # al
 Linux/macOS equivalents:
 
 ```bash
-install/uninstall.sh                 # remove per-user services; keep data
+install/uninstall.sh                 # remove per-user services and the harness command; keep data
 install/uninstall.sh --remove-files  # also remove the install directory
 ```
+
+Uninstall removes `~/.local/bin/harness` only when this install wrote it.
 
 ## Security model, briefly
 
@@ -529,7 +573,9 @@ so it must say who it is:
 - An App, device or owner API token (`Authorization: Bearer …`) on `/api/v1` and `/api/admin/v1`, an owner admin
   token anywhere, an inference key on `/v1`, a runner token on the runner routes, or a stream ticket still works; its
   route checks it as before.
-- `/health` and `/metrics` answer without a credential, so Prometheus and the restart scripts keep working.
+- `/health` and `/metrics` answer without a credential, so Prometheus and the restart scripts keep working. So does
+  the App discovery document, `GET /api/v1` (exact path), which holds no credentials and lists no projects: an App
+  reads it before it sends its token (#909).
 
 Approving, denying or releasing the standalone Hub's claim needs one more secret: the daemon writes a new
 `data_dir/hub-approval.secret` at every start, and `harness hub approve`, `deny` and `release` read it, so they work only

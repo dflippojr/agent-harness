@@ -52,12 +52,14 @@ def _field(text: str, lo: int, hi: int, names: dict | None = None) -> set[int]:
 
 def _field_part(part: str, text: str, lo: int, hi: int, names: dict | None) -> range:
     step = 1
+    if not part:  # `0,30,` or `1,,15`: a typo, not every value
+        raise CronError(f"empty list item in {text!r}")
     if "/" in part:
         part, step_text = part.split("/", 1)
         if not step_text.isdigit() or int(step_text) < 1:
             raise CronError(f"bad step in {text!r}")
         step = int(step_text)
-    if part in ("*", ""):
+    if part in ("*", ""):  # "" only from `/5`: an empty base before a step is a wildcard
         start, end = lo, (6 if hi == 7 else hi)  # * in day-of-week: 0-6
     elif "-" in part:
         a, b = part.split("-", 1)
@@ -183,10 +185,22 @@ class JobScheduler:
                 log.exception("job tick failed")
             await asyncio.sleep(self.poll_seconds)
 
+    def _schedule_ok(self, job: dict) -> bool:
+        """A job saved before its schedule became invalid (#933: `0,30,`) is parked, not run: no next run, an error."""
+        try:
+            Cron(job["cron"])
+            return True
+        except CronError as e:
+            log.warning("job %s has an invalid schedule %r: %s", job["id"], job["cron"], e)
+            self.db.update_job(job["id"], next_run_at=None, last_error=f"invalid schedule, edit the job: {e}"[:300])
+            return False
+
     def _catch_up(self, now: float) -> None:
         """At start: jobs whose slot passed while the daemon was down run once if the miss is recent, else skip."""
         for job in self.db.list_jobs():
             if not job["enabled"] or not job["next_run_at"] or job["next_run_at"] > now:
+                continue
+            if not self._schedule_ok(job):
                 continue
             if now - job["next_run_at"] <= job["catch_up_minutes"] * 60:
                 continue  # tick() runs it
@@ -196,6 +210,8 @@ class JobScheduler:
         started = []
         for job in self.db.list_jobs():
             if not job["enabled"] or not job["next_run_at"] or job["next_run_at"] > now:
+                continue
+            if not self._schedule_ok(job):
                 continue
             if job["last_session_id"] and self.active(job["last_session_id"]):
                 self._reschedule(job, now, skipped="the previous run was still going")

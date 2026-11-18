@@ -13,6 +13,8 @@ import re
 
 RELEASE = "0.9.0"
 BUILD_ID = os.environ.get("HARNESS_BUILD_ID", "2026.09.17.1")
+# The pinned Stables release's build id. tools/stables/pin.py writes it with tools/stables/api-calls.json (#996);
+# a test fails when the two differ, so re-pin rather than edit it here.
 WEB_BUILD_ID = "2026.10.10.1"
 MAC_CLIENT_VERSION = "4.3"
 
@@ -25,6 +27,9 @@ CLIENT_PROTOCOLS = {"web": 2, "cli": 2, "runner": 3}
 MINIMUM_CLIENTS = {"web": "2026.09.16", "cli": "4.1", "runner": "4.2"}
 
 CLIENT_HEADER = "X-Agent-Harness-Client"
+# Host names that mean this machine, for the CLI and the server alike (harness/origins.py). Kept here because the Mac
+# bundle ships this file beside the CLI.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _HEADER_RE = re.compile(r"^(web|cli|runner)/(\d+)$")
 
 

@@ -19,6 +19,7 @@ from test_api import LOGIN, wait_for
 from test_checkpoints import two_edits
 from test_daemon import events
 from test_phase3 import finished, make_repo, project_cfg
+from host_git import needs_host_git
 
 
 def _no_cli(**_):
@@ -38,6 +39,7 @@ async def started(tmp_path):
     return m, await finished(m, m.create("go", project="proj")["id"])
 
 
+@needs_host_git
 def test_fork_moves_a_claude_session_to_codex(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -65,6 +67,7 @@ def test_fork_moves_a_claude_session_to_codex(tmp_path):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_local_fork_to_hosted_uses_the_digest_and_same_backend_keeps_the_saved_context(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -82,6 +85,7 @@ def test_local_fork_to_hosted_uses_the_digest_and_same_backend_keeps_the_saved_c
     asyncio.run(body())
 
 
+@needs_host_git
 def test_hosted_fork_to_local_keeps_the_digest_in_its_checkpoint(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -96,6 +100,7 @@ def test_hosted_fork_to_local_keeps_the_digest_in_its_checkpoint(tmp_path):
 
 
 @pytest.mark.parametrize("via", ["local", "claude"], ids=["local-fork", "hosted-fork"])
+@needs_host_git
 def test_a_forks_inherited_task_reaches_another_backend(tmp_path, via):
     """The task survives a fork through `via` and on to Codex: the digest has it though the middle fork's own event
     log starts later (a hosted one's does)."""
@@ -109,6 +114,7 @@ def test_a_forks_inherited_task_reaches_another_backend(tmp_path, via):
     asyncio.run(body())
 
 
+@needs_host_git
 def test_a_digest_fork_uses_the_checkpoints_system_prompt(tmp_path):
     async def body():
         m, s = await started(tmp_path)
@@ -186,6 +192,7 @@ async def _now(value):
     return value
 
 
+@needs_host_git
 def test_override_routes_start_sessions_on_the_chosen_backend_and_rerun_still_takes_no_body(tmp_path):
     cfg = project_cfg(tmp_path, str(make_repo(tmp_path / "src")))
     cfg.backends["codex"] = BackendConfig(enabled=True, model="gpt-5.5", effort="medium")
@@ -217,6 +224,7 @@ def test_audit_metadata_keeps_backend_and_model_names_only():
     assert namespace_audit.clean({"backend": "a prompt with spaces", "model": 5}) == {}
 
 
+@needs_host_git
 def test_continuing_a_hosted_session_carries_its_unanswered_follow_up(tmp_path):
     async def body():
         m, s = await started(tmp_path)

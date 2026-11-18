@@ -1,4 +1,4 @@
-import { test, expect, openSession, expectDone, expectReflow, reflowTest } from './fixtures';
+import { test, expect, openSession, expectDone, expectReflow, reflowTest, selfSizingTest, signIn } from './fixtures';
 
 const surfaces = [
   { name: 'Chat landing', route: '/#/chat', ready: '.chat-welcome' },
@@ -35,6 +35,28 @@ reflowTest('primary pages reflow without overflow at 320/375/768/1440 CSS pixels
     else if (tab === '/changes') await expect(page.getByText('No git repositories in this workspace yet.', { exact: true })).toBeVisible();
     else await expect(page.locator('main')).toContainText('Tool rows');
     await expectReflow(page);
+  }
+});
+
+// #885: WebKit delivers the 1280 px media query change on a later frame. A navigation that gets ahead of it mounts the
+// list in <main>, then the late change re-routes and moves it to the pane, taking a search box being filled with it.
+// One crossing loses that race only some of the time, so this crosses repeatedly.
+selfSizingTest('openSession after a resize across the split breakpoint types into the search box that stays', async ({ signedIn: page }) => {
+  for (let crossing = 0; crossing < 8; crossing++) {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await signIn(page);  // a fresh page each time: the first crossing after a load is the one that races
+    await page.evaluate(() => {
+      const state = window as unknown as { searchBoxesRemoved: number };
+      state.searchBoxesRemoved = 0;
+      new MutationObserver(records => {
+        for (const record of records) for (const node of record.removedNodes) {
+          if (node instanceof Element && (node.matches('input.search') || node.querySelector('input.search'))) state.searchBoxesRemoved++;
+        }
+      }).observe(document.documentElement, { childList: true, subtree: true });
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await openSession(page, 'Tab bar tour');
+    expect(await page.evaluate(() => (window as unknown as { searchBoxesRemoved: number }).searchBoxesRemoved), `crossing ${crossing}`).toBe(0);
   }
 });
 

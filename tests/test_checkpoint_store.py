@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from harness import checkpoints, projects
+from host_git import needs_host_git
 
 
 def sh(cwd, *args):
@@ -27,6 +28,7 @@ def repo(tmp_path):
     return ws, checkpoints.Store(tmp_path / "ckpt")
 
 
+@needs_host_git
 def test_rewind_restores_tracked_untracked_deleted(repo):
     ws, store = repo
     (ws / "edit.txt").write_text("v2\n")           # tracked, modified
@@ -80,6 +82,7 @@ def test_crlf_round_trips_byte_exact(repo):
     assert (ws / "win.txt").read_bytes() == b"a\r\nb\r\n"
 
 
+@needs_host_git
 def test_reset_branch_rewinds_commits(repo):
     ws, store = repo
     head, branch = checkpoints.head_and_branch(ws)
@@ -104,6 +107,7 @@ def test_scratch_workspace_without_git(tmp_path):
     assert (ws / "d" / "a.txt").read_text() == "a" and not (ws / "z.txt").exists()
 
 
+@needs_host_git
 def test_head_and_branch_reads_the_repository_files_without_git(repo, monkeypatch):
     ws, _ = repo
     want = sh(ws, "rev-parse", "HEAD").strip()
@@ -118,6 +122,7 @@ def test_head_and_branch_reads_the_repository_files_without_git(repo, monkeypatc
     assert checkpoints.head_and_branch(ws) == (want, "") and calls == []
 
 
+@needs_host_git
 def test_head_and_branch_asks_git_for_what_it_cannot_read(repo, monkeypatch):
     ws, _ = repo
     calls = []
@@ -142,6 +147,7 @@ def test_snapshots_reuse_the_index_and_drop_files_that_became_ignored(repo):
     assert "new.txt" not in names and ".gitignore" in names
 
 
+@needs_host_git
 def test_head_and_branch_of_an_unborn_branch_is_empty(tmp_path):
     ws = tmp_path / "unborn"
     ws.mkdir()

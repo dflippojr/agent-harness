@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from harness.modules import require_readable_file, require_url, setting_bool, setting_hidden
+from harness.modules import cfg_field, require_readable_file, require_url, setting_bool, setting_hidden
 
 NOTIFICATIONS = "Notifications"
 
@@ -16,19 +16,11 @@ def check_notifications(cfg) -> list[str]:
     return errors
 
 
-def _get_enabled(cfg):
-    return cfg.notify.enabled
-
-
-def _set_enabled(cfg, value):
-    cfg.notify.enabled = bool(value)
-
-
 def specs() -> list:
     return [
         setting_bool("notifications.enabled", "Notifications",
                      "Runtime enable for ntfy notifications. Does not configure a server or topic.",
-                     "Features", False, _get_enabled, _set_enabled, ("notify", "enabled"),
+                     "Features", False, *cfg_field("notify", "enabled", cast=bool), ("notify", "enabled"),
                      apply_mode="daemon_restart", modules=("notifications",), enable_check=check_notifications),
         setting_hidden("notify.server", "Notification server", "ntfy server URL.",
                        NOTIFICATIONS, ("notify", "server"), modules=("notifications",)),

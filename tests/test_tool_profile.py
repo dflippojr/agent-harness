@@ -21,6 +21,7 @@ from harness.manager import HarnessError, Manager
 from harness.mcp_server import McpRelay
 from harness.metrics import render as render_metrics
 from test_daemon import make_cfg, wait_status
+from host_git import needs_host_git
 
 FIXTURE = Path(__file__).resolve().parent.parent / "bakeoff" / "tool_profile_fixture.json"
 
@@ -341,6 +342,7 @@ def test_idempotency_digest_is_unchanged_for_the_default_profile():
     assert bash is not None and bash["request_digest"] != record["request_digest"]
 
 
+@needs_host_git
 def test_workspace_files_without_a_base_include_commits_the_run_made_in_its_own_repository(tmp_path):
     import subprocess
     git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "-C", str(tmp_path)]
@@ -351,6 +353,7 @@ def test_workspace_files_without_a_base_include_commits_the_run_made_in_its_own_
     assert compare.workspace_files(tmp_path, "", since=0.0) == {"app.py"}
 
 
+@needs_host_git
 def test_workspace_files_skip_untouched_files_of_a_repository_cloned_during_the_run(tmp_path):
     import os
     import subprocess

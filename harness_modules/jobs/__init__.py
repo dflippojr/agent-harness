@@ -1,24 +1,5 @@
 """Scheduled jobs and templates, registered through the optional module interface."""
-from harness.modules import Module
-
-
-def _runtime(manager, module):
-    from .runtime import JobsRuntime
-    return JobsRuntime(manager, module)
-
-
-def _owner_routes():
-    from .routes import owner_routes
-    return owner_routes
-
-
-def _settings():
-    from .settings import specs
-    return specs()
-
-
-def _runtime_enabled(cfg, switch):
-    return bool(cfg.jobs.enabled)
+from harness.modules import Module, enabled_flag, lazy
 
 
 def _principal_capabilities(owner, scopes):
@@ -31,8 +12,9 @@ _TEMPLATE = ("name", "prompt", "--project", "--backend", "--model")
 
 MODULE = Module(
     name="jobs", switches=("jobs",), title="Scheduled jobs and templates",
-    docs=("docs/modules.md",), runtime_enabled=_runtime_enabled, runtime=_runtime,
-    owner_routes=_owner_routes, settings=_settings,
+    docs=("docs/modules.md",), runtime_enabled=enabled_flag("jobs"),
+    runtime=lazy(".runtime", "JobsRuntime", call=True),
+    owner_routes=lazy(".routes", "owner_routes"), settings=lazy(".settings", "specs", call=True),
     principal_capabilities=_principal_capabilities,
     admin_paths=frozenset(['/jobs', '/jobs/preview', '/jobs/{jid}', '/jobs/{jid}/run', '/templates', '/templates/{tid}']),
     cli=(

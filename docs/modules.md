@@ -172,7 +172,10 @@ sessions. `session_prompt(project, defaults, app)` delegates to `project_prompt`
 with personal context withhold it from Apps. These hooks contribute nothing by default.
 
 1. Make `harness_modules/<name>/__init__.py` with `MODULE = Module(name=..., switches=(...), ...)`. Keep it light:
-   point at the heavy parts with small functions that import them on demand.
+   point at the heavy parts with `lazy(".routes", "owner_routes")` (or `lazy(".runtime", "MyRuntime",
+   call=True)` for a hook that calls its target), which imports the submodule only when the core calls the hook, and
+   use `enabled_flag("<section>")` for a `runtime_enabled` that reads `cfg.<section>.enabled`. Add the module's row
+   to `tests/test_module_hooks.py`.
 2. Import the core only from `harness.modules`. If you need a core object it doesn't export, add it to `_PUBLIC`.
 3. Put the profile switch in `config.MODULE_NAMES` so profiles and the installer accept it (see below).
 4. Add one row to the table in `tests/test_module_lifecycle.py`: its probe route, settings keys, capability, routes,

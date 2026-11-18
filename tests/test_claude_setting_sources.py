@@ -150,6 +150,7 @@ def _command_settings(marker: str) -> dict:
     }
 
 
+@pytest.mark.docker
 @needs_docker
 def test_project_command_settings_have_no_effect_in_a_session(tmp_path):
     (tmp_path / ".claude").mkdir()

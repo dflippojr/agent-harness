@@ -85,7 +85,7 @@ def test_the_canary_cli_runs_the_held_out_suite_only_on_request(monkeypatch):
     from bakeoff import canary
     seen = {}
 
-    async def fake_run(task_ids, repeats, fixture, heldout=False, plan_reinject=False):
+    async def fake_run(task_ids, repeats, fixture, heldout=False, plan_reinject=False, **_):
         seen.update(task_ids=task_ids, repeats=repeats, heldout=heldout, plan_reinject=plan_reinject)
 
     monkeypatch.setattr(canary, "run_standalone", fake_run)

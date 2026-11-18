@@ -24,8 +24,8 @@ npm --prefix tools/ui-tests ci
 npm --prefix tools/ui-tests exec -- playwright install chromium
 ```
 
-Then point `HARNESS_STABLES_DIR` at the `public/` directory of a dflippojr/stables checkout at the tag in
-`tools/stables/pin.json`, or clone that checkout into this one as `stables/` (git-ignored). The commands are the same in
+Then point `HARNESS_STABLES_DIR` at the `public/` directory of the owner's private Stables checkout at the tag in
+`tools/stables/pin.json`, or place that checkout in this one as `stables/` (git-ignored). The commands are the same in
 PowerShell, Git Bash and macOS shells. Without either, the launch step fails at once and names what is missing.
 
 ## 1. Launch
@@ -96,8 +96,9 @@ folder is refused:
 
 - `summary.md`: the result of each step, the head commit (and whether the tree had uncommitted changes), the
   journeys, the loopback URLs, the doctor's lines, the screenshot list and log excerpts. The excerpts are the fake
-  model banner and any `ERROR`, `Traceback` or `FAILED` lines. The seeded Failed run always logs one `crashed`
-  traceback, and the summary marks it as expected. Read the summary first and quote it in the PR.
+  model banner and any `ERROR`, `Traceback` or `FAILED` lines. The seeded Failed run logs one `model call failed`
+  warning, with no traceback, and the summary marks it as expected. A `crashed` line is an internal error (a daemon
+  bug), and the summary marks it as unexpected. Read the summary first and quote it in the PR.
 - `screenshots/<desktop|pixel7>-<name>.png`.
 - `doctor.txt`, `drive.txt`, `launcher.txt`, `cleanup.txt`, `launch.json` and `logs/server.log`, plus Playwright
   traces under `playwright/` when a test failed.

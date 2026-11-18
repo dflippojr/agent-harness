@@ -21,6 +21,7 @@ from harness.github_auth import GitHubAuthError, canonical_github_url
 from github_fakes import FakeGitHub, wait_for
 from waits import scaled
 from test_household import ALICE, BOB, OWNER, H, create_member, household
+from host_git import needs_host_git
 
 CODE = "WDJB-MJHT"
 ME = "/api/v1/me/github-connection"
@@ -653,6 +654,7 @@ def test_owner_project_github_flag_refused_and_owner_path_unchanged(tmp_path, fa
         close(client)
 
 
+@needs_host_git
 def test_member_review_push_uses_managed_repo_and_stored_origin(tmp_path, fake):
     """End to end: private clone -> session branch -> reviewed push, never the workspace's own remote."""
     client, m, ids = setup(tmp_path, fake)

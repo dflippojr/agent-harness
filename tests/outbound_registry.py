@@ -449,9 +449,12 @@ async def comfy_progress(ctx: Ctx):
 
 
 def guard_doctor(ctx: Ctx):
+    from harness import local_owner
     from harness_modules.local_model import doctor
+    ctx.file(local_owner.TOKEN_FILE, ctx.secret)
     report = Report()
-    doctor.check_guard(report, SimpleNamespace(port=8100, gpu_guard=GpuGuardConfig(pause_flag=str(ctx.tmp / "p"))))
+    doctor.check_guard(report, SimpleNamespace(port=8100, data_dir=ctx.tmp,
+                                               gpu_guard=GpuGuardConfig(pause_flag=str(ctx.tmp / "p"))))
     return report
 
 
@@ -661,7 +664,7 @@ REGISTRY: list[Outbound] = [
     Outbound("harness_modules/images/service.py::ImageService._listen_progress", "ComfyUI: progress websocket",
              comfy_progress, returned([])),
     Outbound("harness_modules/local_model/doctor.py::check_guard", "doctor: resource guard /gpu", guard_doctor,
-             flagged("Resource guard")),
+             flagged("Resource guard"), secret=True),
     Outbound("harness_modules/local_model/doctor.py::check_model_server", "doctor: llama-server /props",
              model_doctor, flagged("Model server")),
     Outbound("harness_modules/local_model/service.py::Detector._plex", "GPU guard: Plex transcodes", plex,

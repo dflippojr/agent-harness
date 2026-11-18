@@ -1,28 +1,14 @@
 """Owner-approved instruction skills add-on (#334 stage c)."""
 from __future__ import annotations
-from harness.modules import Module, ToolGate
-
-def _runtime(manager, module):
-    from .runtime import SkillsRuntime
-    return SkillsRuntime(manager, module)
-
-def _routes():
-    from .routes import owner_routes
-    return owner_routes
-
-def _settings():
-    from .settings import specs
-    return specs()
-
-def _enabled(cfg, switch):
-    return bool(cfg.skills.enabled)
+from harness.modules import Module, ToolGate, enabled_flag, lazy
 
 def _eligible(kit, session):
     return kit.can_propose(session)
 
 MODULE = Module(
     name="skills", switches=("skills",), title="Instruction skills", docs=("docs/modules.md",),
-    runtime=_runtime, runtime_enabled=_enabled, owner_routes=_routes, settings=_settings,
+    runtime=lazy(".runtime", "SkillsRuntime", call=True), runtime_enabled=enabled_flag("skills"),
+    owner_routes=lazy(".routes", "owner_routes"), settings=lazy(".settings", "specs", call=True),
     tool_names=("propose_skill",),
     tools=ToolGate(project_flag="", capability="", mcp=False, eligible=_eligible),
     admin_paths=frozenset({

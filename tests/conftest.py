@@ -11,6 +11,7 @@ from harness import backend_state, cli_domains, manager as manager_mod, metrics,
 from harness.fileops import grant_tree_owner_access
 from harness_modules.local_model import service as gpu_guard
 from harness_modules.local_model.warmup import READY, ModelWarmer
+from stray_drive_guard import pytest_sessionfinish  # noqa: F401 - pytest finds this hook by name
 
 # Stables lives in its own repository (#334). The Server's tests serve a stand-in shell instead of whatever copy the
 # machine has (tests/fixtures/stables_shell/README.md); tests that need no shell set the variable themselves.
@@ -44,6 +45,7 @@ def isolate_local_supervision(monkeypatch, flag_dir):
     monkeypatch.setattr(gpu_guard.ServerControl, '__init__', init)
     monkeypatch.setattr(gpu_guard, 'run_cmd', fake_command)
     monkeypatch.setattr(psutil, 'process_iter', lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr(psutil, 'net_connections', lambda *args, **kwargs: [])  # a park never signals a real server
     monkeypatch.setattr(psutil, 'virtual_memory', lambda: SimpleNamespace(available=64 * 1024**3, total=128 * 1024**3))
     monkeypatch.setattr(resources, '_run', run)
 

@@ -415,6 +415,11 @@ def validate_dir(root: Path) -> dict:
 
 
 SANDBOX_WORK = "/sandbox-work"
+# /workspace in free text, after either separator since Windows reads both. The name ends at the end of the text, a
+# separator, whitespace, a quote, or a character that can expand to something else, with any trailing dots (Windows
+# strips them). A name that goes on, such as /workspaces or /workspace#2, is another path.
+_WORKSPACE_IN_TEXT = re.compile(r"""[/\\]workspace(?=\.*(?:$|[\s/\\:,;"'`*?\[\]{}$%)<>|&]))""")
+_PATH_COMPONENT = re.compile(r"[/\\]([^/\\]*)")
 
 
 def _container_user() -> str:
@@ -465,6 +470,27 @@ def _mount_reasons(argv: list[str]) -> list[str]:
     return reasons
 
 
+def _names_workspace(field: str, *, literal_path: bool) -> bool:
+    if literal_path:
+        return any(c.strip("\"'").rstrip(". ") == "workspace" for c in _PATH_COMPONENT.findall(field))
+    return _WORKSPACE_IN_TEXT.search(field) is not None
+
+
+def _reaches_workspace(argv: list[str]) -> bool:
+    """A bind mount's source is one literal path (docker runs without a shell), so only an exact component counts."""
+    for i, arg in enumerate(argv):
+        is_mount = i > 0 and argv[i - 1] == "--mount"
+        for field in arg.lower().split(",") if is_mount else [arg.lower()]:
+            key, _, value = field.partition("=")
+            if is_mount and key in ("source", "src"):
+                found = _names_workspace(value, literal_path=True)
+            else:
+                found = _names_workspace(field, literal_path=False)
+            if found:
+                return True
+    return False
+
+
 def sandbox_command_is_isolated(argv: list[str]) -> list[str]:
     """Return reasons the docker argv would violate the v1 sandbox contract."""
     reasons = []
@@ -478,12 +504,14 @@ def sandbox_command_is_isolated(argv: list[str]) -> list[str]:
     if "--cap-drop" not in argv or "ALL" not in argv:
         reasons.append("capabilities are not dropped")
     forbidden_needles = (
-        "docker.sock", "/var/run/docker", "/workspace", "provider-auth", "harness-auth",
+        "docker.sock", "/var/run/docker", "provider-auth", "harness-auth",
         "/secrets", "memory-library", "com.docker.desktop", "\\\\.\\pipe\\docker",
     )
     for needle in forbidden_needles:
         if needle.lower() in joined.lower():
             reasons.append(f"forbidden mount or path {needle}")
+    if _reaches_workspace(argv):
+        reasons.append("forbidden mount or path /workspace")
     reasons += _mount_reasons(argv)
     if any(a in argv for a in ("--privileged", "--pid=host", "--network=host")):
         reasons.append("host namespaces are forbidden")

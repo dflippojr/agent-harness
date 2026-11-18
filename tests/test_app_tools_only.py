@@ -179,7 +179,7 @@ def test_capability_discovery_lists_supporting_backends(tmp_path):
         assert root["features"]["app_tools_only"] is True
         assert root["features"]["app_tools_only_backends"] == ["local", "claude", "codex"]
         listed = {b["name"]: b["app_tools_only"] for b in client.get("/api/v1/backends", headers=auth).json()}
-        assert listed == {"claude": True, "codex": True, "cursor": False}
+        assert listed == {"local": True, "claude": True, "codex": True, "cursor": False}  # local listed since #946
 
 
 def test_models_status_for_apps_and_warm_behind_its_scope(tmp_path, monkeypatch):

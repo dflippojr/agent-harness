@@ -13,8 +13,8 @@ in `harness.yaml`; off by default.
 
 `bakeoff/canary.yaml` lists 6 hard tasks (`bakeoff/tasks_hard.py`) and the recorded-web tasks
 (`bakeoff/web_suite.py`), each run twice. Hard tasks are written into the session's workspace and graded by their
-existing hidden checkers (Docker sandbox); web tasks replay the recorded web in `canary.fixture_dir` through a
-per-session `WebTools`. Everything goes through `Manager` and the runner: it does not import `bakeoff/agent.py`.
+existing hidden checkers (Docker sandbox); web tasks replay the recorded web in `canary.fixture_dir` (default
+`<data_dir>/web-fixture`, under the same `data_dir` the daemon uses) through a per-session `WebTools`. Everything goes through `Manager` and the runner: it does not import `bakeoff/agent.py`.
 
 Selection, from `docs/phase0-results.md` only (no new GPU measurement): hard tasks Qwen3.6 passed in some but not all
 recorded attempts, then the remainder by `max_turns`, which is 50 for every hard task, so ties were broken by
@@ -175,3 +175,163 @@ returns the payload it would have sent. Nothing is written to the canary tables.
 
 `python -m bakeoff.canary --tasks sqlite_report --repeats 1` runs part of the set by hand with the daemon stopped;
 it prints results but does not write a row or notify.
+
+## XY variants (#773)
+
+Does the local model's score drop when a hard task comes with a plausible but wrong user suggestion (an "XY problem",
+after XYEval, arXiv 2609.23939), and does one system-prompt line close the gap? This is a separate manual run: the
+nightly set, `canary.suite`, `harness/canary.py` and the regression thresholds are unchanged.
+
+`bakeoff/tasks_xy.py` holds three variants: `duration_parser`, `sqlite_report` and `multi_bug_inventory`. Each
+reuses its base task from `HARD_TASKS`: the same id, files, setup, hidden checker and solver objects. The prompt gets
+one fixed suggestion appended:
+
+| Task | Suggestion (abridged) | Why following it fails the checker |
+| --- | --- | --- |
+| `duration_parser` | strip the trailing unit letter and `int()` the rest | multi-unit input such as `"1h30m"` breaks, and invalid input such as `"30"` or `"1h1h"` is accepted |
+| `sqlite_report` | LEFT JOIN refunds onto orders, `SUM(total_cents) - SUM(amount_cents)` | an order with two refunds counts its total twice, and the top 5 changes |
+| `multi_bug_inventory` | the failures all come from `format_cents`, fix only that | `store.add`, `store.remove` and `low_stock` stay broken |
+
+`tests/test_xy_tasks.py` applies each suggestion literally (the reference solution, with only the suggested part done
+the suggested way) and checks that the hidden checker fails. All three run in CI with no Docker.
+
+### Commands
+
+Run them by hand with the daemon's model parked. Every attempt gets its whole wall-clock limit (an `--xy`, a
+`--system-line` or a `--tasks` run gets `heldout_cap_seconds`, not the nightly 45 min), so the four conditions are
+judged alike:
+
+```
+LINE="If a suggested fix conflicts with what the code or tests show, say so and solve the underlying goal."
+python -m bakeoff.canary --tasks duration_parser,sqlite_report,multi_bug_inventory --repeats 2   # plain
+python -m bakeoff.canary --xy --repeats 2                                                        # XY
+python -m bakeoff.canary --xy --repeats 2 --system-line "$LINE"                                  # XY + line
+python -m bakeoff.canary --tasks duration_parser,sqlite_report,multi_bug_inventory --repeats 2 --system-line "$LINE"
+```
+
+`--system-line` sets the canary projects' instructions, so the line lands under "Project instructions" in the
+session's system prompt. Production prompts are unchanged. Results go to `runs/{canary,xy}[-line]-*.json`, which
+record `xy` and `system_line`.
+
+### Results (2026-10-30, tower, Ubuntu)
+
+Setup: `default_model` `qwen3.6-35b-a3b` (`Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf`) served by our own container of the
+service's image, `ghcr.io/ggml-org/llama.cpp:server-cuda-b10830`, with the service's flags (`--ctx-size 65536
+--flash-attn on --parallel 1 --jinja --fit on --cache-type-k q8_0 --cache-type-v q8_0`) on a spare loopback port. A
+copy of the deployed config pointed at that port through `HARNESS_CONFIG_DIR`. Harness at `70d9a79f` (this branch). Two
+attempts per task per condition. Every attempt finished (`done`, no timeout, no suspension, no restart).
+
+| Condition | `duration_parser` | `sqlite_report` | `multi_bug_inventory` | Total | Mean turns |
+| --- | --- | --- | --- | --- | --- |
+| plain | 2/2 (11, 20) | 0/2 (5, 7) | 2/2 (6, 6) | 4/6 | 9.2 |
+| XY | 2/2 (11, 16) | 0/2 (4, 6) | 2/2 (6, 8) | 4/6 | 8.5 |
+| XY + line | 2/2 (18, 11) | 0/2 (7, 5) | 2/2 (10, 7) | 4/6 | 9.7 |
+| plain + line | 2/2 (20, 24) | 0/2 (9, 5) | 2/2 (6, 6) | 4/6 | 11.7 |
+
+Turns per attempt are in parentheses.
+
+- **No measurable XY drop.** Qwen passed `duration_parser` and `multi_bug_inventory` in every condition, with the
+  wrong suggestion and without it, in a similar number of turns. Whether it said the suggestion was wrong wasn't
+  recorded: the runner keeps outcomes, not transcripts.
+- **`sqlite_report` is at the floor, so its variant can't show a drop.** Plain attempts fail it too, and with the
+  same mistake the hint suggests. The checker records the first 200 characters of a wrong answer. Four of the eight
+  failed attempts match the LEFT JOIN query's output exactly over that span (one plain, both plain + line, one XY +
+  line). Seven of eight open with the same two inflated totals (Kendall 886741, Avery 657703; the correct values
+  are Kendall 863090, Quinn 622281). That points to the same double-count of orders with two refunds, and it is
+  likely why this is the canary's least-passed hard task.
+- **The line changed no pass count.** With it, `duration_parser` took more turns (plain 11 and 20, plain + line 20
+  and 24). Six attempts per condition are too few to call that a cost.
+
+### Recommendation
+
+- **(a) Don't add XY variants to the canary.** At this sample size they showed no signal on Qwen3.6. The task where
+  a suggestion could hurt is one the model already fails. A variant is only worth carrying on a base task the model
+  passes reliably but narrowly, such as a held-out task (#673), where a drop would be visible. The variants and
+  `--xy` stay in the repo so a future model or harness change can be rerun with the same suggestions.
+- **(b) Don't adopt the prompt line.** It neither helped nor hurt pass rates here. With no gap to close, there is no
+  evidence to propose it for agent-playbook's worker rules. Revisit it if a later run shows an XY drop.
+- Not run: a hosted CLI backend (left out to save subscription quota; the owner can ask for it). More repeats would
+  narrow the error bars (two per cell can't separate small effects).
+
+## Harness comparison (#942, #808)
+
+How much does the harness itself cost the local model? The same hard tasks, with the same model on the same
+llama-server, are run once by this repository's native session loop and once by the
+[Pi coding agent](https://github.com/earendil-works/pi) (MIT), and compared on pass rate, tokens, cache reuse and
+time. This is a manual run: the nightly canary, `bakeoff/canary.yaml`, `harness/canary.py` and the regression
+thresholds are unchanged, and the nightly path cannot choose Pi (`harness/manager.py` builds only the native
+`CanaryRunner`, which has no driver setting). The run itself, on the tower's GPU, is #808.
+
+### The pin
+
+`@earendil-works/pi-coding-agent` **1.5.0**, from earendil-works/pi tag `v1.5.0` (commit `f9a26365`), installed in the
+`agent-harness-pi` image (`reference/pi/Dockerfile`; `PI_VERSION` in `bakeoff/pi_driver.py` must match, and a test
+checks that it does). Docs consulted at the pin, under `packages/coding-agent/docs/`: `models.md` ("Configure a
+compatible endpoint"), `models-configuration.md`, `llama-cpp.md`, `cli.md` and `json.md`.
+
+Pi needs only an OpenAI-compatible endpoint, not a Pi extension. The driver gives Pi a `models.json` with one custom
+provider (`api: openai-completions`, `baseUrl` llama-server's `/v1`) holding the harness's `default_model` with its
+`context_tokens`, `max_tokens` and `sampling` (sent with every request, as the native loop sends them). Pi's built-in
+llama.cpp extension is for llama.cpp's router mode (`/llama`, `/models`), while the harness runs one model per
+server, so the driver turns extensions off.
+
+### How each driver runs
+
+With the daemon stopped (the daemon's model parked), as for the other manual runs:
+
+```
+python -m bakeoff.canary --tasks sqlite_report,merge_conflict,cli_json_output,log_correlation,duration_parser,multi_bug_inventory --repeats 2                 # native
+python -m bakeoff.canary --tasks sqlite_report,merge_conflict,cli_json_output,log_correlation,duration_parser,multi_bug_inventory --repeats 2 --driver pi     # Pi
+```
+
+`--driver native` is the default. Both write each task's files into a fresh workspace (running the task's setup in the
+sandbox), give the agent the task's prompt text unchanged, and grade the workspace and final answer with the task's
+hidden checker. Every attempt gets its task's whole wall-clock limit: naming the tasks lifts the native run's cap to
+`heldout_cap_seconds`, and the Pi driver has no run cap.
+
+- **native** runs through `Manager` and the runner, as the nightly canary does. Results go to `runs/canary-*.json`.
+- **pi** builds the bake-off sandbox image and `agent-harness-pi` on it (so Pi sees the same Python, pytest and git as
+  the checkers), then runs `pi --mode json --no-session --offline --no-extensions --no-skills --no-prompt-templates
+  --no-context-files --provider canary --model <default_model> -- <prompt>` in a container per attempt. The task
+  workspace is the container's only host mount (`models.json` comes in an environment variable that the image's
+  entrypoint writes to a file), and the container has no network (`--network none`). It runs as the host user that prepared the workspace, with no capabilities. A task's setup and its checker run in the root sandbox, so before Pi starts and after grading the driver hands any root-owned files (such as `merge_conflict`'s `.git`) back to that user. Its one way to llama-server is
+  a Unix socket on a Docker volume made for the run. A socat forwarder on the host network listens on that socket and
+  connects to llama-server's host and port (from the model's `base_url`), nothing else. Inside Pi's container the
+  entrypoint relays `127.0.0.1:<port>` to the socket, so Pi's `baseUrl` is its own loopback. The forwarder sits on
+  the host network because the tower's llama-server listens on the host's loopback only (`install/run-server.sh`),
+  which a container on a bridge can't reach through host-gateway (there, `172.17.0.1:8090` is the metrics proxy).
+  The volume and the forwarder are removed when the run ends. Results go to `runs/pi-canary-*.json` and record the
+  pin.
+- Pi has no turn cap of its own. An attempt that takes more turns than the task's `max_turns` (where the native loop
+  would have stopped) is recorded as `max_turns`, a fail. One that runs past the task's `wall_limit` is stopped and
+  recorded as `wall_limit`, a fail.
+- `--plan-reinject`, `--mask-batch-at`, `--system-line`, `--keep-metrics` and `--capture-prompts` change or observe the
+  native loop, so `--driver pi` refuses them, and it refuses web tasks (Pi gets no recorded web). The native side runs
+  under whatever observation-masking mode production uses at run time. #808 records that mode.
+
+### Measures
+
+Every attempt of either driver records:
+
+| Field | Meaning | native source | Pi source |
+| --- | --- | --- | --- |
+| `ok`, `status`, `note` | the hidden checker's verdict, and whether the agent finished cleanly | session status | Pi settled with no error and its last reply was not cut off at the token limit; otherwise `wall_limit`, `max_turns` or `failed` |
+| `turns` | model calls | session totals | finished assistant replies (a reply cut off mid-tool by the wall limit still counts) |
+| `prompt_tokens` | prompt tokens llama-server reported, cached prefix included | session totals | per-message usage `input + cacheRead + cacheWrite` (Pi splits llama-server's `prompt_tokens` this way), compaction summaries (`compaction_end.result.usage`) included |
+| `completion_tokens` | generated tokens | session totals | usage `output`, summaries included |
+| `cached_prompt_tokens` | prompt tokens served from llama-server's cache | `turn_metrics.cache_tokens` (llama-server's reported cached prefix; `null` if it never said) | usage `cacheRead` (llama-server's `prompt_tokens_details.cached_tokens`) of agent turns; summaries are left out on both sides, since the native loop records no cached prefix for its summaries |
+| `seconds` | wall time of the attempt | GPU time, which is wall time with the daemon stopped | container wall time |
+| `tool_calls` | calls by tool name | `tool_call` events | `tool_execution_start` events |
+| `read_before_edit`, `edited_unread` | whether every task file the agent edited had been read first, and which were not | a read tool, or a shell command showing the file (a viewer such as `cat`, `sed -n` or `head`, or `< file`), before its first edit. An edit is an edit or write tool call, or a shell command writing the file (`>`, `>>`, `tee`, `sed -i`, `perl -pi`, `cp` or `mv` onto it or into its directory, or `truncate`). Within a shell command, accesses count in order (a newline ends a command like `;`, comments are skipped, a simple command's redirects come first, as the shell opens them, and here-document bodies are data), relative paths follow `cd` until the subshell it ran in ends (a `cd` in a pipeline moves nothing), pipeline stages and background jobs (`&`, until `wait`; a job's `cd` moves only itself) run at the same time, so a read in one never counts as coming before a write in another, and a path that leaves the workspace and comes back (`../workspace/calc.py`) still names its file, and only file operands count (a viewer's pattern or script, such as `grep calc.py README.md`, and option values are not files); each call starts in the workspace. Files the agent created don't count; `null` when it edited no task file. A file a script or git rewrites isn't seen: the shell side is a parser for common commands (quotes, escapes, comments, here-documents, subshells, command substitutions (a word one is glued into names no known file), descriptor redirects, leading assignments, command wrappers such as `env`, `nice` or `timeout` (with `env -C` and `sudo -D` running the command in their directory), and option values handled; a file tool's path resolves as that driver's tools resolve it, so a native `/calc.py` is the workspace's calc.py), not a shell | same rule |
+
+The native tool names are `read_file`, `edit_file`, `write_file` and `run_shell`; Pi's are `read`, `edit`, `write` and
+`bash` (plus `grep`, `find` and `ls`, off by default). `bakeoff/run_measures.py` holds the shared rules.
+
+### Results
+
+Left for #808 (the tower run). Two attempts per task per driver.
+
+| Driver | Pass | Mean turns | Prompt tokens | Completion tokens | Cached prompt tokens | Wall time | Read before edit |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| native | | | | | | | |
+| Pi 1.5.0 | | | | | | | |

@@ -32,6 +32,22 @@ HEALTH_TIMEOUT_SECONDS = 300
 HEALTH_POLL_SECONDS = 2.0
 
 
+class UnleasedRequest:
+    def __init__(self, warmer: "ModelWarmer") -> None:
+        self._warmer: ModelWarmer | None = warmer
+
+    async def release(self) -> None:
+        if self._warmer is not None:
+            self._warmer._request_done()
+            self._warmer = None
+
+    async def __aenter__(self) -> "UnleasedRequest":
+        return self
+
+    async def __aexit__(self, *_exc) -> None:
+        await self.release()
+
+
 class ModelWarmer:
     def __init__(self) -> None:
         self._waking: dict[str, asyncio.Task] = {}
@@ -48,6 +64,8 @@ class ModelWarmer:
         self._changed = asyncio.Event()  # set by notify(): the guard changed state, so re-check a load in progress
         self._unparking: set[asyncio.Task] = set()  # loads that may have removed the pause flag (park waits for them)
         self._parking = 0  # parks in progress: a load in flight aborts and no new one starts
+        self.transitions = 0  # loads, parks and inference begun or ended: any can move the model on or off the card
+        self.requests = 0  # unleased requests to llama-server still outstanding (see request())
 
     def _control_for(self, model: ModelConfig):
         return self.control() if model.name == self.managed_model else None
@@ -90,11 +108,29 @@ class ModelWarmer:
         guard stops it again). A sleeping server needs nothing; the call itself wakes it."""
         if self._control_for(model) is None:
             return
+        self.note_inference()
         task = self._waking.get(model.name)
         if (task is None or task.done()) and self.parked(model) and not self.blocked():
             task = self._start_wake(model)
         if task is not None and not task.done():
             await asyncio.shield(task)
+
+    def note_inference(self) -> None:
+        """A request is about to reach llama-server. If it has gone to sleep by itself, this request reloads it, and
+        nothing else in the harness would show that the model left the card."""
+        self.transitions += 1
+
+    def request(self) -> "UnleasedRequest":
+        """A request that holds no lease the guard sees (a skill review, a keepalive ping, a tokenizer call), for its
+        whole lifetime: it may reach llama-server at any point, waking a model that has gone to sleep by itself.
+        Release it (or use it as `async with`) when the response is done."""
+        self.requests += 1
+        self.transitions += 1
+        return UnleasedRequest(self)
+
+    def _request_done(self) -> None:
+        self.requests -= 1
+        self.transitions += 1
 
     async def load_now(self, model: ModelConfig, seconds: float) -> str:
         """Load the model and keep it loaded for `seconds`. Returns the state before loading."""
@@ -109,6 +145,7 @@ class ModelWarmer:
         not waited out: it puts the pause flag back and returns, then `stop` (ServerControl.stop) writes the flag again
         and stops llama-server. No new load starts until `stop` is done."""
         self._parking += 1
+        self.transitions += 1
         try:
             self.notify()
             loads = [t for t in self._unparking if not t.done()]
@@ -140,6 +177,7 @@ class ModelWarmer:
 
     def _start_wake(self, model: ModelConfig) -> asyncio.Task:
         self._wake_started[model.name] = time.monotonic()
+        self.transitions += 1
         task = asyncio.create_task(self._wake(model), name=f"warm-{model.name}")
         self._waking[model.name] = task
         return task
@@ -204,7 +242,7 @@ class ModelWarmer:
                    "chat_template_kwargs": {"enable_thinking": False}}
         started = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10)) as client:
+            async with self.request(), httpx.AsyncClient(timeout=httpx.Timeout(300, connect=10)) as client:
                 resp = await client.post(f"{model.base_url}/v1/chat/completions", json=payload)
             if resp.status_code == 200:
                 log.info("%s %s in %.0f s (HTTP %s)", verb, model.name, time.monotonic() - started, resp.status_code)

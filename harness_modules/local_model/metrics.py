@@ -9,7 +9,7 @@ def _guard_metrics(m, out) -> None:
         out.metric("harness_gpu_guard_state", "gauge", "Current GPU guard state.",
                    [({"state": st}, 1 if g.state == st else 0) for st in ("clear", "pausing", "paused", "resuming")])
         out.metric("harness_gpu_guard_triggers", "gauge", "Detected GPU users by kind.",
-                   [({"kind": k}, sum(1 for s in g.signals if s["kind"] == k)) for k in ("game", "plex")])
+                   [({"kind": k}, sum(1 for s in g.signals if s["kind"] == k)) for k in ("game", "plex", "vram")])
         out.metric("harness_gpu_guard_pauses_total", "counter", "Pauses since the daemon started.", [({}, g.pauses)])
         extra = time.time() - g._paused_at if g.active and g._paused_at else 0
         out.metric("harness_gpu_guard_paused_seconds_total", "counter", "Time paused since the daemon started.",
@@ -47,6 +47,12 @@ def _resource_metrics(m, out) -> None:
         out.metric("harness_resource_vram_total_bytes", "gauge", "VRAM total (nvidia-smi).", [({}, gpu["vram_total"])])
         out.metric("harness_resource_gpu_load_percent", "gauge", "GPU utilization (nvidia-smi).",
                    [({}, gpu["gpu_load"])])
+        if gpu["vram_free"] is not None:  # a field the driver reports [N/A] is left out alone (#833)
+            out.metric("harness_resource_vram_free_bytes", "gauge", "VRAM free (nvidia-smi).",
+                       [({}, gpu["vram_free"])])
+        if gpu["nvenc_sessions"] is not None:
+            out.metric("harness_resource_nvenc_sessions", "gauge", "NVENC encoder sessions open on the GPU (nvidia-smi).",
+                       [({}, gpu["nvenc_sessions"])])
     cpu = cpu_percent_since_last()
     if cpu is not None:
         out.metric("harness_resource_cpu_load_percent", "gauge", "CPU load since the previous scrape.", [({}, cpu)])

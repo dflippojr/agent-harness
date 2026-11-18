@@ -20,6 +20,7 @@ from copy import deepcopy
 import logging
 import math
 import re
+from urllib.parse import quote
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
@@ -31,6 +32,7 @@ from . import audit_context, credential_audit
 from . import compat
 from .app_usage import AppsUsageResponse, snapshot as app_usage_snapshot
 from .manager import HarnessError
+from .origins import check_key_origin, daemon_origins, normalize_origin_or_403 as _normalized_origin
 
 log = logging.getLogger("harness.admin")
 
@@ -122,7 +124,8 @@ def _validated_scopes(scopes) -> list[str]:
     from .apps import all_scopes
     known = all_scopes()
     if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
-        raise HarnessError(400, f"unknown scopes {scopes!r}; known: {', '.join(known)}")
+        # No repr of the value: a deeply nested one would exhaust the recursion limit (#965).
+        raise HarnessError(400, f"scopes must be a list of scope names; known: {', '.join(known)}")
     unknown = [s for s in scopes if s not in known and s != ADMIN_SCOPE]
     if unknown:
         raise HarnessError(400, f"unknown scopes {unknown}; known: {', '.join(known)}")
@@ -132,7 +135,10 @@ def _validated_scopes(scopes) -> list[str]:
 def parse_key_spec(body: dict | None) -> tuple[str, str, str]:
     """Validate POST /keys (and /api/admin/v1/keys). Returns (name, scopes, kind)."""
     body = body or {}
-    name = str(body.get("name") or "").strip()
+    raw_name = body.get("name")
+    if isinstance(raw_name, (list, dict)):   # #965: never str() of a nested value
+        raise HarnessError(400, "name must be a string")
+    name = str(raw_name or "").strip()
     if not name:
         raise HarnessError(400, "name is required")
     scopes = _validated_scopes(body.get("scopes") or ["inference"])
@@ -152,28 +158,9 @@ def parse_key_spec(body: dict | None) -> tuple[str, str, str]:
     return name[:60], " ".join(dict.fromkeys(scopes)), kind
 
 
-def _normalized_origin(raw_origin: str) -> str:
-    from .apps import normalize_origin
-    try:
-        return normalize_origin(raw_origin)
-    except ValueError as e:
-        raise HarnessError(403, str(e)) from e
-
-
-def _check_token_origin(request: Request, m, key: dict) -> None:
-    raw_origin = request.headers.get("origin", "")
-    if not raw_origin:
-        return
-    from .apps import daemon_origins
-    origin = _normalized_origin(raw_origin)
-    if origin not in daemon_origins(m.cfg) and origin not in (key.get("origins") or []):
-        raise HarnessError(403, "this owner token is not approved for this origin")
-
-
 def _check_browser_origin(request: Request, m) -> None:
     raw_origin = request.headers.get("origin", "")
     if raw_origin:
-        from .apps import daemon_origins
         if _normalized_origin(raw_origin) not in daemon_origins(m.cfg):
             raise HarnessError(401, "cross-origin browser requests require an owner token")
     elif request.headers.get("sec-fetch-site") == "cross-site":
@@ -196,7 +183,7 @@ def require_admin(request: Request, mgr) -> dict | None:
         scopes = set((key.get("scopes") or "").split())
         if key.get("kind") != OWNER_KIND or ADMIN_SCOPE not in scopes:
             raise HarnessError(403, "app tokens cannot use the owner API")
-        _check_token_origin(request, m, key)
+        check_key_origin(request, m, key, noun="owner")
         request.state.authenticated_key_id = key["id"]
         return key
     _check_browser_origin(request, m)
@@ -630,5 +617,8 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         request.scope["harness_original_path"] = path
         request.scope["path"] = rest
         if "raw_path" in request.scope:
-            request.scope["raw_path"] = rest.encode("ascii")
+            # `rest` is percent-decoded and may hold non-ASCII (#929): keep the client's own encoding of the tail.
+            raw = request.scope["raw_path"]
+            prefix = PREFIX.encode("ascii")
+            request.scope["raw_path"] = raw[len(prefix):] if raw.startswith(prefix + b"/") else quote(rest).encode("ascii")
         return await call_next(request)

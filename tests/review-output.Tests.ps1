@@ -11,7 +11,21 @@ Describe 'Review publication safety' {
         # Credentials and long tokens.
         @{ Payload = 'sk-synthetic12345678' }
         @{ Payload = 'ghp_synthetic12345678' }
-        @{ Payload = ('T' * 48) }
+        # #800: past 64 letters a run is not an identifier, however it is split up or quoted.
+        @{ Payload = ('T' * 65) }
+        @{ Payload = ('`' + ('T' * 65) + '`') }
+        @{ Payload = (('T' * 33) + '**' + ('T' * 32) + '**') }
+        # #800: every shape but letters alone stays matched, whatever its length past 40.
+        @{ Payload = 'cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a' }
+        @{ Payload = 'cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a.' }
+        @{ Payload = '(cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a)' }
+        @{ Payload = 'cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a/' }
+        @{ Payload = '`cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a`' }
+        @{ Payload = ('aB3' * 14) }
+        @{ Payload = (('Ab3+/' * 9) + '=') }
+        @{ Payload = (('Ab' * 21) + '+') }
+        @{ Payload = (('a' * 22) + '7' + ('b' * 22)) }
+        @{ Payload = (('a' * 41) + '`1`') }
         @{ Payload = (('T' * 48) + '/unknown.py') }
         @{ Payload = ('./' + ('T' * 48) + '/unknown.py') }
         @{ Payload = ('./' + ('T1' * 24) + '/unknown.py') }
@@ -266,6 +280,10 @@ Describe 'Review publication safety' {
     }
 
     It 'publishes ordinary review text' -TestCases @(
+        # #800: a run of letters alone, up to 64, is a code identifier (POW #233's Java test name).
+        @{ Payload = 'The recordedExpiryComparedWithPayerClockFails test covers it.' }
+        @{ Payload = 'The `recordedExpiryComparedWithPayerClockFails` test covers it.' }
+        @{ Payload = ('Name: ' + ('camelCase' * 7) + 'x') }
         @{ Payload = 'ops/review/run-review.ps1:340: the regex `[\\/]` misses `"\\n"`.' }
         @{ Payload = 'See https://learn.microsoft.com/dotnet/standard/io/file-path-formats#trim-characters.' }
         @{ Payload = 'docs/users.md, docs/root-ca.md and src/rooted/homepage.py' }
@@ -364,6 +382,26 @@ Describe 'Review publication safety' {
         if ($log -match 'synthetic|reviewer|a1a1') { throw "The log leaked the matched text: $log" }
     }
 
+    It 'logs a long token''s length and character classes, never its characters (#800)' -TestCases @(
+        @{ Text = ('x ' + ('T' * 65)); Length = 65; Classes = 'uppercase' }
+        @{ Text = ('x ' + ('camel' * 13)); Length = 65; Classes = 'lowercase' }
+        @{ Text = ('x ' + ('camelCase' * 8)); Length = 72; Classes = 'lowercase+uppercase' }
+        @{ Text = 'x cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a'; Length = 40; Classes = 'lowercase+digit' }
+        @{ Text = 'x cba527153f0e4d8a9b1c2d3e4f5a6b7c8d9e0f1a-'; Length = 41; Classes = 'lowercase+digit+other' }
+        @{ Text = ('x ' + ('aB3+' * 11)); Length = 44; Classes = 'lowercase+uppercase+digit+other' }
+    ) {
+        param($Text, $Length, $Classes)
+        try { Assert-ReviewOutputSafe -Text $Text -WarningVariable scanWarnings -WarningAction SilentlyContinue }
+        catch { Write-Verbose 'The scan fails closed; the warnings are what is checked.' }
+        $log = @($scanWarnings | ForEach-Object { $_.Message })
+        $expected = "Publication safety scan: rule long-token matched the raw form at offset 2 (length $Length, classes $Classes)."
+        if ($log -cnotcontains $expected) { throw "Missing $expected in: $($log -join "`n")" }
+        # Every line is fixed wording around the numbers and class names, so no character of the match can show.
+        $shape = '^Publication safety scan: rule long-token matched the [a-z-]+ form at offset \d+ \(length \d+, classes (?:lowercase|uppercase|digit|other)(?:\+(?:lowercase|uppercase|digit|other))*\)\.$'
+        $other = @($log | Where-Object { $_ -cnotmatch $shape })
+        if ($other.Count) { throw "A log line is not length and classes only: $($other -join "`n")" }
+    }
+
     Context 'GitHub''s rendered form (#767)' {
         BeforeAll {
             # GitHub's real POST /markdown answers for the payloads above (Update-RenderedFixtures.ps1).
@@ -396,7 +434,7 @@ Describe 'Review publication safety' {
                 $miss = $row.text -match $script:browserOnly -or $row.text -match $script:shownOtherwise
                 if ($hits.Count -and $miss) { "now caught, so drop it from the expected misses: $($row.text)" }
                 if (-not $hits.Count -and -not $miss) { "missed by the github form: $($row.text)" }
-                if (@($hits | Where-Object { $_ -notmatch '^rule [a-z-]+ matched the github(?:-decoded|-unescaped)? form at offset \d+ \(length \d+\)$' }).Count) { "unexpected hit format: $($hits -join '; ')" }
+                if (@($hits | Where-Object { $_ -notmatch '^rule [a-z-]+ matched the github(?:-decoded|-unescaped)? form at offset \d+ \(length \d+(?:, classes [a-z+]+)?\)$' }).Count) { "unexpected hit format: $($hits -join '; ')" }
             }
             if ($unexpected) { throw ($unexpected -join "`n") }
         }
@@ -579,8 +617,407 @@ Describe 'Review publication safety' {
         if ((Get-ReviewDiagnosticTail -Stderr 'open %2Fhome%2Freviewer then C:\temp\x') -ne '[REDACTED LINE]') { throw 'Encoded prefix survived truncation' }
         if ((Get-ReviewDiagnosticTail -Stderr 'value ghp%5Fsynthetic12345678') -ne '[REDACTED LINE]') { throw 'Encoded token survived' }
         if ((Get-ReviewDiagnosticTail -Stderr 'token=synthetic-value') -ne 'token=[REDACTED]') { throw 'Redaction marker was re-redacted' }
+        # #800 loosens publication only: a job log still redacts a long run of letters.
+        if ((Get-ReviewDiagnosticTail -Stderr 'x recordedExpiryComparedWithPayerClockFails') -ne 'x [REDACTED]') { throw 'Diagnostics exempted a run of letters' }
         $multiline = Get-ReviewDiagnosticTail -Stderr "password=`"synthetic-first`nsynthetic-rest`" done"
         if ($multiline -like '*synthetic*') { throw "Multiline quoted credential survived: $multiline" }
+    }
+}
+
+Describe 'Withholding unsafe review lines (#974)' {
+    BeforeEach {
+        . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
+        $script:reviewOutputPath = Join-Path $TestDrive 'review-output.md'
+        Mock Invoke-ReviewMarkdownRender { '<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }
+    }
+
+    It 'withholds only the line that quotes an unsafe value and publishes the rest' -TestCases @(
+        # The payer-onboarding-workbench runs: a scheme-less root quoted from a scanner test, in code formatting.
+        @{ Unsafe = '`//fixture-host/share/sample.txt`'; Secret = 'fixture-host' }
+        @{ Unsafe = 'the fixture C:\fixture\sample.txt'; Secret = 'fixture\sample' }
+        @{ Unsafe = 'in /home/reviewer/auth.json'; Secret = 'reviewer' }
+        @{ Unsafe = 'ghp_synthetic12345678'; Secret = 'synthetic12345678' }
+        @{ Unsafe = ('a1' * 24); Secret = ('a1' * 24) }
+    ) {
+        param($Unsafe, $Secret)
+        $review = "## Findings`n- app.py:1: quotes $Unsafe in a test.`n  > continued $Unsafe`n- app.py:2: a safe finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        # The text the runs produced is still rejected as it stands, with or without the switch's caller.
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WarningAction SilentlyContinue }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -notlike 'Review did not complete*') { throw 'The unsafe review was published without withholding' }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains($Secret)) { throw 'A withheld value was published' }
+        if (-not $body.Contains("`n- (line withheld by the publication safety scan)`n")) { throw "List marker lost: $body" }
+        if (-not $body.Contains("  > (line withheld by the publication safety scan)")) { throw "Quote marker lost: $body" }
+        if (-not $body.Contains('- app.py:2: a safe finding.') -or -not $body.Contains('withheld 2 lines of this review')) { throw "Unexpected body: $body" }
+        # A review with lines withheld is incomplete: no marker, so readiness tools never count it.
+        if ($body.Contains('agent-review')) { throw 'A review with withheld lines kept its marker' }
+        if ($result.WithheldLines -ne 2) { throw 'The withheld line count was not recorded' }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'withheld 2 lines of the review \(lines 2, 3\)' -or $log.Contains($Secret)) { throw "Unexpected log: $log" }
+        # GitHub's renderer only ever sees the body with the lines withheld.
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly -ParameterFilter { -not $Text.Contains($Secret) }
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly
+    }
+
+    It 'gives no passing marker when criteria lines are withheld from an otherwise clean review' {
+        $review = "## Acceptance criteria`n**Met** the fixture C:\fixture\x is quoted.`n**Met** a second criterion.`n`n## Findings`nNo significant findings."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review; Verdict = 'clean'; FindingCount = 0; CriteriaMet = 2; CriteriaTotal = 2 }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -BaseRef 'main' -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains('agent-review') -or $body.Contains('criteria=')) { throw "A partial review kept a readiness marker: $body" }
+        if ($result.WithheldLines -ne 1) { throw 'The withheld line count was not recorded' }
+    }
+
+    It 'keeps the list marker but never text a withheld line held before it' {
+        $withheld = Get-ReviewWithheldOutput -Text "1. ok`n12) C:\fixture\x`nplain //fixture-host/share/x"
+        if ($withheld.Text -cne "1. ok`n12) (line withheld by the publication safety scan)`n(line withheld by the publication safety scan)") { throw "Unexpected text: $($withheld.Text)" }
+        if (($withheld.Lines -join ',') -ne '2,3' -or $withheld.KeptLines -ne 1) { throw 'Unexpected line numbers' }
+    }
+
+    It 'withholds a line whose match needs another line as context' -TestCases @(
+        # A reference definition on the withheld line drops every bracket, so the scan reads line 1 as a token
+        # or a profile path; line 1 alone does not match, and once line 2 is gone neither would the rescan.
+        @{ Review = "- app.py:1: see [gh]p_synthetic12345678`n- app.py:2: C:\fixture\x [gh]: https://example.invalid`n- app.py:3: a safe finding."; Secret = 'synthetic12345678' }
+        @{ Review = "- app.py:1: in [/ho]me/reviewer/auth.json`n- app.py:2: C:\fixture\x [/ho]: https://example.invalid`n- app.py:3: a safe finding."; Secret = 'reviewer' }
+    ) {
+        param($Review, $Secret)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains($Secret) -or -not $body.Contains('- app.py:3: a safe finding.')) { throw "Unexpected body: $body" }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'withheld 2 lines of the review \(lines 1, 2\)') { throw "Unexpected log: $log" }
+    }
+
+    It 'fails closed when no single line fails, or nothing would be left' -TestCases @(
+        # Only GitHub's rendering shows the value, so no line can be found locally.
+        @{ Review = "- app.py:1: a finding.`n- app.py:2: another."; Rendered = '<p>ghp_synthetic12345678</p>' }
+        # Every line fails, so withholding leaves no review to post.
+        @{ Review = "- app.py:1: C:\fixture\x`n`n- app.py:2: ghp_synthetic12345678"; Rendered = $null }
+        # Only headings and a fence would be left, which is no review.
+        @{ Review = "## Findings`n- app.py:1: C:\fixture\x`n`n## Style and structure (advisory)`n``````text`n``````"; Rendered = $null }
+        # A match spans lines: withholding the line with the fixture and the label would leave the value (PR #978 review).
+        @{ Review = ("- app.py:1: the fixture C:\fixture\x sets password =`n  " + '"short"' + "`n- app.py:2: a safe finding."); Rendered = $null }
+        @{ Review = ("- app.py:1: C:\fixture\x and Bearer`n  synthetic-value-1`n- app.py:2: a safe finding."); Rendered = $null }
+        # A match crossing the line break starts inside an earlier match, which a scan for separate matches skips (PR #978 review).
+        @{ Review = "- app.py:1: C:\fixture\x Bearer synthetic-1/Bearer`n  synthetic-value-2`n- app.py:2: a safe finding."; Rendered = $null }
+        # Markup the scan cannot settle (a tag spanning lines) fails closed rather than being split (PR #978 review).
+        @{ Review = ("- app.py:1: the fixture C:\fixture\x sets password = <b`ntitle=" + '"short">' + "`n- app.py:2: a safe finding."); Rendered = $null }
+        @{ Review = "- app.py:1: the fixture C:\fixture\x`n- app.py:2: x &#x202E; y`n- app.py:3: a safe finding."; Rendered = $null }
+        # The whole body's rejections decide, not the review text's alone: an unterminated tag on the last line
+        # is raw HTML once the footer follows it (PR #978 review).
+        @{ Review = "- app.py:1: a safe finding.`n<div title=C:\fixture\x"; Rendered = $null }
+        # A form that joins lines (a link title spanning them) cannot be split line by line.
+        @{ Review = ("- app.py:1: [a](x " + '"t' + "`n" + 'u") C:\fixture\x' + "`n- app.py:2: a safe finding."); Rendered = $null }
+    ) {
+        param($Review, $Rendered)
+        $script:rendered = $Rendered
+        if ($Rendered) { Mock Invoke-ReviewMarkdownRender { $script:rendered } }
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+    }
+
+    It 'drops a review marker the reviewer wrote, in any form, before scanning or counting (<Case>)' -TestCases @(
+        # The SHA doubles as a known repository path, so the path rules mask it; the marker must go regardless.
+        @{ Case = 'coverage form'; Marker = '<!-- agent-review: sha={0} mode=incremental base=main -->' }
+        @{ Case = 'summary form'; Marker = '<!-- agent-review: sha={0} criteria=4/4 findings=0 -->' }
+        @{ Case = 'no spaces'; Marker = '<!--agent-review:sha={0} mode=incremental base=main-->' }
+        @{ Case = 'upper case, extra spaces'; Marker = '<!--   AGENT-REVIEW :  sha={0}   mode=incremental -->' }
+        @{ Case = 'in a code span'; Marker = 'quotes `<!-- agent-review: sha={0} mode=incremental base=main -->` here' }
+        @{ Case = 'rebuilt once removed'; Marker = '<!-<!-- agent-review -->- agent-review: sha={0} mode=incremental base=main -->' }
+        # An abrupt empty comment ends where it starts, so the text after it stays.
+        @{ Case = 'after an abrupt empty comment'; Marker = '<!--> a visible note <!-- agent-review: sha={0} mode=incremental base=main -->'; Visible = 'a visible note' }
+        @{ Case = 'after an abrupt empty comment with a dash'; Marker = '<!---> a visible note <!-- agent-review: sha={0} mode=incremental base=main -->'; Visible = 'a visible note' }
+        @{ Case = 'ended by --!>'; Marker = '<!-- agent-review: sha={0} mode=incremental base=main --!> a visible note -->'; Visible = 'a visible note' }
+    ) {
+        param($Case, $Marker, $Visible)
+        $sha = 'c' * 40
+        $planted = $Marker -f $sha
+        foreach ($withhold in @($true, $false)) {
+            $unsafe = $(if ($withhold) { "`n- app.py:2: the fixture C:\fixture\x is quoted." } else { '' })
+            $review = "## Findings`n- app.py:1: a safe finding.$unsafe`n$planted`n- app.py:3: another safe finding."
+            $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+            Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -BaseRef 'main' -DiffPaths @($sha) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+            $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+            if (-not $body.Contains('- app.py:1: a safe finding.') -or -not $body.Contains('- app.py:3: another safe finding.')) { throw "Unexpected body: $body" }
+            if ($body.Contains($sha)) { throw "A reviewer-written marker survived: $body" }
+            if ($Visible -and -not $body.Contains($Visible)) { throw "Visible text was removed with the marker: $body" }
+            $expected = $(if ($withhold) { '' } else { 'a' * 40 })
+            if ((Get-ReviewMarkerShaFromBody -Body $body) -ne $expected) { throw "Marker consumers read a reviewer marker: $body" }
+            if ($withhold -and ((Get-ReviewMarkerBaseRefFromBody -Body $body) -ne '' -or $body -match '(?i)agent\W*review')) { throw "A partial review kept a marker: $body" }
+            if (-not $withhold -and [regex]::Matches($body, '(?i)agent\W*review').Count -ne 1) { throw "Only the job's own marker may remain: $body" }
+        }
+    }
+
+    It 'fails closed on a review marker comment that crosses a line or never closes (<Case>)' -TestCases @(
+        # Removing it could drop text GitHub shows (an opener in a code span hides nothing), so nothing is posted.
+        @{ Case = 'spanning lines'; Marker = "<!--`nagent-review: sha={0} mode=incremental base=main`n-->" }
+        @{ Case = 'unterminated'; Marker = '<!-- agent-review: sha={0} mode=incremental base=main' }
+        @{ Case = 'unterminated in a code span'; Marker = 'quotes `<!-- agent-review:` here' }
+        @{ Case = 'closed lines later'; Marker = "quotes ``<!-- agent-review:`` here`n- app.py:4: a finding that ends with -->" }
+        @{ Case = 'inside a comment spanning lines'; Marker = "<!-- note`n<!-- agent-review: sha={0} mode=full -->" }
+    ) {
+        param($Case, $Marker)
+        $sha = 'c' * 40
+        foreach ($withhold in @($true, $false)) {
+            $unsafe = $(if ($withhold) { "`n- app.py:2: the fixture C:\fixture\x is quoted." } else { '' })
+            $review = "## Findings`n- app.py:1: a safe finding.$unsafe`n$($Marker -f $sha)`n- app.py:3: another safe finding."
+            $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+            $failure = ''
+            try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -DiffPaths @($sha) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+            catch { $failure = $_.Exception.Message }
+            if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+            if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+        }
+    }
+
+    It 'counts nothing that renders as nothing toward what is left (<Case>)' -TestCases @(
+        @{ Case = 'an HTML comment'; Kept = '<!-- placeholder -->' }
+        @{ Case = 'an HTML comment spanning lines'; Kept = "<!--`nplaceholder text`n-->" }
+        @{ Case = 'an unterminated HTML comment'; Kept = '<!-- placeholder text' }
+        @{ Case = 'a rule tag'; Kept = '<hr>' }
+        @{ Case = 'tags only'; Kept = '<details><summary></summary></details>' }
+        @{ Case = 'a tag spanning lines'; Kept = "<p`nclass=placeholder></p>" }
+        @{ Case = 'an entity'; Kept = '&nbsp;' }
+        @{ Case = 'an entity without a semicolon in a tag'; Kept = '<div>&nbsp</div>' }
+        @{ Case = 'entities without semicolons'; Kept = '&nbsp&ensp; &#160 &#x2003' }
+        @{ Case = 'a style element'; Kept = '<style>p { color: red }</style>' }
+        @{ Case = 'a script element spanning lines'; Kept = "<script>`nvar note = 1`n</script>" }
+        @{ Case = 'an empty ordered list item'; Kept = '1.' }
+        @{ Case = 'an empty ordered list item, paren'; Kept = '12)' }
+        @{ Case = 'an empty ordered list item, trailing spaces'; Kept = "2.  `t" }
+        @{ Case = 'an empty nested list in a quote'; Kept = '> - 1.' }
+        @{ Case = 'nested empty lists'; Kept = '- 1. * 2)' }
+        @{ Case = 'an empty task item'; Kept = '- [x]' }
+        @{ Case = 'a heading and an empty quote'; Kept = "### Notes`n>`n> >" }
+        @{ Case = 'a setext heading, dashes'; Kept = "Findings`n--------" }
+        @{ Case = 'a setext heading, equals'; Kept = "Notes`n  ===" }
+        @{ Case = 'a setext heading in a quote'; Kept = "> Notes`n> ---" }
+        @{ Case = 'a setext heading in a list item'; Kept = "- Notes`n  ---" }
+        @{ Case = 'an empty ordered list item, CRLF'; Kept = "1.`r`n2)`r`n" }
+        @{ Case = 'emphasis only'; Kept = '**__**' }
+        @{ Case = 'a fence with an info string'; Kept = "``````python`n``````" }
+        @{ Case = 'a reference definition'; Kept = '[note]: https://example.invalid' }
+        @{ Case = 'a reference definition, title on the next line'; Kept = "`n[note]: https://example.invalid`n  " + '"a title"' }
+        @{ Case = 'a reference definition, title across lines'; Kept = "[note]: https://example.invalid " + '"a' + "`n" + 'title"' }
+        @{ Case = 'a reference definition, destination on the next line'; Kept = "[note]:`n  https://example.invalid`n  'a title'" }
+        @{ Case = 'a reference definition in a quote'; Kept = "> [note]: https://example.invalid`n> (a title)" }
+        @{ Case = 'a footnote definition'; Kept = "[^1]: a note`n    more of the note" }
+        @{ Case = 'a footnote definition, indented list item'; Kept = "[^1]: a note`n    - an item" }
+        @{ Case = 'a footnote definition, lazy continuation'; Kept = "[^1]: a note`nmore of the note" }
+        @{ Case = 'a footnote definition, indented paragraph after a blank line'; Kept = "[^1]: a note`n`n    more of the note" }
+        @{ Case = 'a planted marker'; Kept = '<!-- agent-review: sha=0000000000000000000000000000000000000000 mode=full -->' }
+    ) {
+        param($Case, $Kept)
+        $review = "## Findings`n- app.py:1: C:\fixture\x`n$Kept"
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+    }
+
+    It 'still counts a short kept line that says something' -TestCases @(
+        @{ Kept = '1. a finding' }
+        @{ Kept = '> - 1. ok' }
+        @{ Kept = '<b>ok</b>' }
+        @{ Kept = '&#65;' }
+        # Literal code shows its text, markup included.
+        @{ Kept = '`<title>missing authorization check</title>`' }
+        @{ Kept = '`<style>p { color: red }</style>`' }
+        @{ Kept = "``````html`n<!-- a note --><b></b>`n``````" }
+        # A rule after a list item is a rule, not a heading underline.
+        @{ Kept = "- a finding`n---" }
+        # Text after a blank line that ends a reference definition is text again.
+        @{ Kept = "[note]: https://example.invalid`n`nok" }
+        # A definition ends where its destination and title do; the next block is text again.
+        @{ Kept = "[note]: https://example.invalid`n- a safe finding" }
+        @{ Kept = "[note]: https://example.invalid " + '"a title"' + "`nok" }
+        @{ Kept = "[note]:`n  https://example.invalid`nok" }
+        @{ Kept = "[note]: https://example.invalid " + '"a' + "`ntitle" + '"' + "`nok" }
+        @{ Kept = "[^1]: a note`n`nok" }
+    ) {
+        param($Kept)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "## Findings`n- app.py:1: C:\fixture\x`n$Kept" }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        if ($result.WithheldLines -ne 1) { throw 'The kept line was not counted' }
+    }
+
+    # The Hangul filler letters render as nothing, as raw characters or as decimal or hex references.
+    It 'ignores invisible filler letters when counting content (U+<Code> as <Form>)' -TestCases @(
+        foreach ($code in 0x115F, 0x1160, 0x3164, 0xFFA0) {
+            foreach ($form in 'raw', 'decimal', 'hex') {
+                $filler = switch ($form) { 'raw' { [string][char]$code } 'decimal' { '&#{0};' -f $code } 'hex' { '&#x{0:X};' -f $code } }
+                @{ Code = '{0:X4}' -f $code; Form = $form; Filler = $filler }
+            }
+        }
+    ) {
+        param($Code, $Form, $Filler)
+        if ((Measure-ReviewSubstantiveLines -Text "$Filler`n- $Filler$Filler`n> $Filler") -ne 0) { throw 'Filler alone was counted' }
+        if ((Measure-ReviewSubstantiveLines -Text "$Filler`n- ${Filler}ok$Filler") -ne 1) { throw 'The real text beside the filler was not counted' }
+        $review = "## Findings`n- app.py:1: C:\fixture\x`n$Filler"
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = "$review a safe finding" }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        if ($result.WithheldLines -ne 1) { throw 'The kept line was not counted' }
+    }
+
+    It 'words the unpublished notice without review text, marker or double quotes' {
+        $notice = Get-ReviewUnpublishedNotice -HeadSha ('b' * 40) -ServerUrl 'https://github.com' -Repository 'owner/repo' -RunId '42'
+        if (-not $notice.StartsWith('The automated review of bbbbbbb was not published')) { throw "Unexpected notice: $notice" }
+        if (-not $notice.EndsWith('https://github.com/owner/repo/actions/runs/42')) { throw "Run link missing: $notice" }
+        if ($notice -match '"|agent-review|[^\x20-\x7E]') { throw "Notice holds a marker, a double quote or non-ASCII text: $notice" }
+        $bare = Get-ReviewUnpublishedNotice -HeadSha 'not-a-sha' -ServerUrl 'https://x/../y' -Repository 'owner/repo' -RunId '42'
+        if ($bare -match 'https:|not-a-sha' -or -not $bare.StartsWith('The automated review was not published')) { throw "Unvalidated value used: $bare" }
+    }
+}
+
+Describe 'Escaping entity references the scan cannot decode (#998)' {
+    BeforeEach {
+        . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
+        $script:reviewOutputPath = Join-Path $TestDrive 'review-output.md'
+        Mock Invoke-ReviewMarkdownRender { '<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }
+    }
+
+    It 'publishes a review that quotes an entity reference, with the reference escaped (<Case>)' -TestCases @(
+        # A review of a pull request about HTML entities quotes them: the personal-website run matched one of
+        # nine characters in the decoded form.
+        @{ Case = 'unknown name in a code span'; Quote = '`&NoBreak;`'; Escaped = '`(entity: NoBreak)`'; Name = 'NoBreak' }
+        @{ Case = 'double-encoded name in a code span'; Quote = '`&amp;nbsp;`'; Escaped = '`(entity: nbsp)`'; Name = 'nbsp' }
+        @{ Case = 'unknown name in plain text'; Quote = 'the &ZeroWidthSpace; reference'; Escaped = 'the (entity: ZeroWidthSpace) reference'; Name = 'ZeroWidthSpace' }
+        @{ Case = 'percent-encoded'; Quote = 'x %26fjlig%3B y'; Escaped = 'x (entity: fjlig) y'; Name = 'fjlig' }
+        @{ Case = 'spelled with numeric references'; Quote = 'x &#38;fjlig&#59; y'; Escaped = 'x (entity: fjlig) y'; Name = 'fjlig' }
+    ) {
+        param($Case, $Quote, $Escaped, $Name)
+        $review = "## Findings`n- index.html:1: the page uses $Quote where a plain space would do.`n- index.html:2: a second finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review; Verdict = 'findings'; FindingCount = 2; CriteriaMet = 1; CriteriaTotal = 1 }
+        # Without the switch the text is still rejected as it stands: what the scan blocks is unchanged.
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WarningAction SilentlyContinue }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -notlike 'Review did not complete*') { throw 'The review was published without escaping' }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -BaseRef 'main' -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if (-not $body.Contains("- index.html:1: the page uses $Escaped where a plain space would do.")) { throw "Reference not escaped in place: $body" }
+        if (-not $body.Contains('- index.html:2: a second finding.')) { throw "Finding lost: $body" }
+        if ((ConvertFrom-ReviewEntities -Text $body) -cmatch $script:ReviewUnknownEntityPattern) { throw "An entity reference was published: $body" }
+        if (-not $body.Contains('escaped 1 entity reference')) { throw "No note says a reference was escaped: $body" }
+        # Only entity spelling changed, never a finding or criterion, so the review stays complete: marker and summary kept.
+        if ((Get-ReviewMarkerShaFromBody -Body $body) -ne ('a' * 40)) { throw "The review marker was dropped: $body" }
+        if (-not $body.Contains('criteria=1/1 findings=2')) { throw "The criteria summary was dropped: $body" }
+        if ($result.WithheldLines -ne 0) { throw 'Lines were counted as withheld' }
+        if ($result.EscapedEntities -ne 1) { throw 'The escaped reference count was not recorded' }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'escaped 1 entity reference \(line 2\)' -or $log.Contains($Name)) { throw "Unexpected log: $log" }
+        # GitHub's renderer only ever sees the escaped body.
+        Should -Invoke Invoke-ReviewMarkdownRender -Times 1 -Exactly
+    }
+
+    It 'escapes every reference on a line and counts them' {
+        $review = "## Findings`n- a.html:1: replace ``&amp;hellip;`` and ``&NoBreak;`` with text.`n- a.html:2: and &fjlig; too."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if (-not $body.Contains('- a.html:1: replace `(entity: hellip)` and `(entity: NoBreak)` with text.')) { throw "Unexpected body: $body" }
+        if (-not $body.Contains('- a.html:2: and (entity: fjlig) too.') -or -not $body.Contains('escaped 3 entity references')) { throw "Unexpected body: $body" }
+        if ($result.EscapedEntities -ne 3) { throw 'The escaped reference count was not recorded' }
+        $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
+        if ($log -notmatch 'escaped 3 entity references \(lines 2, 3\)') { throw "Unexpected log: $log" }
+    }
+
+    It 'withholds a line whose escaped reference still fails a token rule, as an incomplete review' {
+        # The entity name itself is a long token once it is plain text, so its line goes as in #974.
+        $token = 'a1' * 24
+        $review = "## Findings`n- a.html:1: quotes &$token; here.`n- a.html:2: a safe finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if ($body.Contains($token) -or -not $body.Contains('- (line withheld by the publication safety scan)')) { throw "Unexpected body: $body" }
+        if (-not $body.Contains('- a.html:2: a safe finding.') -or $body.Contains('agent-review')) { throw "Unexpected body: $body" }
+        if ($result.WithheldLines -ne 1) { throw 'The withheld line count was not recorded' }
+    }
+
+    It 'never escapes a reference whose removal would join a path, credential or token (<Payload>)' -TestCases @(
+        # GitHub may render the reference as nothing or as letters, so the text around it may be one token or
+        # path; escaping would print its pieces. The line fails closed or goes whole, never with the rest shown.
+        @{ Payload = 'gh&ZeroWidthSpace;p_synthetic12345678'; Secret = 'p_synthetic12345678' }
+        @{ Payload = 'gh&amp;ZeroWidthSpace;p_synthetic12345678'; Secret = 'p_synthetic12345678' }
+        @{ Payload = 'gh%26ZeroWidthSpace%3Bp_synthetic12345678'; Secret = 'p_synthetic12345678' }
+        @{ Payload = 'ghp_ab&fjlig;12345678'; Secret = '12345678' }
+        @{ Payload = 'in /ho&ZeroWidthSpace;me/reviewer/auth.json'; Secret = 'reviewer' }
+        @{ Payload = 'see C&NegativeThinSpace;:/temp/config.py'; Secret = 'temp/config' }
+        @{ Payload = (('a1' * 12) + '&fjlig;' + ('b2' * 12)); Secret = ('b2' * 12) }
+    ) {
+        param($Payload, $Secret)
+        $review = "## Findings`n- a.py:1: $Payload is quoted.`n- a.py:2: a safe finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { if ($_.Exception.Message -ne 'Review did not complete: output failed the publication safety scan.') { throw } }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) {
+            $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+            if ($body.Contains($Secret) -or $body.Contains('(entity:')) { throw "Pieces of a joined value were published: $body" }
+        }
+    }
+
+    It 'keeps encoded text beside a reference when it escapes it' {
+        $review = "## Findings`n- a.html:1: x%20%26NoBreak%3B%20y here.`n- a.html:2: a safe finding."
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if (-not $body.Contains('- a.html:1: x%20(entity: NoBreak)%20y here.')) { throw "Text beside the reference changed: $body" }
+    }
+
+    It 'maps each decoded character to the raw text that spelled it' {
+        $map = Get-ReviewEntityDecodedMap -Text 'a%3D%26b%C3%A9&#59;c'
+        if ($map.Text -cne ('a=&b' + [char]0xE9 + ';c')) { throw "Unexpected text: $($map.Text)" }
+        if (($map.Starts -join ',') -ne '0,1,4,7,8,14,19' -or ($map.Ends -join ',') -ne '1,4,7,8,14,19,20') { throw "Unexpected spans: $($map.Starts -join ',') / $($map.Ends -join ',')" }
+    }
+
+    It 'entity-escape hardening: never publishes the value (<Case>)' -TestCases @(
+        @{ Case = 'shape 1'; Review = "- a.py:1: password%3D%26NoBreak%3Bsynthetic-value-1 is quoted.`n- a.py:2: a safe finding."; Secret = 'synthetic-value-1' }
+        @{ Case = 'shape 2'; Review = "- a.py:1: password=&NoBreak;`n  synthetic-value-1`n- a.py:2: a safe finding."; Secret = 'synthetic-value-1' }
+        @{ Case = 'shape 3'; Review = "- a.py:1: Bearer&ThickSpace;synthetic-value-1 is quoted.`n- a.py:2: a safe finding."; Secret = 'synthetic-value-1' }
+        @{ Case = 'shape 4'; Review = "- a.py:1: g&hopf;p_synthetic12345678 is quoted.`n- a.py:2: a safe finding."; Secret = 'synthetic12345678' }
+        @{ Case = 'shape 5'; Review = "- a.py:1: a finding.`n<div>`nBearer&nbspsyntheticvalue1; is quoted.`n</div>`n- a.py:2: a safe finding."; Secret = 'syntheticvalue1' }
+        @{ Case = 'shape 6'; Review = "- a.py:1: password=&nbspsyntheticvalue1; is quoted.`n- a.py:2: a safe finding."; Secret = 'syntheticvalue1' }
+    ) {
+        param($Case, $Review, $Secret)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { if ($_.Exception.Message -ne 'Review did not complete: output failed the publication safety scan.') { throw } }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) {
+            $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+            if ($body.Contains($Secret)) { throw "The value was published: $body" }
+        }
+    }
+
+    It 'still fails closed when another fail-closed rule matches beside a reference' -TestCases @(
+        @{ Review = "- a.html:1: quotes &NoBreak; here.`n- a.html:2: x &#x202E; y" }
+        @{ Review = "- a.html:1: quotes &NoBreak; here <b`ntitle=x>.`n- a.html:2: a safe finding." }
+        # Escaping must not change whether another rule rejects the text: here it would end the tag.
+        @{ Review = "- a.html:1: quotes <b title=&NoBreak;x`nclass=y>text</b> here.`n- a.html:2: a safe finding." }
+    ) {
+        param($Review)
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $Review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+        if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
     }
 }
 
@@ -589,18 +1026,49 @@ Describe 'GitHub''s renderer call (#767)' {
     BeforeAll {
         . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
         # A stand-in for gh: records its arguments and stdin, then answers as the FAKE_GH_* variables say.
-        $script:fakeGh = Join-Path $TestDrive 'gh.cmd'
-        @(
-            '@echo off'
-            'echo %*> "%~dp0args.txt"'
-            'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
-            'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Start-Sleep %FAKE_GH_SLEEP%"'
-            'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
-            'exit /b %FAKE_GH_EXIT%'
-        ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
+        # A batch file on Windows and an sh script elsewhere, as the review runners are Linux or Windows (#806).
+        # Its sleep records its process id for AfterEach: the renderer kills only gh, and on Windows a survivor holds
+        # gh's pipes (redirecting it does not help, as a child inherits every inheritable handle), so two thread-pool
+        # threads stay blocked on their reads and the next case's stdin write waits for a free one (#878).
+        $script:windowsHost = $env:OS -eq 'Windows_NT'
+        if ($script:windowsHost) {
+            $script:fakeGh = Join-Path $TestDrive 'gh.cmd'
+            @(
+                '@echo off'
+                'echo %*> "%~dp0args.txt"'
+                'powershell -NoProfile -NonInteractive -Command "[Console]::InputEncoding = New-Object Text.UTF8Encoding($false); [IO.File]::WriteAllText(''%~dp0stdin.txt'', [Console]::In.ReadToEnd())"'
+                'if defined FAKE_GH_SLEEP powershell -NoProfile -NonInteractive -Command "Set-Content -LiteralPath ''%~dp0sleeper.txt'' $PID; Start-Sleep %FAKE_GH_SLEEP%"'
+                'if defined FAKE_GH_HTML echo %FAKE_GH_HTML%'
+                'exit /b %FAKE_GH_EXIT%'
+            ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
+        } else {
+            $script:fakeGh = Join-Path $TestDrive 'gh'
+            @(
+                '#!/bin/sh'
+                'dir=$(dirname "$0")'
+                'printf ''%s\n'' "$*" > "$dir/args.txt"'
+                'cat > "$dir/stdin.txt"'
+                'if [ -n "$FAKE_GH_SLEEP" ]; then sleep "$FAKE_GH_SLEEP" & echo "$!" > "$dir/sleeper.txt"; wait "$!"; fi'
+                'if [ -n "$FAKE_GH_HTML" ]; then printf ''%s\n'' "$FAKE_GH_HTML"; fi'
+                'exit "$FAKE_GH_EXIT"'
+            ) | Set-Content -LiteralPath $script:fakeGh -Encoding ascii
+            & chmod +x $script:fakeGh
+        }
+        # cmd's echo needs ^ before < and >; sh prints the value as it is.
+        $script:ghHtml = { param([string]$Html) if ($script:windowsHost -and $Html) { $Html -replace '([<>])', '^$1' } else { $Html } }
+        $script:sleepers = @()
     }
     BeforeEach {
-        $env:FAKE_GH_SLEEP = $null; $env:FAKE_GH_HTML = '^<p^>ok^</p^>'; $env:FAKE_GH_EXIT = '0'
+        $env:FAKE_GH_SLEEP = $null; $env:FAKE_GH_HTML = & $script:ghHtml '<p>ok</p>'; $env:FAKE_GH_EXIT = '0'
+    }
+    AfterEach {
+        $sleeper = Join-Path $TestDrive 'sleeper.txt'
+        if (Test-Path -LiteralPath $sleeper) {
+            $id = [int](Get-Content -LiteralPath $sleeper)
+            $script:sleepers += $id
+            Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $sleeper
+        }
     }
     AfterAll {
         Remove-Item Env:FAKE_GH_SLEEP, Env:FAKE_GH_HTML, Env:FAKE_GH_EXIT -ErrorAction SilentlyContinue
@@ -618,23 +1086,35 @@ Describe 'GitHub''s renderer call (#767)' {
         if ($request.PSObject.Properties['context']) { throw 'An invalid repository was sent as context' }
     }
 
+    # Only the timeout case is about the budget; the others have the renderer's default, as gh's start is not their subject.
     It 'throws <Type> when gh <Case>' -TestCases @(
-        @{ Case = 'does not answer in time'; Sleep = '20'; Html = '^<p^>late^</p^>'; Exit = '0'; Type = 'TimeoutException'; Missing = $false }
-        @{ Case = 'fails'; Sleep = $null; Html = 'ghp_synthetic12345678'; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
-        @{ Case = 'answers nothing'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $false }
-        @{ Case = 'cannot start'; Sleep = $null; Html = $null; Exit = '0'; Type = 'InvalidOperationException'; Missing = $true }
+        @{ Case = 'does not answer in time'; Sleep = '20'; Html = '<p>late</p>'; Budget = 3; Exit = '0'; Type = 'TimeoutException'; Missing = $false }
+        @{ Case = 'fails'; Sleep = $null; Html = 'ghp_synthetic12345678'; Budget = 30; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
+        @{ Case = 'fails after a slow start'; Sleep = '4'; Html = 'ghp_synthetic12345678'; Budget = 30; Exit = '1'; Type = 'InvalidOperationException'; Missing = $false }
+        @{ Case = 'answers nothing'; Sleep = $null; Html = $null; Budget = 30; Exit = '0'; Type = 'InvalidOperationException'; Missing = $false }
+        @{ Case = 'cannot start'; Sleep = $null; Html = $null; Budget = 30; Exit = '0'; Type = 'InvalidOperationException'; Missing = $true }
     ) {
-        param($Case, $Sleep, $Html, $Exit, $Type, $Missing)
-        $env:FAKE_GH_SLEEP = $Sleep; $env:FAKE_GH_HTML = $Html; $env:FAKE_GH_EXIT = $Exit
+        param($Case, $Sleep, $Html, $Budget, $Exit, $Type, $Missing)
+        $env:FAKE_GH_SLEEP = $Sleep; $env:FAKE_GH_HTML = & $script:ghHtml $Html; $env:FAKE_GH_EXIT = $Exit
         $path = if ($Missing) { Join-Path $TestDrive 'missing-gh.exe' } else { $script:fakeGh }
         $watch = [Diagnostics.Stopwatch]::StartNew()
         $caught = $null
-        try { Invoke-ReviewMarkdownRender -Text 'body ghp_synthetic12345678' -FilePath $path -TimeoutSeconds 3 | Out-Null }
+        try { Invoke-ReviewMarkdownRender -Text 'body ghp_synthetic12345678' -FilePath $path -TimeoutSeconds $Budget | Out-Null }
         catch { $caught = $_.Exception }
         $name = if ($caught) { $caught.GetType().Name } else { 'no exception' }
         if ($name -ne $Type) { throw "Expected $Type, got $name" }
         if ($caught.Message -match 'synthetic') { throw "The error echoed text: $($caught.Message)" }
-        if ($watch.Elapsed.TotalSeconds -gt 15) { throw "The renderer outlived its timeout: $($watch.Elapsed.TotalSeconds) s" }
+        if ($watch.Elapsed.TotalSeconds -gt $Budget + 12) { throw "The renderer outlived its timeout: $($watch.Elapsed.TotalSeconds) s" }
+    }
+
+    # Runs after the table: the timeout case's sleeper would otherwise outlive this check by about 15 s, and the wide
+    # budgets above would hide the starvation it causes (#878).
+    It 'leaves none of the fake''s sleepers running' {
+        if ($script:sleepers.Count -eq 0) { throw 'No sleeper was recorded' }
+        foreach ($id in $script:sleepers) {
+            $process = Get-Process -Id $id -ErrorAction SilentlyContinue
+            if ($process -and -not $process.WaitForExit(5000)) { throw "Sleeper $id is still running" }
+        }
     }
 }
 

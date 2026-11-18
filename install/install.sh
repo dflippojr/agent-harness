@@ -22,6 +22,7 @@ existing_server=
 instance=Main
 port=8100
 server_port=8090
+vram_headroom_mib=0
 no_start=0
 dry_run=0
 force=0
@@ -45,7 +46,9 @@ usage: install/install.sh [options]
   --instance NAME         service name suffix (default: Main)
   --port N                daemon port (default: 8100)
   --server-port N         llama-server port (default: 8090)
-  --no-start              do not install or start systemd/launchd services
+  --vram-headroom-mib N   Qwen only: keep N MiB of VRAM free with --fit-target,
+                          for Plex or Sunshine (default: 0, llama-server's margin)
+  --no-start             do not install or start systemd/launchd services
   --dry-run               validate choices and print actions only
   --force                 rewrite base config files
   --with-hub              install and link the Hub after doctor passes
@@ -69,6 +72,7 @@ while [[ $# -gt 0 ]]; do
         --instance) need_value "$@"; instance=$2; shift 2 ;;
         --port) need_value "$@"; port=$2; shift 2 ;;
         --server-port) need_value "$@"; server_port=$2; shift 2 ;;
+        --vram-headroom-mib) need_value "$@"; vram_headroom_mib=$2; shift 2 ;;
         --no-start) no_start=1; shift ;;
         --dry-run) dry_run=1; shift ;;
         --force) force=1; shift ;;
@@ -90,6 +94,7 @@ case "$profile" in auto|full|service) ;; *) echo "invalid profile: $profile" >&2
 case "$model" in auto|qwen|gpt-oss) ;; *) echo "invalid model: $model" >&2; exit 64 ;; esac
 [[ $port =~ ^[0-9]+$ && $server_port =~ ^[0-9]+$ ]] || { echo "ports must be integers" >&2; exit 64; }
 [[ $instance =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "instance may contain only letters, digits, dot, underscore, and dash" >&2; exit 64; }
+[[ $vram_headroom_mib =~ ^(0|[1-9][0-9]*)$ ]] || { echo "--vram-headroom-mib must be a whole number of MiB" >&2; exit 64; }
 
 case "$os/$arch" in
     Linux/x86_64|Linux/amd64) platform=linux ;;
@@ -166,6 +171,10 @@ xml_escape() {
 systemd_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
 }
+# WorkingDirectory= is a bare path: systemd rejects quotes there and reads spaces and backslashes literally.
+systemd_path() {
+    printf '%s' "$1" | sed -e 's/%/%%/g'
+}
 
 printf 'Agent harness installer (platform: %s, profile: %s, app: %s, install: %s)\n' \
     "$platform" "$profile" "$app_dir" "$install_dir"
@@ -215,6 +224,15 @@ else
     llama_args=(--n-gpu-layers 99 --reasoning-effort medium)
 fi
 [[ $needs_local -eq 1 ]] && info "local model: $model_name" || info "local model: disabled (hosted-provider service profile)"
+if [[ $vram_headroom_mib -gt 0 ]]; then
+    # Only --fit reads the margin, and only a unit this installer writes carries it. docs/gpu-vram-budget.md has the budget.
+    if [[ $model == qwen && $needs_local -eq 1 && -z $existing_server ]]; then
+        llama_args+=(--fit-target "$vram_headroom_mib")
+        info "VRAM headroom: --fit-target $vram_headroom_mib"
+    else
+        info "--vram-headroom-mib ignored: only a local Qwen server managed by this installer uses --fit"
+    fi
+fi
 if [[ $dry_run -eq 0 ]]; then
     mkdir -p "$install_dir"
     free_gib=$(df -Pk "$install_dir" | awk 'NR == 2 {printf "%d", $4 / 1024 / 1024}')
@@ -357,6 +375,53 @@ elif ! (cd "$app_dir" && "$python" -m harness.secret_scan install --config-dir "
     info "WARNING: gitleaks is not installed; Review push and merge stay blocked until it is (the daemon retries at start)"
 fi
 
+# The `harness` command the docs and the Hub's host commands use. macOS has the Mac client's wrapper at this path
+# (macrunner/install.sh), so only Linux writes it. The marker line says which install owns it; uninstall.sh reads it.
+wrapper=
+wrapper_marker='# agent-harness install: '
+# %q in the C locale: the same text whatever locale install.sh and uninstall.sh run in, for non-ASCII paths too.
+quote() { (export LC_ALL=C; printf '%q' "$1"); }
+write_wrapper() {
+    local install_real tmp
+    install_real=$(CDPATH= cd -- "$install_dir" && pwd -P) &&
+        mkdir -p "$(dirname "$wrapper")" &&
+        tmp=$(mktemp "$wrapper.XXXXXX") || return 1
+    # No cd into the app: relative path arguments mean the caller's directory. -P then keeps a harness/ folder there
+    # from shadowing the app, and PYTHONPATH finds the app. .venv-path is the pointer run-daemon.sh follows. The CLI
+    # reads the daemon's port from HARNESS_CONFIG_DIR, so a later port change needs no new wrapper.
+    cat >"$tmp" <<EOF &&
+#!/usr/bin/env bash
+# Written by install/install.sh and removed by install/uninstall.sh. Runs the CLI of this install.
+$wrapper_marker$(quote "$install_real")
+python=$(quote "$install_real/venv/bin/python")
+app_dir=$(quote "$app_dir")
+if [[ -f \$app_dir/.venv-path ]]; then
+    venv=
+    read -r venv <"\$app_dir/.venv-path" || true
+    [[ \$venv != /* ]] || python=\$venv/bin/python
+fi
+export HARNESS_CONFIG_DIR=\${HARNESS_CONFIG_DIR:-$(quote "$install_real/config")}
+export PYTHONPATH=\$app_dir
+exec "\$python" -P -m harness.cli "\$@"
+EOF
+        chmod 0755 "$tmp" && mv -f "$tmp" "$wrapper"
+}
+if [[ $platform == linux ]]; then
+    step "harness command"
+    wrapper="$HOME/.local/bin/harness"
+    if [[ -L $wrapper ]] || { [[ -e $wrapper ]] && ! grep -q "^$wrapper_marker" "$wrapper"; }; then
+        info "kept $wrapper: this installer did not write it. For this install's CLI, run: HARNESS_CONFIG_DIR=$config_dir $python -m harness.cli (from $app_dir)"
+        wrapper=
+    elif [[ $dry_run -eq 1 ]]; then
+        info "[dry run] write $wrapper"
+    elif write_wrapper; then
+        info "wrote $wrapper"
+    else
+        info "WARNING: could not write $wrapper; run this install's CLI with HARNESS_CONFIG_DIR=$config_dir $python -m harness.cli (from $app_dir)"
+        wrapper=
+    fi
+fi
+
 safe_instance=$(printf '%s' "$instance" | tr '[:upper:]' '[:lower:]')
 if [[ $no_start -eq 0 ]]; then
     step "Per-user startup services"
@@ -366,14 +431,15 @@ if [[ $no_start -eq 0 ]]; then
         unit_dir=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
         mkdir -p "$unit_dir"
         daemon_unit="agent-harness-$safe_instance-daemon.service"
+        # No After=default.target: WantedBy=default.target starts the daemon at login, and After= on the target
+        # makes any user unit ordered after the daemon a cycle that systemd drops at boot (#889).
         cat >"$unit_dir/$daemon_unit" <<EOF
 [Unit]
 Description=Agent harness daemon ($instance)
-After=default.target
 
 [Service]
 Type=simple
-WorkingDirectory="$(systemd_escape "$app_dir")"
+WorkingDirectory=$(systemd_path "$app_dir")
 ExecStart=/bin/bash "$(systemd_escape "$bin_dir/run-daemon.sh")" "$(systemd_escape "$app_dir")" "$(systemd_escape "$config_dir")" "$(systemd_escape "$python")" "$(systemd_escape "$log_dir")"
 Restart=on-failure
 RestartSec=10
@@ -484,6 +550,13 @@ else
 fi
 
 printf '\nDone.\n  Web app: http://127.0.0.1:%s\n  Config:  %s\n  Logs:    %s\n' "$port" "$config_dir" "$log_dir"
+if [[ -n $wrapper ]]; then
+    printf '  CLI:     %s\n' "$wrapper"
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) ;;
+        *) printf '  Add %s to PATH to use the harness command.\n' "$HOME/.local/bin" ;;
+    esac
+fi
 if [[ $profile == service ]]; then
     printf '  Next:    ops/backends/login.sh claude|codex|cursor\n'
 fi

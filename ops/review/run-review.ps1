@@ -33,9 +33,14 @@ $script:MaxIssueCommentPages = 10
 $script:MaxIssueComments = 100 * $script:MaxIssueCommentPages
 $script:ReviewSpecModes = @('off', 'on')
 $script:ReviewCompletionMarker = 'REVIEW_STATUS: COMPLETE'
+$script:ReviewPublicationFailure = 'Review did not complete: output failed the publication safety scan.'
+$script:ReviewWithheldLine = '(line withheld by the publication safety scan)'
 $script:ReviewVerdictPattern = '^`?REVIEW_VERDICT:\s*(?:(CLEAN)|FINDINGS\s+([1-9][0-9]{0,3}))\s*`?$'
 $script:ReviewCriteriaPattern = '^`?REVIEW_CRITERIA:\s*([0-9]{1,3})\s*/\s*([0-9]{1,3})\s*`?$'
 $script:ReviewRepositoryPattern = '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+# An HTML comment as Get-ReviewHtmlToken reads one: <!--> and <!---> are empty, any other ends at the first --> or
+# --!>, and one that never ends runs to the end of the text.
+$script:ReviewHtmlCommentPattern = '<!--(?:-?>|[\s\S]*?(?:--!?>|\z))'
 $script:ReviewMarkerPattern = '(?i)<!-- agent-review: sha=([0-9a-f]{40}) mode=(full|incremental)(?: base=([A-Za-z0-9._/\-]+))? -->'
 $script:UntrustedAgentConfigDirectories = @('.claude', '.cursor', '.codex', '.agents')
 $script:UntrustedAgentConfigFiles = @('.mcp.json', '.cursorrules', 'CLAUDE.md', 'AGENTS.md')
@@ -230,13 +235,23 @@ function Resolve-ReviewMode {
     return [pscustomobject]@{ Mode = 'incremental'; Reason = 'safe incremental range' }
 }
 
+function ConvertFrom-ReviewJson {
+    param([AllowEmptyString()][string]$Json)
+
+    # GitHub's text as text: PowerShell 7 turns ISO 8601 strings (a comment's created_at, or a title that is only a
+    # date) into DateTime values unless -DateKind String (7.5 and later) says otherwise. Windows PowerShell 5.1 has
+    # no -DateKind and keeps them as strings already.
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { return ($Json | ConvertFrom-Json -DateKind String) }
+    return ($Json | ConvertFrom-Json)
+}
+
 function Get-CompareReviewFacts {
     [CmdletBinding()]
     param([AllowEmptyString()][string]$Json)
 
     if ([string]::IsNullOrWhiteSpace($Json)) { return $null }
     try {
-        $data = $Json | ConvertFrom-Json
+        $data = ConvertFrom-ReviewJson -Json $Json
     } catch {
         return $null
     }
@@ -348,6 +363,12 @@ function Get-ReviewRedactionRules {
     $tokenValue = '(?=[A-Za-z0-9._~+/=-]*[0-9])[A-Za-z0-9._~+/=-]{6,}|[A-Za-z0-9._~+/=-]{20,}'
     # A quoted literal is a value unless it is empty or a reference ($VAR, ${{ }}, %VAR%, {x}, <x>).
     $quotedValue = '"(?![$%{<])[^"\s][^"]*"|''(?![$%{<])[^''\s][^'']*'''
+    # A run of 40+ token characters, unless it reads as an identifier: only letters, slashes, underscores
+    # and hyphens, at least one underscore or hyphen, and digits only as up to four that end a lowercase
+    # word (test_strips_c1_controls, sha256_digest, Verb-NounLikeThis). Random tokens of this length almost
+    # always have digits elsewhere.
+    $longTokenStart = '(?<![A-Za-z0-9+/=_-])'
+    $longTokenRest = '(?!(?=[A-Za-z0-9/]*[_-])(?:[A-Za-z/_-]|(?<=[a-z][0-9]{0,3})[0-9](?![A-Za-z]))+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'
     return @(
         [pscustomobject]@{
             Name = 'bearer'
@@ -369,13 +390,12 @@ function Get-ReviewRedactionRules {
             Replacement = '[REDACTED]'
             Maskable = $false
         }
-        # A long run of token characters is rejected unless it reads as an identifier: only letters,
-        # slashes, underscores and hyphens, at least one underscore or hyphen, and digits only as up to
-        # four that end a lowercase word (test_strips_c1_controls, sha256_digest, Verb-NounLikeThis).
-        # Random tokens of this length almost always have digits elsewhere.
+        # A review body may also name a code identifier of letters alone, up to 64 (a long camelCase test
+        # name, #800). Every other shape stays matched, bare hexadecimal included.
         [pscustomobject]@{
             Name = 'long-token'
-            Pattern = '(?<![A-Za-z0-9+/=_-])(?!(?=[A-Za-z0-9/]*[_-])(?:[A-Za-z/_-]|(?<=[a-z][0-9]{0,3})[0-9](?![A-Za-z]))+(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/=_-]{40,}(?![A-Za-z0-9+/=_-])'
+            Pattern = $longTokenStart + $longTokenRest
+            PublishPattern = $longTokenStart + '(?![A-Za-z]{40,64}(?![A-Za-z0-9+/=_-]))' + $longTokenRest
             Replacement = '[REDACTED]'
             Maskable = $true
         }
@@ -409,6 +429,12 @@ $script:ReviewHtml5Entities = @{
 # A named entity reference the decoders leave in place. GitHub may render it as a character the scan
 # never sees (&fjlig; is two letters, &ZeroWidthSpace; an invisible split), so it fails closed.
 $script:ReviewUnknownEntityPattern = '&[A-Za-z][A-Za-z0-9]*;'
+# What a review shows in place of such a reference once publication escapes it (#998): its name as text.
+$script:ReviewEscapedEntityFormat = '(entity: {0})'
+# The HTML Standard's named references, which escaping reads a reference as (Get-ReviewHtml5EntityTable).
+$script:ReviewHtml5EntityTablePath = Join-Path $PSScriptRoot 'html5-entities.tsv'
+$script:ReviewHtml5EntityTable = $null
+$script:ReviewHtml5LegacyNames = @()
 # HTML5 decodes these names even without a semicolon (gh&shyp_ is gh, a soft hyphen, p_), longest first.
 $script:ReviewLegacyEntities = @(
     'AElig AMP Aacute Acirc Agrave Aring Atilde Auml COPY Ccedil ETH Eacute Ecirc Egrave Euml GT Iacute Icirc Igrave',
@@ -478,6 +504,37 @@ function Get-ReviewNamedEntityText {
     return $null
 }
 
+# One character reference as an HTML5 parser reads text: a numeric reference, or a name with or without
+# its semicolon.
+$script:ReviewCharacterReferencePattern = '&(?:#(?:[xX](?<hex>[0-9A-Fa-f]+)|(?<dec>[0-9]+));?|(?<name>[A-Za-z][A-Za-z0-9]*)(?<semi>;)?)'
+
+function ConvertFrom-ReviewCharacterReference {
+    param([Parameter(Mandatory = $true)][System.Text.RegularExpressions.Match]$Match)
+
+    # The text one match of ReviewCharacterReferencePattern decodes to (ConvertFrom-ReviewEntities).
+    $name = $Match.Groups['name'].Value
+    if ($name) {
+        if ($Match.Groups['semi'].Success) {
+            $entity = Get-ReviewNamedEntityText -Name $name
+            if ($null -ne $entity) { return $entity }
+            return $Match.Value
+        }
+        foreach ($legacy in $script:ReviewLegacyEntities) {
+            if ($name.StartsWith($legacy, [StringComparison]::Ordinal)) {
+                return (Get-ReviewNamedEntityText -Name $legacy) + $name.Substring($legacy.Length)
+            }
+        }
+        return $Match.Value
+    }
+    $digits, $base = if ($Match.Groups['hex'].Success) { $Match.Groups['hex'].Value, 16 } else { $Match.Groups['dec'].Value, 10 }
+    $digits = $digits.TrimStart('0')
+    # Zero, surrogates and values past U+10FFFF decode to the replacement character.
+    $code = if (-not $digits) { 0 } elseif ($digits.Length -gt 7) { 0x110000 } else { [Convert]::ToInt32($digits, $base) }
+    if ($code -eq 0 -or $code -gt 0x10FFFF -or ($code -ge 0xD800 -and $code -le 0xDFFF)) { return [string][char]0xFFFD }
+    if ($script:ReviewC1References.ContainsKey($code)) { $code = $script:ReviewC1References[$code] }
+    return [char]::ConvertFromUtf32($code)
+}
+
 function ConvertFrom-ReviewEntities {
     param([AllowEmptyString()][string]$Text)
 
@@ -485,31 +542,66 @@ function ConvertFrom-ReviewEntities {
     # references and legacy names need no semicolon, so a raw HTML block can spell gh&#112_ or
     # gh&shyp_. A named reference with a semicolon that the scan does not know stays for the
     # unknown-entity rule. An ampersand that starts no reference (AT&T) stays as it is.
-    $pattern = '&(?:#(?:[xX](?<hex>[0-9A-Fa-f]+)|(?<dec>[0-9]+));?|(?<name>[A-Za-z][A-Za-z0-9]*)(?<semi>;)?)'
-    return [regex]::Replace([Uri]::UnescapeDataString($Text), $pattern, {
+    return [regex]::Replace([Uri]::UnescapeDataString($Text), $script:ReviewCharacterReferencePattern, {
             param($match)
-            $name = $match.Groups['name'].Value
-            if ($name) {
-                if ($match.Groups['semi'].Success) {
-                    $entity = Get-ReviewNamedEntityText -Name $name
-                    if ($null -ne $entity) { return $entity }
-                    return $match.Value
-                }
-                foreach ($legacy in $script:ReviewLegacyEntities) {
-                    if ($name.StartsWith($legacy, [StringComparison]::Ordinal)) {
-                        return (Get-ReviewNamedEntityText -Name $legacy) + $name.Substring($legacy.Length)
-                    }
-                }
-                return $match.Value
-            }
-            $digits, $base = if ($match.Groups['hex'].Success) { $match.Groups['hex'].Value, 16 } else { $match.Groups['dec'].Value, 10 }
-            $digits = $digits.TrimStart('0')
-            # Zero, surrogates and values past U+10FFFF decode to the replacement character.
-            $code = if (-not $digits) { 0 } elseif ($digits.Length -gt 7) { 0x110000 } else { [Convert]::ToInt32($digits, $base) }
-            if ($code -eq 0 -or $code -gt 0x10FFFF -or ($code -ge 0xD800 -and $code -le 0xDFFF)) { return [string][char]0xFFFD }
-            if ($script:ReviewC1References.ContainsKey($code)) { $code = $script:ReviewC1References[$code] }
-            return [char]::ConvertFromUtf32($code)
+            ConvertFrom-ReviewCharacterReference -Match $match
         })
+}
+
+function Get-ReviewEntityDecodedMap {
+    param([AllowEmptyString()][string]$Text)
+
+    # ConvertFrom-ReviewEntities, with the raw span each decoded character came from (#998): Starts[i] and
+    # Ends[i] bound the raw text that decoded character i was spelled with. A percent escape maps to its own
+    # three characters, or a UTF-8 sequence of escapes to all of them, and a character reference to the
+    # whole reference, so a span never takes in text that decoded to a neighbouring character. The result
+    # is checked against ConvertFrom-ReviewEntities itself; $null when the two differ, so a caller never
+    # acts on a map that does not describe what the scan read.
+    $starts = New-Object System.Collections.Generic.List[int]
+    $ends = New-Object System.Collections.Generic.List[int]
+    $builder = New-Object System.Text.StringBuilder
+    $position = 0
+    foreach ($run in [regex]::Matches($Text, '(?:%[0-9A-Fa-f]{2})+')) {
+        for ($i = $position; $i -lt $run.Index; $i++) { [void]$builder.Append($Text[$i]); $starts.Add($i); $ends.Add($i + 1) }
+        $escapes = $run.Length / 3
+        $index = 0
+        while ($index -lt $escapes) {
+            # A UTF-8 lead byte says how many escapes spell one character; anything else is one escape.
+            $lead = [Convert]::ToInt32($run.Value.Substring($index * 3 + 1, 2), 16)
+            $count = $(if ($lead -ge 0xF0 -and $lead -le 0xF4) { 4 } elseif ($lead -ge 0xE0 -and $lead -le 0xEF) { 3 } elseif ($lead -ge 0xC2 -and $lead -le 0xDF) { 2 } else { 1 })
+            $count = [Math]::Min($count, $escapes - $index)
+            $piece = [Uri]::UnescapeDataString($run.Value.Substring($index * 3, $count * 3))
+            if ($count -gt 1 -and $piece.StartsWith('%')) { $count = 1; $piece = [Uri]::UnescapeDataString($run.Value.Substring($index * 3, 3)) }
+            $start = $run.Index + $index * 3
+            foreach ($character in $piece.ToCharArray()) { [void]$builder.Append($character); $starts.Add($start); $ends.Add($start + $count * 3) }
+            $index += $count
+        }
+        $position = $run.Index + $run.Length
+    }
+    for ($i = $position; $i -lt $Text.Length; $i++) { [void]$builder.Append($Text[$i]); $starts.Add($i); $ends.Add($i + 1) }
+    $unescaped = $builder.ToString()
+    if ($unescaped -cne [Uri]::UnescapeDataString($Text)) { return $null }
+
+    $decodedStarts = New-Object System.Collections.Generic.List[int]
+    $decodedEnds = New-Object System.Collections.Generic.List[int]
+    $builder = New-Object System.Text.StringBuilder
+    $position = 0
+    foreach ($reference in [regex]::Matches($unescaped, $script:ReviewCharacterReferencePattern)) {
+        for ($i = $position; $i -lt $reference.Index; $i++) { [void]$builder.Append($unescaped[$i]); $decodedStarts.Add($starts[$i]); $decodedEnds.Add($ends[$i]) }
+        $decodedReference = ConvertFrom-ReviewCharacterReference -Match $reference
+        $position = $reference.Index + $reference.Length
+        # A reference left as it is (an unknown name, or AT&T) keeps each character's own span.
+        if ($decodedReference -ceq $reference.Value) { $position = $reference.Index; continue }
+        $start = $starts[$reference.Index]
+        $end = $ends[$reference.Index + $reference.Length - 1]
+        foreach ($character in $decodedReference.ToCharArray()) {
+            [void]$builder.Append($character); $decodedStarts.Add($start); $decodedEnds.Add($end)
+        }
+    }
+    for ($i = $position; $i -lt $unescaped.Length; $i++) { [void]$builder.Append($unescaped[$i]); $decodedStarts.Add($starts[$i]); $decodedEnds.Add($ends[$i]) }
+    $decoded = $builder.ToString()
+    if ($decoded -cne (ConvertFrom-ReviewEntities -Text $Text)) { return $null }
+    return [pscustomobject]@{ Text = $decoded; Starts = $decodedStarts.ToArray(); Ends = $decodedEnds.ToArray() }
 }
 
 function Get-ReviewScanForms {
@@ -1036,6 +1128,16 @@ function Invoke-ReviewMarkdownRender {
     }
 }
 
+function Get-ReviewCharacterClasses {
+    param([string]$Value)
+
+    # The classes a value's characters fall in, for a log line. It names no character, not even punctuation.
+    $classes = foreach ($class in @(@('lowercase', '[a-z]'), @('uppercase', '[A-Z]'), @('digit', '[0-9]'), @('other', '[^A-Za-z0-9]'))) {
+        if ([regex]::IsMatch($Value, $class[1])) { $class[0] }
+    }
+    return @($classes) -join '+'
+}
+
 function Get-ReviewRuleHits {
     param(
         [AllowEmptyString()][string]$Text,
@@ -1048,7 +1150,8 @@ function Get-ReviewRuleHits {
     )
 
     # The credential, absolute-root, profile-segment and long-token rules over each scan form of $Text,
-    # as one log line per hit: rule, form and offset, never the matched text or its surroundings.
+    # as one log line per hit: rule, form, offset and length, never the matched text or its surroundings.
+    # A long token's line adds its character classes, so a false positive can be told from a real token.
     $rules = @(Get-ReviewRedactionRules)
     $credentialRules = @($rules | Where-Object { -not $_.Maskable })
     $maskableRules = @($rules | Where-Object { $_.Maskable })
@@ -1057,7 +1160,10 @@ function Get-ReviewRuleHits {
         param([string]$RuleName, [string]$FormName, [string]$FormText, [string]$Pattern)
         $match = [regex]::Match($FormText, $Pattern)
         if ($FormPrefix) { $FormName = if ($FormName -eq 'raw') { $FormPrefix } else { "$FormPrefix-$FormName" } }
-        if ($match.Success) { "rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length))" }
+        if ($match.Success) {
+            $classes = if ($RuleName -eq 'long-token') { ", classes $(Get-ReviewCharacterClasses -Value $match.Value)" } else { '' }
+            "rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length)$classes)"
+        }
     }
     # Absolute roots and credential patterns always scan the unmasked text.
     foreach ($form in (& $forms $Text)) {
@@ -1100,32 +1206,23 @@ function Get-ReviewGitHubFormHits {
     Get-ReviewRuleHits -Text $text -KnownPaths $KnownPaths -PlainText -FormPrefix 'github'
 }
 
-function Assert-ReviewOutputSafe {
-    [CmdletBinding()]
+function Get-ReviewLocalScanHits {
     param(
         [AllowEmptyString()][string]$Text,
-        [AllowEmptyString()][string]$Workspace = '',
-        [string[]]$DiffPaths = @(),
-        # The context GitHub's renderer resolves references against.
-        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
-        # For validated metadata such as a branch name: credential patterns only, no path or long-token rules.
+        [string[]]$KnownPaths = @(),
         [switch]$CredentialsOnly
     )
 
-    $knownPaths = @()
-    if ($Workspace -or $DiffPaths.Count -gt 0) {
-        $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
-    }
-    # Each hit is logged by rule, scan form and offset so a rejection can be diagnosed. Never log the
-    # matched text or its surroundings: they are what the scan withholds.
+    # Every check of the publication gate that runs here, without GitHub's renderer, as one log line per
+    # hit: rule, scan form, offset and length. Never the matched text or its surroundings: they are what
+    # the scan withholds. Offsets for the first rules count in the raw text, or in the entity-decoded
+    # text before format characters are removed.
     $hits = New-Object System.Collections.Generic.List[string]
     $check = {
         param([string]$RuleName, [string]$FormName, [string]$FormText, [string]$Pattern)
         $match = [regex]::Match($FormText, $Pattern)
         if ($match.Success) { $hits.Add("rule $RuleName matched the $FormName form at offset $($match.Index) (length $($match.Length))") }
     }
-    # Offsets for these rules count in the raw text, or in the entity-decoded text before format
-    # characters are removed.
     $entityDecoded = ConvertFrom-ReviewEntities -Text $Text
     & $check 'bidi-control' 'raw' $Text $script:ReviewBidiPattern
     & $check 'bidi-control' 'decoded' $entityDecoded $script:ReviewBidiPattern
@@ -1142,7 +1239,28 @@ function Assert-ReviewOutputSafe {
             if ($renderer) { $hits.Add("rule $($renderer.Rule) matched the $($form.Name) form at offset $($renderer.Offset) (length $($renderer.Length))") }
         }
     }
-    foreach ($hit in @(Get-ReviewRuleHits -Text $Text -KnownPaths $knownPaths -CredentialsOnly:$CredentialsOnly)) { $hits.Add($hit) }
+    foreach ($hit in @(Get-ReviewRuleHits -Text $Text -KnownPaths $KnownPaths -CredentialsOnly:$CredentialsOnly)) { $hits.Add($hit) }
+    return , $hits
+}
+
+function Assert-ReviewOutputSafe {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$Text,
+        [AllowEmptyString()][string]$Workspace = '',
+        [string[]]$DiffPaths = @(),
+        # The context GitHub's renderer resolves references against.
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
+        # For validated metadata such as a branch name: credential patterns only, no path or long-token rules.
+        [switch]$CredentialsOnly
+    )
+
+    $knownPaths = @()
+    if ($Workspace -or $DiffPaths.Count -gt 0) {
+        $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths)
+    }
+    # Each hit is logged by rule, scan form and offset so a rejection can be diagnosed.
+    $hits = Get-ReviewLocalScanHits -Text $Text -KnownPaths $knownPaths -CredentialsOnly:$CredentialsOnly
     # GitHub's own rendering is scanned too, never instead: only once every form above passes, so a body
     # they reject is never sent anywhere. A failed or timed-out call fails closed (markdown-render).
     if (-not $CredentialsOnly -and $hits.Count -eq 0) {
@@ -1160,7 +1278,7 @@ function Assert-ReviewOutputSafe {
     }
     if ($hits.Count -gt 0) {
         foreach ($hit in (Get-ReviewOrdinalUnique -Values $hits.ToArray())) { Write-Warning "Publication safety scan: $hit." }
-        throw 'Review did not complete: output failed the publication safety scan.'
+        throw $script:ReviewPublicationFailure
     }
 }
 
@@ -1216,15 +1334,17 @@ function Get-ReviewBackendEnvironment {
     # Provider authentication is read from the runner service user's profile.
     # Deliberately exclude inherited tokens, API keys, workflow metadata, and
     # repository-controlled environment variables from reviewer processes.
+    # The list covers both Windows and Linux runners; names absent on a host are skipped.
     $allowedNames = @(
         'ALLUSERSPROFILE', 'APPDATA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
         'COLORTERM', 'COMSPEC', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'LANG',
-        'LC_ALL', 'LOCALAPPDATA', 'NO_COLOR', 'NUMBER_OF_PROCESSORS', 'OS',
+        'LC_ALL', 'LC_CTYPE', 'LOCALAPPDATA', 'LOGNAME', 'NO_COLOR', 'NUMBER_OF_PROCESSORS', 'OS',
         'PATH', 'PATHEXT', 'PROCESSOR_ARCHITECTURE', 'PROCESSOR_IDENTIFIER',
         'PROCESSOR_LEVEL', 'PROCESSOR_REVISION', 'PROGRAMDATA', 'PROGRAMFILES',
-        'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PSMODULEPATH', 'SYSTEMDRIVE',
-        'SYSTEMROOT', 'TEMP', 'TERM', 'TMP', 'USERDOMAIN',
-        'USERDOMAIN_ROAMINGPROFILE', 'USERNAME', 'USERPROFILE', 'WINDIR'
+        'PROGRAMFILES(X86)', 'PROGRAMW6432', 'PSMODULEPATH', 'SHELL', 'SYSTEMDRIVE',
+        'SYSTEMROOT', 'TEMP', 'TERM', 'TMP', 'TMPDIR', 'USER', 'USERDOMAIN',
+        'USERDOMAIN_ROAMINGPROFILE', 'USERNAME', 'USERPROFILE', 'WINDIR',
+        'XDG_CACHE_HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR', 'XDG_STATE_HOME'
     )
     $environment = @{}
     foreach ($name in $allowedNames) {
@@ -1251,6 +1371,8 @@ function Set-ProcessEnvironmentSnapshot {
 
     foreach ($name in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
         [Environment]::SetEnvironmentVariable([string]$name, $null, 'Process')
+        # PowerShell 7 on Linux keeps a name cleared that way, empty, in a child's environment; the Env: drive removes it.
+        if (Test-Path -LiteralPath "Env:$name") { Remove-Item -LiteralPath "Env:$name" }
     }
     foreach ($entry in $Environment.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable([string]$entry.Key, [string]$entry.Value, 'Process')
@@ -1350,19 +1472,34 @@ function Get-ReviewVerdict {
     }
 }
 
+function Get-CursorAgentBase {
+    param([bool]$WindowsPlatform = ($env:OS -eq 'Windows_NT'))
+
+    # Where Cursor's installer puts cursor-agent for the runner service user.
+    if ($WindowsPlatform) { return (Join-Path ([string]$env:LOCALAPPDATA) 'cursor-agent') }
+    $dataHome = [string]$env:XDG_DATA_HOME
+    if ([string]::IsNullOrWhiteSpace($dataHome)) { $dataHome = Join-Path ([string]$env:HOME) '.local/share' }
+    return (Join-Path $dataHome 'cursor-agent')
+}
+
 function Get-CursorAgentEntrypoint {
     [CmdletBinding()]
-    param([string]$CursorBase = (Join-Path $env:LOCALAPPDATA 'cursor-agent'))
+    param(
+        [string]$CursorBase = '',
+        [bool]$WindowsPlatform = ($env:OS -eq 'Windows_NT')
+    )
 
+    if ([string]::IsNullOrWhiteSpace($CursorBase)) { $CursorBase = Get-CursorAgentBase -WindowsPlatform $WindowsPlatform }
     $versions = Join-Path $CursorBase 'versions'
     $latest = Get-ChildItem -LiteralPath $versions -Directory -ErrorAction Stop |
         Sort-Object Name -Descending |
         Select-Object -First 1
     if (-not $latest) { throw "no cursor-agent version under $versions" }
-    $node = Join-Path $latest.FullName 'node.exe'
+    $nodeName = $(if ($WindowsPlatform) { 'node.exe' } else { 'node' })
+    $node = Join-Path $latest.FullName $nodeName
     $index = Join-Path $latest.FullName 'index.js'
     if (-not (Test-Path -LiteralPath $node) -or -not (Test-Path -LiteralPath $index)) {
-        throw "cursor-agent node.exe/index.js missing in $($latest.FullName)"
+        throw "cursor-agent $nodeName/index.js missing in $($latest.FullName)"
     }
     return [pscustomobject]@{ Node = $node; Index = $index }
 }
@@ -1429,11 +1566,7 @@ function Get-ReviewBackendCommand {
     }
     switch ($name) {
         'cursor' {
-            if ([string]::IsNullOrWhiteSpace($CursorBase)) {
-                $entrypoint = Get-CursorAgentEntrypoint
-            } else {
-                $entrypoint = Get-CursorAgentEntrypoint -CursorBase $CursorBase
-            }
+            $entrypoint = Get-CursorAgentEntrypoint -CursorBase $CursorBase -WindowsPlatform $WindowsPlatform
             $arguments = @($entrypoint.Index, '-p', '--output-format', 'text', '--mode', 'ask')
             if (-not $WindowsPlatform) {
                 $arguments += @('--sandbox', 'enabled')
@@ -1453,14 +1586,17 @@ function Get-ReviewBackendCommand {
         }
         'codex' {
             $resultPath = Join-Path $ScratchDirectory 'codex-review-output.md'
+            # The unelevated sandbox is a Windows setting; Linux and macOS use Codex's own OS sandbox.
+            $platformArgs = @()
+            if ($WindowsPlatform) { $platformArgs = @('-c', 'windows.sandbox="unelevated"') }
             return [pscustomobject]@{
                 Backend = $name
                 FilePath = 'codex'
                 Arguments = @(
                     'exec'
                 ) + $modelArgs + $effortArgs + @(
-                    '--ignore-user-config',
-                    '-c', 'windows.sandbox="unelevated"',
+                    '--ignore-user-config'
+                ) + $platformArgs + @(
                     '-c', 'mcp_servers={}',
                     '--disable', 'apps',
                     '--disable', 'plugins',
@@ -1498,6 +1634,285 @@ function Get-ReviewBackendCommand {
     }
 }
 
+# The Codex CLI runs each tool command under codex-linux-sandbox, and a sandbox still running when the review ends,
+# or when the job is cancelled or times out, used to be orphaned on the runner (#910). On Linux, pwsh makes itself
+# a child subreaper, so an orphaned descendant re-parents to pwsh instead of PID 1, and each backend command runs as
+# the leader of a session of its own, writing its output to files rather than to pipes that pwsh would wait on.
+# The leader also tags the command's environment with a per-command marker that its descendants inherit. When the
+# command returns, every process in that session, every orphan re-parented to pwsh, every process carrying the
+# marker, and all of their descendants are killed; a descendant that calls setsid itself is caught through its
+# parent, pwsh or the marker. A detached watchdog does the same if pwsh is stopped before its finally block runs (the
+# runner signals the step and then kills it), adding the tree it last saw, at most a second old.
+# Where unprivileged user namespaces work (#912), the leader also starts the command through unshare as PID 1 of a
+# user and PID namespace of its own, so every descendant dies with it, however it left the session, the marker or
+# the tree: when the command exits the kernel kills the namespace, and when the cleanup or the watchdog kills unshare,
+# --kill-child kills the command and the kernel the rest. Elsewhere the session and marker cleanup is the fallback.
+$script:ReviewSessionHelperScript = @'
+#!/bin/sh
+# Written by run-review.ps1 (#910): runs a review backend command in a session of its own and reaps what it leaves.
+set -u
+
+start_time() {
+    stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    # Field 22 (start time); the command name in parentheses may hold spaces, so split after its closing one.
+    set -- ${stat##*) }
+    printf '%s\n' "${20}"
+}
+
+leader_sid() {
+    sid=$(cat "$1" 2>/dev/null) || sid=0
+    case $sid in '' | *[!0-9]*) sid=0 ;; esac
+    printf '%s\n' "$sid"
+}
+
+# The command runs as PID 1 of a new PID namespace inside a new user namespace (#912); --kill-child kills it when
+# unshare dies, and --map-current-user keeps the runner's own uid, so tools that start namespaces of their own
+# (sandboxes) still can. Without a mapping the command would run as the overflow uid.
+namespace_flags='--user --pid --fork --kill-child --map-current-user'
+
+# marked MARK: processes this user can read whose environment carries the command's marker.
+marked() {
+    grep -l -a -F "AGENT_HARNESS_REVIEW_RUN=$1" /proc/[0-9]*/environ 2>/dev/null | sed -n 's|^/proc/\([0-9]*\)/environ$|\1|p' | tr '\n' ' '
+}
+
+# targets SID ROOT MARK SKIP...: live processes in session SID, the children of ROOT, the processes carrying MARK,
+# and all their descendants, except each SKIP and its own descendants (the shell doing the reaping and its ps and
+# awk, and the watchdog). 0 disables SID or ROOT.
+targets() {
+    sid=$1
+    root=$2
+    tagged=$(marked "$3")
+    shift 3
+    ps -e -o pid= -o ppid= -o sid= -o stat= 2>/dev/null | awk -v sid="$sid" -v root="$root" -v skip="$*" -v tagged="$tagged" '
+        $4 !~ /^Z/ { n++; pid[n] = $1; ppid[n] = $2; session[n] = $3 }
+        END {
+            split(skip, skips, " "); for (k in skips) ex[skips[k]] = 1
+            split(tagged, tags, " "); for (k in tags) mark[tags[k]] = 1
+            ex[1] = 1; ex[root] = 1
+            for (changed = 1; changed;) {
+                changed = 0
+                for (i = 1; i <= n; i++) if (!(pid[i] in ex) && (ppid[i] in ex) && ppid[i] != 1 && ppid[i] != root) { ex[pid[i]] = 1; changed = 1 }
+            }
+            for (i = 1; i <= n; i++) if (!(pid[i] in ex) && ((sid > 1 && session[i] == sid) || (root > 1 && ppid[i] == root) || (pid[i] in mark))) hit[pid[i]] = 1
+            for (changed = 1; changed;) {
+                changed = 0
+                for (i = 1; i <= n; i++) if (!(pid[i] in hit) && !(pid[i] in ex) && (ppid[i] in hit)) { hit[pid[i]] = 1; changed = 1 }
+            }
+            for (p in hit) print p
+        }'
+}
+
+# reap LEADER ROOT MARK SKIP [PID:START ...]: TERM, then KILL after up to a second, every target and every listed
+# process that still has the same start time. SKIP is a space-separated list.
+reap() {
+    leader=$1
+    root=$2
+    mark=$3
+    skip=$4
+    shift 4
+    sid=$(leader_sid "$leader")
+    for signal in TERM KILL; do
+        list=$(targets "$sid" "$root" "$mark" $skip)
+        for entry in "$@"; do
+            if [ "$(start_time "${entry%%:*}")" = "${entry#*:}" ]; then list="$list ${entry%%:*}"; fi
+        done
+        if [ "$sid" -gt 1 ]; then kill "-$signal" -- "-$sid" 2>/dev/null; fi
+        if [ -n "${list# }" ]; then kill "-$signal" $list 2>/dev/null; fi
+        if [ "$signal" = TERM ] && [ -n "${list# }" ]; then
+            tries=0
+            while [ "$tries" -lt 10 ] && [ -n "$(targets "$sid" "$root" "$mark" $skip)" ]; do
+                sleep 0.1
+                tries=$((tries + 1))
+            done
+        fi
+    done
+    return 0
+}
+
+command=$1
+shift
+case $command in
+    contain)
+        # contain: prints "namespace UNSHARE" when the unshare on PATH starts a command as PID 1 of a new user and
+        # PID namespace here, else "session-marker REASON" (#912).
+        unshare=$(command -v unshare) || unshare=''
+        case $unshare in
+            /*) ;;
+            *) echo 'session-marker unshare is not on PATH'; exit 0 ;;
+        esac
+        # shellcheck disable=SC2086 # namespace_flags is a list of flags.
+        if reason=$("$unshare" $namespace_flags -- /bin/sh -c 'test $$ -eq 1' 2>&1 < /dev/null); then
+            printf 'namespace %s\n' "$unshare"
+        else
+            reason=$(printf '%s\n' "$reason" | sed -n '1p' | tr -cd '[:print:]' | cut -c1-200)
+            printf 'session-marker unshare failed: %s\n' "${reason:-no message}"
+        fi
+        ;;
+    lead | lead-namespace)
+        # lead LEADER STDOUT STDERR PARENT PARENT_START MARK COMMAND...: setsid made this shell the session leader,
+        # so its pid names the session, and exec keeps it for the backend. The leader file is written before pwsh
+        # is checked, so a watchdog that saw pwsh exit reads it; a command whose pwsh is already gone never starts.
+        # lead-namespace LEADER STDOUT STDERR PARENT PARENT_START MARK UNSHARE COMMAND... does the same, but execs
+        # UNSHARE, which stays the session leader and starts the command as PID 1 of its own namespace (#912).
+        printf '%s\n' "$$" > "$1"
+        exec > "$2" 2> "$3"
+        if [ "$(start_time "$4")" != "$5" ]; then exit 125; fi
+        AGENT_HARNESS_REVIEW_RUN=$6
+        export AGENT_HARNESS_REVIEW_RUN
+        shift 6
+        if [ "$command" = lead-namespace ]; then
+            unshare=$1
+            shift
+            # shellcheck disable=SC2086 # namespace_flags is a list of flags.
+            exec "$unshare" $namespace_flags -- "$@"
+        fi
+        exec "$@"
+        ;;
+    spawn-watch)
+        # spawn-watch PARENT LEADER DONE MARK: the watchdog's pid goes to LEADER.watch, so finish spares it.
+        parent_start=$(start_time "$1") || exit 0
+        setsid /bin/sh "$0" watch "$1" "$parent_start" "$2" "$3" "$4" < /dev/null > /dev/null 2>&1 &
+        printf '%s\n' "$!" > "$2.watch"
+        ;;
+    watch)
+        # watch PARENT PARENT_START LEADER DONE MARK: while pwsh runs, remember the processes the command has
+        # started; if pwsh exits before it writes DONE, reap the session, the marked processes and everything
+        # remembered.
+        seen=''
+        while [ ! -e "$4" ] && [ "$(start_time "$1")" = "$2" ]; do
+            seen=''
+            for pid in $(targets "$(leader_sid "$3")" "$1" "$5" "$$"); do
+                started=$(start_time "$pid") && seen="$seen $pid:$started"
+            done
+            sleep 1
+        done
+        if [ ! -e "$4" ]; then reap "$3" 0 "$5" "$$" $seen; fi
+        rm -f "$3" "$3.watch" "$4"
+        ;;
+    finish)
+        # finish LEADER DONE ROOT MARK: spares the watchdog, which pwsh adopted as subreaper, until DONE is written,
+        # so it can still finish the job if pwsh is killed meanwhile.
+        watchdog=$(cat "$1.watch" 2>/dev/null) || watchdog=''
+        case $watchdog in '' | *[!0-9]*) watchdog='' ;; esac
+        reap "$1" "$3" "$4" "$$ $watchdog"
+        : > "$2"
+        ;;
+esac
+exit 0
+'@
+
+function Enable-ReviewChildSubreaper {
+    [CmdletBinding()]
+    param()
+
+    # PR_SET_CHILD_SUBREAPER (36): orphaned descendants re-parent to pwsh, not PID 1, so the cleanup can find them.
+    if ($script:ReviewChildSubreaperTried) { return }
+    $script:ReviewChildSubreaperTried = $true
+    try {
+        if (-not ('ReviewProcessNative' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class ReviewProcessNative {
+    [DllImport("libc", SetLastError = true)]
+    public static extern int prctl(int option, ulong arg2, ulong arg3, ulong arg4, ulong arg5);
+}
+'@
+        }
+        [void][ReviewProcessNative]::prctl(36, 1, 0, 0, 0)
+    } catch {
+        Write-Verbose "could not make pwsh a child subreaper: $($_.Exception.Message)"
+    }
+}
+$script:ReviewChildSubreaperTried = $false
+
+function Get-ReviewProcessContainment {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$Helper)
+
+    # Probed once per run (#912), and the run log says which path runs: namespace, or the session-marker fallback
+    # where unshare is missing or unprivileged user namespaces are not allowed.
+    if ($null -ne $script:ReviewProcessContainment) { return $script:ReviewProcessContainment }
+    $report = ''
+    try {
+        $report = [string](& /bin/sh $Helper contain 2> $null | Select-Object -First 1)
+    } catch {
+        $report = "session-marker the probe failed: $($_.Exception.Message)"
+    }
+    $mode, $detail = $report.Trim() -split ' ', 2
+    $containment = [pscustomobject]@{ Mode = 'session-marker'; Unshare = $null }
+    if ($mode -eq 'namespace' -and $detail -and $detail.StartsWith('/')) {
+        $containment.Mode = 'namespace'
+        $containment.Unshare = $detail
+        Write-Host "Review process containment: namespace (each command runs as PID 1 of its own user and PID namespace)"
+    } else {
+        if (-not $detail) { $detail = 'the probe gave no answer' }
+        Write-Host "Review process containment: session-marker ($detail)"
+    }
+    $script:ReviewProcessContainment = $containment
+    return $containment
+}
+$script:ReviewProcessContainment = $null
+
+function Start-ReviewProcessSession {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$ScratchDirectory)
+
+    # $IsLinux is undefined in Windows PowerShell 5.1, and strict mode refuses an undefined variable.
+    if (-not [bool](Get-Variable -Name IsLinux -ValueOnly -ErrorAction SilentlyContinue)) { return $null }
+    $setsid = Get-Command -Name setsid -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $setsid -or -not (Test-Path -LiteralPath '/bin/sh')) { return $null }
+    Enable-ReviewChildSubreaper
+
+    $helper = Join-Path $ScratchDirectory 'review-session.sh'
+    [System.IO.File]::WriteAllText($helper, $script:ReviewSessionHelperScript.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    $containment = Get-ReviewProcessContainment -Helper $helper
+    $id = [guid]::NewGuid().ToString('N')
+    $session = [pscustomobject]@{
+        Mark = $id
+        Setsid = $setsid.Source
+        Helper = $helper
+        Unshare = $containment.Unshare
+        LeaderFile = Join-Path $ScratchDirectory "review-session-$id.leader"
+        DoneFile = Join-Path $ScratchDirectory "review-session-$id.done"
+        WrapperOutputFile = Join-Path $ScratchDirectory "review-session-$id.out"
+        WrapperErrorFile = Join-Path $ScratchDirectory "review-session-$id.err"
+        ParentStart = ''
+    }
+    $stat = [System.IO.File]::ReadAllText("/proc/$PID/stat")
+    $session.ParentStart = ($stat.Substring($stat.LastIndexOf(')') + 2) -split ' ')[19]
+    & /bin/sh $helper spawn-watch $PID $session.LeaderFile $session.DoneFile $session.Mark 2> $null | Out-Null
+    return $session
+}
+
+function Get-ReviewSessionCommandLine {
+    [CmdletBinding()]
+    param(
+        $Session,
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [object[]]$Arguments = @(),
+        [Parameter(Mandatory = $true)][string]$StdoutPath,
+        [Parameter(Mandatory = $true)][string]$StderrPath
+    )
+
+    if ($null -eq $Session) { return [pscustomobject]@{ FilePath = $FilePath; Arguments = @($Arguments) } }
+    $leader = @($Session.LeaderFile, $StdoutPath, $StderrPath, [string]$PID, $Session.ParentStart, $Session.Mark)
+    # On the namespace path (#912) the leader execs unshare, which starts the command as PID 1 of its own namespace.
+    $lead = @('lead') + $leader
+    if ($Session.Unshare) { $lead = @('lead-namespace') + $leader + @($Session.Unshare) }
+    return [pscustomobject]@{
+        FilePath = $Session.Setsid
+        Arguments = @('--wait', '/bin/sh', $Session.Helper) + $lead + @($FilePath) + @($Arguments)
+    }
+}
+
+function Stop-ReviewProcessSession {
+    [CmdletBinding()]
+    param($Session)
+
+    if ($null -eq $Session) { return }
+    & /bin/sh $Session.Helper finish $Session.LeaderFile $Session.DoneFile $PID $Session.Mark 2> $null | Out-Null
+}
+
 function Invoke-ReviewBackendProcess {
     [CmdletBinding()]
     param(
@@ -1514,10 +1929,18 @@ function Invoke-ReviewBackendProcess {
     }
 
     $exitCode = -1
+    $session = $null
     try {
         Push-Location -LiteralPath $Command.WorkingDirectory
         try {
-            $arguments = @($Command.Arguments)
+            $session = Start-ReviewProcessSession -ScratchDirectory $ScratchDirectory
+            $commandLine = Get-ReviewSessionCommandLine -Session $session -FilePath $Command.FilePath -Arguments @($Command.Arguments) -StdoutPath $stdoutPath -StderrPath $stderrPath
+            # In a session the leader writes the command's output to the files itself, so no descendant holds a pipe
+            # that pwsh waits on; pwsh keeps only setsid's own messages.
+            $outPath = $(if ($null -ne $session) { $session.WrapperOutputFile } else { $stdoutPath })
+            $errPath = $(if ($null -ne $session) { $session.WrapperErrorFile } else { $stderrPath })
+            $filePath = $commandLine.FilePath
+            $arguments = @($commandLine.Arguments)
             $previousErrorActionPreference = $ErrorActionPreference
             # Native pipeline encoding is read from the global preference in
             # Windows PowerShell 5.1; a function-local assignment is ignored.
@@ -1540,9 +1963,9 @@ function Invoke-ReviewBackendProcess {
                     Set-ProcessEnvironmentSnapshot -Environment $Command.Environment
                 }
                 if ($null -ne $Command.InputText) {
-                    $Command.InputText | & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
+                    $Command.InputText | & $filePath @arguments 1> $outPath 2> $errPath
                 } else {
-                    & $Command.FilePath @arguments 1> $stdoutPath 2> $stderrPath
+                    & $filePath @arguments 1> $outPath 2> $errPath
                 }
             } finally {
                 $ErrorActionPreference = $previousErrorActionPreference
@@ -1560,6 +1983,17 @@ function Invoke-ReviewBackendProcess {
         }
     } catch {
         $_ | Out-String | Out-File -LiteralPath $stderrPath -Append -Encoding utf8
+    } finally {
+        # Kill whatever the command left running (#910), whether it exited, failed or was stopped.
+        Stop-ReviewProcessSession -Session $session
+        if ($null -ne $session) {
+            foreach ($wrapperPath in @($session.WrapperOutputFile, $session.WrapperErrorFile)) {
+                if (-not (Test-Path -LiteralPath $wrapperPath)) { continue }
+                $wrapperText = [string](Get-Content -Raw -LiteralPath $wrapperPath)
+                if ($wrapperText) { $wrapperText | Out-File -LiteralPath $stderrPath -Append -Encoding utf8 -NoNewline }
+                Remove-Item -LiteralPath $wrapperPath -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
     $stdout = ''
@@ -1713,7 +2147,7 @@ function Get-PullRequestReviewRefs {
         throw "gh pr view $PrNumber did not return review refs: $(([string]$attempt.Stderr).Trim())"
     }
     try {
-        $data = ([string]$attempt.Stdout) | ConvertFrom-Json
+        $data = ConvertFrom-ReviewJson -Json ([string]$attempt.Stdout)
     } catch {
         throw "gh pr view $PrNumber did not return review refs: $(([string]$attempt.Stderr).Trim())"
     }
@@ -1736,6 +2170,30 @@ function Get-PullRequestReviewRefs {
     return [pscustomobject]@{
         HeadSha = $sha.Trim().ToLowerInvariant()
         BaseRef = $baseRef
+    }
+}
+
+function Resolve-ReviewExpectedHeadSha {
+    # REVIEW_HEAD_SHA: the PR head the workflow looked up when it started, checked out and attached its check run to
+    # (#975). Empty when an older workflow or a manual run does not pin one.
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Sha)
+
+    if ([string]::IsNullOrWhiteSpace($Sha)) { return '' }
+    $value = $Sha.Trim().ToLowerInvariant()
+    if (-not (Test-GitObjectId -Sha $value)) { throw 'REVIEW_HEAD_SHA must be a full commit SHA.' }
+    return $value
+}
+
+function Assert-ReviewHeadUnmoved {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$ExpectedHeadSha,
+        [Parameter(Mandatory = $true)][string]$HeadSha
+    )
+
+    if (-not [string]::IsNullOrEmpty($ExpectedHeadSha) -and $HeadSha -ne $ExpectedHeadSha) {
+        throw "The PR head moved from $ExpectedHeadSha to $HeadSha since this run started; not reviewing. Dispatch the review again."
     }
 }
 
@@ -1805,7 +2263,7 @@ function ConvertFrom-ReviewGitHubJson {
     param([Parameter(Mandatory = $true)]$Attempt, [Parameter(Mandatory = $true)][string]$What)
 
     if ($Attempt.ExitCode -ne 0) { throw "could not read $What`: $(([string]$Attempt.Stderr).Trim())" }
-    try { return (([string]$Attempt.Stdout) | ConvertFrom-Json) }
+    try { return (ConvertFrom-ReviewJson -Json ([string]$Attempt.Stdout)) }
     catch { throw "could not parse $What" }
 }
 
@@ -2106,7 +2564,7 @@ function Get-LastReviewedSha {
         $raw = ([string]$attempt.Stdout).Trim()
         if ([string]::IsNullOrWhiteSpace($raw) -or $raw -eq '[]') { break }
         try {
-            $parsed = $raw | ConvertFrom-Json
+            $parsed = ConvertFrom-ReviewJson -Json $raw
         } catch {
             return [pscustomobject]@{ Sha = ''; BaseRef = '' }
         }
@@ -2143,11 +2601,15 @@ function Get-ReviewCoverage {
         [Parameter(Mandatory = $true)][string]$PrNumber,
         [Parameter(Mandatory = $true)][string]$Workspace,
         [Parameter(Mandatory = $true)][string]$ScratchDirectory,
-        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
+        [AllowEmptyString()][string]$ExpectedHeadSha = $env:REVIEW_HEAD_SHA
     )
 
+    $expectedHead = Resolve-ReviewExpectedHeadSha -Sha $ExpectedHeadSha
     $refs = Get-PullRequestReviewRefs -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
     $headSha = [string]$refs.HeadSha
+    # The marker must name the commit the check run is on, so a pinned run reviews that head or nothing.
+    Assert-ReviewHeadUnmoved -ExpectedHeadSha $expectedHead -HeadSha $headSha
     $currentBaseRef = [string]$refs.BaseRef
     $lastReview = Get-LastReviewedSha -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Repository $Repository
     $lastSha = [string]$lastReview.Sha
@@ -2201,6 +2663,12 @@ function Get-ReviewCoverage {
         $diff = Get-ReviewDiff -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
         $aheadBy = 0
         $lineCount = 0
+        if (-not [string]::IsNullOrEmpty($expectedHead)) {
+            # gh pr diff answers for whatever the head is now; a push since the lookup would put a newer diff
+            # under this SHA's marker. The incremental diff above is already pinned to $headSha.
+            $after = Get-PullRequestReviewRefs -PrNumber $PrNumber -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+            Assert-ReviewHeadUnmoved -ExpectedHeadSha $expectedHead -HeadSha ([string]$after.HeadSha)
+        }
     }
 
     return [pscustomobject]@{
@@ -2421,6 +2889,407 @@ function Add-ReviewDiffContext {
     return (Format-ReviewDiffPrompt -Prompt $Prompt -Embedding $embedding)
 }
 
+function Get-ReviewRuleHitLines {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+
+    # The 0-based lines of $Text that hold a match of a path, credential or token rule in any scan form of
+    # the whole text, as Get-ReviewRuleHits reads it: the same forms, masking and URL segmenting, split line
+    # by line. A match may need context from another line (a reference definition anywhere drops every
+    # bracket), so scanning each line alone can miss it. Returns $null when a form does not keep the raw
+    # text's lines, since a form line then does not name a raw line. A line tested on its own loses only
+    # what lies before it, which can add a match but never hide one.
+    $lineCount = @($Text -split "`n").Count
+    $hitLines = New-Object 'System.Collections.Generic.HashSet[int]'
+    $rules = @(Get-ReviewRedactionRules)
+    $mark = {
+        param([string]$FormText, [string[]]$Patterns)
+        $formLines = @($FormText -split "`n")
+        if ($formLines.Count -ne $lineCount) { return $false }
+        for ($i = 0; $i -lt $formLines.Count; $i++) {
+            foreach ($pattern in $Patterns) { if ([regex]::IsMatch($formLines[$i], $pattern)) { [void]$hitLines.Add($i); break } }
+        }
+        return $true
+    }
+    $unmasked = @($script:ReviewAbsoluteRootPattern) + @($rules | Where-Object { -not $_.Maskable } | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
+    $maskable = @($rules | Where-Object { $_.Maskable } | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
+    foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
+        if (-not (& $mark $form.Text $unmasked)) { return $null }
+    }
+    $maskedText = Remove-ReviewRepositoryCitations -Text $Text -Paths $KnownPaths
+    foreach ($form in (Get-ReviewNamedScanForms -Text $maskedText)) {
+        if (-not (& $mark (Remove-ReviewRepositoryCitations -Text $form.Text -Paths $KnownPaths) @($script:ReviewProfileSegmentPattern))) { return $null }
+    }
+    $segmented = [regex]::Replace($maskedText, '(?i)\bhttps?://[^\s<>"`?#]+', { param($url) $url.Value.Replace('/', ' ') })
+    foreach ($form in (Get-ReviewNamedScanForms -Text $segmented)) {
+        if (-not (& $mark (Remove-ReviewRepositoryCitations -Text $form.Text -Paths $KnownPaths) $maskable)) { return $null }
+    }
+    return , $hitLines
+}
+
+function Remove-ReviewSuppliedMarkers {
+    param([AllowEmptyString()][string]$Text)
+
+    # The review text with every HTML comment that names agent-review removed, in any spelling, case or
+    # spacing, in a code span or not. Only the job writes review markers (Write-ReviewResult), so nothing
+    # the reviewer wrote can be read back as one, whatever the scan makes of it. Removal repeats until
+    # nothing changes, so pieces left around a removed comment cannot join into a new one. Only a comment
+    # that opens and closes on one line is removed. One that crosses a line or never closes fails closed:
+    # its opener may sit in a code span, where GitHub shows it and everything after it, so removing it
+    # could silently drop findings from a review published as complete.
+    $marker = '(?i)agent\W*review'
+    $comment = [regex]$script:ReviewHtmlCommentPattern
+    do {
+        $before = $Text
+        $Text = $comment.Replace($Text, { param($m) if ($m.Value -match $marker -and $m.Value -notmatch '[\r\n]' -and $m.Value -match '--!?>\z') { '' } else { $m.Value } })
+    } while ($Text -cne $before)
+    foreach ($m in $comment.Matches($Text)) {
+        if ($m.Value -match $marker) {
+            Write-Warning 'Publication safety scan: a review marker comment in the review text crosses a line or never closes, so it cannot be removed.'
+            throw $script:ReviewPublicationFailure
+        }
+    }
+    return $Text
+}
+
+function Get-ReviewDefinitionState {
+    param([AllowEmptyString()][string]$Rest)
+
+    # What may follow a link reference definition whose destination, and maybe a title, is $Rest:
+    # 'maybe-title' (a title may come on the next line), 'title:<close>' (a title is still open) or ''
+    # (the definition is complete).
+    $parts = [regex]::Match($Rest, '^[ \t]*(?:<[^>]*>|\S+)(?:[ \t]+(["''(])(.*))?$')
+    if (-not $parts.Success -or -not $parts.Groups[1].Success) { return 'maybe-title' }
+    $close = $(if ($parts.Groups[1].Value -eq '(') { ')' } else { $parts.Groups[1].Value })
+    if ($parts.Groups[2].Value.TrimEnd().EndsWith($close)) { return '' }
+    return "title:$close"
+}
+
+function Measure-ReviewSubstantiveLines {
+    param([AllowEmptyString()][string]$Text)
+
+    # The number of lines of $Text that say something a reader can see. Outside literal code, HTML
+    # comments, tags and elements GitHub never shows with their text (script, style and the like) go first,
+    # across lines, entities are decoded, then on each line every container marker (quote, list and task
+    # markers, nested and empty, with or without text after them). A line left as a heading (# or
+    # underlined), a fence delimiter or part of a link reference or footnote definition says nothing; any
+    # other line counts when it still holds a letter or digit. A review left with only formatting (rules,
+    # table delimiters, emphasis, empty lists) is no review.
+    # Literal code shows its text, markup included, so its <, > and & become spaces before markup goes:
+    # every line inside a fenced block, and each inline code span on one line (an opener after a
+    # backslash opens none).
+    $literal = New-Object System.Collections.Generic.List[string]
+    $fence = ''
+    foreach ($line in ($Text -split "`r?`n")) {
+        $open = [regex]::Match($line, '^[ \t]*(?:(?:>|[-*+]|[0-9]{1,9}[.)])[ \t]*)*(`{3,}|~{3,})')
+        if ($fence) {
+            if ($open.Success -and $open.Groups[1].Value[0] -eq $fence[0] -and $open.Groups[1].Length -ge $fence.Length -and $line -match '^[^`~]*[`~]+[ \t]*$') { $fence = '' }
+            else { $line = $line -replace '[<>&]', ' ' }
+        } elseif ($open.Success -and -not ($open.Groups[1].Value[0] -eq '`' -and $line.Substring($open.Index + $open.Length).Contains('`'))) {
+            $fence = $open.Groups[1].Value
+        } else {
+            $line = [regex]::Replace($line, '(?<![\\`])(`+)(?!`)(.+?)(?<!`)\1(?!`)', { param($m) $m.Groups[1].Value + ($m.Groups[2].Value -replace '[<>&]', ' ') + $m.Groups[1].Value })
+        }
+        $literal.Add($line)
+    }
+    $visible = [regex]::Replace(($literal -join "`n"), $script:ReviewHtmlCommentPattern, '')
+    $visible = [regex]::Replace($visible, '(?i)<(script|style|textarea|title|template)\b[\s\S]*?(?:</\1[^>]*>|\z)', '')
+    $visible = [regex]::Replace($visible, '</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:"[^"]*"|''[^'']*''|[^<>"''])*)?/?>|<![A-Za-z\[][^>]*>|<\?[\s\S]*?(?:\?>|\z)', '')
+    # Entities count by what they render (&nbsp is a space with or without its semicolon, &#65; a letter).
+    # Invisible characters, among them the Hangul filler letters (U+115F, U+1160, U+3164, U+FFA0), render
+    # as nothing, raw or as references, so they go once decoded.
+    $visible = ConvertFrom-ReviewEntities -Text ([regex]::Replace($visible, '!?\[[ \t]*\]\([^)]*\)', ''))
+    $visible = $visible -replace $script:ReviewInvisiblePattern, ''
+    $count = 0
+    $definition = ''
+    $lines = @($visible -split "`r?`n")
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        # A line over an = or - underline is a setext heading, in a quote or a list item too. Only a list
+        # item over an unindented dash line is not: that line is a rule after the list.
+        if ($i + 1 -lt $lines.Count) {
+            $current = $line -replace '^(?:[ \t]*>)+', ''
+            $next = $lines[$i + 1] -replace '^(?:[ \t]*>)+', ''
+            if ($current -match '\S' -and $next -match '^[ \t]*(?:=+|-+)[ \t]*$') {
+                $listItem = $current -match '^[ \t]*(?:[-*+]|[0-9]{1,9}[.)])(?:[ \t]|$)'
+                if (-not ($listItem -and $next -match '^[-=]')) { continue }
+            }
+        }
+        $indented = ($line -replace '^(?:[ \t]{0,3}>)+', '') -match '^(?: {4}|\t)'
+        do {
+            $before = $line
+            $line = $line -replace '^[ \t]*(?:>|[-*+](?=[ \t]|$)|[0-9]{1,9}[.)](?=[ \t]|$)|\[[ xX]\](?=[ \t]|$))', ''
+        } while ($line -cne $before)
+        # A link reference or footnote definition says nothing, and neither do the lines that continue it.
+        # A link reference definition goes on with a destination or a title on the next line, or the rest
+        # of a title spanning lines, and ends there, at a blank line, or at any other line, which is text.
+        # A footnote goes on with every line up to a blank line (a lazy continuation needs no indent), and
+        # after blank lines with every line indented as its content. It counts as nothing, referenced or not.
+        if ($line -notmatch '\S') { $definition = $(if ($definition -like 'footnote*') { 'footnote-gap' } else { '' }); continue }
+        if ($definition -eq 'footnote' -or ($definition -eq 'footnote-gap' -and $indented)) { continue }
+        if ($definition -like 'title:*') {
+            if ($line.Contains($definition.Substring(6))) { $definition = '' }
+            continue
+        }
+        if ($definition -eq 'destination') { $definition = Get-ReviewDefinitionState -Rest $line; continue }
+        if ($definition -eq 'maybe-title' -and $line -match '^[ \t]*["''(]') {
+            $definition = Get-ReviewDefinitionState -Rest ('<> ' + $line.Trim())
+            continue
+        }
+        $definition = ''
+        if ($line -match '^[ \t]*\[([^\]]*)\]:(.*)$') {
+            $label = $Matches[1]
+            $rest = $Matches[2]
+            $definition = $(if ($label.StartsWith('^')) { 'footnote' } elseif ($rest -notmatch '\S') { 'destination' } else { Get-ReviewDefinitionState -Rest $rest })
+            continue
+        }
+        if ($line -match '^[ \t]*(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,})') { continue }
+        if ($line -match '[\p{L}\p{N}]') { $count++ }
+    }
+    return $count
+}
+
+function Get-ReviewWithheldOutput {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+
+    # Each line of the review that a path, credential or token rule rejects, replaced whole (#974): a line
+    # that fails on its own, and a line that holds a match in the whole text's scan forms. A match is often
+    # only a prefix (a root or one segment), and the rest of the line may continue what it names, so the
+    # matched span alone is never enough. A list marker, quote marker and indentation are kept so the
+    # review keeps its shape. Call it only once Test-ReviewLinesCanBeWithheld passes, so no match crosses a
+    # line; the caller scans the whole result again, so nothing that fails is ever published. Returns
+    # $null when the lines cannot be told apart (Get-ReviewRuleHitLines).
+    $contextLines = Get-ReviewRuleHitLines -Text $Text -KnownPaths $KnownPaths
+    if ($null -eq $contextLines) { return $null }
+    $lines = @($Text -split "`r?`n")
+    $withheld = New-Object System.Collections.Generic.List[int]
+    $kept = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ([string]::IsNullOrWhiteSpace($lines[$i])) { $kept.Add(''); continue }
+        if (-not $contextLines.Contains($i) -and @(Get-ReviewRuleHits -Text $lines[$i] -KnownPaths $KnownPaths).Count -eq 0) {
+            $kept.Add($lines[$i])
+            continue
+        }
+        $kept.Add('')
+        $prefix = [regex]::Match($lines[$i], '^[ \t]*(?:>[ \t]*)*(?:(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)?').Value
+        $lines[$i] = $prefix + $script:ReviewWithheldLine
+        $withheld.Add($i + 1)
+    }
+    # KeptLines counts only the kept lines that say something, read together (Measure-ReviewSubstantiveLines).
+    $keptCount = Measure-ReviewSubstantiveLines -Text ($kept -join "`n")
+    return [pscustomobject]@{ Text = ($lines -join "`n"); Lines = @($withheld.ToArray()); KeptLines = $keptCount }
+}
+
+function Get-ReviewHtml5EntityTable {
+    # The HTML Standard's named references (html5-entities.tsv beside this script, Python's
+    # html.entities.html5), name to the characters HTML5 renders, loaded once: each name with its
+    # semicolon, and the legacy names HTML5 also reads without one. $null when the file cannot be read, so
+    # a caller that needs it fails closed.
+    if ($null -eq $script:ReviewHtml5EntityTable) {
+        try {
+            $table = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+            foreach ($line in [System.IO.File]::ReadAllLines($script:ReviewHtml5EntityTablePath)) {
+                $fields = $line.TrimEnd("`r").Split("`t")
+                if ($fields.Count -ne 2) { throw 'malformed entity table' }
+                $table[$fields[0]] = -join @($fields[1].Split(' ') | ForEach-Object { [char]::ConvertFromUtf32([Convert]::ToInt32($_, 16)) })
+            }
+            if ($table.Count -eq 0) { throw 'empty entity table' }
+            $script:ReviewHtml5LegacyNames = @($table.Keys | Where-Object { -not $_.EndsWith(';') } | Sort-Object { $_.Length } -Descending)
+            $script:ReviewHtml5EntityTable = $table
+        } catch {
+            return $null
+        }
+    }
+    return , $script:ReviewHtml5EntityTable
+}
+
+function Get-ReviewRenderedEntityText {
+    param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)]$Table)
+
+    # What HTML5 renders &Name; as in text: the name with its semicolon if the standard has it, or else the
+    # longest legacy name that starts it followed by the rest as written (&nbspX; is a no-break space then
+    # X;), or else the reference as written.
+    if ($Table.ContainsKey("$Name;")) { return $Table["$Name;"] }
+    foreach ($legacy in $script:ReviewHtml5LegacyNames) {
+        if ($Name.StartsWith($legacy, [StringComparison]::Ordinal)) { return $Table[$legacy] + $Name.Substring($legacy.Length) + ';' }
+    }
+    return "&$Name;"
+}
+
+function Test-ReviewRejectionsOnlyFrom {
+    param([AllowEmptyString()][string]$Text, [AllowEmptyString()][string]$Body = '', [string[]]$KnownPaths = @(), [string[]]$Rules)
+
+    # True when every local rejection of $Text and of the published $Body comes from one of $Rules.
+    foreach ($scanned in @($Text, $Body)) {
+        if ([string]::IsNullOrEmpty($scanned)) { continue }
+        foreach ($hit in (Get-ReviewLocalScanHits -Text $scanned -KnownPaths $KnownPaths)) {
+            if ($hit -notmatch '^rule (\S+) ' -or $Rules -notcontains $Matches[1]) { return $false }
+        }
+    }
+    return $true
+}
+
+function Get-ReviewContentRuleNames {
+    # The path, credential and token rules, the only ones whose lines can be withheld (#974).
+    return @('absolute-root', 'profile-segment') + @(Get-ReviewRedactionRules | ForEach-Object { $_.Name })
+}
+
+function Test-ReviewRuleMatchesStayOnLines {
+    param([AllowEmptyString()][string]$Text)
+
+    # True when every scan form keeps the raw text's lines and no path, credential or token rule match in
+    # any form crosses a line break (Test-ReviewLinesCanBeWithheld).
+    # Listing matches is not enough: they never overlap, so a crossing match that starts inside an earlier
+    # one is skipped. Instead, for each line break, one anchored search asks whether any match can start
+    # on the line before it and end past it, and backtracking tries every start and every way to match.
+    # A match that crosses lines crosses its first line break, so the line before it holds the start.
+    # The search reads from that line's start, so the rule sees no text before it: that can only add
+    # matches, never hide one.
+    $patterns = @($script:ReviewAbsoluteRootPattern, $script:ReviewProfileSegmentPattern) + @(Get-ReviewRedactionRules | ForEach-Object { Get-ReviewPublishPattern -Rule $_ })
+    $lineCount = @($Text -split "`n").Count
+    $crossing = @($patterns | ForEach-Object { '\A[^\n]*?(?:' + $_ + ')(?<=\n[\s\S]*)' })
+    foreach ($form in (Get-ReviewNamedScanForms -Text $Text)) {
+        if (@($form.Text -split "`n").Count -ne $lineCount) { return $false }
+        $start = 0
+        while (($break = $form.Text.IndexOf("`n", $start)) -ge 0) {
+            $rest = $form.Text.Substring($start)
+            foreach ($pattern in $crossing) { if ([regex]::IsMatch($rest, $pattern)) { return $false } }
+            $start = $break + 1
+        }
+    }
+    return $true
+}
+
+function Get-ReviewEscapeHitLines {
+    param([AllowEmptyString()][string]$Text, [int[]]$Lines, [string[]]$KnownPaths = @())
+
+    # The 0-based lines of $Text a path, credential or token rule matches, read as Get-ReviewWithheldOutput
+    # reads them: in the whole text's scan forms, and each of $Lines (1-based) on its own. $null when the
+    # forms do not keep the raw text's lines.
+    $hitLines = Get-ReviewRuleHitLines -Text $Text -KnownPaths $KnownPaths
+    if ($null -eq $hitLines) { return $null }
+    $textLines = @($Text -split "`n")
+    foreach ($number in $Lines) {
+        if (@(Get-ReviewRuleHits -Text $textLines[$number - 1] -KnownPaths $KnownPaths).Count -gt 0) { [void]$hitLines.Add($number - 1) }
+    }
+    return , $hitLines
+}
+
+function Get-ReviewEscapedEntityOutput {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @())
+
+    # $Text with each named reference the unknown-entity rule rejects rewritten as plain text (#998). A
+    # review of a pull request about HTML entities quotes them (`&NoBreak;`, or `&amp;nbsp;`, which decodes
+    # to one), and GitHub may render such a reference as characters the scan never sees, so the rule
+    # rejects it. Escaped, the raw text that spelled the reference becomes (entity: NoBreak), which every
+    # form reads as it is, so nothing is left for GitHub to render differently. Returns the text, the
+    # count, and the line numbers that held one; Count is 0 when nothing matched.
+    # Escaping must never print pieces of what the reference sat in, so the text is first read as GitHub
+    # would render it: each reference as HTML5 renders it in text (Get-ReviewRenderedEntityText), and, as a
+    # second reading, as nothing. Every line a path, credential or token rule matches in
+    # either reading, in the whole text or on its own, must still match once escaped, so that it is
+    # withheld whole afterwards (#974), and no match in either reading may cross a line break.
+    # Returns $null, so the caller fails closed as before, when one does not hold, when the entity table
+    # cannot be read, or when the scan's decoding cannot be mapped back to the raw text exactly.
+    $map = Get-ReviewEntityDecodedMap -Text $Text
+    if ($null -eq $map) { return $null }
+    $found = [regex]::Matches($map.Text, $script:ReviewUnknownEntityPattern)
+    if ($found.Count -eq 0) { return [pscustomobject]@{ Text = $Text; Count = 0; Lines = @() } }
+    $entities = Get-ReviewHtml5EntityTable
+    if ($null -eq $entities) { return $null }
+    $escaped = New-Object System.Text.StringBuilder
+    $rendered = New-Object System.Text.StringBuilder
+    $removed = New-Object System.Text.StringBuilder
+    $lineNumbers = New-Object System.Collections.Generic.SortedSet[int]
+    $position = 0
+    foreach ($reference in $found) {
+        $first = $reference.Index
+        $last = $reference.Index + $reference.Length - 1
+        $start = $map.Starts[$first]
+        $end = $map.Ends[$last]
+        # The raw span must spell this reference and nothing beside it: not a neighbouring character, not a
+        # second reference, and not a line break.
+        if ($start -lt $position -or ($first -gt 0 -and $map.Ends[$first - 1] -gt $start) -or ($last + 1 -lt $map.Text.Length -and $map.Starts[$last + 1] -lt $end)) { return $null }
+        if ($Text.Substring($start, $end - $start).Contains("`n")) { return $null }
+        $name = $reference.Value.Substring(1, $reference.Length - 2)
+        $meaning = Get-ReviewRenderedEntityText -Name $name -Table $entities
+        $before = $Text.Substring($position, $start - $position)
+        [void]$escaped.Append($before).Append($script:ReviewEscapedEntityFormat -f $name)
+        [void]$rendered.Append($before).Append($meaning)
+        [void]$removed.Append($before)
+        [void]$lineNumbers.Add($Text.Substring(0, $start).Split("`n").Count)
+        $position = $end
+    }
+    $rest = $Text.Substring($position)
+    $escapedText = $escaped.Append($rest).ToString()
+    $lines = @($lineNumbers)
+    $escapedHits = Get-ReviewEscapeHitLines -Text $escapedText -Lines $lines -KnownPaths $KnownPaths
+    if ($null -eq $escapedHits) { return $null }
+    foreach ($reading in @($rendered.Append($rest).ToString(), $removed.Append($rest).ToString())) {
+        if (-not (Test-ReviewRuleMatchesStayOnLines -Text $reading)) { return $null }
+        $readingHits = Get-ReviewEscapeHitLines -Text $reading -Lines $lines -KnownPaths $KnownPaths
+        if ($null -eq $readingHits) { return $null }
+        foreach ($line in $readingHits) { if (-not $escapedHits.Contains($line)) { return $null } }
+    }
+    if ((ConvertFrom-ReviewEntities -Text $escapedText) -cmatch $script:ReviewUnknownEntityPattern) { return $null }
+    return [pscustomobject]@{ Text = $escapedText; Count = $found.Count; Lines = $lines }
+}
+
+function Test-ReviewLinesCanBeWithheld {
+    param([AllowEmptyString()][string]$Text, [string[]]$KnownPaths = @(), [AllowEmptyString()][string]$Body = '')
+
+    # True when withholding whole lines can remove every rejection in $Text. Each rejection must come from
+    # a path, credential or token rule: the other rules reject markup or characters whose reading the scan
+    # cannot settle (a tag spanning lines, math, a bidi control), so a review holding any fails closed.
+    # Each scan form must keep the raw text's lines (a link title spanning lines, or an encoded line
+    # break, would move text between them), and no rule match in any form may cross a line break. A label
+    # and its value on two lines (password = then a quoted value) cross one, so withholding either line
+    # alone would leave the other (Test-ReviewRuleMatchesStayOnLines).
+    # The published body adds lines around the review, and text after it can change what a rule reads (an
+    # unterminated tag on the last line is raw HTML once more text follows), so its rejections count too.
+    if (-not (Test-ReviewRejectionsOnlyFrom -Text $Text -Body $Body -KnownPaths $KnownPaths -Rules (Get-ReviewContentRuleNames))) { return $false }
+    return (Test-ReviewRuleMatchesStayOnLines -Text $Text)
+}
+
+function Get-ReviewUnpublishedNotice {
+    param(
+        [AllowEmptyString()][string]$HeadSha = '',
+        [AllowEmptyString()][string]$ServerUrl = $env:GITHUB_SERVER_URL,
+        [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
+        [AllowEmptyString()][string]$RunId = $env:GITHUB_RUN_ID
+    )
+
+    # The PR comment for a review that cannot be published (#974). It carries no review text and no
+    # agent-review marker, so readiness tools never count it as a review. Only validated values go in,
+    # and it holds no double quote, which Windows PowerShell drops from a native argument.
+    $subject = 'The automated review'
+    if (Test-GitObjectId -Sha $HeadSha.Trim()) { $subject = "$subject of $($HeadSha.Trim().Substring(0, 7))" }
+    $notice = "$subject was not published: its text failed the publication safety scan, which never posts absolute paths, credentials or long tokens, even with the lines it flagged withheld. No verdict was posted for this commit."
+    if ($ServerUrl -match '^https://[A-Za-z0-9.-]+$' -and $Repository -match $script:ReviewRepositoryPattern -and $RunId -match '^[0-9]{1,20}$') {
+        $notice = "$notice The workflow run log names each rule, scan form and offset: $ServerUrl/$Repository/actions/runs/$RunId"
+    }
+    return $notice
+}
+
+function Send-ReviewUnpublishedNotice {
+    param(
+        [Parameter(Mandatory = $true)][string]$PrNumber,
+        [AllowEmptyString()][string]$HeadSha = '',
+        [Parameter(Mandatory = $true)][string]$Workspace,
+        [Parameter(Mandatory = $true)][string]$ScratchDirectory
+    )
+
+    # A failed post is only a warning: the job fails on the scan either way.
+    if ($PrNumber -notmatch '^[0-9]{1,10}$') { Write-Warning 'No notice was posted: the pull request number is not valid.'; return }
+    $notice = Get-ReviewUnpublishedNotice -HeadSha $HeadSha
+    try {
+        $attempt = Invoke-ReviewGitHubCli -Arguments @('pr', 'comment', $PrNumber, '--body', $notice) -Workspace $Workspace -ScratchDirectory $ScratchDirectory -Name 'review-notice'
+        if ([int]$attempt.ExitCode -eq 0) { Write-Host 'Posted a notice on the pull request that the review was not published.' }
+        else { Write-Warning "Could not post the notice that the review was not published (gh exited with code $($attempt.ExitCode))." }
+    } catch {
+        Write-Warning 'Could not post the notice that the review was not published.'
+    }
+}
+
 function Write-ReviewResult {
     [CmdletBinding()]
     param(
@@ -2433,7 +3302,9 @@ function Write-ReviewResult {
         [AllowEmptyString()][string]$Workspace = '',
         [string[]]$DiffPaths = @(),
         [AllowEmptyString()][string]$Repository = $env:GITHUB_REPOSITORY,
-        [bool]$PublishMarker = $true
+        [bool]$PublishMarker = $true,
+        # When the body fails the scan, withhold each line that fails on its own and scan the rest again (#974).
+        [switch]$WithholdUnsafeLines
     )
 
     # Remove a stale body before checking this attempt. The workflow skips posting on failure.
@@ -2464,8 +3335,81 @@ function Write-ReviewResult {
             $marker += "`r`n<!-- agent-review: sha=$($HeadSha.Trim()) criteria=$([int]$met)/$([int]$total) findings=$([int]$Result.FindingCount) -->"
         }
     }
-    $body = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**." -f $CoverageLine.Trim(), $Result.Output.Trim(), $label
-    Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+    $format = "{0}`r`n`r`n{1}`r`n`r`n---`r`nAutomated review backend: **{2}**."
+    # Only this function writes review markers: any the reviewer's text carries go before the scan (#974).
+    $output = Remove-ReviewSuppliedMarkers -Text $Result.Output
+    if ($output -cne $Result.Output) { Write-Host 'Removed review markers from the review text; only the job writes them.' }
+    $output = $output.Trim()
+    if ($WithholdUnsafeLines) {
+        $Result | Add-Member -NotePropertyName WithheldLines -NotePropertyValue 0 -Force
+        $Result | Add-Member -NotePropertyName EscapedEntities -NotePropertyValue 0 -Force
+    }
+    $body = $format -f $CoverageLine.Trim(), $output, $label
+    try {
+        Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+    } catch {
+        if (-not $WithholdUnsafeLines -or $_.Exception.Message -ne $script:ReviewPublicationFailure) { throw }
+        $knownPaths = @()
+        if ($Workspace -or $DiffPaths.Count -gt 0) { $knownPaths = @(Get-ReviewRepositoryPaths -Workspace $Workspace -DiffPaths $DiffPaths) }
+        # Entity references the scan cannot decode are escaped as plain text first (#998). Only their spelling
+        # changes, never a finding or criterion, so a review that then passes keeps its marker and verdict.
+        $escapedNote = ''
+        $escape = $null
+        # Escaping can change how other text reads (it may end a tag), so it runs only when every rejection
+        # of the review and of the body is an unknown entity or a path, credential or token rule.
+        if (Test-ReviewRejectionsOnlyFrom -Text $output -Body $body -KnownPaths $knownPaths -Rules (@('unknown-entity') + (Get-ReviewContentRuleNames))) {
+            $escape = Get-ReviewEscapedEntityOutput -Text $output -KnownPaths $knownPaths
+        }
+        if ($null -ne $escape -and $escape.Count -gt 0) {
+            $references = $(if ($escape.Count -eq 1) { '1 entity reference' } else { "$($escape.Count) entity references" })
+            $where = $(if ($escape.Lines.Count -eq 1) { "line $($escape.Lines[0])" } else { "lines $($escape.Lines -join ', ')" })
+            Write-Host "Publication safety scan: escaped $references ($where) as plain text; scanning the review again."
+            $output = $escape.Text
+            $escapedNote = "`n`n_The publication safety scan escaped $references in this review as plain text, shown as (entity: name), because GitHub could render them as characters the scan cannot check._"
+            $Result | Add-Member -NotePropertyName EscapedEntities -NotePropertyValue $escape.Count -Force
+            $body = $format -f $CoverageLine.Trim(), "$output$escapedNote", $label
+            try {
+                Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+                Write-Host "Publication safety scan: the review passed with $references escaped and is posted with its marker."
+                $body += $marker
+                $body | Out-File -LiteralPath $OutputPath -Encoding utf8
+                return
+            } catch {
+                if ($_.Exception.Message -ne $script:ReviewPublicationFailure) { throw }
+            }
+        }
+        if (-not (Test-ReviewLinesCanBeWithheld -Text $output -KnownPaths $knownPaths -Body $body)) {
+            Write-Warning 'Publication safety scan: a rejection is not a path, credential or token on one line, so no line can be withheld.'
+            throw
+        }
+        $withheld = Get-ReviewWithheldOutput -Text $output -KnownPaths $knownPaths
+        if ($null -eq $withheld) {
+            Write-Warning 'Publication safety scan: a scan form moves text between lines, so no line can be withheld.'
+            throw
+        }
+        $count = $withheld.Lines.Count
+        if ($count -eq 0) {
+            Write-Warning 'Publication safety scan: no single line of the review fails on its own, so none could be withheld.'
+            throw
+        }
+        $numbers = $withheld.Lines -join ', '
+        $described = $(if ($count -eq 1) { "1 line of the review (line $numbers)" } else { "$count lines of the review (lines $numbers)" })
+        if ($withheld.KeptLines -eq 0) {
+            Write-Warning "Publication safety scan: withholding $described would leave no review content, so it is not published."
+            throw
+        }
+        Write-Host "Publication safety scan: withheld $described; scanning the rest again."
+        $note = $(if ($count -eq 1) { '1 line' } else { "$count lines" })
+        $output = "$($withheld.Text)$escapedNote`n`n_The publication safety scan withheld $note of this review that held text it never posts, such as an absolute path, a credential or a long token. The workflow run log gives the line numbers. With lines withheld this review is incomplete, so it carries no review marker and readiness tools do not count it._"
+        $body = $format -f $CoverageLine.Trim(), $output, $label
+        Assert-ReviewOutputSafe -Text $body -Workspace $Workspace -DiffPaths $DiffPaths -Repository $Repository
+        Write-Host "Publication safety scan: the rest of the review passed and is posted with $note withheld, as incomplete and without its marker."
+        # Withheld lines may hold criteria or findings, so the counts in the markers no longer describe what
+        # is published. Without a marker, readiness tools never count the review and the next run reviews
+        # the whole PR again.
+        $marker = ''
+        $Result | Add-Member -NotePropertyName WithheldLines -NotePropertyValue $count -Force
+    }
     # The marker contains validated Git metadata; its SHA intentionally resembles a long token.
     $body += $marker
     $body | Out-File -LiteralPath $OutputPath -Encoding utf8
@@ -2489,7 +3433,8 @@ function Invoke-ReviewMain {
     if ([string]::IsNullOrWhiteSpace($PrNumber)) { throw 'PR_NUMBER is required' }
     if ([string]::IsNullOrWhiteSpace($Prompt)) { throw 'REVIEW_PROMPT is required' }
     if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { $ScratchDirectory = $env:TEMP }
-    if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { throw 'RUNNER_TEMP or TEMP is required' }
+    if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { $ScratchDirectory = $env:TMPDIR }
+    if ([string]::IsNullOrWhiteSpace($ScratchDirectory)) { throw 'RUNNER_TEMP, TEMP or TMPDIR is required' }
     if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = Join-Path $Workspace 'review-output.md' }
 
     Assert-ReviewModelConfiguration
@@ -2514,16 +3459,32 @@ function Invoke-ReviewMain {
     $publishMarker = (@($embedding.OmittedFiles).Count -eq 0)
     $coverageLine = $coverage.CoverageLine
     if (-not $publishMarker) { $coverageLine = Get-ReviewOmissionCoverageLine -Embedding $embedding }
-    Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -Workspace $Workspace -DiffPaths @($embedding.FilePaths) -PublishMarker:$publishMarker
+    try {
+        Write-ReviewResult -Result $result -OutputPath $OutputPath -CoverageLine $coverageLine -HeadSha $coverage.HeadSha -Mode $coverage.Mode -BaseRef $coverage.BaseRef -Workspace $Workspace -DiffPaths @($embedding.FilePaths) -PublishMarker:$publishMarker -WithholdUnsafeLines
+    } catch {
+        # The job posts nothing once this step fails, so the PR is told here why no review came (#974).
+        if ($_.Exception.Message -eq $script:ReviewPublicationFailure) {
+            Send-ReviewUnpublishedNotice -PrNumber $PrNumber -HeadSha $coverage.HeadSha -Workspace $Workspace -ScratchDirectory $ScratchDirectory
+        }
+        throw
+    }
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_OUTPUT)) {
         "backend=$($result.Backend)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         $verdictValue = if ($result.PSObject.Properties['Verdict']) { [string]$result.Verdict } else { '' }
+        # A review published with lines withheld is incomplete: never report its clean or findings verdict.
+        $withheldLines = if ($result.PSObject.Properties['WithheldLines']) { [int]$result.WithheldLines } else { 0 }
+        if ($withheldLines -gt 0) {
+            $verdictValue = 'incomplete'
+            "withheld_lines=$withheldLines" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+        }
+        $escapedEntities = if ($result.PSObject.Properties['EscapedEntities']) { [int]$result.EscapedEntities } else { 0 }
+        if ($escapedEntities -gt 0) { "escaped_entities=$escapedEntities" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8 }
         $findingValue = if ($result.PSObject.Properties['FindingCount']) { [string]$result.FindingCount } else { '' }
         "verdict=$verdictValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "findings=$findingValue" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         "omitted_files=$(@($embedding.OmittedFiles).Count)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-        if ($result.PSObject.Properties['CriteriaTotal'] -and $null -ne $result.CriteriaTotal) {
+        if ($withheldLines -eq 0 -and $result.PSObject.Properties['CriteriaTotal'] -and $null -ne $result.CriteriaTotal) {
             "criteria=$([int]$result.CriteriaMet)/$([int]$result.CriteriaTotal)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
         }
         if (-not [string]::IsNullOrWhiteSpace([string]$result.Model)) {

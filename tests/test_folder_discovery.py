@@ -225,7 +225,20 @@ def test_registry_has_only_dedicated_owner_settings(tmp_path, monkeypatch):
         service.patch_admin({'remote_control.discovery.enabled': True}, 0)
 
 
+class _WindowsSys:
+    """A `sys` stand-in that reports win32, for a single module (#973): Windows-only settings become available
+    without sending the whole process down its Windows paths (which patching `sys.platform` itself would)."""
+
+    platform = "win32"
+
+    def __getattr__(self, name):
+        return getattr(sys, name)
+
+
 def test_stale_root_does_not_block_unrelated_settings(tmp_path, monkeypatch):
+    import harness.settings as settings_module
+
+    monkeypatch.setattr(settings_module, 'sys', _WindowsSys())
     cfg = make_cfg(tmp_path)
     service = SettingsService(cfg)
     calls = []
@@ -683,3 +696,24 @@ async def test_configured_folder_vanishing_after_launch_returns_unavailable_view
     view = await rc.launch('proj')
     assert view['invalid'] == 'directory_unavailable' and view['running']
     assert view['pairing_url'] == 'https://claude.ai/code/x'
+
+
+def test_sensitive_paths_cover_every_credential_files_folder(tmp_path):
+    """Each owner-registered credential file's folder is excluded from discovery, read with Windows path rules on any
+    host (#973)."""
+    from harness_modules.remote_control.discovery_paths import sensitive_paths
+
+    cfg = make_cfg(tmp_path)
+    cfg.provider_secret_files = {"provider": "C:\\keys\\provider\\secret.txt"}
+    cfg.backends = {"remote": SimpleNamespace(api_key_file="C:\\keys\\backend\\api.txt",
+                                              token_file="D:\\tokens\\backend\\token.txt")}
+    cfg.notify.token_file = "C:\\keys\\notify\\token.txt"
+    cfg.skills.reviewer_api_key_file = "C:\\keys\\reviewer\\key.txt"
+    cfg.runners = {"mac": SimpleNamespace(token_file="C:\\keys\\runner\\token.txt")}
+    cfg.github.token_file = "C:\\keys\\github\\token.txt"
+
+    paths = sensitive_paths(cfg)
+
+    for folder in ("C:\\keys\\provider", "C:\\keys\\backend", "D:\\tokens\\backend", "C:\\keys\\notify",
+                   "C:\\keys\\reviewer", "C:\\keys\\runner", "C:\\keys\\github"):
+        assert folder in paths, folder

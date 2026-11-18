@@ -49,6 +49,21 @@ def test_health_and_metrics_answer_without_a_token(harness):
     assert client.get("/metrics").status_code == 200
 
 
+def test_the_app_discovery_document_answers_without_a_credential_and_nothing_else_does(harness):
+    """#909: docs/app-api.md says `GET /api/v1` needs no token, and an App such as the Financial Planner reads it before
+    it sends its App token. Only that exact document opens; every other App route still needs a credential."""
+    client, _ = harness
+    root = client.get("/api/v1")
+    assert root.status_code == 200
+    assert root.json()["server"] == "agent-harness"
+    assert root.json()["projects"] == []
+    assert client.head("/api/v1").status_code != 401
+    for path in ("/api/v1/backends", "/api/v1/projects", "/api/v1/sessions", "/api/v1/me", "/api/admin/v1",
+                 "/api/admin/v1/keys", "/me"):
+        assert client.get(path).status_code == 401, path
+    assert client.post("/api/v1").status_code == 401
+
+
 def test_an_empty_identity_header_counts_as_no_identity(harness):
     client, m = harness
     assert client.get("/me", headers={"Tailscale-User-Login": ""}).status_code == 401

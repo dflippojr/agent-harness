@@ -9767,7 +9767,7 @@
     },
     "/api/v1/backends": {
       "get": {
-        "description": "Each configured backend's availability, login state, limits and usage; some callers see only the local backend.",
+        "description": "The local model and each configured backend: availability, login state, limits and usage; members see only the local model.",
         "operationId": "backends_api_v1_backends_get",
         "responses": {
           "200": {

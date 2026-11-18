@@ -274,6 +274,8 @@ class Runner:
         self.scheduler = scheduler
         self.chat = chat
         self.approval_events: dict[str, asyncio.Event] = {}
+        # Per recovered session: the approvals a restart left unanswered, the only ones a regenerated request binds to.
+        self._recovery_unanswered: dict[str, set[str]] = {}
         self.user_cancelled: set[str] = set()
         self._unended: set[str] = set()  # live runs whose _end_run has not started
         self._sandboxes: dict[str, Sandbox] = {}
@@ -1022,22 +1024,24 @@ class Runner:
             message = str(e)
             code = (TOOLS_ONLY_UNSUPPORTED if isinstance(e, ToolsOnlyUnsupported)
                     else e.code or self._cli_failure_code(self.db.get_session(sid), message))
-            self._record_failure(sid, code, message, code in ("model_unavailable", "provider_unavailable"),
+            await self._fail_run(sid, code, message, code in ("model_unavailable", "provider_unavailable"),
                                  f"{code}: {message}")
-            await self._end_run(sid)
         except SandboxUnavailable as e:
-            self._record_failure(sid, "backend_unavailable", str(e), True, f"sandbox_unavailable: {e}")
-            await self._end_run(sid)
+            await self._fail_run(sid, "backend_unavailable", str(e), True, f"sandbox_unavailable: {e}")
         except (projects.GitError, RunnerError) as e:
-            self._record_failure(sid, "workspace_error", str(e), False, f"workspace_error: {e}")
-            await self._end_run(sid)
+            await self._fail_run(sid, "workspace_error", str(e), False, f"workspace_error: {e}")
+        except llm.LLMError as e:
+            # The model call failed after its retries (#915): the model's failure, not a daemon bug, so no traceback.
+            if await self._take_pending_cancel(sid):
+                return
+            log.warning("session %s model call failed: %s", sid, str(e)[:200])
+            await self._fail_run(sid, "model_error", str(e), e.retryable, f"model_error: {e}")
         except Exception as e:  # noqa: BLE001 - a crash must not leave the session looking active
             if await self._take_pending_cancel(sid):
                 return
             log.exception("session %s crashed", sid)
-            self._record_failure(sid, "internal_error", f"{type(e).__name__}: {e}", True,
+            await self._fail_run(sid, "internal_error", f"{type(e).__name__}: {e}", True,
                                  f"internal_error: {type(e).__name__}: {e}")
-            await self._end_run(sid)
         finally:
             if watch is not None:
                 watch.cancel()
@@ -1118,6 +1122,8 @@ class Runner:
         one saved before HOLDS_PLACE existed gets it now, before anything changes its status (an offline Mac, the GPU
         queue) and before another run's admission counts the cap."""
         sid = s["id"]
+        if s.get("backend", "local") != "local":
+            self._note_unanswered(sid)  # before the owner can answer a card the regenerated request should bind to
         ran = ("running", "waiting_approval", "waiting_app", "waiting_limit")
         if s["status"] not in ran or s["run"].get(HOLDS_PLACE):
             return
@@ -1173,6 +1179,23 @@ class Runner:
         if any(marker in message.lower() for marker in ("auth", "login", "api key", "api-key", "credential")):
             return "provider_auth_required"
         return "provider_unavailable"
+
+    async def _fail_run(self, sid: str, code: str, message: str, retryable: bool, stop_reason: str) -> None:
+        """End a run that failed, as a cancel ends one (#924): each tool call it leaves gets a result, so the next run's
+        context answers every call, and its pending approvals are cancelled. One unit, so a daemon stop meanwhile can't
+        leave the run active."""
+        await finish_then_cancel(self._fail_run_inner(sid, code, message, retryable, stop_reason))
+
+    async def _fail_run_inner(self, sid: str, code: str, message: str, retryable: bool, stop_reason: str) -> None:
+        try:
+            await self._close_unresolved(sid, "Not run: the run failed.",
+                                         "Stopped: the run failed while this ran; its effects are unknown.")
+            for approval in self.db.pending_approvals(sid):
+                self.db.decide_approval(approval["id"], "cancelled")
+        except Exception:  # noqa: BLE001 - whatever broke the run may break this too: it must still end failed
+            log.exception("session %s: could not answer the failed run's open tool calls", sid)
+        self._record_failure(sid, code, message, retryable, stop_reason)
+        await self._end_run(sid)
 
     def _record_failure(self, sid: str, code: str, message: str, retryable: bool, stop_reason: str) -> None:
         s = self.db.get_session(sid)
@@ -1265,6 +1288,8 @@ class Runner:
         await self._prepare_repo(s)
         slot = self._backend_slots[backend_name]
         while True:
+            if recovered and sid not in self._recovery_unanswered:
+                self._note_unanswered(sid)  # a CLI restarted within this daemon, or a run resumed without the Manager
             s = self.db.get_session(sid)
             if s["status"] == "waiting_limit":
                 delay = max(0, float(s["run"].get("limit_resets_at") or 0) - time.time())
@@ -1293,6 +1318,7 @@ class Runner:
                 await self._cli_limit_reached(sid, backend_name, limit, use_api_key)
                 recovered = True
             finally:
+                self._recovery_unanswered.pop(sid, None)
                 self._held_slots.pop(sid, None)
                 self._unreserve(sid)
                 await self._release_cli_turn(sid)  # a local-model CLI turn's leases on the model (#168)
@@ -2088,13 +2114,7 @@ class Runner:
         s = self.db.get_session(sid)
         existing = self.db.approval_for_call(sid, call_id)
         if existing is None and recovered and s["status"] == "waiting_approval":
-            # Claude regenerates the interrupted tool request with a new
-            # tool_use_id after --resume. Bind it to the one durable approval
-            # with identical semantics so the user sees and decides it once.
-            matches = [approval for approval in self.db.approvals(sid)
-                       if approval["tool"] == name and approval["args"] == args]
-            if len(matches) == 1:
-                existing = matches[0]
+            existing = self._recovery_approval(sid, name, args)
         if existing is None:
             existing = await self._ask_cli_policy(s, cli, request_id, request, name, args, call_id)
             if existing is None:
@@ -2113,6 +2133,25 @@ class Runner:
             return
         note = f" User note: {existing['note']}" if existing.get("note") else ""
         await cli.respond_permission(request_id, "deny", args, f"The user denied this {name} call.{note}")
+
+    def _note_unanswered(self, sid: str) -> None:
+        """Before a recovered run's CLI starts: the approvals still pending are the ones the restart left unanswered."""
+        self._recovery_unanswered[sid] = {approval["id"] for approval in self.db.pending_approvals(sid)}
+
+    def _recovery_approval(self, sid: str, name: str, args: dict | None) -> dict | None:
+        """The approval a regenerated CLI request binds to after a restart, or None to ask anew. Claude regenerates
+        the interrupted tool request with a new tool_use_id after --resume; it binds to the one durable approval with
+        identical semantics so the user sees and decides it once. Only an approval the restart left unanswered, that
+        no live request waits on, can bind; it keeps a decision made since (the owner may answer the card before the
+        request comes back) and binds once. The same command asked and decided before the restart is history (#925)."""
+        unanswered = self._recovery_unanswered.get(sid, set())
+        matches = [approval for approval in self.db.approvals(sid)
+                   if approval["id"] in unanswered and approval["id"] not in self.approval_events
+                   and approval["tool"] == name and approval["args"] == args]
+        if len(matches) != 1:
+            return None
+        unanswered.discard(matches[0]["id"])
+        return matches[0]
 
     def _hosted_status(self, sid: str) -> str:
         """A hosted session's status while it runs: parked on an approval or an App's reply while any is pending (its
@@ -3354,20 +3393,18 @@ class Runner:
         context, artifacts, masked_chars, outcomes = s["context"], {}, 0, None
         if self.artifact_tool_available(s):  # a receipt tells the model to call read_artifact
             outcomes = self._tool_outcomes(sid)  # loaded once a pass: trim reuses them
-            context, artifacts, masked_chars = self._mask_used_results(s, outcomes)
-        if artifacts:
-            def mask_results() -> None:
-                for digest, content in artifacts.items():
-                    self.db.put_artifact(sid, digest, content)
-                self.db.update_session(sid, context=context)
-                if masked_chars > 0:
-                    self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
-                                                       "characters_saved": masked_chars})
-            await self.db.for_session(s["id"]).awrite(mask_results)
+            if compaction.mask_due(before, n, self.cfg.mask_batch_at, self.cfg.elide_at):
+                masked, found, saved = self._mask_used_results(s, outcomes)
+                if compaction.mask_batch_worthwhile(saved / cpt, before, n, self.cfg.mask_batch_at, self.cfg.elide_at):
+                    context, artifacts, masked_chars = masked, found, saved
+        await self._store_masked(sid, context, artifacts, masked_chars, cpt)
         s = self.db.get_session(sid)
+        # Per-turn masking keeps `before` close to the masked size. A batch can be most of it, and what it frees is
+        # no reason to reset or elide.
+        pressure = compaction.estimate_tokens(context, cpt) + overhead if self.cfg.mask_batch_at else before
         explicit = bool(s["run"].get("pending_round_reset"))
         valid = self.has_valid_saved_state(s)
-        if (explicit or before >= self.cfg.reset_at * n) and valid:
+        if (explicit or pressure >= self.cfg.reset_at * n) and valid:
             with telemetry.span("compaction", {"harness.compaction_tier": "round_reset",
                                                "harness.tokens_before": before}):
                 return self._round_reset(s, context, before, cpt, overhead)
@@ -3376,16 +3413,33 @@ class Runner:
             run.pop("pending_round_reset", None)
             self.db.update_session(sid, run=run)
             s = self.db.get_session(sid)
-        if before < self.cfg.elide_at * n:
+        if pressure < self.cfg.elide_at * n:
             return s
         return await self._elide_and_summarize(s, context, before, cpt, overhead, outcomes=outcomes)
+
+    async def _store_masked(self, sid: str, context: list, artifacts: dict, masked_chars: int, cpt: float) -> None:
+        if not artifacts:
+            return
+
+        def mask_results() -> None:
+            for digest, content in artifacts.items():
+                self.db.put_artifact(sid, digest, content)
+            self.db.update_session(sid, context=context)
+            if masked_chars > 0:
+                self.bus.emit(sid, "compaction", {"tier": "mask", "tokens_saved": int(masked_chars / cpt),
+                                                   "characters_saved": masked_chars})
+        await self.db.for_session(sid).awrite(mask_results)
 
     async def _compact_on_overflow(self, s: dict) -> dict:
         """The model server rejected the prompt as too long: one summary pass whatever `summarize_at` says."""
         cpt = s["run"].get("chars_per_token", 3.0)
         overhead = int(len(json.dumps(self.tool_schemas(s, self.workspace(s)))) / cpt)
         before = compaction.estimate_tokens(s["context"], cpt) + overhead
-        return await self._elide_and_summarize(s, s["context"], before, cpt, overhead, overflow=True)
+        context = s["context"]
+        if self.cfg.mask_batch_at and self.artifact_tool_available(s):  # results a batch hasn't reached yet go first
+            context, artifacts, masked_chars = self._mask_used_results(s, self._tool_outcomes(s["id"]))
+            await self._store_masked(s["id"], context, artifacts, masked_chars, cpt)
+        return await self._elide_and_summarize(s, context, before, cpt, overhead, overflow=True)
 
     async def _elide_and_summarize(self, s: dict, context: list, before: int, cpt: float, overhead: int,
                                    overflow: bool = False, outcomes: dict | None = None) -> dict:

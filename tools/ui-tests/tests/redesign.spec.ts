@@ -116,6 +116,7 @@ test('Live resize keeps the Delete job sheet, a partly edited name and focus ins
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.setViewportSize({ width: 1440, height: 900 });
+  await settle(page);  // the breakpoint change lands before the navigation, so the list mounts once (#885)
   await page.goto('/#/jobs');
   const job = page.locator('.job-row').filter({ hasText: 'Nightly report' }).locator('a.job-main');
   const jobUrl = '/' + await job.getAttribute('href');

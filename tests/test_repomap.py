@@ -9,6 +9,8 @@ import pytest
 
 from harness import repomap
 
+from host_git import needs_host_git
+
 pytest.importorskip("tree_sitter")
 pytest.importorskip("tree_sitter_rust")
 pytest.importorskip("tree_sitter_typescript")
@@ -114,6 +116,7 @@ def test_skips_unparseable_other_language_large_and_ignored_dirs(tmp_path):
         assert absent not in text
 
 
+@needs_host_git
 def test_uses_git_ls_files_and_respects_gitignore(tmp_path):
     if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
         pytest.skip("git unavailable")

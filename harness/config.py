@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,8 +23,30 @@ MODULE_NAMES = (
 )
 # Opt-in even on a full profile: the Qwen-Image-Edit weights are ~20 GB and must not arrive with an ordinary install.
 OPT_IN_MODULES = frozenset({"image_edit", "mcp_client"})
+WINDOWS_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
+
+
+def _platform_path(windows: str, *elsewhere: str) -> str:
+    """Windows keeps its drive path. Elsewhere it is under the XDG data dir (#837, #854), never a relative path in the
+    checkout, or "" for a file with no sensible place to guess. A relative or empty XDG_DATA_HOME counts as unset, as
+    the XDG Base Directory spec says."""
+    if sys.platform == "win32":
+        return windows
+    if not elsewhere:
+        return ""
+    xdg = os.environ.get("XDG_DATA_HOME", "")
+    data_home = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
+    return str(data_home.joinpath("agent-harness", *elsewhere))
+
+
+def _path_field(windows: str, *elsewhere: str):
+    return field(default_factory=lambda: _platform_path(windows, *elsewhere))
+
+
 # extra_model_paths root shared by installer, doctor, and image components (Z-Image / quality / image_edit).
-DEFAULT_IMAGES_MODELS_DIR = "C:/AI/comfy-models"
+DEFAULT_IMAGES_MODELS_DIR = _platform_path(WINDOWS_IMAGES_MODELS_DIR, "comfy-models")
+
+
 # Core switches whose on/off is ``cfg.<section>.enabled``.
 MODULE_ENABLE_SECTIONS = {
     "web": "web",
@@ -82,17 +105,22 @@ class SandboxConfig:
     proxy: str = "http://harness-egress-sandbox:8888"  # network commands go out only through this proxy (#671)
     proxy_network: str = "harness-sandbox-egress"     # each network command's own network is `<this>-<session id>`
     idle_stop_seconds: float = 900  # stop the container after this long without a command (0 = never, #428, #524)
+    # The pip and npm cache volumes are `<this>-pip-<project>` and `<this>-npm-<project>` (#429). A disposable instance
+    # (the real-environment lane, #731) names its own, so its sessions never share the live instance's caches.
+    cache_volume_prefix: str = "harness-cache"
 
 
 # Install-level only (#671): a project's `sandbox:` override cannot move network commands off the egress proxy.
 SANDBOX_EGRESS_KEYS = frozenset({"egress_network", "proxy", "proxy_network"})
+# Nor can it point its caches at another project's or principal's volumes (#529, #731).
+SANDBOX_INSTALL_KEYS = SANDBOX_EGRESS_KEYS | {"cache_volume_prefix"}
 
 
 def sandbox_for_project(base: SandboxConfig, overrides: dict) -> SandboxConfig:
     """The install's sandbox settings with a project's `sandbox:` overrides, except the egress ones."""
     if not overrides:
         return base
-    return type(base)(**{**base.__dict__, **{k: v for k, v in overrides.items() if k not in SANDBOX_EGRESS_KEYS}})
+    return type(base)(**{**base.__dict__, **{k: v for k, v in overrides.items() if k not in SANDBOX_INSTALL_KEYS}})
 
 TOOL_MODES = ("builtin", "split")
 
@@ -111,7 +139,7 @@ class BackendConfig:
     proxy: str = "http://harness-egress-claude:8888"
     volume: str = "harness-auth-claude"
     network: str = "harness-cli-claude"
-    api_key_file: str = "D:/Agents/harness/secrets/claude-api-key"
+    api_key_file: str = _path_field("D:/Agents/harness/secrets/claude-api-key")
     # Claude only (#390): file holding the owner's `claude setup-token` token. When set, Web and the Apps in
     # `oauth_token_apps` authenticate with it as CLAUDE_CODE_OAUTH_TOKEN and no login volume is mounted; any other
     # App on the subscription is refused. Owner's own sessions only (docs/per-user-subscriptions-study.md).
@@ -197,7 +225,7 @@ class HomelabService:
 
 @dataclass
 class HomelabConfig:
-    docker_root: str = "D:/Docker"
+    docker_root: str = _path_field("D:/Docker", "docker")
     prometheus_url: str = "http://127.0.0.1:9090"
     services: dict[str, HomelabService] = field(default_factory=dict)
     # Never readable through read_service_config, matched against the path relative to docker_root.
@@ -213,6 +241,9 @@ class CleanupConfig:
     workspace_retention_days: float = 14  # delete a finished session's workspace after this long
     workspace_quota_mb: int = 5000        # per-session workspace limit (projects can override with quota_mb)
     min_free_gb: float = 20               # refuse new sessions when the data drive has less free space
+
+
+PLEX_TRANSCODES_ALLOWED_MAX = 4
 
 
 @dataclass
@@ -235,8 +266,12 @@ class GpuGuardConfig:
     load_now_default_minutes: int = 60    # default window for "Load local model now" (idle unload suspended)
     keepalive_seconds: float = 300        # a pinned model gets a one-token request this often; keep under the idle unload
     drain_timeout_seconds: float = 300    # longest wait for the current model turn before the server is stopped
+    # Free VRAM (nvidia-smi) under this for two polls in a row parks the model: the backstop for every VRAM estimate
+    # being wrong (docs/gpu-vram-budget.md). 0 turns it off and nvidia-smi isn't asked for it.
+    min_free_vram_mib: int = 0
+    vram_drain_timeout_seconds: float = 30  # the drain when that alone starts a pause: memory is short already
     # The model server's supervisor (ops/llama-server/run-qwen.ps1) doesn't restart the server while this file exists.
-    pause_flag: str = "C:/AI/llama-server.paused"
+    pause_flag: str = _path_field("C:/AI/llama-server.paused", "llama-server.paused")
     # A running executable whose path contains one of these (case-insensitive) is a game ...
     game_dirs: list[str] = field(default_factory=lambda: [
         "\\steamapps\\common\\", "\\Epic Games\\", "\\GOG Galaxy\\Games\\", "\\XboxGames\\"])
@@ -245,15 +280,33 @@ class GpuGuardConfig:
     game_processes: list[str] = field(default_factory=list)  # extra executable names, e.g. [Game.exe]
     # A visible window with one of these titles (Sunshine's "Steam Big Picture" app) also counts.
     window_titles: list[str] = field(default_factory=lambda: ["Steam Big Picture Mode"])
-    plex_url: str = "http://127.0.0.1:32400"  # hardware transcodes; the token is read from Plex's registry key
+    plex_url: str = "http://127.0.0.1:32400"  # hardware transcodes, with the token in Plex's registry key; without
+                                              # one (Linux) nvidia-smi's Plex Transcoder processes count instead
     plex: bool = True
+    # Plex hardware transcodes the model shares the card with (docs/gpu-vram-budget.md, follow-up 2): the guard parks
+    # only when there are more than this. Count only; a heavy (4K/HDR) one is left to min_free_vram_mib. 0 to 4.
+    plex_transcodes_allowed: int = 0
+
+
+def validate_gpu_guard(guard: GpuGuardConfig) -> None:
+    """The fields a poll does arithmetic on, which YAML could otherwise hand it as anything."""
+    floor = guard.min_free_vram_mib
+    if not isinstance(floor, int) or isinstance(floor, bool) or floor < 0:
+        raise ValueError(f"gpu_guard.min_free_vram_mib must be a whole number of MiB, 0 or more, got {floor!r}")
+    drain = guard.vram_drain_timeout_seconds
+    if not isinstance(drain, (int, float)) or isinstance(drain, bool) or not 0 <= drain < float("inf"):
+        raise ValueError(f"gpu_guard.vram_drain_timeout_seconds must be a number of seconds, got {drain!r}")
+    allowed = guard.plex_transcodes_allowed
+    if not isinstance(allowed, int) or isinstance(allowed, bool) or not 0 <= allowed <= PLEX_TRANSCODES_ALLOWED_MAX:
+        raise ValueError(f"gpu_guard.plex_transcodes_allowed must be a whole number from 0 to "
+                         f"{PLEX_TRANSCODES_ALLOWED_MAX}, got {allowed!r}")
 
 
 @dataclass
 class BackupConfig:
     """Nightly copy of the session database and transcripts (maintenance.py)."""
     enabled: bool = False
-    dir: str = "D:/My Backups/agent-harness"
+    dir: str = _path_field("D:/My Backups/agent-harness", "backups")
     at: str = "03:30"        # local time
     keep_days: int = 14
     member_key_dir: str = ""   # default: backup.dir/member-keys, outside dated snapshots
@@ -291,7 +344,7 @@ class MemoryLibraryConfig:
     """The user's memory library for agents (harness_modules/memory_library/service.py): reads, approved writes, and the agent profile."""
     enabled: bool = False
     repo: str = ""                      # git URL or path; the daemon keeps its own clone
-    clone_dir: str = "D:/Agents/memory-library"
+    clone_dir: str = _path_field("D:/Agents/memory-library", "memory-library")
     refresh_minutes: float = 10         # `git pull` at most this often, when an agent uses the tools
     categories: list[str] = field(default_factory=list)  # readable categories; everything else is invisible
     writes: bool = False                # memory_edit / memory_write: every change needs approval, then commit + push
@@ -418,7 +471,7 @@ class CanaryConfig:
     drop_points: float = 15.0
     metrics_limit: int = 30
     suite: str = "bakeoff/canary.yaml"
-    fixture_dir: str = "D:/Agents/harness/web-fixture"  # the recorded web for the web tasks (bakeoff/web_suite.py)
+    fixture_dir: str = ""                # the recorded web for the web tasks (bakeoff/web_suite.py); "": <data_dir>/web-fixture
     disabled_reason: str = ""            # set by the loader when `enabled` was turned off for a bad suite/fixture (doctor reports it)
 
 
@@ -443,11 +496,11 @@ class ImagesConfig:
     """Local image generation with ComfyUI (images.py). The language model is unloaded while jobs run."""
     enabled: bool = False
     edit_enabled: bool = False                 # resolved opt-in; absent YAML follows modules.image_edit
-    comfy_dir: str = "C:/AI/ComfyUI"          # portable install (python_embeded + ComfyUI)
-    models_dir: str = DEFAULT_IMAGES_MODELS_DIR  # extra_model_paths root (diffusion_models / text_encoders / vae)
+    comfy_dir: str = _path_field("C:/AI/ComfyUI", "ComfyUI")  # portable install (python_embeded + ComfyUI)
+    models_dir: str = _path_field(WINDOWS_IMAGES_MODELS_DIR, "comfy-models")  # extra_model_paths root (diffusion_models / text_encoders / vae)
     port: int = 8188
-    work_dir: str = "D:/Agents/harness/images-work"  # ComfyUI output/temp and the harness's PNGs (images/)
-    log_dir: str = "D:/Agents/harness/logs"
+    work_dir: str = _path_field("D:/Agents/harness/images-work", "images-work")  # ComfyUI output/temp and the harness's PNGs (images/)
+    log_dir: str = _path_field("D:/Agents/harness/logs", "logs")
     linger_seconds: float = 0                  # unused; kept so existing YAML still loads. GPU is released when the queue is empty.
     start_timeout_seconds: float = 180
     job_timeout_seconds: float = 1200
@@ -622,6 +675,7 @@ class Config:
     keep_recent: float = 0.20
     reset_at: float = 0.60
     mask_min_chars: int = 2000
+    mask_batch_at: float = 0.0  # off: mask each result one turn after it is used (#855, docs/compaction.md)
     state_max_chars: int = 8000
     trim: TrimRules = field(default_factory=TrimRules)
     repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
@@ -761,16 +815,18 @@ def _canary_fixture_problem(raw: dict) -> str:
         web = (yaml.safe_load((ROOT / suite).read_text(encoding="utf-8")) or {}).get("web")
     except (OSError, yaml.YAMLError, AttributeError) as e:
         return f"canary.suite {suite!r} can't be read: {e}"
-    fixture = Path(raw.get("fixture_dir", CanaryConfig.fixture_dir))
+    fixture = Path(raw["fixture_dir"])
     if web and not (fixture / "manifest.json").is_file():  # every web task would fail against an empty replay
         return f"canary.fixture_dir {str(fixture)!r} has no manifest.json (the suite has web tasks)"
     return ""
 
 
-def _load_canary(raw) -> CanaryConfig:
-    """`at` comes back as "HH:MM"; anything the nightly can't use is a config error here, not a dead loop at night."""
+def _load_canary(raw, data_dir: Path = ROOT / "data") -> CanaryConfig:
+    """`at` comes back as "HH:MM"; anything the nightly can't use is a config error here, not a dead loop at night.
+    An omitted fixture_dir is the effective data_dir's web-fixture (#810)."""
     from .canary import parse_at
     raw = dict(raw or {})
+    raw["fixture_dir"] = str(raw.get("fixture_dir") or Path(data_dir) / "web-fixture")
     at = raw.get("at", CanaryConfig.at)
     if isinstance(at, int) and not isinstance(at, bool):  # YAML 1.1 reads an unquoted 3:05 as 3 * 60 + 5
         at = f"{at // 60}:{at % 60}" if 0 <= at < 24 * 60 else str(at)
@@ -810,7 +866,7 @@ def _load_guests(raw) -> list[GuestAccess]:
 def resolve_images_models_dir(cfg=None) -> Path:
     """Single models root used by installer, daemon, doctor, and image components."""
     configured = getattr(cfg, "models_dir", None) if cfg is not None else None
-    return Path(configured or DEFAULT_IMAGES_MODELS_DIR)
+    return Path(configured or _platform_path(WINDOWS_IMAGES_MODELS_DIR, "comfy-models"))
 
 
 def images_models_dir_matches(left: str | Path, right: str | Path) -> bool:
@@ -843,6 +899,36 @@ def _apply_profile_overlay(raw: dict, profile_raw: dict) -> None:
         raise ValueError("backends must be a mapping")
     raw["backends"] = {name: {**(spec or {}), **(existing_backends.get(name) or {})}
                        for name, spec in profile_backends.items()} | existing_backends
+
+
+def _default_data_dir() -> Path:
+    # Off Windows, per checkout: a run from a checkout with no data_dir must not share a deployed daemon's database.
+    return Path("D:/Agents/harness") if sys.platform == "win32" else ROOT / "data"
+
+
+def _default_repos_dir() -> Path:
+    return Path("D:/Agents/repos") if sys.platform == "win32" else ROOT / "data" / "repos"
+
+
+def _apply_windows_defaults(raw: dict) -> None:
+    """Values config/harness.yaml used to set that have no dataclass default, so a Windows host on that file keeps them
+    (#854). They name one tower's layout, so a generated config, which never had them, stays out: only the shipped file
+    sets windows_tower_layout. Explicit values, "" included, win."""
+    if sys.platform != "win32" or not raw.get("windows_tower_layout"):
+        return
+    raw["notify"] = {"token_file": "D:/Docker/ntfy/secrets/harness-publisher.token", **(raw.get("notify") or {})}
+    raw["remote_control"] = {
+        "folders": {"agent-harness": "D:/Projects/agent-harness",
+                    "agent-memory-library": "~/OneDrive/Documents/agent-memory-library"},
+        **(raw.get("remote_control") or {}),
+    }
+    backends = raw.get("backends") or {}
+    for name in ("codex", "cursor"):  # the dataclass default is Claude's key
+        if name in backends:
+            backends[name] = {"api_key_file": f"D:/Agents/harness/secrets/{name}-api-key", **(backends[name] or {})}
+    runners = raw.get("runners") or {}
+    for name, spec in runners.items():
+        runners[name] = {"token_file": f"D:/Agents/harness/secrets/runner-{name}.token", **(spec or {})}
 
 
 def _read_raw_config(config_dir: Path) -> dict:
@@ -969,6 +1055,7 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
     hub.enabled = hub.enabled and selected.hub
     notify = NotifyConfig(**(raw.get("notify") or {}))
     gpu_guard = GpuGuardConfig(**(raw.get("gpu_guard") or {}))
+    validate_gpu_guard(gpu_guard)
     backup = BackupConfig(**(raw.get("backup") or {}))
     memory_library = MemoryLibraryConfig(**(raw.get("memory_library") or {}))
     web = WebConfig(**(raw.get("web") or {}))
@@ -1026,19 +1113,20 @@ def resolve_port(config_dir: Path | None = None) -> int:
 def resolve_data_dir(config_dir: Path | None = None) -> Path:
     """The data_dir `load` would use, without building the whole Config (the local CLI reads its token from here)."""
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
-    return Path(os.environ.get("HARNESS_DATA_DIR") or _read_raw_config(config_dir).get("data_dir", ROOT / "data"))
+    return Path(os.environ.get("HARNESS_DATA_DIR") or _read_raw_config(config_dir).get("data_dir") or _default_data_dir())
 
 
 def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
     from .smart_approvals import load_smart_config
     config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
     raw = _read_raw_config(config_dir)
+    _apply_windows_defaults(raw)
     if "fake_model" in raw:
         raise ValueError("fake_model is not a config key: fake model mode is opt-in through HARNESS_FAKE_MODEL only "
                          "(docs/ui-testing.md)")
     profile, raw_modules, selected = _resolve_profile(raw)
     provider_secret_files = _load_provider_secret_files(raw)
-    resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir", ROOT / "data"))
+    resolved_data_dir = Path(data_dir or os.environ.get("HARNESS_DATA_DIR") or raw.get("data_dir") or _default_data_dir())
 
     models = {
         name: ModelConfig(name=name, **spec) for name, spec in (raw.get("models") or {}).items()
@@ -1077,7 +1165,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         host=listen.get("host", "127.0.0.1"),
         port=int(listen.get("port", 8100)),
         data_dir=resolved_data_dir,
-        repos_dir=Path(raw.get("repos_dir", ROOT / "data" / "repos")),
+        repos_dir=Path(raw.get("repos_dir") or _default_repos_dir()),
         default_model=(raw.get("default_model") or next(iter(models), "")) if models else "",
         models=models,
         sandbox=SandboxConfig(**(raw.get("sandbox") or {})),
@@ -1110,7 +1198,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
         images=images,
         search=search,
         repo_map=RepoMapConfig(**(raw.get("repo_map") or {})),
-        canary=_load_canary(raw.get("canary")),
+        canary=_load_canary(raw.get("canary"), resolved_data_dir),
         jobs=jobs,
         skills=skills,
         remote_control=remote_control,
@@ -1131,6 +1219,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
                            float(compaction.get("elide_at", 0.55)),
                            float(compaction.get("summarize_at", 0.65))),
         mask_min_chars=_mask_min_chars(compaction.get("mask_min_chars", 2000)),
+        mask_batch_at=_mask_batch_at(compaction.get("mask_batch_at"), float(compaction.get("elide_at", 0.55))),
         state_max_chars=_state_max_chars(compaction.get("state_max_chars", 8000)),
         trim=_trim_rules(compaction.get("trim")),
         tool_output=_tool_output(raw.get("tool_output")),
@@ -1236,6 +1325,17 @@ def _mask_min_chars(value) -> int:
     except (TypeError, ValueError, OverflowError):
         return 2000
     return parsed if 1 <= parsed <= 10_000_000 else 2000
+
+
+def _mask_batch_at(value, elide: float = 0.55) -> float:
+    """A share of the window below `elide_at`, where trim and elide start; anything else leaves batching off (0)."""
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return parsed if 0 < parsed < elide else 0.0
 
 
 def _reset_at(value, elide: float = 0.55, summarize: float = 0.65) -> float:

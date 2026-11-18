@@ -1,0 +1,15 @@
+# Real-environment lane (#731), nightly: the sandbox and GPU suites against origin/main (docs/real-env-lane.md).
+# Not enabled by any installer. The owner installs it: copy this file and agent-harness-real-env.timer to
+# ~/.config/systemd/user/, then `systemctl --user daemon-reload && systemctl --user enable --now agent-harness-real-env.timer`.
+[Unit]
+Description=Agent harness real-environment lane (sandbox, GPU) against origin/main
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/.local/share/agent-harness-real-env/run-lane.sh
+# Yield to the live daemon's sessions: lowest CPU and I/O priority, and a run cap.
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+TimeoutStartSec=3h

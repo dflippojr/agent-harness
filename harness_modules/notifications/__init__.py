@@ -6,26 +6,7 @@ CLI imports it to list commands, so the service, routes and settings load only w
 
 from __future__ import annotations
 
-from harness.modules import Module
-
-
-def _runtime(manager, module):
-    from .runtime import NotificationsRuntime
-    return NotificationsRuntime(manager, module)
-
-
-def _owner_routes():
-    from .routes import owner_routes
-    return owner_routes
-
-
-def _settings():
-    from .settings import specs
-    return specs()
-
-
-def _runtime_enabled(cfg, switch: str) -> bool:
-    return bool(cfg.notify.enabled)
+from harness.modules import Module, enabled_flag, lazy
 
 
 MODULE = Module(
@@ -33,11 +14,11 @@ MODULE = Module(
     switches=("notifications",),
     title="Phone notifications",
     docs=("docs/modules.md",),
-    runtime_enabled=_runtime_enabled,
-    runtime=_runtime,
-    owner_routes=_owner_routes,
+    runtime_enabled=enabled_flag("notify"),
+    runtime=lazy(".runtime", "NotificationsRuntime", call=True),
+    owner_routes=lazy(".routes", "owner_routes"),
     admin_paths=frozenset({"/notify/test"}),
-    settings=_settings,
+    settings=lazy(".settings", "specs", call=True),
     cli=(("notify test", "POST", "/notify/test", "send a test notification", ()),),
     cli_groups={"notify": "notifications"},
 )

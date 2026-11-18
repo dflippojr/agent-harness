@@ -493,8 +493,11 @@ class Run:
                                                                  "nothing notable")]
             lines += [f"  - `{line.strip()[:160]}`" for line in notable[:8]]
             if any(SEEDED_FAILURE in line for line in text):
-                lines.append(f"  - expected: the seeded Failed run logs a `crashed` traceback ending in "
+                lines.append(f"  - expected: the seeded Failed run logs one `model call failed` warning ending in "
                              f"`{SEEDED_FAILURE}`")
+            crashed = sum(1 for line in text if "crashed" in line)
+            if crashed:  # a model failure is a warning (#915): a `crashed` traceback is a daemon bug
+                lines.append(f"  - unexpected: {crashed} `crashed` line(s), an internal_error traceback each")
         return lines or ["- no instance logs"]
 
     def passed(self) -> bool:

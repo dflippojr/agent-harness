@@ -1211,6 +1211,10 @@ class Manager:
         self._enforce_app_caps(app_id)
         self._check_free_space(False, owner_id != OWNER_USER_ID, "tower", owner_id, app_id)
         cp = self.runner.checkpointer
+        try:
+            await asyncio.to_thread(cp.refuse_host_git_fork, parent, int(turn))  # before a workspace is allocated
+        except projects.GitError as e:
+            raise HarnessError(e.status, str(e)) from e
         new_sid = uuid.uuid4().hex[:10]
         workspace = self._new_workspace(False, "tower", owner_id, new_sid, app_id=app_id)
         # A hosted parent's CLI state can't be forked, and another backend can't read the parent's saved context:
@@ -1355,7 +1359,10 @@ class Manager:
                 return {"repos": [], "secret_scan": {"status": "unavailable", "scanner": secret_scan.SCANNER,
                                                      "findings": [], "open": 0, "message": str(e)}}
             return await asyncio.to_thread(changes_from_diffs, data["diffs"], scan)
-        return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None, scan)
+        try:
+            return await asyncio.to_thread(workspace_changes, Path(s["workspace"]), s["base_commit"] or None, scan)
+        except projects.GitError as e:  # the Windows refusal among them (#973): an error, never an empty diff
+            raise HarnessError(e.status, str(e)) from e
 
     def _remote_scan_supported(self, s: dict) -> bool:
         state = self.hub.state.get(s["target"])
@@ -2297,15 +2304,19 @@ class Manager:
             return False
         if holds_place(s) or sid in self.runner.admitted:
             return True  # it counts against the cap already, and coming back adds nothing (even over a lowered cap)
+        if account is None and not capped_app(self.db, s.get("app_id") or ""):
+            return True
+        # About to run first, then what holds a place: separate reads, and the writer commits between them. A session
+        # only moves from about to run to holding its place, so this order counts one whose `running` lands in
+        # between twice (until the recheck that commit brings) rather than not at all (#906).
+        about = self._about_to_run(sid, admission_key(self.db, s))
         if account is not None:
             occupied = self.db.count_stored_sessions(user_id, *ACTIVE, holding=True)
             cap = int(account["max_running"])
-        elif capped_app(self.db, s.get("app_id") or ""):
+        else:
             occupied = self.db.count_stored_app_sessions(s["app_id"], *ACTIVE, holding=True)
             cap = self.app_limits(s["app_id"])["max_running"]
-        else:
-            return True
-        return occupied + self._about_to_run(sid, admission_key(self.db, s)) < cap
+        return occupied + about < cap
 
     def _about_to_run(self, sid: str, key: str) -> int:
         """Sessions of admission `key` (other than `sid`) let past its running cap that do not hold their place yet:

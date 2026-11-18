@@ -11,3 +11,5 @@ harness/cli_erase.py text eol=lf
 harness/gitleaks/** text eol=lf
 # The exported OpenAPI document compares byte-for-byte on Windows and in CI.
 tools/openapi/openapi.json text eol=lf
+# The HTML5 entity table the review publication scan reads compares byte-for-byte with Python's (#998).
+ops/review/html5-entities.tsv text eol=lf
