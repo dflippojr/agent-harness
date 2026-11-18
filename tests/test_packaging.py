@@ -11,11 +11,13 @@ so the test needs no package index. The checkout itself is never on its path, an
 
 from __future__ import annotations
 
+import ast
 import base64
 import hashlib
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -26,7 +28,7 @@ import urllib.error
 import urllib.request
 import venv
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -333,6 +335,293 @@ def test_nothing_the_build_reads_is_on_the_ci_skip_list():
     folders = [*settings["build"]["packages"], settings["addons"]["namespace"]]
     assert skipped and not files & skipped
     assert not [path for path in skipped if any(path.startswith(f"{folder}/") for folder in folders)]
+
+
+def test_a_project_inside_a_bigger_checkout_ships_only_what_git_tracks(tmp_path):
+    """A project vendored into another repository has no .git of its own, and git still tracks its files or not."""
+    outer = tmp_path / "outer"
+    root = _layout(outer / "vendor" / "project", 'modules = { notes = "notes.py" }\n')
+    (root / "notes.py").write_text("", encoding="utf-8")
+    _git(outer, "init", "-q")
+    _git(outer, "add", "vendor/project/pyproject.toml", "vendor/project/pkg/__init__.py", "vendor/project/notes.py")
+    (root / "pkg" / "untracked.py").write_text("SECRET = 1\n", encoding="utf-8")
+    assert set(build.core_distribution(root).files) == {"pkg/__init__.py", "notes.py"}
+    _git(outer, "rm", "-q", "--cached", "vendor/project/notes.py")
+    with pytest.raises(build.BuildError, match="notes.py is not tracked by git"):
+        build.core_distribution(root)
+
+
+def test_a_folder_git_tracks_nothing_in_is_built_as_it_is(tmp_path):
+    """An unpacked source distribution has no .git. Unpacked in a checkout's ignored folder (a temporary folder kept
+    there), git tracks none of it, so it is built as it is, as it would be anywhere else."""
+    outer = tmp_path / "outer"
+    root = _layout(outer / "build" / "unpacked")
+    (root / "pkg" / "extra.py").write_text("", encoding="utf-8")
+    (outer / ".gitignore").write_text("build/\n", encoding="utf-8")
+    _git(outer, "init", "-q")
+    _git(outer, "add", ".gitignore")
+    assert set(build.core_distribution(root).files) == {"pkg/__init__.py", "pkg/extra.py"}
+
+
+def test_a_project_in_a_checkout_git_cannot_list_is_refused(tmp_path, monkeypatch):
+    root = _layout(tmp_path / "outer" / "project")
+    (tmp_path / "outer" / ".git").mkdir()
+
+    def no_git(*args, **kwargs):
+        raise OSError("git: not found")
+    monkeypatch.setattr(build.subprocess, "run", no_git)
+    with pytest.raises(build.BuildError, match="could not list its tracked files"):
+        build.core_distribution(root)
+
+
+# ---------------------------------------------------------------- one way to read, one way to write (#1001, review r2)
+
+BACKEND = ROOT / "scripts" / "packaging" / "agent_harness_build.py"
+# The review of #1001 found reads that skipped Tree's checks: package folders walked whole (r1) and pyproject.toml read
+# directly (r2). So the backend touches the disk in two places only: Tree reads the source (tracked files, never through
+# a link) and Out writes the artifacts, reading nothing. These tables say what each reference in the backend does.
+SIDES = {"Tree": {"read", "locate"}, "Out": {"write", "locate"}}
+MODULE_NAMES = {  # by dotted prefix, the first match deciding; None touches nothing
+    **dict.fromkeys(("os.environ", "os.sep", "os.name", "io.BytesIO", "tomllib.loads", "tomllib.TOMLDecodeError",
+                     "zipfile.ZipInfo", "zipfile.ZIP_DEFLATED", "tarfile.TarInfo", "tarfile.PAX_FORMAT",
+                     "gzip.compress")),
+    **dict.fromkeys(("os.path.realpath", "os.path.join", "os.getcwd"), "locate"),
+    **dict.fromkeys(("os.replace", "os.rename", "os.remove", "os.unlink", "os.mkdir", "os.makedirs", "os.rmdir",
+                     "os.chmod", "os.symlink", "os.link", "os.truncate", "os.utime", "os.write"), "write"),
+    **dict.fromkeys(("os", "subprocess", "glob", "tomllib"), "read"),
+    **dict.fromkeys(("shutil", "tempfile", "io", "zipfile", "tarfile", "gzip", "sys.modules"), "both"),
+}
+MODULE_BASES = {name.split(".")[0] for name in MODULE_NAMES}
+PURE_MODULES = {"argparse", "ast", "base64", "fnmatch", "hashlib", "re", "stat", "time"}  # ast.walk walks a syntax tree
+ARCHIVES = {"zipfile.ZipFile", "tarfile.open", "tarfile.TarFile", "gzip.GzipFile", "gzip.open"}  # fine on a BytesIO
+METHODS = {  # whatever the receiver: the backend's paths are pathlib objects
+    **dict.fromkeys(("read_bytes", "read_text", "iterdir", "glob", "rglob", "walk", "exists", "is_file", "is_dir",
+                     "is_symlink", "is_junction", "is_mount", "stat", "lstat", "readlink", "samefile"), "read"),
+    **dict.fromkeys(("write_bytes", "write_text", "mkdir", "touch", "unlink", "rmdir", "rename", "chmod", "lchmod",
+                     "symlink_to", "hardlink_to"), "write"),  # and replace(target): str.replace takes two arguments
+    **dict.fromkeys(("resolve", "absolute", "expanduser", "cwd", "home"), "locate"),
+    **dict.fromkeys(("open", "__dict__", "__getattribute__"), "both"),
+}
+BUILTINS = {"open", "getattr", "setattr", "delattr", "__import__", "__builtins__", "exec", "eval", "compile",
+            "globals", "vars", "locals", "breakpoint"}  # open, and the ways around this scan
+IMPORTS = {"__future__", "argparse", "ast", "base64", "dataclasses", "fnmatch", "gzip", "hashlib", "io", "os",
+           "pathlib", "re", "stat", "subprocess", "sys", "tarfile", "time", "tomllib", "zipfile"}
+FROM_IMPORTS = {"__future__": {"annotations"}, "dataclasses": {"dataclass", "field"},
+                "pathlib": {"Path", "PurePosixPath"}}
+
+
+def _dotted(node: ast.AST | None) -> str:
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    return ".".join([node.id, *reversed(parts)]) if isinstance(node, ast.Name) else ""
+
+
+def _on_a_buffer(call: ast.Call, parents: dict) -> bool:
+    """An archive opened on an io.BytesIO its own function made: it lives in memory, not on the disk."""
+    function: ast.AST = call
+    while function in parents and not isinstance(function, ast.FunctionDef):
+        function = parents[function]
+    buffers = {target.id for node in ast.walk(function) if isinstance(node, ast.Assign)
+               and isinstance(node.value, ast.Call) and _dotted(node.value.func) == "io.BytesIO"
+               for target in node.targets if isinstance(target, ast.Name)}
+    files = [*call.args[:1], *(k.value for k in call.keywords if k.arg in ("file", "fileobj", "name", "filename"))]
+    return bool(files) and all(isinstance(f, ast.Name) and f.id in buffers for f in files)
+
+
+def _kind(node: ast.AST, parents: dict) -> tuple[str, str | None]:
+    """What `node` names, and what that does to the disk: read, write, locate, both, or nothing (None)."""
+    parent = parents.get(node)
+    call = parent if isinstance(parent, ast.Call) and parent.func is node else None
+    inner = isinstance(parent, ast.Attribute) and parent.value is node  # only the whole of a dotted name counts
+    if isinstance(node, ast.Name):
+        if node.id in BUILTINS or (node.id in MODULE_BASES - {"sys"} and not inner):
+            return node.id, "both"
+        return node.id, None
+    if not isinstance(node, ast.Attribute) or inner:
+        return "", None
+    dotted = _dotted(node)
+    if dotted.split(".")[0] in PURE_MODULES:
+        return dotted, None
+    if dotted.split(".")[0] in MODULE_BASES:
+        if dotted in ARCHIVES and call is not None and _on_a_buffer(call, parents):
+            return dotted, None
+        return dotted, next((kind for prefix, kind in MODULE_NAMES.items()
+                             if dotted == prefix or dotted.startswith(f"{prefix}.")), None)
+    if node.attr == "replace":  # str.replace(old, new) touches nothing; Path.replace(target) moves a file
+        return "replace", "write" if call is None or len(call.args) + len(call.keywords) == 1 else None
+    return node.attr, METHODS.get(node.attr)
+
+
+def _import_problems(node: ast.Import | ast.ImportFrom, module: ast.Module) -> list[str]:
+    where = "" if node in module.body else " (not at the top)"
+    if isinstance(node, ast.Import):
+        return [f"import {a.name}{f' as {a.asname}' if a.asname else ''}{where}" for a in node.names
+                if a.name not in IMPORTS or a.asname or where]
+    allowed = FROM_IMPORTS.get(node.module or "", set())
+    return [f"from {node.module} import {a.name}{where}" for a in node.names
+            if node.level or a.name not in allowed or a.asname or where]
+
+
+def _disk_access(source: str) -> list[tuple[int, str]]:
+    """(line, problem) for each reference in `source` that touches the disk where its scope may not, and for each
+    import this scan can't vouch for."""
+    module = ast.parse(source)
+    parents = {child: node for node in ast.walk(module) for child in ast.iter_child_nodes(node)}
+    scopes = {inner: top.name for top in module.body if isinstance(top, ast.ClassDef) and top.name in SIDES
+              for inner in ast.walk(top)}
+    found = []
+    for node in ast.walk(module):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            found += [(node.lineno, problem) for problem in _import_problems(node, module)]
+            continue
+        what, kind = _kind(node, parents)
+        scope = scopes.get(node, "module")
+        if kind is not None and kind not in SIDES.get(scope, set()):
+            found.append((getattr(node, "lineno", 0), f"{what} ({kind}) in {scope}"))
+    return sorted(found)
+
+
+def test_the_backend_touches_the_disk_only_through_tree_and_out():
+    """Nothing but Tree reads and nothing but Out writes, so no input can skip Tree's checks: the review of #1001 found
+    one that did (r2: pyproject.toml), after the first round had added Tree for the package folders."""
+    found = [f"line {line}: {problem}" for line, problem in _disk_access(BACKEND.read_text(encoding="utf-8"))]
+    assert not found, "Read the source through Tree and write through Out:\n" + "\n".join(found)
+
+
+@pytest.mark.parametrize(("code", "expected"), [
+    ("def f(p):\n    return p.read_text()\n", ["read_text (read) in module"]),
+    ("class Tree:\n    def f(self, p):\n        p.write_bytes(b'')\n", ["write_bytes (write) in Tree"]),
+    ("class Out:\n    def f(self, p):\n        return p.read_bytes()\n", ["read_bytes (read) in Out"]),
+    ("import os\n\n\ndef f():\n    return os.listdir('.')\n", ["os.listdir (read) in module"]),
+    ("def f(p, q):\n    p.replace(q)\n    return 'a'.replace('a', 'b')\n", ["replace (write) in module"]),
+    ("import zipfile\n\n\ndef f(p):\n    zipfile.ZipFile(p, 'w')\n", ["zipfile.ZipFile (both) in module"]),
+    ("import io\nimport zipfile\n\n\ndef f():\n    b = io.BytesIO()\n    zipfile.ZipFile(b, 'w')\n", []),
+    ("def f(p):\n    return getattr(p, 'read_' + 'text')()\n", ["getattr (both) in module"]),
+    ("import shutil as s\n", ["import shutil as s"]),
+    ("def f():\n    import os\n", ["import os (not at the top)"]),
+    ("import ast\nimport re\n\n\ndef f(s):\n    return list(ast.walk(ast.parse(s))), re.match('a', s).group(0)\n", []),
+], ids=["read", "write-in-tree", "read-in-out", "os-call", "path-replace", "zip-on-disk", "zip-in-memory", "getattr",
+        "new-import", "late-import", "pure-modules"])
+def test_the_disk_scan_catches_each_way_onto_the_disk(code, expected):
+    assert [problem for _line, problem in _disk_access(code)] == expected
+
+
+# The grid: every kind of input the backend reads, in every state it can be in. Each file sits in a folder of its own,
+# so linking that folder touches that kind alone.
+GRID = {
+    "pyproject.toml": "pyproject.toml",
+    "version-from": "release/version.py",
+    "readme": "text/README.md",
+    "license-files": "legal/COPYING.txt",
+    "sdist entry": "tools/notes.txt",
+    "modules mapping": "client/client.py",
+    "repo-files": "shared/manifest.json",
+    "package source": "pkg/sub/mod.py",
+    "package data": "pkg/assets/data.json",
+    "add-on source": "addons/one/sub/mod.py",
+    "add-on data": "addons/one/assets/data.json",
+}
+LISTED = {"package source", "package data", "add-on source", "add-on data"}  # found by listing a folder, not named
+STATES = ("tracked", "untracked", "linked file", "linked parent")
+# pyproject.toml has no linked-parent cell: it sits at the root, the folder the build runs in.
+GRID_CELLS = [(kind, state) for kind in GRID for state in STATES if state != "linked parent" or "/" in GRID[kind]]
+GRID_PYPROJECT = """\
+[project]
+name = "grid"
+description = "{marker}"
+dynamic = ["version"]
+readme = "text/README.md"
+license-files = ["legal/COPYING.txt"]
+
+[tool.agent-harness.build]
+version-from = "release/version.py"
+packages = ["pkg"]
+modules = {{ client = "client/client.py" }}
+package-data = ["pkg/assets/*.json"]
+sdist = ["tools/notes.txt"]
+
+[tool.agent-harness.addons]
+namespace = "addons"
+package-data = {{ one = ["assets/*.json"] }}
+repo-files = {{ one = ["shared/manifest.json"] }}
+"""
+
+
+def _grid_project(root: Path, outside: Path) -> None:
+    """The grid's project with every input present and tracked, and beside it a copy that a link could lead to. Each
+    file says which copy it is."""
+    for where, folder in (("inside", root), ("outside", outside)):
+        files = {path: f"# <{kind}: {where}>\n" for kind, path in GRID.items()}
+        files.update({"pyproject.toml": GRID_PYPROJECT.format(marker=f"<pyproject.toml: {where}>"),
+                      "release/version.py": f'RELEASE = "{"2.3.4" if where == "inside" else "6.6.6"}"\n',
+                      "pkg/__init__.py": "", "pkg/assets/other.json": "{}\n",
+                      "addons/one/__init__.py": 'MODULE = Module(title="One")\n', "addons/one/assets/other.json": "{}\n"})
+        for path, text in files.items():
+            (folder / path).parent.mkdir(parents=True, exist_ok=True)
+            (folder / path).write_text(text, encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+
+
+def _wheels(root: Path, out: Path) -> list[Path]:
+    return build.build_all(root, out)
+
+
+def _sdist(root: Path, out: Path) -> Path:
+    tree = build.Tree(root)
+    pyproject = build.load_pyproject(tree)
+    return build.write_sdist(tree, build.core_distribution(tree, pyproject), pyproject, out)
+
+
+def _unpacked(paths: list[Path]) -> bytes:
+    """The names and unpacked contents of wheels and source distributions, in one blob to search."""
+    blob = []
+    for path in paths:
+        blob.append(path.name.encode())
+        if path.suffix == ".whl":
+            with zipfile.ZipFile(path) as z:
+                blob += [z.read(name) for name in z.namelist()]
+        else:
+            with tarfile.open(path) as archive:
+                blob += [archive.extractfile(m).read() for m in archive.getmembers() if m.isfile()]
+    return b"\n".join(blob)
+
+
+@pytest.mark.parametrize(("kind", "state"), GRID_CELLS, ids=[f"{k}-{s}".replace(" ", "_") for k, s in GRID_CELLS])
+def test_every_input_is_read_while_tracked_and_never_otherwise(tmp_path, kind, state):
+    """The review of #1001 (r1, r2): every byte the wheels, the sdist or their metadata hold comes through Tree. So each
+    input is read while git tracks it, and refused when it's untracked, a link, or behind a linked folder; a file found
+    by listing a folder is left out instead when untracked. Links are committed, as a clone of a repository holding
+    them has them, and nothing from the copy outside may reach anything written."""
+    path = GRID[kind]
+    parent = PurePosixPath(path).parent.as_posix()
+    root, outside, out = tmp_path / "project", tmp_path / "outside", tmp_path / "out"
+    _grid_project(root, outside)
+    if state == "untracked":
+        _git(root, "rm", "-q", "--cached", path)
+    elif state == "linked file":
+        (root / path).unlink()
+        _link(root / path, outside / path)
+    elif state == "linked parent":
+        shutil.rmtree(root / parent)
+        _link(root / parent, outside / parent)
+    if state.startswith("linked"):
+        _git(root, "add", "-A")
+    evidence = b"Version: 2.3.4" if kind == "version-from" else f"<{kind}: inside>".encode()
+    if state == "tracked" or (state == "untracked" and kind in LISTED):
+        made = _unpacked([*_wheels(root, out), _sdist(root, out)])
+        assert (evidence in made) == (state == "tracked"), (kind, state)
+    else:
+        door = _sdist if kind == "sdist entry" else _wheels  # the wheels never read an sdist entry
+        with pytest.raises(build.BuildError) as refused:
+            door(root, out)
+        reason = {"untracked": f"{path} is not tracked by git", "linked file": f"link at {path}",
+                  "linked parent": f"link at {parent}"}[state]
+        assert reason in str(refused.value)
+        made = _unpacked(sorted(out.glob("*")))  # whatever was written before the refusal
+    assert b": outside>" not in made and b"6.6.6" not in made
 
 
 # ------------------------------------------------------------------------------------------------ installed, for real

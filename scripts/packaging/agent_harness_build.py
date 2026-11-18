@@ -13,11 +13,14 @@ The layout comes from pyproject.toml's `[tool.agent-harness]` tables:
   which requires the same core version. A module is the unit the module interface adds or removes
   (docs/modules.md), and no module imports another, so a module's wheel needs only the core.
   The namespace has no `__init__.py` in any wheel, so each wheel adds its own package to it.
-- A wheel holds the `.py` sources of its packages and the files the tables list, nothing else. From a git checkout
-  the build reads only files git tracks, so an untracked or ignored file in a package folder never ships; a source
-  distribution holds only what such a build selected. Every read refuses a link anywhere on its path. Repository files
-  an add-on reads from outside its package (`repo-files`) go into the package's `_repo_files/`, where
+- A wheel holds the `.py` sources of its packages and the files the tables list, nothing else. Repository files an
+  add-on reads from outside its package (`repo-files`) go into the package's `_repo_files/`, where
   `harness.modules.repo_file` finds them.
+
+Every input, pyproject.toml included, is read through `Tree`, and every artifact is written through `Out`: nothing
+else here touches the disk (tests/test_packaging.py scans for any other access). From a git checkout `Tree` reads only
+the files git tracks, so an untracked or ignored file never ships, and a source distribution holds only what such a
+build selected. No read follows a link anywhere on its path.
 
 Builds need no network and no setuptools, and are reproducible: the same tree gives the same bytes (entries are
 sorted, and timestamps come from SOURCE_DATE_EPOCH or a fixed date).
@@ -86,71 +89,132 @@ class Distribution:
 
 
 class Tree:
-    """The files a build may read, and the one way it reads them.
+    """The files a build may read, and the one way it reads them. Apart from `Out`, which writes and reads nothing,
+    nothing else in this file touches the disk, so pyproject.toml and every other input pass the same checks.
 
-    From a git checkout these are the files git tracks (staged ones included), so nothing untracked or ignored can
-    reach a wheel. A source distribution has no .git and holds only what such a build selected, so it, like any other
-    tree, is taken as it is. Hidden files and folders and __pycache__ are never candidates. `read` refuses a link
-    anywhere on the path: a linked file, folder or package root could lead anywhere on the building machine."""
+    In a git checkout the candidates are the files git tracks (staged ones included), so nothing untracked or ignored
+    can reach a wheel. That holds for a project inside a bigger checkout too, with no .git of its own. A folder git
+    tracks nothing in is taken as it is: an unpacked source distribution, which holds only what such a build selected,
+    or the image build's context. Hidden files and folders and __pycache__ are never candidates.
+
+    A link is never followed, wherever it is on a path: a linked file, folder or package root could lead anywhere on
+    the building machine. A link on the disk or one git records is refused: a read through it, or one met while listing
+    a folder, rather than left out quietly. (A Windows checkout without symlinks holds a recorded link as a plain
+    file.) The tree is the builder's own: a process that can change it during a build can change tracked files too, so
+    the checks don't guard against a race."""
+
+    source: Path
+    tracked: frozenset[str] | None  # None: no checkout here, so every file is a candidate
+    links: frozenset[str]  # the paths git records as a link or a submodule
 
     def __init__(self, source: Path | Tree):
-        self.source = source.source if isinstance(source, Tree) else Path(source)
-        self.tracked = source.tracked if isinstance(source, Tree) else _git_tracked(self.source)
+        if isinstance(source, Tree):
+            self.source, self.tracked, self.links = source.source, source.tracked, source.links
+            return
+        self.source, self.tracked, self.links = Path(source), None, frozenset()
+        own = os.path.lexists(self.source / ".git")
+        if own or any(os.path.lexists(folder / ".git") for folder in Path(os.path.realpath(self.source)).parents):
+            regular, links = self._git_listing()
+            if own or regular or links:  # git tracks nothing in a bigger checkout's folder: not a checkout here
+                self.tracked, self.links = regular, links
+
+    @classmethod
+    def here(cls) -> Tree:
+        """The tree a PEP 517 frontend runs the backend in: the working directory is the project's root."""
+        return cls(Path.cwd())
+
+    @classmethod
+    def for_command_line(cls, source: str) -> Tree:
+        """The command line's --source, checked before anything is read: it must hold a pyproject.toml."""
+        root = os.path.realpath(source)
+        if not os.path.isfile(os.path.join(root, "pyproject.toml")):
+            raise BuildError(f"--source {source!r} is not a checkout with a pyproject.toml")
+        return cls(Path(root))
+
+    def _git_listing(self) -> tuple[frozenset[str], frozenset[str]]:
+        """What git tracks under the source, by path relative to it: (regular files, links and submodules)."""
+        try:  # the source is git's working directory, so no path ever lands on its command line
+            out = subprocess.run(["git", "ls-files", "-z", "--cached", "--stage"], cwd=self.source,
+                                 capture_output=True, check=True, timeout=120).stdout.decode("utf-8")
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as e:
+            raise BuildError(f"{self.source} is in a git checkout, but git could not list its tracked files: "
+                             f"{e}") from None
+        regular, links = set(), set()
+        for entry in filter(None, out.split("\0")):  # "<mode> <object> <stage>\t<path>"
+            meta, _, name = entry.partition("\t")
+            (regular if meta.split(" ")[0] in ("100644", "100755") else links).add(name)
+        return frozenset(regular), frozenset(links)
+
+    def _no_link_on(self, rel: PurePosixPath, path: str) -> int | None:
+        """Refuse a link anywhere on `rel`, recorded by git or on the disk. Returns the st_mode of the last part, or
+        None when it doesn't exist."""
+        prefixes = ["/".join(rel.parts[:depth]) for depth in range(1, len(rel.parts) + 1)]
+        for where in prefixes:
+            if where in self.links:
+                raise BuildError(f"{path} goes through a link at {where}: git records a link or a submodule there "
+                                 "(neither is packaged)")
+        mode = None
+        for where in prefixes:
+            try:
+                mode = os.lstat(self.source / where).st_mode
+            except (FileNotFoundError, NotADirectoryError):
+                return None
+            except OSError as e:
+                raise BuildError(f"{path} could not be read: {e}") from None
+            if stat.S_ISLNK(mode) or os.path.isjunction(self.source / where):
+                raise BuildError(f"{path} goes through a link at {where} (links are not packaged)")
+        return mode
+
+    def _walk(self, rel: PurePosixPath) -> list[str]:
+        """Every file under `rel`, outside a checkout."""
+        found = []
+
+        def unreadable(error: OSError) -> None:
+            raise BuildError(f"{rel}/ could not be listed: {error}")
+        for dirpath, dirnames, filenames in os.walk(self.source / rel, onerror=unreadable):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d != "__pycache__")
+            for name in dirnames:  # the walk wouldn't enter one; say so rather than leave its files out quietly
+                folder = Path(dirpath) / name
+                if folder.is_symlink() or os.path.isjunction(folder):
+                    where = folder.relative_to(self.source).as_posix()
+                    raise BuildError(f"{where} is a link to a folder (links are not packaged)")
+            found += [(Path(dirpath) / name).relative_to(self.source).as_posix() for name in filenames]
+        return found
 
     def files(self, top: str) -> list[str]:
-        """The candidate files under the folder `top`, as repository-relative posix paths."""
-        prefix = f"{_relative(top, 'folder')}/"
+        """The candidate files under the folder `top`, as repository-relative posix paths. A link met there, file or
+        folder, is refused."""
+        rel = _relative(top, "folder")
+        exists = self._no_link_on(rel, f"{top}/") is not None
         if self.tracked is not None:
-            found = [name for name in self.tracked if name.startswith(prefix)]
+            found = [name for name in self.tracked | self.links if name.startswith(f"{rel}/")]
         else:
-            found = []
-            for dirpath, dirnames, filenames in os.walk(self.source / top):
-                dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d != "__pycache__")
-                for name in dirnames:  # the walk wouldn't enter one; say so rather than leave its files out quietly
-                    folder = Path(dirpath) / name
-                    if folder.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(folder):
-                        where = folder.relative_to(self.source).as_posix()
-                        raise BuildError(f"{where} is a link to a folder (links are not packaged)")
-                found += [(Path(dirpath) / name).relative_to(self.source).as_posix() for name in filenames]
-        return sorted(name for name in found
-                      if not any(part.startswith(".") or part == "__pycache__" for part in name.split("/")))
+            found = self._walk(rel) if exists else []
+        candidates = sorted(name for name in found
+                            if not any(part.startswith(".") or part == "__pycache__" for part in name.split("/")))
+        for name in candidates:
+            self._no_link_on(PurePosixPath(name), name)
+        return candidates
 
     def read(self, path: str) -> bytes:
+        """The bytes of the file `path`, refused when a link is anywhere on its path, when a checkout doesn't track it,
+        and when it isn't a regular file."""
         rel = _relative(path, "file")
+        mode = self._no_link_on(rel, path)
+        if mode is None:
+            raise BuildError(f"{path} is missing")
         if self.tracked is not None and rel.as_posix() not in self.tracked:
             raise BuildError(f"{path} is not tracked by git (a build from a checkout ships tracked files only)")
-        current, mode = self.source, 0
-        for part in rel.parts:
-            current = current / part
-            try:
-                mode = os.lstat(current).st_mode
-            except OSError:
-                raise BuildError(f"{path} is missing") from None
-            if stat.S_ISLNK(mode) or getattr(os.path, "isjunction", lambda _: False)(current):
-                where = current.relative_to(self.source).as_posix()
-                raise BuildError(f"{path} goes through a link at {where} (links are not packaged)")
         if not stat.S_ISREG(mode):
             raise BuildError(f"{path} is not a regular file")
-        return current.read_bytes()
-
-
-def _git_tracked(source: Path) -> frozenset[str] | None:
-    """The tracked files of the checkout at `source`, or None when it isn't one (no .git)."""
-    if not (source / ".git").exists():
-        return None
-    try:  # the checkout is the working directory, so no path ever lands on git's command line
-        out = subprocess.run(["git", "ls-files", "-z", "--cached"], cwd=source, capture_output=True, check=True,
-                             timeout=120).stdout
-    except (OSError, subprocess.SubprocessError) as e:
-        raise BuildError(f"{source} is a git checkout, but git could not list its tracked files: {e}") from None
-    return frozenset(name for name in out.decode("utf-8").split("\0") if name)
+        return (self.source / rel).read_bytes()
 
 
 def load_pyproject(source: Path | Tree) -> dict:
-    root = source.source if isinstance(source, Tree) else Path(source)
+    """pyproject.toml, read through the tree like every other input."""
     try:
-        return tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as e:
+        return tomllib.loads(Tree(source).read("pyproject.toml").decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise BuildError(f"pyproject.toml: {e}") from None
 
 
@@ -266,7 +330,7 @@ def addon_names(source: Path | Tree, pyproject: dict | None = None) -> list[str]
 def _module_title(init: bytes) -> str:
     """The `title=` of the package's `MODULE = Module(...)`, read without importing it."""
     for node in ast.walk(ast.parse(init)):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Module":
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Module":
             for keyword in node.keywords:
                 if keyword.arg == "title" and isinstance(keyword.value, ast.Constant):
                     return str(keyword.value.value)
@@ -302,6 +366,32 @@ def unknown_repo_file_addons(source: Path | Tree, pyproject: dict | None = None)
 
 
 # ------------------------------------------------------------------------------------------------- wheel writing
+
+class Out:
+    """The folder a build writes into, and the one way it writes: each file whole, under a temporary name first and
+    then renamed, so no reader meets half a wheel. It reads nothing."""
+
+    def __init__(self, folder: str | Path | Out):
+        self.folder = folder.folder if isinstance(folder, Out) else Path(folder)
+
+    @classmethod
+    def for_command_line(cls, out: str) -> Out:
+        """The command line's --out, checked before anything is read or written: only a folder inside the working
+        directory."""
+        base, target = os.path.realpath(os.getcwd()), os.path.realpath(out)
+        if target != base and not target.startswith(base + os.sep):
+            raise BuildError(f"--out {out!r} must be a folder inside the working directory ({base})")
+        return cls(target)
+
+    def write(self, name: str, data: bytes) -> Path:
+        """Write `data` as `name`, a relative path inside the folder, and return its path."""
+        target = self.folder.joinpath(*_relative(name, "output file").parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".part")
+        temporary.write_bytes(data)
+        temporary.replace(target)
+        return target
+
 
 def _metadata(dist: Distribution) -> bytes:
     lines = ["Metadata-Version: 2.1", f"Name: {dist.name}", f"Version: {dist.version}"]
@@ -364,24 +454,25 @@ def _zip_info(name: str, epoch: int) -> zipfile.ZipInfo:
     return info
 
 
-def write_wheel(dist: Distribution, out: Path) -> Path:
-    """Write `dist` to `out` and return the wheel's path."""
-    out.mkdir(parents=True, exist_ok=True)
+def _wheel_bytes(dist: Distribution) -> bytes:
     entries = {**dist.files, **dist_info_files(dist)}
     record = f"{dist.dist_info}/RECORD"
     lines = [f"{name},{_digest(data)},{len(data)}" for name, data in sorted(entries.items())] + [f"{record},,"]
     entries[record] = ("\n".join(lines) + "\n").encode("utf-8")
-    target = out / dist.wheel_name
     epoch = _epoch()
-    temporary = target.with_name(target.name + ".part")
-    with zipfile.ZipFile(temporary, "w") as wheel:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as wheel:
         for name in sorted(entries, key=lambda n: (n.startswith(dist.dist_info), n)):  # .dist-info last
             wheel.writestr(_zip_info(name, epoch), entries[name])
-    temporary.replace(target)
-    return target
+    return buffer.getvalue()
 
 
-def write_sdist(source: Path | Tree, dist: Distribution, pyproject: dict, out: Path) -> Path:
+def write_wheel(dist: Distribution, out: Path | Out) -> Path:
+    """Write `dist` into `out` and return the wheel's path."""
+    return Out(out).write(dist.wheel_name, _wheel_bytes(dist))
+
+
+def write_sdist(source: Path | Tree, dist: Distribution, pyproject: dict, out: Path | Out) -> Path:
     """The core's source distribution: what building its wheel again needs, under <name>-<version>/."""
     tree = Tree(source)
     sdist = [*_settings(pyproject).get("build", {}).get("sdist", []), *dist.license_files]
@@ -391,8 +482,6 @@ def write_sdist(source: Path | Tree, dist: Distribution, pyproject: dict, out: P
     for path in ["pyproject.toml", *sdist]:
         entries[f"{base}/{_relative(path, 'sdist file')}"] = tree.read(path)
     entries[f"{base}/PKG-INFO"] = _metadata(dist)
-    out.mkdir(parents=True, exist_ok=True)
-    target = out / f"{base}.tar.gz"
     epoch = _epoch()
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w", format=tarfile.PAX_FORMAT) as archive:
@@ -402,20 +491,19 @@ def write_sdist(source: Path | Tree, dist: Distribution, pyproject: dict, out: P
             info.uid = info.gid = 0
             info.uname = info.gname = ""
             archive.addfile(info, io.BytesIO(entries[name]))
-    target.write_bytes(gzip.compress(raw.getvalue(), mtime=epoch))
-    return target
+    return Out(out).write(f"{base}.tar.gz", gzip.compress(raw.getvalue(), mtime=epoch))
 
 
-def build_all(source: Path | Tree, out: Path) -> list[Path]:
+def build_all(source: Path | Tree, out: Path | Out) -> list[Path]:
     """The core wheel, then one wheel per add-on module, in `out`."""
-    tree = Tree(source)
+    tree, folder = Tree(source), Out(out)
     pyproject = load_pyproject(tree)
     stray = unknown_repo_file_addons(tree, pyproject)
     if stray:
         raise BuildError(f"tool.agent-harness.addons names packages that don't exist: {', '.join(stray)}")
     core = core_distribution(tree, pyproject)
-    return [write_wheel(core, out)] + [write_wheel(addon_distribution(tree, name, pyproject, core), out)
-                                       for name in addon_names(tree, pyproject)]
+    return [write_wheel(core, folder)] + [write_wheel(addon_distribution(tree, name, pyproject, core), folder)
+                                          for name in addon_names(tree, pyproject)]
 
 
 # ------------------------------------------------------------------------------------------------- PEP 517 hooks
@@ -429,46 +517,33 @@ def get_requires_for_build_sdist(config_settings=None) -> list[str]:
 
 
 def prepare_metadata_for_build_wheel(metadata_directory, config_settings=None) -> str:
-    dist = core_distribution(Path.cwd())
+    dist = core_distribution(Tree.here())
+    out = Out(metadata_directory)
     for name, data in dist_info_files(dist).items():
-        path = Path(metadata_directory) / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        out.write(name, data)
     return dist.dist_info
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None) -> str:
-    return write_wheel(core_distribution(Path.cwd()), Path(wheel_directory)).name
+    return write_wheel(core_distribution(Tree.here()), Out(wheel_directory)).name
 
 
 def build_sdist(sdist_directory, config_settings=None) -> str:
-    tree = Tree(Path.cwd())
+    tree = Tree.here()
     pyproject = load_pyproject(tree)
-    return write_sdist(tree, core_distribution(tree, pyproject), pyproject, Path(sdist_directory)).name
-
-
-def cli_paths(source: str, out: str) -> tuple[Path, Path]:
-    """The command line's checkout and output folder, checked before anything is read or written: the checkout must
-    hold a pyproject.toml, and the wheels go only into a folder inside the working directory."""
-    root = os.path.realpath(source)
-    if not os.path.isfile(os.path.join(root, "pyproject.toml")):
-        raise BuildError(f"--source {source!r} is not a checkout with a pyproject.toml")
-    base, target = os.path.realpath(os.getcwd()), os.path.realpath(out)
-    if target != base and not target.startswith(base + os.sep):
-        raise BuildError(f"--out {out!r} must be a folder inside the working directory ({base})")
-    return Path(root), Path(target)
+    return write_sdist(tree, core_distribution(tree, pyproject), pyproject, Out(sdist_directory)).name
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the core wheel and every add-on module wheel.")
     parser.add_argument("--out", default="dist", help="folder for the wheels, inside the working directory "
                                                       "(default: dist)")
-    parser.add_argument("--source", default=str(Path(__file__).resolve().parents[2]),
+    parser.add_argument("--source", default=str(Path(__file__).parents[2]),
                         help="the repository checkout to build (default: this script's)")
     args = parser.parse_args(argv)
-    try:
-        source, out = cli_paths(args.source, args.out)
-        for path in build_all(source, out):
+    try:  # both are checked before anything is read or written
+        out = Out.for_command_line(args.out)
+        for path in build_all(Tree.for_command_line(args.source), out):
             print(path)
     except BuildError as e:
         print(f"build failed: {e}", file=sys.stderr)

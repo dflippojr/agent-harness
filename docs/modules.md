@@ -122,8 +122,9 @@ has the commands):
   `harness_modules/__init__.py`, so the namespace stays open to all of them.
 
 A wheel holds the `.py` sources of its package plus the files `pyproject.toml` lists, nothing else. Built from a git
-checkout it reads only files git tracks, so an untracked or ignored file in a package folder never ships, and every
-read refuses a link anywhere on its path. A module's own data files go in `package-data` (`images` lists
+checkout, or from a project folder inside one, the build reads only files git tracks, `pyproject.toml` included, so an
+untracked or ignored file never ships. Every read refuses a link anywhere on its path, whether the disk has it or git
+records it. A module's own data files go in `package-data` (`images` lists
 `flux_fast.json`). A module that reads a repository file outside its package (the hub's manifest schema in `docs/`,
 the runners' Mac bundle in `macrunner/`) lists it under `[tool.agent-harness.addons.repo-files]` and reads it with
 `harness.modules.repo_file(__package__, "<path>")`. That is the checkout's file when the Server runs from one, and the
