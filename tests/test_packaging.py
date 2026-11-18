@@ -209,7 +209,18 @@ def test_a_bad_layout_is_refused_with_its_name(tmp_path):
                                              '[tool.agent-harness.build]\npackages = ["pkg"]\n', encoding="utf-8")
     with pytest.raises(build.BuildError, match="release number"):
         build.core_distribution(tmp_path)
-    assert build.main(["--source", str(tmp_path), "--out", str(tmp_path / "out")]) == 1
+
+
+def test_the_command_line_writes_only_inside_the_working_directory(tmp_path, monkeypatch, capsys):
+    """SonarCloud on #1001: the command line's --source and --out are checked before anything is read or written."""
+    monkeypatch.chdir(tmp_path)
+    assert build.main(["--source", str(tmp_path), "--out", "dist"]) == 1  # no pyproject.toml there
+    assert "is not a checkout" in capsys.readouterr().err
+    assert build.main(["--source", str(ROOT), "--out", str(tmp_path.parent / "elsewhere")]) == 1
+    assert "inside the working directory" in capsys.readouterr().err
+    assert not (tmp_path.parent / "elsewhere").exists()
+    assert build.main(["--source", str(ROOT), "--out", "dist"]) == 0
+    assert sorted(p.name for p in (tmp_path / "dist").iterdir())[0] == CORE_WHEEL
 
 
 def _layout(root: Path, extra: str = "") -> Path:

@@ -138,9 +138,9 @@ def _git_tracked(source: Path) -> frozenset[str] | None:
     """The tracked files of the checkout at `source`, or None when it isn't one (no .git)."""
     if not (source / ".git").exists():
         return None
-    try:
-        out = subprocess.run(["git", "-C", str(source), "ls-files", "-z", "--cached"], capture_output=True,
-                             check=True, timeout=120).stdout
+    try:  # the checkout is the working directory, so no path ever lands on git's command line
+        out = subprocess.run(["git", "ls-files", "-z", "--cached"], cwd=source, capture_output=True, check=True,
+                             timeout=120).stdout
     except (OSError, subprocess.SubprocessError) as e:
         raise BuildError(f"{source} is a git checkout, but git could not list its tracked files: {e}") from None
     return frozenset(name for name in out.decode("utf-8").split("\0") if name)
@@ -447,14 +447,28 @@ def build_sdist(sdist_directory, config_settings=None) -> str:
     return write_sdist(tree, core_distribution(tree, pyproject), pyproject, Path(sdist_directory)).name
 
 
+def cli_paths(source: str, out: str) -> tuple[Path, Path]:
+    """The command line's checkout and output folder, checked before anything is read or written: the checkout must
+    hold a pyproject.toml, and the wheels go only into a folder inside the working directory."""
+    root = os.path.realpath(source)
+    if not os.path.isfile(os.path.join(root, "pyproject.toml")):
+        raise BuildError(f"--source {source!r} is not a checkout with a pyproject.toml")
+    base, target = os.path.realpath(os.getcwd()), os.path.realpath(out)
+    if target != base and not target.startswith(base + os.sep):
+        raise BuildError(f"--out {out!r} must be a folder inside the working directory ({base})")
+    return Path(root), Path(target)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the core wheel and every add-on module wheel.")
-    parser.add_argument("--out", default="dist", help="directory for the wheels (default: dist)")
+    parser.add_argument("--out", default="dist", help="folder for the wheels, inside the working directory "
+                                                      "(default: dist)")
     parser.add_argument("--source", default=str(Path(__file__).resolve().parents[2]),
                         help="the repository checkout to build (default: this script's)")
     args = parser.parse_args(argv)
     try:
-        for path in build_all(Path(args.source), Path(args.out)):
+        source, out = cli_paths(args.source, args.out)
+        for path in build_all(source, out):
             print(path)
     except BuildError as e:
         print(f"build failed: {e}", file=sys.stderr)
