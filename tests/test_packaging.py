@@ -308,14 +308,15 @@ def sysconfig_path(name: str) -> str:
 
 
 class Server:
-    """`harness-server` with no arguments: it finds the per-user install's config itself."""
+    """`python -m harness` with no arguments: it finds the per-user install's config itself. (Not the console script:
+    on Windows that is a launcher process with the interpreter as its child.)"""
 
     def __init__(self, installed: Installed, port: int, data_dir: Path):
         self.port, self.data_dir = port, data_dir
         self.log = installed.root / f"server-{time.monotonic_ns()}.log"
         with self.log.open("w", encoding="utf-8") as log:
-            self.proc = subprocess.Popen([installed.script("harness-server")], cwd=installed.work, env=installed.env,
-                                         stdout=log, stderr=subprocess.STDOUT)
+            self.proc = subprocess.Popen([str(installed.python), "-m", "harness"], cwd=installed.work,
+                                         env=installed.env, stdout=log, stderr=subprocess.STDOUT)
         deadline = time.monotonic() + 120
         while True:
             if self.proc.poll() is not None:
@@ -391,6 +392,8 @@ def test_the_wheels_install_and_run_the_server_without_the_checkout(built, tmp_p
     assert probe["checkout"] is None and probe["stables"] is None
     assert (Path(probe["config_dir"]), Path(probe["data_dir"])) == (install / "config", install / "data")
     assert probe["modules"] == {} and probe["module_names"] == []
+    assert "agent-harness daemon" in env.run(env.script("harness-server"), "--help").stdout  # the console scripts
+    assert "usage:" in env.run(env.script("harness"), "--help").stdout
     # The installed core writes a service-profile config to its default place, and the Server finds it there.
     env.run(str(env.python), "-m", "harness.setup_config", "--config-dir", probe["config_dir"],
             "--data-dir", str(data_dir), "--profile", "service", "--port", str(port),
@@ -417,8 +420,9 @@ def test_the_wheels_install_and_run_the_server_without_the_checkout(built, tmp_p
     assert sorted(probe["modules"]) == [f"harness_modules.{name}" for name in expected]
     assert all(_under(path, env.site) for path in probe["modules"].values())
     assert probe["module_names"] == sorted(module.name for module in modules.discover())
+    port = _free_port()  # a new one: on Windows the last server's closed connections can hold the old port a while
     env.run(str(env.python), "-m", "harness.setup_config", "--config-dir", probe["config_dir"],
-            "--data-dir", str(data_dir), "--profile", "service", "--port", str(port),
+            "--data-dir", str(data_dir), "--profile", "service", "--port", str(port), "--force",
             "--pause-flag", str(tmp_path / "paused"), "--enable-module", "jobs", "--enable-module", "runners",
             "--enable-module", "hub")
     # The hub module validates its example against the schema its wheel carries, into the default config dir.
