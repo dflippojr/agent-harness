@@ -86,7 +86,7 @@ def test_the_image_bakes_in_no_secret_and_publishes_no_port():
     final = stages[-1]
     assert not [a for n, a in final if n == "EXPOSE"]  # the daemon listens on 127.0.0.1 unless configured otherwise
     # The final stage gets only the built wheels; source, config and data never enter it.
-    assert [a for n, a in final if n in ("COPY", "ADD")] == ["--from=wheels /wheels /tmp/wheels"]
+    assert [a for n, a in final if n in ("COPY", "ADD")] == ["--from=wheels /src/wheels /tmp/wheels"]
     secretish = ("TOKEN", "SECRET", "PASSWORD", "KEY")
     for stage in stages:
         for name, args in stage:
@@ -99,7 +99,8 @@ def test_the_image_bakes_in_no_secret_and_publishes_no_port():
 def test_the_build_stage_makes_the_wheels_with_the_in_tree_backend():
     wheels = _stages()[0]
     assert wheels[0] == ("FROM", "python:3.12-slim AS wheels")
-    assert ("RUN", "python scripts/packaging/agent_harness_build.py --out /wheels") in wheels
+    assert ("WORKDIR", "/src") in wheels  # the backend writes only inside the working directory
+    assert ("RUN", "python scripts/packaging/agent_harness_build.py --out wheels") in wheels
 
 
 # ------------------------------------------------------------------------------------------------ the build context

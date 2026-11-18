@@ -11,7 +11,7 @@
 FROM python:3.12-slim AS wheels
 WORKDIR /src
 COPY . .
-RUN python scripts/packaging/agent_harness_build.py --out /wheels
+RUN python scripts/packaging/agent_harness_build.py --out wheels
 
 FROM python:3.12-slim
 # git for project workspaces and checkpoints. No Docker client: hosted sessions need Docker access, which the image
@@ -21,7 +21,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 # The core and every add-on module. A module stays absent until the profile switches it on (HARNESS_ENABLE_MODULES on
 # the first start, or config/profile.yaml in the volume).
-COPY --from=wheels /wheels /tmp/wheels
+COPY --from=wheels /src/wheels /tmp/wheels
 RUN pip install --no-cache-dir --disable-pip-version-check /tmp/wheels/*.whl \
     && rm -rf /tmp/wheels
 # One fixed unprivileged account owns the volume: config/ and data/, with the local owner token the daemon creates on
