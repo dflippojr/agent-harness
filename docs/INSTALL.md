@@ -267,6 +267,44 @@ The wheels hold the Server only:
 - Running from a checkout is unchanged (`python -m harness`, the installers, the tower's deploy). `pip install -e .` is
   not supported; run the checkout directly instead.
 
+## Run the Server in Docker
+
+The repository's `Dockerfile` builds an image of Agent Harness Server from the same wheels. It runs the service
+profile as an unprivileged account (uid 10001) and keeps its config and data in one volume, `/var/lib/agent-harness`.
+It holds no token or config of its own: the container writes its config, and the daemon its local owner token, into
+the volume on the first start. Build it from a clean checkout, because the build context is the allowlist in
+`.dockerignore`, and an untracked file inside `harness/` would reach the image's wheel:
+
+```bash
+docker build -t agent-harness-server .
+docker run -d --name agent-harness --restart unless-stopped --network host \
+  -v agent-harness:/var/lib/agent-harness agent-harness-server
+docker exec agent-harness harness --help   # Agent Harness CLI, with this install's port and local token
+```
+
+The first start writes a service-profile config into `/var/lib/agent-harness/config`, and later starts keep whatever
+you change there. `-e HARNESS_PORT=8200` sets that first config's port, and `-e HARNESS_ENABLE_MODULES=jobs,backup`
+its modules. The image holds every module's wheel, and a module stays absent until the profile switches it on.
+
+The daemon listens on 127.0.0.1 only. With `--network host`, which Docker Desktop must have turned on, that is the
+host's loopback, as with the installers. To use a bridge network instead, set `listen.host: 0.0.0.0` in
+`/var/lib/agent-harness/config/harness.local.yaml` and publish the same port on the host's loopback only:
+`-p 127.0.0.1:8100:8100`. The daemon answers only a request whose `Host` is its own loopback address and port (or
+`public_url`), and everything except `/health`, `/metrics` and `GET /api/v1` needs a credential.
+
+`docker inspect --format '{{.State.Health.Status}}' agent-harness` shows the image's health check.
+`python scripts/server_image_smoke.py agent-harness-server` checks a built image. It confirms that `/health` answers,
+that the daemon runs unprivileged and listens on loopback only, that its state is in the volume, and that a fresh
+container holds no token, secret or config.
+
+The image holds the Server only:
+
+- Hosted sessions run in Docker containers, and the image has no Docker client or socket. Handing the container the
+  host's Docker socket would give it root on the host. The session sandboxes also mount host paths (the workspaces and
+  the CLI home files), which would have to exist at the same place on the host. Until that is designed, run sessions
+  from an installer-made install; the image serves the API, the CLI and management.
+- Stables is served only when `HARNESS_STABLES_DIR` names a copy mounted into the container.
+
 ## Check it
 
 ```powershell

@@ -18,6 +18,8 @@ updates:
     assignees:
       - dflippojr
     directories:
+      # The Server image (#334): the repository root's Dockerfile.
+      - /
       # Dockerfile discovery also includes cli.Dockerfile.
       - /sandbox
       - /ops/egress
