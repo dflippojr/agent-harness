@@ -23,11 +23,14 @@ import logging
 import pkgutil
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 log = logging.getLogger("harness.modules")
 
 NAMESPACE = "harness_modules"
+# Where an add-on wheel carries the repository files its package reads (repo_file, scripts/packaging).
+REPO_FILES = "_repo_files"
 
 # The core's public interface for modules: name -> (core module, attribute). Resolved on first use, so importing
 # harness.modules never drags in the API or the manager.
@@ -143,7 +146,8 @@ _PUBLIC = {
     "remove_tree": ("harness.maintenance", "remove_tree"),
     "backup_sqlite": ("harness.sqlite_backup", "backup_sqlite"),
     "OWNER_USER_ID": ("harness.principal", "OWNER_USER_ID"),
-    "ROOT": ("harness.config", "ROOT"),
+    # No ROOT: an installed Server has no checkout. Modules reach repository files through repo_file below.
+    "resolve_config_dir": ("harness.config", "resolve_config_dir"),
     "write_atomic": ("harness.atomic_io", "write_atomic"),
     "ManagedStore": ("harness.managed_config", "ManagedStore"),
 }
@@ -157,6 +161,21 @@ def __getattr__(name: str) -> Any:
     # Not cached: patches to a public core attribute reach its consumers too.
     module = importlib.import_module(target[0])
     return module if target[1] is None else getattr(module, target[1])
+
+
+def repo_file(package: str | None, relative: str) -> Path:
+    """A repository file outside the module's package that the module reads (``docs/...``, ``macrunner/...``).
+
+    From a source checkout it is the checkout's own file. A Server installed from wheels has no checkout, so the
+    module's add-on wheel carries a copy in ``<package>/_repo_files/`` (the ``repo-files`` table in pyproject.toml,
+    #334). The path comes back whether or not it exists; reading a missing one fails with its name."""
+    from .config import CHECKOUT
+    if not package:
+        raise ValueError("repo_file takes the calling module's __package__")
+    carried = Path(sys.modules[package].__file__ or "").parent / REPO_FILES / relative
+    if carried.is_file() or CHECKOUT is None:
+        return carried
+    return CHECKOUT / relative
 
 
 def lazy(path: str, attr: str, *, call: bool = False) -> Callable[..., Any]:

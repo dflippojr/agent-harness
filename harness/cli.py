@@ -65,14 +65,16 @@ def configure(path: Path | str = DEFAULT_CONFIG) -> dict:
 
 def _local_daemon_url() -> str:
     """The daemon on this machine. When HARNESS_CONFIG_DIR names a daemon's configuration (an install's `harness`
-    command sets it, install/install.sh), use that daemon's listen.port, which need not be 8100."""
+    command sets it, install/install.sh), use that daemon's listen.port, which need not be 8100. Installed from the
+    wheel (#334), the CLI reads the per-user install's configuration by default, as the installed daemon does, so the
+    two agree on the port as they already do on the data dir and its local token."""
     default = "http://127.0.0.1:8100"
-    if not os.environ.get("HARNESS_CONFIG_DIR"):
-        return default
     try:
-        from .config import resolve_port
+        from .config import CHECKOUT, resolve_port
     except ImportError:  # the native bundle has no daemon config next to it
         return default
+    if not os.environ.get("HARNESS_CONFIG_DIR") and CHECKOUT is not None:
+        return default  # a checkout's CLI with no install named: as before
     try:
         return f"http://127.0.0.1:{resolve_port()}"
     except Exception:  # unreadable or malformed configuration: the default port, as before

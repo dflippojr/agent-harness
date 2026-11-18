@@ -21,7 +21,6 @@ can't bring back erased App data on its own. See docs/INSTALL.md, "Backups and r
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import sqlite3
 import sys
@@ -31,8 +30,8 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, ROOT, WEB_APP_ID, app_dir,
-                            migrations, remove_tree, storage)
+from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, WEB_APP_ID, app_dir, migrations, remove_tree,
+                            resolve_config_dir, storage)
 
 from . import audit
 from .member_key import KEY_FILE, expected_fingerprint, fingerprint, key_dir, write_private
@@ -221,10 +220,10 @@ def plan(cfg, folder: Path, *, include_config: bool = False, config_dir: Path | 
                               "main store")
     _plan_audit(data, folder, p)
     if include_config:
-        config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+        target: Path = resolve_config_dir(config_dir)
         for name in CONFIG_FILES:
             if (folder / "config" / name).is_file():
-                p.items.append(Item("config", folder / "config" / name, config_dir / name, f"config {name}"))
+                p.items.append(Item("config", folder / "config" / name, target / name, f"config {name}"))
         for path in sorted(folder.glob("managed-config*.json")):
             p.items.append(Item("config", path, data / path.name, f"managed config {path.name}"))
     return p

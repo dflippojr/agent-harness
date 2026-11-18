@@ -217,6 +217,56 @@ Server. No
 Rosetta, local GPU model, or administrator privileges are required. Docker Desktop must be running before hosted
 sessions can start.
 
+## Install the Server from wheels (pip)
+
+The installers above remain the way to set up a machine. They choose the service profile first, build the sandbox
+and provider images, and register the services. Agent Harness Server is also a pip package, for hosts that manage
+their own Python and processes. No package index carries it yet (#334), so build the wheels from a checkout. The
+build uses only the standard library and needs no network:
+
+```bash
+python scripts/packaging/agent_harness_build.py --out dist
+```
+
+`dist/` then holds the core wheel, `agent_harness-<release>-py3-none-any.whl`, and one wheel per optional module,
+`agent_harness_module_<name>-<release>-py3-none-any.whl`. The core wheel holds the `harness` package and the SDK as
+the `harness_client` module (`from harness_client import Harness`). `pip wheel .` and `pip install .` build the core
+wheel alone. [modules.md](modules.md#packaging) explains the split.
+
+Install the core and the modules you want into a virtual environment with Python 3.12 or later:
+
+```bash
+python3.12 -m venv ~/.local/share/agent-harness/venv
+~/.local/share/agent-harness/venv/bin/pip install dist/agent_harness-*.whl dist/agent_harness_module_jobs-*.whl
+```
+
+An installed Server keeps nothing next to its code. Without `--config-dir`, `--data-dir`, `HARNESS_CONFIG_DIR` or
+`HARNESS_DATA_DIR`, it uses the directories the installers write: `config/` and `data/` under
+`~/.local/share/agent-harness` (`$XDG_DATA_HOME/agent-harness` when that is set), or under
+`%LOCALAPPDATA%\agent-harness` on Windows. On a machine that already has an installer-made install, those are that
+install's files, so run only one Server on them. Write a service-profile config there and start the Server:
+
+```bash
+venv=~/.local/share/agent-harness/venv
+$venv/bin/python -m harness.setup_config --profile service --enable-module jobs \
+  --config-dir ~/.local/share/agent-harness/config --data-dir ~/.local/share/agent-harness/data \
+  --pause-flag ~/.local/share/agent-harness/llama-server.paused
+$venv/bin/harness-server      # the daemon on 127.0.0.1:8100; python -m harness also works
+$venv/bin/harness --help      # Agent Harness CLI
+```
+
+The wheels hold the Server only:
+
+- Hosted sessions run in Docker. The sandbox image, the provider CLI image and the egress proxies are built from a
+  checkout (`sandbox/`, `ops/egress/compose.yaml`), as the installers do, and provider logins use
+  `ops/backends/login.sh`.
+- Stables is served only when `HARNESS_STABLES_DIR` names a copy. An installed Server never looks beside its code.
+- The nightly canary runs `bakeoff/`, which only a checkout has. An installed Server turns the canary off and logs why.
+- A module wheel requires the core release it was built with. `pip uninstall agent-harness-module-jobs` removes the
+  module, as taking its package out of a checkout does.
+- Running from a checkout is unchanged (`python -m harness`, the installers, the tower's deploy). `pip install -e .` is
+  not supported; run the checkout directly instead.
+
 ## Check it
 
 ```powershell

@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, ROOT, ManagedStore, app_dir, backup_sqlite,
+from harness.modules import (APP_STORE_FILE, OWNER_USER_ID, ManagedStore, app_dir, backup_sqlite,
                              remove_tree, storage, operation_audit, audit_context)
 
 from .audit import AUDIT_FILE, AuditError, stable_prefix
@@ -147,9 +147,11 @@ class BackupService:
         transcript_archives += self._backup_other_transcripts(tmp / "transcripts", warnings)
         config = tmp / "config"
         config.mkdir()
+        # The configuration this daemon runs with (restore writes back to the same directory). Installed from the
+        # wheel there is no checkout config/ at all (#334).
         for name in ("harness.yaml", "harness.local.yaml", "projects.yaml"):
-            if (ROOT / "config" / name).exists():
-                shutil.copy2(ROOT / "config" / name, config / name)
+            if (self.cfg.config_dir / name).exists():
+                shutil.copy2(self.cfg.config_dir / name, config / name)
         managed = ManagedStore(self.cfg.data_dir)
         for path in managed.overlay_files():
             shutil.copy2(path, tmp / path.name)

@@ -6,8 +6,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from harness.modules import (HarnessError, RouteTable, manager as mgr, runtime,
-                             require_admin, log_safe, compat, API_VERSION, ROOT, credential_audit,
-                             refuse_hub_owner_key)
+                             require_admin, log_safe, compat, API_VERSION, credential_audit,
+                             refuse_hub_owner_key, repo_file)
 
 log = logging.getLogger("harness.runners")
 RUNNER_BODY_LIMIT = 16 * 2**20
@@ -154,7 +154,7 @@ async def pair_runner(body: RunnerPairRequest, request: Request):
 @public_routes.get("/mac-client/install.sh", include_in_schema=False)
 async def mac_client_installer():
     """Serve the shell script that installs the Mac client."""
-    return FileResponse(ROOT / "macrunner" / "install.sh",
+    return FileResponse(repo_file(__package__, "macrunner/install.sh"),
                         media_type="text/x-shellscript", headers={"Cache-Control": "no-cache"})
 
 

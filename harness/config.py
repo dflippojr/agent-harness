@@ -15,7 +15,20 @@ import yaml
 from .atomic_io import write_atomic
 from .compaction import TrimRules
 
+# The directory holding the harness package: the repository root in a source checkout, site-packages when installed.
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _source_checkout(root: Path) -> Path | None:
+    """`root` when it is a source checkout of this repository, else None (#334, stage e).
+
+    Installed from the wheel, `root` is site-packages, where none of the repository's files are, so no default may
+    resolve against it. Two tracked files a site-packages directory never holds mark a checkout."""
+    return root if (root / "pyproject.toml").is_file() and (root / "config" / "harness.yaml").is_file() else None
+
+
+# Every default that names a repository file goes through this: a checkout's config/, data/, stables/ and bakeoff/.
+CHECKOUT = _source_checkout(ROOT)
 PROJECTS_FILE = "projects.yaml"
 MODULE_NAMES = (
     "local_model", "homelab", "memory_library", "images", "image_edit", "jobs", "gpu_guard", "runners",
@@ -34,9 +47,33 @@ def _platform_path(windows: str, *elsewhere: str) -> str:
         return windows
     if not elsewhere:
         return ""
+    return str(_xdg_data_home().joinpath("agent-harness", *elsewhere))
+
+
+def _xdg_data_home() -> Path:
     xdg = os.environ.get("XDG_DATA_HOME", "")
-    data_home = Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
-    return str(data_home.joinpath("agent-harness", *elsewhere))
+    return Path(xdg) if xdg and Path(xdg).is_absolute() else Path.home() / ".local" / "share"
+
+
+def install_home() -> Path:
+    """The per-user directory the platform installers set up (#334): %LOCALAPPDATA%\\agent-harness on Windows
+    (install.ps1), the XDG data dir's agent-harness elsewhere (install.sh). Its config/ and data/ are the defaults of a
+    Server installed from the wheel, so the pip, Docker and installer routes agree on where an install keeps them."""
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        return (Path(local) if local and Path(local).is_absolute() else Path.home() / "AppData" / "Local") / "agent-harness"
+    return _xdg_data_home() / "agent-harness"
+
+
+def _base_config_dir() -> Path:
+    """The configuration directory when nothing names one: the checkout's config/, else the per-user install's."""
+    return CHECKOUT / "config" if CHECKOUT else install_home() / "config"
+
+
+def resolve_config_dir(config_dir: Path | str | None = None) -> Path:
+    """`config_dir`, else HARNESS_CONFIG_DIR, else the checkout's config/ or, installed from the wheel, the per-user
+    install's config/. Never a path relative to the installed package."""
+    return Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or _base_config_dir())
 
 
 def _path_field(windows: str, *elsewhere: str):
@@ -627,7 +664,7 @@ class Config:
     profile: str = "full"
     modules: ModulesConfig = field(default_factory=ModulesConfig)
     installed: ModulesConfig = field(default_factory=ModulesConfig)
-    config_dir: Path = field(default_factory=lambda: ROOT / "config")
+    config_dir: Path = field(default_factory=_base_config_dir)
     # Opaque names to owner-managed files. Only the names may be stored in SQLite; paths stay in local config.
     provider_secret_files: dict[str, str] = field(default_factory=dict)
     backends: dict[str, BackendConfig] = field(default_factory=dict)
@@ -804,15 +841,41 @@ def _load_google_signin(raw) -> GoogleSigninConfig:
     return GoogleSigninConfig(**raw)
 
 
+def canary_suite_path(suite: str) -> Path | None:
+    """The canary suite file: an absolute path as given, a relative one inside the checkout. Installed from the wheel
+    a relative path has nothing to resolve against: None."""
+    path = Path(suite)
+    if path.is_absolute():
+        return path
+    return CHECKOUT / path if CHECKOUT else None
+
+
+def canary_runner_problem() -> str:
+    """Why the canary's task runner can't load, or "". It is bakeoff/canary.py, dev-side benchmark tooling that only a
+    checkout has: a Server installed from the wheel runs without it (#334)."""
+    import importlib.util
+    try:
+        if importlib.util.find_spec("bakeoff") is not None:
+            return ""
+    except (ImportError, ValueError):
+        pass
+    return "the canary runs bakeoff/canary.py, which only a source checkout has (this Server is installed from a wheel)"
+
+
 def _canary_fixture_problem(raw: dict) -> str:
-    """Why an enabled canary can't run (missing suite file, or web tasks without a fixture manifest); "" if fine."""
+    """Why an enabled canary can't run (no task runner, a missing suite file, or web tasks without a fixture
+    manifest); "" if fine."""
     suite = raw.get("suite", CanaryConfig.suite)
     if not (raw.get("enabled") and suite):
         return ""
-    if not (ROOT / suite).is_file():
+    runner = canary_runner_problem()
+    if runner:
+        return runner
+    path = canary_suite_path(suite)
+    if path is None or not path.is_file():
         return f"canary.suite {suite!r} is not a file"
     try:
-        web = (yaml.safe_load((ROOT / suite).read_text(encoding="utf-8")) or {}).get("web")
+        web = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("web")
     except (OSError, yaml.YAMLError, AttributeError) as e:
         return f"canary.suite {suite!r} can't be read: {e}"
     fixture = Path(raw["fixture_dir"])
@@ -821,12 +884,13 @@ def _canary_fixture_problem(raw: dict) -> str:
     return ""
 
 
-def _load_canary(raw, data_dir: Path = ROOT / "data") -> CanaryConfig:
+def _load_canary(raw, data_dir: Path | None = None) -> CanaryConfig:
     """`at` comes back as "HH:MM"; anything the nightly can't use is a config error here, not a dead loop at night.
     An omitted fixture_dir is the effective data_dir's web-fixture (#810)."""
     from .canary import parse_at
     raw = dict(raw or {})
-    raw["fixture_dir"] = str(raw.get("fixture_dir") or Path(data_dir) / "web-fixture")
+    data_dir = Path(data_dir) if data_dir else (CHECKOUT or install_home()) / "data"
+    raw["fixture_dir"] = str(raw.get("fixture_dir") or data_dir / "web-fixture")
     at = raw.get("at", CanaryConfig.at)
     if isinstance(at, int) and not isinstance(at, bool):  # YAML 1.1 reads an unquoted 3:05 as 3 * 60 + 5
         at = f"{at // 60}:{at % 60}" if 0 <= at < 24 * 60 else str(at)
@@ -903,11 +967,17 @@ def _apply_profile_overlay(raw: dict, profile_raw: dict) -> None:
 
 def _default_data_dir() -> Path:
     # Off Windows, per checkout: a run from a checkout with no data_dir must not share a deployed daemon's database.
-    return Path("D:/Agents/harness") if sys.platform == "win32" else ROOT / "data"
+    # Installed from the wheel there is no checkout, and the Server is an install: the per-user data dir the
+    # installers write (#334), never site-packages.
+    if CHECKOUT is None:
+        return install_home() / "data"
+    return Path("D:/Agents/harness") if sys.platform == "win32" else CHECKOUT / "data"
 
 
 def _default_repos_dir() -> Path:
-    return Path("D:/Agents/repos") if sys.platform == "win32" else ROOT / "data" / "repos"
+    if CHECKOUT is None:
+        return install_home() / "data" / "repos"
+    return Path("D:/Agents/repos") if sys.platform == "win32" else CHECKOUT / "data" / "repos"
 
 
 def _apply_windows_defaults(raw: dict) -> None:
@@ -1106,19 +1176,19 @@ def _load_module_sections(raw: dict, profile: str, raw_modules: dict, selected) 
 
 def resolve_port(config_dir: Path | None = None) -> int:
     """Read this daemon's port without validating unrelated runtime configuration."""
-    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+    config_dir = resolve_config_dir(config_dir)
     return int((_read_raw_config(config_dir).get("listen") or {}).get("port", 8100))
 
 
 def resolve_data_dir(config_dir: Path | None = None) -> Path:
     """The data_dir `load` would use, without building the whole Config (the local CLI reads its token from here)."""
-    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+    config_dir = resolve_config_dir(config_dir)
     return Path(os.environ.get("HARNESS_DATA_DIR") or _read_raw_config(config_dir).get("data_dir") or _default_data_dir())
 
 
 def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config:
     from .smart_approvals import load_smart_config
-    config_dir = Path(config_dir or os.environ.get("HARNESS_CONFIG_DIR") or ROOT / "config")
+    config_dir = resolve_config_dir(config_dir)
     raw = _read_raw_config(config_dir)
     _apply_windows_defaults(raw)
     if "fake_model" in raw:
