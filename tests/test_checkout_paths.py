@@ -115,6 +115,26 @@ def test_installed_the_default_config_is_read_from_the_per_user_install(installe
     assert (cfg.config_dir, cfg.port, cfg.data_dir) == (installed / "config", 8124, installed / "data")
 
 
+def test_an_installed_cli_reaches_the_installed_daemons_port(installed):
+    """The review of #1001: the installed `harness` command read the install's token but assumed port 8100."""
+    from harness import cli
+    assert cli._local_daemon_url() == "http://127.0.0.1:8100"  # no install configured yet: the default
+    (installed / "config").mkdir(parents=True)
+    (installed / "config" / "harness.yaml").write_text("listen: {port: 8126}\n", encoding="utf-8")
+    assert cli._local_daemon_url() == "http://127.0.0.1:8126"
+
+
+def test_a_checkouts_cli_keeps_the_default_port_unless_an_install_is_named(tmp_path, monkeypatch):
+    from harness import cli
+    monkeypatch.delenv("HARNESS_CONFIG_DIR", raising=False)
+    assert cli._local_daemon_url() == "http://127.0.0.1:8100"
+    named = tmp_path / "named"
+    named.mkdir()
+    (named / "harness.yaml").write_text("listen: {port: 8127}\n", encoding="utf-8")
+    monkeypatch.setenv("HARNESS_CONFIG_DIR", str(named))
+    assert cli._local_daemon_url() == "http://127.0.0.1:8127"
+
+
 def test_installed_stables_is_served_only_from_the_variable(tmp_path, monkeypatch):
     monkeypatch.setattr(stables_shell, "DEFAULT", None)  # what an installed core computes: no checkout
     monkeypatch.delenv(stables_shell.ENV, raising=False)
