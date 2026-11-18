@@ -22,8 +22,10 @@ else here touches the disk (tests/test_packaging.py scans for any other access).
 the files git tracks, so an untracked or ignored file never ships, and a source distribution holds only what such a
 build selected. No read follows a link anywhere on its path.
 
-Builds need no network and no setuptools, and are reproducible: the same tree gives the same bytes (entries are
-sorted, and timestamps come from SOURCE_DATE_EPOCH or a fixed date).
+Builds need no network and no setuptools, and are reproducible: the same file contents give the same bytes on every
+platform (entries are sorted, timestamps come from SOURCE_DATE_EPOCH or a fixed date, and zip entries say Unix). A
+file is shipped as the checkout has it, so a Windows clone that converts line ends gives different bytes for those
+files.
 """
 
 from __future__ import annotations
@@ -449,6 +451,7 @@ def _epoch() -> int:
 
 def _zip_info(name: str, epoch: int) -> zipfile.ZipInfo:
     info = zipfile.ZipInfo(name, date_time=time.gmtime(epoch)[:6])
+    info.create_system = 3  # Unix, as the mode bits below are, on every platform (zipfile says 0 on Windows)
     info.external_attr = (stat.S_IFREG | 0o644) << 16
     info.compress_type = zipfile.ZIP_DEFLATED
     return info

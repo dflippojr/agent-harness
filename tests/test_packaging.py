@@ -163,6 +163,26 @@ def test_each_module_is_an_add_on_wheel_of_its_own_on_this_core(built):
     assert build.unknown_repo_file_addons(ROOT) == []
 
 
+def test_every_platform_builds_the_same_bytes(tmp_path, monkeypatch):
+    """The review of #1001 (r3): zipfile marks each entry with the platform that wrote it (create_system 0 on Windows,
+    3 elsewhere), so the same files made different wheels on Windows and Linux. The entries now say Unix, as their mode
+    bits do, and nothing else the backend writes depends on the platform it runs on."""
+    made = {}
+    for platform in ("win32", "linux"):
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "platform", platform)
+            tree = build.Tree(ROOT)
+            pyproject = build.load_pyproject(tree)
+            paths = [*build.build_all(tree, tmp_path / platform),
+                     build.write_sdist(tree, build.core_distribution(tree, pyproject), pyproject, tmp_path / platform)]
+            made[platform] = {path.name: path.read_bytes() for path in paths}
+    assert made["win32"] == made["linux"]
+    for name, data in made["win32"].items():
+        if name.endswith(".whl"):
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                assert {info.create_system for info in z.infolist()} == {3}, name
+
+
 def test_builds_are_reproducible(built, tmp_path, monkeypatch):
     again = {path.name: path for path in build.build_all(ROOT, tmp_path / "again")}
     assert {name: path.read_bytes() for name, path in again.items()} == {
