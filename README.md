@@ -349,6 +349,7 @@ gives up the GPU.
 | Topic | Doc |
 | --- | --- |
 | Installation and profiles | [INSTALL](docs/INSTALL.md) · [service profile](docs/service-profile.md) |
+| Packaging, the Server and modules as wheels | [INSTALL, from wheels](docs/INSTALL.md#install-the-server-from-wheels-pip) · [modules, packaging](docs/modules.md#packaging) |
 | App API and SDK | [app-api](docs/app-api.md) · [`sdk/`](sdk) |
 | Owner API, members, per-app provider keys | [admin-api](docs/admin-api.md) |
 | Configuration registry | [config-registry](docs/config-registry.md) |
