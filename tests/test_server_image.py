@@ -253,10 +253,13 @@ def test_every_location_the_daemon_picks_is_in_the_volume(tmp_path, monkeypatch)
     assert [(where, str(path)) for where, path in found if not path.is_relative_to(volume)] == []
 
 
-def test_the_volume_must_be_named(volume, monkeypatch):
+def test_the_volume_must_be_named(volume, monkeypatch, tmp_path):
     monkeypatch.delenv("HARNESS_DATA_DIR")
     with pytest.raises(SystemExit, match="HARNESS_DATA_DIR"):
         container.prepare()
+    # Every setting comes from the environment prepare() is handed, the volume included.
+    other = {"HARNESS_CONFIG_DIR": str(tmp_path / "other" / "config"), "HARNESS_DATA_DIR": str(tmp_path / "other" / "data")}
+    assert container.prepare(other) is True and (tmp_path / "other" / "config" / "profile.yaml").is_file()
 
 
 def test_a_config_the_daemon_would_refuse_stops_the_first_start(volume, monkeypatch):

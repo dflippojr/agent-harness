@@ -25,8 +25,8 @@ PAUSE_FLAG = "llama-server.paused"  # setup_config requires one; the service pro
 FIRST_START_FILES = ("harness.yaml", "projects.yaml", "profile.yaml")
 
 
-def _volume(name: str) -> Path:
-    value = os.environ.get(name, "").strip()
+def _volume(name: str, environ=os.environ) -> Path:
+    value = environ.get(name, "").strip()
     if not value:
         raise SystemExit(f"{name} must name the image's volume directory (the Dockerfile sets it)")
     return Path(value)
@@ -49,7 +49,7 @@ def prepare(environ=os.environ) -> bool:
     """Write the first config when the volume has none, or finish one that an interrupted first start left half
     written (setup_config keeps an existing harness.yaml and projects.yaml, and writes profile.yaml afresh). True
     when this start wrote anything."""
-    config_dir, data_dir = _volume("HARNESS_CONFIG_DIR"), _volume("HARNESS_DATA_DIR")
+    config_dir, data_dir = _volume("HARNESS_CONFIG_DIR", environ), _volume("HARNESS_DATA_DIR", environ)
     if all((config_dir / name).exists() for name in FIRST_START_FILES):
         return False
     from . import setup_config
