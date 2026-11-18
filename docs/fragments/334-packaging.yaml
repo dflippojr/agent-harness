@@ -1,10 +1,12 @@
 schema_version: 1
 kind: doc-index
 target: readme-docs-index
-title: Packaging, the Server and modules as wheels
+title: Packaging, the Server as wheels and as a Docker image
 order: 11
 links:
   - text: 'INSTALL, from wheels'
     href: docs/INSTALL.md#install-the-server-from-wheels-pip
+  - text: 'INSTALL, Docker'
+    href: docs/INSTALL.md#run-the-server-in-docker
   - text: 'modules, packaging'
     href: docs/modules.md#packaging
