@@ -39,7 +39,8 @@ ENV HARNESS_CONFIG_DIR=/var/lib/agent-harness/config \
 VOLUME ["/var/lib/agent-harness"]
 USER 10001:10001
 WORKDIR /home/harness
-# The daemon listens on 127.0.0.1 only (harness/container.py); the check runs inside the container.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+# The daemon listens on 127.0.0.1 only (harness/container.py); the check runs inside the container, and Docker's
+# default number of failed checks marks it unhealthy.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s \
     CMD ["python", "-m", "harness.container", "--health"]
 ENTRYPOINT ["python", "-m", "harness.container"]
