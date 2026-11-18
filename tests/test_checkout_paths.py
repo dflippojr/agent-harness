@@ -187,8 +187,8 @@ def test_repo_file_prefers_the_copy_an_add_on_wheel_carries(tmp_path, monkeypatc
     import importlib
     importlib.import_module("harness_modules.probe")
     try:
-        assert modules.repo_file("harness_modules.probe", "docs/modules.md") == ROOT / "docs" / "modules.md"
-        carried = package / modules.REPO_FILES / "docs" / "modules.md"
+        assert modules.repo_file("harness_modules.probe", "docs/modules.md") == ROOT / "docs/modules.md"
+        carried = package / modules.REPO_FILES / "docs/modules.md"
         monkeypatch.setattr(config, "CHECKOUT", None)
         assert modules.repo_file("harness_modules.probe", "docs/modules.md") == carried  # missing: named on read
         carried.parent.mkdir(parents=True)
@@ -200,8 +200,8 @@ def test_repo_file_prefers_the_copy_an_add_on_wheel_carries(tmp_path, monkeypatc
 
 
 def test_from_a_checkout_modules_read_the_checkouts_files():
-    assert hub_entries.SCHEMA == ROOT / "docs" / "marketplace-manifest.schema.json"
-    assert hub_entries.EXAMPLE == ROOT / "docs" / "hub.entries.example.json"
+    assert hub_entries.SCHEMA == ROOT / "docs/marketplace-manifest.schema.json"
+    assert hub_entries.EXAMPLE == ROOT / "docs/hub.entries.example.json"
     assert mac_client.source("macrunner/install.sh") == ROOT / "macrunner" / "install.sh"
     assert mac_client.source("sdk/harness_client.py") == ROOT / "sdk" / "harness_client.py"
     assert mac_client.source("harness/cli.py") == ROOT / "harness" / "cli.py"  # the running core's own file

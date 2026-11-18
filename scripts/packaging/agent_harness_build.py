@@ -64,7 +64,7 @@ class Distribution:
     requires: list[str]
     files: dict[str, bytes]
     license: str = ""
-    license_text: bytes = b""
+    license_files: dict[str, bytes] = field(default_factory=dict)  # [project] license-files, by repository path
     readme: str = ""
     extras: dict[str, list[str]] = field(default_factory=dict)
     scripts: dict[str, str] = field(default_factory=dict)
@@ -202,7 +202,7 @@ def core_distribution(source: Path, pyproject: dict | None = None) -> Distributi
     return Distribution(
         name=name, version=project_version(source, pyproject), summary=project.get("description", ""),
         requires_python=project.get("requires-python", ""), requires=requires, files=files, license=license,
-        license_text=b"\n".join(_read(source, path) for path in license_files),
+        license_files={str(_relative(path, "license file")): _read(source, path) for path in license_files},
         readme=_read(source, readme).decode("utf-8") if readme else "", extras=extras,
         scripts={str(k): str(v) for k, v in project.get("scripts", {}).items()})
 
@@ -242,7 +242,7 @@ def addon_distribution(source: Path, name: str, pyproject: dict | None = None,
         name=str(addons.get("distribution", "agent-harness-module-{name}")).format(name=name.replace("_", "-")),
         version=core.version, summary=f"Agent Harness add-on module: {title} (harness_modules.{name})",
         requires_python=core.requires_python, requires=[f"{core.name}=={core.version}"], files=files,
-        license=core.license, license_text=core.license_text)
+        license=core.license, license_files=core.license_files)
 
 
 def unknown_repo_file_addons(source: Path, pyproject: dict | None = None) -> list[str]:
@@ -292,8 +292,8 @@ def dist_info_files(dist: Distribution) -> dict[str, bytes]:
     entry_points = _entry_points(dist)
     if entry_points:
         files[f"{dist.dist_info}/entry_points.txt"] = entry_points
-    if dist.license_text:
-        files[f"{dist.dist_info}/licenses/LICENSE"] = dist.license_text
+    for path, data in dist.license_files.items():  # where PEP 639 puts them: licenses/<path in the project>
+        files[f"{dist.dist_info}/licenses/{path}"] = data
     return files
 
 
@@ -335,7 +335,7 @@ def write_wheel(dist: Distribution, out: Path) -> Path:
 
 def write_sdist(source: Path, dist: Distribution, pyproject: dict, out: Path) -> Path:
     """The core's source distribution: what building its wheel again needs, under <name>-<version>/."""
-    sdist = _settings(pyproject).get("build", {}).get("sdist", [])
+    sdist = [*_settings(pyproject).get("build", {}).get("sdist", []), *dist.license_files]
     base = f"{dist.escaped}-{dist.version}"
     entries = {f"{base}/{rel}": data for rel, data in dist.files.items() if rel.startswith(tuple(
         f"{package}/" for package in _settings(pyproject).get("build", {}).get("packages", [])))}

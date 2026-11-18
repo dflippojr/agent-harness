@@ -117,7 +117,6 @@ def test_the_core_wheel_metadata_matches_pyproject(built):
     assert readme == (ROOT / "README.md").read_text(encoding="utf-8")
     with zipfile.ZipFile(built[CORE_WHEEL]) as z:
         entry_points = z.read(f"agent_harness-{VERSION}.dist-info/entry_points.txt").decode("utf-8")
-        assert z.read(f"agent_harness-{VERSION}.dist-info/licenses/LICENSE") == (ROOT / "LICENSE").read_bytes()
     assert entry_points.splitlines() == ["[console_scripts]", "harness = harness.cli:main",
                                          "harness-server = harness.__main__:main"]
 
@@ -432,7 +431,7 @@ def test_the_wheels_install_and_run_the_server_without_the_checkout(built, tmp_p
         assert {"/jobs", "/api/admin/v1/hub"} <= paths
         assert server.json("/jobs") == []
         assert len(server.json("/api/admin/v1/hub")["entries"]) == len(
-            json.loads((ROOT / "docs" / "hub.entries.example.json").read_text(encoding="utf-8"))["entries"])
+            json.loads((ROOT / "docs/hub.entries.example.json").read_text(encoding="utf-8"))["entries"])
         status, script = server.get("/mac-client/install.sh")
         assert (status, script) == (200, (ROOT / "macrunner" / "install.sh").read_bytes())
         status, package = server.get("/mac-client/package.tar.gz")

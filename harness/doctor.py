@@ -305,7 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = config_mod.load(args.config_dir)
         mode = f"model {cfg.default_model}" if cfg.modules.local_model else "hosted providers only"
-        r.ok("Config", f"{cfg.config_dir}; {cfg.profile} profile, {mode}, port {cfg.port}")
+        where = config_mod.resolve_config_dir(args.config_dir)  # what load read: the argument, the variable or the default
+        r.ok("Config", f"{where}; {cfg.profile} profile, {mode}, port {cfg.port}")
     except Exception as e:  # noqa: BLE001 - report any config problem
         r.fail("Config", f"{type(e).__name__}: {e}")
         return 1
