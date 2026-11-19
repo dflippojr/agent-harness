@@ -35,7 +35,9 @@ from . import taint
 from . import telemetry
 from . import transcript
 from .manager import HarnessError, Manager, public_approval
-from .api_models import WebSessionResponse
+from .api_models import ApprovalResponse, WebSessionResponse
+from . import response_docs as docs
+from .response_docs import documented
 from .modules import principal_capabilities
 from .origins import LOOPBACK_HOSTS, daemon_origins, normalize_origin
 from .webgzip import WebGzipMiddleware
@@ -489,7 +491,7 @@ async def manifest(request: Request):
 
 
 # API
-@api_router.get("/health")
+@api_router.get("/health", responses=documented(docs.HealthResponse))
 async def health(request: Request):
     """Liveness check that also reports the build commit and configuration revision."""
     cfg = mgr(request).cfg
@@ -517,7 +519,7 @@ async def metrics(request: Request):
     return PlainTextResponse(await asyncio.to_thread(render, m), media_type="text/plain; version=0.0.4")
 
 
-@api_router.get("/me")
+@api_router.get("/me", responses=documented(docs.MeResponse))
 async def me(request: Request):
     """Caller's identity, role and capabilities, plus disk and queue usage where the account has it."""
     m = mgr(request)
@@ -583,7 +585,7 @@ async def update_profile(body: ProfileUpdate, request: Request):
     return {"emoji": body.emoji, "choices": profile_emojis}
 
 
-@api_router.get("/projects")
+@api_router.get("/projects", responses=documented(list[docs.ProjectView]))
 async def projects(request: Request):
     """Projects visible to the caller, or an empty list for a read-only demo session."""
     from . import catalog
@@ -594,7 +596,7 @@ async def projects(request: Request):
     return [catalog.public_project(p) for p in catalog.list_projects(m.cfg, m.db, scope)]
 
 
-@api_router.post("/projects", status_code=201)
+@api_router.post("/projects", status_code=201, responses=documented(docs.ProjectView, 201))
 async def create_project(body: CreateProject, request: Request):
     """Creates a project with an empty workspace or a repo cloned per session; `github` clones use the caller's GitHub sign-in."""
     ident = request.state.access
@@ -643,7 +645,7 @@ async def models(request: Request):
             for m in cfg.models.values()]
 
 
-@api_router.get("/backends")
+@api_router.get("/backends", responses=documented(list[docs.BackendView]))
 async def backends(request: Request):
     """Local and hosted backends with their model and sign-in state; `auth=skip` skips the sign-in checks."""
     m = mgr(request)
@@ -659,7 +661,7 @@ async def backends(request: Request):
     return [local_view(m), *hosted]
 
 
-@api_router.put("/backends/{name}")
+@api_router.put("/backends/{name}", responses=documented(docs.BackendView))
 async def update_backend(name: str, body: BackendUpdate, request: Request):
     """Settings → Backends: persist the default model (and effort, for hosted CLIs)."""
     from .backend_state import save_prefs
@@ -678,19 +680,19 @@ async def update_backend(name: str, body: BackendUpdate, request: Request):
     return await asyncio.to_thread(backend_view, m, name, False)
 
 
-@api_router.get("/smart-approvals")
+@api_router.get("/smart-approvals", responses=documented(docs.SmartApprovalsResponse))
 async def smart_approvals(request: Request):
     """Smart-approval status and the 20 most recent reviews."""
     return require_owner(request).smart_approvals_status()
 
 
-@api_router.put("/smart-approvals")
+@api_router.put("/smart-approvals", responses=documented(docs.SmartApprovalsResponse))
 async def update_smart_approvals(body: SmartApprovalsUpdate, request: Request):
     """Sets the smart-approval mode; any mode but off needs smart_approvals configured in harness.yaml."""
     return require_owner(request).set_smart_approvals_mode(body.mode)
 
 
-@api_router.get("/queue")
+@api_router.get("/queue", responses=documented(list[docs.QueueEntry]))
 async def queue(request: Request):
     """Queue positions of the caller's queued agent sessions, in queue order."""
     m = mgr(request)
@@ -827,22 +829,22 @@ async def get_session(ref: str, request: Request):
     return m.summary(session)
 
 
-@api_router.patch("/sessions/{ref}")
-@api_router.put("/sessions/{ref}")
+@api_router.patch("/sessions/{ref}", responses=documented(WebSessionResponse))
+@api_router.put("/sessions/{ref}", responses=documented(WebSessionResponse))
 async def patch_session(ref: str, body: SessionUpdate, request: Request):
     """Renames the conversation; its whitespace is collapsed and the title must be 1 to 120 characters."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(m.rename(sid, body.title, context=operation_audit.request_context(request, m)))
 
 
-@api_router.post("/sessions/{ref}/messages")
+@api_router.post("/sessions/{ref}/messages", responses=documented(WebSessionResponse))
 async def send_message(ref: str, body: SendMessage, request: Request):
     """Sends a follow-up and returns before the reply finishes; a running session reads it before its next model call."""
     m, sid, _ = owned_session(request, ref)
     return m.summary(await m.send(sid, body.content, context=operation_audit.request_context(request, m)))
 
 
-@api_router.post("/sessions/{ref}/rerun", status_code=201)
+@api_router.post("/sessions/{ref}/rerun", status_code=201, responses=documented(WebSessionResponse, 201))
 async def rerun(ref: str, request: Request, body: RerunRequest | None = None):
     """Starts a new session repeating this one's original prompt, project and taint, optionally on another backend or model; 409 for App tools-only sessions."""
     m, sid, _ = owned_session(request, ref)
@@ -930,13 +932,13 @@ async def review(ref: str, action: str, request: Request):
     return m.summary(await m.review(sid, action, context=operation_audit.request_context(request, m)))
 
 
-@api_router.get("/maintenance")
+@api_router.get("/maintenance", responses=documented(docs.MaintenanceResponse))
 async def maintenance(request: Request):
     """Disk usage of session workspaces and checkpoints, and of the data volume."""
     return await require_owner(request).maintenance.usage()
 
 
-@api_router.post("/maintenance/cleanup")
+@api_router.post("/maintenance/cleanup", responses=documented(docs.CleanupResponse))
 async def maintenance_cleanup(request: Request):
     """Runs a cleanup pass now, after any pass in progress, and returns what it removed."""
     m = require_owner(request)
@@ -964,7 +966,7 @@ async def canary_alert_test(request: Request, body: CanaryAlertTest | None = Non
     return {"sent": True, "reason": "", "notification": payload}
 
 
-@api_router.get("/sessions/{ref}/approvals")
+@api_router.get("/sessions/{ref}/approvals", responses=documented(list[ApprovalResponse]))
 async def approvals(ref: str, request: Request, all: bool = False):
     """Pending approvals for the session, or every approval when `all` is true."""
     m, sid, _ = owned_session(request, ref)
@@ -972,7 +974,7 @@ async def approvals(ref: str, request: Request, all: bool = False):
     return [public_approval(a) for a in rows]
 
 
-@api_router.post("/sessions/{ref}/approvals/{approval_id}")
+@api_router.post("/sessions/{ref}/approvals/{approval_id}", responses=documented(ApprovalResponse))
 async def decide(ref: str, approval_id: str, body: Decision, request: Request):
     """Approves or denies an approval; `pending` works only when exactly one is waiting, and a decided one returns 409."""
     if body.decision not in ("approve", "deny"):
@@ -1094,7 +1096,7 @@ async def clear_taint(ref: str, request: Request):
     return m.summary(m.clear_taint(sid, context=operation_audit.request_context(request, m)))
 
 
-@api_router.post("/sessions/{ref}/cancel")
+@api_router.post("/sessions/{ref}/cancel", responses=documented(WebSessionResponse))
 async def cancel(ref: str, request: Request):
     """Stops an active session and returns once its run has ended; 409 when nothing is active."""
     m, sid, _ = owned_session(request, ref)
@@ -1288,7 +1290,7 @@ def _key_catalog_app_id(body: dict) -> str:
         raise HarnessError(400, str(e)) from e
 
 
-@api_router.get("/keys")
+@api_router.get("/keys", responses=documented(list[docs.KeyResponse]))
 async def list_keys(request: Request):
     """Key metadata only; a key's secret is returned once, by the create response."""
     return mgr(request).db.list_api_keys()

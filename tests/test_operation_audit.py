@@ -363,7 +363,8 @@ def test_taint_and_maintenance_route_contexts(manager, monkeypatch, path, source
     monkeypatch.setattr(cleanup, "_remote_workspaces", AsyncMock())
     cleanup.app_sweep = None
     backup = m.modules.get("backup").service
-    monkeypatch.setattr(backup, "_backup_sync", lambda _: {"path": SENTINEL, "bytes": 1, "removed": []})
+    monkeypatch.setattr(backup, "_backup_sync", lambda _: {"ok_at": 1.0, "path": SENTINEL, "bytes": 1, "removed": [],
+                                                           "error": ""})
     monkeypatch.setattr(backup, "_write_backup_status", lambda: None)
     with TestClient(create_app(m)) as client:
         for endpoint in ("/sessions/session1/taint/clear", "/maintenance/cleanup", "/maintenance/backup"):

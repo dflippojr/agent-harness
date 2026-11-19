@@ -29,6 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .api import RouteTable, mgr
 from .api_models import ApprovalResponse, SessionResponse
+from . import response_docs as docs
+from .response_docs import documented
 from .fileops import ToolError
 from .manager import HarnessError, public_approval
 from .modules import principal_capabilities
@@ -646,7 +648,7 @@ def _member_me(m, key: dict, ident) -> dict:
     }
 
 
-@route_table.get("/api/v1/me")
+@route_table.get("/api/v1/me", responses=documented(docs.AppMeResponse))
 async def api_me(request: Request):
     """Authenticated principal. Unauthenticated callers receive 401 rather than a project list."""
     key = auth(request, "sessions")

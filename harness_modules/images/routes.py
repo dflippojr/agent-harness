@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import TypedDict
 
 from fastapi import File, Form, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
-from harness.modules import HarnessError, RouteTable, ToolError, app_auth, manager, require_owner, runtime
+from harness.modules import (HarnessError, RouteTable, ToolError, app_auth, documented, manager, require_owner,
+                             runtime)
 
 from . import edit as image_edit
 
@@ -227,14 +229,33 @@ async def get_image(iid: str, request: Request):
     return FileResponse(path, media_type="image/png", headers=headers)
 
 
-@owner_routes.post("/maintenance/image-archive/retention/preview")
+class _Reply(TypedDict):
+    __pydantic_config__ = ConfigDict(extra="allow")  # documentation only: extra fields allowed
+
+
+class RetentionPreview(_Reply):
+    """What retention would delete now, and the confirmation phrase apply needs."""
+    enabled: bool
+    keep_days: float
+    count: int
+    bytes: int
+    confirmation: str
+
+
+class RetentionApplied(_Reply):
+    removed: int
+    bytes: int
+    errors: list[str]
+
+
+@owner_routes.post("/maintenance/image-archive/retention/preview", responses=documented(RetentionPreview))
 async def image_archive_retention_preview(request: Request):
     """Preview the archived images that retention would delete, with the confirmation to pass to apply."""
     require_owner(request)
     return await asyncio.to_thread(images_runtime(request).archive.retention_preview)
 
 
-@owner_routes.post("/maintenance/image-archive/retention/apply")
+@owner_routes.post("/maintenance/image-archive/retention/apply", responses=documented(RetentionApplied))
 async def image_archive_retention_apply(body: ImageArchiveRetentionApply, request: Request):
     """Delete the archived images from a preview if its confirmation still matches; a missing or stale one returns 409."""
     from .archive import ImageArchiveError

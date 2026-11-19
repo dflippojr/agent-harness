@@ -118,6 +118,8 @@ _PUBLIC = {
     "normalize_origin": ("harness.origins", "normalize_origin"),  # canonical browser origin, as keys and pairing use it
     "RouteTable": ("harness.api", "RouteTable"),
     "WebSessionResponse": ("harness.api_models", "WebSessionResponse"),
+    "documented": ("harness.response_docs", "documented"),  # a route's documentation-only reply model (#1015)
+    "response_docs": ("harness.response_docs", None),
     "require_owner": ("harness.api", "require_owner"),
     "app_auth": ("harness.apps", "auth"),
     "calling_app": ("harness.apps", "calling_app"),

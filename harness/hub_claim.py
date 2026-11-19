@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field, ValidationError
 from . import audit_context, credential_audit
 from .local_owner import HUB_HEADER as HEADER
 from .manager import HarnessError
+from . import response_docs as docs
+from .response_docs import documented
 from .request_body import BODY_PARSE_ERRORS
 
 ROLE = "hub"
@@ -146,7 +148,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         pr._raise_refusal(out)
         return JSONResponse(pr.owner_view(out["row"], m.cfg), headers=pr.NO_STORE)
 
-    @app.get(base)
+    @app.get(base, responses=documented(docs.HubClaimResponse))
     async def hub_claim_status(request: Request):
         """Whether a Hub is claimed, its record (never a token or hash), and Hub claim requests still open."""
         require_admin(request, mgr)
