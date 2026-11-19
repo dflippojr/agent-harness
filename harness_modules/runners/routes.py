@@ -9,6 +9,8 @@ from harness.modules import (HarnessError, RouteTable, documented, response_docs
                              require_admin, log_safe, compat, API_VERSION, credential_audit,
                              refuse_hub_owner_key, repo_file)
 
+from .store import RunnerPairingStore
+
 log = logging.getLogger("harness.runners")
 RUNNER_BODY_LIMIT = 16 * 2**20
 PAIRING_TTL_SECONDS = 10 * 60
@@ -113,7 +115,7 @@ async def runner_update(name: str, request: Request):
 @owner_routes.get("/runner-pairing-codes")
 async def runner_pairing_codes(request: Request):
     """Owner view. Native pairing codes and runner tokens are never included."""
-    return mgr(request).db.list_runner_pairing_codes()
+    return RunnerPairingStore(mgr(request).db).list_runner_pairing_codes()
 
 
 @owner_routes.post("/runner-pairing-codes", status_code=201)

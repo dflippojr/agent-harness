@@ -31,6 +31,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from harness.modules import ModelConfig, GpuExclusive, QueueFull
 
+from .store import EndpointRequestStore
+
 log = logging.getLogger("harness.endpoint")
 
 EMBEDDINGS_PATH = "/v1/embeddings"
@@ -193,7 +195,7 @@ def _request_log(m, record: dict, started: float):
         record.update(status=status, prompt_tokens=prompt, completion_tokens=completion, wait_ms=wait_ms,
                       total_ms=int((time.monotonic() - started) * 1000))
         try:
-            m.db.log_endpoint_request(record)
+            EndpointRequestStore(m.db).log_endpoint_request(record)
         except Exception:  # noqa: BLE001 - accounting must not break a response
             log.exception("could not log endpoint request")
     return finish

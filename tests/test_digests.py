@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from harness.db import Database
+from harness_modules.runners.store import RunnerPairingStore
 from harness.delegate_edit import text_digest
 from harness.digests import sha256_hex
 
@@ -59,10 +60,10 @@ def test_pairing_code_and_its_key_hash_to_the_literal_digests(db: Database):
 
 
 def test_runner_pairing_code_and_its_key_hash_to_the_literal_digests(db: Database):
-    row, code = db.create_runner_pairing_code("mac", "macrunner", 600)
+    row, code = RunnerPairingStore(db).create_runner_pairing_code("mac", "macrunner", 600)
     assert code == "hrp-fixed"
     assert _hash(db, "runner_pairing_codes", "id", row["id"]) == HRP_FIXED
-    _pairing, key, secret, error = db.redeem_runner_pairing_code(code)
+    _pairing, key, secret, error = RunnerPairingStore(db).redeem_runner_pairing_code(code)
     assert error == "" and key is not None and secret == "ho-fixed"
     assert _hash(db, "api_keys", "id", key["id"]) == HO_FIXED
 

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from harness.api import create_app
 from harness.manager import Manager
 from harness_modules.endpoint import settings, service
+from harness_modules.endpoint.store import EndpointRequestStore
 from test_daemon import make_cfg, Script, Completion
 
 
@@ -87,12 +88,16 @@ def test_parked_model_rejections(tmp_path, held):
 
 def test_accounting_failure_preserves_response(tmp_path, monkeypatch):
     m = endpoint_manager(tmp_path)
-    def fail(record):
+    attempts = []
+
+    def fail(store, record):
+        attempts.append(record["status"])
         raise RuntimeError("fake database failure")
-    monkeypatch.setattr(m.db, "log_endpoint_request", fail)
+    monkeypatch.setattr(EndpointRequestStore, "log_endpoint_request", fail)
     with TestClient(create_app(m)) as client:
         key = client.post("/keys", json={"name": "fake"}).json()["key"]
         assert client.post("/v1/chat/completions", headers={"Authorization": "Bearer " + key}, json={}).status_code == 200
+    assert attempts == [200]
 
 
 DEEP = 100_000  # far past the interpreter's recursion limit, still well under MAX_BODY

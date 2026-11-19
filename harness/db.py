@@ -604,8 +604,8 @@ class ModuleStore:
     `harness.modules.database_reads` or `database_writes`, as `Database` does its own.
 
     It wraps the main Database (a `SessionStores`' `main`), so a module write joins the caller's transaction, and it
-    exposes only what those decorators and `aio` need. It forwards nothing else: a module reaches a core table
-    through the Database it was given, never through its store."""
+    exposes only what those decorators and `aio` need. It forwards nothing else: a core method is called on the
+    Database itself (`core` inside a store method), never through the store."""
 
     def __init__(self, db):
         self._db: Database = getattr(db, "main", db)
@@ -624,6 +624,11 @@ class ModuleStore:
     @property
     def lock(self) -> TimedLock:
         return self._db.lock
+
+    @property
+    def core(self) -> Database:
+        """The main Database, for a store method that also calls a public core method in its transaction."""
+        return self._db
 
     def reading(self):
         return self._db.reading()
@@ -1542,9 +1547,12 @@ class Database:
     # inference endpoint keys and request log
     @_writes
     def create_api_key(self, name: str, scopes: str = "inference", kind: str = "device",
-                       origins: list[str] | None = None, catalog_app_id: str = "") -> tuple[dict, str]:
+                       origins: list[str] | None = None, catalog_app_id: str | None = "", *,
+                       now: float | None = None) -> tuple[dict, str]:
+        """Mint a key (see `_insert_api_key`); inside a caller's write it joins that transaction, stamped `now`."""
         with self.lock:
-            return self._insert_api_key(name, scopes, kind, origins or [], time.time(), catalog_app_id)
+            return self._insert_api_key(name, scopes, kind, origins or [], time.time() if now is None else now,
+                                        catalog_app_id)
 
     def _insert_api_key(self, name: str, scopes: str, kind: str, origins: list[str], now: float,
                         catalog_app_id: str | None = "", role: str = "") -> tuple[dict, str]:
@@ -1819,53 +1827,6 @@ class Database:
                 "AND outcome = 'ok' AND actor_kind = 'hub') ORDER BY created_at").fetchall()
         return [dict(r) for r in rows]
 
-    # Agent Harness for Mac pairing is separate from browser-origin pairing. It authorizes one owner CLI token;
-    # the runner token remains in its configured owner file and never enters SQLite.
-    @_writes
-    def create_runner_pairing_code(self, name: str, runner: str, ttl_seconds: int) -> tuple[dict, str]:
-        now = time.time()
-        code = "hrp-" + secrets.token_urlsafe(18)
-        row = {"id": "rp-" + secrets.token_hex(4), "name": name, "runner": runner,
-               "created_at": now, "expires_at": now + ttl_seconds, "used_at": None, "key_id": ""}
-        with self.lock:
-            self.conn.execute("INSERT INTO runner_pairing_codes "
-                              "(id, hash, name, runner, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-                              (row["id"], sha256_hex(code), name, runner, now,
-                               row["expires_at"]))
-        return row, code
-
-    @_reads
-    def list_runner_pairing_codes(self) -> list[dict]:
-        with self.lock:
-            rows = self.conn.execute(
-                "SELECT id, name, runner, created_at, expires_at, used_at, key_id "
-                "FROM runner_pairing_codes ORDER BY created_at DESC LIMIT 100").fetchall()
-        return [dict(row) for row in rows]
-
-    @_writes
-    def revoke_runner_pairing_code(self, pid: str) -> bool:
-        now = time.time()
-        with self.lock:
-            return self.conn.execute("UPDATE runner_pairing_codes SET expires_at = ? WHERE id = ? "
-                                     "AND used_at IS NULL AND expires_at > ?", (now, pid, now)).rowcount == 1
-
-    @_writes
-    def redeem_runner_pairing_code(self, code: str) -> tuple[dict | None, dict | None, str, str]:
-        """Atomically redeem a native-client code. Returns (pairing, owner key, secret, error)."""
-        digest, now = sha256_hex(code), time.time()
-        with self._tx():
-            pairing = self.conn.execute("SELECT * FROM runner_pairing_codes WHERE hash = ?", (digest,)).fetchone()
-            if pairing is None:
-                return None, None, "", "invalid runner pairing code"
-            if pairing["used_at"] is not None:
-                return None, None, "", "runner pairing code already used"
-            if pairing["expires_at"] <= now:
-                return None, None, "", "runner pairing code expired"
-            key, secret = self._insert_api_key(pairing["name"], "admin", "owner", [], now, catalog_app_id=None)
-            self.conn.execute("UPDATE runner_pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
-                              (now, key["id"], pairing["id"]))
-        return dict(pairing), key, secret, ""
-
     @_reads
     def origin_allowed(self, origin: str, kind: str | None = None) -> bool:
         query = "SELECT origins FROM api_keys WHERE revoked_at IS NULL"
@@ -2121,16 +2082,6 @@ class Database:
     def delete_app_settings(self, app_id: str) -> None:
         with self.lock:
             self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (app_id,))
-
-    @_writes
-    def log_endpoint_request(self, r: dict) -> None:
-        with self.lock:
-            self.conn.execute(
-                "INSERT INTO endpoint_requests (key_id, route, model, stream, status, prompt_tokens, "
-                "completion_tokens, wait_ms, total_ms, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (r["key_id"], r["route"], r["model"], int(r["stream"]), r["status"], r.get("prompt_tokens", 0),
-                 r.get("completion_tokens", 0), r.get("wait_ms", 0), r.get("total_ms", 0), time.time()))
-            self.conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (time.time(), r["key_id"]))
 
     @_writes
     def decide_approval(self, aid: str, status: str, note: str = "") -> bool:
