@@ -1402,7 +1402,8 @@ def create_app(manager: Manager | None = None) -> FastAPI:
     api_router.install(app)
     modules.install_routes(app, manager.cfg, "owner")
     modules.install_routes(app, manager.cfg, "public")
-    from . import admin
+    from . import admin, event_schema
+    event_schema.install(app)  # the SSE payloads in the OpenAPI document (#1014); before the admin aliases copy paths
     admin.register(app, mgr, modules.admin_paths(manager.cfg), manager.cfg)
     # Keep /static for installed bundled clients, while making the Stables shell directly deployable at a static-site
     # root. This catch-all mount is last so daemon/API routes always win.

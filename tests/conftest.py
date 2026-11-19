@@ -12,6 +12,33 @@ from harness.fileops import grant_tree_owner_access
 from harness_modules.local_model import service as gpu_guard
 from harness_modules.local_model.warmup import READY, ModelWarmer
 from stray_drive_guard import pytest_sessionfinish  # noqa: F401 - pytest finds this hook by name
+import sse_event_capture
+
+# Every event the Server emits during a test must match its documented SSE schema (#1014).
+sse_event_capture.install()
+
+
+def _report_event_problems(where: str) -> None:
+    found, sse_event_capture.problems[:] = list(sse_event_capture.problems), []
+    if found:
+        pytest.fail(f"{where}:\n" + "\n".join(found[:5])
+                    + (f"\n... and {len(found) - 5} more" if len(found) > 5 else ""), pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def emitted_events_match_schema():
+    """Fails a test for every off-schema event since the last check: its own, and any a module- or session-scoped
+    fixture emitted while setting up for it (those run before this fixture, so nothing is cleared here)."""
+    yield
+    _report_event_problems("events emitted by this test or the fixtures set up for it")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def emitted_events_match_schema_at_the_end():
+    """What a fixture's teardown emits after the last test still fails the run."""
+    yield
+    _report_event_problems("events emitted after the last test (a fixture's teardown)")
+
 
 # Stables lives in its own repository (#334). The Server's tests serve a stand-in shell instead of whatever copy the
 # machine has (tests/fixtures/stables_shell/README.md); tests that need no shell set the variable themselves.

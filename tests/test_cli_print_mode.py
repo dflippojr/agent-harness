@@ -387,7 +387,7 @@ def test_opencode_cancel_stops_the_container(tmp_path):
 class FakeGuard:
     def __init__(self, active: bool):
         self.active = active
-        self.reasons = [{"kind": "game", "name": "game.exe"}]
+        self.reasons = [{"key": "game:game.exe", "kind": "game", "detail": "game.exe"}]  # the guard's shape
         self.cfg = type("C", (), {"resume_after_seconds": 60})()
 
     @staticmethod
