@@ -20,6 +20,9 @@ from harness_modules.runners import mac_client, service
 from harness_modules.runners.runtime import RunnersRuntime
 from test_daemon import make_cfg
 
+# What a Mac client answers to update_client (harness/updater.py apply_update), passed through by the route.
+UPDATED = {"ok": True, "version": "1.2.3", "build_id": "b", "at": 1.0, "message": "updated"}
+
 
 def runner_manager(tmp_path, *, packages=None, installed=True):
     cfg = make_cfg(tmp_path)
@@ -52,7 +55,7 @@ def test_existing_token_and_protocol_work_after_manager_restart(tmp_path, monkey
 
 def test_runner_result_auth_limits_and_update_errors(tmp_path, monkeypatch):
     m = runner_manager(tmp_path)
-    m.hub.call = AsyncMock(return_value={"updated": True})
+    m.hub.call = AsyncMock(return_value=UPDATED)
     with TestClient(create_app(m)) as client:
         body = {"id": "no-request", "ok": True}
         assert client.post("/runners/mac/results", json=body).status_code == 401
@@ -69,7 +72,7 @@ def test_runner_result_auth_limits_and_update_errors(tmp_path, monkeypatch):
             st.info = {"protocol": protocol}
             assert client.post(PREFIX + "/runners/mac/update").status_code == 409
         st.info = {"protocol": 2}
-        assert client.post(PREFIX + "/runners/mac/update").json() == {"updated": True}
+        assert client.post(PREFIX + "/runners/mac/update").json() == UPDATED
         m.hub.call.assert_awaited_once_with("mac", "update_client", {}, timeout=300, wait_if_offline=False)
         m.hub.call.side_effect = RuntimeError("failed download")
         failed = client.post(PREFIX + "/runners/mac/update")

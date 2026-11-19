@@ -60,7 +60,7 @@ def test_routes_use_fake_service_and_preserve_error_codes(tmp_path):
 
     class Fake:
         def status(self, include_owner_only=False):
-            return [{'project': 'fake', 'owner': include_owner_only}]
+            return [{'project': 'fake', 'path': '/srv/fake', 'owner': include_owner_only}]
 
         async def launch(self, project, **kwargs):
             if project == 'bad':

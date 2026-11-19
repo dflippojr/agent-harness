@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import httpx
 from fastapi import Request
+from pydantic import ConfigDict, with_config
 
-from harness.modules import HarnessError, RouteTable, manager, runtime
+from harness.modules import HarnessError, RouteTable, documented, manager, runtime
 
 from .service import DeliveryError
 
 owner_routes = RouteTable()
 
 
-@owner_routes.post("/notify/test")
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
+class NotifyTestResponse(TypedDict):
+    sent: bool
+
+
+@owner_routes.post("/notify/test", responses=documented(NotifyTestResponse))
 async def notify_test(request: Request):
     """Send a test push notification through ntfy."""
     m = manager(request)

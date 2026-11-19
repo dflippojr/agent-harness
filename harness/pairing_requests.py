@@ -40,6 +40,8 @@ from pydantic import BaseModel, Field
 from . import audit_context, catalog_ids, credential_audit
 from .digests import sha256_hex
 from .manager import HarnessError
+from . import response_docs as docs
+from .response_docs import documented
 from .origins import normalize_origin, request_origin as _request_origin
 from .request_body import json_body
 
@@ -472,7 +474,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
     def _elevated_unacknowledged(scopes: list[str], acknowledged: bool) -> bool:
         return bool(ELEVATED.intersection(scopes)) and not acknowledged
 
-    @app.get(base)
+    @app.get(base, responses=documented(list[docs.PairingRequestView]))
     async def list_pairing_requests(request: Request):
         """Owner view of pairing requests: metadata and disclosure copy; never a match code, token or verifier."""
         require_admin(request, mgr)
@@ -500,7 +502,8 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         return JSONResponse(values, headers={**NO_STORE, "X-Disclosures-Digest": disclosures_digest(values),
                                              "Access-Control-Expose-Headers": "X-Disclosures-Digest"})
 
-    @app.post(base, status_code=201, responses={409: {"description": "disclosures_changed: preview again before arming"}})
+    @app.post(base, status_code=201, responses={**documented(docs.PairingRequestView, 201),
+                                                409: {"description": "disclosures_changed: preview again before arming"}})
     async def arm_pairing_request(body: ArmPairingRequest, request: Request):
         """Arm a pre-approved slot for a Hub entry (#519): no secret; the App claims it with its own challenge."""
         key = require_admin(request, mgr)
@@ -543,7 +546,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         _raise_refusal(out)
         return JSONResponse(out["view"], status_code=201, headers=NO_STORE)
 
-    @app.post(base + "/{rid}/approve")
+    @app.post(base + "/{rid}/approve", responses=documented(docs.PairingRequestView))
     async def approve_pairing_request(rid: str, body: ApprovePairingRequest, request: Request):
         """Approve an App's pairing request with the match code it shows. Elevated scopes need acknowledge_elevated.
         No token exists until the App redeems."""
@@ -560,7 +563,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                             lambda row: {"scopes": row["scopes"].split(),
                                          "acknowledged": bool(ELEVATED.intersection(row["scopes"].split()))})
 
-    @app.post(base + "/{rid}/confirm")
+    @app.post(base + "/{rid}/confirm", responses=documented(docs.PairingRequestView))
     async def confirm_pairing_request(rid: str, body: ConfirmPairingRequest, request: Request):
         """Confirm an App's claim on an armed slot with the match code it shows; then it may redeem."""
         key = require_admin(request, mgr)
@@ -573,7 +576,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
                             approved,
                             lambda row: {"scopes": row["scopes"].split(), "confirmed": True})
 
-    @app.post(base + "/{rid}/deny")
+    @app.post(base + "/{rid}/deny", responses=documented(docs.PairingRequestView))
     async def deny_pairing_request(rid: str, request: Request):
         """Deny a pairing request, or withdraw an armed slot or an approval the App has not redeemed yet."""
         key = require_admin(request, mgr)

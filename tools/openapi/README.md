@@ -32,3 +32,16 @@ HARNESS_RECORD_SSE_EVENTS=.tmp/sse-events python -m pytest tests -q -n 4 --dist 
 python tools/openapi/record_event_samples.py .tmp/sse-events            # rewrite the samples
 python tools/openapi/record_event_samples.py .tmp/sse-events --shapes   # or list each type's fields as emitted
 ```
+
+## Reply models
+
+The routes Stables and the Hub read declare their success reply with `responses=documented(Model)`
+(`harness/response_docs.py`, and a module's own `routes.py`), never `response_model=`: FastAPI puts the model in the
+document and sends the payload as the route returns it, with no field dropped or validated (#1015). Every model allows
+extra fields. A `NotRequired` field is one the Server sends only sometimes (a module, a state, a role); `X | None` is
+one it always sends that may be null. A model needs a name no other component has, or FastAPI renames both.
+
+During the test run, `tests/response_model_capture.py` checks every reply of a documented route against its model in
+strict mode (no coercion), so a field that contradicts the model fails the test that made the request.
+`tests/test_response_models.py` drives every documented route to a real success reply, one scenario per area, and
+fails when a documented route has no scenario.

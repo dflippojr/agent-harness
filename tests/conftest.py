@@ -7,6 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+import response_model_capture
+
+# Every reply of a route with a documentation-only response model must match it (#1015). Installed before the
+# Server's modules are imported, so every route FastAPI builds gets the check.
+response_model_capture.install()
+
 from harness import backend_state, cli_domains, manager as manager_mod, metrics, secret_scan, stables_shell
 from harness.fileops import grant_tree_owner_access
 from harness_modules.local_model import service as gpu_guard
@@ -38,6 +44,28 @@ def emitted_events_match_schema_at_the_end():
     """What a fixture's teardown emits after the last test still fails the run."""
     yield
     _report_event_problems("events emitted after the last test (a fixture's teardown)")
+
+
+def _report_response_problems(where: str) -> None:
+    found, response_model_capture.problems[:] = list(response_model_capture.problems), []
+    if found:
+        pytest.fail(f"{where}:\n" + "\n".join(found[:5])
+                    + (f"\n... and {len(found) - 5} more" if len(found) > 5 else ""), pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def responses_match_documented_models():
+    """Fails a test for every reply since the last check that contradicts its route's documented model: its own, and
+    any a module- or session-scoped fixture got while setting up for it (nothing is cleared here)."""
+    yield
+    _report_response_problems("replies that contradict their documented response model")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def responses_match_documented_models_at_the_end():
+    """A reply a fixture's teardown gets after the last test still fails the run."""
+    yield
+    _report_response_problems("replies after the last test (a fixture's teardown) that contradict their model")
 
 
 # Stables lives in its own repository (#334). The Server's tests serve a stand-in shell instead of whatever copy the

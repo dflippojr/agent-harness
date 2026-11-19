@@ -14,6 +14,51 @@
         "title": "AcceptedResponse",
         "type": "object"
       },
+      "AccountAuditRow": {
+        "additionalProperties": true,
+        "description": "A household audit row; `ts` is in epoch seconds.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "ts",
+          "actor_id",
+          "target_id",
+          "action",
+          "outcome",
+          "detail"
+        ],
+        "title": "AccountAuditRow",
+        "type": "object"
+      },
       "AccountCreateRequest": {
         "properties": {
           "disk_quota_bytes": {
@@ -63,6 +108,96 @@
           "display_name"
         ],
         "title": "AccountCreateRequest",
+        "type": "object"
+      },
+      "AccountResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "account_hint": {
+            "title": "Account Hint",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "number"
+          },
+          "disk_quota_bytes": {
+            "title": "Disk Quota Bytes",
+            "type": "integer"
+          },
+          "disk_used_bytes": {
+            "title": "Disk Used Bytes",
+            "type": "integer"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "google": {
+            "$ref": "#/components/schemas/GoogleLink"
+          },
+          "last_activity_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Activity At"
+          },
+          "login": {
+            "title": "Login",
+            "type": "string"
+          },
+          "max_queued": {
+            "title": "Max Queued",
+            "type": "integer"
+          },
+          "max_running": {
+            "title": "Max Running",
+            "type": "integer"
+          },
+          "queued": {
+            "title": "Queued",
+            "type": "integer"
+          },
+          "running": {
+            "title": "Running",
+            "type": "integer"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "number"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "account_hint",
+          "login",
+          "display_name",
+          "enabled",
+          "disk_quota_bytes",
+          "disk_used_bytes",
+          "max_running",
+          "max_queued",
+          "running",
+          "queued",
+          "last_activity_at",
+          "created_at",
+          "updated_at",
+          "google"
+        ],
+        "title": "AccountResponse",
         "type": "object"
       },
       "AccountUpdateRequest": {
@@ -471,6 +606,106 @@
         "title": "AppLimitsRequest",
         "type": "object"
       },
+      "AppLimitsResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "app_id": {
+            "title": "App Id",
+            "type": "string"
+          },
+          "configured": {
+            "$ref": "#/components/schemas/ConfiguredLimits"
+          },
+          "effective": {
+            "$ref": "#/components/schemas/EffectiveLimits"
+          },
+          "parked": {
+            "title": "Parked",
+            "type": "integer"
+          },
+          "queued": {
+            "title": "Queued",
+            "type": "integer"
+          },
+          "running": {
+            "title": "Running",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "app_id",
+          "configured",
+          "effective",
+          "running",
+          "queued",
+          "parked"
+        ],
+        "title": "AppLimitsResponse",
+        "type": "object"
+      },
+      "AppMeResponse": {
+        "additionalProperties": true,
+        "description": "The principal a token speaks for (GET /api/v1/me): the owner, an App or device, or a household member.",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/MeCapabilities"
+          },
+          "login": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Login"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "public_url": {
+            "title": "Public Url",
+            "type": "string"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/MeUsage"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "user_id",
+          "login",
+          "name",
+          "public_url",
+          "capabilities"
+        ],
+        "title": "AppMeResponse",
+        "type": "object"
+      },
       "AppMessage": {
         "properties": {
           "content": {
@@ -618,6 +853,99 @@
           "title"
         ],
         "title": "AppSessionUpdate",
+        "type": "object"
+      },
+      "AppStore": {
+        "additionalProperties": true,
+        "properties": {
+          "errors": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Errors"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "last_error_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error At"
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessions"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AppStoreUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "AppStore",
+        "type": "object"
+      },
+      "AppStoreUsage": {
+        "additionalProperties": true,
+        "properties": {
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "number"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "number"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "number"
+          }
+        },
+        "required": [
+          "requests",
+          "prompt_tokens",
+          "completion_tokens",
+          "cost_usd"
+        ],
+        "title": "AppStoreUsage",
         "type": "object"
       },
       "AppTool": {
@@ -1397,6 +1725,153 @@
         "title": "AssistantEventData",
         "type": "object"
       },
+      "AuditPage": {
+        "additionalProperties": true,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuditRow"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_before_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Before Id"
+          }
+        },
+        "required": [
+          "items",
+          "next_before_id"
+        ],
+        "title": "AuditPage",
+        "type": "object"
+      },
+      "AuditRow": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_id": {
+            "title": "Actor Id",
+            "type": "string"
+          },
+          "actor_kind": {
+            "title": "Actor Kind",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_kind": {
+            "title": "Target Kind",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "ts",
+          "actor_id",
+          "target_id",
+          "action",
+          "outcome",
+          "detail",
+          "actor_kind",
+          "key_id",
+          "source",
+          "target_kind",
+          "metadata"
+        ],
+        "title": "AuditRow",
+        "type": "object"
+      },
+      "AuthSessionResponse": {
+        "additionalProperties": true,
+        "description": "Google sign-in availability and this browser's sign-in state; `csrf` only with a session.",
+        "properties": {
+          "admitted": {
+            "title": "Admitted",
+            "type": "boolean"
+          },
+          "csrf": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Csrf"
+          },
+          "google": {
+            "$ref": "#/components/schemas/GoogleOffer"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "signed_in": {
+            "title": "Signed In",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "google",
+          "admitted",
+          "signed_in",
+          "role",
+          "csrf"
+        ],
+        "title": "AuthSessionResponse",
+        "type": "object"
+      },
       "BackendAuthRequiredEvent": {
         "additionalProperties": false,
         "description": "A `backend_auth_required` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
@@ -1636,6 +2111,142 @@
           }
         },
         "title": "BackendUpdate",
+        "type": "object"
+      },
+      "BackendView": {
+        "additionalProperties": true,
+        "description": "A backend with its default model and, for hosted ones, sign-in state and usage.",
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "billing": {
+            "title": "Billing",
+            "type": "string"
+          },
+          "effort": {
+            "title": "Effort",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "popular_models": {
+            "items": {
+              "$ref": "#/components/schemas/PopularModel"
+            },
+            "title": "Popular Models",
+            "type": "array"
+          },
+          "today": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Today",
+            "type": "object"
+          },
+          "week": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Week",
+            "type": "object"
+          }
+        },
+        "required": [
+          "name",
+          "model",
+          "effort"
+        ],
+        "title": "BackendView",
+        "type": "object"
+      },
+      "BackupResponse": {
+        "additionalProperties": true,
+        "description": "The backup just written; `error` is empty when it succeeded.",
+        "properties": {
+          "app_stores": {
+            "title": "App Stores",
+            "type": "integer"
+          },
+          "bytes": {
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "files": {
+            "title": "Files",
+            "type": "integer"
+          },
+          "ok_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok At"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "removed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Removed",
+            "type": "array"
+          },
+          "transcript_archives": {
+            "title": "Transcript Archives",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok_at",
+          "path",
+          "bytes",
+          "error"
+        ],
+        "title": "BackupResponse",
+        "type": "object"
+      },
+      "BackupState": {
+        "additionalProperties": true,
+        "description": "`dir` is the backup module's: without it the core answers only `enabled`.",
+        "properties": {
+          "dir": {
+            "title": "Dir",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "BackupState",
         "type": "object"
       },
       "BillingWarningEvent": {
@@ -1963,6 +2574,66 @@
         "title": "ClaimPairingRequest",
         "type": "object"
       },
+      "CleanupResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "apps_erased": {
+            "title": "Apps Erased",
+            "type": "integer"
+          },
+          "at": {
+            "title": "At",
+            "type": "number"
+          },
+          "containers_removed": {
+            "title": "Containers Removed",
+            "type": "integer"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "expired": {
+            "title": "Expired",
+            "type": "integer"
+          },
+          "kept": {
+            "title": "Kept",
+            "type": "integer"
+          },
+          "orphans_removed": {
+            "title": "Orphans Removed",
+            "type": "integer"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "integer"
+          },
+          "sessions_expired": {
+            "title": "Sessions Expired",
+            "type": "integer"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          },
+          "workspaces_removed": {
+            "title": "Workspaces Removed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "at"
+        ],
+        "title": "CleanupResponse",
+        "type": "object"
+      },
       "CompactingEvent": {
         "additionalProperties": false,
         "description": "A `compacting` event. Ephemeral: never stored or replayed, so `seq` is null and there is no `ts`.",
@@ -2234,6 +2905,386 @@
         "title": "CompareChoice",
         "type": "object"
       },
+      "ConfigAppliedResponse": {
+        "additionalProperties": true,
+        "description": "The saved change's plan with the admin view after it.",
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/SettingChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "confirmed": {
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "errors": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SettingError"
+            },
+            "title": "Errors",
+            "type": "object"
+          },
+          "pending_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Revision"
+          },
+          "recovery": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery"
+          },
+          "restart_required": {
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/Setting"
+            },
+            "title": "Settings",
+            "type": "array"
+          },
+          "supervised_restart": {
+            "title": "Supervised Restart",
+            "type": "boolean"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warning"
+          }
+        },
+        "required": [
+          "revision",
+          "pending_revision",
+          "confirmed",
+          "supervised_restart",
+          "restart_required",
+          "recovery",
+          "warning",
+          "settings",
+          "target_revision",
+          "changes",
+          "errors"
+        ],
+        "title": "ConfigAppliedResponse",
+        "type": "object"
+      },
+      "ConfigDryRunResponse": {
+        "additionalProperties": true,
+        "description": "What a change would do, without saving it (`dry_run`).",
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/SettingChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "errors": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SettingError"
+            },
+            "title": "Errors",
+            "type": "object"
+          },
+          "restart_required": {
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "target_revision",
+          "restart_required",
+          "changes",
+          "errors",
+          "dry_run"
+        ],
+        "title": "ConfigDryRunResponse",
+        "type": "object"
+      },
+      "ConfigPlanResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/SettingChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "errors": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SettingError"
+            },
+            "title": "Errors",
+            "type": "object"
+          },
+          "restart_required": {
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "target_revision",
+          "restart_required",
+          "changes",
+          "errors"
+        ],
+        "title": "ConfigPlanResponse",
+        "type": "object"
+      },
+      "ConfigResponse": {
+        "additionalProperties": true,
+        "description": "Every admin setting with the active and pending revisions and the restart state.",
+        "properties": {
+          "confirmed": {
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "pending_revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Revision"
+          },
+          "recovery": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery"
+          },
+          "restart_required": {
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/Setting"
+            },
+            "title": "Settings",
+            "type": "array"
+          },
+          "supervised_restart": {
+            "title": "Supervised Restart",
+            "type": "boolean"
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warning"
+          }
+        },
+        "required": [
+          "revision",
+          "pending_revision",
+          "confirmed",
+          "supervised_restart",
+          "restart_required",
+          "recovery",
+          "warning",
+          "settings"
+        ],
+        "title": "ConfigResponse",
+        "type": "object"
+      },
+      "ConfigRollbackPreview": {
+        "additionalProperties": true,
+        "description": "What a rollback would restore (`dry_run`), without saving it.",
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "errors": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SettingError"
+            },
+            "title": "Errors",
+            "type": "object"
+          },
+          "live": {
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "title": "Live",
+            "type": "array"
+          },
+          "pending": {
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "title": "Pending",
+            "type": "array"
+          },
+          "restart_required": {
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "target_revision",
+          "changes",
+          "restart_required",
+          "live",
+          "pending",
+          "errors"
+        ],
+        "title": "ConfigRollbackPreview",
+        "type": "object"
+      },
+      "ConfigSchemaResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "settings": {
+            "items": {
+              "$ref": "#/components/schemas/SettingSpec"
+            },
+            "title": "Settings",
+            "type": "array"
+          },
+          "supervised_restart": {
+            "title": "Supervised Restart",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "schema_version",
+          "supervised_restart",
+          "settings"
+        ],
+        "title": "ConfigSchemaResponse",
+        "type": "object"
+      },
+      "ConfiguredLimits": {
+        "additionalProperties": true,
+        "properties": {
+          "max_queued": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Queued"
+          },
+          "max_running": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Running"
+          }
+        },
+        "required": [
+          "max_running",
+          "max_queued"
+        ],
+        "title": "ConfiguredLimits",
+        "type": "object"
+      },
       "ConfirmPairingRequest": {
         "properties": {
           "match": {
@@ -2258,6 +3309,25 @@
           }
         },
         "title": "ConfirmRequest",
+        "type": "object"
+      },
+      "ContainerUsage": {
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "title": "ContainerUsage",
         "type": "object"
       },
       "ContentEventData": {
@@ -2846,6 +3916,87 @@
         "title": "DeltaEventData",
         "type": "object"
       },
+      "Disclosure": {
+        "additionalProperties": true,
+        "properties": {
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "tier": {
+            "enum": [
+              "standard",
+              "elevated"
+            ],
+            "title": "Tier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "tier",
+          "text"
+        ],
+        "title": "Disclosure",
+        "type": "object"
+      },
+      "EffectiveLimits": {
+        "additionalProperties": true,
+        "properties": {
+          "max_queued": {
+            "title": "Max Queued",
+            "type": "integer"
+          },
+          "max_running": {
+            "title": "Max Running",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_running",
+          "max_queued"
+        ],
+        "title": "EffectiveLimits",
+        "type": "object"
+      },
+      "ErasureResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "erase_after": {
+            "title": "Erase After",
+            "type": "number"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "revoked_at": {
+            "title": "Revoked At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "revoked_at",
+          "erase_after"
+        ],
+        "title": "ErasureResponse",
+        "type": "object"
+      },
       "ErrorEvent": {
         "additionalProperties": false,
         "description": "A `error` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
@@ -3065,6 +4216,111 @@
         "title": "GitHubMemberAuthRequest",
         "type": "object"
       },
+      "GitHubMemberAuthResponse": {
+        "additionalProperties": true,
+        "description": "Member GitHub sign-in: whether it is set up and switched on, its last check, and each member's state.",
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/GitHubMemberStatus"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "preflight": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GitHubPreflight"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scopes_note": {
+            "title": "Scopes Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "configured",
+          "enabled",
+          "preflight",
+          "scopes_note",
+          "members"
+        ],
+        "title": "GitHubMemberAuthResponse",
+        "type": "object"
+      },
+      "GitHubMemberStatus": {
+        "additionalProperties": true,
+        "description": "A member's coarse GitHub state: no URL, username, scope or repository.",
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "user_id": {
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "status",
+          "last_used_at"
+        ],
+        "title": "GitHubMemberStatus",
+        "type": "object"
+      },
+      "GitHubPreflight": {
+        "additionalProperties": true,
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "error",
+          "message"
+        ],
+        "title": "GitHubPreflight",
+        "type": "object"
+      },
       "GitHubResetRequest": {
         "properties": {
           "confirm": {
@@ -3074,6 +4330,200 @@
           }
         },
         "title": "GitHubResetRequest",
+        "type": "object"
+      },
+      "GoogleInvitationResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "code",
+          "expires_at"
+        ],
+        "title": "GoogleInvitationResponse",
+        "type": "object"
+      },
+      "GoogleLink": {
+        "additionalProperties": true,
+        "description": "Coarse Google sign-in metadata for one member; never a Google subject or token.",
+        "properties": {
+          "active_web_sessions": {
+            "title": "Active Web Sessions",
+            "type": "integer"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "invitation_expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invitation Expires At"
+          },
+          "last_sign_in_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sign In At"
+          },
+          "linked": {
+            "title": "Linked",
+            "type": "boolean"
+          },
+          "linked_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Linked At"
+          }
+        },
+        "required": [
+          "linked",
+          "email",
+          "linked_at",
+          "last_sign_in_at",
+          "active_web_sessions",
+          "invitation_expires_at"
+        ],
+        "title": "GoogleLink",
+        "type": "object"
+      },
+      "GoogleOffer": {
+        "additionalProperties": true,
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "explanation": {
+            "title": "Explanation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "available",
+          "explanation"
+        ],
+        "title": "GoogleOffer",
+        "type": "object"
+      },
+      "GoogleRevokedResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "active_web_sessions": {
+            "title": "Active Web Sessions",
+            "type": "integer"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "invitation_expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invitation Expires At"
+          },
+          "last_sign_in_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sign In At"
+          },
+          "linked": {
+            "title": "Linked",
+            "type": "boolean"
+          },
+          "linked_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Linked At"
+          },
+          "revoked": {
+            "title": "Revoked",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "linked",
+          "email",
+          "linked_at",
+          "last_sign_in_at",
+          "active_web_sessions",
+          "invitation_expires_at",
+          "revoked"
+        ],
+        "title": "GoogleRevokedResponse",
+        "type": "object"
+      },
+      "GoogleSigninResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "preflight": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Preflight"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "ready",
+          "preflight"
+        ],
+        "title": "GoogleSigninResponse",
         "type": "object"
       },
       "GpuHoldRequest": {
@@ -3248,6 +4698,188 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HealthCapabilities": {
+        "additionalProperties": true,
+        "properties": {
+          "config_registry": {
+            "title": "Config Registry",
+            "type": "boolean"
+          },
+          "hosted_backends": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Hosted Backends",
+            "type": "array"
+          },
+          "modules": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Modules",
+            "type": "object"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "required": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Required",
+            "type": "object"
+          }
+        },
+        "required": [
+          "profile",
+          "required",
+          "modules",
+          "hosted_backends",
+          "config_registry"
+        ],
+        "title": "HealthCapabilities",
+        "type": "object"
+      },
+      "HealthConfig": {
+        "additionalProperties": true,
+        "properties": {
+          "confirmed": {
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "recovery": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "supervised_restart": {
+            "title": "Supervised Restart",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revision",
+          "confirmed",
+          "supervised_restart",
+          "recovery"
+        ],
+        "title": "HealthConfig",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "additionalProperties": true,
+        "description": "Liveness, the release and build, the protocols and capabilities this Server offers, and its config state.",
+        "properties": {
+          "build": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Build",
+            "type": "object"
+          },
+          "build_id": {
+            "title": "Build Id",
+            "type": "string"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/HealthCapabilities"
+          },
+          "config": {
+            "$ref": "#/components/schemas/HealthConfig"
+          },
+          "minimum_clients": {
+            "additionalProperties": true,
+            "title": "Minimum Clients",
+            "type": "object"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "protocols": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProtocolRange"
+            },
+            "title": "Protocols",
+            "type": "object"
+          },
+          "release": {
+            "title": "Release",
+            "type": "string"
+          },
+          "update_hint": {
+            "additionalProperties": true,
+            "title": "Update Hint",
+            "type": "object"
+          }
+        },
+        "required": [
+          "ok",
+          "profile",
+          "release",
+          "build_id",
+          "protocols",
+          "minimum_clients",
+          "capabilities",
+          "update_hint",
+          "build",
+          "config"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "HubClaimResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "claimed": {
+            "title": "Claimed",
+            "type": "boolean"
+          },
+          "hub": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HubRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/PairingRequestView"
+            },
+            "title": "Requests",
+            "type": "array"
+          }
+        },
+        "required": [
+          "claimed",
+          "hub",
+          "requests"
+        ],
+        "title": "HubClaimResponse",
+        "type": "object"
+      },
       "HubInventory": {
         "properties": {
           "apps": {
@@ -3283,6 +4915,35 @@
         "title": "HubInventory",
         "type": "object"
       },
+      "HubRecord": {
+        "additionalProperties": true,
+        "properties": {
+          "claimed_at": {
+            "title": "Claimed At",
+            "type": "number"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key_id",
+          "name",
+          "kind",
+          "claimed_at"
+        ],
+        "title": "HubRecord",
+        "type": "object"
+      },
       "ImageArchiveRetentionApply": {
         "properties": {
           "confirmation": {
@@ -3294,6 +4955,20 @@
           "confirmation"
         ],
         "title": "ImageArchiveRetentionApply",
+        "type": "object"
+      },
+      "ImageArchiveState": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "ImageArchiveState",
         "type": "object"
       },
       "ImageRequest": {
@@ -3349,6 +5024,57 @@
           }
         },
         "title": "ImageUpscaleRequest",
+        "type": "object"
+      },
+      "InstalledSkill": {
+        "additionalProperties": true,
+        "properties": {
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "installed_at": {
+            "title": "Installed At",
+            "type": "number"
+          },
+          "projects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "slug",
+          "title",
+          "purpose",
+          "version",
+          "content_hash",
+          "enabled",
+          "projects"
+        ],
+        "title": "InstalledSkill",
         "type": "object"
       },
       "Job": {
@@ -3569,6 +5295,122 @@
         "title": "JobRunResponse",
         "type": "object"
       },
+      "KeyResponse": {
+        "additionalProperties": true,
+        "description": "An App, device, member or owner key, never its token.",
+        "properties": {
+          "catalog_app_id": {
+            "title": "Catalog App Id",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "number"
+          },
+          "erase_after": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Erase After"
+          },
+          "erased_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Erased At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "origins": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Origins",
+            "type": "array"
+          },
+          "retention_days": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Days"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "scopes": {
+            "title": "Scopes",
+            "type": "string"
+          },
+          "store": {
+            "$ref": "#/components/schemas/AppStore"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "role",
+          "scopes",
+          "origins",
+          "catalog_app_id",
+          "created_at",
+          "last_used_at",
+          "revoked_at",
+          "erase_after",
+          "erased_at",
+          "retention_days"
+        ],
+        "title": "KeyResponse",
+        "type": "object"
+      },
       "LimitWaitingEvent": {
         "additionalProperties": false,
         "description": "A `limit_waiting` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
@@ -3693,6 +5535,306 @@
         "title": "LlmRetryEventData",
         "type": "object"
       },
+      "MaintenanceResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "backup": {
+            "$ref": "#/components/schemas/BackupState"
+          },
+          "checkpoints_mb": {
+            "title": "Checkpoints Mb",
+            "type": "number"
+          },
+          "containers": {
+            "items": {
+              "$ref": "#/components/schemas/ContainerUsage"
+            },
+            "title": "Containers",
+            "type": "array"
+          },
+          "free_gb": {
+            "title": "Free Gb",
+            "type": "number"
+          },
+          "image_archive": {
+            "$ref": "#/components/schemas/ImageArchiveState"
+          },
+          "last_cleanup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Cleanup"
+          },
+          "quota_mb": {
+            "title": "Quota Mb",
+            "type": "number"
+          },
+          "runners": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerResponse"
+            },
+            "title": "Runners",
+            "type": "array"
+          },
+          "total_gb": {
+            "title": "Total Gb",
+            "type": "number"
+          },
+          "workspaces_mb": {
+            "title": "Workspaces Mb",
+            "type": "number"
+          }
+        },
+        "required": [
+          "workspaces_mb",
+          "checkpoints_mb",
+          "free_gb",
+          "total_gb",
+          "quota_mb",
+          "containers",
+          "runners",
+          "backup",
+          "image_archive"
+        ],
+        "title": "MaintenanceResponse",
+        "type": "object"
+      },
+      "MeCapabilities": {
+        "additionalProperties": true,
+        "properties": {
+          "accounts": {
+            "title": "Accounts",
+            "type": "boolean"
+          },
+          "admin": {
+            "title": "Admin",
+            "type": "boolean"
+          },
+          "hosted_backends": {
+            "title": "Hosted Backends",
+            "type": "boolean"
+          },
+          "local_sessions": {
+            "title": "Local Sessions",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "admin",
+          "local_sessions",
+          "hosted_backends",
+          "accounts"
+        ],
+        "title": "MeCapabilities",
+        "type": "object"
+      },
+      "MeNotify": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled",
+          "topic"
+        ],
+        "title": "MeNotify",
+        "type": "object"
+      },
+      "MeResponse": {
+        "additionalProperties": true,
+        "description": "The caller's identity, role and capabilities (GET /me).",
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/MeCapabilities"
+          },
+          "guest_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Guest Until"
+          },
+          "login": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Login"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "notify": {
+            "$ref": "#/components/schemas/MeNotify"
+          },
+          "public_url": {
+            "title": "Public Url",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/MeUsage"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          }
+        },
+        "required": [
+          "login",
+          "name",
+          "public_url",
+          "role",
+          "user_id",
+          "guest_until",
+          "capabilities",
+          "usage",
+          "notify"
+        ],
+        "title": "MeResponse",
+        "type": "object"
+      },
+      "MeUsage": {
+        "additionalProperties": true,
+        "description": "A household member's disk and queue usage; empty for the owner and guests.",
+        "properties": {
+          "account_hint": {
+            "title": "Account Hint",
+            "type": "string"
+          },
+          "disk_note": {
+            "title": "Disk Note",
+            "type": "string"
+          },
+          "disk_quota_bytes": {
+            "title": "Disk Quota Bytes",
+            "type": "integer"
+          },
+          "disk_used_bytes": {
+            "title": "Disk Used Bytes",
+            "type": "integer"
+          },
+          "max_queued": {
+            "title": "Max Queued",
+            "type": "integer"
+          },
+          "max_running": {
+            "title": "Max Running",
+            "type": "integer"
+          },
+          "queued": {
+            "title": "Queued",
+            "type": "integer"
+          },
+          "running": {
+            "title": "Running",
+            "type": "integer"
+          }
+        },
+        "title": "MeUsage",
+        "type": "object"
+      },
+      "MemoryCommit": {
+        "additionalProperties": true,
+        "properties": {
+          "at": {
+            "title": "At",
+            "type": "number"
+          },
+          "head": {
+            "title": "Head",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "pushed": {
+            "title": "Pushed",
+            "type": "boolean"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "title": "MemoryCommit",
+        "type": "object"
+      },
+      "MemoryProfileResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "last_commit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryCommit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "profile_chars": {
+            "title": "Profile Chars",
+            "type": "integer"
+          },
+          "profile_max_chars": {
+            "title": "Profile Max Chars",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "profile",
+          "profile_chars",
+          "profile_max_chars",
+          "last_commit"
+        ],
+        "title": "MemoryProfileResponse",
+        "type": "object"
+      },
       "MemoryProfileUpdate": {
         "properties": {
           "content": {
@@ -3751,6 +5893,95 @@
           "data"
         ],
         "title": "MemoryRecoveredEvent",
+        "type": "object"
+      },
+      "MemoryResponse": {
+        "additionalProperties": true,
+        "description": "The memory library's state; with the library switched off, only `enabled` (false).",
+        "properties": {
+          "categories": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "changed_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Changed Paths",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "last_commit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryCommit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_success": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "profile_chars": {
+            "title": "Profile Chars",
+            "type": "integer"
+          },
+          "profile_max_chars": {
+            "title": "Profile Max Chars",
+            "type": "integer"
+          },
+          "profile_path": {
+            "title": "Profile Path",
+            "type": "string"
+          },
+          "refresh_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Error"
+          },
+          "refresh_failures": {
+            "title": "Refresh Failures",
+            "type": "integer"
+          },
+          "refresh_state": {
+            "title": "Refresh State",
+            "type": "string"
+          },
+          "writes": {
+            "title": "Writes",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "MemoryResponse",
         "type": "object"
       },
       "ModelReadyEvent": {
@@ -3934,6 +6165,20 @@
         "title": "NotesEventData",
         "type": "object"
       },
+      "NotifyTestResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "sent": {
+            "title": "Sent",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sent"
+        ],
+        "title": "NotifyTestResponse",
+        "type": "object"
+      },
       "PairRequest": {
         "properties": {
           "code": {
@@ -4104,6 +6349,144 @@
         "title": "PairingRequestResponse",
         "type": "object"
       },
+      "PairingRequestView": {
+        "additionalProperties": true,
+        "description": "A pairing request as the owner sees it: never a code verifier, token or hash.",
+        "properties": {
+          "approved_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved At"
+          },
+          "armed": {
+            "title": "Armed",
+            "type": "boolean"
+          },
+          "browser": {
+            "title": "Browser",
+            "type": "boolean"
+          },
+          "catalog_app_id": {
+            "title": "Catalog App Id",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "number"
+          },
+          "disclosures": {
+            "items": {
+              "$ref": "#/components/schemas/Disclosure"
+            },
+            "title": "Disclosures",
+            "type": "array"
+          },
+          "elevated": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Elevated",
+            "type": "array"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "number"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "key_id": {
+            "title": "Key Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "app",
+              "hub"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs": {
+            "enum": [
+              "",
+              "approve",
+              "claim",
+              "confirm",
+              "redeem"
+            ],
+            "title": "Needs",
+            "type": "string"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "armed",
+              "claimed",
+              "approved",
+              "redeemed",
+              "denied",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "scopes",
+          "catalog_app_id",
+          "origin",
+          "browser",
+          "armed",
+          "state",
+          "needs",
+          "created_at",
+          "expires_at",
+          "approved_at",
+          "finished_at",
+          "key_id",
+          "elevated",
+          "disclosures"
+        ],
+        "title": "PairingRequestView",
+        "type": "object"
+      },
       "PickWinner": {
         "properties": {
           "action": {
@@ -4125,6 +6508,104 @@
           "winner"
         ],
         "title": "PickWinner",
+        "type": "object"
+      },
+      "PlannedChange": {
+        "additionalProperties": true,
+        "description": "A change as a rollback preview lists it: the plan's own record, values as stored.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "after": {
+            "title": "After"
+          },
+          "apply": {
+            "title": "Apply",
+            "type": "string"
+          },
+          "before": {
+            "title": "Before"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "before",
+          "after",
+          "apply",
+          "action",
+          "source"
+        ],
+        "title": "PlannedChange",
+        "type": "object"
+      },
+      "PopularModel": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ],
+        "title": "PopularModel",
+        "type": "object"
+      },
+      "Preflight": {
+        "additionalProperties": true,
+        "properties": {
+          "checked_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checked At"
+          },
+          "ok": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ok"
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "problems",
+          "checked_at"
+        ],
+        "title": "Preflight",
         "type": "object"
       },
       "PreviewPairingRequest": {
@@ -4178,6 +6659,45 @@
           "target"
         ],
         "title": "ProjectResponse",
+        "type": "object"
+      },
+      "ProjectView": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "homelab": {
+            "title": "Homelab",
+            "type": "boolean"
+          },
+          "managed": {
+            "title": "Managed",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "repo": {
+            "title": "Repo",
+            "type": "boolean"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "repo",
+          "homelab",
+          "target",
+          "managed"
+        ],
+        "title": "ProjectView",
         "type": "object"
       },
       "Promotion": {
@@ -4265,6 +6785,25 @@
         "title": "PromptProgressEventData",
         "type": "object"
       },
+      "ProtocolRange": {
+        "additionalProperties": true,
+        "properties": {
+          "max": {
+            "title": "Max",
+            "type": "integer"
+          },
+          "min": {
+            "title": "Min",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min",
+          "max"
+        ],
+        "title": "ProtocolRange",
+        "type": "object"
+      },
       "ProviderCredentialRequest": {
         "properties": {
           "app_id": {
@@ -4300,6 +6839,74 @@
         "title": "ProviderCredentialRequest",
         "type": "object"
       },
+      "ProviderCredentialResponse": {
+        "additionalProperties": true,
+        "description": "A provider grant; `available` says whether a key-based grant's secret file exists.",
+        "properties": {
+          "app_id": {
+            "title": "App Id",
+            "type": "string"
+          },
+          "app_name": {
+            "title": "App Name",
+            "type": "string"
+          },
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "backend": {
+            "title": "Backend",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "number"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "policy": {
+            "title": "Policy",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "secret_ref": {
+            "title": "Secret Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "app_id",
+          "backend",
+          "secret_ref",
+          "policy",
+          "models",
+          "created_at",
+          "revoked_at"
+        ],
+        "title": "ProviderCredentialResponse",
+        "type": "object"
+      },
       "ProviderFailureResponse": {
         "properties": {
           "code": {
@@ -4326,6 +6933,25 @@
           "retryable"
         ],
         "title": "ProviderFailureResponse",
+        "type": "object"
+      },
+      "QueueEntry": {
+        "additionalProperties": true,
+        "properties": {
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "position"
+        ],
+        "title": "QueueEntry",
         "type": "object"
       },
       "QueueEvent": {
@@ -4522,6 +7148,94 @@
         "title": "RateLimitsResponse",
         "type": "object"
       },
+      "RemoteControlStatus": {
+        "additionalProperties": true,
+        "description": "Whether Remote Control is enabled and each project's state; `discovery` only on the owner API.",
+        "properties": {
+          "discovery": {
+            "$ref": "#/components/schemas/RemoteDiscovery"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/RemoteFolder"
+            },
+            "title": "Projects",
+            "type": "array"
+          }
+        },
+        "required": [
+          "enabled",
+          "projects"
+        ],
+        "title": "RemoteControlStatus",
+        "type": "object"
+      },
+      "RemoteDiscovery": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "supported": {
+            "title": "Supported",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "supported",
+          "enabled"
+        ],
+        "title": "RemoteDiscovery",
+        "type": "object"
+      },
+      "RemoteFolder": {
+        "additionalProperties": true,
+        "properties": {
+          "git": {
+            "title": "Git",
+            "type": "boolean"
+          },
+          "managed": {
+            "title": "Managed",
+            "type": "boolean"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "running": {
+            "title": "Running",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "trusted": {
+            "title": "Trusted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "project",
+          "path"
+        ],
+        "title": "RemoteFolder",
+        "type": "object"
+      },
       "RerunRequest": {
         "properties": {
           "backend": {
@@ -4548,6 +7262,30 @@
           }
         },
         "title": "RerunRequest",
+        "type": "object"
+      },
+      "RestartResponse": {
+        "additionalProperties": true,
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accepted",
+          "target_revision",
+          "status"
+        ],
+        "title": "RestartResponse",
         "type": "object"
       },
       "ResumedEvent": {
@@ -4605,6 +7343,68 @@
           "status"
         ],
         "title": "ResumedEventData",
+        "type": "object"
+      },
+      "RetentionApplied": {
+        "additionalProperties": true,
+        "properties": {
+          "bytes": {
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "removed": {
+            "title": "Removed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "removed",
+          "bytes",
+          "errors"
+        ],
+        "title": "RetentionApplied",
+        "type": "object"
+      },
+      "RetentionPreview": {
+        "additionalProperties": true,
+        "description": "What retention would delete now, and the confirmation phrase apply needs.",
+        "properties": {
+          "bytes": {
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "confirmation": {
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "keep_days": {
+            "title": "Keep Days",
+            "type": "number"
+          }
+        },
+        "required": [
+          "enabled",
+          "keep_days",
+          "count",
+          "bytes",
+          "confirmation"
+        ],
+        "title": "RetentionPreview",
         "type": "object"
       },
       "ReviewComment": {
@@ -5022,6 +7822,71 @@
         "title": "RunnerPoll",
         "type": "object"
       },
+      "RunnerResponse": {
+        "additionalProperties": true,
+        "description": "A configured runner and whether it is polling.",
+        "properties": {
+          "compatibility": {
+            "additionalProperties": true,
+            "title": "Compatibility",
+            "type": "object"
+          },
+          "info": {
+            "additionalProperties": true,
+            "title": "Info",
+            "type": "object"
+          },
+          "last_seen_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen Seconds"
+          },
+          "last_update": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunnerUpdateResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "manual_update": {
+            "title": "Manual Update",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "online": {
+            "title": "Online",
+            "type": "boolean"
+          },
+          "pending_requests": {
+            "title": "Pending Requests",
+            "type": "integer"
+          },
+          "update_supported": {
+            "title": "Update Supported",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "online",
+          "last_seen_seconds",
+          "pending_requests"
+        ],
+        "title": "RunnerResponse",
+        "type": "object"
+      },
       "RunnerResult": {
         "properties": {
           "error": {
@@ -5051,6 +7916,40 @@
           "ok"
         ],
         "title": "RunnerResult",
+        "type": "object"
+      },
+      "RunnerUpdateResult": {
+        "additionalProperties": true,
+        "properties": {
+          "at": {
+            "title": "At",
+            "type": "number"
+          },
+          "build_id": {
+            "title": "Build Id",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "plist_changed": {
+            "title": "Plist Changed",
+            "type": "boolean"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "RunnerUpdateResult",
         "type": "object"
       },
       "SandboxDiskLimitEvent": {
@@ -5858,6 +8757,326 @@
         "title": "SessionUpdate",
         "type": "object"
       },
+      "Setting": {
+        "additionalProperties": true,
+        "properties": {
+          "apply": {
+            "title": "Apply",
+            "type": "string"
+          },
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "configured": {
+            "title": "Configured"
+          },
+          "default": {
+            "title": "Default"
+          },
+          "effective": {
+            "title": "Effective"
+          },
+          "enum": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enum"
+          },
+          "file_only": {
+            "title": "File Only",
+            "type": "boolean"
+          },
+          "guidance": {
+            "title": "Guidance",
+            "type": "string"
+          },
+          "help": {
+            "title": "Help",
+            "type": "string"
+          },
+          "inherited": {
+            "title": "Inherited"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "maximum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maximum"
+          },
+          "minimum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum"
+          },
+          "modules": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Modules",
+            "type": "array"
+          },
+          "pending": {
+            "title": "Pending"
+          },
+          "readable": {
+            "title": "Readable",
+            "type": "boolean"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "sensitivity": {
+            "title": "Sensitivity",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "writable": {
+            "title": "Writable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "help",
+          "category",
+          "type",
+          "scope",
+          "apply",
+          "sensitivity",
+          "readable",
+          "writable",
+          "available",
+          "file_only",
+          "minimum",
+          "maximum",
+          "enum",
+          "modules",
+          "default",
+          "effective",
+          "configured",
+          "inherited",
+          "pending",
+          "source"
+        ],
+        "title": "Setting",
+        "type": "object"
+      },
+      "SettingChange": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "apply": {
+            "title": "Apply",
+            "type": "string"
+          },
+          "from": {
+            "title": "From"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "to": {
+            "title": "To"
+          }
+        },
+        "required": [
+          "from",
+          "key",
+          "to",
+          "apply",
+          "action"
+        ],
+        "title": "SettingChange",
+        "type": "object"
+      },
+      "SettingError": {
+        "additionalProperties": true,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "SettingError",
+        "type": "object"
+      },
+      "SettingSpec": {
+        "additionalProperties": true,
+        "properties": {
+          "apply": {
+            "title": "Apply",
+            "type": "string"
+          },
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "default": {
+            "title": "Default"
+          },
+          "enum": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enum"
+          },
+          "file_only": {
+            "title": "File Only",
+            "type": "boolean"
+          },
+          "guidance": {
+            "title": "Guidance",
+            "type": "string"
+          },
+          "help": {
+            "title": "Help",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "maximum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maximum"
+          },
+          "minimum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum"
+          },
+          "modules": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Modules",
+            "type": "array"
+          },
+          "readable": {
+            "title": "Readable",
+            "type": "boolean"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "sensitivity": {
+            "title": "Sensitivity",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "writable": {
+            "title": "Writable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "help",
+          "category",
+          "type",
+          "scope",
+          "apply",
+          "sensitivity",
+          "readable",
+          "writable",
+          "available",
+          "file_only",
+          "minimum",
+          "maximum",
+          "enum",
+          "modules",
+          "default"
+        ],
+        "title": "SettingSpec",
+        "type": "object"
+      },
       "SkillAllowlist": {
         "properties": {
           "projects": {
@@ -5870,6 +9089,115 @@
           }
         },
         "title": "SkillAllowlist",
+        "type": "object"
+      },
+      "SkillExample": {
+        "additionalProperties": true,
+        "properties": {
+          "expected": {
+            "title": "Expected",
+            "type": "string"
+          },
+          "expected_behavior": {
+            "title": "Expected Behavior",
+            "type": "string"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "title": "SkillExample",
+        "type": "object"
+      },
+      "SkillExport": {
+        "additionalProperties": true,
+        "description": "The installed version as a bundle another Server can import.",
+        "properties": {
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "examples": {
+            "items": {
+              "$ref": "#/components/schemas/SkillExample"
+            },
+            "title": "Examples",
+            "type": "array"
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/SkillManifest"
+          },
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/SkillReference"
+            },
+            "title": "References",
+            "type": "array"
+          },
+          "skill_md": {
+            "title": "Skill Md",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "slug",
+          "title",
+          "purpose",
+          "version",
+          "content_hash",
+          "skill_md",
+          "references",
+          "examples",
+          "manifest"
+        ],
+        "title": "SkillExport",
+        "type": "object"
+      },
+      "SkillFinding": {
+        "additionalProperties": true,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "SkillFinding",
         "type": "object"
       },
       "SkillInstall": {
@@ -5885,6 +9213,157 @@
         "title": "SkillInstall",
         "type": "object"
       },
+      "SkillManifest": {
+        "additionalProperties": true,
+        "properties": {
+          "activation_suggestion": {
+            "title": "Activation Suggestion",
+            "type": "string"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "validator_version": {
+            "title": "Validator Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "title",
+          "purpose",
+          "activation_suggestion",
+          "content_hash",
+          "validator_version"
+        ],
+        "title": "SkillManifest",
+        "type": "object"
+      },
+      "SkillProposal": {
+        "additionalProperties": true,
+        "description": "A proposal; the body (`skill_md`, references, examples, diff) only when one proposal is read.",
+        "properties": {
+          "activation_suggestion": {
+            "title": "Activation Suggestion",
+            "type": "string"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "diff": {
+            "title": "Diff",
+            "type": "string"
+          },
+          "examples": {
+            "items": {
+              "$ref": "#/components/schemas/SkillExample"
+            },
+            "title": "Examples",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "references": {
+            "items": {
+              "$ref": "#/components/schemas/SkillReference"
+            },
+            "title": "References",
+            "type": "array"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review"
+          },
+          "review_status": {
+            "title": "Review Status",
+            "type": "string"
+          },
+          "skill_md": {
+            "title": "Skill Md",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "source_session_id": {
+            "title": "Source Session Id",
+            "type": "string"
+          },
+          "static_findings": {
+            "items": {
+              "$ref": "#/components/schemas/SkillFinding"
+            },
+            "title": "Static Findings",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "title",
+          "purpose",
+          "content_hash",
+          "status"
+        ],
+        "title": "SkillProposal",
+        "type": "object"
+      },
+      "SkillReference": {
+        "additionalProperties": true,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "title": "SkillReference",
+        "type": "object"
+      },
       "SkillReject": {
         "properties": {
           "reason": {
@@ -5894,6 +9373,113 @@
           }
         },
         "title": "SkillReject",
+        "type": "object"
+      },
+      "SkillReviewStarted": {
+        "additionalProperties": true,
+        "properties": {
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "reviewer_model": {
+            "title": "Reviewer Model",
+            "type": "string"
+          },
+          "usage_notice": {
+            "title": "Usage Notice",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "usage_notice",
+          "reviewer_model"
+        ],
+        "title": "SkillReviewStarted",
+        "type": "object"
+      },
+      "SkillUninstalled": {
+        "additionalProperties": true,
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "SkillUninstalled",
+        "type": "object"
+      },
+      "SkillsOverview": {
+        "additionalProperties": true,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "installed": {
+            "items": {
+              "$ref": "#/components/schemas/InstalledSkill"
+            },
+            "title": "Installed",
+            "type": "array"
+          },
+          "proposals": {
+            "items": {
+              "$ref": "#/components/schemas/SkillProposal"
+            },
+            "title": "Proposals",
+            "type": "array"
+          }
+        },
+        "required": [
+          "enabled",
+          "proposals",
+          "installed"
+        ],
+        "title": "SkillsOverview",
+        "type": "object"
+      },
+      "SmartApprovalsResponse": {
+        "additionalProperties": true,
+        "description": "Smart-approval status and the most recent reviews.",
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "recent": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Recent",
+            "type": "array"
+          },
+          "secret_ref": {
+            "title": "Secret Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "enabled",
+          "configured",
+          "secret_ref",
+          "recent"
+        ],
+        "title": "SmartApprovalsResponse",
         "type": "object"
       },
       "SmartApprovalsUpdate": {
@@ -7708,7 +11294,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AccountResponse"
+                  },
+                  "title": "Response 200 List Accounts Api Admin V1 Accounts Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -7733,7 +11325,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7772,7 +11366,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AccountAuditRow"
+                  },
+                  "title": "Response 200 Account Audit Api Admin V1 Accounts Audit Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -7810,7 +11410,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7856,7 +11458,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7904,7 +11508,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubMemberAuthResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -7952,7 +11558,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleLink"
+                }
               }
             },
             "description": "Successful Response"
@@ -7990,7 +11598,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleLink"
+                }
               }
             },
             "description": "Successful Response"
@@ -8026,7 +11636,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleInvitationResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8064,7 +11676,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleRevokedResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8091,7 +11705,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ErasureResponse"
+                  },
+                  "title": "Response 200 App Erasures Api Admin V1 Apps Erasures Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -8162,7 +11782,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AppLimitsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8208,7 +11830,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AppLimitsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8294,7 +11918,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/KeyResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -8461,7 +12087,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
               }
             },
             "description": "Successful Response"
@@ -8488,7 +12116,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BackendView"
+                  },
+                  "title": "Response 200 Backends Backends Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -8526,7 +12160,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BackendView"
+                }
               }
             },
             "description": "Successful Response"
@@ -9112,7 +12748,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -9137,7 +12775,17 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ConfigAppliedResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConfigDryRunResponse"
+                    }
+                  ],
+                  "title": "Response 200 Admin Patch Api Admin V1 Config Patch"
+                }
               }
             },
             "description": "Successful Response"
@@ -9174,7 +12822,9 @@
           "202": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RestartResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -9211,7 +12861,17 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ConfigAppliedResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ConfigRollbackPreview"
+                    }
+                  ],
+                  "title": "Response 200 Admin Rollback Api Admin V1 Config Rollback Post"
+                }
               }
             },
             "description": "Successful Response"
@@ -9238,7 +12898,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigSchemaResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -9265,7 +12927,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigPlanResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -9323,7 +12987,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubMemberAuthResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -9358,7 +13024,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GitHubMemberAuthResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -9539,7 +13207,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleSigninResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -9657,7 +13327,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HubClaimResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -10415,7 +14087,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/KeyResponse"
+                  },
+                  "title": "Response 200 List Keys Keys Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -10480,7 +14158,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -10497,7 +14177,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BackupResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -10514,7 +14196,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -10541,7 +14225,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionApplied"
+                }
               }
             },
             "description": "Successful Response"
@@ -10568,7 +14254,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionPreview"
+                }
               }
             },
             "description": "Successful Response"
@@ -10585,7 +14273,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -10602,7 +14292,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -10629,7 +14321,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryProfileResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -10707,7 +14401,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/NotifyTestResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -10809,7 +14505,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PairingRequestView"
+                  },
+                  "title": "Response 200 List Pairing Requests Api Admin V1 Pairing Requests Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -10834,7 +14536,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PairingRequestView"
+                }
               }
             },
             "description": "Successful Response"
@@ -10937,7 +14641,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PairingRequestView"
+                }
               }
             },
             "description": "Successful Response"
@@ -10985,7 +14691,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PairingRequestView"
+                }
               }
             },
             "description": "Successful Response"
@@ -11023,7 +14731,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/PairingRequestView"
+                }
               }
             },
             "description": "Successful Response"
@@ -11102,7 +14812,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectView"
+                  },
+                  "title": "Response 200 Projects Projects Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -11127,7 +14843,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
               }
             },
             "description": "Successful Response"
@@ -11154,7 +14872,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderCredentialResponse"
+                  },
+                  "title": "Response 200 Provider Credentials Api Admin V1 Provider Credentials Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -11179,7 +14903,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderCredentialResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -11239,7 +14965,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/QueueEntry"
+                  },
+                  "title": "Response 200 Queue Queue Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -11256,7 +14988,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteControlStatus"
+                }
               }
             },
             "description": "Successful Response"
@@ -11747,7 +15481,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RunnerResponse"
+                  },
+                  "title": "Response 200 Runners Runners Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -11775,7 +15515,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerUpdateResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -12022,7 +15764,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -12068,7 +15812,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -12116,7 +15862,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ApprovalResponse"
+                  },
+                  "title": "Response 200 Approvals Sessions  Ref  Approvals Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -12173,7 +15925,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -12211,7 +15965,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -12499,7 +16255,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -12592,7 +16350,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -13003,7 +16763,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillsOverview"
+                }
               }
             },
             "description": "Successful Response"
@@ -13020,7 +16782,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InstalledSkill"
+                  },
+                  "title": "Response 200 Skills Enabled Skills Enabled Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -13079,7 +16847,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillProposal"
+                }
               }
             },
             "description": "Successful Response"
@@ -13127,7 +16897,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -13175,7 +16947,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillProposal"
+                }
               }
             },
             "description": "Successful Response"
@@ -13213,7 +16987,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillProposal"
+                }
               }
             },
             "description": "Successful Response"
@@ -13251,7 +17027,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillReviewStarted"
+                }
               }
             },
             "description": "Successful Response"
@@ -13289,7 +17067,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -13327,7 +17107,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -13365,7 +17147,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillExport"
+                }
               }
             },
             "description": "Successful Response"
@@ -13413,7 +17197,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -13451,7 +17237,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -13489,7 +17277,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillUninstalled"
+                }
               }
             },
             "description": "Successful Response"
@@ -13516,7 +17306,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SmartApprovalsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -13541,7 +17333,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SmartApprovalsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -13939,7 +17733,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AuthSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -14378,7 +18174,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/AppMeResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -16331,7 +20129,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BackendView"
+                  },
+                  "title": "Response 200 Backends Backends Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -16369,7 +20173,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BackendView"
+                }
               }
             },
             "description": "Successful Response"
@@ -17349,7 +21155,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -17996,7 +21804,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/KeyResponse"
+                  },
+                  "title": "Response 200 List Keys Keys Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -18061,7 +21875,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -18078,7 +21894,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BackupResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -18095,7 +21913,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -18122,7 +21942,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionApplied"
+                }
               }
             },
             "description": "Successful Response"
@@ -18149,7 +21971,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionPreview"
+                }
               }
             },
             "description": "Successful Response"
@@ -18166,7 +21990,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -18183,7 +22009,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -18210,7 +22038,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryProfileResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -18288,7 +22118,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/NotifyTestResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -18442,7 +22274,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectView"
+                  },
+                  "title": "Response 200 Projects Projects Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -18467,7 +22305,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
               }
             },
             "description": "Successful Response"
@@ -18494,7 +22334,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/QueueEntry"
+                  },
+                  "title": "Response 200 Queue Queue Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -18511,7 +22357,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteControlStatus"
+                }
               }
             },
             "description": "Successful Response"
@@ -18816,7 +22664,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RunnerResponse"
+                  },
+                  "title": "Response 200 Runners Runners Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -18940,7 +22794,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerUpdateResult"
+                }
               }
             },
             "description": "Successful Response"
@@ -19187,7 +23043,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -19233,7 +23091,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -19281,7 +23141,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ApprovalResponse"
+                  },
+                  "title": "Response 200 Approvals Sessions  Ref  Approvals Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -19338,7 +23204,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -19376,7 +23244,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -19664,7 +23534,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -19757,7 +23629,9 @@
           "201": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/WebSessionResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -20168,7 +24042,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillsOverview"
+                }
               }
             },
             "description": "Successful Response"
@@ -20185,7 +24061,13 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InstalledSkill"
+                  },
+                  "title": "Response 200 Skills Enabled Skills Enabled Get",
+                  "type": "array"
+                }
               }
             },
             "description": "Successful Response"
@@ -20244,7 +24126,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillProposal"
+                }
               }
             },
             "description": "Successful Response"
@@ -20292,7 +24176,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -20340,7 +24226,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillProposal"
+                }
               }
             },
             "description": "Successful Response"
@@ -20378,7 +24266,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillProposal"
+                }
               }
             },
             "description": "Successful Response"
@@ -20416,7 +24306,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillReviewStarted"
+                }
               }
             },
             "description": "Successful Response"
@@ -20454,7 +24346,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -20492,7 +24386,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -20530,7 +24426,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillExport"
+                }
               }
             },
             "description": "Successful Response"
@@ -20578,7 +24476,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -20616,7 +24516,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledSkill"
+                }
               }
             },
             "description": "Successful Response"
@@ -20654,7 +24556,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SkillUninstalled"
+                }
               }
             },
             "description": "Successful Response"
@@ -20681,7 +24585,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SmartApprovalsResponse"
+                }
               }
             },
             "description": "Successful Response"
@@ -20706,7 +24612,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/SmartApprovalsResponse"
+                }
               }
             },
             "description": "Successful Response"
