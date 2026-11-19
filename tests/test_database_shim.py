@@ -44,25 +44,52 @@ def _forwarded() -> dict[str, str]:
     return {name: value.store for name, value in vars(Database).items() if isinstance(value, core_db._Forwarded)}
 
 
+def shim_problems(forwarded: set[str], pinned: frozenset[str], store_methods: set[str]) -> list[str]:
+    """Why the shim breaks its ratchet: it forwards a name the pin lacks (it grew), the pin names one it no longer
+    forwards (shrink the pin), or it forwards a name the store lacks."""
+    problems = []
+    if added := sorted(forwarded - pinned):
+        problems.append(f"the forwarding shim grew: {added}. Call the store (`db.credentials.<name>`) instead.")
+    if removed := sorted(pinned - forwarded):
+        problems.append(f"the shim no longer forwards {removed}: delete them from PINNED_CREDENTIAL_SHIM, so they "
+                        "cannot come back.")
+    if missing := sorted(forwarded - store_methods):
+        problems.append(f"the shim forwards {missing}, which the store does not define.")
+    return problems
+
+
+def _store_methods() -> set[str]:
+    return {n for n, v in vars(CredentialStore).items() if callable(v) and not n.startswith("_")}
+
+
 def test_the_shim_only_shrinks():
     forwarded = _forwarded()
-    added = sorted(set(forwarded) - PINNED_CREDENTIAL_SHIM)
-    assert not added, f"the forwarding shim grew: {added}. Call the store (`db.credentials.<name>`) instead."
-    removed = sorted(PINNED_CREDENTIAL_SHIM - set(forwarded))
-    assert not removed, (f"the shim no longer forwards {removed}: delete them from PINNED_CREDENTIAL_SHIM, so they "
-                         "cannot come back.")
+    assert shim_problems(set(forwarded), PINNED_CREDENTIAL_SHIM, _store_methods()) == []
     assert set(forwarded.values()) == {"credentials"}
 
 
-def test_every_forwarded_name_is_a_store_method_and_not_a_database_one():
+def test_the_ratchet_allows_a_removal_and_refuses_growth_and_a_stale_pin():
+    pinned = frozenset({"a", "b"})
+    store = {"a", "b", "c"}
+    assert shim_problems({"a", "b"}, pinned, store) == []
+    # A caller moved: its name leaves the shim and the pin, and stays a store method.
+    assert shim_problems({"a"}, frozenset({"a"}), store) == []
+    grew = shim_problems({"a", "b", "c"}, pinned, store)
+    assert len(grew) == 1 and "grew: ['c']" in grew[0]
+    stale = shim_problems({"a"}, pinned, store)
+    assert len(stale) == 1 and "no longer forwards ['b']" in stale[0]
+    assert shim_problems({"a", "d"}, frozenset({"a", "d"}), store) == [
+        "the shim forwards ['d'], which the store does not define."]
+
+
+def test_every_forwarded_name_is_a_store_method():
     for name in PINNED_CREDENTIAL_SHIM:
         method = vars(CredentialStore).get(name)
         assert callable(method) and method.db_kind in ("read", "write"), name
         # The class-level lookup `app_stores` routes by sees the store's decorated method.
         assert getattr(Database, name) is method, name
-    # Nothing on the store is forwarded by default: a new store method is called on `db.credentials`.
-    public = {n for n, v in vars(CredentialStore).items() if callable(v) and not n.startswith("_")}
-    assert public == PINNED_CREDENTIAL_SHIM
+    # A store method is forwarded only by its own `_Forwarded` line on `Database`, never by default.
+    assert PINNED_CREDENTIAL_SHIM <= _store_methods()
     assert issubclass(CredentialStore, CoreStore)
 
 
