@@ -1517,17 +1517,17 @@ class Runner:
             raise CliBackendError("the app provider credential file changed")
 
     async def _pump_cli(self, sid: str, cli, credential: dict, use_api_key: bool, recovered: bool) -> None:
-        """Feed the CLI's events to the handlers until the run is complete."""
-        tool_names: dict[str, str] = {}
+        """Feed the CLI's records through its translator to the applier until the run is complete."""
         while True:
             self._check_cli_credential(credential, use_api_key)
             await self._send_cli_inbox(sid, cli)
-            event = await cli.receive(timeout=0.05)
-            if event is None:
+            record = await cli.receive(timeout=0.05)
+            if record is None:
                 continue
-            if await self._handle_cli_event(sid, cli, event, tool_names, recovered=recovered):
-                await self._end_run(sid)
-                return
+            for event in cli.translator.translate(record):
+                if await self._apply(sid, cli, event, recovered):
+                    await self._end_run(sid)
+                    return
 
     async def _cli_limit_reached(self, sid: str, backend_name: str, limit: CliLimitError,
                                  use_api_key: bool) -> None:
@@ -1612,41 +1612,6 @@ class Runner:
             remaining = current[len(queued):] if current[:len(queued)] == queued else current
             self.db.update_session(sid, inbox=remaining)
         await self.db.for_session(sid).awrite(drain_inbox)
-
-    @staticmethod
-    def _cli_text(content) -> str:
-        if isinstance(content, str):
-            return content
-        if not isinstance(content, list):
-            return "" if content is None else json.dumps(content, ensure_ascii=False)
-        parts = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                value = block.get("text")
-                if isinstance(value, str):
-                    parts.append(value)
-                elif isinstance(block.get("content"), str):
-                    parts.append(block["content"])
-                elif isinstance(block.get("content"), list):
-                    parts.append(Runner._cli_text(block["content"]))
-        return "\n".join(x for x in parts if x)
-
-    async def _handle_cli_event(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession | PrintModeSession,
-                                 event: dict, tool_names: dict[str, str], recovered: bool = False) -> bool:
-        """Map one hosted-CLI record. Returns true when the run is complete."""
-        if isinstance(cli, CursorSession):
-            return await self._handle_cursor_event(sid, cli, event, tool_names)
-        for neutral in cli.translator.translate(event):  # print mode, Claude Code and Codex
-            if await self._apply(sid, cli, neutral, recovered):
-                return True
-        return False
-
-    def _bind_session_if_any(self, sid: str, cli, event: dict) -> None:
-        backend_session_id = str(event.get("session_id") or "")
-        if backend_session_id:
-            self._bind_backend_session(sid, cli, backend_session_id)
 
     def _bind_backend_session(self, sid: str, cli, backend_session_id: str) -> None:
         self.db.patch_run(sid, backend_session_id=backend_session_id)
@@ -1740,70 +1705,6 @@ class Runner:
                                                "output_chars": len(output),
                                                "output": truncate_middle(output, 20000)})
         self.db.for_session(sid).write(record_cli_tool_result)
-
-    @staticmethod
-    def _cursor_tool(event: dict) -> tuple[str, dict, dict]:
-        tool_call = event.get("tool_call") if isinstance(event.get("tool_call"), dict) else {}
-        for name, value in tool_call.items():
-            if isinstance(value, dict):
-                args = value.get("args") if isinstance(value.get("args"), dict) else {}
-                result = value.get("result") if isinstance(value.get("result"), dict) else {}
-                return name, args, result
-        return "cursorTool", {}, {}
-
-    async def _handle_cursor_event(self, sid: str, cli: CursorSession, event: dict,
-                                   tool_names: dict[str, str]) -> bool:
-        """Map Cursor Agent's documented print-mode stream-json records."""
-        type_ = str(event.get("type") or "")
-        if type_ == "system" and event.get("subtype") == "init":
-            self._bind_session_if_any(sid, cli, event)
-        elif type_ in ("assistant", "thinking"):
-            self._cursor_text(sid, cli, event, type_)
-        elif type_ == "tool_call":
-            self._cursor_tool_event(sid, event, tool_names)
-        elif type_ == "result":
-            return await self._cursor_result(sid, cli, event)
-        return False
-
-    def _cursor_text(self, sid: str, cli: CursorSession, event: dict, type_: str) -> None:
-        text = self._cli_text((event.get("message") or {}).get("content"))
-        if not text and isinstance(event.get("text"), str):
-            text = event["text"]
-        if not text:
-            return
-        kind = "reasoning" if type_ == "thinking" else "content"
-        # With --stream-partial-output Cursor emits timestamped deltas,
-        # then one untimestamped aggregate assistant record. Stream the
-        # deltas and retain the aggregate without displaying it twice.
-        if type_ == "thinking" or event.get("timestamp_ms") is not None:
-            self.bus.ephemeral(sid, "delta", {"kind": kind, "text": text})
-        if type_ == "assistant" and event.get("timestamp_ms") is None:
-            cli.last_answer = text
-
-    def _cursor_tool_event(self, sid: str, event: dict, tool_names: dict[str, str]) -> None:
-        call_id = str(event.get("call_id") or "")
-        name, args, result = self._cursor_tool(event)
-        tool_names[call_id] = name
-        if event.get("subtype") == "started":
-            self._emit_assistant(sid, "", [self._tool_call_entry(call_id, name, args)])
-        elif event.get("subtype") == "completed":
-            ok = "success" in result and "error" not in result
-            output = result.get("success") if ok else result.get("error", result)
-            self._record_cli_tool_result(sid, call_id, tool_names.get(call_id, name), ok, self._cli_text(output))
-
-    async def _cursor_result(self, sid: str, cli: CursorSession, event: dict) -> bool:
-        combined = cli.combined_result(event)
-        text = str(combined.get("result") or "").lower()
-        if (combined.get("is_error") or combined.get("subtype") in ("error", "failed")) and any(
-                marker in text for marker in ("rate limit", "quota", "usage limit")):
-            raise CliLimitError()
-        if cli.has_followups:
-            await cli.continue_followups()
-            return False
-        if cli.last_answer:
-            self._emit_assistant(sid, cli.last_answer)
-        self._finish_cli_result(sid, combined)
-        return True
 
     async def _authorize_cli(self, sid: str, cli: ClaudeSession | CodexSession, request_id, request: dict,
                               recovered: bool = False) -> None:

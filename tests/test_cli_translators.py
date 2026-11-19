@@ -10,6 +10,7 @@ from pathlib import Path
 
 from harness.backends.claude import ClaudeTranslator
 from harness.backends.codex import ELICITATION, CodexTranslator
+from harness.backends.cursor import CursorTranslator
 from harness.backends.events import (Assistant, Delta, Error, PermissionRequest, RateLimits, Result, Session, ToolCall,
                                      ToolResult)
 from harness.backends.print_mode import PrintModeTranslator
@@ -186,3 +187,50 @@ def test_codex_elicitation_binds_once_and_a_form_is_not_decidable():
     assert translator.translate({**ask, "id": 6}) == [PermissionRequest(6, "", {}, decidable=False)]  # asked already
     form = {"id": 7, "method": ELICITATION, "params": {"serverName": "harness", "mode": "form", "_meta": {}}}
     assert translator.translate(form) == [PermissionRequest(7, "", {}, decidable=False)]
+
+
+# --- Cursor Agent 2026.10.01: print-mode stream-json (assembled; see the fixture's README) -----------------------
+# Cursor asks the host nothing (it runs with --force) and reports no rate limits: a limit is a failed result.
+
+CURSOR = FIXTURES / "cursor_agent_2026.10.01"
+
+
+def test_cursor_replays_a_turn_with_a_tool_error_and_the_aggregate_answer():
+    turn = records(CURSOR / "turn.jsonl")
+    shell, read = turn[6]["call_id"], turn[8]["call_id"]
+    shell_args, read_args = turn[6]["tool_call"]["shellToolCall"]["args"], turn[8]["tool_call"]["readToolCall"]["args"]
+    success = turn[7]["tool_call"]["shellToolCall"]["result"]["success"]
+    error = turn[9]["tool_call"]["readToolCall"]["result"]["error"]
+    answer = turn[-1]["result"]
+    assert replay(CursorTranslator(), turn) == [
+        Session(turn[0]["session_id"]),
+        Delta("reasoning", "Run the tests first."),
+        Delta("content", "I'll run "),
+        Delta("content", "the tests."),
+        Assistant(tool_calls=(ToolCall(shell, "shellToolCall", shell_args),)),
+        ToolResult(shell, "shellToolCall", True, json.dumps(success, ensure_ascii=False)),
+        Assistant(tool_calls=(ToolCall(read, "readToolCall", read_args),)),
+        ToolResult(read, "readToolCall", False, json.dumps(error, ensure_ascii=False)),
+        Delta("content", "All 3 tests pass."),
+        # the untimestamped aggregate is kept as the answer, not streamed twice; the result shows it
+        Result(answer=answer, turns=1, subtype="success", show_answer=True, usage={
+            "input_tokens": 512, "cache_read_input_tokens": 4096, "cache_creation_input_tokens": 512,
+            "output_tokens": 240}),
+    ]
+
+
+def test_cursor_adds_up_usage_turns_and_cost_over_the_session_turns():
+    translator = CursorTranslator()
+    first = translator.translate(records(CURSOR / "turn.jsonl")[-1])[0]
+    second = translator.translate({"type": "result", "subtype": "success", "is_error": False, "result": "",
+                                   "usage": {"inputTokens": 10, "outputTokens": 1}, "total_cost_usd": 0.5})[0]
+    assert (second.turns, second.usage["output_tokens"], second.usage["input_tokens"], second.cost) == (2, 241, 522, 0.5)
+    assert second.answer == first.answer  # a result without text keeps the answer so far
+
+
+def test_cursor_usage_limit_result_reaches_the_limit():
+    limit = records(CURSOR / "limit.jsonl")
+    events = replay(CursorTranslator(), limit)
+    assert events[0] == Session(limit[0]["session_id"])
+    assert events[1].is_error and events[1].limit_reached and events[1].answer == limit[1]["result"]
+    assert not CursorTranslator().translate({"type": "result", "is_error": True, "result": "model crashed"})[0].limit_reached

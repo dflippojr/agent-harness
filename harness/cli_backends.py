@@ -21,6 +21,7 @@ from urllib.parse import urlsplit, urlunsplit
 from . import claude_token, cli_domains, credential_sources, end_users, member_keys  # noqa: F401 - these register their sources
 from .backends.claude import ClaudeTranslator
 from .backends.codex import APPROVALS, CODEX_TOOLS_ONLY_ITEMS, ELICITATION, CodexTranslator  # noqa: F401 - re-exported
+from .backends.cursor import CursorTranslator
 from .backends.events import obj
 from .backends.print_mode import PrintModeTranslator
 from .config import BackendConfig, SandboxConfig
@@ -725,10 +726,11 @@ class CursorSession(TurnProcess):
         self._stderr: list[str] = []
         self._threads: list[threading.Thread] = []
         self._followups: list[str] = []
-        self._result_usage: dict[str, int] = {}
-        self._result_turns = 0
-        self._result_cost = 0.0
-        self.last_answer = ""
+        self.translator = CursorTranslator()
+
+    @property
+    def last_answer(self) -> str:
+        return self.translator.answer
 
     def command(self, prompt: str = "") -> list[str]:
         if self._command_override is not None:
@@ -796,26 +798,6 @@ class CursorSession(TurnProcess):
 
     async def continue_followups(self) -> None:
         self._turn(await self._take_followups())
-
-    def combined_result(self, result: dict) -> dict:
-        raw = result.get("usage") if isinstance(result.get("usage"), dict) else {}
-        cache_read = int(raw.get("cacheReadTokens") or raw.get("cache_read_input_tokens") or 0)
-        cache_write = int(raw.get("cacheWriteTokens") or raw.get("cache_creation_input_tokens") or 0)
-        total_input = int(raw.get("inputTokens") or raw.get("input_tokens") or 0)
-        usage = {
-            "input_tokens": max(0, total_input - cache_read - cache_write),
-            "cache_read_input_tokens": cache_read,
-            "cache_creation_input_tokens": cache_write,
-            "output_tokens": int(raw.get("outputTokens") or raw.get("output_tokens") or 0),
-        }
-        for key, value in usage.items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                self._result_usage[key] = self._result_usage.get(key, 0) + int(value)
-        self._result_turns += int(result.get("num_turns") or 1)
-        self._result_cost += float(result.get("total_cost_usd") or 0)
-        self.last_answer = str(result.get("result") or self.last_answer)
-        return {**result, "result": self.last_answer, "usage": dict(self._result_usage),
-                "num_turns": self._result_turns, "total_cost_usd": self._result_cost}
 
     async def receive(self, timeout: float | None = None) -> dict | None:
         line = await self._next_line(timeout)

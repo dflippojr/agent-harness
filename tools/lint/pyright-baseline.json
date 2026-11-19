@@ -291,7 +291,7 @@
     "file": "harness/cli_backends.py",
     "rule": "reportOptionalMemberAccess",
     "message": "\"get\" is not a known attribute of \"None\"",
-    "count": 27
+    "count": 19
   },
   {
     "file": "harness/cli_backends.py",
@@ -1058,12 +1058,6 @@
   {
     "file": "harness/runner.py",
     "rule": "reportOptionalMemberAccess",
-    "message": "\"items\" is not a known attribute of \"None\"",
-    "count": 1
-  },
-  {
-    "file": "harness/runner.py",
-    "rule": "reportOptionalMemberAccess",
     "message": "\"prompt_tokens\" is not a known attribute of \"None\"",
     "count": 4
   },
@@ -1090,12 +1084,6 @@
     "rule": "reportReturnType",
     "message": "Type \"dict[Unknown, Unknown] | None\" is not assignable to return type \"dict[Unknown, Unknown]\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
     "count": 4
-  },
-  {
-    "file": "harness/runner.py",
-    "rule": "reportReturnType",
-    "message": "Type \"tuple[Unknown, Unknown | dict[Unknown, Unknown] | None, Unknown | dict[Unknown, Unknown] | None]\" is not assignable to return type \"tuple[str, dict[Unknown, Unknown], dict[Unknown, Unknown]]\"\n  Type \"Unknown | dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"\n  Type \"Unknown | dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
-    "count": 1
   },
   {
     "file": "harness/sandbox.py",
