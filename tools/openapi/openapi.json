@@ -339,6 +339,48 @@
         "title": "AppContext",
         "type": "object"
       },
+      "AppContextEvent": {
+        "additionalProperties": false,
+        "description": "A `app_context` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ContentEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "app_context",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "AppContextEvent",
+        "type": "object"
+      },
       "AppDecision": {
         "properties": {
           "decision": {
@@ -612,6 +654,79 @@
         "title": "AppTool",
         "type": "object"
       },
+      "AppToolCallEvent": {
+        "additionalProperties": false,
+        "description": "A `app_tool_call` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AppToolCallEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "app_tool_call",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "AppToolCallEvent",
+        "type": "object"
+      },
+      "AppToolCallEventData": {
+        "additionalProperties": false,
+        "description": "The model called one of the App's tools; the App answers within `timeout_seconds`.",
+        "properties": {
+          "args": {
+            "additionalProperties": true,
+            "title": "Args",
+            "type": "object"
+          },
+          "call_id": {
+            "title": "Call Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "title": "Timeout Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "call_id",
+          "name",
+          "args",
+          "timeout_seconds"
+        ],
+        "title": "AppToolCallEventData",
+        "type": "object"
+      },
       "AppToolCallResponse": {
         "additionalProperties": true,
         "properties": {
@@ -640,6 +755,73 @@
           "status"
         ],
         "title": "AppToolCallResponse",
+        "type": "object"
+      },
+      "AppToolResultEvent": {
+        "additionalProperties": false,
+        "description": "A `app_tool_result` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AppToolResultEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "app_tool_result",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "AppToolResultEvent",
+        "type": "object"
+      },
+      "AppToolResultEventData": {
+        "additionalProperties": false,
+        "description": "The App answered a tool call.",
+        "properties": {
+          "call_id": {
+            "title": "Call Id",
+            "type": "string"
+          },
+          "chars": {
+            "title": "Chars",
+            "type": "integer"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "call_id",
+          "ok",
+          "chars"
+        ],
+        "title": "AppToolResultEventData",
         "type": "object"
       },
       "AppUsage": {
@@ -691,6 +873,285 @@
           "by_billing"
         ],
         "title": "AppUsage",
+        "type": "object"
+      },
+      "ApprovalAutoApprovedEvent": {
+        "additionalProperties": false,
+        "description": "A `approval_auto_approved` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ApprovalAutoApprovedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "approval_auto_approved",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ApprovalAutoApprovedEvent",
+        "type": "object"
+      },
+      "ApprovalAutoApprovedEventData": {
+        "additionalProperties": true,
+        "description": "A tool call was approved without asking: approval `id`, with the smart reviewer's record (the\n`smart_review` fields) when it decided.",
+        "properties": {
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "escalate_reason": {
+            "title": "Escalate Reason",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "latency_ms": {
+            "title": "Latency Ms",
+            "type": "integer"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "policy_fingerprint": {
+            "title": "Policy Fingerprint",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "recommendation": {
+            "title": "Recommendation",
+            "type": "string"
+          },
+          "risk_flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Risk Flags",
+            "type": "array"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "ApprovalAutoApprovedEventData",
+        "type": "object"
+      },
+      "ApprovalDecidedEvent": {
+        "additionalProperties": false,
+        "description": "A `approval_decided` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ApprovalDecidedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "approval_decided",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ApprovalDecidedEvent",
+        "type": "object"
+      },
+      "ApprovalDecidedEventData": {
+        "additionalProperties": false,
+        "description": "An approval was decided: `status` is `approved` or `denied`; `expired` marks one denied for waiting too long.",
+        "properties": {
+          "expired": {
+            "title": "Expired",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "note"
+        ],
+        "title": "ApprovalDecidedEventData",
+        "type": "object"
+      },
+      "ApprovalRequestedEvent": {
+        "additionalProperties": false,
+        "description": "A `approval_requested` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ApprovalRequestedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "approval_requested",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ApprovalRequestedEvent",
+        "type": "object"
+      },
+      "ApprovalRequestedEventData": {
+        "additionalProperties": false,
+        "description": "A tool call waits for the owner's decision. `smart` is the smart reviewer's advice, when it ran.",
+        "properties": {
+          "args": {
+            "additionalProperties": true,
+            "title": "Args",
+            "type": "object"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "smart": {
+            "additionalProperties": true,
+            "title": "Smart",
+            "type": "object"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "title": "Tool Call Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tool_call_id",
+          "tool",
+          "args",
+          "reason",
+          "detail"
+        ],
+        "title": "ApprovalRequestedEventData",
         "type": "object"
       },
       "ApprovalResponse": {
@@ -835,6 +1296,211 @@
         "title": "ArmPairingRequest",
         "type": "object"
       },
+      "AssistantEvent": {
+        "additionalProperties": false,
+        "description": "A `assistant` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AssistantEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "assistant",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "AssistantEvent",
+        "type": "object"
+      },
+      "AssistantEventData": {
+        "additionalProperties": false,
+        "description": "One model turn: its text, reasoning and tool calls (OpenAI chat format), with token counts and speeds.\n`totals` (the session's running totals) is present on a local model's turns.",
+        "properties": {
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "finish_reason": {
+            "title": "Finish Reason",
+            "type": "string"
+          },
+          "gen_tps": {
+            "title": "Gen Tps",
+            "type": "number"
+          },
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "prompt_tps": {
+            "title": "Prompt Tps",
+            "type": "number"
+          },
+          "reasoning": {
+            "title": "Reasoning",
+            "type": "string"
+          },
+          "tool_calls": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Tool Calls",
+            "type": "array"
+          },
+          "totals": {
+            "additionalProperties": true,
+            "title": "Totals",
+            "type": "object"
+          }
+        },
+        "required": [
+          "content",
+          "reasoning",
+          "tool_calls",
+          "finish_reason",
+          "prompt_tokens",
+          "completion_tokens",
+          "prompt_tps",
+          "gen_tps"
+        ],
+        "title": "AssistantEventData",
+        "type": "object"
+      },
+      "BackendAuthRequiredEvent": {
+        "additionalProperties": false,
+        "description": "A `backend_auth_required` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/BackendEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "backend_auth_required",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "BackendAuthRequiredEvent",
+        "type": "object"
+      },
+      "BackendEventData": {
+        "additionalProperties": false,
+        "description": "A hosted backend's event: an authentication mode it fell back to or needs.",
+        "properties": {
+          "auth": {
+            "title": "Auth",
+            "type": "string"
+          },
+          "backend": {
+            "title": "Backend",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "auth"
+        ],
+        "title": "BackendEventData",
+        "type": "object"
+      },
+      "BackendFallbackEvent": {
+        "additionalProperties": false,
+        "description": "A `backend_fallback` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/BackendEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "backend_fallback",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "BackendFallbackEvent",
+        "type": "object"
+      },
       "BackendResponse": {
         "additionalProperties": true,
         "properties": {
@@ -972,6 +1638,68 @@
         "title": "BackendUpdate",
         "type": "object"
       },
+      "BillingWarningEvent": {
+        "additionalProperties": false,
+        "description": "A `billing_warning` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/BillingWarningEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "billing_warning",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "BillingWarningEvent",
+        "type": "object"
+      },
+      "BillingWarningEventData": {
+        "additionalProperties": false,
+        "description": "A hosted backend's billing warning.",
+        "properties": {
+          "backend": {
+            "title": "Backend",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backend",
+          "message"
+        ],
+        "title": "BillingWarningEventData",
+        "type": "object"
+      },
       "Body_edit_image_images__iid__edit_post": {
         "properties": {
           "feather": {
@@ -1019,6 +1747,86 @@
           "file"
         ],
         "title": "Body_upload_image_images_uploads_post",
+        "type": "object"
+      },
+      "BranchSavedEvent": {
+        "additionalProperties": false,
+        "description": "A `branch_saved` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/BranchSavedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "branch_saved",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "BranchSavedEvent",
+        "type": "object"
+      },
+      "BranchSavedEventData": {
+        "additionalProperties": false,
+        "description": "The session branch was saved at the end of a run: `commits` lists its commits ahead of the base, one line\neach.",
+        "properties": {
+          "auto_commit": {
+            "title": "Auto Commit",
+            "type": "boolean"
+          },
+          "branch": {
+            "title": "Branch",
+            "type": "string"
+          },
+          "commits": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Commits",
+            "type": "array"
+          },
+          "head": {
+            "title": "Head",
+            "type": "string"
+          },
+          "published": {
+            "title": "Published",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "branch",
+          "auto_commit",
+          "published",
+          "head",
+          "commits"
+        ],
+        "title": "BranchSavedEventData",
         "type": "object"
       },
       "CanaryAlertTest": {
@@ -1070,6 +1878,72 @@
         "title": "CapabilitiesResponse",
         "type": "object"
       },
+      "CheckpointEvent": {
+        "additionalProperties": false,
+        "description": "A `checkpoint` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/CheckpointEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "checkpoint",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "CheckpointEvent",
+        "type": "object"
+      },
+      "CheckpointEventData": {
+        "additionalProperties": false,
+        "description": "The workspace was checkpointed after `turn` at commit `head`, or the checkpoint was skipped (`status`,\n`reason`).",
+        "properties": {
+          "head": {
+            "title": "Head",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "turn": {
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "title": "CheckpointEventData",
+        "type": "object"
+      },
       "ClaimPairingRequest": {
         "properties": {
           "code_challenge": {
@@ -1087,6 +1961,244 @@
           "code_challenge"
         ],
         "title": "ClaimPairingRequest",
+        "type": "object"
+      },
+      "CompactingEvent": {
+        "additionalProperties": false,
+        "description": "A `compacting` event. Ephemeral: never stored or replayed, so `seq` is null and there is no `ts`.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/CompactingEventData"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "null"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "compacting",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "type",
+          "data"
+        ],
+        "title": "CompactingEvent",
+        "type": "object"
+      },
+      "CompactingEventData": {
+        "additionalProperties": false,
+        "description": "Progress of a summary pass: `reading` the prompt, then `writing` the summary. Ephemeral.",
+        "properties": {
+          "cached": {
+            "title": "Cached",
+            "type": "integer"
+          },
+          "max_tokens": {
+            "title": "Max Tokens",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "processed": {
+            "title": "Processed",
+            "type": "integer"
+          },
+          "tokens": {
+            "title": "Tokens",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "phase"
+        ],
+        "title": "CompactingEventData",
+        "type": "object"
+      },
+      "CompactionEvent": {
+        "additionalProperties": false,
+        "description": "A `compaction` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/CompactionEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "compaction",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "CompactionEvent",
+        "type": "object"
+      },
+      "CompactionEventData": {
+        "additionalProperties": false,
+        "description": "The context was compacted. `tier` is `mask`, `trim`, `elide`, `summary` or `round_reset`; each tier carries the\ncounts it has. A summary pass adds its own token counts and the session's `totals`.",
+        "properties": {
+          "characters_saved": {
+            "title": "Characters Saved",
+            "type": "integer"
+          },
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "context_tokens": {
+            "title": "Context Tokens",
+            "type": "integer"
+          },
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "summarized_messages": {
+            "title": "Summarized Messages",
+            "type": "integer"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "summary_averted": {
+            "title": "Summary Averted",
+            "type": "boolean"
+          },
+          "tier": {
+            "title": "Tier",
+            "type": "string"
+          },
+          "tokens_after": {
+            "title": "Tokens After",
+            "type": "integer"
+          },
+          "tokens_before": {
+            "title": "Tokens Before",
+            "type": "integer"
+          },
+          "tokens_saved": {
+            "title": "Tokens Saved",
+            "type": "integer"
+          },
+          "totals": {
+            "additionalProperties": true,
+            "title": "Totals",
+            "type": "object"
+          }
+        },
+        "required": [
+          "tier"
+        ],
+        "title": "CompactionEventData",
+        "type": "object"
+      },
+      "CompactionStartedEvent": {
+        "additionalProperties": false,
+        "description": "A `compaction_started` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/CompactionStartedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "compaction_started",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "CompactionStartedEvent",
+        "type": "object"
+      },
+      "CompactionStartedEventData": {
+        "additionalProperties": false,
+        "description": "A summary pass began over `messages` messages.",
+        "properties": {
+          "context_tokens": {
+            "title": "Context Tokens",
+            "type": "integer"
+          },
+          "messages": {
+            "title": "Messages",
+            "type": "integer"
+          },
+          "tokens_before": {
+            "title": "Tokens Before",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "messages",
+          "tokens_before",
+          "context_tokens"
+        ],
+        "title": "CompactionStartedEventData",
         "type": "object"
       },
       "CompareChoice": {
@@ -1146,6 +2258,21 @@
           }
         },
         "title": "ConfirmRequest",
+        "type": "object"
+      },
+      "ContentEventData": {
+        "additionalProperties": false,
+        "description": "A message's text.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "ContentEventData",
         "type": "object"
       },
       "ContextBlock": {
@@ -1669,6 +2796,125 @@
         "title": "Decision",
         "type": "object"
       },
+      "DeltaEvent": {
+        "additionalProperties": false,
+        "description": "A `delta` event. Ephemeral: never stored or replayed, so `seq` is null and there is no `ts`.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DeltaEventData"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "null"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "delta",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "type",
+          "data"
+        ],
+        "title": "DeltaEvent",
+        "type": "object"
+      },
+      "DeltaEventData": {
+        "additionalProperties": false,
+        "description": "Streamed text of the turn in progress: `kind` is `content` or `reasoning`. Ephemeral.",
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text"
+        ],
+        "title": "DeltaEventData",
+        "type": "object"
+      },
+      "ErrorEvent": {
+        "additionalProperties": false,
+        "description": "A `error` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ErrorEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "error",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ErrorEvent",
+        "type": "object"
+      },
+      "ErrorEventData": {
+        "additionalProperties": false,
+        "description": "Something failed. A run's failure also carries `code`, `provider` and `retryable`.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "ErrorEventData",
+        "type": "object"
+      },
       "EventTicketResponse": {
         "properties": {
           "events_url": {
@@ -1727,6 +2973,85 @@
         "title": "ForkRequest",
         "type": "object"
       },
+      "ForkedEvent": {
+        "additionalProperties": false,
+        "description": "A `forked` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ForkedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "forked",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ForkedEvent",
+        "type": "object"
+      },
+      "ForkedEventData": {
+        "additionalProperties": false,
+        "description": "This session was forked from `parent` at `turn`; `backend` and `model` when the fork changed them.",
+        "properties": {
+          "backend": {
+            "title": "Backend",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "parent": {
+            "title": "Parent",
+            "type": "string"
+          },
+          "summary_note": {
+            "title": "Summary Note",
+            "type": "string"
+          },
+          "tool_profile_reset": {
+            "additionalProperties": true,
+            "title": "Tool Profile Reset",
+            "type": "object"
+          },
+          "turn": {
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "parent",
+          "turn"
+        ],
+        "title": "ForkedEventData",
+        "type": "object"
+      },
       "GitHubMemberAuthRequest": {
         "properties": {
           "enabled": {
@@ -1771,6 +3096,143 @@
           }
         },
         "title": "GpuHoldRequest",
+        "type": "object"
+      },
+      "GpuPauseReason": {
+        "additionalProperties": false,
+        "description": "One thing holding the GPU: `kind` (`game`, `plex`, `vram`, `memory`, `manual`, ...), a stable `key` and a\nreadable `detail`.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "kind",
+          "detail"
+        ],
+        "title": "GpuPauseReason",
+        "type": "object"
+      },
+      "GpuPausedEvent": {
+        "additionalProperties": false,
+        "description": "A `gpu_paused` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/GpuPausedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "gpu_paused",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "GpuPausedEvent",
+        "type": "object"
+      },
+      "GpuPausedEventData": {
+        "additionalProperties": false,
+        "description": "The GPU is paused for something else; the run waits. `reason` says why in words.",
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "$ref": "#/components/schemas/GpuPauseReason"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "resume_after_seconds": {
+            "title": "Resume After Seconds",
+            "type": "number"
+          }
+        },
+        "required": [
+          "reason",
+          "reasons",
+          "resume_after_seconds"
+        ],
+        "title": "GpuPausedEventData",
+        "type": "object"
+      },
+      "GpuResumedEvent": {
+        "additionalProperties": false,
+        "description": "A `gpu_resumed` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SecondsEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "gpu_resumed",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "GpuResumedEvent",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -2107,6 +3569,130 @@
         "title": "JobRunResponse",
         "type": "object"
       },
+      "LimitWaitingEvent": {
+        "additionalProperties": false,
+        "description": "A `limit_waiting` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/LimitWaitingEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "limit_waiting",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "LimitWaitingEvent",
+        "type": "object"
+      },
+      "LimitWaitingEventData": {
+        "additionalProperties": false,
+        "description": "A hosted backend's usage limit is reached; the run waits until `resets_at` (epoch seconds).",
+        "properties": {
+          "backend": {
+            "title": "Backend",
+            "type": "string"
+          },
+          "resets_at": {
+            "title": "Resets At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "backend",
+          "resets_at"
+        ],
+        "title": "LimitWaitingEventData",
+        "type": "object"
+      },
+      "LlmRetryEvent": {
+        "additionalProperties": false,
+        "description": "A `llm_retry` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/LlmRetryEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "llm_retry",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "LlmRetryEvent",
+        "type": "object"
+      },
+      "LlmRetryEventData": {
+        "additionalProperties": false,
+        "description": "A model call failed and is retried.",
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt",
+          "error"
+        ],
+        "title": "LlmRetryEventData",
+        "type": "object"
+      },
       "MemoryProfileUpdate": {
         "properties": {
           "content": {
@@ -2123,6 +3709,229 @@
           "content"
         ],
         "title": "MemoryProfileUpdate",
+        "type": "object"
+      },
+      "MemoryRecoveredEvent": {
+        "additionalProperties": false,
+        "description": "A `memory_recovered` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SecondsEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "memory_recovered",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "MemoryRecoveredEvent",
+        "type": "object"
+      },
+      "ModelReadyEvent": {
+        "additionalProperties": false,
+        "description": "A `model_ready` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ModelReadyEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "model_ready",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ModelReadyEvent",
+        "type": "object"
+      },
+      "ModelReadyEventData": {
+        "additionalProperties": false,
+        "description": "The local model answered after waking.",
+        "properties": {
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "seconds": {
+            "title": "Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "model",
+          "seconds"
+        ],
+        "title": "ModelReadyEventData",
+        "type": "object"
+      },
+      "ModelWakingEvent": {
+        "additionalProperties": false,
+        "description": "A `model_waking` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ModelWakingEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "model_waking",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ModelWakingEvent",
+        "type": "object"
+      },
+      "ModelWakingEventData": {
+        "additionalProperties": false,
+        "description": "The local model is loading; the turn waits for it.",
+        "properties": {
+          "expected_seconds": {
+            "title": "Expected Seconds",
+            "type": "integer"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "expected_seconds"
+        ],
+        "title": "ModelWakingEventData",
+        "type": "object"
+      },
+      "NotesEvent": {
+        "additionalProperties": false,
+        "description": "A `notes` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/NotesEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "notes",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "NotesEvent",
+        "type": "object"
+      },
+      "NotesEventData": {
+        "additionalProperties": false,
+        "description": "The agent's notes.",
+        "properties": {
+          "notes": {
+            "title": "Notes",
+            "type": "string"
+          }
+        },
+        "required": [
+          "notes"
+        ],
+        "title": "NotesEventData",
         "type": "object"
       },
       "PairRequest": {
@@ -2401,6 +4210,61 @@
         "title": "Promotion",
         "type": "object"
       },
+      "PromptProgressEvent": {
+        "additionalProperties": false,
+        "description": "A `prompt_progress` event. Ephemeral: never stored or replayed, so `seq` is null and there is no `ts`.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PromptProgressEventData"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "null"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "prompt_progress",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "type",
+          "data"
+        ],
+        "title": "PromptProgressEvent",
+        "type": "object"
+      },
+      "PromptProgressEventData": {
+        "additionalProperties": false,
+        "description": "How far the model server has read a long prompt, in tokens. Ephemeral.",
+        "properties": {
+          "cached": {
+            "title": "Cached",
+            "type": "integer"
+          },
+          "processed": {
+            "title": "Processed",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "processed",
+          "total",
+          "cached"
+        ],
+        "title": "PromptProgressEventData",
+        "type": "object"
+      },
       "ProviderCredentialRequest": {
         "properties": {
           "app_id": {
@@ -2464,6 +4328,177 @@
         "title": "ProviderFailureResponse",
         "type": "object"
       },
+      "QueueEvent": {
+        "additionalProperties": false,
+        "description": "A `queue` event. Ephemeral: never stored or replayed, so `seq` is null and there is no `ts`.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/QueueEventData"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "null"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "queue",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "type",
+          "data"
+        ],
+        "title": "QueueEvent",
+        "type": "object"
+      },
+      "QueueEventData": {
+        "additionalProperties": false,
+        "description": "The session's place in the run queue (1 is next). Ephemeral.",
+        "properties": {
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "position"
+        ],
+        "title": "QueueEventData",
+        "type": "object"
+      },
+      "QuoteCheckEvent": {
+        "additionalProperties": false,
+        "description": "A `quote_check` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/QuotesEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "quote_check",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "QuoteCheckEvent",
+        "type": "object"
+      },
+      "QuotesEventData": {
+        "additionalProperties": false,
+        "description": "Quoted passages in the answer that no source the session read contains.",
+        "properties": {
+          "quotes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Quotes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "quotes"
+        ],
+        "title": "QuotesEventData",
+        "type": "object"
+      },
+      "RateLimitEvent": {
+        "additionalProperties": false,
+        "description": "A `rate_limit` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RateLimitEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "rate_limit",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "RateLimitEvent",
+        "type": "object"
+      },
+      "RateLimitEventData": {
+        "additionalProperties": true,
+        "description": "A hosted CLI's rate-limit report, as the CLI sent it (open: its fields are the CLI's).",
+        "properties": {
+          "rateLimitType": {
+            "title": "Ratelimittype",
+            "type": "string"
+          },
+          "resetsAt": {
+            "title": "Resetsat",
+            "type": "number"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "utilization": {
+            "title": "Utilization",
+            "type": "number"
+          }
+        },
+        "title": "RateLimitEventData",
+        "type": "object"
+      },
       "RateLimitsResponse": {
         "additionalProperties": true,
         "properties": {
@@ -2513,6 +4548,63 @@
           }
         },
         "title": "RerunRequest",
+        "type": "object"
+      },
+      "ResumedEvent": {
+        "additionalProperties": false,
+        "description": "A `resumed` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ResumedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "resumed",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ResumedEvent",
+        "type": "object"
+      },
+      "ResumedEventData": {
+        "additionalProperties": false,
+        "description": "The Server restarted and picked the session's run up again in this status.",
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ResumedEventData",
         "type": "object"
       },
       "ReviewComment": {
@@ -2575,6 +4667,231 @@
           "comment"
         ],
         "title": "ReviewComment",
+        "type": "object"
+      },
+      "ReviewEvent": {
+        "additionalProperties": false,
+        "description": "A `review` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ReviewEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "review",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ReviewEvent",
+        "type": "object"
+      },
+      "ReviewEventData": {
+        "additionalProperties": false,
+        "description": "A review action (`push`, `merge`, `discard`, ...) and the review state it left.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "head": {
+            "title": "Head",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "state",
+          "detail",
+          "head"
+        ],
+        "title": "ReviewEventData",
+        "type": "object"
+      },
+      "RewoundEvent": {
+        "additionalProperties": false,
+        "description": "A `rewound` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RewoundEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "rewound",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "RewoundEvent",
+        "type": "object"
+      },
+      "RewoundEventData": {
+        "additionalProperties": false,
+        "description": "The session was rewound to the checkpoint after `turn`.",
+        "properties": {
+          "head": {
+            "title": "Head",
+            "type": "string"
+          },
+          "turn": {
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "turn",
+          "head"
+        ],
+        "title": "RewoundEventData",
+        "type": "object"
+      },
+      "RunFinishedEvent": {
+        "additionalProperties": false,
+        "description": "A `run_finished` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RunFinishedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "run_finished",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "RunFinishedEvent",
+        "type": "object"
+      },
+      "RunFinishedEventData": {
+        "additionalProperties": false,
+        "description": "A run ended. `run` is the run record (absent on the session-list streams); the job fields are present for a\njob's session, `ungrounded_quotes` when the answer quotes text no source contains.",
+        "properties": {
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "job_reason": {
+            "title": "Job Reason",
+            "type": "string"
+          },
+          "job_status": {
+            "title": "Job Status",
+            "type": "string"
+          },
+          "run": {
+            "additionalProperties": true,
+            "title": "Run",
+            "type": "object"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stop_reason": {
+            "title": "Stop Reason",
+            "type": "string"
+          },
+          "ungrounded_quotes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ungrounded Quotes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "status",
+          "stop_reason",
+          "answer"
+        ],
+        "title": "RunFinishedEventData",
         "type": "object"
       },
       "RunSnippet": {
@@ -2736,6 +5053,135 @@
         "title": "RunnerResult",
         "type": "object"
       },
+      "SandboxDiskLimitEvent": {
+        "additionalProperties": false,
+        "description": "A `sandbox_disk_limit` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SandboxDiskLimitEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "sandbox_disk_limit",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "SandboxDiskLimitEvent",
+        "type": "object"
+      },
+      "SandboxDiskLimitEventData": {
+        "additionalProperties": false,
+        "description": "The sandbox hit a disk limit; `stopped` when the run was stopped for it.",
+        "properties": {
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "stopped": {
+            "title": "Stopped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reason",
+          "stopped"
+        ],
+        "title": "SandboxDiskLimitEventData",
+        "type": "object"
+      },
+      "SandboxSetupEvent": {
+        "additionalProperties": false,
+        "description": "A `sandbox_setup` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SandboxSetupEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "sandbox_setup",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "SandboxSetupEvent",
+        "type": "object"
+      },
+      "SandboxSetupEventData": {
+        "additionalProperties": false,
+        "description": "The project's sandbox setup command ran.",
+        "properties": {
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "command",
+          "ok",
+          "detail"
+        ],
+        "title": "SandboxSetupEventData",
+        "type": "object"
+      },
       "ScopeDisclosure": {
         "properties": {
           "scope": {
@@ -2763,6 +5209,21 @@
         "title": "ScopeDisclosure",
         "type": "object"
       },
+      "SecondsEventData": {
+        "additionalProperties": false,
+        "description": "A wait ended after `seconds`.",
+        "properties": {
+          "seconds": {
+            "title": "Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seconds"
+        ],
+        "title": "SecondsEventData",
+        "type": "object"
+      },
       "SecretDismissal": {
         "properties": {
           "reason": {
@@ -2788,6 +5249,365 @@
         ],
         "title": "SendMessage",
         "type": "object"
+      },
+      "SessionCreatedEvent": {
+        "additionalProperties": false,
+        "description": "A `session_created` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SessionCreatedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "session_created",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "SessionCreatedEvent",
+        "type": "object"
+      },
+      "SessionCreatedEventData": {
+        "additionalProperties": false,
+        "description": "A session was created. The App fields are present only for an App's session.",
+        "properties": {
+          "app": {
+            "title": "App",
+            "type": "string"
+          },
+          "app_tools": {
+            "items": {
+              "type": "string"
+            },
+            "title": "App Tools",
+            "type": "array"
+          },
+          "backend": {
+            "title": "Backend",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/SessionSkill"
+            },
+            "title": "Skills",
+            "type": "array"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "target",
+          "model",
+          "backend",
+          "title"
+        ],
+        "title": "SessionCreatedEventData",
+        "type": "object"
+      },
+      "SessionEvent": {
+        "description": "One event of a session's SSE stream (the frame's `data:`), keyed on `type`; the frame's `event:` line repeats the type.",
+        "discriminator": {
+          "mapping": {
+            "app_context": "#/components/schemas/AppContextEvent",
+            "app_tool_call": "#/components/schemas/AppToolCallEvent",
+            "app_tool_result": "#/components/schemas/AppToolResultEvent",
+            "approval_auto_approved": "#/components/schemas/ApprovalAutoApprovedEvent",
+            "approval_decided": "#/components/schemas/ApprovalDecidedEvent",
+            "approval_requested": "#/components/schemas/ApprovalRequestedEvent",
+            "assistant": "#/components/schemas/AssistantEvent",
+            "backend_auth_required": "#/components/schemas/BackendAuthRequiredEvent",
+            "backend_fallback": "#/components/schemas/BackendFallbackEvent",
+            "billing_warning": "#/components/schemas/BillingWarningEvent",
+            "branch_saved": "#/components/schemas/BranchSavedEvent",
+            "checkpoint": "#/components/schemas/CheckpointEvent",
+            "compacting": "#/components/schemas/CompactingEvent",
+            "compaction": "#/components/schemas/CompactionEvent",
+            "compaction_started": "#/components/schemas/CompactionStartedEvent",
+            "delta": "#/components/schemas/DeltaEvent",
+            "error": "#/components/schemas/ErrorEvent",
+            "forked": "#/components/schemas/ForkedEvent",
+            "gpu_paused": "#/components/schemas/GpuPausedEvent",
+            "gpu_resumed": "#/components/schemas/GpuResumedEvent",
+            "limit_waiting": "#/components/schemas/LimitWaitingEvent",
+            "llm_retry": "#/components/schemas/LlmRetryEvent",
+            "memory_recovered": "#/components/schemas/MemoryRecoveredEvent",
+            "model_ready": "#/components/schemas/ModelReadyEvent",
+            "model_waking": "#/components/schemas/ModelWakingEvent",
+            "notes": "#/components/schemas/NotesEvent",
+            "prompt_progress": "#/components/schemas/PromptProgressEvent",
+            "queue": "#/components/schemas/QueueEvent",
+            "quote_check": "#/components/schemas/QuoteCheckEvent",
+            "rate_limit": "#/components/schemas/RateLimitEvent",
+            "resumed": "#/components/schemas/ResumedEvent",
+            "review": "#/components/schemas/ReviewEvent",
+            "rewound": "#/components/schemas/RewoundEvent",
+            "run_finished": "#/components/schemas/RunFinishedEvent",
+            "sandbox_disk_limit": "#/components/schemas/SandboxDiskLimitEvent",
+            "sandbox_setup": "#/components/schemas/SandboxSetupEvent",
+            "session_created": "#/components/schemas/SessionCreatedEvent",
+            "smart_review": "#/components/schemas/SmartReviewEvent",
+            "snippet_result": "#/components/schemas/SnippetResultEvent",
+            "snippet_started": "#/components/schemas/SnippetStartedEvent",
+            "state": "#/components/schemas/StateEvent",
+            "status": "#/components/schemas/StatusEvent",
+            "stuck": "#/components/schemas/StuckEvent",
+            "taint_added": "#/components/schemas/TaintAddedEvent",
+            "taint_cleared": "#/components/schemas/TaintClearedEvent",
+            "target_online": "#/components/schemas/TargetOnlineEvent",
+            "target_waiting": "#/components/schemas/TargetWaitingEvent",
+            "tool_call": "#/components/schemas/ToolCallEvent",
+            "tool_result": "#/components/schemas/ToolResultEvent",
+            "turn_metrics": "#/components/schemas/TurnMetricsEvent",
+            "ungrounded_quotes": "#/components/schemas/UngroundedQuotesEvent",
+            "user_message": "#/components/schemas/UserMessageEvent",
+            "waiting_memory": "#/components/schemas/WaitingMemoryEvent",
+            "workspace_ready": "#/components/schemas/WorkspaceReadyEvent"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionCreatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/UserMessageEvent"
+          },
+          {
+            "$ref": "#/components/schemas/AppContextEvent"
+          },
+          {
+            "$ref": "#/components/schemas/StatusEvent"
+          },
+          {
+            "$ref": "#/components/schemas/QueueEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ResumedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ForkedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RunFinishedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ErrorEvent"
+          },
+          {
+            "$ref": "#/components/schemas/StuckEvent"
+          },
+          {
+            "$ref": "#/components/schemas/AssistantEvent"
+          },
+          {
+            "$ref": "#/components/schemas/DeltaEvent"
+          },
+          {
+            "$ref": "#/components/schemas/PromptProgressEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ModelWakingEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ModelReadyEvent"
+          },
+          {
+            "$ref": "#/components/schemas/LlmRetryEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TurnMetricsEvent"
+          },
+          {
+            "$ref": "#/components/schemas/QuoteCheckEvent"
+          },
+          {
+            "$ref": "#/components/schemas/UngroundedQuotesEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolCallEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolResultEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalRequestedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalDecidedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalAutoApprovedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SmartReviewEvent"
+          },
+          {
+            "$ref": "#/components/schemas/AppToolCallEvent"
+          },
+          {
+            "$ref": "#/components/schemas/AppToolResultEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaintAddedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaintClearedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/StateEvent"
+          },
+          {
+            "$ref": "#/components/schemas/NotesEvent"
+          },
+          {
+            "$ref": "#/components/schemas/CompactionEvent"
+          },
+          {
+            "$ref": "#/components/schemas/CompactionStartedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/CompactingEvent"
+          },
+          {
+            "$ref": "#/components/schemas/CheckpointEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RewoundEvent"
+          },
+          {
+            "$ref": "#/components/schemas/WorkspaceReadyEvent"
+          },
+          {
+            "$ref": "#/components/schemas/BranchSavedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ReviewEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SandboxSetupEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SandboxDiskLimitEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TargetWaitingEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TargetOnlineEvent"
+          },
+          {
+            "$ref": "#/components/schemas/GpuPausedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/GpuResumedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/WaitingMemoryEvent"
+          },
+          {
+            "$ref": "#/components/schemas/MemoryRecoveredEvent"
+          },
+          {
+            "$ref": "#/components/schemas/BackendAuthRequiredEvent"
+          },
+          {
+            "$ref": "#/components/schemas/BackendFallbackEvent"
+          },
+          {
+            "$ref": "#/components/schemas/BillingWarningEvent"
+          },
+          {
+            "$ref": "#/components/schemas/LimitWaitingEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RateLimitEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SnippetStartedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SnippetResultEvent"
+          }
+        ]
+      },
+      "SessionListEvent": {
+        "description": "One event of the session-list SSE streams: the status-level types, with `seq` null and no `run` in `run_finished`.",
+        "discriminator": {
+          "mapping": {
+            "approval_decided": "#/components/schemas/ApprovalDecidedEvent",
+            "approval_requested": "#/components/schemas/ApprovalRequestedEvent",
+            "queue": "#/components/schemas/QueueEvent",
+            "run_finished": "#/components/schemas/RunFinishedEvent",
+            "session_created": "#/components/schemas/SessionCreatedEvent",
+            "status": "#/components/schemas/StatusEvent"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ApprovalDecidedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalRequestedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/QueueEvent"
+          },
+          {
+            "$ref": "#/components/schemas/RunFinishedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/SessionCreatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/StatusEvent"
+          }
+        ]
       },
       "SessionResponse": {
         "additionalProperties": true,
@@ -2995,6 +5815,36 @@
         "title": "SessionRunResponse",
         "type": "object"
       },
+      "SessionSkill": {
+        "additionalProperties": false,
+        "description": "A skill the session runs with, frozen at creation.",
+        "properties": {
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "slug",
+          "title",
+          "version",
+          "content_hash"
+        ],
+        "title": "SessionSkill",
+        "type": "object"
+      },
       "SessionUpdate": {
         "properties": {
           "title": {
@@ -3059,6 +5909,342 @@
         "title": "SmartApprovalsUpdate",
         "type": "object"
       },
+      "SmartReviewEvent": {
+        "additionalProperties": false,
+        "description": "A `smart_review` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SmartReviewEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "smart_review",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "SmartReviewEvent",
+        "type": "object"
+      },
+      "SmartReviewEventData": {
+        "additionalProperties": true,
+        "description": "The smart reviewer's record of one tool call (`harness.smart_approvals`).",
+        "properties": {
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "cost_usd": {
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "escalate_reason": {
+            "title": "Escalate Reason",
+            "type": "string"
+          },
+          "latency_ms": {
+            "title": "Latency Ms",
+            "type": "integer"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "policy_fingerprint": {
+            "title": "Policy Fingerprint",
+            "type": "string"
+          },
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "recommendation": {
+            "title": "Recommendation",
+            "type": "string"
+          },
+          "risk_flags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Risk Flags",
+            "type": "array"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool",
+          "mode",
+          "outcome",
+          "recommendation",
+          "reason",
+          "confidence",
+          "risk_flags",
+          "escalate_reason",
+          "provider",
+          "model",
+          "prompt_tokens",
+          "completion_tokens",
+          "cost_usd",
+          "latency_ms",
+          "policy_fingerprint"
+        ],
+        "title": "SmartReviewEventData",
+        "type": "object"
+      },
+      "SnippetResultEvent": {
+        "additionalProperties": false,
+        "description": "A `snippet_result` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SnippetResultEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "snippet_result",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "SnippetResultEvent",
+        "type": "object"
+      },
+      "SnippetResultEventData": {
+        "additionalProperties": false,
+        "description": "A chat code snippet's result. A run the Server found unfinished at startup has only `id`, `status` and\n`reasons` when its language is no longer known.",
+        "properties": {
+          "compile": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compile"
+          },
+          "duration_ms": {
+            "title": "Duration Ms",
+            "type": "integer"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "limits": {
+            "additionalProperties": true,
+            "title": "Limits",
+            "type": "object"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "run": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "toolchain": {
+            "additionalProperties": true,
+            "title": "Toolchain",
+            "type": "object"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "reasons"
+        ],
+        "title": "SnippetResultEventData",
+        "type": "object"
+      },
+      "SnippetStartedEvent": {
+        "additionalProperties": false,
+        "description": "A `snippet_started` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SnippetStartedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "snippet_started",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "SnippetStartedEvent",
+        "type": "object"
+      },
+      "SnippetStartedEventData": {
+        "additionalProperties": false,
+        "description": "A chat code snippet started running.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "toolchain": {
+            "title": "Toolchain",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "language",
+          "label",
+          "toolchain",
+          "source",
+          "origin"
+        ],
+        "title": "SnippetStartedEventData",
+        "type": "object"
+      },
       "StartRequest": {
         "properties": {
           "code": {
@@ -3075,6 +6261,323 @@
         "title": "StartRequest",
         "type": "object"
       },
+      "StateEvent": {
+        "additionalProperties": false,
+        "description": "A `state` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/StateEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "state",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "StateEvent",
+        "type": "object"
+      },
+      "StateEventData": {
+        "additionalProperties": false,
+        "description": "The agent's working state (goal, plan, errors, next step, notes) after `update_state`.",
+        "properties": {
+          "state": {
+            "additionalProperties": true,
+            "title": "State",
+            "type": "object"
+          }
+        },
+        "required": [
+          "state"
+        ],
+        "title": "StateEventData",
+        "type": "object"
+      },
+      "StatusEvent": {
+        "additionalProperties": false,
+        "description": "A `status` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/StatusEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "status",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "StatusEvent",
+        "type": "object"
+      },
+      "StatusEventData": {
+        "additionalProperties": false,
+        "description": "The session's status changed (`queued`, `running`, `waiting_approval`, `waiting_limit`, `done`, `failed`,\n`cancelled`, ...). A run's end carries its stop reason and, when it has one, the answer.",
+        "properties": {
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "stop_reason": {
+            "title": "Stop Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "StatusEventData",
+        "type": "object"
+      },
+      "StuckEvent": {
+        "additionalProperties": false,
+        "description": "A `stuck` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/StuckEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "stuck",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "StuckEvent",
+        "type": "object"
+      },
+      "StuckEventData": {
+        "additionalProperties": false,
+        "description": "The run stopped repeating a failing tool call.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "tool",
+          "count"
+        ],
+        "title": "StuckEventData",
+        "type": "object"
+      },
+      "TaintAddedEvent": {
+        "additionalProperties": false,
+        "description": "A `taint_added` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TaintAddedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "taint_added",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "TaintAddedEvent",
+        "type": "object"
+      },
+      "TaintAddedEventData": {
+        "additionalProperties": false,
+        "description": "The session read untrusted content (`kind`, from `origin`); `sources` is how many it holds now.",
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "sources": {
+            "title": "Sources",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "origin",
+          "sources"
+        ],
+        "title": "TaintAddedEventData",
+        "type": "object"
+      },
+      "TaintClearedEvent": {
+        "additionalProperties": false,
+        "description": "A `taint_cleared` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TaintClearedEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "taint_cleared",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "TaintClearedEvent",
+        "type": "object"
+      },
+      "TaintClearedEventData": {
+        "additionalProperties": false,
+        "description": "The owner cleared these taint origins.",
+        "properties": {
+          "cleared": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cleared",
+            "type": "array"
+          }
+        },
+        "required": [
+          "cleared"
+        ],
+        "title": "TaintClearedEventData",
+        "type": "object"
+      },
       "TaintResponse": {
         "additionalProperties": true,
         "properties": {
@@ -3087,6 +6590,133 @@
           "origin"
         ],
         "title": "TaintResponse",
+        "type": "object"
+      },
+      "TargetOnlineEvent": {
+        "additionalProperties": false,
+        "description": "A `target_online` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TargetOnlineEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "target_online",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "TargetOnlineEvent",
+        "type": "object"
+      },
+      "TargetOnlineEventData": {
+        "additionalProperties": false,
+        "description": "The session's machine is back after `seconds`.",
+        "properties": {
+          "during": {
+            "title": "During",
+            "type": "string"
+          },
+          "seconds": {
+            "title": "Seconds",
+            "type": "integer"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "seconds"
+        ],
+        "title": "TargetOnlineEventData",
+        "type": "object"
+      },
+      "TargetWaitingEvent": {
+        "additionalProperties": false,
+        "description": "A `target_waiting` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TargetWaitingEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "target_waiting",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "TargetWaitingEvent",
+        "type": "object"
+      },
+      "TargetWaitingEventData": {
+        "additionalProperties": false,
+        "description": "The session's machine is offline; the run waits for it (`during` names the tool call it interrupted).",
+        "properties": {
+          "during": {
+            "title": "During",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "title": "TargetWaitingEventData",
         "type": "object"
       },
       "Template": {
@@ -3159,6 +6789,84 @@
         "title": "TokenTotalsResponse",
         "type": "object"
       },
+      "ToolCallEvent": {
+        "additionalProperties": false,
+        "description": "A `tool_call` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ToolCallEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "tool_call",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ToolCallEvent",
+        "type": "object"
+      },
+      "ToolCallEventData": {
+        "additionalProperties": false,
+        "description": "The model called a tool; `decision` is the policy's (`allow`, `ask`, `deny`) and `reason` why.",
+        "properties": {
+          "args": {
+            "additionalProperties": true,
+            "title": "Args",
+            "type": "object"
+          },
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "args",
+          "decision",
+          "reason"
+        ],
+        "title": "ToolCallEventData",
+        "type": "object"
+      },
       "ToolResult": {
         "properties": {
           "ok": {
@@ -3175,6 +6883,289 @@
           "output"
         ],
         "title": "ToolResult",
+        "type": "object"
+      },
+      "ToolResultEvent": {
+        "additionalProperties": false,
+        "description": "A `tool_result` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ToolResultEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "tool_result",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "ToolResultEvent",
+        "type": "object"
+      },
+      "ToolResultEventData": {
+        "additionalProperties": false,
+        "description": "A tool's result. `output` keeps the middle of a long result out (`output_chars` is the full length);\n`artifact_id` names the stored full result when there is one. `tainted` marks a result from untrusted content;\n`verify` is the project's verify checks' report, after an edit.",
+        "properties": {
+          "artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Artifact Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "output": {
+            "title": "Output",
+            "type": "string"
+          },
+          "output_chars": {
+            "title": "Output Chars",
+            "type": "integer"
+          },
+          "seconds": {
+            "title": "Seconds",
+            "type": "number"
+          },
+          "tainted": {
+            "title": "Tainted",
+            "type": "boolean"
+          },
+          "verify": {
+            "additionalProperties": true,
+            "title": "Verify",
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "ok",
+          "seconds",
+          "output_chars",
+          "output"
+        ],
+        "title": "ToolResultEventData",
+        "type": "object"
+      },
+      "TurnMetricsEvent": {
+        "additionalProperties": false,
+        "description": "A `turn_metrics` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TurnMetricsEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "turn_metrics",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "TurnMetricsEvent",
+        "type": "object"
+      },
+      "TurnMetricsEventData": {
+        "additionalProperties": false,
+        "description": "One turn's context-efficiency counts (#159, #639). A row with only the activity counts closes a run whose\nlast increments no model turn committed.",
+        "properties": {
+          "cache_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Tokens"
+          },
+          "compaction_correlated_retries": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Compaction Correlated Retries",
+            "type": "object"
+          },
+          "completion_tokens": {
+            "title": "Completion Tokens",
+            "type": "integer"
+          },
+          "composition": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Composition",
+            "type": "object"
+          },
+          "dead_end_retries": {
+            "title": "Dead End Retries",
+            "type": "integer"
+          },
+          "edit_mismatches": {
+            "title": "Edit Mismatches",
+            "type": "integer"
+          },
+          "elide_only_compactions": {
+            "title": "Elide Only Compactions",
+            "type": "integer"
+          },
+          "estimated": {
+            "title": "Estimated",
+            "type": "boolean"
+          },
+          "prompt_tokens": {
+            "title": "Prompt Tokens",
+            "type": "integer"
+          },
+          "read_artifact_calls": {
+            "title": "Read Artifact Calls",
+            "type": "integer"
+          },
+          "read_artifact_repeats": {
+            "title": "Read Artifact Repeats",
+            "type": "integer"
+          },
+          "recomputed_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recomputed Tokens"
+          },
+          "schema_count": {
+            "title": "Schema Count",
+            "type": "integer"
+          },
+          "schema_tokens": {
+            "title": "Schema Tokens",
+            "type": "integer"
+          },
+          "turn": {
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "turn",
+          "dead_end_retries",
+          "compaction_correlated_retries",
+          "edit_mismatches",
+          "elide_only_compactions",
+          "read_artifact_calls",
+          "read_artifact_repeats"
+        ],
+        "title": "TurnMetricsEventData",
+        "type": "object"
+      },
+      "UngroundedQuotesEvent": {
+        "additionalProperties": false,
+        "description": "A `ungrounded_quotes` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/QuotesEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "ungrounded_quotes",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "UngroundedQuotesEvent",
         "type": "object"
       },
       "UsageTally": {
@@ -3231,6 +7222,48 @@
         "title": "UsageWindows",
         "type": "object"
       },
+      "UserMessageEvent": {
+        "additionalProperties": false,
+        "description": "A `user_message` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ContentEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "user_message",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "UserMessageEvent",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -3269,6 +7302,78 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WaitingMemoryEvent": {
+        "additionalProperties": false,
+        "description": "A `waiting_memory` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/WaitingMemoryEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "waiting_memory",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "WaitingMemoryEvent",
+        "type": "object"
+      },
+      "WaitingMemoryEventData": {
+        "additionalProperties": false,
+        "description": "The host is short of memory; the run waits for it to recover.",
+        "properties": {
+          "available_bytes": {
+            "title": "Available Bytes",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "threshold_bytes": {
+            "title": "Threshold Bytes",
+            "type": "integer"
+          },
+          "waiting_for": {
+            "title": "Waiting For",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "waiting_for",
+          "available_bytes",
+          "threshold_bytes"
+        ],
+        "title": "WaitingMemoryEventData",
         "type": "object"
       },
       "WebSessionResponse": {
@@ -3447,6 +7552,78 @@
           "updated_at"
         ],
         "title": "WebSessionResponse",
+        "type": "object"
+      },
+      "WorkspaceReadyEvent": {
+        "additionalProperties": false,
+        "description": "A `workspace_ready` event. `seq` is its place in the session's stored events (null on the session-list streams); `ts` is when it happened, in epoch seconds.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/WorkspaceReadyEventData"
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "number"
+          },
+          "type": {
+            "const": "workspace_ready",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "session_id",
+          "ts",
+          "type",
+          "data"
+        ],
+        "title": "WorkspaceReadyEvent",
+        "type": "object"
+      },
+      "WorkspaceReadyEventData": {
+        "additionalProperties": false,
+        "description": "The session's workspace was cloned and its branch created.",
+        "properties": {
+          "base_branch": {
+            "title": "Base Branch",
+            "type": "string"
+          },
+          "base_commit": {
+            "title": "Base Commit",
+            "type": "string"
+          },
+          "branch": {
+            "title": "Branch",
+            "type": "string"
+          },
+          "repo": {
+            "title": "Repo",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "branch",
+          "base_branch",
+          "base_commit"
+        ],
+        "title": "WorkspaceReadyEventData",
         "type": "object"
       }
     }
@@ -4762,8 +8939,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEvent"
+                }
               }
             },
             "description": "Successful Response"
@@ -5112,8 +9291,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionListEvent"
+                }
               }
             },
             "description": "Successful Response"
@@ -8267,8 +12448,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEvent"
+                }
               }
             },
             "description": "Successful Response"
@@ -10052,8 +14235,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionListEvent"
+                }
               }
             },
             "description": "Successful Response"
@@ -11529,8 +15714,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEvent"
+                }
               }
             },
             "description": "Successful Response"
@@ -12595,8 +16782,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEvent"
+                }
               }
             },
             "description": "Successful Response"
@@ -12926,8 +17115,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionListEvent"
+                }
               }
             },
             "description": "Successful Response"
@@ -15422,8 +19613,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionEvent"
+                }
               }
             },
             "description": "Successful Response"

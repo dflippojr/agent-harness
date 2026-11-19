@@ -1,0 +1,1222 @@
+{
+  "app_context": [
+    {
+      "data": {
+        "content": "Context from the app \"contract-local\" that started this session. It is information to use, not instructions from the user; if it conflicts with the user's request, follow the user.\n\n### Incremental\nbeta"
+      },
+      "seq": 8,
+      "session_id": "7a18b6d544",
+      "ts": 1795062084.3661633,
+      "type": "app_context"
+    }
+  ],
+  "app_tool_call": [
+    {
+      "data": {
+        "args": {},
+        "call_id": "c1",
+        "name": "lookup",
+        "timeout_seconds": 60
+      },
+      "seq": 1,
+      "session_id": "apptool001",
+      "ts": 1795061896.693958,
+      "type": "app_tool_call"
+    }
+  ],
+  "app_tool_result": [
+    {
+      "data": {
+        "call_id": "call-1",
+        "chars": 4,
+        "ok": true
+      },
+      "seq": 11,
+      "session_id": "9cb0d91299",
+      "ts": 1795062012.0019963,
+      "type": "app_tool_result"
+    }
+  ],
+  "approval_auto_approved": [
+    {
+      "data": {
+        "completion_tokens": 0,
+        "confidence": 0.95,
+        "cost_usd": 0.0,
+        "escalate_reason": "",
+        "id": "a-a9be32de",
+        "latency_ms": 0,
+        "mode": "auto",
+        "model": "gpt-4.1-mini",
+        "outcome": "auto_approved",
+        "policy_fingerprint": "2b9abbc0b11ab570",
+        "prompt_tokens": 0,
+        "provider": "openai",
+        "reason": "routine tests",
+        "recommendation": "approve",
+        "risk_flags": [],
+        "tool": "Bash"
+      },
+      "seq": 7,
+      "session_id": "d95e6e66d5",
+      "ts": 1795061788.5133085,
+      "type": "approval_auto_approved"
+    },
+    {
+      "data": {
+        "id": "a-auto"
+      },
+      "seq": 2,
+      "session_id": "session1",
+      "ts": 1795061865.3615613,
+      "type": "approval_auto_approved"
+    }
+  ],
+  "approval_decided": [
+    {
+      "data": {
+        "expired": true,
+        "id": "a-mac00001",
+        "note": "Expired: nobody decided it in time.",
+        "status": "denied"
+      },
+      "seq": 4,
+      "session_id": "macpark001",
+      "ts": 1795061879.981496,
+      "type": "approval_decided"
+    },
+    {
+      "data": {
+        "id": "a-test",
+        "note": "",
+        "status": "approved"
+      },
+      "seq": 2,
+      "session_id": "session1",
+      "ts": 1795061861.666879,
+      "type": "approval_decided"
+    }
+  ],
+  "approval_requested": [
+    {
+      "data": {
+        "args": {
+          "command": "python build.py"
+        },
+        "detail": "test command",
+        "id": "a-0e9375e6",
+        "reason": "runs a Claude Code shell command",
+        "smart": {
+          "confidence": 0.99,
+          "escalate_reason": "",
+          "mode": "auto",
+          "model": "gpt-4.1-mini",
+          "outcome": "escalated",
+          "provider": "openai",
+          "reason": "nope",
+          "recommendation": "deny",
+          "risk_flags": []
+        },
+        "tool": "Bash",
+        "tool_call_id": "tool-1"
+      },
+      "seq": 7,
+      "session_id": "fc8df57e77",
+      "ts": 1795061789.5449662,
+      "type": "approval_requested"
+    },
+    {
+      "data": {
+        "args": {
+          "url": "https://refused.example/x"
+        },
+        "detail": "",
+        "id": "a-6a4e443a",
+        "reason": "",
+        "tool": "WebFetch",
+        "tool_call_id": "c2"
+      },
+      "seq": 10,
+      "session_id": "0bda97c5fa",
+      "ts": 1795061988.139759,
+      "type": "approval_requested"
+    }
+  ],
+  "assistant": [
+    {
+      "data": {
+        "completion_tokens": 0,
+        "content": "ok",
+        "finish_reason": "",
+        "gen_tps": 0.0,
+        "prompt_tokens": 0,
+        "prompt_tps": 0.0,
+        "reasoning": "",
+        "tool_calls": [],
+        "totals": {
+          "completion_tokens": 0,
+          "prompt_tokens": 0,
+          "schema_tokens": 2533,
+          "turns": 1
+        }
+      },
+      "seq": 4,
+      "session_id": "winding001",
+      "ts": 1795061858.3089316,
+      "type": "assistant"
+    },
+    {
+      "data": {
+        "completion_tokens": 0,
+        "content": "done",
+        "finish_reason": "",
+        "gen_tps": 0,
+        "prompt_tokens": 0,
+        "prompt_tps": 0,
+        "reasoning": "",
+        "tool_calls": []
+      },
+      "seq": 14,
+      "session_id": "9cb0d91299",
+      "ts": 1795062012.006582,
+      "type": "assistant"
+    }
+  ],
+  "backend_auth_required": [
+    {
+      "data": {
+        "auth": "api_key",
+        "backend": "claude"
+      },
+      "seq": 3,
+      "session_id": "d2cea0b469",
+      "ts": 1795062244.935619,
+      "type": "backend_auth_required"
+    }
+  ],
+  "backend_fallback": [
+    {
+      "data": {
+        "auth": "api_key",
+        "backend": "claude"
+      },
+      "seq": 2,
+      "session_id": "fallback01",
+      "ts": 1795061893.194725,
+      "type": "backend_fallback"
+    }
+  ],
+  "billing_warning": [
+    {
+      "data": {
+        "backend": "claude",
+        "message": "This run is using an API key and may incur provider API charges."
+      },
+      "seq": 5,
+      "session_id": "9d1c2298a1",
+      "ts": 1795062096.937518,
+      "type": "billing_warning"
+    }
+  ],
+  "branch_saved": [
+    {
+      "data": {
+        "auto_commit": false,
+        "branch": "agent/25744ac14e",
+        "commits": [],
+        "head": "6a76dccefabb",
+        "published": true
+      },
+      "seq": 9,
+      "session_id": "25744ac14e",
+      "ts": 1795061986.282412,
+      "type": "branch_saved"
+    }
+  ],
+  "checkpoint": [
+    {
+      "data": {
+        "head": "",
+        "turn": 1
+      },
+      "seq": 18,
+      "session_id": "232175a145",
+      "ts": 1795062058.102,
+      "type": "checkpoint"
+    },
+    {
+      "data": {
+        "reason": "the snapshot failed (database is locked)",
+        "status": "skipped"
+      },
+      "seq": 17,
+      "session_id": "d977097b82",
+      "ts": 1795061946.104265,
+      "type": "checkpoint"
+    }
+  ],
+  "compacting": [
+    {
+      "data": {
+        "cached": 0,
+        "phase": "reading",
+        "processed": 0,
+        "total": 4582
+      },
+      "seq": null,
+      "session_id": "4a5f9d55cd",
+      "type": "compacting"
+    },
+    {
+      "data": {
+        "max_tokens": 4096,
+        "phase": "writing",
+        "tokens": 1
+      },
+      "seq": null,
+      "session_id": "4a5f9d55cd",
+      "type": "compacting"
+    }
+  ],
+  "compaction": [
+    {
+      "data": {
+        "completion_tokens": 10,
+        "context_tokens": 32768,
+        "prompt_tokens": 100,
+        "reason": "overflow",
+        "summarized_messages": 8,
+        "summary": "SUMMARY: did things",
+        "summary_averted": false,
+        "tier": "summary",
+        "tokens_after": 2974,
+        "tokens_before": 5999,
+        "totals": {
+          "completion_tokens": 10,
+          "edit_mismatches": 0,
+          "elide_only_compactions": 0,
+          "prompt_tokens": 100,
+          "read_artifact_calls": 0,
+          "read_artifact_repeats": 0,
+          "schema_tokens": 2533,
+          "total_cost_usd": 0.0,
+          "turns": 1
+        }
+      },
+      "seq": 13,
+      "session_id": "fd93e465b1",
+      "ts": 1795061982.097533,
+      "type": "compaction"
+    },
+    {
+      "data": {
+        "characters_saved": 151,
+        "tier": "trim",
+        "tokens_saved": 50
+      },
+      "seq": 13,
+      "session_id": "87c5643b4c",
+      "ts": 1795062060.8316717,
+      "type": "compaction"
+    },
+    {
+      "data": {
+        "context_tokens": 65536,
+        "tier": "round_reset",
+        "tokens_after": 507,
+        "tokens_before": 0
+      },
+      "seq": 8,
+      "session_id": "78168cef00",
+      "ts": 1795062079.2374222,
+      "type": "compaction"
+    },
+    {
+      "data": {
+        "context_tokens": 65536,
+        "summary_averted": true,
+        "tier": "elide",
+        "tokens_after": 2918,
+        "tokens_before": 2918
+      },
+      "seq": 4,
+      "session_id": "232175a145",
+      "ts": 1795062057.727,
+      "type": "compaction"
+    }
+  ],
+  "compaction_started": [
+    {
+      "data": {
+        "context_tokens": 2000,
+        "messages": 3,
+        "tokens_before": 5613
+      },
+      "seq": 9,
+      "session_id": "70ba1f0fb3",
+      "ts": 1795062052.8795614,
+      "type": "compaction_started"
+    }
+  ],
+  "delta": [
+    {
+      "data": {
+        "kind": "content",
+        "text": "x"
+      },
+      "seq": null,
+      "session_id": "0bda97c5fa",
+      "type": "delta"
+    }
+  ],
+  "error": [
+    {
+      "data": {
+        "code": "workspace_error",
+        "message": "interrupted",
+        "provider": "local",
+        "retryable": false
+      },
+      "seq": 5,
+      "session_id": "a846507153",
+      "ts": 1795061995.4707508,
+      "type": "error"
+    },
+    {
+      "data": {
+        "message": "merge failed: the branch changed; review again"
+      },
+      "seq": 10,
+      "session_id": "b8105897ac",
+      "ts": 1795062000.227104,
+      "type": "error"
+    }
+  ],
+  "forked": [
+    {
+      "data": {
+        "backend": "codex",
+        "model": "gpt-5.5",
+        "parent": "f2af3eb25f",
+        "summary_note": "moved from claude: started from a transcript digest, no model call",
+        "tool_profile_reset": {
+          "from": "bash-only",
+          "to": "default"
+        },
+        "turn": 1
+      },
+      "seq": 22,
+      "session_id": "52eb7f942c",
+      "ts": 1795062061.4191856,
+      "type": "forked"
+    },
+    {
+      "data": {
+        "parent": "d4c8f99f26",
+        "turn": 1
+      },
+      "seq": 28,
+      "session_id": "f0bc5acdf7",
+      "ts": 1795061955.064058,
+      "type": "forked"
+    },
+    {
+      "data": {
+        "backend": "local",
+        "model": "fake",
+        "parent": "6f140bcd42",
+        "turn": 1
+      },
+      "seq": 30,
+      "session_id": "a56dffd217",
+      "ts": 1795062062.614696,
+      "type": "forked"
+    },
+    {
+      "data": {
+        "parent": "b4c500f83d",
+        "summary_note": "hosted session: a fresh CLI session started from a transcript digest, no model call",
+        "turn": 1
+      },
+      "seq": 22,
+      "session_id": "480072082d",
+      "ts": 1795061933.7239714,
+      "type": "forked"
+    }
+  ],
+  "gpu_paused": [
+    {
+      "data": {
+        "reason": "Hades.exe",
+        "reasons": [
+          {
+            "detail": "Hades.exe",
+            "key": "game:hades.exe",
+            "kind": "game"
+          }
+        ],
+        "resume_after_seconds": 0
+      },
+      "seq": 8,
+      "session_id": "35058c0fd1",
+      "ts": 1795062011.776065,
+      "type": "gpu_paused"
+    }
+  ],
+  "gpu_resumed": [
+    {
+      "data": {
+        "seconds": 0
+      },
+      "seq": 6,
+      "session_id": "91b1193062",
+      "ts": 1795061780.470673,
+      "type": "gpu_resumed"
+    }
+  ],
+  "limit_waiting": [
+    {
+      "data": {
+        "backend": "claude",
+        "resets_at": 1795061984.6980655
+      },
+      "seq": 6,
+      "session_id": "c6ed5748e5",
+      "ts": 1795061925.0034497,
+      "type": "limit_waiting"
+    }
+  ],
+  "llm_retry": [
+    {
+      "data": {
+        "attempt": 1,
+        "error": "HTTP 500: failed to parse tool call"
+      },
+      "seq": 4,
+      "session_id": "a018309370",
+      "ts": 1795062088.64758,
+      "type": "llm_retry"
+    }
+  ],
+  "memory_recovered": [
+    {
+      "data": {
+        "seconds": 0
+      },
+      "seq": 4,
+      "session_id": "8a93ef33d7",
+      "ts": 1795061770.0865066,
+      "type": "memory_recovered"
+    }
+  ],
+  "model_ready": [
+    {
+      "data": {
+        "model": "fake",
+        "seconds": 0
+      },
+      "seq": 5,
+      "session_id": "895b2d0ee2",
+      "ts": 1795062063.570822,
+      "type": "model_ready"
+    }
+  ],
+  "model_waking": [
+    {
+      "data": {
+        "expected_seconds": 60,
+        "model": "fake"
+      },
+      "seq": 4,
+      "session_id": "6a46ba4893",
+      "ts": 1795061769.4334326,
+      "type": "model_waking"
+    }
+  ],
+  "notes": [
+    {
+      "data": {
+        "notes": "old"
+      },
+      "seq": 6,
+      "session_id": "4e1b462a51",
+      "ts": 1795062049.8362782,
+      "type": "notes"
+    }
+  ],
+  "prompt_progress": [
+    {
+      "data": {
+        "cached": 0,
+        "processed": 0,
+        "total": 4232
+      },
+      "seq": null,
+      "session_id": "67146d0e40",
+      "type": "prompt_progress"
+    }
+  ],
+  "queue": [
+    {
+      "data": {
+        "position": 0
+      },
+      "seq": null,
+      "session_id": "a",
+      "type": "queue"
+    }
+  ],
+  "quote_check": [
+    {
+      "data": {
+        "quotes": [
+          "SearXNG is licensed under the strong AGPL terms"
+        ]
+      },
+      "seq": 4,
+      "session_id": "0dac33de9e",
+      "ts": 1795061915.4551587,
+      "type": "quote_check"
+    }
+  ],
+  "rate_limit": [
+    {
+      "data": {
+        "planType": "plus",
+        "primary": {
+          "resetsAt": 1234567890,
+          "usedPercent": 28,
+          "windowDurationMins": 10080
+        },
+        "rateLimitType": "seven_day",
+        "resetsAt": 1234567890.0,
+        "secondary": null,
+        "status": "allowed",
+        "unifiedWindows": {
+          "seven_day": {
+            "resetsAt": 1234567890,
+            "utilization": 0.28
+          }
+        },
+        "utilization": 0.28
+      },
+      "seq": 7,
+      "session_id": "995485f1b3",
+      "ts": 1795061925.88284,
+      "type": "rate_limit"
+    },
+    {
+      "data": {
+        "rateLimitType": "seven_day",
+        "resetsAt": 1234567890,
+        "status": "allowed_warning",
+        "utilization": 0.8
+      },
+      "seq": 7,
+      "session_id": "eb5da9bf5b",
+      "ts": 1795061917.813793,
+      "type": "rate_limit"
+    }
+  ],
+  "resumed": [
+    {
+      "data": {
+        "status": "queued"
+      },
+      "seq": 2,
+      "session_id": "queued0006",
+      "ts": 1795061857.0417662,
+      "type": "resumed"
+    }
+  ],
+  "review": [
+    {
+      "data": {
+        "action": "discard",
+        "detail": "branch deleted and workspace removed",
+        "head": "",
+        "state": "discarded"
+      },
+      "seq": 10,
+      "session_id": "5d119ed297",
+      "ts": 1795061998.4784,
+      "type": "review"
+    }
+  ],
+  "rewound": [
+    {
+      "data": {
+        "head": "",
+        "turn": 2
+      },
+      "seq": 20,
+      "session_id": "c4222f7d2a",
+      "ts": 1795061857.2755,
+      "type": "rewound"
+    }
+  ],
+  "run_finished": [
+    {
+      "data": {
+        "answer": "fake answer",
+        "job_id": "j-58c01eb7",
+        "job_reason": "",
+        "job_status": "",
+        "run": {
+          "completion_tokens": 0,
+          "executing": null,
+          "holds_place": true,
+          "idle": 0,
+          "invalid_tool_calls": 0,
+          "max_completion_tokens": 200000,
+          "max_turns": 80,
+          "prompt_tokens": 0,
+          "run_seconds": 0.0,
+          "started_at": 1795061865.9386773,
+          "tool_calls": 0,
+          "tool_errors": 0,
+          "turns": 1,
+          "workspace_context_applied": true
+        },
+        "status": "done",
+        "stop_reason": "final_message"
+      },
+      "seq": 8,
+      "session_id": "1fba49aef8",
+      "ts": 1795061865.9558578,
+      "type": "run_finished"
+    },
+    {
+      "data": {
+        "answer": "",
+        "run": {},
+        "status": "done",
+        "stop_reason": ""
+      },
+      "seq": 1,
+      "session_id": "split00002",
+      "ts": 1795061890.7283838,
+      "type": "run_finished"
+    },
+    {
+      "data": {
+        "answer": "Done. The docs say \"our tests show a 40 percent speedup on every workload\".",
+        "run": {
+          "completion_tokens": 0,
+          "executing": null,
+          "holds_place": true,
+          "idle": 0,
+          "invalid_tool_calls": 0,
+          "max_completion_tokens": 200000,
+          "max_turns": 80,
+          "prompt_tokens": 0,
+          "quote_check": 1,
+          "run_seconds": 0.01491294999141246,
+          "started_at": 1795061915.7116628,
+          "stuck": {
+            "failures": {
+              "1869680cbc3981b3": 1
+            },
+            "invalid_streak": 0
+          },
+          "tool_calls": 2,
+          "tool_errors": 1,
+          "turns": 2,
+          "ungrounded_quotes": [
+            "our tests show a 40 percent speedup on every workload"
+          ],
+          "workspace_context_applied": true
+        },
+        "status": "done",
+        "stop_reason": "finished",
+        "ungrounded_quotes": [
+          "our tests show a 40 percent speedup on every workload"
+        ]
+      },
+      "seq": 13,
+      "session_id": "f4f9ff2595",
+      "ts": 1795061915.7369134,
+      "type": "run_finished"
+    }
+  ],
+  "sandbox_disk_limit": [
+    {
+      "data": {
+        "reason": "the disk watchdog failed (OSError: drive gone)",
+        "stopped": true
+      },
+      "seq": 0,
+      "session_id": "s1",
+      "ts": 0.0,
+      "type": "sandbox_disk_limit"
+    }
+  ],
+  "sandbox_setup": [
+    {
+      "data": {
+        "command": "pip install -e .",
+        "detail": "",
+        "ok": true
+      },
+      "seq": 0,
+      "session_id": "s1",
+      "ts": 0.0,
+      "type": "sandbox_setup"
+    }
+  ],
+  "session_created": [
+    {
+      "data": {
+        "app": "shop",
+        "app_tools": [],
+        "backend": "local",
+        "model": "fake",
+        "project": "lab",
+        "target": "tower",
+        "title": "hello"
+      },
+      "seq": 1,
+      "session_id": "4feab5d803",
+      "ts": 1795061873.8345,
+      "type": "session_created"
+    },
+    {
+      "data": {
+        "backend": "local",
+        "model": "fake",
+        "project": "lab",
+        "target": "tower",
+        "title": "x"
+      },
+      "seq": 1,
+      "session_id": "41a80c65d5",
+      "ts": 1795062072.8260245,
+      "type": "session_created"
+    },
+    {
+      "data": {
+        "backend": "local",
+        "job_id": "job1",
+        "model": "fake",
+        "project": "scratch",
+        "target": "tower",
+        "title": "hello"
+      },
+      "seq": 7,
+      "session_id": "df813817c5",
+      "ts": 1795061770.8752155,
+      "type": "session_created"
+    },
+    {
+      "data": {
+        "backend": "local",
+        "model": "fake",
+        "project": "scratch",
+        "skills": [
+          {
+            "content_hash": "a3b19b2fd9a9e557bfdbc864740d6109b42b16ff61d360082f3506b142d7d210",
+            "slug": "commit-style",
+            "title": "Commit style",
+            "version": 1
+          }
+        ],
+        "target": "tower",
+        "title": "hello"
+      },
+      "seq": 1,
+      "session_id": "054ee0cee7",
+      "ts": 1795061771.49233,
+      "type": "session_created"
+    }
+  ],
+  "smart_review": [
+    {
+      "data": {
+        "completion_tokens": 0,
+        "confidence": 0.99,
+        "cost_usd": 0.0,
+        "escalate_reason": "",
+        "latency_ms": 0,
+        "mode": "auto",
+        "model": "gpt-4.1-mini",
+        "outcome": "escalated",
+        "policy_fingerprint": "2b9abbc0b11ab570",
+        "prompt_tokens": 0,
+        "provider": "openai",
+        "reason": "nope",
+        "recommendation": "deny",
+        "risk_flags": [],
+        "tool": "Bash"
+      },
+      "seq": 6,
+      "session_id": "fc8df57e77",
+      "ts": 1795061789.5446346,
+      "type": "smart_review"
+    }
+  ],
+  "snippet_result": [
+    {
+      "data": {
+        "compile": null,
+        "duration_ms": 0,
+        "error": "",
+        "id": "sn-1742ae89cd",
+        "label": "C++",
+        "language": "cpp",
+        "limits": {
+          "cpus": 1,
+          "memory_mib": 1024,
+          "output_bytes": 1048576,
+          "pids": 64,
+          "timeout_seconds": 30,
+          "tmp_mib": 128
+        },
+        "reasons": [
+          "cancelled"
+        ],
+        "run": null,
+        "status": "cancelled",
+        "toolchain": {
+          "digest": "gcc@sha256:ead103e6d03b69232962d467f3520c3f70b6718c69ff71efcc08efe9011fadb6",
+          "image": "gcc:15",
+          "version": "Fake 1.0"
+        },
+        "truncated": false
+      },
+      "seq": 9,
+      "session_id": "57f50cae74",
+      "ts": 1795061964.9777405,
+      "type": "snippet_result"
+    }
+  ],
+  "snippet_started": [
+    {
+      "data": {
+        "id": "sn-cf116aa918",
+        "label": "Python",
+        "language": "python",
+        "origin": "editor",
+        "source": "x",
+        "toolchain": "python:3.12-slim"
+      },
+      "seq": 8,
+      "session_id": "48c64322b6",
+      "ts": 1795061967.7694619,
+      "type": "snippet_started"
+    }
+  ],
+  "state": [
+    {
+      "data": {
+        "state": {
+          "errors": [],
+          "goal": "g",
+          "next_step": "",
+          "notes": "",
+          "plan": "p"
+        }
+      },
+      "seq": 6,
+      "session_id": "9126a0f092",
+      "ts": 1795062051.5962262,
+      "type": "state"
+    }
+  ],
+  "status": [
+    {
+      "data": {
+        "answer": "42",
+        "status": "done",
+        "stop_reason": "finished"
+      },
+      "seq": 7,
+      "session_id": "24a9948a5f",
+      "ts": 1795061950.785471,
+      "type": "status"
+    },
+    {
+      "data": {
+        "status": "queued"
+      },
+      "seq": 10,
+      "session_id": "232175a145",
+      "ts": 1795062057.977,
+      "type": "status"
+    },
+    {
+      "data": {
+        "status": "done",
+        "stop_reason": "budget_time"
+      },
+      "seq": 4,
+      "session_id": "6221f03249",
+      "ts": 1795061884.748044,
+      "type": "status"
+    }
+  ],
+  "stuck": [
+    {
+      "data": {
+        "count": 5,
+        "reason": "stuck_invalid",
+        "tool": "nope9"
+      },
+      "seq": 34,
+      "session_id": "84367b5db6",
+      "ts": 1795061946.3057306,
+      "type": "stuck"
+    }
+  ],
+  "taint_added": [
+    {
+      "data": {
+        "kind": "mcp",
+        "origin": "mcp__demo__echo",
+        "sources": 1
+      },
+      "seq": 6,
+      "session_id": "c4222f7d2a",
+      "ts": 1795061857.018117,
+      "type": "taint_added"
+    }
+  ],
+  "taint_cleared": [
+    {
+      "data": {
+        "cleared": []
+      },
+      "seq": 2,
+      "session_id": "session1",
+      "ts": 1795061870.534643,
+      "type": "taint_cleared"
+    }
+  ],
+  "target_online": [
+    {
+      "data": {
+        "seconds": 0,
+        "target": "macbook"
+      },
+      "seq": 4,
+      "session_id": "oldrun0001",
+      "ts": 1795061856.548312,
+      "type": "target_online"
+    }
+  ],
+  "target_waiting": [
+    {
+      "data": {
+        "target": "macbook"
+      },
+      "seq": 2,
+      "session_id": "macsess001",
+      "ts": 1795061853.2900252,
+      "type": "target_waiting"
+    }
+  ],
+  "tool_call": [
+    {
+      "data": {
+        "args": {},
+        "decision": "allow",
+        "id": "c0-verify",
+        "name": "verify",
+        "reason": ""
+      },
+      "seq": 5,
+      "session_id": "9039378db1",
+      "ts": 1795062015.2461996,
+      "type": "tool_call"
+    }
+  ],
+  "tool_result": [
+    {
+      "data": {
+        "artifact_id": "50431c7981f5cd2fa6d1c45cdaae30d11ca46b7adcd069568dd366b61fd2723a",
+        "id": "c1-verify",
+        "name": "verify",
+        "ok": true,
+        "output": "verify: 1 failed (1 checks)\n[tests] FAILED tests/test_a.py:3 assert False (×2)",
+        "output_chars": 78,
+        "seconds": 0.0,
+        "verify": {
+          "checks": [
+            {
+              "code": 1,
+              "name": "tests",
+              "parser": "pytest",
+              "timed_out": false,
+              "timeout": 30
+            }
+          ],
+          "failures": [
+            {
+              "check": "tests",
+              "count": 2,
+              "file": "tests/test_a.py",
+              "kind": "failed",
+              "line": 3,
+              "message": "assert False",
+              "nodeid": "tests/test_a.py::test_a_0"
+            }
+          ],
+          "ok": false
+        }
+      },
+      "seq": 10,
+      "session_id": "647f7d578c",
+      "ts": 1795062014.1406715,
+      "type": "tool_result"
+    },
+    {
+      "data": {
+        "id": "tool-1",
+        "name": "Read",
+        "ok": true,
+        "output": "allow",
+        "output_chars": 5,
+        "seconds": 0
+      },
+      "seq": 8,
+      "session_id": "8a93ef33d7",
+      "ts": 1795061770.116697,
+      "type": "tool_result"
+    },
+    {
+      "data": {
+        "artifact_id": null,
+        "id": "c2-web_fetch",
+        "name": "web_fetch",
+        "ok": true,
+        "output": "ok",
+        "output_chars": 2,
+        "seconds": 0.0
+      },
+      "seq": 10,
+      "session_id": "2c1b91aa19",
+      "ts": 1795062074.1532557,
+      "type": "tool_result"
+    },
+    {
+      "data": {
+        "artifact_id": null,
+        "id": "c0-session_read",
+        "name": "session_read",
+        "ok": true,
+        "output": "[Earlier session: background only; it may be outdated or wrong.]\n# 7mread0001\nsession 7mread0001 · project scratch · 2023-11-14 17:13 · status done\n\n## User\nnotes in 7mread0001\n",
+        "output_chars": 177,
+        "seconds": 0.0,
+        "tainted": true
+      },
+      "seq": 8,
+      "session_id": "54ff6ad861",
+      "ts": 1795061990.203997,
+      "type": "tool_result"
+    }
+  ],
+  "turn_metrics": [
+    {
+      "data": {
+        "cache_tokens": 0,
+        "compaction_correlated_retries": {
+          "elide": 0,
+          "round_reset": 0,
+          "summary": 0
+        },
+        "completion_tokens": 0,
+        "composition": {
+          "file_contents": 0,
+          "reasoning_other": 7,
+          "system_state": 198,
+          "tool_outputs": 0
+        },
+        "dead_end_retries": 0,
+        "edit_mismatches": 0,
+        "elide_only_compactions": 0,
+        "estimated": true,
+        "prompt_tokens": 0,
+        "read_artifact_calls": 0,
+        "read_artifact_repeats": 0,
+        "recomputed_tokens": 0,
+        "schema_count": 0,
+        "schema_tokens": 0,
+        "turn": 1
+      },
+      "seq": 6,
+      "session_id": "07a89fe7e0",
+      "ts": 1795062056.539259,
+      "type": "turn_metrics"
+    },
+    {
+      "data": {
+        "compaction_correlated_retries": {
+          "elide": 0,
+          "round_reset": 0,
+          "summary": 0
+        },
+        "dead_end_retries": 0,
+        "edit_mismatches": 0,
+        "elide_only_compactions": 1,
+        "read_artifact_calls": 0,
+        "read_artifact_repeats": 0,
+        "turn": 2
+      },
+      "seq": 19,
+      "session_id": "97bfeea570",
+      "ts": 1795062010.2127573,
+      "type": "turn_metrics"
+    }
+  ],
+  "ungrounded_quotes": [
+    {
+      "data": {
+        "quotes": [
+          "our tests show a 40 percent speedup on every workload"
+        ]
+      },
+      "seq": 12,
+      "session_id": "f4f9ff2595",
+      "ts": 1795061915.7361612,
+      "type": "ungrounded_quotes"
+    }
+  ],
+  "user_message": [
+    {
+      "data": {
+        "content": "p"
+      },
+      "seq": 2,
+      "session_id": "a90e9b92d5",
+      "ts": 1795061986.83448,
+      "type": "user_message"
+    }
+  ],
+  "waiting_memory": [
+    {
+      "data": {
+        "available_bytes": 2147483648,
+        "reason": "2.0 GB RAM available, needs 4 GB",
+        "threshold_bytes": 4294967296,
+        "waiting_for": "local model"
+      },
+      "seq": 5,
+      "session_id": "6a46ba4893",
+      "ts": 1795061769.4346437,
+      "type": "waiting_memory"
+    }
+  ],
+  "workspace_ready": [
+    {
+      "data": {
+        "base_branch": "main",
+        "base_commit": "f3e4f682b14615389affdc0d4d4b86b62b6fc400",
+        "branch": "agent/b54946c1a9",
+        "repo": "/checkout/.scratch/pytest/popen-gw0/shared0/src"
+      },
+      "seq": 3,
+      "session_id": "b54946c1a9",
+      "ts": 1795061934.4438052,
+      "type": "workspace_ready"
+    }
+  ]
+}

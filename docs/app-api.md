@@ -796,6 +796,11 @@ deltas (`delta`) and queue moves have `seq: null` and aren't replayed. Types an 
 | `stuck` | `reason` (`stuck_repeat` or `stuck_invalid`), `tool`, `count`: a stuck cap is ending the run |
 | `run_finished` | the run ended; the session may continue if you send a message |
 
+Every type and its fields are in the OpenAPI document (`/openapi.json`, committed as `tools/openapi/openapi.json`):
+the stream's `text/event-stream` response points at `SessionEvent`, a union keyed on `type` with one schema per event
+type and its `data` (`/api/v1/events` points at `SessionListEvent`, the status-level part). The schemas describe what
+the Server sends; they don't filter it, and a client should ignore a type it doesn't know.
+
 Persisted events are committed and delivered in increasing `seq` order. A stream subscribes before replaying the
 database and suppresses duplicate sequence numbers, so events committed during reconnect are not lost. `after=N`
 replays exactly persisted events with `seq > N`; reconnect with the largest sequence actually processed. Ephemeral

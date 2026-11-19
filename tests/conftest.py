@@ -12,6 +12,20 @@ from harness.fileops import grant_tree_owner_access
 from harness_modules.local_model import service as gpu_guard
 from harness_modules.local_model.warmup import READY, ModelWarmer
 from stray_drive_guard import pytest_sessionfinish  # noqa: F401 - pytest finds this hook by name
+import sse_event_capture
+
+# Every event the Server emits during a test must match its documented SSE schema (#1014).
+sse_event_capture.install()
+
+
+@pytest.fixture(autouse=True)
+def emitted_events_match_schema():
+    sse_event_capture.problems.clear()
+    yield
+    found, sse_event_capture.problems[:] = list(sse_event_capture.problems), []
+    if found:
+        pytest.fail("\n".join(found[:5]) + (f"\n... and {len(found) - 5} more" if len(found) > 5 else ""),
+                    pytrace=False)
 
 # Stables lives in its own repository (#334). The Server's tests serve a stand-in shell instead of whatever copy the
 # machine has (tests/fixtures/stables_shell/README.md); tests that need no shell set the variable themselves.
