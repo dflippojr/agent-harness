@@ -319,25 +319,8 @@ class ConfigAppliedResponse(ConfigResponse):
     errors: dict[str, SettingError]
 
 
-class PlannedChange(Open):
-    """A change as a rollback preview lists it: the plan's own record, values as stored."""
-    key: str
-    before: Any
-    after: Any
-    apply: str
-    action: str
-    source: str
-
-
-class ConfigRollbackPreview(Open):
-    """What a rollback would restore (`dry_run`), without saving it."""
-    revision: int
-    target_revision: int
-    changes: list[PlannedChange]
-    restart_required: bool
-    live: list[PlannedChange]
-    pending: list[PlannedChange]
-    errors: dict[str, SettingError]
+class ConfigRollbackPreview(ConfigDryRunResponse):
+    """What a rollback would restore (`dry_run`), without saving it; the same reply as a PATCH `dry_run`."""
 
 
 ConfigPatchReply = ConfigAppliedResponse | ConfigDryRunResponse
