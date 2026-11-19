@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from harness.backends.events import Assistant, Delta, Error, Result, Session, ToolCall, ToolResult
+from harness.backends.claude import ClaudeTranslator
+from harness.backends.events import (Assistant, Delta, Error, PermissionRequest, RateLimits, Result, Session, ToolCall,
+                                     ToolResult)
 from harness.backends.print_mode import PrintModeTranslator
 from harness.cli_backends import OpencodeJsonl
 
@@ -21,6 +23,10 @@ def replay(translator, records) -> list:
 
 def jsonl(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
+
+
+def records(path: Path) -> list[dict]:
+    return [json.loads(line) for line in jsonl(path)]
 
 
 # --- config-declared print mode (#168): OpenCode 1.18.30, recorded from the real CLI ------------------------------
@@ -54,3 +60,52 @@ def test_print_mode_error_record_and_failed_exit_are_errors():
     assert translator.translate({"type": "exit", "code": 3, "stderr": "llama-server went away"}) == [
         Error("opencode exited with code 3: llama-server went away")]
     assert translator.translate({"type": "exit", "code": 1, "stderr": ""}) == [Error("opencode exited with code 1")]
+
+
+# --- Claude Code 2.1.272: stream-json (assembled from the verified protocol; see the fixture's README) --------------
+
+CLAUDE = FIXTURES / "claude_code_2.1.272"
+
+
+def test_claude_replays_a_turn_with_a_permission_request_a_tool_error_and_rate_limits():
+    turn = records(CLAUDE / "turn.jsonl")
+    sid, bash, read = turn[0]["session_id"], turn[6]["message"]["content"][0], turn[9]["message"]["content"][0]
+    limits, result = turn[11]["rate_limit_info"], turn[-1]
+    answer = result["result"]
+    assert replay(ClaudeTranslator(), turn) == [
+        Session(sid),
+        # the thinking delta carries `thinking`, not `text`: nothing streams for it (as before #991)
+        Delta("content", "I'll run the test suite first."),
+        Assistant("I'll run the test suite first."),
+        Assistant(tool_calls=(ToolCall(bash["id"], "Bash", bash["input"]),)),
+        PermissionRequest(turn[7]["request_id"], "Bash", bash["input"], bash["id"], "Run the test suite"),
+        ToolResult(bash["id"], "Bash", True, turn[8]["message"]["content"][0]["content"]),
+        Assistant(tool_calls=(ToolCall(read["id"], "Read", read["input"]),)),
+        ToolResult(read["id"], "Read", False, "<tool_use_error>File does not exist.</tool_use_error>"),
+        RateLimits(limits, limit_reached=False, resets_at=1795046400.0, billing=True),
+        Delta("content", "All 3 tests pass."),
+        Assistant(answer),
+        Result(answer=answer, usage=result["usage"], turns=4, cost=0.1234, subtype="success"),
+    ]
+
+
+def test_claude_rejected_limit_and_rate_limited_result_reach_the_limit():
+    limit = records(CLAUDE / "limit.jsonl")
+    events = replay(ClaudeTranslator(), limit)
+    assert events[0] == Session(limit[0]["session_id"])
+    assert events[1] == RateLimits(limit[1]["rate_limit_info"], limit_reached=True, resets_at=1794819600.0,
+                                   billing=True)
+    assert events[2].is_error and events[2].limit_reached and events[2].subtype == "success"
+    # A failed result that isn't about a limit fails the run instead
+    failed = ClaudeTranslator().translate({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                                           "result": "tool crashed", "num_turns": 1})
+    assert failed == [Result(answer="tool crashed", turns=1, is_error=True, subtype="error_during_execution")]
+
+
+def test_claude_skips_what_is_not_a_session_event():
+    translator = ClaudeTranslator()
+    assert translator.translate({"type": "control_request", "request_id": "r1",
+                                 "request": {"subtype": "hook_callback"}}) == []
+    assert translator.translate({"type": "system", "subtype": "init"}) == []  # no session id yet
+    assert translator.translate({"type": "user", "message": {"content": "a plain user message"}}) == []
+    assert translator.translate("not a record") == []

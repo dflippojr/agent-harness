@@ -19,6 +19,7 @@ from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from . import claude_token, cli_domains, credential_sources, end_users, member_keys  # noqa: F401 - these register their sources
+from .backends.claude import ClaudeTranslator
 from .backends.print_mode import PrintModeTranslator
 from .config import BackendConfig, SandboxConfig
 from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides, mcp_config
@@ -136,6 +137,7 @@ class ClaudeSession:
         self.backend_session_id = backend_session_id
         self.api_key = session_key(end_user, api_key)
         self.container = f"harness-{session_id}-claude"
+        self.translator = ClaudeTranslator()
         # With MCP the CLI shares the relay's network namespace: the relay's loopback port is reachable from this
         # container only, and egress still goes through the same network and proxy.
         self.mcp = mcp

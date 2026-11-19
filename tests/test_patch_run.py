@@ -22,6 +22,7 @@ import pytest
 
 from harness import telemetry
 from harness.app_stores import SessionStores
+from harness.backends.events import RateLimits, Result, Session, ToolResult
 from harness.config import BackendConfig, Project
 from harness.db import Database
 from harness.manager import Manager
@@ -208,6 +209,26 @@ def test_split_mode_file_write_keeps_a_field_written_meanwhile(manager):
     with Interleave(manager.db, sid) as interleave:
         asyncio.run(manager.runner._split_call(s, "write_file", {"path": "a.txt", "content": "hi"}))
     _check(manager, sid, interleave, files_touched=["a.txt"])
+
+
+class AppliedCli:
+    """What `Runner._apply` needs of a transport for these events."""
+    backend_session_id = ""
+
+
+@pytest.mark.parametrize("event, expected", [
+    (Session("claude-session-1"), {"backend_session_id": "claude-session-1"}),
+    (RateLimits({"status": "allowed", "utilization": 0.2, "resetsAt": 1795046400}),
+     {"rate_limits": {"status": "allowed", "utilization": 0.2, "resetsAt": 1795046400}}),
+    (ToolResult("toolu-1", "Bash", False, "exit 1"), {"tool_calls": 1, "tool_errors": 1}),
+    (Result(answer="done", usage={"input_tokens": 3, "output_tokens": 2}, turns=2, cost=0.01),
+     {"turns": 2, "prompt_tokens": 3, "completion_tokens": 2, "total_cost_usd": 0.01, "executing": None}),
+], ids=["session", "rate-limits", "tool-result", "result"])
+def test_the_hosted_applier_keeps_a_field_written_meanwhile(manager, event, expected):
+    sid = manager.create("hosted", backend="claude")["id"]
+    with Interleave(manager.db, sid) as interleave:
+        asyncio.run(manager.runner._apply(sid, AppliedCli(), event))
+    _check(manager, sid, interleave, **expected)
 
 
 # --- patch_run itself -------------------------------------------------------------------------------------------------

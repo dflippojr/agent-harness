@@ -1636,50 +1636,19 @@ class Runner:
     async def _handle_cli_event(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession | PrintModeSession,
                                  event: dict, tool_names: dict[str, str], recovered: bool = False) -> bool:
         """Map one hosted-CLI record. Returns true when the run is complete."""
-        if isinstance(cli, PrintModeSession):
-            for neutral in cli.translator.translate(event):
-                if await self._apply(sid, cli, neutral, recovered):
-                    return True
-            return False
         if isinstance(cli, CodexSession):
             return await self._handle_codex_event(sid, cli, event, tool_names, recovered=recovered)
         if isinstance(cli, CursorSession):
             return await self._handle_cursor_event(sid, cli, event, tool_names)
-        type_ = event.get("type")
-        if type_ == "system" and event.get("subtype") == "init":
-            self._bind_session_if_any(sid, cli, event)
-        elif type_ == "control_request":
-            await self._claude_control(sid, cli, event, tool_names, recovered)
-        elif type_ == "result":
-            self._claude_result(sid, event)
-            return True
-        elif type_ in self._CLAUDE_SIMPLE:
-            getattr(self, self._CLAUDE_SIMPLE[type_])(sid, event, tool_names)
+        for neutral in cli.translator.translate(event):  # print mode and Claude Code
+            if await self._apply(sid, cli, neutral, recovered):
+                return True
         return False
-
-    _CLAUDE_SIMPLE = {"stream_event": "_claude_delta", "assistant": "_claude_assistant",
-                      "user": "_claude_tool_results", "rate_limit_event": "_claude_rate_limits"}
 
     def _bind_session_if_any(self, sid: str, cli, event: dict) -> None:
         backend_session_id = str(event.get("session_id") or "")
         if backend_session_id:
             self._bind_backend_session(sid, cli, backend_session_id)
-
-    async def _claude_control(self, sid: str, cli, event: dict, tool_names: dict[str, str],
-                              recovered: bool) -> None:
-        request = event.get("request") or {}
-        if request.get("subtype") != "can_use_tool":
-            return
-        call_id = str(request.get("tool_use_id") or event.get("request_id") or "")
-        tool_names[call_id] = str(request.get("tool_name") or "")
-        await self._authorize_cli(sid, cli, str(event.get("request_id") or ""), request, recovered=recovered)
-
-    def _claude_result(self, sid: str, event: dict) -> None:
-        text = str(event.get("result") or "").lower()
-        if (event.get("is_error") or event.get("subtype") in ("error", "failed")) and "rate limit" in text:
-            latest = self.db.get_session(sid)["run"].get("rate_limits") or {}
-            raise CliLimitError(float(latest.get("resetsAt") or 0))
-        self._finish_cli_result(sid, event)
 
     def _bind_backend_session(self, sid: str, cli, backend_session_id: str) -> None:
         self.db.patch_run(sid, backend_session_id=backend_session_id)
@@ -1773,52 +1742,6 @@ class Runner:
                                                "output_chars": len(output),
                                                "output": truncate_middle(output, 20000)})
         self.db.for_session(sid).write(record_cli_tool_result)
-
-    def _claude_delta(self, sid: str, event: dict, _tool_names: dict[str, str] | None = None) -> None:
-        delta = (event.get("event") or {}).get("delta") or {}
-        text = delta.get("text")
-        if isinstance(text, str) and text:
-            kind = "reasoning" if delta.get("type") in ("thinking_delta", "reasoning_delta") else "content"
-            self.bus.ephemeral(sid, "delta", {"kind": kind, "text": text})
-
-    def _claude_assistant(self, sid: str, event: dict, tool_names: dict[str, str]) -> None:
-        content = (event.get("message") or {}).get("content") or []
-        blocks = content if isinstance(content, list) else []
-        calls = []
-        for block in blocks:
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
-                continue
-            call_id = str(block.get("id") or "")
-            name = str(block.get("name") or "")
-            args = block.get("input") if isinstance(block.get("input"), dict) else {}
-            tool_names[call_id] = name
-            calls.append(self._tool_call_entry(call_id, name, args))
-        self._emit_assistant(sid, self._cli_text(content), calls)
-
-    def _claude_tool_results(self, sid: str, event: dict, tool_names: dict[str, str]) -> None:
-        content = (event.get("message") or {}).get("content") or []
-        blocks = content if isinstance(content, list) else []
-        for block in blocks:
-            if not isinstance(block, dict) or block.get("type") != "tool_result":
-                continue
-            call_id = str(block.get("tool_use_id") or "")
-            self._record_cli_tool_result(sid, call_id, tool_names.get(call_id, ""), not bool(block.get("is_error")),
-                                         self._cli_text(block.get("content")))
-
-    def _claude_rate_limits(self, sid: str, event: dict, _tool_names: dict[str, str] | None = None) -> None:
-        rate_limits = event.get("rate_limit_info") or {}
-        s = self.db.get_session(sid)
-        self.db.patch_run(sid, rate_limits=rate_limits)
-        self.db.set_backend_usage(s["backend"], rate_limits)
-        self.bus.emit(sid, "rate_limit", rate_limits)
-        warning = billing_warning(self.cfg.backends[s["backend"]], rate_limits,
-                                  using_api_key=s["run"].get("billing_mode") == "api_key")
-        if warning:
-            self.bus.emit(sid, "billing_warning", {"backend": s["backend"], "message": warning})
-        utilization = float(rate_limits.get("utilization") or 0)
-        stop = float(self.cfg.backends[s["backend"]].stop_at_utilization or 0)
-        if rate_limits.get("status") == "rejected" or (stop and utilization >= stop):
-            raise CliLimitError(float(rate_limits.get("resetsAt") or 0))
 
     @staticmethod
     def _cursor_tool(event: dict) -> tuple[str, dict, dict]:
