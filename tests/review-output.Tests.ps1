@@ -1078,6 +1078,10 @@ Describe 'Entity references and link targets quoted in code (#1003)' {
         @{ Case = 'code span beside an escaped backtick'; Lines = @('- notes.js:1: \``&ZeroWidthSpace;` here.'); Rule = 'unknown-entity' }
         @{ Case = 'code span opened inside an autolink'; Lines = @('- notes.js:1: <https://example.invalid/`> &ZeroWidthSpace; `x`.'); Rule = 'unknown-entity' }
         @{ Case = 'fenced block in a list item'; Lines = @('- notes.js:5: example:', '', '  ```', '  &ZeroWidthSpace;', '  ```'); Rule = 'unknown-entity' }
+        # A link that opens first takes its target whole, and a reference definition is no paragraph.
+        @{ Case = 'backticks in a link title'; Lines = @('- notes.js:1: [docs](/notes "`&ZeroWidthSpace;`") here.'); Rule = 'unknown-entity' }
+        @{ Case = 'backticks in a link destination'; Lines = @('- notes.js:1: [docs](`&ZeroWidthSpace;`) here.'); Rule = 'unknown-entity' }
+        @{ Case = 'backticks in a reference definition title'; Lines = @('- notes.js:1: see [docs].', '', '[docs]: /notes', '  "`&ZeroWidthSpace;`"'); Rule = 'unknown-entity' }
         @{ Case = 'link in a code span holding a table cell break'; Lines = @('- notes.js:6: ``a | [label](`code`)`` b'); Rule = 'link-target' }
     ) {
         param($Case, $Lines, $Rule)
