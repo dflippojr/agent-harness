@@ -17,21 +17,14 @@ The verified protocol is in docs/phase8a-design.md ("Claude Code"). The records 
 
 from __future__ import annotations
 
-import asyncio
-import json
 import os
-import subprocess
-import threading
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable
 
 from .. import claude_token, cli_domains
-from .. import cli_backends as shared  # run_cmd and ready_domain are looked up there at call time
-from ..cli_backends import (EMPTY_MCP_CONFIG, NO_PROXY, NODE_USE_ENV_PROXY, WORKSPACE, CliBackendError, session_key,
-                            split_note, workspace_args)
-from ..config import BackendConfig, SandboxConfig
-from ..mcp_server import TOKEN_ENV, McpRelay, McpRelayError, mcp_config
+from ..cli_backends import (EMPTY_MCP_CONFIG, HARDENING, WORKSPACE, CliBackendError, JsonlProcess, container_limits,
+                            provider_run, split_note, workspace_args)
+from ..mcp_server import TOKEN_ENV, mcp_config
 from ..workspace_guidance import GUIDANCE_LIMIT, cap, read_workspace_file
 from .events import (Assistant, Delta, Event, PermissionRequest, RateLimits, Session, ToolCall, ToolResult, obj,
                      result_of, text_of)
@@ -132,59 +125,25 @@ class ClaudeTranslator:
                                   str(request.get("description") or ""))]
 
 
-class ClaudeSession:
+class ClaudeSession(JsonlProcess):
     """One long-lived ``claude -p`` stream-json process."""
 
-    def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
-                 sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
-                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = "", split: bool = False,
-                 tool_profile: str = "default"):
-        self.session_id = session_id
-        self.tool_profile = tool_profile  # "bash-only" (#638): --tools Bash, or run_shell alone in split mode
-        self.app_id = app_id  # the session's domain: "" for Web, else its App (#371)
-        self.end_user = end_user  # the App's end user whose own login this session runs on (#365)
-        self.workspace = workspace.resolve()
-        self.tools_only = tools_only  # an App-tools-only session (#329): no built-in tools, only the MCP server's
-        self.split = split and not tools_only  # split mode (#427): token here, shell and files over MCP, no workspace
-        self.backend = backend
-        self.sandbox = sandbox
-        self.system_prompt = system_prompt
-        self.model = model or backend.model
-        self.backend_session_id = backend_session_id
-        self.api_key = session_key(end_user, api_key)
-        self.container = f"harness-{session_id}-claude"
+    name, label = "claude", "Claude CLI"
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
         self.translator = ClaudeTranslator()
-        # With MCP the CLI shares the relay's network namespace: the relay's loopback port is reachable from this
-        # container only, and egress still goes through the same network and proxy.
-        self.mcp = mcp
-        self.mcp_token = mcp_token
-        self._popen = popen
-        self._command_override = command
-        self.process: subprocess.Popen | None = None
-        self._events: asyncio.Queue[str | None] = asyncio.Queue()
-        self._stderr: list[str] = []
-        self._write_lock = threading.Lock()
-        self._threads: list[threading.Thread] = []
 
     def command(self) -> list[str]:
         if self._command_override is not None:
             return list(self._command_override)
+        network = f"container:{self.mcp.container}" if self.mcp else self.backend.network
         args = [
-            "docker", "run", "--rm", "-i", "--name", self.container,
-            "--label", f"agent-harness.session={self.session_id}",
-            "--network", f"container:{self.mcp.container}" if self.mcp else self.backend.network,
-            "-e", f"HTTPS_PROXY={self.backend.proxy}",
-            "-e", f"HTTP_PROXY={self.backend.proxy}",
-            "-e", NO_PROXY,
-            "-e", NODE_USE_ENV_PROXY,
+            *provider_run(self.session_id, self.container, network, self.backend.proxy),
             *cli_domains.docker_args("claude", self.backend, self.app_id, token=self._uses_token(), end_user=self.end_user),
             *workspace_args(self.workspace, self.split),
-            "--memory", self.sandbox.memory,
-            "--cpus", str(self.sandbox.cpus),
-            "--pids-limit", str(self.sandbox.pids),
-            "--security-opt", "no-new-privileges",
-            "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD", "--cap-drop", "AUDIT_WRITE",
+            *container_limits(self.sandbox),
+            *HARDENING,
             self.backend.image,
             "claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
@@ -219,18 +178,7 @@ class ClaudeSession:
         return not self.end_user and claude_token.uses_token(self.backend, self.app_id, self.api_key)
 
     async def start(self) -> None:
-        loop = asyncio.get_running_loop()
-        if self._command_override is None:
-            # The Windows daemon restart script force-stops Python. That skips
-            # our finally block and can leave `docker run`'s container behind.
-            # Remove only this session's deterministic container before reuse.
-            await shared.run_cmd(["docker", "rm", "-f", self.container], timeout=30)
-            await shared.ready_domain("claude", self.backend, self.app_id, self.api_key, self.end_user)
-            if self.mcp is not None:
-                try:
-                    await self.mcp.start()
-                except McpRelayError as e:
-                    raise CliBackendError(str(e)) from e
+        await self._prepare()
         child_env = os.environ.copy()
         if self.api_key:
             child_env["ANTHROPIC_API_KEY"] = self.api_key
@@ -243,58 +191,13 @@ class ClaudeSession:
             child_env[claude_token.ENV] = token
         if self.mcp is not None:
             child_env[TOKEN_ENV] = self.mcp_token
-        process = self._popen(
-            self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=child_env,
-        )
-        self.process = process
-
-        def stdout_reader() -> None:
-            assert process.stdout is not None
-            try:
-                for line in process.stdout:
-                    loop.call_soon_threadsafe(self._events.put_nowait, line)
-            finally:
-                loop.call_soon_threadsafe(self._events.put_nowait, None)
-
-        def stderr_reader() -> None:
-            assert process.stderr is not None
-            self._stderr.extend(process.stderr)
-
-        self._threads = [threading.Thread(target=stdout_reader, daemon=True),
-                         threading.Thread(target=stderr_reader, daemon=True)]
-        for thread in self._threads:
-            thread.start()
+        self._open(child_env)
 
     async def send(self, item: dict) -> None:
-        def write() -> None:
-            if self.process is None or self.process.stdin is None or self.process.poll() is not None:
-                raise CliBackendError("Claude CLI is not running")
-            with self._write_lock:
-                self.process.stdin.write(json.dumps(item, ensure_ascii=False) + "\n")
-                self.process.stdin.flush()
-        try:
-            await asyncio.to_thread(write)
-        except OSError as e:
-            raise CliBackendError(f"could not write to Claude CLI: {e}") from e
+        await self._write(item)
 
     async def receive(self, timeout: float | None = None) -> dict | None:
-        try:
-            line = await asyncio.wait_for(self._events.get(), timeout) if timeout else await self._events.get()
-        except asyncio.TimeoutError:
-            return None
-        if line is None:
-            code = self.process.poll() if self.process is not None else None
-            error = "".join(self._stderr).strip()
-            raise CliBackendError(f"Claude CLI exited with code {code}: {error}".rstrip())
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as e:
-            raise CliBackendError(f"Claude CLI wrote invalid JSONL: {line[:300].rstrip()}") from e
-        if not isinstance(value, dict):
-            raise CliBackendError("Claude CLI JSONL event was not an object")
-        return value
+        return await self._read(timeout)
 
     async def initialize(self, prompt: str) -> None:
         await self.send({"type": "control_request", "request_id": "init-1",
@@ -319,20 +222,3 @@ class ClaudeSession:
             decision["message"] = message
         await self.send({"type": "control_response", "response": {"subtype": "success",
                          "request_id": request_id, "response": decision}})
-
-    async def stop(self) -> None:
-        proc = self.process
-        self.process = None
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try:
-                await asyncio.to_thread(proc.wait, 2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                await asyncio.to_thread(proc.wait)
-        for thread in self._threads:
-            await asyncio.to_thread(thread.join, 0.5)
-        if self._command_override is None:
-            await shared.run_cmd(["docker", "rm", "-f", self.container], timeout=30)
-            if self.mcp is not None:
-                await self.mcp.stop()

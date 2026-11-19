@@ -17,7 +17,6 @@ reports no rate limits; a usage limit only shows as a failed result. The records
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import subprocess
 import threading
@@ -26,7 +25,8 @@ from typing import Callable
 
 from .. import cli_domains
 from .. import cli_backends as shared  # run_cmd and ready_domain are looked up there at call time
-from ..cli_backends import NO_PROXY, NODE_USE_ENV_PROXY, WORKSPACE, CliBackendError, TurnProcess
+from ..cli_backends import (HARDENING, WORKSPACE, CliBackendError, TurnProcess, container_limits, jsonl_record,
+                            provider_run)
 from ..config import BackendConfig, SandboxConfig
 from .events import (FAILED_SUBTYPES, Assistant, Delta, Event, Result, Session, ToolCall, ToolResult, obj,
                      text_of)
@@ -153,20 +153,12 @@ class CursorSession(TurnProcess):
                 args += ["--resume", self.backend_session_id]
             return [*args, prompt]
         args = [
-            "docker", "run", "--rm", "-i", "--name", self.container,
-            "--label", f"agent-harness.session={self.session_id}",
-            "--network", self.backend.network,
-            "-e", f"HTTPS_PROXY={self.backend.proxy}",
-            "-e", f"HTTP_PROXY={self.backend.proxy}",
-            "-e", NO_PROXY,
-            "-e", NODE_USE_ENV_PROXY,
+            *provider_run(self.session_id, self.container, self.backend.network, self.backend.proxy),
             # The login is $XDG_CONFIG_HOME/cursor/auth.json; HOME stays the container's own (#371).
             *cli_domains.docker_args("cursor", self.backend, self.app_id),
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
             "-w", WORKSPACE,
-            "--memory", self.sandbox.memory,
-            "--cpus", str(self.sandbox.cpus),
-            "--pids-limit", str(self.sandbox.pids),
+            *container_limits(self.sandbox),
             # Cursor's Linux sandbox creates its own unprivileged user
             # namespace. Docker's default seccomp and AppArmor profiles block
             # that setup; relax only those outer profiles while keeping the
@@ -174,8 +166,7 @@ class CursorSession(TurnProcess):
             # resource limits, workspace-only mount and provider-only network.
             "--security-opt", "seccomp=unconfined",
             "--security-opt", "apparmor=unconfined",
-            "--security-opt", "no-new-privileges",
-            "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD", "--cap-drop", "AUDIT_WRITE",
+            *HARDENING,
             self.backend.image,
             "agent", "-p", "--output-format", "stream-json", "--stream-partial-output",
             # Cursor exposes no host approval protocol in print mode. This is
@@ -221,13 +212,7 @@ class CursorSession(TurnProcess):
             raise CliBackendError(f"Cursor Agent exited with code {code} before a result: {error}".rstrip())
         if not isinstance(line, str):  # False: nothing within the timeout
             return None
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as e:
-            raise CliBackendError(f"Cursor Agent wrote invalid JSONL: {line[:300].rstrip()}") from e
-        if not isinstance(value, dict):
-            raise CliBackendError("Cursor Agent JSONL event was not an object")
-        return value
+        return jsonl_record(line, "Cursor Agent")
 
     async def stop(self) -> None:
         await self._close_process(terminate=True)

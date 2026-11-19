@@ -20,7 +20,7 @@ from typing import Callable
 
 from .. import cli_domains
 from .. import cli_backends as shared  # run_cmd is looked up there at call time
-from ..cli_backends import WORKSPACE, CliBackendError, TurnProcess
+from ..cli_backends import HARDENING, WORKSPACE, CliBackendError, TurnProcess, container_limits
 from ..config import BackendConfig, SandboxConfig
 from .events import Assistant, Delta, Error, Event, Result, Session, ToolCall, ToolResult
 from .opencode import OpencodeJsonl
@@ -148,11 +148,8 @@ class PrintModeSession(TurnProcess):
             *args,
             "--mount", f"type=bind,source={self.workspace},target=/workspace",
             "-w", WORKSPACE,
-            "--memory", self.sandbox.memory,
-            "--cpus", str(self.sandbox.cpus),
-            "--pids-limit", str(self.sandbox.pids),
-            "--security-opt", "no-new-privileges",
-            "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD", "--cap-drop", "AUDIT_WRITE",
+            *container_limits(self.sandbox),
+            *HARDENING,
             self.backend.image,
             *self.cli_args(prompt),
         ]

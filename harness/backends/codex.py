@@ -20,20 +20,13 @@ Responses to the harness's own requests carry no method and are the transport's 
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import subprocess
-import threading
-from pathlib import Path
-from typing import Callable
 
 from .. import cli_domains
-from .. import cli_backends as shared  # run_cmd and ready_domain are looked up there at call time
-from ..cli_backends import (NO_PROXY, NODE_USE_ENV_PROXY, WORKSPACE, CliBackendError, session_key, split_note,
-                            workspace_args)
-from ..config import BackendConfig, SandboxConfig
-from ..mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides
+from ..cli_backends import (HARDENING, WORKSPACE, CliBackendError, JsonlProcess, container_limits, provider_run,
+                            split_note, workspace_args)
+from ..mcp_server import TOKEN_ENV, codex_mcp_overrides
 from ..policy import MCP_SERVER
 from .events import (Assistant, Delta, Error, Event, PermissionRequest, RateLimits, Result, Session, ToolCall,
                      ToolResult, obj, text_of)
@@ -279,39 +272,13 @@ CODEX_TOOLS_ONLY_OVERRIDES = (
 CODEX_SPLIT_OVERRIDES = tuple(o for o in CODEX_TOOLS_ONLY_OVERRIDES if o != "tools.update_plan.enabled=false")
 
 
-class CodexSession:
+class CodexSession(JsonlProcess):
     """One long-lived ``codex app-server`` JSON-RPC process."""
 
-    def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
-                 sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
-                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
-                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = "", split: bool = False,
-                 tool_profile: str = "default"):
-        self.session_id = session_id
-        self.tool_profile = tool_profile  # "bash-only" (#638): split mode only, where the MCP server serves run_shell
-        self.app_id = app_id
-        self.end_user = end_user
-        self.workspace = workspace.resolve()
-        # With MCP Codex shares the relay's network namespace, as Claude Code does (#373). An App-tools-only session
-        # starts with no environment and every other built-in tool off, so only the harness server's tools remain.
-        self.mcp = mcp
-        self.mcp_token = mcp_token
-        self.tools_only = tools_only
-        self.split = split and not tools_only  # split mode (#427), as for Claude Code
-        self.backend = backend
-        self.sandbox = sandbox
-        self.system_prompt = system_prompt
-        self.model = model or backend.model
-        self.backend_session_id = backend_session_id
-        self.api_key = session_key(end_user, api_key)
-        self.container = f"harness-{session_id}-codex"
-        self._popen = popen
-        self._command_override = command
-        self.process: subprocess.Popen | None = None
-        self._events: asyncio.Queue[str | None] = asyncio.Queue()
-        self._stderr: list[str] = []
-        self._write_lock = threading.Lock()
-        self._threads: list[threading.Thread] = []
+    name, label = "codex", "Codex app-server"
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
         self._next_request_id = 1
         self._pending: list[dict] = []
         self._approval_methods: dict[str, str] = {}
@@ -327,26 +294,18 @@ class CodexSession:
     def command(self) -> list[str]:
         if self._command_override is not None:
             return list(self._command_override)
+        network = f"container:{self.mcp.container}" if self.mcp else self.backend.network
         args = [
-            "docker", "run", "--rm", "-i", "--name", self.container,
-            "--label", f"agent-harness.session={self.session_id}",
-            "--network", f"container:{self.mcp.container}" if self.mcp else self.backend.network,
-            "-e", f"HTTPS_PROXY={self.backend.proxy}",
-            "-e", f"HTTP_PROXY={self.backend.proxy}",
-            "-e", NO_PROXY,
-            "-e", NODE_USE_ENV_PROXY,
+            *provider_run(self.session_id, self.container, network, self.backend.proxy),
             *cli_domains.docker_args("codex", self.backend, self.app_id, end_user=self.end_user),
             *workspace_args(self.workspace, self.split),
-            "--memory", self.sandbox.memory,
-            "--cpus", str(self.sandbox.cpus),
-            "--pids-limit", str(self.sandbox.pids),
+            *container_limits(self.sandbox),
             # Docker's default seccomp profile blocks the unprivileged user
             # namespace that Linux Codex uses for bubblewrap. The outer
             # container still has no-new-privileges, dropped capabilities,
             # a workspace-only bind mount, and a provider-only network.
             "--security-opt", "seccomp=unconfined",
-            "--security-opt", "no-new-privileges",
-            "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD", "--cap-drop", "AUDIT_WRITE",
+            *HARDENING,
             self.backend.image, "codex", "app-server", "--stdio",
         ]
         if self.mcp:
@@ -361,83 +320,24 @@ class CodexSession:
         return args
 
     async def start(self) -> None:
-        loop = asyncio.get_running_loop()
-        if self._command_override is None:
-            await shared.run_cmd(["docker", "rm", "-f", self.container], timeout=30)
-            await shared.ready_domain("codex", self.backend, self.app_id, self.api_key, self.end_user)
-            if self.mcp is not None:
-                try:
-                    await self.mcp.start()
-                except McpRelayError as e:
-                    raise CliBackendError(str(e)) from e
+        await self._prepare()
         child_env = os.environ.copy()
         if self.api_key:
             child_env["OPENAI_API_KEY"] = self.api_key
         if self.mcp is not None:
             child_env[TOKEN_ENV] = self.mcp_token
-        process = self._popen(
-            self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=child_env,
-        )
-        self.process = process
-
-        def stdout_reader() -> None:
-            assert process.stdout is not None
-            try:
-                for line in process.stdout:
-                    loop.call_soon_threadsafe(self._events.put_nowait, line)
-            finally:
-                loop.call_soon_threadsafe(self._events.put_nowait, None)
-
-        def stderr_reader() -> None:
-            assert process.stderr is not None
-            self._stderr.extend(process.stderr)
-
-        self._threads = [threading.Thread(target=stdout_reader, daemon=True),
-                         threading.Thread(target=stderr_reader, daemon=True)]
-        for thread in self._threads:
-            thread.start()
+        self._open(child_env)
 
     def _id(self) -> int:
         value = self._next_request_id
         self._next_request_id += 1
         return value
 
-    async def _write(self, item: dict) -> None:
-        def write() -> None:
-            if self.process is None or self.process.stdin is None or self.process.poll() is not None:
-                raise CliBackendError("Codex app-server is not running")
-            with self._write_lock:
-                self.process.stdin.write(json.dumps(item, ensure_ascii=False) + "\n")
-                self.process.stdin.flush()
-        try:
-            await asyncio.to_thread(write)
-        except OSError as e:
-            raise CliBackendError(f"could not write to Codex app-server: {e}") from e
-
-    async def _receive_raw(self, timeout: float | None = None) -> dict | None:
-        try:
-            line = await asyncio.wait_for(self._events.get(), timeout) if timeout else await self._events.get()
-        except asyncio.TimeoutError:
-            return None
-        if line is None:
-            code = self.process.poll() if self.process is not None else None
-            error = "".join(self._stderr).strip()
-            raise CliBackendError(f"Codex app-server exited with code {code}: {error}".rstrip())
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as e:
-            raise CliBackendError(f"Codex app-server wrote invalid JSONL: {line[:300].rstrip()}") from e
-        if not isinstance(value, dict):
-            raise CliBackendError("Codex app-server JSONL event was not an object")
-        return value
-
     async def _request(self, method: str, params: dict) -> dict:
         request_id = self._id()
         await self._write({"id": request_id, "method": method, "params": params})
         while True:
-            event = await self._receive_raw(timeout=30)
+            event = await self._read(timeout=30)
             if event is None:
                 raise CliBackendError(f"Codex app-server timed out answering {method}")
             if event.get("id") == request_id:
@@ -510,7 +410,7 @@ class CodexSession:
         await self._write(item)
 
     async def receive(self, timeout: float | None = None) -> dict | None:
-        event = self._pending.pop(0) if self._pending else await self._receive_raw(timeout)
+        event = self._pending.pop(0) if self._pending else await self._read(timeout)
         if event and event.get("error") and event.get("id") is not None:
             raise CliBackendError(f"Codex app-server request failed: {event['error']}")
         if not event:
@@ -539,20 +439,3 @@ class CodexSession:
         else:
             result = {"decision": "accept" if accept else "decline"}
         await self._write({"id": request_id, "result": result})
-
-    async def stop(self) -> None:
-        proc = self.process
-        self.process = None
-        if proc is not None and proc.poll() is None:
-            proc.terminate()
-            try:
-                await asyncio.to_thread(proc.wait, 2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                await asyncio.to_thread(proc.wait)
-        for thread in self._threads:
-            await asyncio.to_thread(thread.join, 0.5)
-        if self._command_override is None:
-            await shared.run_cmd(["docker", "rm", "-f", self.container], timeout=30)
-            if self.mcp is not None:
-                await self.mcp.stop()
