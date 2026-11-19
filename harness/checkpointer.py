@@ -309,9 +309,10 @@ class Checkpointer:
         event log. The log itself keeps the full history."""
         ckpt = self.checkpoint(sid, turn)
         context, carried = saved
-        run = {k: v for k, v in self.db.get_session(sid)["run"].items() if k not in (*TURN_RUN_KEYS, UNSETTLED)}
-        self.db.update_session(sid, context=context, run={**run, **carried}, inbox=[], turn_seq=turn, review="",
-                               review_detail="", answer="", stop_reason="")
+        self.db.unset_run(sid, *TURN_RUN_KEYS, UNSETTLED)
+        self.db.patch_run(sid, **carried)
+        self.db.update_session(sid, context=context, inbox=[], turn_seq=turn, review="", review_detail="", answer="",
+                               stop_reason="")
         self.db.show_checkpoints_through(sid, turn)
         self.bus.emit(sid, "rewound", {"turn": turn, "head": ckpt["head"][:12]})
 

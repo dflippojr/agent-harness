@@ -254,7 +254,7 @@ def erase_command(backend: str, cfg, app_id: str, conversation_id: str) -> list[
     if not cli_erase.SAFE_ID.fullmatch(conversation_id):
         raise ValueError(f"unsafe {backend} conversation id {conversation_id!r}")
     if getattr(cfg, "is_cli", False):  # a kind: cli backend deletes its own session (#168), offline
-        from .cli_backends import PRINT_MODE_PARSERS
+        from .backends.print_mode import PRINT_MODE_PARSERS
         layout = CLI_LAYOUT
         parser = PRINT_MODE_PARSERS[cfg.parser]
         return ["docker", "run", "--rm", "--network", "none", "--user", AGENT_UID,
@@ -273,7 +273,7 @@ async def erase_history(backend: str, cfg, app_id: str, conversation_id: str) ->
     code, out, err = await run_cmd(erase_command(backend, cfg, app_id, conversation_id), timeout=120,
                                    input_=source)
     if code != 0 and getattr(cfg, "is_cli", False):
-        from .cli_backends import PRINT_MODE_PARSERS
+        from .backends.print_mode import PRINT_MODE_PARSERS
         if PRINT_MODE_PARSERS[cfg.parser].erase_missing(f"{err}\n{out}", conversation_id):
             return  # nothing left of it
     if code != 0:

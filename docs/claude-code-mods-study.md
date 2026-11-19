@@ -100,7 +100,7 @@ denied `curl` it saw **no request**, only the error result
   `can_use_tool` request. The harness sees such calls only in the transcript. A mod sees them before they run.
 - **UI surfaces do not no-op silently.** `$.ui.status` and `$.ui.toast` succeed, and Claude Code forwards them on
   stdout as `{"type":"system","subtype":"ui_status","plugin":"harness-policy","text":...}` and `ui_toast`. The runner
-  ignores unknown `system` subtypes (`Runner._handle_cli_event`), so they are harmless today.
+  ignores unknown `system` subtypes (`ClaudeTranslator` in `harness/backends/claude.py`), so they are harmless today.
 
 ## Q2: pre-install, pin, read-only, tamper
 

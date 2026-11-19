@@ -1,6 +1,6 @@
 """The repository's own guidance file for native sessions (#642): AGENTS.md, else CLAUDE.md, at the workspace root.
 
-Hosted Claude sessions get CLAUDE.md through `cli_backends.project_memory`; both read files here. The text goes into
+Hosted Claude sessions get CLAUDE.md through `backends.claude.project_memory`; both read files here. The text goes into
 the system prompt at the session's first run and is refreshed only at a round reset, like the repo map, so the prompt
 prefix stays cache-stable within a round. The file is trusted like the rest of the workspace: it is not a taint
 source, the same as the repo map.

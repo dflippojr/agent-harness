@@ -1,0 +1,4 @@
+{"method":"thread/started","params":{"thread":{"id":"019a7c3e-5f21-7d40-8b6c-2e9f1a3d4c5b","preview":"","modelProvider":"openai","createdAt":1794812400,"cwd":"/workspace","cliVersion":"0.154.0","source":"appServer"}}}
+{"method":"turn/started","params":{"threadId":"019a7c3e-5f21-7d40-8b6c-2e9f1a3d4c5b","turn":{"id":"turn_02","items":[],"status":"inProgress","error":null}}}
+{"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":100,"windowDurationMins":300,"resetsAt":1794819600},"secondary":{"usedPercent":74,"windowDurationMins":10080,"resetsAt":1795046400},"credits":null,"planType":"plus","rateLimitReachedType":"primary"}}}
+{"method":"turn/completed","params":{"threadId":"019a7c3e-5f21-7d40-8b6c-2e9f1a3d4c5b","turn":{"id":"turn_02","items":[],"status":"failed","error":{"message":"You've hit your usage limit. Try again later.","codexErrorInfo":"usageLimitExceeded"}}}}

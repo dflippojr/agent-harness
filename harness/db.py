@@ -879,6 +879,29 @@ class Database:
         with self.lock:
             self.conn.execute(f"UPDATE sessions SET {sets} WHERE id = ?", [*values, sid])
 
+    @_writes
+    def patch_run(self, sid: str, /, **fields: object) -> dict | None:
+        """Merge `fields` into session `sid`'s `run` and return the new `run` (None for a session that is gone). The
+        read and the write are one writer transaction, so a field another write set meanwhile is never lost (#991):
+        write `run` through here, not with a copy read earlier."""
+        current = self.get_session(sid)
+        if current is None:
+            return None
+        run = dict(current.get("run") or {})
+        run.update(fields)
+        self.update_session(sid, run=run)
+        return run
+
+    @_writes
+    def unset_run(self, sid: str, /, *keys: str) -> dict | None:
+        """Remove `keys` from session `sid`'s `run`, as `patch_run` sets them: in one writer transaction."""
+        current = self.get_session(sid)
+        if current is None:
+            return None
+        run = {k: v for k, v in (current.get("run") or {}).items() if k not in keys}
+        self.update_session(sid, run=run)
+        return run
+
     @_reads
     def get_session(self, sid: str) -> dict | None:
         with self.lock:
