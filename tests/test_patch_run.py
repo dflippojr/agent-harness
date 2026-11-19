@@ -9,6 +9,10 @@ Each case below runs one of the runner's `run` writes while `Interleave` queues 
 after the code's first read of the session outside a transaction (the copy a separate write would build on), or right
 before its first write if it never reads first. The job sets a field of its own; the case checks that the field and the
 code's own fields are both there afterwards. Synthetic sessions only.
+
+`Interleave` fires before `patch_run` is entered, so the cases for `patch_run` and `unset_run` themselves hook their own
+read of the session instead (`AfterTheRead`): another writer commits a field as soon as the database lets it, which is
+only after the write when the read and the write are one transaction.
 """
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ import ast
 import asyncio
 import sqlite3
 import time
+from operator import methodcaller
 from pathlib import Path
 
 import pytest
@@ -277,6 +282,57 @@ def test_patch_run_goes_to_the_app_store_and_never_to_an_erased_session(tmp_path
             stores.patch_run("app-sess", turns=10)
     finally:
         stores.close()
+
+
+class AfterTheRead:
+    """While active, the first read of session `sid` through `Database.get_session` lets another writer job set
+    `run[INTERLEAVED]` as soon as the database allows (`Database.after_commit`): at once if the read is outside a
+    writer transaction, or else right after that transaction commits. A write whose read is in the same transaction
+    keeps the field; one that read on a pooled reader, or in an earlier transaction, writes over it."""
+
+    def __init__(self, db: Database, sid: str):
+        self.db, self.sid, self.fired = db, sid, False
+
+    def __enter__(self):
+        self.read = self.db.get_session
+        self.db.get_session = self._get_session
+        return self
+
+    def __exit__(self, *exc):
+        self.db.__dict__.pop("get_session", None)
+
+    def _get_session(self, sid, *args, **kwargs):
+        row = self.read(sid, *args, **kwargs)
+        if sid == self.sid and not self.fired:
+            self.fired = True
+            self.db.after_commit(lambda: self.db.write(self._another_writer))
+        return row
+
+    def _another_writer(self) -> None:  # a read and a write in one transaction: it loses nothing itself
+        run = dict(self.read(self.sid)["run"])
+        run[INTERLEAVED] = True
+        self.db.update_session(self.sid, run=run)
+
+
+@pytest.mark.parametrize("call, expected", [
+    (methodcaller("patch_run", "s-1", turns=3), {"turns": 3, "notes": "keep", "stale": 1}),
+    (methodcaller("unset_run", "s-1", "stale"), {"turns": 2, "notes": "keep"}),
+], ids=["patch_run", "unset_run"])
+def test_a_field_another_writer_commits_after_the_primitive_reads_survives(tmp_path, call, expected):
+    """`patch_run` and `unset_run` themselves (#991): the read of the session and the write of `run` are one writer
+    transaction, so another writer's field lands after the write, never between the two. Each case fails if its
+    primitive loses the transaction wrapper or reads outside the transaction it writes in."""
+    db = Database(tmp_path / "harness.sqlite3")
+    try:
+        db.insert_session(_row("s-1"))
+        with AfterTheRead(db, "s-1") as after:
+            assert call(db) == expected
+        assert after.fired, "the primitive never read the session through Database.get_session"
+        run = db.get_session("s-1")["run"]
+        assert run.get(INTERLEAVED) is True, f"the field another writer committed after the read was lost: {run}"
+        assert run == {**expected, INTERLEAVED: True}
+    finally:
+        db.close()
 
 
 # --- the source audit -------------------------------------------------------------------------------------------------
