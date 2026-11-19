@@ -51,6 +51,8 @@ _PUBLIC = {
     "database_reads": ("harness.db", "_reads"),
     "database_writes": ("harness.db", "_writes"),
     "AsyncDatabase": ("harness.db", "AsyncDatabase"),
+    "ModuleStore": ("harness.db", "ModuleStore"),  # a module's own queries on the shared database (#992)
+    "sha256_hex": ("harness.digests", "sha256_hex"),
     "GpuExclusive": ("harness.scheduler", "GpuExclusive"),
     "QueueFull": ("harness.scheduler", "QueueFull"),
     "SLEEPING": ("harness.local_inference", "SLEEPING"),

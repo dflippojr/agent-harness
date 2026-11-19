@@ -459,17 +459,14 @@ CREATE TABLE IF NOT EXISTS app_settings (
 """
 
 JSON_COLUMNS = {"context", "run", "totals", "inbox", "args", "app_tools", "app_metadata", "app_defaults", "data",
-                "origins", "models", "smart", "risk_flags", "skills", "references", "examples", "manifest",
-                "static_findings", "findings", "provenance", "taint"}
-# skill_proposals.review is JSON; sessions.review is a plain merge/push/discard string.
-SKILL_JSON_COLUMNS = JSON_COLUMNS | {"review"}
+                "origins", "models", "smart", "risk_flags", "skills", "provenance", "taint"}
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
     if row is None:
         return None
     out = dict(row)
-    for key in SKILL_JSON_COLUMNS & out.keys():
+    for key in JSON_COLUMNS & out.keys():
         val = out[key]
         if isinstance(val, str) and val[:1] in "{[":
             try:
@@ -583,7 +580,7 @@ class AsyncDatabase:
     """`await db.aio.<method>(...)`: any Database method without blocking the event loop. A write goes straight to
     the writer queue; a read (or a composite method) runs in a worker thread on a pooled read connection."""
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database | ModuleStore):
         self._db = db
 
     def __getattr__(self, name: str):
@@ -600,6 +597,51 @@ class AsyncDatabase:
         async def read(*args, **kwargs):
             return await asyncio.to_thread(bound, *args, **kwargs)
         return read
+
+
+class ModuleStore:
+    """A module's own queries on the core's shared database (#992): subclass it and decorate each query method with
+    `harness.modules.database_reads` or `database_writes`, as `Database` does its own.
+
+    It wraps the main Database (a `SessionStores`' `main`), so a module write joins the caller's transaction, and it
+    exposes only what those decorators and `aio` need. It forwards nothing else: a module reaches a core table
+    through the Database it was given, never through its store."""
+
+    def __init__(self, db):
+        self._db: Database = getattr(db, "main", db)
+        self.aio = AsyncDatabase(self)
+
+    # `conn`, `lock` and `_local` are per thread (the writer's, or a pooled reader's inside `reading()`): looked up
+    # on every access, never kept.
+    @property
+    def _local(self) -> threading.local:
+        return self._db._local
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        return self._db.conn
+
+    @property
+    def lock(self) -> TimedLock:
+        return self._db.lock
+
+    def reading(self):
+        return self._db.reading()
+
+    def read(self, fn, *args, **kwargs):
+        return self._db.read(fn, *args, **kwargs)
+
+    def write(self, fn, *args, **kwargs):
+        return self._db.write(fn, *args, **kwargs)
+
+    async def awrite(self, fn, *args, **kwargs):
+        return await self._db.awrite(fn, *args, **kwargs)
+
+    def in_transaction(self) -> bool:
+        return self._db.in_transaction()
+
+    def after_commit(self, callback) -> None:
+        self._db.after_commit(callback)
 
 
 class Database:
@@ -2215,208 +2257,6 @@ class Database:
         with self.lock:
             rows = self.conn.execute(
                 "SELECT * FROM smart_reviews ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
-        return [_row(r) for r in rows]
-
-    # instruction skills (issue #17)
-    @_writes
-    def insert_skill_proposal(self, row: dict) -> None:
-        cols = ("id", "slug", "title", "purpose", "activation_suggestion", "content_hash", "status",
-                "source_session_id", "skill_md", "references", "examples", "manifest", "static_findings",
-                "review", "review_status", "target_slug", "diff", "created_at", "updated_at")
-        values = [json.dumps(row[c]) if c in SKILL_JSON_COLUMNS else row[c] for c in cols]
-        sql_cols = [f'"{c}"' if c == "references" else c for c in cols]
-        with self.lock:
-            self.conn.execute(
-                f"INSERT INTO skill_proposals ({','.join(sql_cols)}) VALUES ({','.join('?' * len(cols))})", values)
-
-    @_writes
-    def update_skill_proposal(self, pid: str, *, expected_status: str | tuple[str, ...] | None = None,
-                              **fields) -> bool:
-        if not fields:
-            return False
-        if "status" in fields and expected_status is None:
-            raise ValueError("skill proposal status changes require expected_status")
-        fields["updated_at"] = time.time()
-        sets = ", ".join(f'"{k}" = ?' if k == "references" else f"{k} = ?" for k in fields)
-        values = [json.dumps(v) if k in SKILL_JSON_COLUMNS else v for k, v in fields.items()]
-        query = f"UPDATE skill_proposals SET {sets} WHERE id = ?"
-        params = [*values, pid]
-        if expected_status is not None:
-            statuses = (expected_status,) if isinstance(expected_status, str) else tuple(expected_status)
-            query += f" AND status IN ({','.join('?' * len(statuses))})"
-            params.extend(statuses)
-        with self.lock:
-            return self.conn.execute(query, params).rowcount == 1
-
-    @_reads
-    def skill_proposal(self, pid: str) -> dict | None:
-        with self.lock:
-            return _row(self.conn.execute("SELECT * FROM skill_proposals WHERE id = ?", (pid,)).fetchone())
-
-    @_reads
-    def skill_proposal_by_hash(self, content_hash: str) -> dict | None:
-        with self.lock:
-            return _row(self.conn.execute(
-                "SELECT * FROM skill_proposals WHERE content_hash = ? ORDER BY created_at DESC LIMIT 1",
-                (content_hash,)).fetchone())
-
-    @_reads
-    def list_skill_proposals(self, slug: str | None = None) -> list[dict]:
-        query, params = "SELECT * FROM skill_proposals", []
-        if slug:
-            query += " WHERE slug = ?"
-            params.append(slug)
-        with self.lock:
-            rows = self.conn.execute(query + " ORDER BY created_at DESC", params).fetchall()
-        return [_row(r) for r in rows]
-
-    @_reads
-    def skill_proposal_count(self, since: float, session_id: str | None = None) -> int:
-        query, params = "SELECT COUNT(*) FROM skill_proposals WHERE created_at >= ?", [since]
-        if session_id:
-            query += " AND source_session_id = ?"
-            params.append(session_id)
-        with self.lock:
-            return int(self.conn.execute(query, params).fetchone()[0])
-
-    @_writes
-    def delete_skill_proposal(self, pid: str, *, not_status: str | tuple[str, ...] | None = None) -> bool:
-        query = "DELETE FROM skill_proposals WHERE id = ?"
-        params: list = [pid]
-        if not_status is not None:
-            statuses = (not_status,) if isinstance(not_status, str) else tuple(not_status)
-            query += f" AND status NOT IN ({','.join('?' * len(statuses))})"
-            params.extend(statuses)
-        with self.lock:
-            return self.conn.execute(query, params).rowcount == 1
-
-    @_writes
-    def reject_skill_hash(self, content_hash: str, proposal_id: str, reason: str = "") -> None:
-        with self.lock:
-            self.conn.execute(
-                "INSERT OR REPLACE INTO skill_rejected (content_hash, proposal_id, reason, rejected_at) "
-                "VALUES (?, ?, ?, ?)", (content_hash, proposal_id, reason, time.time()))
-
-    @_writes
-    def clear_rejected_skill_hash(self, content_hash: str) -> None:
-        with self.lock:
-            self.conn.execute("DELETE FROM skill_rejected WHERE content_hash = ?", (content_hash,))
-
-    @_reads
-    def skill_hash_rejected(self, content_hash: str) -> bool:
-        with self.lock:
-            row = self.conn.execute("SELECT 1 FROM skill_rejected WHERE content_hash = ?",
-                                    (content_hash,)).fetchone()
-        return row is not None
-
-    @_reads
-    def skill_installed(self, slug: str) -> dict | None:
-        with self.lock:
-            return _row(self.conn.execute("SELECT * FROM skill_installed WHERE slug = ?", (slug,)).fetchone())
-
-    @_reads
-    def list_skill_installed(self) -> list[dict]:
-        with self.lock:
-            rows = self.conn.execute("SELECT * FROM skill_installed ORDER BY slug").fetchall()
-        return [_row(r) for r in rows]
-
-    @_writes
-    def upsert_skill_installed(self, row: dict) -> None:
-        with self.lock:
-            self.conn.execute(
-                "INSERT INTO skill_installed (slug, title, purpose, current_version, current_hash, enabled, "
-                "installed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(slug) DO UPDATE SET title=excluded.title, purpose=excluded.purpose, "
-                "current_version=excluded.current_version, current_hash=excluded.current_hash, "
-                "enabled=excluded.enabled, updated_at=excluded.updated_at",
-                (row["slug"], row["title"], row.get("purpose") or "", row["current_version"], row["current_hash"],
-                 int(row.get("enabled") or 0), row["installed_at"], row["updated_at"]))
-
-    @_writes
-    def delete_skill_installed(self, slug: str) -> None:
-        with self.lock:
-            self.conn.execute("DELETE FROM skill_installed WHERE slug = ?", (slug,))
-
-    @_writes
-    def insert_skill_version(self, row: dict) -> None:
-        with self.lock:
-            self.conn.execute(
-                "INSERT INTO skill_versions (slug, version, content_hash, title, purpose, skill_md, \"references\", "
-                "examples, manifest, installed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (row["slug"], row["version"], row["content_hash"], row["title"], row.get("purpose") or "",
-                 row["skill_md"], json.dumps(row.get("references") or []), json.dumps(row.get("examples") or []),
-                 json.dumps(row.get("manifest") or {}), row["installed_at"]))
-
-    @_reads
-    def skill_version(self, slug: str, version: int) -> dict | None:
-        with self.lock:
-            return _row(self.conn.execute("SELECT * FROM skill_versions WHERE slug = ? AND version = ?",
-                                          (slug, version)).fetchone())
-
-    @_reads
-    def skill_version_by_hash(self, content_hash: str) -> dict | None:
-        with self.lock:
-            return _row(self.conn.execute("SELECT * FROM skill_versions WHERE content_hash = ?",
-                                          (content_hash,)).fetchone())
-
-    @_reads
-    def list_skill_versions(self, slug: str) -> list[dict]:
-        with self.lock:
-            rows = self.conn.execute(
-                "SELECT * FROM skill_versions WHERE slug = ? ORDER BY version", (slug,)).fetchall()
-        return [_row(r) for r in rows]
-
-    @_reads
-    def skill_allowlist(self, slug: str) -> list[str]:
-        with self.lock:
-            rows = self.conn.execute(
-                "SELECT project FROM skill_project_allowlist WHERE slug = ? ORDER BY project", (slug,)).fetchall()
-        return [r[0] for r in rows]
-
-    @_reads
-    def skill_allowlisted_slugs(self, project: str) -> list[str]:
-        with self.lock:
-            rows = self.conn.execute(
-                "SELECT slug FROM skill_project_allowlist WHERE project = ? ORDER BY slug", (project,)).fetchall()
-        return [r[0] for r in rows]
-
-    @_writes
-    def set_skill_allowlist(self, slug: str, projects: list[str]) -> None:
-        with self.lock:
-            self.conn.execute("DELETE FROM skill_project_allowlist WHERE slug = ?", (slug,))
-            self.conn.executemany("INSERT INTO skill_project_allowlist (project, slug) VALUES (?, ?)",
-                                  [(p, slug) for p in projects])
-
-    @_writes
-    def clear_skill_allowlist(self, slug: str) -> None:
-        with self.lock:
-            self.conn.execute("DELETE FROM skill_project_allowlist WHERE slug = ?", (slug,))
-
-    @_writes
-    def insert_skill_review_job(self, row: dict) -> None:
-        with self.lock:
-            self.conn.execute(
-                "INSERT INTO skill_review_jobs (id, proposal_id, content_hash, status, mode, findings, error, "
-                "created_at, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (row["id"], row["proposal_id"], row["content_hash"], row["status"], row["mode"],
-                 json.dumps(row.get("findings") or {}), row.get("error") or "", row["created_at"],
-                 row.get("started_at"), row.get("finished_at")))
-
-    @_writes
-    def update_skill_review_job(self, jid: str, **fields) -> None:
-        values = [json.dumps(v) if k in JSON_COLUMNS else v for k, v in fields.items()]
-        sets = ", ".join(f"{k} = ?" for k in fields)
-        with self.lock:
-            self.conn.execute(f"UPDATE skill_review_jobs SET {sets} WHERE id = ?", [*values, jid])
-
-    @_reads
-    def list_skill_review_jobs(self, status: tuple[str, ...] | None = None) -> list[dict]:
-        query, params = "SELECT * FROM skill_review_jobs", []
-        if status:
-            query += f" WHERE status IN ({','.join('?' * len(status))})"
-            params.extend(status)
-        with self.lock:
-            rows = self.conn.execute(query + " ORDER BY created_at", params).fetchall()
         return [_row(r) for r in rows]
 
     # household accounts (non-secret metadata only: never tokens, credentials, or session material)

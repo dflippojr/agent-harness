@@ -10,6 +10,7 @@ import pytest
 from harness import metrics
 from harness.bus import EventBus
 from harness.db import Database
+from harness_modules.skills.store import SkillRecordStore
 from waits import scaled
 
 
@@ -253,9 +254,11 @@ def test_a_reader_never_sees_an_event_without_its_search_index_row(db):
 
 
 def test_a_reader_never_sees_an_empty_allowlist_mid_save(db):
-    db.set_skill_allowlist("commit-style", ["alpha", "beta"])
+    """A module store's multi-statement write is one transaction on the core writer, as a Database method's is."""
+    skills = SkillRecordStore(db)
+    skills.set_skill_allowlist("commit-style", ["alpha", "beta"])
     seen = _observe_between_statements(db, "INSERT INTO skill_project_allowlist",
-                                       lambda: db.skill_allowlist("commit-style"))
-    db.set_skill_allowlist("commit-style", ["alpha", "beta", "gamma"])
+                                       lambda: skills.skill_allowlist("commit-style"))
+    skills.set_skill_allowlist("commit-style", ["alpha", "beta", "gamma"])
     assert seen and all(s == ["alpha", "beta"] for s in seen)  # never [] or part-way between DELETE and INSERTs
-    assert db.skill_allowlist("commit-style") == ["alpha", "beta", "gamma"]
+    assert skills.skill_allowlist("commit-style") == ["alpha", "beta", "gamma"]

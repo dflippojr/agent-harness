@@ -11,6 +11,7 @@ from typing import Callable
 
 from harness.modules import ModelConfig, SkillsConfig, default_chat
 from .service import REVIEWABLE_STATUSES, SkillError
+from .store import SkillRecordStore
 
 log = logging.getLogger("harness.skill_review")
 
@@ -104,7 +105,7 @@ class SkillReviewer:
                  model: ModelConfig | None = None, chat=default_chat,
                  hosted_chat=None, local_review: bool = True):
         self.cfg = cfg
-        self.db = db
+        self.db = db if isinstance(db, SkillRecordStore) else SkillRecordStore(db)
         self.idle = idle
         self.model = model
         self.chat = chat
