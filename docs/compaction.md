@@ -15,8 +15,8 @@ SHA-256 of that string). After the model has used that result, the next
 compaction pass replaces the message in the model's context with a short
 receipt. The receipt names the tool, a truncated argument preview, the
 character length, the digest, and tells the model to recover the text with
-`read_artifact`. With [`compaction.mask_batch_at`](#batched-masking) set, that
-replacement waits for a batch instead of the next pass.
+`read_artifact`. With [`compaction.mask_batch_at`](#batched-masking) on (the default,
+`0.45`), that replacement waits for a batch instead of the next pass.
 
 `read_artifact` reads a character range of that stored string: `start` is
 inclusive, `end` is exclusive, and each call returns at most 20,000
@@ -94,11 +94,14 @@ older checkpoint and re-reads the rest
 session at 38% reuse). `compaction.mask_batch_at` (#855) masks in batches
 instead, so that between batches a prompt only grows and is reused whole.
 
-It is off by default (`0`, or absent), and off nothing changes: each result is
-masked on the pass after the model used it. It is file configuration only, in
-`config/harness.yaml` under `compaction:`. Set, it is a share of the context
-window, greater than 0 and below `elide_at`. Anything else leaves batching off,
-because at `elide_at` or above trim and elide would reach the results first.
+It is on by default at `0.45` (#1027, on the measurement in
+[*On the real server*](#batched-masking) below). Rollback is one line:
+`compaction.mask_batch_at: 0` in `config/harness.yaml`, which masks each result on
+the pass after the model used it, as it did before the default changed. It is
+file configuration only, under `compaction:`, not a live admin key. The value is
+a share of the context window, greater than 0 and below `elide_at`. Anything else,
+including `null`, leaves batching off, because at `elide_at` or above trim and
+elide would reach the results first.
 
 With it on, a pass before a model call works like this:
 
@@ -216,9 +219,11 @@ today's per-turn masking (batching off), on the tower's production flags
   recover a masked result. That matches arXiv 2609.20804: cheap rules did all
   the compaction, and recoverability went unused.
 
-**Recommendation: make `mask_batch_at: 0.45` the default** and keep the 64K
-window. Changing the default is a separate PR, made once the owner agrees, so it
-stays off until then. With batching on, a smaller llama-server
+**Decision (#1027, the owner's, 2026-11-19): `mask_batch_at: 0.45` is the
+default**, with the 64K window. The per-task and total tables are in
+[`prefix-cache-study.md`](prefix-cache-study.md#batched-masking-on-the-canary-898).
+The nightly canary is the check on pass rate after the change; the rollback is
+the `mask_batch_at: 0` line above. With batching on, a smaller llama-server
 `--checkpoint-min-step` adds nothing measurable (#856, same doc).
 
 ## The `mask` event

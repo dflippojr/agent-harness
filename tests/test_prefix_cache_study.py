@@ -328,6 +328,7 @@ def test_a_fake_session_breaks_the_prefix_only_where_compaction_or_the_plan_does
     monkeypatch.setenv(fake_model.ENV, str(script))
     cfg = config_mod.load(config_dir, data_dir)
     cfg.planning = config_mod.PlanningConfig(reinject=reinject)
+    cfg.mask_batch_at = 0.0  # the per-turn breaks this study pins; batching is the default since #1027
     m = Manager(cfg)
     path = tmp_path / "p.jsonl"
     m.runner.chat = canary_cli.PromptCapture(path, chat=m.runner.chat, holder=lambda: m.scheduler.holder)

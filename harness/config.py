@@ -712,7 +712,9 @@ class Config:
     keep_recent: float = 0.20
     reset_at: float = 0.60
     mask_min_chars: int = 2000
-    mask_batch_at: float = 0.0  # off: mask each result one turn after it is used (#855, docs/compaction.md)
+    # Batch masking at 0.45 of the window (#1027, from the #898 canary measurement, #1025); 0 is the rollback: mask each
+    # result one turn after it is used (#855, docs/compaction.md).
+    mask_batch_at: float = 0.45
     state_max_chars: int = 8000
     trim: TrimRules = field(default_factory=TrimRules)
     repo_map: RepoMapConfig = field(default_factory=RepoMapConfig)
@@ -1295,7 +1297,7 @@ def load(config_dir: Path | None = None, data_dir: Path | None = None) -> Config
                            float(compaction.get("elide_at", 0.55)),
                            float(compaction.get("summarize_at", 0.65))),
         mask_min_chars=_mask_min_chars(compaction.get("mask_min_chars", 2000)),
-        mask_batch_at=_mask_batch_at(compaction.get("mask_batch_at"), float(compaction.get("elide_at", 0.55))),
+        mask_batch_at=_mask_batch_at(compaction.get("mask_batch_at", 0.45), float(compaction.get("elide_at", 0.55))),
         state_max_chars=_state_max_chars(compaction.get("state_max_chars", 8000)),
         trim=_trim_rules(compaction.get("trim")),
         tool_output=_tool_output(raw.get("tool_output")),

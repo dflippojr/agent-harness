@@ -285,6 +285,7 @@ def test_capture_cap_is_reported_in_artifact_truncation_and_footer():
 def test_verify_and_run_shell_store_full_output_not_the_view(tmp_path):
     full = "shell-body-" + ("N" * 25000)
     cfg = make_cfg(tmp_path)
+    cfg.mask_batch_at = 0.0  # per-turn masking: the receipt is due on the next pass (#1027: batching is the default)
     cfg.projects["scratch"] = Project(
         name="scratch",
         verify=[VerifyCheck("tests", "pytest --tb=short -ra", timeout=30, parser="pytest")],
