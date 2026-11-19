@@ -1,0 +1,18 @@
+# The Server image (Dockerfile) builds from these paths only. Everything else stays out of the build context: config
+# and its local overlay, data, tokens, virtual environments, test output and the git history.
+*
+!pyproject.toml
+!README.md
+!scripts/packaging/agent_harness_build.py
+!harness/
+!harness_modules/
+!sdk/harness_client.py
+!macrunner/harness_runner.py
+!macrunner/sandbox.sb
+!macrunner/dev.agent-harness.runner.plist
+!macrunner/install.sh
+!docs/marketplace-manifest.schema.json
+!docs/hub.entries.example.json
+**/__pycache__
+**/*.pyc
+**/.*

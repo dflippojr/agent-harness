@@ -19,7 +19,7 @@ def test_scheduled_ecosystems_and_manifest_directories():
         directories[ecosystem] = set(update.get("directories", [update.get("directory")]))
     assert directories == {
         "pip": {"/", "/tools/openapi"},
-        "docker": {"/sandbox", "/ops/egress", "/reference/hermes", "/reference/openclaw",
+        "docker": {"/", "/sandbox", "/ops/egress", "/reference/hermes", "/reference/openclaw",
                    "/reference/opencode", "/reference/openhands"},
         "docker-compose": {"/ops/observability"},
         "github-actions": {"/"},

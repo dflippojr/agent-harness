@@ -4,6 +4,8 @@ With project Python dependencies and `tools/openapi/requirements.txt` installed,
 
 `python scripts/packaging/agent_harness_build.py --out dist` builds the core wheel and one wheel per module (#334, stage e; standard library only, no network). `tests/test_packaging.py` installs them in a new virtual environment and runs the Server from it. A new non-`.py` file in a package must be listed in `pyproject.toml` (`[tool.agent-harness]`), and nothing may resolve a file against the folder above a package (`tests/test_checkout_paths.py`). In the backend only `Tree` reads (tracked files, never through a link) and only `Out` writes: `tests/test_packaging.py` fails on any other disk access.
 
+With Docker, `docker build -t agent-harness-server .` builds the Server image and `python scripts/server_image_smoke.py agent-harness-server` checks it: `/health`, an unprivileged daemon on loopback only, state in the volume, no secret in the image. It runs offline and removes the container and the volume it made. `tests/test_server_image.py` checks the `Dockerfile`, the `.dockerignore` allowlist and the smoke script without Docker.
+
 Stables, the browser client, lives in its own repository, dflippojr/stables (#334). After changing API routes or models, regenerate the document with `python tools/openapi/export_schema.py --write` and commit it; Stables pins a copy. This repository pins a Stables release in `tools/stables/pin.json` (see `tools/stables/README.md`): the tower deploys it, the Playwright journeys in `tools/ui-tests` run against it, and the management-parity tests read its API calls from `tools/stables/api-calls.json`. The Server's own tests serve a stand-in shell (`tests/fixtures/stables_shell`).
 
 # How to prove a change works
@@ -26,6 +28,7 @@ replace its own judge. Require both checks, `gate` and `gate-guard-target / gate
 | `review-linux` | On Linux with `pwsh` 7.5+ and Pester 5 on PATH, after installing `requirements.txt`, `requirements-repomap.txt` and `requirements-telemetry.txt`: `REVIEW_TESTS_REQUIRE_PWSH=1 python -m pytest tests/test_review_runner.py tests/test_runner_install.py -q -rs -p no:cacheprovider`. |
 | `unix-installers` | On Linux or macOS with bash, after installing `requirements.txt`, `requirements-repomap.txt` and `requirements-telemetry.txt`: `python -m pytest tests/test_unix_installers.py -q -rs -p no:cacheprovider`. |
 | `deploy-linux` | On Linux with `pwsh` 7 on PATH: `python -m pytest tests/test_deploy_ci_linux.py -q -p no:xdist --noconftest`. The module skips elsewhere. |
+| `server-image` | With Docker: `docker build -t agent-harness-server .`, then `python scripts/server_image_smoke.py agent-harness-server`. |
 | `sonar` | CI only (SonarCloud). On a PR, list its new issues at `https://sonarcloud.io/api/issues/search?componentKeys=dflippojr_agent-harness&pullRequest=<PR>&resolved=false`. |
 | `changes`, `gate` | CI only (`scripts/ci_gate.py`). A change touching only the files in `CI_SKIP_UNREAD_PATHS` skips the test jobs, and `gate` still passes. |
 

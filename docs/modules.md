@@ -133,6 +133,9 @@ the package, which is site-packages once installed: `tests/test_checkout_paths.p
 checkout only through `harness.config.CHECKOUT` (None when installed). `tests/test_packaging.py` installs the wheels in
 a new virtual environment and runs the Server from it, with the core alone and then with the add-ons.
 
+The Server image (`Dockerfile`, [INSTALL.md](INSTALL.md#run-the-server-in-docker)) installs the core and every module
+wheel. Presence still follows the profile, so a module stays absent until it is switched on.
+
 ## What a module contributes
 
 | `Module` field | What the core does with it |
