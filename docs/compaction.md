@@ -196,11 +196,30 @@ What the numbers say (2026-11-02):
   minimum on its own.
 
 The transcripts are synthetic and these are estimates: this does not measure
-prefill time or pass rate, and it doesn't model a saved state's round reset. The
-measurement on the real server is #898, with `python -m bakeoff.canary
---mask-batch-at 0.45`; the canary builds its own configuration, so
-`harness.yaml` doesn't reach it. 0.45 is the value to try first: it leaves room
-below `elide_at` for one large result. The default stays off until #898 decides.
+prefill time or pass rate, and it doesn't model a saved state's round reset.
+
+**On the real server (#898, 2026-11-19).** The six hard canary tasks, two
+attempts each, with `python -m bakeoff.canary --mask-batch-at 0.45` against
+today's per-turn masking (batching off), on the tower's production flags
+([`prefix-cache-study.md`](prefix-cache-study.md#batched-masking-on-the-canary-898)):
+
+- Prefill fell from 273 s to 140 s, reuse rose from 74% to 92%, and prefix
+  breaks from 18 to 1.
+- The pass rate didn't drop: every task passed or failed the same way in both
+  arms (10 of 12 with batching, 9 of 11 without; `sqlite_report` failed every
+  attempt, as it always has).
+- Wall time barely changed (742 s to 718 s), because decode dominates sessions
+  this small.
+- A more aggressive arm, a 32K window with batching, did no better: at that
+  window `log_correlation`'s large results cross the threshold on every turn.
+- No arm summarized, trimmed or elided, and no agent called `read_artifact` to
+  recover a masked result. That matches arXiv 2609.20804: cheap rules did all
+  the compaction, and recoverability went unused.
+
+**Recommendation: make `mask_batch_at: 0.45` the default** and keep the 64K
+window. Changing the default is a separate PR, made once the owner agrees, so it
+stays off until then. With batching on, a smaller llama-server
+`--checkpoint-min-step` adds nothing measurable (#856, same doc).
 
 ## The `mask` event
 
