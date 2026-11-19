@@ -9,7 +9,15 @@ from harness import compaction
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.tools import bound_shell_text
-from test_daemon import Script, call, events, make_cfg, wait_status
+from test_daemon import Script, call, events, wait_status
+from test_daemon import make_cfg as _make_cfg
+
+
+def make_cfg(tmp_path, **kwargs):
+    """Per-turn masking, the timing these tests pin; batching is the default since #1027 (test_mask_batch.py)."""
+    cfg = _make_cfg(tmp_path, **kwargs)
+    cfg.mask_batch_at = 0.0
+    return cfg
 
 BIG = "0123456789" * 6000  # 60,000 characters: over the 20,000-character read cap
 
