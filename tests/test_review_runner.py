@@ -2319,7 +2319,7 @@ def test_review_script_escapes_a_quoted_entity_reference_and_posts_a_complete_re
     keeps its marker and verdict, and the log gives the line, never the reference."""
     review = (
         "## Findings\n"
-        "- src/app.py:1: the template writes `&NoBreak;` and `&amp;nbsp;` where a plain space would do.\n"
+        "- src/app.py:1: the template writes &NoBreak; and &amp;nbsp; where a plain space would do.\n"
         "- src/app.py:1: a second synthetic finding with nothing unsafe in it.\n"
         "REVIEW_VERDICT: FINDINGS 2\nREVIEW_STATUS: COMPLETE"
     )
@@ -2332,7 +2332,7 @@ def test_review_script_escapes_a_quoted_entity_reference_and_posts_a_complete_re
     assert run.result.returncode == 0, run.text
     assert "escaped 2 entity references (line 2)" in run.text
     assert "NoBreak" not in run.text
-    assert "the template writes `(entity: NoBreak)` and `(entity: nbsp)` where a plain space would do." in run.body
+    assert "the template writes (entity: NoBreak) and (entity: nbsp) where a plain space would do." in run.body
     assert "a second synthetic finding with nothing unsafe in it." in run.body
     assert "&NoBreak;" not in run.body and "&amp;nbsp;" not in run.body
     assert f"<!-- agent-review: sha={HEAD_SHA} mode=full" in run.body
@@ -2340,6 +2340,36 @@ def test_review_script_escapes_a_quoted_entity_reference_and_posts_a_complete_re
     assert run.outputs["escaped_entities"] == "2"
     renders = [call for call in run.gh if call["argv"] == MARKDOWN_ARGV]
     assert renders and all("NoBreak;" not in call["stdin"] for call in renders)
+    assert not _pr_comment_calls(run)
+
+
+def test_review_script_posts_entity_references_and_link_targets_quoted_in_code_unchanged(tmp_path, fake_cli_launcher):
+    """#1003: a review of a Markdown parser (personal-website#434) quotes entity references and link targets in code
+    spans and fenced blocks, where GitHub shows them as written. They pass the scan unchanged, so the review is posted
+    complete, with its marker and verdict, and nothing is escaped or withheld."""
+    findings = (
+        "## Findings\n"
+        "- src/notes.js:1: `&ThisIsNotDefined;` and ``&amp;nbsp;`` reach the page as written.\n"
+        "- src/notes.js:2: ``[label](`code`)`` and ``[a`b](https://example.invalid/notes)`` keep their backticks.\n"
+        "- src/notes.js:3: CommonMark example 32 renders these as text:\n"
+        "\n"
+        "```markdown\n"
+        "&nbsp &x; &#; &ThisIsNotDefined; [label](`code`)\n"
+        "```\n"
+    )
+    review = findings + "REVIEW_VERDICT: FINDINGS 3\nREVIEW_STATUS: COMPLETE"
+    run = _run_review_script(
+        tmp_path,
+        fake_cli_launcher,
+        {"gh": [{"match": ["pr comment 7"], "stdout": ""}] + _gh_responses(), "claude": [{"match": ["-p"], "stdout": review}]},
+        NOTICE_ENV,
+    )
+    assert run.result.returncode == 0, run.text
+    assert findings.rstrip("\n") in run.body.replace("\r\n", "\n")
+    assert "(entity:" not in run.body and "escaped" not in run.text and "withheld" not in run.text
+    assert f"<!-- agent-review: sha={HEAD_SHA} mode=full" in run.body
+    assert run.outputs["verdict"] == "findings" and "withheld_lines" not in run.outputs
+    assert "escaped_entities" not in run.outputs or run.outputs["escaped_entities"] == "0"
     assert not _pr_comment_calls(run)
 
 
