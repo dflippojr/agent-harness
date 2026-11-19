@@ -26,15 +26,15 @@ from .backends.events import (Assistant, Delta, Error, Event, PermissionRequest,
 from .bus import EventBus
 from .checkpointer import Checkpointer
 from .checkpoints import MUTATING_TOOLS
-from .cli_backends import (CODEX_TOOLS_ONLY_ITEMS, ELICITATION, ClaudeSession, CliBackendError, CodexSession,
-                           CursorSession, PrintModeSession, cli_route_ready, forwarder_url)
+from .cli_backends import (ClaudeSession, CliBackendError, CodexSession, CursorSession, PrintModeSession,
+                           cli_route_ready, forwarder_url)
 from .config import (BUILTIN_BACKENDS, Config, ModelConfig, resolve_tool_output, clamp_tool_limit, module_effective,
                      sandbox_for_project)
 from .db import Database, finish_then_cancel
 from .mcp_server import MCP_BACKENDS, SPLIT_TOOLS, McpRelay, McpServer, McpTokens
 from .principal import OWNER_USER_ID, session_user_id
-from .policy import (ALLOW, ASK, DENY, MCP_SERVER, TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED,
-                     AppToolsPolicy, ChatPolicy, Decision, Policy, mcp_harness_tool)
+from .policy import (ALLOW, ASK, DENY, TOOLS_ONLY, TOOLS_ONLY_BACKENDS, TOOLS_ONLY_UNSUPPORTED, AppToolsPolicy,
+                     ChatPolicy, Decision, Policy, mcp_harness_tool)
 from .smart_approvals import SmartReviewer, persist_review, sanitized_record
 from .runner_contract import RemoteWorkspace, RunnerError, NoRunnerHub
 from .disk_watch import AccountLimit, DiskLimits
@@ -1636,11 +1636,9 @@ class Runner:
     async def _handle_cli_event(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession | PrintModeSession,
                                  event: dict, tool_names: dict[str, str], recovered: bool = False) -> bool:
         """Map one hosted-CLI record. Returns true when the run is complete."""
-        if isinstance(cli, CodexSession):
-            return await self._handle_codex_event(sid, cli, event, tool_names, recovered=recovered)
         if isinstance(cli, CursorSession):
             return await self._handle_cursor_event(sid, cli, event, tool_names)
-        for neutral in cli.translator.translate(event):  # print mode and Claude Code
+        for neutral in cli.translator.translate(event):  # print mode, Claude Code and Codex
             if await self._apply(sid, cli, neutral, recovered):
                 return True
         return False
@@ -1806,249 +1804,6 @@ class Runner:
             self._emit_assistant(sid, cli.last_answer)
         self._finish_cli_result(sid, combined)
         return True
-
-    @staticmethod
-    def _codex_window(slot: str, value: dict) -> tuple[int, str, dict]:
-        minutes = int(value.get("windowDurationMins") or 0)
-        if minutes == 300:
-            name = "five_hour"
-        elif minutes == 10080:
-            name = "seven_day"
-        else:
-            name = f"{minutes}_minute" if minutes else slot
-        window = {"utilization": float(value["usedPercent"]) / 100}
-        if value.get("resetsAt") is not None:
-            window["resetsAt"] = value["resetsAt"]
-        return minutes, name, window
-
-    @staticmethod
-    def _codex_rate_limits(snapshot: dict) -> dict:
-        """Translate app-server's percent windows into the shared 0..1 shape."""
-        windows: dict[str, dict] = {}
-        ranked: list[tuple[int, str, float, float]] = []
-        for slot in ("primary", "secondary"):
-            value = snapshot.get(slot)
-            if not isinstance(value, dict) or value.get("usedPercent") is None:
-                continue
-            minutes, name, window = Runner._codex_window(slot, value)
-            windows[name] = window
-            ranked.append((minutes, name, window["utilization"], float(value.get("resetsAt") or 0)))
-        longest = max(ranked, default=(0, "", 0.0, 0.0))
-        reached = snapshot.get("rateLimitReachedType") or ("spend_control" if snapshot.get("spendControlReached") else "")
-        result = {**snapshot, "status": "rejected" if reached else "allowed",
-                  "unifiedWindows": windows}
-        if longest[1]:
-            result.update({"rateLimitType": longest[1], "utilization": longest[2],
-                           "resetsAt": longest[3]})
-        return result
-
-    @staticmethod
-    def _codex_file_args(item: dict) -> dict:
-        changes = item.get("changes") if isinstance(item.get("changes"), list) else []
-        paths, patches = [], []
-        for change in changes:
-            if not isinstance(change, dict):
-                continue
-            raw = str(change.get("path") or "").replace("\\", "/")
-            path = raw if raw.startswith("/") else "/workspace/" + raw.lstrip("/")
-            if raw:
-                paths.append(path)
-            if change.get("diff"):
-                patches.append(str(change["diff"]))
-        return {"file_paths": paths, "patch": "\n".join(patches)}
-
-    async def _handle_codex_event(self, sid: str, cli: CodexSession, event: dict,
-                                  tool_names: dict[str, str], recovered: bool = False) -> bool:
-        """Map Codex app-server v2 JSON-RPC messages into harness events."""
-        method = str(event.get("method") or "")
-        params = event.get("params") if isinstance(event.get("params"), dict) else {}
-        if not method:  # response to turn/start (or another fire-and-continue request)
-            return False
-        if method in self._CODEX_SIMPLE:
-            getattr(self, self._CODEX_SIMPLE[method])(sid, cli, params, tool_names, method)
-        elif method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
-            await self._codex_request_approval(sid, cli, event, params, tool_names, recovered)
-        elif method == ELICITATION:
-            await self._codex_mcp_approval(sid, cli, event, params, recovered)
-        elif method == "turn/completed":
-            self._codex_turn_completed(sid, cli, params)
-            return True
-        elif method == "error":
-            error = params.get("error") or params
-            raise CliBackendError(f"Codex app-server error: {error}")
-        return False
-
-    _CODEX_SIMPLE = {
-        "thread/started": "_codex_thread_started", "turn/started": "_codex_turn_started",
-        "item/agentMessage/delta": "_codex_delta", "item/reasoning/summaryTextDelta": "_codex_delta",
-        "item/reasoning/textDelta": "_codex_delta", "item/started": "_codex_item_started",
-        "item/completed": "_codex_item_completed", "thread/tokenUsage/updated": "_codex_token_usage",
-        "account/rateLimits/updated": "_codex_rate_limits_event"}
-
-    def _codex_turn_started(self, _sid: str, cli: CodexSession, params: dict, _tool_names, _method) -> None:
-        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
-        cli.active_turn_id = str(turn.get("id") or cli.active_turn_id)
-
-    def _codex_delta(self, sid: str, _cli: CodexSession, params: dict, _tool_names, method: str) -> None:
-        text = params.get("delta")
-        if isinstance(text, str) and text:
-            kind = "content" if method == "item/agentMessage/delta" else "reasoning"
-            self.bus.ephemeral(sid, "delta", {"kind": kind, "text": text})
-
-    def _codex_token_usage(self, _sid: str, cli: CodexSession, params: dict, _tool_names, _method) -> None:
-        usage = params.get("tokenUsage")
-        if isinstance(usage, dict):
-            cli.token_usage = usage
-
-    def _codex_thread_started(self, sid: str, cli: CodexSession, params: dict, _tool_names=None, _method="") -> None:
-        thread = params.get("thread") if isinstance(params.get("thread"), dict) else {}
-        thread_id = str(thread.get("id") or "")
-        if thread_id:
-            self._bind_backend_session(sid, cli, thread_id)
-
-    def _codex_item_started(self, sid: str, cli: CodexSession, params: dict, tool_names: dict[str, str],
-                            _method: str = "") -> None:
-        item = params.get("item") if isinstance(params.get("item"), dict) else {}
-        item_id, kind = str(item.get("id") or ""), str(item.get("type") or "")
-        if item_id:
-            cli.items[item_id] = item
-        self._codex_tools_only_guard(cli, item)
-        if kind == "commandExecution":
-            name = "exec_command"
-            args = {"command": str(item.get("command") or ""), "cwd": str(item.get("cwd") or "")}
-        elif kind == "fileChange":
-            name, args = "apply_patch", self._codex_file_args(item)
-        elif kind == "mcpToolCall":
-            name, args = self._codex_mcp_tool(item)
-        else:
-            return
-        tool_names[item_id] = name
-        self._emit_assistant(sid, "", [self._tool_call_entry(item_id, name, args)])
-
-    def _codex_item_completed(self, sid: str, cli: CodexSession, params: dict, tool_names: dict[str, str],
-                              _method: str = "") -> None:
-        item = params.get("item") if isinstance(params.get("item"), dict) else {}
-        item_id, kind = str(item.get("id") or ""), str(item.get("type") or "")
-        if item_id:
-            cli.items[item_id] = item
-        if kind == "agentMessage":
-            cli.last_answer = str(item.get("text") or "")
-            self._emit_assistant(sid, cli.last_answer)
-            return
-        self._codex_tools_only_guard(cli, item)
-        if kind == "mcpToolCall":
-            name, _ = self._codex_mcp_tool(item)
-            tool_names[item_id] = name
-            ok = str(item.get("status") or "") == "completed"
-            result = item.get("result") if isinstance(item.get("result"), dict) else {}
-            error = item.get("error") if isinstance(item.get("error"), dict) else {}
-            output = self._cli_text(result.get("content")) if ok else str(error.get("message") or "")
-            self._record_cli_tool_result(sid, item_id, name, ok, output,
-                                         seconds=float(item.get("durationMs") or 0) / 1000)
-            return
-        if kind not in ("commandExecution", "fileChange"):
-            return
-        name = "exec_command" if kind == "commandExecution" else "apply_patch"
-        tool_names[item_id] = name
-        output = (str(item.get("aggregatedOutput") or "") if kind == "commandExecution"
-                  else "\n".join(str(c.get("diff") or "") for c in item.get("changes", [])
-                                 if isinstance(c, dict)))
-        self._record_cli_tool_result(sid, item_id, name, str(item.get("status") or "") == "completed", output,
-                                     seconds=float(item.get("durationMs") or 0) / 1000)
-
-    @staticmethod
-    def _codex_mcp_tool(item: dict) -> tuple[str, dict]:
-        """A Codex mcpToolCall item as the name the policy decides (mcp__<server>__<tool>, as Claude Code names it)
-        and its arguments."""
-        args = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
-        return f"mcp__{item.get('server') or ''}__{item.get('tool') or ''}", args
-
-    @staticmethod
-    def _codex_tools_only_guard(cli: CodexSession, item: dict) -> None:
-        """An App-tools-only Codex session starts with every built-in tool off. Should one run anyway (a Codex
-        change the pinned-version notes missed), stop the run rather than let it go on."""
-        if not (cli.tools_only or cli.split):
-            return
-        kind = str(item.get("type") or "")
-        if kind not in CODEX_TOOLS_ONLY_ITEMS or (kind == "mcpToolCall" and item.get("server") != MCP_SERVER):
-            mode = "an App-tools-only" if cli.tools_only else "a split-mode"
-            raise CliBackendError(f"Codex used a built-in tool ({kind}) in {mode} session; stopped")
-
-    async def _codex_request_approval(self, sid: str, cli: CodexSession, event: dict, params: dict,
-                                      tool_names: dict[str, str], recovered: bool) -> None:
-        item_id = str(params.get("itemId") or event.get("id") or "")
-        item = cli.items.get(item_id, {})
-        if event.get("method") == "item/commandExecution/requestApproval":
-            name = "exec_command"
-            command = params.get("command") if params.get("command") is not None else item.get("command")
-            args = {"command": str(command or ""), "cwd": str(params.get("cwd") or item.get("cwd") or "")}
-            if params.get("networkApprovalContext"):
-                args["network"] = True
-        else:
-            name, args = "apply_patch", self._codex_file_args(item)
-            if params.get("grantRoot") and not args["file_paths"]:
-                args["file_paths"] = [str(params["grantRoot"])]
-        tool_names[item_id] = name
-        request = {"tool_name": name, "input": args, "tool_use_id": item_id,
-                   "description": str(params.get("reason") or params.get("command") or "")}
-        await self._authorize_cli(sid, cli, event.get("id"), request, recovered=recovered)
-
-    async def _codex_mcp_approval(self, sid: str, cli: CodexSession, event: dict, params: dict,
-                                  recovered: bool) -> None:
-        """Codex asks before every harness MCP call (default_tools_approval_mode "prompt") with an MCP elicitation
-        that follows the call's mcpToolCall item/started. The call is decided like Claude Code's can_use_tool
-        request; an allowed call leaves the one-use grant the endpoint matches on the item id (Codex's tools/call
-        _meta.callId). A call to any other server goes the same way and the policy denies it. Any other elicitation
-        is declined: nobody is there to fill in a server's form."""
-        meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
-        item = None
-        if meta.get("codex_approval_kind") == "mcp_tool_call":
-            server = params.get("serverName")
-            wanted = meta.get("tool_params") if isinstance(meta.get("tool_params"), dict) else {}
-            # The newest started, unasked call to this server with these arguments: Codex asks right after it starts
-            # the item, and never twice for one call.
-            item = next((i for i in reversed(list(cli.items.values()))
-                         if i.get("type") == "mcpToolCall" and i.get("server") == server
-                         and i.get("status") == "inProgress" and i.get("id") not in cli.asked
-                         and (i.get("arguments") if isinstance(i.get("arguments"), dict) else {}) == wanted), None)
-        if item is None:
-            await cli.respond_permission(event.get("id"), "deny", {})
-            return
-        cli.asked.add(item.get("id"))
-        name, args = self._codex_mcp_tool(item)
-        request = {"tool_name": name, "input": args, "tool_use_id": str(item.get("id") or ""),
-                   "description": str(params.get("message") or "")}
-        await self._authorize_cli(sid, cli, event.get("id"), request, recovered=recovered)
-
-    def _codex_rate_limits_event(self, sid: str, _cli, params: dict, _tool_names=None, _method="") -> None:
-        snapshot = params.get("rateLimits") if isinstance(params.get("rateLimits"), dict) else {}
-        limits = self._codex_rate_limits(snapshot)
-        s = self.db.get_session(sid)
-        self.db.patch_run(sid, rate_limits=limits)
-        self.db.set_backend_usage(s["backend"], limits)
-        self.bus.emit(sid, "rate_limit", limits)
-        stop = float(self.cfg.backends[s["backend"]].stop_at_utilization or 0)
-        if limits.get("status") == "rejected" or (stop and float(limits.get("utilization") or 0) >= stop):
-            raise CliLimitError(float(limits.get("resetsAt") or 0))
-
-    def _codex_turn_completed(self, sid: str, cli: CodexSession, params: dict) -> None:
-        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
-        status = str(turn.get("status") or "")
-        cli.active_turn_id = ""
-        error = turn.get("error")
-        error_text = json.dumps(error, ensure_ascii=False) if error else ""
-        if status == "failed" and any(x in error_text.lower() for x in ("ratelimit", "rate_limit", "usage limit")):
-            latest = self.db.get_session(sid)["run"].get("rate_limits") or {}
-            raise CliLimitError(float(latest.get("resetsAt") or 0))
-        usage = cli.token_usage.get("last") if isinstance(cli.token_usage.get("last"), dict) else {}
-        result = {"subtype": "success" if status == "completed" else status or "failed",
-                  "is_error": status != "completed", "result": cli.last_answer or error_text,
-                  "total_cost_usd": 0, "num_turns": 1, "usage": {
-                      "input_tokens": int(usage.get("inputTokens") or 0),
-                      "output_tokens": int(usage.get("outputTokens") or 0),
-                      "cached_input_tokens": int(usage.get("cachedInputTokens") or 0),
-                      "reasoning_output_tokens": int(usage.get("reasoningOutputTokens") or 0)}}
-        self._finish_cli_result(sid, result)
 
     async def _authorize_cli(self, sid: str, cli: ClaudeSession | CodexSession, request_id, request: dict,
                               recovered: bool = False) -> None:

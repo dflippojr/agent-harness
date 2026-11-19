@@ -20,6 +20,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from . import claude_token, cli_domains, credential_sources, end_users, member_keys  # noqa: F401 - these register their sources
 from .backends.claude import ClaudeTranslator
+from .backends.codex import APPROVALS, CODEX_TOOLS_ONLY_ITEMS, ELICITATION, CodexTranslator  # noqa: F401 - re-exported
+from .backends.events import obj
 from .backends.print_mode import PrintModeTranslator
 from .config import BackendConfig, SandboxConfig
 from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides, mcp_config
@@ -333,15 +335,10 @@ CODEX_TOOLS_ONLY_OVERRIDES = (
         "tool_suggest", "image_generation", "goals", "sleep_tool", "memories", "browser_use", "computer_use",
         "skill_mcp_dependency_install")),
 )
-# Thread items an App-tools-only Codex session may produce. Anything else means a built-in tool ran: the run stops.
 # Split mode (#427) turns off the same tools, except the plan tool, which touches no environment. Lost in split mode:
 # view_image, apply_patch (edit_file replaces it), Codex's own multi-agent and web_search (web_search comes from the
-# harness server).
+# harness server). The thread items such a session may produce are CODEX_TOOLS_ONLY_ITEMS (harness/backends/codex.py).
 CODEX_SPLIT_OVERRIDES = tuple(o for o in CODEX_TOOLS_ONLY_OVERRIDES if o != "tools.update_plan.enabled=false")
-CODEX_TOOLS_ONLY_ITEMS = ("userMessage", "hookPrompt", "agentMessage", "plan", "reasoning", "contextCompaction",
-                          "mcpToolCall")
-# Answers Codex takes for an MCP tool call approval (an MCP elicitation), as opposed to command and file approvals.
-ELICITATION = "mcpServer/elicitation/request"
 
 
 class CodexSession:
@@ -380,12 +377,9 @@ class CodexSession:
         self._next_request_id = 1
         self._pending: list[dict] = []
         self._approval_methods: dict[str, str] = {}
-        self.items: dict[str, dict] = {}
-        self.asked: set = set()  # mcpToolCall item ids an MCP approval was already asked for
-        self.last_answer = ""
-        self.token_usage: dict = {}
         self.active_turn_id = ""
         self._turn_requests: set[int] = set()
+        self.translator = CodexTranslator("tools_only" if self.tools_only else "split" if self.split else "")
 
     @property
     def no_environment(self) -> bool:
@@ -583,14 +577,18 @@ class CodexSession:
         event = self._pending.pop(0) if self._pending else await self._receive_raw(timeout)
         if event and event.get("error") and event.get("id") is not None:
             raise CliBackendError(f"Codex app-server request failed: {event['error']}")
-        if event and event.get("id") in self._turn_requests:
+        if not event:
+            return event
+        method = event.get("method")
+        if event.get("id") in self._turn_requests:
             self._turn_requests.discard(event["id"])
-            result = event.get("result") if isinstance(event.get("result"), dict) else {}
-            turn = result.get("turn") if isinstance(result.get("turn"), dict) else {}
-            self.active_turn_id = str(turn.get("id") or self.active_turn_id)
-        if event and event.get("method") in (
-                "item/commandExecution/requestApproval", "item/fileChange/requestApproval", ELICITATION):
-            self._approval_methods[str(event.get("id"))] = str(event["method"])
+            self.active_turn_id = str(obj(obj(event, "result"), "turn").get("id") or self.active_turn_id)
+        if method == "turn/started":  # the turn a message sent now steers
+            self.active_turn_id = str(obj(obj(event, "params"), "turn").get("id") or self.active_turn_id)
+        elif method == "turn/completed":  # a message sent now starts a new turn
+            self.active_turn_id = ""
+        elif method in APPROVALS:
+            self._approval_methods[str(event.get("id"))] = str(method)
         return event
 
     async def respond_permission(self, request_id, behavior: str, _args: dict, _message: str = "") -> None:

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from harness.backends.claude import ClaudeTranslator
+from harness.backends.codex import ELICITATION, CodexTranslator
 from harness.backends.events import (Assistant, Delta, Error, PermissionRequest, RateLimits, Result, Session, ToolCall,
                                      ToolResult)
 from harness.backends.print_mode import PrintModeTranslator
@@ -109,3 +110,79 @@ def test_claude_skips_what_is_not_a_session_event():
     assert translator.translate({"type": "system", "subtype": "init"}) == []  # no session id yet
     assert translator.translate({"type": "user", "message": {"content": "a plain user message"}}) == []
     assert translator.translate("not a record") == []
+
+
+# --- Codex 0.154.0: app-server JSON-RPC (assembled from the protocol notes; see the fixture's README) ---------------
+
+CODEX = FIXTURES / "codex_0.154.0"
+
+
+def test_codex_replays_a_turn_with_each_kind_of_approval_tool_errors_and_rate_limits():
+    turn = records(CODEX / "turn.jsonl")
+    thread = turn[0]["params"]["thread"]["id"]
+    cmd, patch, mcp = (turn[i]["params"]["item"] for i in (4, 7, 10))
+    run = {"command": cmd["command"], "cwd": "/workspace"}
+    edit = {"file_paths": ["/workspace/src/settings.py"], "patch": patch["changes"][0]["diff"]}
+    search = {"query": "pytest 9 changelog"}
+    answer = turn[15]["params"]["item"]["text"]
+    windows = {"five_hour": {"utilization": 0.34, "resetsAt": 1794819600},
+               "seven_day": {"utilization": 0.61, "resetsAt": 1795046400}}
+    limits = {**turn[13]["params"]["rateLimits"], "status": "allowed", "unifiedWindows": windows,
+              "rateLimitType": "seven_day", "utilization": 0.61, "resetsAt": 1795046400.0}
+    assert replay(CodexTranslator(), turn) == [
+        Session(thread),
+        # the response to the harness's turn/start, and turn/started, are the transport's: no events
+        Delta("reasoning", "Running the tests"),
+        Assistant(tool_calls=(ToolCall(cmd["id"], "exec_command", run),)),
+        PermissionRequest(0, "exec_command", run, cmd["id"], "Run the test suite"),
+        ToolResult(cmd["id"], "exec_command", True, "...\n3 passed in 0.42s\n", 1.82),
+        Assistant(tool_calls=(ToolCall(patch["id"], "apply_patch", edit),)),
+        PermissionRequest(1, "apply_patch", edit, patch["id"], "Raise the retry count"),
+        ToolResult(patch["id"], "apply_patch", False, edit["patch"]),  # declined
+        Assistant(tool_calls=(ToolCall(mcp["id"], "mcp__harness__web_search", search),)),
+        PermissionRequest(2, "mcp__harness__web_search", search, mcp["id"],
+                          'Allow the harness MCP server to run tool "web_search"?'),
+        ToolResult(mcp["id"], "mcp__harness__web_search", False, "search backend unavailable", 0.24),
+        RateLimits(limits, limit_reached=False, resets_at=1795046400.0),  # the longest window decides
+        Delta("content", "The 3 tests pass."),
+        Assistant(answer),
+        Result(answer=answer, turns=1, subtype="success", usage={
+            "input_tokens": 9050, "output_tokens": 260, "cached_input_tokens": 8192, "reasoning_output_tokens": 96}),
+    ]
+
+
+def test_codex_reached_limit_and_usage_limit_failure_reach_the_limit():
+    limit = records(CODEX / "limit.jsonl")
+    events = replay(CodexTranslator(), limit)
+    assert events[0] == Session(limit[0]["params"]["thread"]["id"])
+    assert isinstance(events[1], RateLimits) and events[1].limit_reached and events[1].info["status"] == "rejected"
+    error = json.dumps(limit[3]["params"]["turn"]["error"], ensure_ascii=False)
+    assert events[2] == Result(answer=error, turns=1, is_error=True, subtype="failed", limit_reached=True, usage={
+        "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_output_tokens": 0})
+
+
+def test_codex_without_an_environment_stops_on_a_built_in_tool():
+    command = {"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "c1", "command": "ls"}}}
+    assert CodexTranslator().translate(command) == [
+        Assistant(tool_calls=(ToolCall("c1", "exec_command", {"command": "ls", "cwd": ""}),))]
+    assert CodexTranslator("tools_only").translate(command) == [
+        Error("Codex used a built-in tool (commandExecution) in an App-tools-only session; stopped")]
+    other_server = {"method": "item/completed", "params": {"item": {
+        "type": "mcpToolCall", "id": "c2", "server": "github", "tool": "list_issues", "status": "completed"}}}
+    assert CodexTranslator("split").translate(other_server) == [
+        Error("Codex used a built-in tool (mcpToolCall) in a split-mode session; stopped")]
+
+
+def test_codex_elicitation_binds_once_and_a_form_is_not_decidable():
+    translator = CodexTranslator()
+    started = {"method": "item/started", "params": {"item": {
+        "type": "mcpToolCall", "id": "c1", "server": "harness", "tool": "web_search", "status": "inProgress",
+        "arguments": {"query": "q"}}}}
+    ask = {"id": 5, "method": ELICITATION, "params": {"serverName": "harness", "message": "Allow?", "_meta": {
+        "codex_approval_kind": "mcp_tool_call", "tool_params": {"query": "q"}}}}
+    translator.translate(started)
+    assert translator.translate(ask) == [
+        PermissionRequest(5, "mcp__harness__web_search", {"query": "q"}, "c1", "Allow?")]
+    assert translator.translate({**ask, "id": 6}) == [PermissionRequest(6, "", {}, decidable=False)]  # asked already
+    form = {"id": 7, "method": ELICITATION, "params": {"serverName": "harness", "mode": "form", "_meta": {}}}
+    assert translator.translate(form) == [PermissionRequest(7, "", {}, decidable=False)]
