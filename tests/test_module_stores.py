@@ -28,9 +28,6 @@ MODULE_TABLES = (
 _SQL_NAMES = re.compile(r'\b(?:FROM|INTO|UPDATE|JOIN|TABLE)\s+"?(%s)\b' % "|".join(MODULE_TABLES), re.IGNORECASE)
 # The frozen baseline the core creates a database from (#334 keeps module tables in it): schema, not queries.
 _BASELINE = frozenset({"SCHEMA", "APP_SETTINGS_SCHEMA"})
-# The one sanctioned read: `/keys` and its listing stay in the core (docs/modules.md, Endpoint), and each key's
-# `requests` count is that listing's count of the key's logged requests (#669). Named so it cannot spread.
-_EXEMPT = {("_API_KEY_LISTING", "endpoint_requests")}
 
 
 def _strings(fn: ast.AST) -> list[str]:
@@ -52,8 +49,7 @@ def module_table_queries(source: str, class_name: str, constants: dict) -> dict[
         for name in {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}:
             value = constants.get(name)
             if isinstance(value, str) and name not in _BASELINE:
-                tables |= {t for t in (m.group(1).lower() for m in _SQL_NAMES.finditer(value))
-                           if (name, t) not in _EXEMPT}
+                tables |= {m.group(1).lower() for m in _SQL_NAMES.finditer(value)}
         if tables:
             found[fn.name] = tables
     return found
@@ -86,12 +82,6 @@ class Database:
 def test_database_defines_no_method_that_queries_a_module_table():
     source = Path(core_db.__file__).read_text(encoding="utf-8")
     assert module_table_queries(source, "Database", vars(core_db)) == {}
-
-
-def test_the_key_listing_exemption_is_still_needed():
-    """A stale exemption is removed, not kept: the listing still counts the key's logged requests."""
-    for constant, table in _EXEMPT:
-        assert re.search(rf"\b{table}\b", getattr(core_db, constant))
 
 
 def _store_classes():

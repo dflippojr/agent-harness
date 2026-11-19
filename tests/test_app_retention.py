@@ -444,10 +444,11 @@ def test_the_retention_route_and_an_undone_revoke_read_one_key_not_the_whole_lis
         monkeypatch.setattr(Database, "list_api_keys", no_listing)
         restored = client.post(f"/api/admin/v1/apps/{a_id}/restore")
         monkeypatch.undo()
-        # The restore answers with the main store's row, as it always has: no App store metadata.
+        # The restore answers with the main store's row and its request count, as it always has: no App store
+        # metadata.
         main_row = {k["id"]: k for k in m.db.main.list_api_keys()}[a_id]
         assert restored.status_code == 200
-        assert {k: v for k, v in restored.json().items() if k != "key"} == main_row
+        assert {k: v for k, v in restored.json().items() if k != "key"} == {**main_row, "requests": 0}
 
 
 def test_the_apps_own_settings_survive_an_undone_revoke_and_go_with_the_erasure(tmp_path):

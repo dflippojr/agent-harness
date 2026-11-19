@@ -207,6 +207,7 @@ class Manager:
         # Add-on modules (harness/modules.py): built here so a module's backup participant joins Maintenance.
         from .modules import ModuleHost
         self.modules = ModuleHost(self)
+        self.db.key_request_counts = self.modules.key_request_counts  # the key listing's `requests` (#992)
         self.maintenance = Maintenance(cfg, self.db, self.runner, image_archive=self.modules.backup_participant())
         self.maintenance.operations = self.operations
         self.maintenance.app_sweep = self.sweep_app_data

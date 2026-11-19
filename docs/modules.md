@@ -179,6 +179,7 @@ and notifications enabled/queued counts. No module imports another module; `_PUB
 | `features()`, `app_root()` | `/api/v1` `features` entries and extra top-level keys (`image_modes`). |
 | `gpu_holders()` | GPU-holder names for machine diagnostics; the core aggregates all present runtimes. |
 | `metrics(out, db)` | Prometheus lines on `/metrics`. |
+| `key_request_counts(key_ids)` | `{key id: logged requests}` for the `/keys` listing's `requests`; `ModuleHost` sums the answers and `SessionStores` adds them to each listed key (0 for none). The endpoint module answers it. |
 | `scheduled_job(jid)` | The scheduled job `jid` (`name`, `notify` and the rest), from the module that schedules jobs; `ModuleHost.scheduled_job` asks each runtime. Notifications names a finished run's job through it, so it never imports the jobs module; with jobs absent the answer is None and the notification names the session. |
 
 `manager.<module name>` returns the runtime's `service` (None while switched off or absent), for code written before
@@ -240,10 +241,11 @@ redeem mints the owner key with `create_api_key`). A store is cheap to build, so
 | images | `ImageStore` | `images` |
 
 The tables themselves stay in the core's frozen baseline and migrations, so existing installs and backups keep their
-schema while a module is absent (#334). Two reads stay in the core because they serve core features:
-`Database.job_sessions` reads a scheduled job's sessions (session rows, on Web's store), and the `/keys` listing counts
-each key's logged requests (#669). `tests/test_module_stores.py` fails on any other `Database` method whose SQL names a
-module table, and on any store that forwards attributes to the Database.
+schema while a module is absent (#334). `Database.job_sessions` stays in the core: it reads a scheduled job's sessions,
+which are session rows on Web's store, not job rows. The `/keys` listing's per-key `requests` count is the endpoint
+module's (`ModuleRuntime.key_request_counts`, filled in by `SessionStores` on the list, the one-key read and an undone
+revoke); it is 0 while the module is absent. `tests/test_module_stores.py` fails on any `Database` method whose SQL
+names a module table, and on any store that forwards attributes to the Database.
 
 ## What stage (b) leaves in the core
 
@@ -305,9 +307,9 @@ These are names, not imports, and move with the config and storage split in stag
   through `ToolGate.mutating`, and the ComfyUI holder through `ModuleRuntime.gpu_holders`. Resources aggregates
   holders, and endpoint aggregates `features()`, without naming images. An absent package contributes none of them;
   a present disabled package still refuses member access and reports false image features.
-- Endpoint: `EndpointConfig`, the `endpoint:` YAML section and profile switch, the shared `InferenceGate`, the
-  `endpoint_requests` table and the `/keys` listing's per-key request count remain core names; the request log is
-  written by the module's `EndpointRequestStore` (#992). `/keys`, its admin API and CLI
+- Endpoint: `EndpointConfig`, the `endpoint:` YAML section and profile switch, the shared `InferenceGate` and the
+  `endpoint_requests` table's schema remain core names. The module's `EndpointRequestStore` writes the request log and
+  counts each key's requests for the `/keys` listing (#992); while the module is absent that count is 0. `/keys`, its admin API and CLI
   stay in core because Apps and owner credentials need them without inference. All URLs, auth, response shapes,
   configuration keys and CLI commands are unchanged; no deprecation is needed. The add-on owns the `/v1` inference
   and discovery routes, embeddings proxy, request logging, `endpoint.*` settings, queue initialization and

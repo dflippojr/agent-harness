@@ -487,12 +487,12 @@ READ_CONNECTIONS = 4
 APP_ERASE_GRACE_SECONDS = 7 * 86400
 APP_LIMITS_META = "app_limits:"           # meta key prefix: an App's owner-set session caps (#524)
 APP_LIMIT_KEYS = ("max_running", "max_queued")
-# An API key as `list_api_keys` and `get_api_key_listing` show it: no hash, and `requests` counts its logged requests.
+# An API key as `list_api_keys` and `get_api_key_listing` show it: no hash. `SessionStores` adds `requests`, the count
+# of its logged requests, from the endpoint module (#992; 0 while that module is absent).
 _API_KEY_LISTING = (
     "SELECT k.id, k.name, k.prefix, k.kind, k.role, k.scopes, k.origins, "
     "COALESCE(k.catalog_app_id, '') AS catalog_app_id, k.created_at, k.last_used_at, k.revoked_at, "
-    "k.retention_days, k.erase_after, k.erased_at, "
-    "(SELECT COUNT(*) FROM endpoint_requests r WHERE r.key_id = k.id) AS requests "
+    "k.retention_days, k.erase_after, k.erased_at "
     "FROM api_keys k WHERE k.kind != 'web'")
 
 
@@ -1939,8 +1939,7 @@ class Database:
 
     @_reads
     def get_api_key_listing(self, kid: str) -> dict | None:
-        """Key `kid` as `list_api_keys` lists it, read alone (#669): the same fields and request count, without
-        listing every key. None when `kid` is not a listed key (a missing or Stables')."""
+        """Key `kid` as `list_api_keys` lists it, read alone (#669): the same fields, without listing every key. None when `kid` is not a listed key (a missing or Stables')."""
         with self.lock:
             row = self.conn.execute(_API_KEY_LISTING + " AND k.id = ?", (kid,)).fetchone()
         return _row(row)
