@@ -195,7 +195,7 @@ class BackendConfig:
     kind: str = ""
     command: list[str] = field(default_factory=list)  # argv after the image; placeholders {model} {session_id}
     resume_args: list[str] = field(default_factory=list)  # added from the second turn on, before `-- <prompt>`
-    parser: str = ""      # a parser registered in cli_backends.PRINT_MODE_PARSERS
+    parser: str = ""      # a parser registered in backends.print_mode.PRINT_MODE_PARSERS
     card_note: str = ""   # Settings → Backends text
 
     @property
@@ -220,7 +220,7 @@ def _validate_cli_backend(name: str, spec: dict, backend: BackendConfig) -> None
         raise ValueError(f"{where}: kind: cli needs image, network and parser")
     if not spec.get("volume"):  # the default is Claude's state volume; a CLI must never mount another backend's
         raise ValueError(f"{where}: kind: cli needs its own volume, such as harness-state-{name}")
-    from .cli_backends import PRINT_MODE_PARSERS
+    from .backends.print_mode import PRINT_MODE_PARSERS
     if backend.parser not in PRINT_MODE_PARSERS:
         raise ValueError(f"{where}.parser must be one of {', '.join(PRINT_MODE_PARSERS)}")
     command = [str(item) for item in backend.command]

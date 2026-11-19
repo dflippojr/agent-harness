@@ -143,7 +143,9 @@ agent-harness/
 │   ├── scheduler.py       single-slot GPU queue that keeps the prompt cache warm
 │   ├── policy.py          deterministic allow / ask / deny rules
 │   ├── sandbox.py         per-session Docker containers, internal network only
-│   ├── cli_backends.py    Claude Code / Codex / Cursor CLIs as session backends
+│   ├── backends/          hosted CLIs (Claude Code, Codex, Cursor, print mode): transport + pure translator each
+│   ├── hosted_runs.py     a hosted session's run and the one applier of its neutral events
+│   ├── cli_backends.py    what the hosted CLI backends share: container conventions, domains, the local-model route
 │   ├── compaction.py      context compaction before each model call
 │   ├── state.py           structured per-round agent state + reset_round
 │   ├── grounding.py       checks that quoted text in answers was actually read

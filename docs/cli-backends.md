@@ -1,8 +1,9 @@
 # Config-declared CLI backends (#168)
 
 A headless print-mode agent CLI can be a session backend through a `backends:` entry with `kind: cli` and a
-parser registered in `harness/cli_backends.py` (`PRINT_MODE_PARSERS`), with no session class of its own. The first one
-is OpenCode on the local llama-server. Claude Code, Codex and Cursor stay built-in backends (`kind` empty).
+parser registered in `harness/backends/print_mode.py` (`PRINT_MODE_PARSERS`), with no session class of its own. The
+first one is OpenCode on the local llama-server. Claude Code, Codex and Cursor stay built-in backends (`kind` empty);
+see "How a hosted backend is built" below for what they share with it.
 
 ## Config
 
@@ -88,9 +89,39 @@ weaker than the hosted backends. Usage is not reported." and "No login needed (l
 
 ## Adding another CLI
 
-Add a parser class to `PRINT_MODE_PARSERS` with `parse(line) -> list[event]` and an `answer` property, plus
-`config_target`, `config(model, base_url)` and `env` if the CLI takes a generated config. Record fixtures from the
-real CLI for its tests (`tests/fixtures/`). Gemini CLI is #214.
+Add a parser class to `PRINT_MODE_PARSERS` (`harness/backends/print_mode.py`; OpenCode's is
+`harness/backends/opencode.py`) with `parse(line) -> list[event]` and an `answer` property, plus `config_target`,
+`config(model, base_url)` and `env` if the CLI takes a generated config. `PrintModeTranslator` turns its events into
+the neutral ones, so nothing in the Runner changes. Record fixtures from the real CLI for its tests
+(`tests/fixtures/`, replayed in `tests/test_cli_translators.py`). Gemini CLI is #214.
+
+## How a hosted backend is built (#991)
+
+Each hosted backend is an adapter in `harness/backends/<vendor>.py`: a **transport** (the CLI's process and its wire
+protocol: `ClaudeSession`, `CodexSession`, `CursorSession`, `PrintModeSession`) and a pure **translator** from the
+vendor's records to a small set of neutral events (`harness/backends/events.py`):
+
+| Event | What it carries |
+| --- | --- |
+| `Session(id)` | the CLI's own session, thread or chat id, kept to resume after a restart |
+| `Delta(kind, text)` | streamed text or reasoning |
+| `Assistant(content, tool_calls)` | an assistant message and the tool calls it makes |
+| `ToolResult(id, name, ok, output, seconds)` | a tool call's outcome |
+| `RateLimits(info, limit_reached, resets_at)` | the provider's usage windows in the shared 0..1 shape |
+| `PermissionRequest(request_id, tool, args, call_id)` | the CLI asks before a tool call |
+| `Result(answer, usage, turns, cost, is_error)` | the turn's end; `limit_reached` when it ended on a usage limit |
+| `Error(message)` | a failure that ends the run |
+
+A translator keeps only its own session's parse state (tool names by call id, Codex's items, Cursor's aggregate
+answer and its usage over the turns) and touches no database, bus or Runner. The Runner applies the events in one
+place, `Runner._apply` (`harness/hosted_runs.py`, which `Runner` mixes in): it records them, asks the approval policy
+and answers through the transport's `respond_permission`, and stops the run on a limit. It writes the session's `run`
+only through `Database.patch_run`, which merges fields inside one writer transaction.
+
+`tests/test_cli_translators.py` replays a transcript per backend into the expected events, with no Manager, database
+or Docker: OpenCode's fixtures are recorded from the real CLI; the Claude Code, Codex and Cursor ones are assembled from
+the verified protocol notes (each fixture folder's README says how), so a format change in a new CLI version shows up
+as a fixture diff. The transports' old names are still importable from `harness/cli_backends.py` for one release.
 
 ## Tool profiles for hosted backends (#638)
 

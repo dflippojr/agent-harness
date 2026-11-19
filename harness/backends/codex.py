@@ -17,8 +17,20 @@ Responses to the harness's own requests carry no method and are the transport's 
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import subprocess
+import threading
+from pathlib import Path
+from typing import Callable
 
+from .. import cli_domains
+from .. import cli_backends as shared  # run_cmd and ready_domain are looked up there at call time
+from ..cli_backends import (NO_PROXY, NODE_USE_ENV_PROXY, WORKSPACE, CliBackendError, session_key, split_note,
+                            workspace_args)
+from ..config import BackendConfig, SandboxConfig
+from ..mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides
 from ..policy import MCP_SERVER
 from .events import (Assistant, Delta, Error, Event, PermissionRequest, RateLimits, Result, Session, ToolCall,
                      ToolResult, obj, text_of)
@@ -244,3 +256,300 @@ class CodexTranslator:
                    "output_tokens": int(usage.get("outputTokens") or 0),
                    "cached_input_tokens": int(usage.get("cachedInputTokens") or 0),
                    "reasoning_output_tokens": int(usage.get("reasoningOutputTokens") or 0)})
+
+
+# Every Codex 0.154.0 built-in tool an App-tools-only session (#329) turns off, besides the ones that need an
+# environment (exec_command, write_stdin, apply_patch, view_image, request_permissions), which `environments: []`
+# removes. Source notes in docs/phase8a-design.md "Harness tools over MCP"; recheck them when the Codex pin moves.
+CODEX_TOOLS_ONLY_OVERRIDES = (
+    'web_search="disabled"',                          # hosted web_search and the standalone web.run
+    "tools.update_plan.enabled=false",
+    "tools.experimental_request_user_input.enabled=false",
+    *(f"features.{name}=false" for name in (
+        "shell_tool", "unified_exec", "view_image", "code_mode", "multi_agent", "apps", "plugins",
+        "tool_suggest", "image_generation", "goals", "sleep_tool", "memories", "browser_use", "computer_use",
+        "skill_mcp_dependency_install")),
+)
+# Split mode (#427) turns off the same tools, except the plan tool, which touches no environment. Lost in split mode:
+# view_image, apply_patch (edit_file replaces it), Codex's own multi-agent and web_search (web_search comes from the
+# harness server). The thread items such a session may produce are CODEX_TOOLS_ONLY_ITEMS (harness/backends/codex.py).
+CODEX_SPLIT_OVERRIDES = tuple(o for o in CODEX_TOOLS_ONLY_OVERRIDES if o != "tools.update_plan.enabled=false")
+
+
+class CodexSession:
+    """One long-lived ``codex app-server`` JSON-RPC process."""
+
+    def __init__(self, *, session_id: str, workspace: Path, backend: BackendConfig,
+                 sandbox: SandboxConfig, system_prompt: str, model: str = "", backend_session_id: str = "",
+                 api_key: str = "", popen: Callable = subprocess.Popen, command: list[str] | None = None,
+                 mcp: McpRelay | None = None, mcp_token: str = "", tools_only: bool = False, app_id: str = "", end_user: str = "", split: bool = False,
+                 tool_profile: str = "default"):
+        self.session_id = session_id
+        self.tool_profile = tool_profile  # "bash-only" (#638): split mode only, where the MCP server serves run_shell
+        self.app_id = app_id
+        self.end_user = end_user
+        self.workspace = workspace.resolve()
+        # With MCP Codex shares the relay's network namespace, as Claude Code does (#373). An App-tools-only session
+        # starts with no environment and every other built-in tool off, so only the harness server's tools remain.
+        self.mcp = mcp
+        self.mcp_token = mcp_token
+        self.tools_only = tools_only
+        self.split = split and not tools_only  # split mode (#427), as for Claude Code
+        self.backend = backend
+        self.sandbox = sandbox
+        self.system_prompt = system_prompt
+        self.model = model or backend.model
+        self.backend_session_id = backend_session_id
+        self.api_key = session_key(end_user, api_key)
+        self.container = f"harness-{session_id}-codex"
+        self._popen = popen
+        self._command_override = command
+        self.process: subprocess.Popen | None = None
+        self._events: asyncio.Queue[str | None] = asyncio.Queue()
+        self._stderr: list[str] = []
+        self._write_lock = threading.Lock()
+        self._threads: list[threading.Thread] = []
+        self._next_request_id = 1
+        self._pending: list[dict] = []
+        self._approval_methods: dict[str, str] = {}
+        self.active_turn_id = ""
+        self._turn_requests: set[int] = set()
+        self.translator = CodexTranslator("tools_only" if self.tools_only else "split" if self.split else "")
+
+    @property
+    def no_environment(self) -> bool:
+        """Whether Codex starts with no environment, and so no shell, apply_patch or view_image."""
+        return self.tools_only or self.split
+
+    def command(self) -> list[str]:
+        if self._command_override is not None:
+            return list(self._command_override)
+        args = [
+            "docker", "run", "--rm", "-i", "--name", self.container,
+            "--label", f"agent-harness.session={self.session_id}",
+            "--network", f"container:{self.mcp.container}" if self.mcp else self.backend.network,
+            "-e", f"HTTPS_PROXY={self.backend.proxy}",
+            "-e", f"HTTP_PROXY={self.backend.proxy}",
+            "-e", NO_PROXY,
+            "-e", NODE_USE_ENV_PROXY,
+            *cli_domains.docker_args("codex", self.backend, self.app_id, end_user=self.end_user),
+            *workspace_args(self.workspace, self.split),
+            "--memory", self.sandbox.memory,
+            "--cpus", str(self.sandbox.cpus),
+            "--pids-limit", str(self.sandbox.pids),
+            # Docker's default seccomp profile blocks the unprivileged user
+            # namespace that Linux Codex uses for bubblewrap. The outer
+            # container still has no-new-privileges, dropped capabilities,
+            # a workspace-only bind mount, and a provider-only network.
+            "--security-opt", "seccomp=unconfined",
+            "--security-opt", "no-new-privileges",
+            "--cap-drop", "NET_RAW", "--cap-drop", "MKNOD", "--cap-drop", "AUDIT_WRITE",
+            self.backend.image, "codex", "app-server", "--stdio",
+        ]
+        if self.mcp:
+            args += codex_mcp_overrides()
+        if self.tools_only or self.split:
+            for override in (CODEX_TOOLS_ONLY_OVERRIDES if self.tools_only else CODEX_SPLIT_OVERRIDES):
+                args += ["-c", override]
+        env_names = (["OPENAI_API_KEY"] if self.api_key else []) + ([TOKEN_ENV] if self.mcp else [])
+        for name in env_names:  # by name only: the value comes from the docker client's environment
+            at = args.index(self.backend.image)
+            args[at:at] = ["-e", name]
+        return args
+
+    async def start(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._command_override is None:
+            await shared.run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+            await shared.ready_domain("codex", self.backend, self.app_id, self.api_key, self.end_user)
+            if self.mcp is not None:
+                try:
+                    await self.mcp.start()
+                except McpRelayError as e:
+                    raise CliBackendError(str(e)) from e
+        child_env = os.environ.copy()
+        if self.api_key:
+            child_env["OPENAI_API_KEY"] = self.api_key
+        if self.mcp is not None:
+            child_env[TOKEN_ENV] = self.mcp_token
+        process = self._popen(
+            self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), env=child_env,
+        )
+        self.process = process
+
+        def stdout_reader() -> None:
+            assert process.stdout is not None
+            try:
+                for line in process.stdout:
+                    loop.call_soon_threadsafe(self._events.put_nowait, line)
+            finally:
+                loop.call_soon_threadsafe(self._events.put_nowait, None)
+
+        def stderr_reader() -> None:
+            assert process.stderr is not None
+            self._stderr.extend(process.stderr)
+
+        self._threads = [threading.Thread(target=stdout_reader, daemon=True),
+                         threading.Thread(target=stderr_reader, daemon=True)]
+        for thread in self._threads:
+            thread.start()
+
+    def _id(self) -> int:
+        value = self._next_request_id
+        self._next_request_id += 1
+        return value
+
+    async def _write(self, item: dict) -> None:
+        def write() -> None:
+            if self.process is None or self.process.stdin is None or self.process.poll() is not None:
+                raise CliBackendError("Codex app-server is not running")
+            with self._write_lock:
+                self.process.stdin.write(json.dumps(item, ensure_ascii=False) + "\n")
+                self.process.stdin.flush()
+        try:
+            await asyncio.to_thread(write)
+        except OSError as e:
+            raise CliBackendError(f"could not write to Codex app-server: {e}") from e
+
+    async def _receive_raw(self, timeout: float | None = None) -> dict | None:
+        try:
+            line = await asyncio.wait_for(self._events.get(), timeout) if timeout else await self._events.get()
+        except asyncio.TimeoutError:
+            return None
+        if line is None:
+            code = self.process.poll() if self.process is not None else None
+            error = "".join(self._stderr).strip()
+            raise CliBackendError(f"Codex app-server exited with code {code}: {error}".rstrip())
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise CliBackendError(f"Codex app-server wrote invalid JSONL: {line[:300].rstrip()}") from e
+        if not isinstance(value, dict):
+            raise CliBackendError("Codex app-server JSONL event was not an object")
+        return value
+
+    async def _request(self, method: str, params: dict) -> dict:
+        request_id = self._id()
+        await self._write({"id": request_id, "method": method, "params": params})
+        while True:
+            event = await self._receive_raw(timeout=30)
+            if event is None:
+                raise CliBackendError(f"Codex app-server timed out answering {method}")
+            if event.get("id") == request_id:
+                if event.get("error"):
+                    raise CliBackendError(f"Codex app-server {method} failed: {event['error']}")
+                result = event.get("result")
+                if not isinstance(result, dict):
+                    raise CliBackendError(f"Codex app-server returned an invalid {method} response: {event!r}"[:500])
+                return result
+            self._pending.append(event)
+
+    async def initialize(self, prompt: str) -> None:
+        init: dict[str, object] = {"clientInfo": {"name": "agent-harness", "version": "0.1.0"}}
+        if self.no_environment:  # `environments` is an experimental field in 0.154.0; nothing else here opts in
+            init["capabilities"] = {"experimentalApi": True}
+        await self._request("initialize", init)
+        await self._write({"method": "initialized"})
+        common = {
+            "cwd": WORKSPACE, "model": self.model, "approvalPolicy": self._approval_policy(),
+            "approvalsReviewer": "user", "sandbox": "read-only" if self.no_environment else "workspace-write",
+        }
+        if self.backend_session_id:
+            result = await self._request("thread/resume", {**common, "threadId": self.backend_session_id})
+        elif self.split:
+            result = await self._request("thread/start", {
+                **common, "developerInstructions": self.system_prompt + split_note(self.tool_profile),
+                "environments": []})
+        elif self.tools_only:
+            # The App's prompt replaces Codex's coding-agent instructions, as --system-prompt does for Claude Code.
+            result = await self._request("thread/start", {**common, "baseInstructions": self.system_prompt,
+                                                          "environments": []})
+        else:
+            result = await self._request("thread/start", {
+                **common, "developerInstructions": self.system_prompt,
+            })
+        thread_id = str(obj(result, "thread").get("id") or self.backend_session_id)
+        if not thread_id:
+            raise CliBackendError("Codex app-server did not return a thread id")
+        self.backend_session_id = thread_id
+        result = await self._request("turn/start", self._turn_start_params(prompt))
+        self.active_turn_id = str(obj(result, "turn").get("id") or "")
+
+    def _approval_policy(self) -> str:
+        # Codex itself refuses every MCP call under "never", so an App-tools-only session always asks (the harness
+        # answers from AppToolsPolicy; nobody is prompted).
+        if self.no_environment:
+            return "on-request"
+        return self.backend.permission_mode if self.backend.permission_mode in ("on-request", "never") else "on-request"
+
+    def _turn_start_params(self, content: str) -> dict:
+        params = {"threadId": self.backend_session_id, "input": [{"type": "text", "text": content}],
+                  "cwd": WORKSPACE, "model": self.model, "effort": self.backend.effort,
+                  "approvalPolicy": self._approval_policy(), "approvalsReviewer": "user"}
+        if self.no_environment:
+            # No environment for this turn and the ones after it: no shell, apply_patch, view_image or
+            # request_permissions. Every turn/start says so again, so a resumed thread can't get one back.
+            params["environments"] = []
+        return params
+
+    def user_message(self, content: str) -> dict:
+        request_id = self._id()
+        input_ = [{"type": "text", "text": content}]
+        if self.active_turn_id:
+            return {"id": request_id, "method": "turn/steer", "params": {
+                "threadId": self.backend_session_id, "expectedTurnId": self.active_turn_id, "input": input_}}
+        self._turn_requests.add(request_id)
+        return {"id": request_id, "method": "turn/start", "params": self._turn_start_params(content)}
+
+    async def send(self, item: dict) -> None:
+        await self._write(item)
+
+    async def receive(self, timeout: float | None = None) -> dict | None:
+        event = self._pending.pop(0) if self._pending else await self._receive_raw(timeout)
+        if event and event.get("error") and event.get("id") is not None:
+            raise CliBackendError(f"Codex app-server request failed: {event['error']}")
+        if not event:
+            return event
+        method = event.get("method")
+        if event.get("id") in self._turn_requests:
+            self._turn_requests.discard(event["id"])
+            self.active_turn_id = str(obj(obj(event, "result"), "turn").get("id") or self.active_turn_id)
+        if method == "turn/started":  # the turn a message sent now steers
+            self.active_turn_id = str(obj(obj(event, "params"), "turn").get("id") or self.active_turn_id)
+        elif method == "turn/completed":  # a message sent now starts a new turn
+            self.active_turn_id = ""
+        elif method in APPROVALS:
+            self._approval_methods[str(event.get("id"))] = str(method)
+        return event
+
+    async def respond_permission(self, request_id, behavior: str, _args: dict, _message: str = "") -> None:
+        # App-server's stable approval response is deliberately narrower than
+        # Claude's: notes remain in the harness transcript, while Codex gets the
+        # accept/decline decision.
+        accept = behavior == "allow"
+        if self._approval_methods.pop(str(request_id), "") == ELICITATION:
+            # An MCP tool call approval. A plain accept approves this one call; no "persist" in _meta, so Codex
+            # never remembers it for the session and asks again next time.
+            result = {"action": "accept" if accept else "decline", "content": None, "_meta": None}
+        else:
+            result = {"decision": "accept" if accept else "decline"}
+        await self._write({"id": request_id, "result": result})
+
+    async def stop(self) -> None:
+        proc = self.process
+        self.process = None
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                await asyncio.to_thread(proc.wait, 2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                await asyncio.to_thread(proc.wait)
+        for thread in self._threads:
+            await asyncio.to_thread(thread.join, 0.5)
+        if self._command_override is None:
+            await shared.run_cmd(["docker", "rm", "-f", self.container], timeout=30)
+            if self.mcp is not None:
+                await self.mcp.stop()
