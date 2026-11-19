@@ -896,8 +896,9 @@ Describe 'Escaping entity references the scan cannot decode (#998)' {
     It 'publishes a review that quotes an entity reference, with the reference escaped (<Case>)' -TestCases @(
         # A review of a pull request about HTML entities quotes them: the personal-website run matched one of
         # nine characters in the decoded form.
-        @{ Case = 'unknown name in a code span'; Quote = '`&NoBreak;`'; Escaped = '`(entity: NoBreak)`'; Name = 'NoBreak' }
-        @{ Case = 'double-encoded name in a code span'; Quote = '`&amp;nbsp;`'; Escaped = '`(entity: nbsp)`'; Name = 'nbsp' }
+        # In a code span GitHub shows a reference as written, so it publishes unchanged (#1003).
+        @{ Case = 'unknown name'; Quote = 'a &NoBreak;'; Escaped = 'a (entity: NoBreak)'; Name = 'NoBreak' }
+        @{ Case = 'double-encoded name'; Quote = 'an &amp;nbsp;'; Escaped = 'an (entity: nbsp)'; Name = 'nbsp' }
         @{ Case = 'unknown name in plain text'; Quote = 'the &ZeroWidthSpace; reference'; Escaped = 'the (entity: ZeroWidthSpace) reference'; Name = 'ZeroWidthSpace' }
         @{ Case = 'percent-encoded'; Quote = 'x %26fjlig%3B y'; Escaped = 'x (entity: fjlig) y'; Name = 'fjlig' }
         @{ Case = 'spelled with numeric references'; Quote = 'x &#38;fjlig&#59; y'; Escaped = 'x (entity: fjlig) y'; Name = 'fjlig' }
@@ -928,11 +929,11 @@ Describe 'Escaping entity references the scan cannot decode (#998)' {
     }
 
     It 'escapes every reference on a line and counts them' {
-        $review = "## Findings`n- a.html:1: replace ``&amp;hellip;`` and ``&NoBreak;`` with text.`n- a.html:2: and &fjlig; too."
+        $review = "## Findings`n- a.html:1: replace &amp;hellip; and &NoBreak; with text.`n- a.html:2: and &fjlig; too."
         $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
         Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue -InformationVariable info 6>$null
         $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
-        if (-not $body.Contains('- a.html:1: replace `(entity: hellip)` and `(entity: NoBreak)` with text.')) { throw "Unexpected body: $body" }
+        if (-not $body.Contains('- a.html:1: replace (entity: hellip) and (entity: NoBreak) with text.')) { throw "Unexpected body: $body" }
         if (-not $body.Contains('- a.html:2: and (entity: fjlig) too.') -or -not $body.Contains('escaped 3 entity references')) { throw "Unexpected body: $body" }
         if ($result.EscapedEntities -ne 3) { throw 'The escaped reference count was not recorded' }
         $log = @($info | ForEach-Object { [string]$_.MessageData }) -join "`n"
@@ -1018,6 +1019,100 @@ Describe 'Escaping entity references the scan cannot decode (#998)' {
         catch { $failure = $_.Exception.Message }
         if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
         if (Test-Path -LiteralPath $script:reviewOutputPath) { throw 'A body was written' }
+    }
+}
+
+Describe 'Entity references and link targets quoted in code (#1003)' {
+    BeforeEach {
+        . (Join-Path $PSScriptRoot '../ops/review/run-review.ps1')
+        $script:reviewOutputPath = Join-Path $TestDrive 'review-output.md'
+        Mock Invoke-ReviewMarkdownRender { '<p>' + [System.Net.WebUtility]::HtmlEncode($Text) + '</p>' }
+        # A review of a Markdown parser (personal-website#434, markdown-it for Notes) quotes the input it
+        # parses. Review runs 44217543955 and 44218806654 failed on unknown-entity and link-target; these are
+        # the shapes they describe, each as a finding line of a review.
+        $script:lines = {
+            param([string[]]$Lines)
+            (@('## Findings') + $Lines + @('- notes.js:9: a safe finding.')) -join "`n"
+        }
+    }
+
+    It 'publishes the quote unchanged, with its marker, when it sits in code (<Case>)' -TestCases @(
+        @{ Case = 'unknown entity in a code span'; Lines = @('- notes.js:1: `&ThisIsNotDefined;` and `&ZeroWidthSpace;` reach the page as written.') }
+        @{ Case = 'double-encoded entity in a code span'; Lines = @('- notes.js:2: the escaper turns `&nbsp;` into `&amp;nbsp;`, so `&amp;hellip;` shows twice encoded.') }
+        @{ Case = 'entity in a double-backtick code span'; Lines = @('- notes.js:3: ``a `b` &NoBreak; c`` keeps its reference.') }
+        @{ Case = 'percent-encoded entity in a code span'; Lines = @('- notes.js:4: the slug `%26fjlig%3B` is not decoded.') }
+        @{ Case = 'entities in a fenced block'; Lines = @('- notes.js:5: CommonMark example 32 renders these as text:', '', '```markdown', '&nbsp &x; &#; &#x; &ThisIsNotDefined; &hi?;', '```', '') }
+        @{ Case = 'link target with a backtick in a code span'; Lines = @('- notes.js:6: ``[label](`code`)`` keeps the backticks in its href.') }
+        @{ Case = 'link text with an unpaired backtick in a code span'; Lines = @('- notes.js:7: ``[a`b](https://example.invalid/notes)`` is a link whose text holds a backtick.') }
+        @{ Case = 'entity in a link target in a code span'; Lines = @('- notes.js:8: ``[x](/notes?a=1&ZeroWidthSpace;b=`2`)`` is linkified with the reference in it.') }
+        @{ Case = 'link target with a backtick in a fenced block'; Lines = @('- notes.js:6: the fixture reads:', '', '```markdown', '[label](`code`) and [a`b](c)', '```', '') }
+        # GFM splits a table row at each | before it reads code spans, so a span without one is still code.
+        @{ Case = 'entity and link in table-row code spans'; Lines = @('| input | `&ThisIsNotDefined;` | ``[label](`code`)`` |', '| - | - | - |') }
+    ) {
+        param($Case, $Lines)
+        $review = & $script:lines $Lines
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review; Verdict = 'findings'; FindingCount = 2 }
+        $hits = Get-ReviewLocalScanHits -Text $review
+        if ($hits.Count) { throw "The scan rejected a quote in code: $($hits -join '; ')" }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if (-not $body.Contains($review)) { throw "The review was not published unchanged: $body" }
+        if ($body.Contains('(entity:') -or $result.EscapedEntities -ne 0 -or $result.WithheldLines -ne 0) { throw "The review was changed: $body" }
+        if ((Get-ReviewMarkerShaFromBody -Body $body) -ne ('a' * 40)) { throw "The review marker was dropped: $body" }
+    }
+
+    It 'still rejects the quote where it would render (<Case>)' -TestCases @(
+        # The same shapes outside code.
+        @{ Case = 'entity in plain text'; Lines = @('- notes.js:1: &ThisIsNotDefined; reaches the page.'); Rule = 'unknown-entity' }
+        @{ Case = 'double-encoded entity in plain text'; Lines = @('- notes.js:2: &amp;hellip; shows twice encoded.'); Rule = 'unknown-entity' }
+        @{ Case = 'percent-encoded entity in plain text'; Lines = @('- notes.js:4: the slug %26fjlig%3B is not decoded.'); Rule = 'unknown-entity' }
+        @{ Case = 'entity between code spans'; Lines = @('- notes.js:1: `a` &ZeroWidthSpace; `b`.'); Rule = 'unknown-entity' }
+        @{ Case = 'entity on a fence line'; Lines = @('- notes.js:5: example:', '', '``` &x;', 'x', '```'); Rule = 'fence-info' }
+        @{ Case = 'link target with a backtick in plain text'; Lines = @('- notes.js:6: [label](`code`) keeps the backticks.'); Rule = 'link-target' }
+        @{ Case = 'link text with an unpaired backtick in plain text'; Lines = @('- notes.js:7: [a`b](https://example.invalid/notes) holds a backtick.'); Rule = 'link-target' }
+        @{ Case = 'link that starts in a code span and ends outside it'; Lines = @('- notes.js:6: `[label](`code) ends outside the span.'); Rule = 'link-target' }
+        # Code spans whose reading the scan cannot settle hide nothing.
+        @{ Case = 'code span beside an unclosed backtick run'; Lines = @('- notes.js:1: `&ZeroWidthSpace;` and a stray ` here.'); Rule = 'unknown-entity' }
+        @{ Case = 'code span holding a table cell break'; Lines = @('- notes.js:1: `a | &ZeroWidthSpace;` b'); Rule = 'unknown-entity' }
+        @{ Case = 'code span in a raw HTML block'; Lines = @('<div>', '`&ZeroWidthSpace;`', '</div>'); Rule = 'unknown-entity' }
+        @{ Case = 'code span beside an escaped backtick'; Lines = @('- notes.js:1: \``&ZeroWidthSpace;` here.'); Rule = 'unknown-entity' }
+        @{ Case = 'code span opened inside an autolink'; Lines = @('- notes.js:1: <https://example.invalid/`> &ZeroWidthSpace; `x`.'); Rule = 'unknown-entity' }
+        @{ Case = 'fenced block in a list item'; Lines = @('- notes.js:5: example:', '', '  ```', '  &ZeroWidthSpace;', '  ```'); Rule = 'unknown-entity' }
+        @{ Case = 'link in a code span holding a table cell break'; Lines = @('- notes.js:6: ``a | [label](`code`)`` b'); Rule = 'link-target' }
+    ) {
+        param($Case, $Lines, $Rule)
+        $review = & $script:lines $Lines
+        $hits = Get-ReviewLocalScanHits -Text $review
+        if (-not @($hits | Where-Object { $_ -like "rule $Rule *" }).Count) { throw "Expected a $Rule hit, got: $($hits -join '; ')" }
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WarningAction SilentlyContinue }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
+    }
+
+    It 'escapes only the reference outside code (#998), leaving the quoted one as written' {
+        $review = & $script:lines @('- notes.js:1: `&NoBreak;` in code, and &NoBreak; in prose.')
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -HeadSha ('a' * 40) -WithholdUnsafeLines -WarningAction SilentlyContinue 6>$null
+        $body = Get-Content -Raw -LiteralPath $script:reviewOutputPath
+        if (-not $body.Contains('- notes.js:1: `&NoBreak;` in code, and (entity: NoBreak) in prose.')) { throw "Unexpected body: $body" }
+        if ($result.EscapedEntities -ne 1 -or -not $body.Contains('escaped 1 entity reference')) { throw "Unexpected count: $body" }
+    }
+
+    It 'never lets code hide a path, credential or token (<Case>)' -TestCases @(
+        @{ Case = 'token in a code span beside a reference'; Lines = @('- a.py:1: `&ZeroWidthSpace; ghp_synthetic12345678`') }
+        @{ Case = 'token split by a reference in a code span'; Lines = @('- a.py:1: `gh&#112;_synthetic12345678`') }
+        @{ Case = 'token in a link target in a code span'; Lines = @('- a.py:1: ``[x](`ghp_synthetic12345678`)``') }
+        @{ Case = 'profile path in a fenced block beside a reference'; Lines = @('```', '&x; /home/reviewer/auth.json', '```') }
+    ) {
+        param($Case, $Lines)
+        $review = & $script:lines $Lines
+        $result = [pscustomobject]@{ Backend = 'fake'; Model = ''; Output = $review }
+        $failure = ''
+        try { Write-ReviewResult -Result $result -OutputPath $script:reviewOutputPath -WarningAction SilentlyContinue }
+        catch { $failure = $_.Exception.Message }
+        if ($failure -ne 'Review did not complete: output failed the publication safety scan.') { throw "Expected a closed failure, got: $failure" }
     }
 }
 
