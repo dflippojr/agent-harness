@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 
 from harness.modules import SkillsConfig, ToolError, resolve_path, contained, is_reparse_point
+from .store import SkillRecordStore
 from .skill_validate import (
     MAX_EXAMPLE_CHARS,
     MAX_EXAMPLES,
@@ -366,7 +367,7 @@ class SkillStore:
     def __init__(self, cfg: SkillsConfig, db, data_dir: Path, sandbox_image: str,
                  run_sandbox=None, reviewer=None):
         self.cfg = cfg
-        self.db = db
+        self.db = db if isinstance(db, SkillRecordStore) else SkillRecordStore(db)
         self.root = Path(data_dir) / "skills"
         self.proposals_dir = self.root / "proposals"
         self.installed_dir = self.root / "installed"

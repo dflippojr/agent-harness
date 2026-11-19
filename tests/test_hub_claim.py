@@ -21,6 +21,7 @@ from harness import api as harness_api, audit_context, cli, local_owner, migrati
 from harness import pairing_requests as pr
 from harness.admin import PREFIX
 from harness.db import Database
+from harness_modules.runners.store import RunnerPairingStore
 import sdk.harness_client as sdk_module
 from sdk.harness_client import Harness
 
@@ -549,7 +550,7 @@ def test_hub_key_cannot_make_a_runner_pairing_code(tmp_path):
         token, key, _ = _claim(client, m, origin="")
         r = client.post(f"{PREFIX}/runner-pairing-codes", headers=_bearer(token), json={"runner": "mac"})
         assert r.status_code == 403 and r.json()["error"]["code"] == "hub_key", r.text
-        assert m.db.list_runner_pairing_codes() == []
+        assert RunnerPairingStore(m.db).list_runner_pairing_codes() == []
         denied = _audit(client, "runner_pairing.create", outcome="denied")
         assert [(r["actor_kind"], r["key_id"], r["metadata"]["reason"]) for r in denied] == [
             ("hub", key["id"], "hub_key")]

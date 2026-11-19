@@ -1,6 +1,7 @@
 """The jobs scheduler lifecycle belongs to the add-on."""
 from harness.modules import ModuleRuntime
 from .service import JobScheduler
+from .store import JobStore
 
 
 class JobsRuntime(ModuleRuntime):
@@ -16,3 +17,7 @@ class JobsRuntime(ModuleRuntime):
     async def stop(self):
         if self.service is not None:
             await self.service.stop()
+
+    def scheduled_job(self, jid: str) -> dict | None:
+        """Read whether or not scheduling is on: a run that already happened still names its job (notifications)."""
+        return JobStore(self.manager.db).get_job(jid)

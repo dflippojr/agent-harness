@@ -51,6 +51,8 @@ _PUBLIC = {
     "database_reads": ("harness.db", "_reads"),
     "database_writes": ("harness.db", "_writes"),
     "AsyncDatabase": ("harness.db", "AsyncDatabase"),
+    "ModuleStore": ("harness.db", "ModuleStore"),  # a module's own queries on the shared database (#992)
+    "sha256_hex": ("harness.digests", "sha256_hex"),
     "GpuExclusive": ("harness.scheduler", "GpuExclusive"),
     "QueueFull": ("harness.scheduler", "QueueFull"),
     "SLEEPING": ("harness.local_inference", "SLEEPING"),
@@ -369,6 +371,16 @@ class ModuleRuntime:
     def metrics(self, out, db) -> None:
         """Prometheus lines for /metrics (out.metric(name, type, help, rows))."""
 
+    def key_request_counts(self, key_ids: list[str]) -> dict[str, int]:
+        """{key id: requests logged with it} for the `/keys` listing, from a module that logs requests; none here."""
+        return {}
+
+    # scheduled jobs (harness/job_results.py is their shared result protocol)
+    def scheduled_job(self, jid: str) -> dict | None:
+        """Scheduled job `jid` (its `name` and `notify` mode among the rest) for a module that schedules jobs; None
+        here: this module schedules none."""
+        return None
+
 
 # discovery
 _discovered: dict[tuple[str, ...] | None, tuple[Module, ...]] = {}
@@ -606,6 +618,18 @@ class ModuleHost:
     def metrics(self, out, db) -> None:
         for rt in self:
             rt.metrics(out, db)
+
+    def key_request_counts(self, key_ids: list[str]) -> dict[str, int]:
+        """Each key's logged requests, summed over the modules that log them; a key with none is left out."""
+        out: dict[str, int] = {}
+        for rt in self:
+            for kid, n in rt.key_request_counts(key_ids).items():
+                out[kid] = out.get(kid, 0) + n
+        return out
+
+    def scheduled_job(self, jid: str) -> dict | None:
+        """Scheduled job `jid` from the module that schedules it; None when there is none, or no such module."""
+        return next((job for rt in self if (job := rt.scheduled_job(jid)) is not None), None)
 
 
 # route helpers for module handlers

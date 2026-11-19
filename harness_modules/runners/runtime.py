@@ -5,6 +5,7 @@ from pathlib import Path
 
 from harness.modules import ModuleRuntime, HarnessError, credential_audit
 from .service import RunnerHub
+from .store import RunnerPairingStore
 
 
 class RunnersRuntime(ModuleRuntime):
@@ -54,7 +55,7 @@ class RunnersRuntime(ModuleRuntime):
         db = self.manager.db
 
         def commit():
-            row, code = db.main.create_runner_pairing_code(name, runner, ttl_seconds)
+            row, code = RunnerPairingStore(db).create_runner_pairing_code(name, runner, ttl_seconds)
             credential_audit.record(db, ctx or credential_audit.unknown_context("legacy_api"),
                                     "runner_pairing.create", row["id"], "ok", "pairing", {"pairing_id": row["id"]})
             return row, code
@@ -64,7 +65,7 @@ class RunnersRuntime(ModuleRuntime):
         db = self.manager.db
 
         def commit() -> bool:
-            ok = db.main.revoke_runner_pairing_code(pid)
+            ok = RunnerPairingStore(db).revoke_runner_pairing_code(pid)
             credential_audit.record(db, ctx, "runner_pairing.revoke", pid if ok else "", "ok" if ok else "noop",
                                     "pairing", {"pairing_id": pid} if ok else {"reason": "not_found"})
             return ok
@@ -77,7 +78,7 @@ class RunnersRuntime(ModuleRuntime):
             pass
 
         def commit():
-            pairing, key, owner_token, error = db.main.redeem_runner_pairing_code(code)
+            pairing, key, owner_token, error = RunnerPairingStore(db).redeem_runner_pairing_code(code)
             if pairing is None or key is None:
                 credential_audit.record(db, credential_audit.unknown_context(), "runner_pairing.redeem", "",
                                         "denied", "pairing", {"reason": credential_audit.pairing_reason(error)})

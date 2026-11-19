@@ -321,16 +321,19 @@ def test_session_taint_migration_adds_column_to_existing_sessions(tmp_path):
         assert "taint" not in {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
 
 
-def test_key_listing_counts_each_keys_requests_through_the_key_index(tmp_path):
-    """#669: the request count in the key listing searches `endpoint_requests` by `key_id`, not scanning every row of
-    the table, which is never pruned."""
-    from harness.db import _API_KEY_LISTING
+@pytest.mark.parametrize("keys", [1, 3])
+def test_key_listing_counts_each_keys_requests_through_the_key_index(tmp_path, keys):
+    """#669: the key listing's request count (the endpoint module's query since #992) searches `endpoint_requests` by
+    `key_id`, not scanning every row of the table, which is never pruned."""
+    from harness_modules.endpoint.store import REQUEST_COUNTS
     db = Database(tmp_path / "harness.db", migrations=_REAL_DISCOVER())
-    plan = db.conn.execute("EXPLAIN QUERY PLAN " + _API_KEY_LISTING + " AND k.id = ?", ("k-1",)).fetchall()
+    query = REQUEST_COUNTS.format(marks=",".join("?" * keys))
+    plan = db.conn.execute("EXPLAIN QUERY PLAN " + query, [f"k-{i}" for i in range(keys)]).fetchall()
     db.close()
     details = [row[-1] for row in plan]
-    assert any(d.startswith("SEARCH r USING") and "endpoint_requests_key (key_id=?)" in d for d in details), details
-    assert not any(d.startswith("SCAN r") or d.startswith("SCAN endpoint_requests") for d in details), details
+    assert any(d.startswith("SEARCH endpoint_requests USING") and "endpoint_requests_key (key_id=?)" in d
+               for d in details), details
+    assert not any(d.startswith("SCAN endpoint_requests") for d in details), details
 
 
 _SESSION_INDEXES = {"sessions_list", "sessions_owner_status"}

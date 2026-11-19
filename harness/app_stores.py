@@ -39,7 +39,7 @@ import time
 import weakref
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .db import Database, merge_newest_first
 from .fileops import remove_tree
@@ -284,6 +284,8 @@ class SessionStores:
         self._stop = threading.Event()
         self._reaper: threading.Thread | None = None
         self.web: Database = main  # until the sessions are in Web's store (`migrate_web_store`)
+        # {key id: logged requests} for the key listing; the Manager installs its module host's (#992).
+        self.key_request_counts: Callable[[list[str]], dict[str, int]] = lambda key_ids: {}
         self.migrate_app_sessions()
         self.web = self.migrate_web_store()
         self._load_index()
@@ -536,13 +538,28 @@ class SessionStores:
         return counts
 
     def list_api_keys(self) -> list[dict]:
-        """The key list (Settings → Apps), each App's and device's with its store's metadata."""
-        return [self._with_store(k) for k in self.main.list_api_keys()]
+        """The key list (Settings → Apps), each App's and device's with its request count and its store's metadata."""
+        return [self._with_store(k) for k in self._with_requests(self.main.list_api_keys())]
 
     def get_api_key_listing(self, kid: str) -> dict | None:
         """Key `kid` as `list_api_keys` lists it, read alone (#669)."""
         key = self.main.get_api_key_listing(kid)
-        return self._with_store(key) if key else None
+        return self._with_store(self._with_requests([key])[0]) if key else None
+
+    def restore_api_key(self, kid: str) -> tuple[dict, str] | None:
+        """`Database.restore_api_key`, its row with the request count (and, as always, no store metadata)."""
+        restored = self.main.restore_api_key(kid)
+        if restored is None:
+            return None
+        row, key = restored
+        return (self._with_requests([row])[0] if row else row), key
+
+    def _with_requests(self, rows: list[dict]) -> list[dict]:
+        """Each listed key's `requests`: its logged requests, from the module that logs them (0 when none does)."""
+        counts = self.key_request_counts([k["id"] for k in rows])
+        for k in rows:
+            k["requests"] = counts.get(k["id"], 0)
+        return rows
 
     def _with_store(self, k: dict) -> dict:
         if k.get("kind") not in ("owner", "web") and not k.get("erased_at"):
