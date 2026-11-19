@@ -427,8 +427,10 @@ backtick run outside fenced code closes on its own line and no backtick sits ins
 escaped backtick (otherwise no span hides anything), and never on a line where a span holds a `|`, since a table row is
 possible wherever a `|` is and GFM ends a cell there before it reads code spans, or on a line that may belong to a raw
 HTML block, where backticks are text. Literal code (#1003) is every line of a fenced code block at column 0 and the
-content of each code span that hides a `$`, except a span that opens inside a link's destination or title (the link
-takes it whole) or on a line that may belong to a link reference definition (from a line holding `]:` to a blank line).
+content of each code span that hides a `$`, except a span that may open inside a link's destination or title (the link
+takes it whole): every inline target starts right after `](`, so a span counts only when each `](` before it in its
+paragraph closes first, at a `)` with no quote, `(`, `<` or `\` before it. A span on a line that may belong to a link
+reference definition (from a line holding `]:` to a blank line) does not count either.
 CommonMark decodes no reference or escape there and reads no link, so a review of a Markdown parser can quote
 `` `&ThisIsNotDefined;` `` or ``` ``[label](`code`)`` ```, while the same text in prose, or in a code span the scan cannot
 read for certain, still fails. The path, credential and token rules read literal code as they read everything else. Rule `line-break` rejects, raw or decoded and before any of this, every line break but LF and CRLF:

@@ -1048,6 +1048,9 @@ Describe 'Entity references and link targets quoted in code (#1003)' {
         @{ Case = 'link target with a backtick in a fenced block'; Lines = @('- notes.js:6: the fixture reads:', '', '```markdown', '[label](`code`) and [a`b](c)', '```', '') }
         # GFM splits a table row at each | before it reads code spans, so a span without one is still code.
         @{ Case = 'entity and link in table-row code spans'; Lines = @('| input | `&ThisIsNotDefined;` | ``[label](`code`)`` |', '| - | - | - |') }
+        # A link that closes before the span leaves it code.
+        @{ Case = 'entity in a code span after a closed link'; Lines = @('- notes.js:1: see [the spec](https://spec.commonmark.org/0.31.2/#entity-and-numeric-character-references) and `&ThisIsNotDefined;`.') }
+        @{ Case = 'two link quotes in code spans on one line'; Lines = @('- notes.js:6: ``[a](`b`)`` and ``[c](`d`)`` both keep backticks.') }
     ) {
         param($Case, $Lines)
         $review = & $script:lines $Lines
@@ -1082,6 +1085,12 @@ Describe 'Entity references and link targets quoted in code (#1003)' {
         @{ Case = 'backticks in a link title'; Lines = @('- notes.js:1: [docs](/notes "`&ZeroWidthSpace;`") here.'); Rule = 'unknown-entity' }
         @{ Case = 'backticks in a link destination'; Lines = @('- notes.js:1: [docs](`&ZeroWidthSpace;`) here.'); Rule = 'unknown-entity' }
         @{ Case = 'backticks in a reference definition title'; Lines = @('- notes.js:1: see [docs].', '', '[docs]: /notes', '  "`&ZeroWidthSpace;`"'); Rule = 'unknown-entity' }
+        # PR #1020 review: link text with nested brackets, or a code span holding ], still takes the target.
+        @{ Case = 'backticks in the title of a link with nested brackets'; Lines = @('- notes.js:1: [a[b]c](notes "`&ZeroWidthSpace;`") here.'); Rule = 'unknown-entity' }
+        @{ Case = 'backticks in the title of a link whose text holds a code span with ]'; Lines = @('- notes.js:1: [a `]` b](notes "`&ZeroWidthSpace;`") here.'); Rule = 'unknown-entity' }
+        @{ Case = 'backticks in a link title holding )'; Lines = @('- notes.js:1: [a](notes "x) `&ZeroWidthSpace;` y") here.'); Rule = 'unknown-entity' }
+        @{ Case = 'backticks in a link title on the next line'; Lines = @('- notes.js:1: [a](notes', '  "`&ZeroWidthSpace;`") here.'); Rule = 'unknown-entity' }
+        @{ Case = 'backticks in an image destination with parentheses'; Lines = @('- notes.js:1: ![a](n(o)`&ZeroWidthSpace;`) here.'); Rule = 'unknown-entity' }
         @{ Case = 'link in a code span holding a table cell break'; Lines = @('- notes.js:6: ``a | [label](`code`)`` b'); Rule = 'link-target' }
     ) {
         param($Case, $Lines, $Rule)

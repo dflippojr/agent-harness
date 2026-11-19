@@ -1007,25 +1007,46 @@ function Get-ReviewLiteralCodeRanges {
     # (Get-ReviewCodeSpans). CommonMark decodes no character reference or escape there and reads no link,
     # so a reader sees the raw text, which the raw scan form reads as it is.
     # A link that opens before a backtick takes its destination and title whole, and a link reference
-    # definition is no paragraph, so a span is left out when it opens inside a link's target or on a line
-    # that may belong to a definition: from a line holding ]: (a label may span lines) to a blank line.
+    # definition is no paragraph, so a span is left out when it may open inside a link's target or on a
+    # line that may belong to a definition: from a line holding ]: (a label may span lines) to a blank line.
+    # Every inline link or image target starts right after ](, and none crosses a blank line, so the check
+    # needs no reading of link text (nested brackets, code spans holding ]). A span opener counts only when
+    # each ]( before it in its paragraph is closed before it: its first ) comes first, with no title opener
+    # (" ' or another (), < or \ between, so nothing after that ) can belong to the target. Matched
+    # reference link labels ([a][label]) are left out too.
     $lines = @(Get-ReviewMarkdownLines -Text $Text)
     $ranges = New-Object System.Collections.Generic.List[int[]]
     $excluded = New-Object System.Collections.Generic.List[int[]]
+    $paragraphs = New-Object System.Collections.Generic.List[int]
     $definition = $false
+    $paragraph = 0
     foreach ($line in $lines) {
         if ($line.Fenced) { $ranges.Add([int[]]@($line.Start, ($line.Start + $line.Text.Length))) }
-        if ($line.Text -notmatch '\S') { $definition = $false } elseif ($line.Text.Contains(']:')) { $definition = $true }
+        if ($line.Text -notmatch '\S') { $definition = $false; $paragraph = $line.Start + $line.Text.Length } elseif ($line.Text.Contains(']:')) { $definition = $true }
+        $paragraphs.Add($paragraph)
         if ($definition) { $excluded.Add([int[]]@($line.Start, ($line.Start + $line.Text.Length + 1))) }
     }
     foreach ($link in [regex]::Matches($Text, $script:ReviewLinkPattern)) {
         $target = $link.Groups['target']
         if ($target.Success) { $excluded.Add([int[]]@($target.Index, ($target.Index + $target.Length))) }
     }
+    $starts = [int[]]@($lines | ForEach-Object { $_.Start })
+    $mayBeTarget = {
+        param([int]$Opener)
+        $index = [Array]::BinarySearch($starts, $Opener)
+        if ($index -lt 0) { $index = (-bnot $index) - 1 }
+        $before = $Text.Substring($paragraphs[$index], $Opener - $paragraphs[$index])
+        foreach ($open in [regex]::Matches($before, '\]\(')) {
+            $rest = $before.Substring($open.Index + 2)
+            $close = $rest.IndexOf(')')
+            if ($close -lt 0 -or $rest.Substring(0, $close) -match '["''(<\\]') { return $true }
+        }
+        return $false
+    }
     $spans = Get-ReviewCodeSpans -Lines $lines
     if ($null -ne $spans) {
         foreach ($span in $spans) {
-            if (Test-ReviewInLiteralCode -Start $span[0] -End ($span[0] + 1) -Ranges $excluded) { continue }
+            if ((Test-ReviewInLiteralCode -Start $span[0] -End ($span[0] + 1) -Ranges $excluded) -or (& $mayBeTarget $span[0])) { continue }
             $delimiter = [regex]::Match($Text.Substring($span[0], $span[1]), '^`+').Length
             $ranges.Add([int[]]@(($span[0] + $delimiter), ($span[0] + $span[1] - $delimiter)))
         }
