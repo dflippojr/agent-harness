@@ -75,9 +75,8 @@ class MemorySampler:
             self.peak_swap = max(self.peak_swap, int(swap.read_text()))
 
     def _run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop.wait(self.interval):  # __enter__ took the first sample
             self.sample()
-            self._stop.wait(self.interval)
 
     def __enter__(self) -> MemorySampler:
         self.sample()

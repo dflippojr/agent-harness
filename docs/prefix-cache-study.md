@@ -413,7 +413,8 @@ What it says:
 - **RAM:** peak anonymous memory rose by about 0.4 GiB at 2048 and 0.6 GiB at 512, against 8.5 GiB at the default.
   Most of that base is llama-server's host prompt cache (`--cache-ram`, 8 GiB by default), which the production flags
   leave as it is. The ceiling for checkpoints is 32 per slot, about 2 GiB, at any spacing; a smaller spacing lets more
-  of them survive. The mmap'd model is file cache and isn't counted.
+  of them survive. The mmap'd model is file cache and isn't counted. Swap peaks swung from 161 to 1,717 MiB
+  between passes, and swapped-out pages don't count as resident, so these differences are approximate.
 - **Go or no-go: no-go while the #898 recommendation is adopted.** With `mask_batch_at: 0.45` the change buys nothing
   for up to 0.6 GiB of RAM. If the owner keeps batched masking off, `--checkpoint-min-step 2048` is the setting to
   take: most of the gain for the smaller RAM cost. No production flag was changed.

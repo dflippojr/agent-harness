@@ -63,7 +63,7 @@ def test_replays_every_answered_call_with_its_template_options_and_one_token(tmp
 def test_memory_sampler_keeps_the_peak_of_anonymous_memory_and_swap(tmp_path):
     (tmp_path / "memory.stat").write_text("anon 1048576\nfile 999999999\n")
     (tmp_path / "memory.swap.current").write_text("0\n")
-    sampler = checkpoint_replay.MemorySampler(tmp_path, interval=0.01)
+    sampler = checkpoint_replay.MemorySampler(tmp_path, interval=60)  # only enter, sample() and exit read
     with sampler:
         (tmp_path / "memory.stat").write_text("anon 3145728\nfile 1\n")
         (tmp_path / "memory.swap.current").write_text("2097152\n")
@@ -91,7 +91,7 @@ def test_main_writes_the_result_with_label_and_memory(tmp_path, monkeypatch, cap
 
     out = tmp_path / "out" / "r.json"
     assert checkpoint_replay.main([str(out), str(capture), "--container", "llama-test", "--label", "512",
-                                   "--sample-seconds", "0.01"]) == 0
+                                   "--sample-seconds", "60"]) == 0
     result = json.loads(out.read_text())
     assert result["label"] == "512" and result["memory"] == {"peak_anon_mib": 5, "peak_swap_mib": 0}
     assert result["total"]["requests"] == 1 and len(sent) == 1
