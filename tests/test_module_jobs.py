@@ -13,6 +13,7 @@ from harness.api import create_app
 from harness.llm import Completion
 from harness.manager import Manager
 from harness_modules.jobs import settings, service
+from harness_modules.jobs.store import JobStore
 from test_daemon import make_cfg, Script
 
 
@@ -46,7 +47,7 @@ def test_job_and_template_error_paths(tmp_path):
         assert client.put("/jobs/missing", json=body).status_code == 404
         jid = client.post("/jobs", json=body).json()["id"]
         assert client.put(f"/jobs/{jid}", json={**body, "cron": "bad"}).status_code == 400
-        m.db.update_job(jid, last_session_id="fake-session")
+        JobStore(m.db).update_job(jid, last_session_id="fake-session")
         m._is_active = lambda sid: True
         assert client.post(f"/jobs/{jid}/run").status_code == 409
         assert len(client.get("/jobs/preview", params={"cron": "@daily", "count": 99}).json()["next"]) == 10
@@ -68,14 +69,14 @@ def test_validate_rejects_invalid_job(extra):
 def test_scheduler_failures_do_not_block_other_jobs(tmp_path):
     m = jobs_manager(tmp_path)
     job = service.validate({"name": "Fake", "prompt": "fake", "cron": "@daily"}, m.cfg.projects, m.cfg.models)
-    m.db.insert_job({**job, "id": "fake-job", "next_run_at": 1})
+    JobStore(m.db).insert_job({**job, "id": "fake-job", "next_run_at": 1})
     def fail(*args, **kwargs):
         raise ValueError("fake failure")
     m.jobs.create = fail
     now = time.time()
     assert m.jobs.tick(now) == []
-    assert m.db.get_job("fake-job")["last_error"] == "fake failure"
-    assert m.db.get_job("fake-job")["next_run_at"] > now
+    assert JobStore(m.db).get_job("fake-job")["last_error"] == "fake failure"
+    assert JobStore(m.db).get_job("fake-job")["next_run_at"] > now
     async def lifecycle():
         m.jobs.start()
         task = m.jobs._task
@@ -140,8 +141,8 @@ def test_cron_accepts_only_the_list_grammar():
 def _stale_and_good_jobs(m, next_run_at: float) -> list[str]:
     """A job saved before #933 with `0,30,` beside a good one; returns the list create() appends job ids to."""
     good = service.validate({"name": "Good", "prompt": "fake", "cron": "@daily"}, m.cfg.projects, m.cfg.models)
-    m.db.insert_job({**good, "cron": "0,30, * * * *", "id": "fake-stale", "next_run_at": next_run_at})
-    m.db.insert_job({**good, "id": "fake-good", "next_run_at": next_run_at})
+    JobStore(m.db).insert_job({**good, "cron": "0,30, * * * *", "id": "fake-stale", "next_run_at": next_run_at})
+    JobStore(m.db).insert_job({**good, "id": "fake-good", "next_run_at": next_run_at})
     started: list[str] = []
     m.jobs.create = lambda *args, **kwargs: started.append(kwargs["job_id"]) or {"id": f"s-{len(started)}"}
     return started
@@ -151,7 +152,7 @@ NOON = datetime(2026, 6, 15, 12, 0).timestamp()
 
 
 def _assert_parked(m):
-    stale = m.db.get_job("fake-stale")
+    stale = JobStore(m.db).get_job("fake-stale")
     assert stale["next_run_at"] is None
     assert "empty list item" in stale["last_error"]
 
@@ -175,6 +176,6 @@ def test_catch_up_parks_stored_job_with_empty_list_item(tmp_path):
     started = _stale_and_good_jobs(m, now - 7 * 24 * 3600)
     m.jobs._catch_up(now)
     _assert_parked(m)
-    assert m.db.get_job("fake-good")["next_run_at"] > now  # the good job's miss is skipped and rescheduled as usual
+    assert JobStore(m.db).get_job("fake-good")["next_run_at"] > now  # the good job's miss is skipped and rescheduled as usual
     assert m.jobs.tick(now) == [] and started == []
     m.db.close()

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from harness.db import Database
+from harness_modules.runners.store import RunnerPairingStore
 
 APP_ORIGIN = "https://app.example"
 EMPTY = {"last_used_at": None, "revoked_at": None, "retention_days": None, "erase_after": None, "erased_at": None}
@@ -61,8 +62,8 @@ def _hub_claim(origin: str):
 
 
 def _runner_code(db: Database):
-    _row, code = db.create_runner_pairing_code("mac", "macrunner", 600)
-    _pairing, key, secret, error = db.redeem_runner_pairing_code(code)
+    _row, code = RunnerPairingStore(db).create_runner_pairing_code("mac", "macrunner", 600)
+    _pairing, key, secret, error = RunnerPairingStore(db).redeem_runner_pairing_code(code)
     assert error == ""
     return key, secret
 

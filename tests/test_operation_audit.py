@@ -15,6 +15,7 @@ from harness.db import Database
 from harness.manager import HarnessError
 from harness_modules.backup.service import BackupService
 from harness_modules.jobs.service import JobScheduler
+from harness_modules.jobs.store import JobStore
 from test_module_jobs import jobs_manager
 from test_phase7 import seed
 
@@ -203,7 +204,7 @@ def test_job_run_provenance_and_no_repeat(manager, monkeypatch, manual):
     job = {"id": "j-test", "name": SENTINEL, "prompt": SENTINEL, "cron": "@daily", "project": "scratch",
            "backend": "local", "model": "", "notify": "low", "enabled": True, "catch_up_minutes": 360,
            "next_run_at": now - 1}
-    manager.db.insert_job(job)
+    JobStore(manager.db).insert_job(job)
     calls = []
     scheduler = JobScheduler(manager.db, lambda *a, **kw: calls.append(kw) or {"id": "session1"}, lambda _: False)
     assert scheduler.run(job, now, manual, context=CTX) == "session1"
@@ -212,7 +213,7 @@ def test_job_run_provenance_and_no_repeat(manager, monkeypatch, manual):
     if not manual:
         fail_write(monkeypatch, manager.db, "ok")
         scheduler.run(job, now, context=CTX)
-        assert manager.db.get_job("j-test")["last_session_id"] == "session1"
+        assert JobStore(manager.db).get_job("j-test")["last_session_id"] == "session1"
         assert scheduler.tick(now) == []
         assert len(calls) == 2
 
@@ -277,7 +278,7 @@ def test_job_mutation_aliases(manager, path, source, monkeypatch):
         fail_write(monkeypatch, m.db, "ok")
         with pytest.raises(OSError):
             client.post(path + "/jobs", json=body, headers=headers)
-        assert m.db.list_jobs() == []  # mutation and audit share the main writer transaction
+        assert JobStore(m.db).list_jobs() == []  # mutation and audit share the main writer transaction
 
 
 @pytest.mark.parametrize("kind", ["fork", "rewind"])

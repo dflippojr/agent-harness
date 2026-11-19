@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict
 
 from harness.modules import HarnessError, RouteTable, WebSessionResponse, manager, operation_audit
 
+from .store import JobStore
+
 NO_SUCH_JOB = "no such job"
 owner_routes = RouteTable()
 
@@ -87,7 +89,7 @@ async def list_jobs(request: Request):
     m = jobs_on(request)
     if request.state.access.role == "guest":
         return []
-    return [job_view(m, j) for j in m.db.list_jobs()]
+    return [job_view(m, j) for j in JobStore(m.db).list_jobs()]
 
 
 @owner_routes.get("/jobs/preview", response_model=CronPreviewSuccess | CronPreviewError)
@@ -120,11 +122,11 @@ async def create_job(body: Job, request: Request):
     job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
     context = operation_audit.request_context(request, m)
     def save():
-        m.db.insert_job(job)
+        JobStore(m.db).insert_job(job)
         operation_audit.append(m.db, context, job["id"], "job.create", "ok",
                                {"fields": list(Job.model_fields), "enabled": job["enabled"]})
     m.db.write(save)
-    return job_view(m, m.db.get_job(job["id"]))
+    return job_view(m, JobStore(m.db).get_job(job["id"]))
 
 
 @owner_routes.get("/jobs/{jid}", response_model=JobResponse)
@@ -133,7 +135,7 @@ async def get_job(jid: str, request: Request):
     m = jobs_on(request)
     if request.state.access.role == "guest":
         raise HarnessError(404, NO_SUCH_JOB)
-    job = m.db.get_job(jid)
+    job = JobStore(m.db).get_job(jid)
     if job is None:
         raise HarnessError(404, NO_SUCH_JOB)
     return job_view(m, job, runs=15)
@@ -145,7 +147,7 @@ async def update_job(jid: str, body: Job, request: Request):
     import time as _time
     from .service import Cron, validate
     m = jobs_on(request)
-    old = m.db.get_job(jid)
+    old = JobStore(m.db).get_job(jid)
     if old is None:
         raise HarnessError(404, NO_SUCH_JOB)
     try:
@@ -155,12 +157,12 @@ async def update_job(jid: str, body: Job, request: Request):
     job["next_run_at"] = Cron(job["cron"]).next_after(_time.time())
     context = operation_audit.request_context(request, m)
     def save():
-        m.db.update_job(jid, **job)
+        JobStore(m.db).update_job(jid, **job)
         operation_audit.append(m.db, context, jid, "job.update", "ok",
                                {"fields": [k for k in Job.model_fields if old.get(k) != job.get(k)],
                                 "enabled": job["enabled"]})
     m.db.write(save)
-    return job_view(m, m.db.get_job(jid), runs=15)
+    return job_view(m, JobStore(m.db).get_job(jid), runs=15)
 
 
 @owner_routes.delete("/jobs/{jid}", status_code=204)
@@ -169,7 +171,7 @@ async def delete_job(jid: str, request: Request):
     m = jobs_on(request)
     context = operation_audit.request_context(request, m)
     def remove():
-        if not m.db.delete_job(jid):
+        if not JobStore(m.db).delete_job(jid):
             raise HarnessError(404, NO_SUCH_JOB)
         operation_audit.append(m.db, context, jid, "job.delete", "ok")
     m.db.write(remove)
@@ -179,7 +181,7 @@ async def delete_job(jid: str, request: Request):
 async def run_job(jid: str, request: Request):
     """Run a job now, outside its schedule (the next scheduled run is unchanged)."""
     m = jobs_on(request)
-    job = m.db.get_job(jid)
+    job = JobStore(m.db).get_job(jid)
     if job is None:
         raise HarnessError(404, NO_SUCH_JOB)
     if job["last_session_id"] and m._is_active(job["last_session_id"]):
@@ -194,7 +196,7 @@ async def list_templates(request: Request):
     """List saved task templates."""
     if request.state.access.role == "guest":
         return []
-    return manager(request).db.list_templates()
+    return JobStore(manager(request).db).list_templates()
 
 
 @owner_routes.post("/templates", status_code=201)
@@ -207,7 +209,7 @@ async def create_template(body: Template, request: Request):
 async def update_template(tid: str, body: Template, request: Request):
     """Replace a task template's fields after the same checks as create; returns 404 if it does not exist."""
     m = manager(request)
-    if m.db.get_template(tid) is None:
+    if JobStore(m.db).get_template(tid) is None:
         raise HarnessError(404, "no such template")
     return _save_template(m, tid, body)
 
@@ -215,7 +217,7 @@ async def update_template(tid: str, body: Template, request: Request):
 @owner_routes.delete("/templates/{tid}", status_code=204)
 async def delete_template(tid: str, request: Request):
     """Delete a saved task template."""
-    if not manager(request).db.delete_template(tid):
+    if not JobStore(manager(request).db).delete_template(tid):
         raise HarnessError(404, "no such template")
 
 
@@ -228,5 +230,5 @@ def _save_template(m, tid: str, body: Template) -> dict:
         raise HarnessError(400, f"unknown or disabled backend {body.backend!r}")
     if body.backend == "local" and body.model and body.model not in m.cfg.models:
         raise HarnessError(400, f"unknown model {body.model!r}")
-    m.db.upsert_template({"id": tid, **body.model_dump()})
-    return m.db.get_template(tid)
+    JobStore(m.db).upsert_template({"id": tid, **body.model_dump()})
+    return JobStore(m.db).get_template(tid)

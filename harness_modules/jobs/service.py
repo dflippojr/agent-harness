@@ -25,6 +25,8 @@ from datetime import datetime, timedelta
 from harness.modules import operation_audit, audit_context
 from harness.modules import parse_job_status as parse_status, job_summary as summary  # noqa: F401 -- tests import them from here
 
+from .store import JobStore
+
 log = logging.getLogger("harness.jobs")
 
 NOTIFY_MODES = ("attention", "low", "always")  # OK results: no notification / low priority / normal priority
@@ -161,6 +163,7 @@ class JobScheduler:
 
     def __init__(self, db, create, active, poll_seconds: float = 30):
         self.db = db
+        self.store = JobStore(db)
         self.create = create
         self.active = active
         self.poll_seconds = poll_seconds
@@ -192,12 +195,12 @@ class JobScheduler:
             return True
         except CronError as e:
             log.warning("job %s has an invalid schedule %r: %s", job["id"], job["cron"], e)
-            self.db.update_job(job["id"], next_run_at=None, last_error=f"invalid schedule, edit the job: {e}"[:300])
+            self.store.update_job(job["id"], next_run_at=None, last_error=f"invalid schedule, edit the job: {e}"[:300])
             return False
 
     def _catch_up(self, now: float) -> None:
         """At start: jobs whose slot passed while the daemon was down run once if the miss is recent, else skip."""
-        for job in self.db.list_jobs():
+        for job in self.store.list_jobs():
             if not job["enabled"] or not job["next_run_at"] or job["next_run_at"] > now:
                 continue
             if not self._schedule_ok(job):
@@ -208,7 +211,7 @@ class JobScheduler:
 
     def tick(self, now: float) -> list[str]:
         started = []
-        for job in self.db.list_jobs():
+        for job in self.store.list_jobs():
             if not job["enabled"] or not job["next_run_at"] or job["next_run_at"] > now:
                 continue
             if not self._schedule_ok(job):
@@ -235,7 +238,7 @@ class JobScheduler:
             s = self.create(prompt, project=job["project"], backend=job.get("backend") or "local",
                             model=job["model"] or None,
                             title=f"⏰ {job['name']} · {stamp}", job_id=job["id"])
-            self.db.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="",
+            self.store.update_job(job["id"], last_run_at=now, last_session_id=s["id"], last_error="",
                                **({} if manual else {"next_run_at": Cron(job["cron"]).next_after(now)}))
             log.info("job %s started session %s%s", job["id"], s["id"], " (run now)" if manual else "")
             audit["resulting_session_id"] = s["id"]
@@ -247,7 +250,7 @@ class JobScheduler:
             fields["last_skip"] = f"{time.strftime('%b %d %H:%M', time.localtime(now))}: {skipped}"
         if error:
             fields["last_error"] = error
-        self.db.update_job(job["id"], **fields)
+        self.store.update_job(job["id"], **fields)
 
 
 def new_job_id() -> str:

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from harness.api import create_app
 from harness.manager import Manager
 from harness_modules.endpoint import settings, service
+from harness_modules.endpoint.store import EndpointRequestStore
 from test_daemon import make_cfg, Script, Completion
 
 
@@ -87,12 +88,16 @@ def test_parked_model_rejections(tmp_path, held):
 
 def test_accounting_failure_preserves_response(tmp_path, monkeypatch):
     m = endpoint_manager(tmp_path)
-    def fail(record):
+    attempts = []
+
+    def fail(store, record):
+        attempts.append(record["status"])
         raise RuntimeError("fake database failure")
-    monkeypatch.setattr(m.db, "log_endpoint_request", fail)
+    monkeypatch.setattr(EndpointRequestStore, "log_endpoint_request", fail)
     with TestClient(create_app(m)) as client:
         key = client.post("/keys", json={"name": "fake"}).json()["key"]
         assert client.post("/v1/chat/completions", headers={"Authorization": "Bearer " + key}, json={}).status_code == 200
+    assert attempts == [200]
 
 
 DEEP = 100_000  # far past the interpreter's recursion limit, still well under MAX_BODY
@@ -130,4 +135,73 @@ def test_hostile_bodies_get_the_flavor_400(tmp_path, path):
                 wrong[name] = (response.status_code, response.text[:120])
         assert wrong == {}
         assert m.db.conn.execute("SELECT COUNT(*) FROM endpoint_requests").fetchone()[0] == 0
+    m.db.close()
+
+
+def _log(m, key_id: str, status: int = 200) -> None:
+    EndpointRequestStore(m.db).log_endpoint_request(
+        {"key_id": key_id, "route": "/v1/chat/completions", "model": "fake", "stream": False, "status": status})
+
+
+@pytest.mark.parametrize("endpoint_present", [True, False])
+def test_every_key_listing_counts_its_requests_from_the_endpoint_module(tmp_path, endpoint_present):
+    """#992: the core's key listing names no module table; `requests` comes from the endpoint module through the host,
+    on the list, the one-key read and the undone revoke alike, and is 0 (still present) while the module is absent."""
+    from test_app_stores import _key
+    m = endpoint_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        a_id, _ = _key(client, "app-a", "sessions")
+        b_id, _ = _key(client, "app-b", "sessions")
+        for _ in range(3):
+            _log(m, a_id)
+        _log(m, b_id, status=502)
+        if not endpoint_present:
+            del m.modules.runtimes["endpoint"]
+        want_a, want_b = (3, 1) if endpoint_present else (0, 0)
+
+        listed = {k["id"]: k for k in client.get("/keys").json()}
+        assert (listed[a_id]["requests"], listed[b_id]["requests"]) == (want_a, want_b)
+        assert all(k["requests"] == 0 for kid, k in listed.items() if kid not in (a_id, b_id))
+        one = client.put(f"/api/admin/v1/apps/{a_id}/retention", json={"retention_days": 30})
+        assert one.status_code == 200 and one.json()["requests"] == want_a
+        assert m.db.get_api_key_listing(b_id)["requests"] == want_b
+
+        assert client.delete(f"/keys/{a_id}").status_code == 204
+        restored = client.post(f"/api/admin/v1/apps/{a_id}/restore")
+        assert restored.status_code == 200 and restored.json()["requests"] == want_a
+        assert "requests" not in m.db.main.get_api_key_listing(a_id)  # the core's own row counts nothing
+    m.db.close()
+
+
+def test_request_counts_reads_only_the_keys_asked_for(tmp_path):
+    m = endpoint_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        ids = [client.post("/keys", json={"name": f"k{i}"}).json()["id"] for i in range(3)]
+    for kid, n in zip(ids, (2, 0, 1), strict=True):
+        for _ in range(n):
+            _log(m, kid)
+    store = EndpointRequestStore(m.db)
+    assert store.request_counts(ids) == {ids[0]: 2, ids[2]: 1}
+    assert store.request_counts([ids[2], ids[2], "k-missing"]) == {ids[2]: 1}
+    assert store.request_counts([]) == {}
+    assert m.modules.key_request_counts(ids[:1]) == {ids[0]: 2}
+    m.db.close()
+
+
+def test_logging_a_request_never_marks_a_revoked_key_used(tmp_path):
+    """The log marks its key used through the core's `touch_api_key`, which leaves a revoked key alone: a request that
+    finishes after its key was revoked is still logged, but the revoked key does not look active."""
+    m = endpoint_manager(tmp_path)
+    with TestClient(create_app(m)) as client:
+        kid = client.post("/keys", json={"name": "fake"}).json()["id"]
+    _log(m, kid)
+    used = m.db.get_api_key(kid)["last_used_at"]
+    assert used is not None
+    assert m.db.main.revoke_api_key(kid)
+    _log(m, kid, status=499)
+    with m.db.main.reading(), m.db.main.lock:
+        statuses = [r[0] for r in m.db.main.conn.execute(
+            "SELECT status FROM endpoint_requests WHERE key_id = ? ORDER BY id", (kid,)).fetchall()]
+    assert statuses == [200, 499]
+    assert m.db.main.get_api_key(kid)["last_used_at"] == used
     m.db.close()
