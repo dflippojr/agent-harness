@@ -234,3 +234,71 @@ def test_the_runner_reports_a_missing_api_key_in_the_documented_shape(tmp_path):
     assert event["type"] == "backend_auth_required"
     assert event["data"] == {"backend": "claude", "auth": "api_key"}
     assert event_schema.mismatch(json.loads(json.dumps(event))) is None
+
+
+INNER = '''
+import pytest
+import sse_event_capture
+
+BAD = {"seq": 1, "session_id": "s", "ts": 1.0, "type": "status", "data": {"status": 3}}
+
+
+@pytest.fixture(scope="module")
+def module_setup_emits_a_bad_event():
+    sse_event_capture._seen(BAD)  # as if the Server emitted it while a module fixture set up
+    yield
+    sse_event_capture._seen({**BAD, "type": "queue"})  # and again in its teardown, after the last test
+
+
+def test_first(module_setup_emits_a_bad_event):
+    pass
+
+
+def test_second():
+    pass
+'''
+
+
+def test_an_off_schema_event_from_a_fixture_is_reported_not_dropped(tmp_path):
+    """Review of #1016: a module-scoped fixture sets up before the per-test check, and tears down after the last one;
+    neither may lose an off-schema event."""
+    import os
+    import subprocess
+    import sys
+    (tmp_path / "test_inner.py").write_text(INNER, encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT / "tests"), str(ROOT)]), "PYTEST_ADDOPTS": ""}
+    env.pop("HARNESS_RECORD_SSE_EVENTS", None)
+    run = subprocess.run([sys.executable, "-m", "pytest", "-p", "conftest", "-p", "no:xdist", "-p", "no:cacheprovider",
+                          "-q", "-rE", f"--basetemp={tmp_path / 'inner'}", str(tmp_path / "test_inner.py")],
+                         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
+    out = run.stdout + run.stderr
+    assert run.returncode == 1, out
+    assert "ERROR at teardown of test_first" in out and "status.data.status" in out, out
+    assert "ERROR at teardown of test_second" in out and "after the last test" in out and "queue.data" in out, out
+
+
+def test_an_aemit_whose_awaiter_is_cancelled_is_still_checked(tmp_path, monkeypatch):
+    """Review of #1016: `Database.awrite` commits and delivers even when its awaiter is cancelled, so the check runs as
+    the event is inserted, not when `aemit` returns."""
+    import asyncio
+    import sse_event_capture
+    from harness.bus import EventBus
+    from harness.db import Database
+
+    monkeypatch.setattr(sse_event_capture, "TESTS", tmp_path / "elsewhere")  # this call site counts as the Server's
+    db = Database(tmp_path / "events.sqlite3")
+    bus = EventBus(db)
+
+    async def body():
+        task = asyncio.create_task(bus.aemit("s1", "status", {"status": 3}))
+        await asyncio.sleep(0)  # submitted to the writer
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    try:
+        asyncio.run(body())
+        assert [e["type"] for e in db.events("s1")] == ["status"]  # committed despite the cancel
+        found, sse_event_capture.problems[:] = list(sse_event_capture.problems), []
+        assert any("status.data.status" in problem for problem in found), found
+    finally:
+        db.close()

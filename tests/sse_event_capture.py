@@ -12,6 +12,7 @@ Nothing here changes what the Server emits: the wrappers call the originals and 
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import sys
@@ -26,12 +27,15 @@ _PLUMBING = {Path(bus_mod.__file__).resolve(), (ROOT / "harness" / "db.py").reso
              (ROOT / "harness" / "app_stores.py").resolve()}
 
 problems: list[str] = []
+# Set by the `aemit` wrapper for its insert, which runs on the database's writer thread in a copy of this context
+# (`Database.awrite`): whether the event is the Server's. There the stack holds no call site to judge by.
+_aemit_from_server: contextvars.ContextVar[bool | None] = contextvars.ContextVar("aemit_from_server", default=None)
 _record_dir = os.environ.get("HARNESS_RECORD_SSE_EVENTS", "")
 
 
 def _origin(frame) -> Path | None:
     """The first frame above the bus that is not plumbing or the standard library; None when there is none (the
-    writer thread running an `aemit`'s insert, which the `aemit` wrapper has already seen)."""
+    writer thread running an `aemit`'s insert)."""
     stdlib = Path(os.__file__).resolve().parent
     while frame is not None:
         path = Path(frame.f_code.co_filename).resolve()
@@ -43,7 +47,9 @@ def _origin(frame) -> Path | None:
 
 def _from_server(frame) -> bool:
     origin = _origin(frame)
-    return origin is not None and TESTS not in origin.parents and origin != TESTS
+    if origin is None:
+        return bool(_aemit_from_server.get())
+    return TESTS not in origin.parents and origin != TESTS
 
 
 def _wire(event: dict) -> dict:
@@ -76,11 +82,13 @@ def install() -> None:
         return event
 
     async def watched_aemit(self, sid, type_, data):
-        server = _from_server(sys._getframe(1))
-        event = await aemit(self, sid, type_, data)
-        if server:
-            _seen(event)
-        return event
+        # The writer-side `emit` checks the event as it is inserted, so an awaiter cancelled after the commit (the
+        # event is still delivered) cannot skip the check.
+        token = _aemit_from_server.set(_from_server(sys._getframe(1)))
+        try:
+            return await aemit(self, sid, type_, data)
+        finally:
+            _aemit_from_server.reset(token)
 
     def watched_ephemeral(self, sid, type_, data):
         ephemeral(self, sid, type_, data)
