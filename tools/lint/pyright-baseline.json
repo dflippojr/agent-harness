@@ -1128,12 +1128,6 @@
     "count": 2
   },
   {
-    "file": "harness/settings_service.py",
-    "rule": "reportReturnType",
-    "message": "Type \"Plan\" is not assignable to return type \"dict[str, Any]\"\n  \"Plan\" is not assignable to \"dict[str, Any]\"",
-    "count": 1
-  },
-  {
     "file": "harness/setup_config.py",
     "rule": "reportArgumentType",
     "message": "Argument of type \"str\" cannot be assigned to parameter \"value\" of type \"bool\" in function \"__setitem__\"\n  \"str\" is not assignable to \"bool\"",
