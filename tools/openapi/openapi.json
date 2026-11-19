@@ -3170,14 +3170,18 @@
       },
       "ConfigRollbackPreview": {
         "additionalProperties": true,
-        "description": "What a rollback would restore (`dry_run`), without saving it.",
+        "description": "What a rollback would restore (`dry_run`), without saving it; the same reply as a PATCH `dry_run`.",
         "properties": {
           "changes": {
             "items": {
-              "$ref": "#/components/schemas/PlannedChange"
+              "$ref": "#/components/schemas/SettingChange"
             },
             "title": "Changes",
             "type": "array"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
           },
           "errors": {
             "additionalProperties": {
@@ -3185,20 +3189,6 @@
             },
             "title": "Errors",
             "type": "object"
-          },
-          "live": {
-            "items": {
-              "$ref": "#/components/schemas/PlannedChange"
-            },
-            "title": "Live",
-            "type": "array"
-          },
-          "pending": {
-            "items": {
-              "$ref": "#/components/schemas/PlannedChange"
-            },
-            "title": "Pending",
-            "type": "array"
           },
           "restart_required": {
             "title": "Restart Required",
@@ -3216,11 +3206,10 @@
         "required": [
           "revision",
           "target_revision",
-          "changes",
           "restart_required",
-          "live",
-          "pending",
-          "errors"
+          "changes",
+          "errors",
+          "dry_run"
         ],
         "title": "ConfigRollbackPreview",
         "type": "object"
@@ -6508,44 +6497,6 @@
           "winner"
         ],
         "title": "PickWinner",
-        "type": "object"
-      },
-      "PlannedChange": {
-        "additionalProperties": true,
-        "description": "A change as a rollback preview lists it: the plan's own record, values as stored.",
-        "properties": {
-          "action": {
-            "title": "Action",
-            "type": "string"
-          },
-          "after": {
-            "title": "After"
-          },
-          "apply": {
-            "title": "Apply",
-            "type": "string"
-          },
-          "before": {
-            "title": "Before"
-          },
-          "key": {
-            "title": "Key",
-            "type": "string"
-          },
-          "source": {
-            "title": "Source",
-            "type": "string"
-          }
-        },
-        "required": [
-          "key",
-          "before",
-          "after",
-          "apply",
-          "action",
-          "source"
-        ],
-        "title": "PlannedChange",
         "type": "object"
       },
       "PopularModel": {

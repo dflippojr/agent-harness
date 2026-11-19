@@ -890,8 +890,12 @@ function Find-ReviewUnmodeledMarkup {
             $at = $line.Text.IndexOf('<', $at + 1)
         }
     }
+    $codeRanges = $null
     foreach ($link in [regex]::Matches($Text, $script:ReviewLinkPattern)) {
         if (-not $link.Groups['label'].Success -or (& $fencedAt $link.Index)) { continue }
+        # Link syntax wholly in a code span is text, whatever its backticks (#1003).
+        if ($null -eq $codeRanges) { $codeRanges = Get-ReviewLiteralCodeRanges -Text $Text }
+        if (Test-ReviewInLiteralCode -Start $link.Index -End ($link.Index + $link.Length) -Ranges $codeRanges) { continue }
         $runs = @([regex]::Matches($link.Groups['label'].Value, '`+') | ForEach-Object { $_.Length })
         $unpaired = $false
         for ($index = 0; $index -lt $runs.Count; $index++) {
@@ -947,36 +951,9 @@ function Find-ReviewRendererMarkup {
             if ((ConvertFrom-ReviewEntities -Text $match.Value) -ceq '$') { return ('#' * ($match.Length - 1)) + '$' }
             return $match.Value
         })
-    # Code spans hide a $ only when their reading is certain: every backtick run outside fenced code
-    # closes on its own line (a bare CR or other separator is rejected before this), so no span can
-    # cross a block boundary or shift the pairing of a later one; and no backtick sits inside <...>
-    # (an autolink or not) or beside an escaped backtick. Otherwise no span hides anything. A table
-    # row is possible wherever a | is (a one-column table's delimiter row needs none), and a | may end
-    # a cell, so no span hides anything on a line where one holds a |.
-    $spans = New-Object System.Collections.Generic.List[int[]]
-    $certain = $true
-    $tokens = [regex]::new('\\[\s\S]|<[^<>\s]*>|`+')
-    foreach ($line in $lines) {
-        if (-not $certain) { break }
-        if ($line.Fenced -or $line.Fence) { continue }
-        $lineSpans = New-Object System.Collections.Generic.List[int[]]
-        $piped = $false
-        $at = 0
-        while ($certain) {
-            $token = $tokens.Match($line.Text, $at)
-            if (-not $token.Success) { break }
-            $at = $token.Index + $token.Length
-            if ($token.Value[0] -eq '\') { if ($token.Value -eq '\`' -and $at -lt $line.Text.Length -and $line.Text[$at] -eq '`') { $certain = $false }; continue }
-            if ($token.Value[0] -eq '<') { if ($token.Value.Contains('`')) { $certain = $false }; continue }
-            $closer = [regex]::Match($line.Text.Substring($at), "(?<!``)``{$($token.Length)}(?!``)")
-            if (-not $closer.Success) { $certain = $false; break }
-            if ($line.Text.Substring($at, $closer.Index).Contains('|')) { $piped = $true }
-            $at += $closer.Index + $closer.Length
-            $lineSpans.Add([int[]]@(($line.Start + $token.Index), ($at - $token.Index)))
-        }
-        if (-not $piped) { $spans.AddRange($lineSpans) }
-    }
-    if ($certain) {
+    # Code spans hide a $ only when their reading is certain (Get-ReviewCodeSpans); otherwise none does.
+    $spans = Get-ReviewCodeSpans -Lines $lines
+    if ($null -ne $spans) {
         $chars = $prose.ToCharArray()
         foreach ($span in $spans) { for ($index = $span[0]; $index -lt $span[0] + $span[1]; $index++) { $chars[$index] = '#' } }
         $prose = -join $chars
@@ -984,6 +961,121 @@ function Find-ReviewRendererMarkup {
     $math = [regex]::Match($prose, '\$\$|(?<![A-Za-z0-9])\$(?=\S)(?:(?!\r?\n[ \t]*\r?\n)[\s\S])*?(?<=\S)\$(?![A-Za-z0-9])')
     if ($math.Success) { return [pscustomobject]@{ Rule = 'math'; Offset = $math.Index; Length = $math.Length } }
     return $null
+}
+
+function Get-ReviewCodeSpans {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Lines)
+
+    # The inline code spans in $Lines (Get-ReviewMarkdownLines), each as the raw offset and length of the
+    # span with its backtick delimiters, or $null when their reading is not certain. It is certain only
+    # when every backtick run outside fenced code closes on its own line (a bare CR or other separator is
+    # rejected before this), so no span can cross a block boundary or shift the pairing of a later one,
+    # and no backtick sits inside raw HTML or <...> (an autolink or not), which CommonMark reads before a
+    # code span, or beside an escaped backtick. A span is left out, hiding nothing, on a line that may
+    # belong to a raw HTML block, where backticks are text, and on a line where a span holds a |: a table
+    # row is possible wherever a | is (a one-column table's delimiter row needs none), and GFM ends a cell
+    # at a | before it reads code spans.
+    $spans = New-Object System.Collections.Generic.List[int[]]
+    $tokens = [regex]::new("\\[\s\S]|$script:ReviewCommonMarkMarkup|<[^<>\s]*>|``+")
+    foreach ($line in $Lines) {
+        if ($line.Fenced -or $line.Fence) { continue }
+        $lineSpans = New-Object System.Collections.Generic.List[int[]]
+        $piped = $false
+        $at = 0
+        while ($true) {
+            $token = $tokens.Match($line.Text, $at)
+            if (-not $token.Success) { break }
+            $at = $token.Index + $token.Length
+            if ($token.Value[0] -eq '\') { if ($token.Value -eq '\`' -and $at -lt $line.Text.Length -and $line.Text[$at] -eq '`') { return $null }; continue }
+            if ($token.Value[0] -eq '<') { if ($token.Value.Contains('`')) { return $null }; continue }
+            $closer = [regex]::Match($line.Text.Substring($at), "(?<!``)``{$($token.Length)}(?!``)")
+            if (-not $closer.Success) { return $null }
+            if ($line.Text.Substring($at, $closer.Index).Contains('|')) { $piped = $true }
+            $at += $closer.Index + $closer.Length
+            $lineSpans.Add([int[]]@(($line.Start + $token.Index), ($at - $token.Index)))
+        }
+        if (-not $piped -and -not $line.Html) { $spans.AddRange($lineSpans) }
+    }
+    return , $spans
+}
+
+function Get-ReviewLiteralCodeRanges {
+    param([AllowEmptyString()][string]$Text)
+
+    # The raw text GitHub shows as literal code, as [start, end) offsets (#1003): each line of fenced code,
+    # and the content of each inline code span between its delimiters when their reading is certain
+    # (Get-ReviewCodeSpans). CommonMark decodes no character reference or escape there and reads no link,
+    # so a reader sees the raw text, which the raw scan form reads as it is.
+    # A link that opens before a backtick takes its destination and title whole, and a link reference
+    # definition is no paragraph, so a span is left out when it may open inside a link's target or on a
+    # line that may belong to a definition: from a line holding ]: (a label may span lines) to a blank line.
+    # Every inline link or image target starts right after ](, and none crosses a blank line, so the check
+    # needs no reading of link text (nested brackets, code spans holding ]). A span opener counts only when
+    # each ]( before it in its paragraph is closed before it: its first ) comes first, with no title opener
+    # (" ' or another (), < or \ between, so nothing after that ) can belong to the target. Matched
+    # reference link labels ([a][label]) are left out too.
+    $lines = @(Get-ReviewMarkdownLines -Text $Text)
+    $ranges = New-Object System.Collections.Generic.List[int[]]
+    $excluded = New-Object System.Collections.Generic.List[int[]]
+    $paragraphs = New-Object System.Collections.Generic.List[int]
+    $definition = $false
+    $paragraph = 0
+    foreach ($line in $lines) {
+        if ($line.Fenced) { $ranges.Add([int[]]@($line.Start, ($line.Start + $line.Text.Length))) }
+        if ($line.Text -notmatch '\S') { $definition = $false; $paragraph = $line.Start + $line.Text.Length } elseif ($line.Text.Contains(']:')) { $definition = $true }
+        $paragraphs.Add($paragraph)
+        if ($definition) { $excluded.Add([int[]]@($line.Start, ($line.Start + $line.Text.Length + 1))) }
+    }
+    foreach ($link in [regex]::Matches($Text, $script:ReviewLinkPattern)) {
+        $target = $link.Groups['target']
+        if ($target.Success) { $excluded.Add([int[]]@($target.Index, ($target.Index + $target.Length))) }
+    }
+    $starts = [int[]]@($lines | ForEach-Object { $_.Start })
+    $mayBeTarget = {
+        param([int]$Opener)
+        $index = [Array]::BinarySearch($starts, $Opener)
+        if ($index -lt 0) { $index = (-bnot $index) - 1 }
+        $before = $Text.Substring($paragraphs[$index], $Opener - $paragraphs[$index])
+        foreach ($open in [regex]::Matches($before, '\]\(')) {
+            $rest = $before.Substring($open.Index + 2)
+            $close = $rest.IndexOf(')')
+            if ($close -lt 0 -or $rest.Substring(0, $close) -match '["''(<\\]') { return $true }
+        }
+        return $false
+    }
+    $spans = Get-ReviewCodeSpans -Lines $lines
+    if ($null -ne $spans) {
+        foreach ($span in $spans) {
+            if ((Test-ReviewInLiteralCode -Start $span[0] -End ($span[0] + 1) -Ranges $excluded) -or (& $mayBeTarget $span[0])) { continue }
+            $delimiter = [regex]::Match($Text.Substring($span[0], $span[1]), '^`+').Length
+            $ranges.Add([int[]]@(($span[0] + $delimiter), ($span[0] + $span[1] - $delimiter)))
+        }
+    }
+    return , $ranges
+}
+
+function Test-ReviewInLiteralCode {
+    param([int]$Start, [int]$End, [AllowEmptyCollection()][System.Collections.Generic.List[int[]]]$Ranges)
+
+    # True when the raw text [$Start, $End) lies wholly in one range of Get-ReviewLiteralCodeRanges.
+    foreach ($range in $Ranges) { if ($Start -ge $range[0] -and $End -le $range[1]) { return $true } }
+    return $false
+}
+
+function Get-ReviewUnknownEntityMatches {
+    param([AllowEmptyString()][string]$Text, [Parameter(Mandatory = $true)]$Map)
+
+    # The matches of ReviewUnknownEntityPattern in $Map.Text (Get-ReviewEntityDecodedMap of $Text) that the
+    # unknown-entity rule rejects: each one whose raw span does not lie wholly in literal code (#1003). In a
+    # code span or fenced code GitHub shows the reference as it is written, so nothing renders unseen.
+    $found = [regex]::Matches($Map.Text, $script:ReviewUnknownEntityPattern)
+    if ($found.Count -eq 0) { return }
+    $ranges = Get-ReviewLiteralCodeRanges -Text $Text
+    foreach ($match in $found) {
+        $start = $Map.Starts[$match.Index]
+        $end = $Map.Ends[$match.Index + $match.Length - 1]
+        if (-not (Test-ReviewInLiteralCode -Start $start -End $end -Ranges $ranges)) { $match }
+    }
 }
 
 function Get-ReviewOrdinalUnique {
@@ -1228,7 +1320,13 @@ function Get-ReviewLocalScanHits {
     & $check 'bidi-control' 'decoded' $entityDecoded $script:ReviewBidiPattern
     & $check 'line-break' 'raw' $Text $script:ReviewLineBreakPattern
     & $check 'line-break' 'decoded' $entityDecoded $script:ReviewLineBreakPattern
-    & $check 'unknown-entity' 'decoded' $entityDecoded $script:ReviewUnknownEntityPattern
+    # A reference in literal code is shown as written (#1003). When the decoding cannot be mapped back to
+    # the raw text, every reference counts.
+    if ($entityDecoded -cmatch $script:ReviewUnknownEntityPattern) {
+        $map = Get-ReviewEntityDecodedMap -Text $Text
+        $unknown = $(if ($null -eq $map) { [regex]::Match($entityDecoded, $script:ReviewUnknownEntityPattern) } else { @(Get-ReviewUnknownEntityMatches -Text $Text -Map $map) | Select-Object -First 1 })
+        if ($unknown) { $hits.Add("rule unknown-entity matched the decoded form at offset $($unknown.Index) (length $($unknown.Length))") }
+    }
     if (-not $CredentialsOnly) {
         $unmodeled = Find-ReviewUnmodeledMarkup -Text $Text
         if ($unmodeled) { $hits.Add("rule $($unmodeled.Rule) matched the raw form at offset $($unmodeled.Offset) (length $($unmodeled.Length))") }
@@ -3192,7 +3290,7 @@ function Get-ReviewEscapedEntityOutput {
     # cannot be read, or when the scan's decoding cannot be mapped back to the raw text exactly.
     $map = Get-ReviewEntityDecodedMap -Text $Text
     if ($null -eq $map) { return $null }
-    $found = [regex]::Matches($map.Text, $script:ReviewUnknownEntityPattern)
+    $found = @(Get-ReviewUnknownEntityMatches -Text $Text -Map $map)
     if ($found.Count -eq 0) { return [pscustomobject]@{ Text = $Text; Count = 0; Lines = @() } }
     $entities = Get-ReviewHtml5EntityTable
     if ($null -eq $entities) { return $null }
@@ -3230,7 +3328,8 @@ function Get-ReviewEscapedEntityOutput {
         if ($null -eq $readingHits) { return $null }
         foreach ($line in $readingHits) { if (-not $escapedHits.Contains($line)) { return $null } }
     }
-    if ((ConvertFrom-ReviewEntities -Text $escapedText) -cmatch $script:ReviewUnknownEntityPattern) { return $null }
+    $escapedMap = Get-ReviewEntityDecodedMap -Text $escapedText
+    if ($null -eq $escapedMap -or @(Get-ReviewUnknownEntityMatches -Text $escapedText -Map $escapedMap).Count) { return $null }
     return [pscustomobject]@{ Text = $escapedText; Count = $found.Count; Lines = $lines }
 }
 

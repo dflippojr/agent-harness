@@ -234,6 +234,39 @@ def test_rollback_restores_immediately_previous_generation(tmp_path):
         assert manager.cfg.max_turns == 50
 
 
+def test_rollback_dry_run_matches_patch_dry_run_view(tmp_path):
+    key = "sessions.max_completion_tokens"
+    client, manager = _client(tmp_path)
+    assert looks_hidden(key, manager.settings.registry.specs[key])
+    with client:
+        earlier = client.patch("/api/admin/v1/config", json={"revision": 0, "changes": {key: 123457}})
+        assert earlier.status_code == 200, earlier.text
+        later = client.patch("/api/admin/v1/config", json={
+            "revision": earlier.json()["revision"], "changes": {key: 98761},
+        })
+        assert later.status_code == 200, later.text
+        revision = later.json()["revision"]
+
+        patch_preview = client.patch("/api/admin/v1/config", json={
+            "revision": revision, "changes": {key: 123457}, "dry_run": True,
+        })
+        rollback_preview = client.post("/api/admin/v1/config/rollback", json={
+            "revision": revision, "dry_run": True,
+        })
+        assert patch_preview.status_code == 200, patch_preview.text
+        assert rollback_preview.status_code == 200, rollback_preview.text
+
+        for raw in (b"123457", b"98761"):
+            assert raw not in rollback_preview.content
+        patch_body, rollback_body = patch_preview.json(), rollback_preview.json()
+        assert set(rollback_body) == set(patch_body)
+        assert rollback_body["dry_run"] is True
+        assert rollback_body["revision"] == patch_body["revision"] == revision
+        row = next(change for change in rollback_body["changes"] if change["key"] == key)
+        assert row == next(change for change in patch_body["changes"] if change["key"] == key)
+        assert manager.cfg.max_completion_tokens == 98761
+
+
 def test_yaml_semantics_and_managed_precedence(tmp_path):
     cfg_dir = tmp_path / "cfg"
     cfg_dir.mkdir()

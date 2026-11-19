@@ -372,7 +372,8 @@ is posted or copied into the check summary. Instead it posts a short notice on t
 `agent-review` marker, saying that the review was not published and linking the run log.
 
 Before any line is withheld, the wrapper escapes the entity references the `unknown-entity` rule rejects (#998). A
-review of a pull request about HTML entities quotes them, such as `&NoBreak;`, or `&amp;nbsp;`, which decodes to one.
+review of a pull request about HTML entities quotes them, such as `&NoBreak;`, or `&amp;nbsp;`, which decodes to one;
+in literal code the rule does not reject them (#1003, below), so only references in prose are escaped.
 The raw text that spelled each reference, however it was encoded, becomes its name as plain text, `(entity: NoBreak)`,
 which GitHub cannot render as anything the scan does not read. A note at the end of the review says how many references
 were escaped, and the job log gives their line numbers, never the names. The result is scanned again in full, GitHub's
@@ -399,7 +400,8 @@ The rules run on the raw body and on what a reader would see: percent escapes, H
 parser reads them (numeric references and legacy names such as `&shy` need no semicolon, as in a raw HTML block;
 HTML5 names for ASCII punctuation such as `&sol;` and `&lsqb;`, which .NET does not decode, are decoded too; any other
 named entity with a semicolon left undecoded, such as `&fjlig;` or `&ZeroWidthSpace;`, fails closed as rule
-`unknown-entity` unless publication can escape it as described above), characters a reader may not see (controls other than whitespace, noncharacters and Unicode's
+`unknown-entity` unless its raw spelling lies wholly in literal code, described below, where GitHub shows it as
+written, or publication can escape it as described above), characters a reader may not see (controls other than whitespace, noncharacters and Unicode's
 default-ignorable code points, such as format characters, the soft hyphen and Hangul fillers), Unicode compatibility forms and Markdown backslash escapes are decoded first. Three
 approximate renderings then read markup from the raw text, so an escaped or entity-encoded bracket stays text:
 `rendered` drops the raw HTML that CommonMark passes through (tags, comments, processing instructions, declarations,
@@ -414,16 +416,24 @@ comment in a possible HTML block), markup that CommonMark and an HTML5 tokenizer
 holding `--!>`, an instruction or CDATA holding `>`), markup holding a backtick, a `dir` attribute, and the elements
 whose text GitHub keeps out of place (`rp`, `rt`, `rb`, `rtc`, `ruby`, `table`, `video`, `bdo`, `bdi`), even when only
 named in inline code; rule `link-target` rejects a link whose target holds a backtick or whose text holds an unpaired
-one; rule `link-depth` rejects links and images nested more than 8 deep, which the `rendered` form stops unwrapping
+one, unless the whole link lies in literal code; rule `link-depth` rejects links and images nested more than 8 deep, which the `rendered` form stops unwrapping
 (even in fenced code). Math and Mermaid are checked in the raw, `decoded` and `unescaped` forms, so a reference or escape
 cannot hide them: rule `fence-info` rejects a fence line (indented, in a list item or block quote, too) whose info string
 is not a single plain language token (letters, digits, `_+#.-`), since GitHub decodes references and escapes there; rule
 `math` rejects a `math` fence (any case), `$$`, and a `$...$` pair GitHub may draw as math (the opening `$` after no
 ASCII letter or digit and before a non-space, the closing `$` after a non-space and before no ASCII letter or digit,
 within a paragraph; `&#36;` and `&dollar;` count and `\$` does not protect). A code span hides a `$` only when every
-backtick run outside fenced code closes on its own line and no backtick sits inside `<...>` or beside an escaped
-backtick (otherwise no span hides anything), and never on a line where a span holds a `|`, since a table row is possible
-wherever a `|` is. Rule `line-break` rejects, raw or decoded and before any of this, every line break but LF and CRLF:
+backtick run outside fenced code closes on its own line and no backtick sits inside raw HTML or `<...>` or beside an
+escaped backtick (otherwise no span hides anything), and never on a line where a span holds a `|`, since a table row is
+possible wherever a `|` is and GFM ends a cell there before it reads code spans, or on a line that may belong to a raw
+HTML block, where backticks are text. Literal code (#1003) is every line of a fenced code block at column 0 and the
+content of each code span that hides a `$`, except a span that may open inside a link's destination or title (the link
+takes it whole): every inline target starts right after `](`, so a span counts only when each `](` before it in its
+paragraph closes first, at a `)` with no quote, `(`, `<` or `\` before it. A span on a line that may belong to a link
+reference definition (from a line holding `]:` to a blank line) does not count either.
+CommonMark decodes no reference or escape there and reads no link, so a review of a Markdown parser can quote
+`` `&ThisIsNotDefined;` `` or ``` ``[label](`code`)`` ```, while the same text in prose, or in a code span the scan cannot
+read for certain, still fails. The path, credential and token rules read literal code as they read everything else. Rule `line-break` rejects, raw or decoded and before any of this, every line break but LF and CRLF:
 a bare CR (GitHub ends a line there; the scans do not), vertical tab, form feed, NEL, U+2028 and U+2029. So
 `$5 and $10`, `$HOME/$USER` and `` `$a` `` still publish. Rule `mermaid` rejects a `mermaid` fence. GeoJSON, TopoJSON
 and STL are not modeled, and no scan stops a value spelled out in pieces in prose. Once every rule above passes, the

@@ -560,8 +560,9 @@ class SettingsService:
             candidate = effective_candidate(old.active, old.pending)
             changes: dict[str, Any] = {key: old.lkg.values.get(key) for key in set(candidate) | set(old.lkg.values)}
             if dry_run:
-                return self._plan_admin(changes, old.active.revision if old.active else 0,
+                plan = self._plan_admin(changes, old.active.revision if old.active else 0,
                                         persist=False, apply=False, actor=actor)
+                return {**plan.as_dict(self.registry), "dry_run": True}
             current_revision = old.active.revision if old.active else 0
             new = next_overlay(
                 old,
