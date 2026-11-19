@@ -86,11 +86,16 @@ class _HeldSlot:
         if self.held:
             self.held = False
             self.sem.release()
-        yield
-        if self.sem.locked() and on_wait is not None:
-            await on_wait()
-        await self.sem.acquire()
-        self.held = True
+        body_done = False
+        try:
+            yield
+            body_done = True
+        finally:
+            if body_done:  # only after a body that returned: one that raised leaves the slot released
+                if self.sem.locked() and on_wait is not None:
+                    await on_wait()
+                await self.sem.acquire()
+                self.held = True
 
 
 class HostedRuns:
