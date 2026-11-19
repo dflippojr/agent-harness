@@ -1,4 +1,7 @@
-"""Cursor Agent (`agent -p --output-format stream-json --stream-partial-output`): its records as neutral events.
+"""Cursor Agent (`agent -p --output-format stream-json --stream-partial-output`): the adapter (#991).
+
+`CursorSession` is the transport: one print-mode process per turn on one chat. `CursorTranslator` turns its records
+into neutral events.
 
 Cursor's print mode has no host approval protocol (the session runs with `--force`, confined by its container) and
 reports no rate limits; a usage limit only shows as a failed result. The records a session turns into events:

@@ -1,4 +1,7 @@
-"""Codex (`codex app-server --stdio`, JSON-RPC v2): its notifications and requests as neutral events.
+"""Codex (`codex app-server --stdio`, JSON-RPC v2): the adapter (#991).
+
+`CodexSession` is the transport: one long-lived app-server process, its requests and the active turn.
+`CodexTranslator` turns its notifications and requests into neutral events.
 
 Notes on the protocol are in docs/phase8a-design.md ("Codex CLI", "Harness tools over MCP"). The messages a session
 turns into events:

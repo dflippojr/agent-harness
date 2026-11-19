@@ -1,4 +1,7 @@
-"""Claude Code (`claude -p --input-format stream-json --output-format stream-json`): its records as neutral events.
+"""Claude Code (`claude -p --input-format stream-json --output-format stream-json`): the adapter (#991).
+
+`ClaudeSession` is the transport: one long-lived process in its container, stdin and stdout. `ClaudeTranslator`
+turns its records into neutral events.
 
 The verified protocol is in docs/phase8a-design.md ("Claude Code"). The records a session turns into events:
 

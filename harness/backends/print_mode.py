@@ -1,4 +1,7 @@
-"""Config-declared print-mode CLIs (`kind: cli`, #168): the translator from a parser's events to neutral ones.
+"""Config-declared print-mode CLIs (`kind: cli`, #168): the adapter (#991).
+
+`PrintModeSession` is the transport (one `docker run --rm` per turn, argv from config); `PrintModeTranslator` maps a
+registered parser's events onto neutral ones.
 
 A parser registered in `PRINT_MODE_PARSERS` keeps the #168 contract: `parse(line) -> list[event]` over the CLI's
 stdout, with `session`, `text`, `tool`, `step` and `error` events, and an `answer` property. The transport adds an

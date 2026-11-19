@@ -471,7 +471,7 @@ class HostedRuns:
         return {"policy": backend.auth, "key": self._read_secret(path), "source": "user_file",
                 "assignment_id": "", "path": path, "marker": self._secret_marker(path)}
 
-    async def _send_cli_inbox(self, sid: str, cli: ClaudeSession | CodexSession | CursorSession | PrintModeSession) -> None:
+    async def _send_cli_inbox(self, sid: str, cli: Transport) -> None:
         """Forward messages received during a CLI run without racing a newer inbox append."""
         queued = list(self._live(sid)["inbox"])
         if not queued:
