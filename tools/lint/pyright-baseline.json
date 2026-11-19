@@ -332,20 +332,8 @@
   {
     "file": "harness/db.py",
     "rule": "reportReturnType",
-    "message": "Type \"dict[Unknown, Unknown] | None\" is not assignable to return type \"dict[Unknown, Unknown]\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
-    "count": 1
-  },
-  {
-    "file": "harness/db.py",
-    "rule": "reportReturnType",
     "message": "Type \"list[dict[Unknown, Unknown] | None]\" is not assignable to return type \"list[dict[Unknown, Unknown]]\"",
-    "count": 12
-  },
-  {
-    "file": "harness/db.py",
-    "rule": "reportReturnType",
-    "message": "Type \"tuple[dict[Unknown, Unknown] | None, str]\" is not assignable to return type \"tuple[dict[Unknown, Unknown], str] | None\"\n  Type \"tuple[dict[Unknown, Unknown] | None, str]\" is not assignable to type \"tuple[dict[Unknown, Unknown], str] | None\"\n    \"tuple[dict[Unknown, Unknown] | None, str]\" is not assignable to \"tuple[dict[Unknown, Unknown], str]\"\n      Tuple entry 1 is incorrect type\n        Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n          \"None\" is not assignable to \"dict[Unknown, Unknown]\"\n    \"tuple[dict[Unknown, Unknown] | None, str]\" is not assignable to \"None\"",
-    "count": 1
+    "count": 10
   },
   {
     "file": "harness/disk_watch.py",
@@ -490,12 +478,6 @@
     "rule": "reportArgumentType",
     "message": "Argument of type \"SessionStores\" cannot be assigned to parameter \"db\" of type \"Database\" in function \"__init__\"\n  \"SessionStores\" is not assignable to \"Database\"",
     "count": 3
-  },
-  {
-    "file": "harness/manager.py",
-    "rule": "reportArgumentType",
-    "message": "Argument of type \"Unknown | None\" cannot be assigned to parameter \"days\" of type \"int\" in function \"__init__\"\n  Type \"Unknown | None\" is not assignable to type \"int\"\n    \"None\" is not assignable to \"int\"",
-    "count": 1
   },
   {
     "file": "harness/manager.py",
@@ -678,12 +660,6 @@
     "count": 1
   },
   {
-    "file": "harness/namespace_audit.py",
-    "rule": "reportArgumentType",
-    "message": "Argument of type \"Unknown | None\" cannot be assigned to parameter \"days\" of type \"int\" in function \"__init__\"\n  Type \"Unknown | None\" is not assignable to type \"int\"\n    \"None\" is not assignable to \"int\"",
-    "count": 1
-  },
-  {
     "file": "harness/operation_audit.py",
     "rule": "reportAttributeAccessIssue",
     "message": "Cannot assign to attribute \"may_have_completed\" for class \"HarnessError\"\n  Attribute \"may_have_completed\" is unknown",
@@ -693,12 +669,6 @@
     "file": "harness/operation_audit.py",
     "rule": "reportAttributeAccessIssue",
     "message": "Cannot assign to attribute \"operation_id\" for class \"HarnessError\"\n  Attribute \"operation_id\" is unknown",
-    "count": 1
-  },
-  {
-    "file": "harness/pairing_requests.py",
-    "rule": "reportArgumentType",
-    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"row\" of type \"dict[Unknown, Unknown]\" in function \"_redeem_hub\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
     "count": 1
   },
   {

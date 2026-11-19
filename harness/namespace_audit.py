@@ -112,7 +112,7 @@ def failure_target(db, session, action, approval_id):
 
 class LoginStore:
     """Adapt #470's protocol to the private store; none of its rows enter account_audit."""
-    def __init__(self, db, app_id, end_user, days=30, backend=""):
+    def __init__(self, db, app_id, end_user, days: int | None = 30, backend=""):
         self.db, self.app_id, self.end_user = db, app_id, end_user
         self.days = min(30, days or 30)
         self.backend = backend
