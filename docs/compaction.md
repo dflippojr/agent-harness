@@ -200,7 +200,7 @@ prefill time or pass rate, and it doesn't model a saved state's round reset.
 
 **On the real server (#898, 2026-11-19).** The six hard canary tasks, two
 attempts each, with `python -m bakeoff.canary --mask-batch-at 0.45` against
-masking off, on the tower's production flags
+today's per-turn masking (batching off), on the tower's production flags
 ([`prefix-cache-study.md`](prefix-cache-study.md#batched-masking-on-the-canary-898)):
 
 - Prefill fell from 273 s to 140 s, reuse rose from 74% to 92%, and prefix
@@ -212,6 +212,9 @@ masking off, on the tower's production flags
   this small.
 - A more aggressive arm, a 32K window with batching, did no better: at that
   window `log_correlation`'s large results cross the threshold on every turn.
+- No arm summarized, trimmed or elided, and no agent called `read_artifact` to
+  recover a masked result. That matches arXiv 2609.20804: cheap rules did all
+  the compaction, and recoverability went unused.
 
 **Recommendation: make `mask_batch_at: 0.45` the default** and keep the 64K
 window. Changing the default is a separate PR, made once the owner agrees, so it

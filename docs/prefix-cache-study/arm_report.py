@@ -7,6 +7,10 @@ made it (its last line names the `runs/canary-*.json` outcome file). Per arm: pa
 prefill and decode seconds, and, by context length (the request's prompt tokens), prefill and decode rates and seconds
 per request. Summary calls count in the totals and the bins; the per-session break count is agent calls whose prompt
 did not reuse most of the previous one.
+
+Only graded attempts count, by the canary's own rule (`harness.canary.valid`: status `done`, `failed` or
+`wall_limit`). A `suspended` attempt, or one with no outcome file (interrupted), is listed with `graded: false` and
+left out of the arm totals and the rate bins.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from bakeoff.prefix_diff import completed, is_summary_call, read_jsonl  # noqa: E402 (after the path insert)
+from harness.canary import valid  # noqa: E402 (after the path insert)
 
 BINS = ((0, 8192), (8192, 16384), (16384, 24576), (24576, 32768), (32768, 49152), (49152, 65536))
 NAME = re.compile(r"^(?P<arm>[^-]+)-(?P<task>.+)-r(?P<rep>\d+)\.prompts\.jsonl$")
@@ -71,8 +76,12 @@ def report(root: Path) -> dict:
             continue
         rows = read_jsonl(capture)
         o = outcome(capture.with_name(capture.name.replace(".prompts.jsonl", ".stdout")), root.parent.parent)
+        graded = bool(o and valid([o]))
         sessions.append({**m.groupdict(), **session_stats(rows), "ok": o.get("ok") if o else None,
-                         "status": o.get("status") if o else None, "seconds": o.get("seconds") if o else None})
+                         "status": o.get("status") if o else None, "seconds": o.get("seconds") if o else None,
+                         "graded": graded})
+        if not graded:
+            continue
         for r in completed(rows):
             b = bins[m["arm"]][bin_of(r.get("prompt_tokens") or 0)]
             read = (r.get("prompt_tokens") or 0) - (r.get("cache_tokens") or 0)
@@ -83,10 +92,11 @@ def report(root: Path) -> dict:
             b["decode_ms"] += r.get("decode_ms") or 0
     arms: dict[str, dict] = {}
     for s in sessions:
+        if not s["graded"]:
+            continue
         a = arms.setdefault(s["arm"], defaultdict(float))
         a["sessions"] += 1
         a["passed"] += bool(s["ok"])
-        a["graded"] += s["ok"] is not None
         for k in ("requests", "summary_calls", "prompt_tokens", "cached", "prefill_s", "decode_s", "completion_tokens",
                   "breaks"):
             a[k] += s[k]
@@ -113,7 +123,7 @@ def main() -> None:
         a.json.write_text(json.dumps(result, indent=1), encoding="utf-8")
     print(json.dumps({"arms": result["arms"], "rates_by_context": result["rates_by_context"]}, indent=1))
     for s in result["sessions"]:
-        print(f"{s['arm']:4} {s['task']:20} r{s['rep']} ok={s['ok']} req={s['requests']} prompt={s['prompt_tokens']} "
+        print(f"{s['arm']:4} {s['task']:20} r{s['rep']} ok={s['ok']} graded={s['graded']} req={s['requests']} prompt={s['prompt_tokens']} "
               f"reuse={s['cached'] / s['prompt_tokens'] if s['prompt_tokens'] else 0:.0%} prefill={s['prefill_s']:.1f}s "
               f"decode={s['decode_s']:.1f}s breaks={s['breaks']} peak={s['peak_prompt']} wall={s['seconds']}")
 

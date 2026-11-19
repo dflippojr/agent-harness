@@ -273,7 +273,7 @@ order, so host load fell on all three alike. Load average was 1.4 to 6.2.
 
 | Arm | What | Config |
 | --- | --- | --- |
-| off | today's default: each result masked the turn after it is used | `--mask-batch-at` not given |
+| per-turn | today's default, batching off: each result masked the turn after it is used | `--mask-batch-at` not given |
 | 0.45 | batched masking at 45% of the window | `--mask-batch-at 0.45` |
 | 32K + 0.45 | the more aggressive arm from the 2026-11-18 comment (arXiv 2611.05306): compact sooner, keep less | `context_tokens: 32768` in the config copy (the server stays at 65,536), and `--mask-batch-at 0.45` |
 
@@ -285,7 +285,7 @@ summary, `keep_recent` and the batch threshold to half the tokens together.
 
 | Arm | Passed | Requests | Prompt tokens | Reuse | Prefill s | Decode s | Wall s | Breaks | Prefill s per session |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| off | 9/11 | 112 | 675,612 | 74% | 273 | 453 | 742 | 18 | 24.8 |
+| per-turn | 9/11 | 112 | 675,612 | 74% | 273 | 453 | 742 | 18 | 24.8 |
 | 0.45 | 10/12 | 137 | 1,041,941 | 92% | 140 | 556 | 718 | 1 | 11.7 |
 | 32K + 0.45 | 9/11 | 101 | 640,939 | 76% | 223 | 386 | 623 | 9 | 20.3 |
 
@@ -294,7 +294,7 @@ summary call. Wall time is the canary's GPU time, which with nothing else queued
 
 **Per task**: passes, prefill seconds of each attempt, and reuse over both attempts.
 
-| Task | off | 0.45 | 32K + 0.45 |
+| Task | per-turn | 0.45 | 32K + 0.45 |
 | --- | --- | --- | --- |
 | `log_correlation` | 2/2, 73 + 45, 47% | 2/2, 15 + 48, 73% | 2/2, 81 + 73, 37% |
 | `duration_parser` | 2/2, 57 + 56, 73% | 2/2, 8 + 23, 97% | 2/2, 24 + 11, 91% |
@@ -306,7 +306,7 @@ summary call. Wall time is the canary's GPU time, which with nothing else queued
 **Prefill and decode against context length**, all requests of an arm by their prompt size. Prefill rate is the tokens
 the server read over `prompt_ms`; seconds per request is prefill plus decode.
 
-| Prompt tokens | off: prefill tok/s, decode tok/s, s/request (n) | 0.45 | 32K + 0.45 |
+| Prompt tokens | per-turn: prefill tok/s, decode tok/s, s/request (n) | 0.45 | 32K + 0.45 |
 | --- | --- | --- | --- |
 | 0-8K | 534, 74.2, 5.0 (86) | 407, 73.2, 4.7 (91) | 451, 73.4, 4.8 (73) |
 | 8-16K | 725, 69.4, 11.4 (26) | 663, 71.7, 5.7 (32) | 754, 71.6, 8.4 (26) |
@@ -316,14 +316,14 @@ the server read over `prompt_ms`; seconds per request is prefill plus decode.
 What it says:
 
 - **Batching at 0.45 halves prefill with no drop in pass rate.** Prefill fell from 273 s to 140 s (131 s over the 11
-  attempts that have a pair in the off arm, -52%), reuse rose from 74% to 92%, and prefix breaks from 18 to 1. Every
+  attempts that have a pair in the per-turn arm, -52%), reuse rose from 74% to 92%, and prefix breaks from 18 to 1. Every
   task passed or failed the same way in both arms: `sqlite_report` failed every attempt in every arm, as it has in every
   recorded run (see `docs/canary-evals.md`), and every other graded attempt passed.
 - **The gain is where masking used to break the prefix.** `duration_parser` went from 113 s of prefill over two
   attempts to 31 s, `log_correlation` from 118 s to 63 s and `multi_bug_inventory` from 18 s to 11 s. Tasks that never
   masked much (`merge_conflict`, `cli_json_output`, `sqlite_report`) are the same within noise.
 - **Wall time barely moves, because decode dominates at these sizes.** Decode was 453 s against 273 s of prefill with
-  masking off. With batching, sessions kept more of each result and wrote more (40,335 completion tokens against
+  per-turn masking. With batching, sessions kept more of each result and wrote more (40,335 completion tokens against
   33,047; the second `duration_parser` attempt took 27 requests), so the arm's wall time fell only from 742 s to 718 s
   (654 s over the paired 11). The prefill saving per request at 8-16K tokens, 11.4 to 5.7 s, is what the owner would
   notice on long sessions.
@@ -335,6 +335,14 @@ What it says:
   of prefill). Fewer tokens per request did not buy anything visible here: no session came near the 64K window
   (largest prompt 26K tokens), and decode slowed only from about 74 to 68 tok/s between the smallest and the largest
   prompts. The paper's cost growth with position is real, but these tasks never reach the positions where it bites.
+- **Against the earlier harness-design result (arXiv 2609.20804).** That study found rule-based elision ahead of
+  summarization the most efficient, and that making elided content recoverable added nothing. Both hold here, at the
+  canary's sizes. No arm made a summary call, and no result was trimmed or elided: masking, the cheapest rule, did all
+  the compaction. Masking is recoverable in this harness, since each receipt names a `read_artifact` handle. Over all
+  34 graded sessions the agents never called `read_artifact`, although 19 results were masked per-turn, 13 at 32K and
+  3 at 0.45. So batching changes only when that cheap rule runs, not what it keeps, and it costs no extra model calls,
+  which is the paper's efficiency criterion. Nothing here tests the paper's summarization ordering, because no session
+  got large enough to summarize.
 - **Recommendation: flip the default to `compaction.mask_batch_at: 0.45`,** in a separate PR once the owner agrees. Keep
   the window at 64K; don't adopt the smaller window. The evidence is two attempts per task: enough to see a halving of
   prefill on the tasks that mask, not enough to rule out a small pass-rate effect.
@@ -346,7 +354,7 @@ command that also has a `cd`, since a relative target depends on the working dir
 waited, its sandbox was idle-stopped, and nothing happened until the run's cap. The runner then records the attempt as
 `suspended` with the note "still waiting for the GPU at the run's cap" (one ran to the cap; two were interrupted once
 the pattern was clear). The canary's rule leaves suspended attempts out of the pass rate, so the arms are compared over
-the 11, 12 and 11 attempts that finished. One attempt with masking off and two (one a rerun) with the 32K window
+the 11, 12 and 11 attempts that finished. One attempt with per-turn masking and two (one a rerun) with the 32K window
 stalled this way, and none with 0.45. This is very likely the cause of the stall #774 could not explain
 (`cli_json_output`'s third run, same task, same note, after turn 13). It is a follow-up, not part of this change: the
 nightly canary counts these attempts as neither pass nor fail, and its note blames the GPU.
@@ -384,7 +392,7 @@ vary with host load.
 
 | #898 arm | 8192: read, prefill s | 2048 | 512 |
 | --- | --- | --- | --- |
-| off (today's masking) | 194,748, 288 | 139,011, 214 | 126,873, 197 |
+| per-turn (today's masking) | 194,748, 288 | 139,011, 214 | 126,873, 197 |
 | 0.45 (batched) | 118,298, 201 | 115,851, 214 | 115,335, 196 |
 | 32K + 0.45 | 178,617, 268 | 158,651, 241 | 149,379, 228 |
 
@@ -403,7 +411,7 @@ server leaves checkpoints only near each prompt's end, so a spacing below that k
 
 What it says:
 
-- **With today's per-turn masking, a smaller spacing helps a lot.** On the masking-off sessions, 2048 read 29% fewer
+- **With today's per-turn masking, a smaller spacing helps a lot.** On the per-turn sessions, 2048 read 29% fewer
   tokens and took 26% less prefill; 512 read 35% fewer and took 32% less. The gain is where #856 expected it: sessions
   with small results between the masked ones, such as `duration_parser` (44,000 tokens read at 8192, 18,000 to 25,000
   at 512) and `log_correlation`.
@@ -418,10 +426,24 @@ What it says:
 - **Go or no-go: no-go while the #898 recommendation is adopted.** With `mask_batch_at: 0.45` the change buys nothing
   for up to 0.6 GiB of RAM. If the owner keeps batched masking off, `--checkpoint-min-step 2048` is the setting to
   take: most of the gain for the smaller RAM cost. No production flag was changed.
-- **Interaction with #851 (speculative decoding), not measured.** The DFlash drafter also uses checkpoints and changes
-  the flags, but #851 is not adopted, and its one approved drafter run needs the owner at the GPU. So the drafter was
-  not loaded. A one-token replay wouldn't show drafting's own checkpoint use anyway, since that happens during decode.
-  If #851 is adopted, rerun the replay commands below with its flags before changing the spacing.
+- **Interaction with #851 (speculative decoding), checked in the server source, not measured.** #851 is not adopted,
+  and its one approved drafter run needs the owner at the GPU, so the drafter was not loaded. Instead, the checkpoint
+  code of the pinned build (`tools/server/server-context.cpp` at llama.cpp tag `b10830`, commit `465e49b9`) shows how
+  the two meet:
+  - **Drafting keeps its own checkpoint.** For a model whose memory can't be cut back (Qwen3.6's recurrent layers),
+    each draft step saves the target's state into one per-slot `spec_ckpt` and restores it when only part of a draft
+    is accepted. That checkpoint is overwritten on every step, never joins the prompt checkpoints, and neither
+    `--checkpoint-min-step` nor `--ctx-checkpoints` touches it. So a smaller spacing doesn't change how drafting rolls
+    back, and drafting doesn't use up the 32 prompt checkpoints.
+  - **Each prompt checkpoint gets bigger.** With a drafter loaded, `create_checkpoint` also stores the draft model's
+    state and the speculative state in each prompt checkpoint (`update_dft`, `data_spec`). So the RAM a smaller
+    spacing costs grows by the drafter's share per surviving checkpoint. That size wasn't measured.
+  - **Where checkpoints go.** Prompt checkpoints sit 4 + `n_ubatch` and 4 tokens before a prompt's end, and at the
+    start of user messages at least min-step past the last checkpoint. The spacing also thins out the older ones.
+    The drafter changes none of that.
+
+  So the go or no-go above doesn't depend on #851, except for the RAM per checkpoint. If #851 is adopted, rerun the
+  replay with its flags and read the peak memory before taking 2048.
 
 ## Commands (#898, #856)
 
@@ -438,7 +460,7 @@ docker run -d --rm --name ah898-llama --gpus all --network host \
   --ctx-size 65536 --flash-attn on --parallel 1 --jinja --metrics \
   --fit on --cache-type-k q8_0 --cache-type-v q8_0 --fit-target 2048 --checkpoint-min-step 8192
 
-# #898: per repeat, per task, one session per arm (arms interleaved). ARM is off, b45 or w32.
+# #898: per repeat, per task, one session per arm (arms interleaved). ARM is off (per-turn), b45 or w32.
 #   off: HARNESS_CONFIG_DIR=$PWD/.tmp/config   (no --mask-batch-at)
 #   b45: HARNESS_CONFIG_DIR=$PWD/.tmp/config   --mask-batch-at 0.45
 #   w32: HARNESS_CONFIG_DIR=$PWD/.tmp/config32k --mask-batch-at 0.45
