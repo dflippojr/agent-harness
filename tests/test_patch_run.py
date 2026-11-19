@@ -12,12 +12,18 @@ code's own fields are both there afterwards. Synthetic sessions only.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import sqlite3
+import time
+from pathlib import Path
 
 import pytest
 
 from harness import telemetry
+from harness.app_stores import SessionStores
 from harness.config import BackendConfig, Project
+from harness.db import Database
 from harness.manager import Manager
 from test_daemon import make_cfg
 
@@ -26,16 +32,19 @@ INTERLEAVED = "interleaved_by_another_writer"
 
 class Interleave:
     """While active, queue one writer job that sets `run[INTERLEAVED]` for session `sid`, between the code's read of
-    the session on a pooled reader and its write (or before its first write when it does not read first)."""
+    the session on a pooled reader and its write; or, when it does not read first, before its first write or the
+    first transaction it starts on the session's store."""
 
     def __init__(self, db, sid: str):
         self.db, self.sid, self.fired = db, sid, False
-        self.names = [name for name in ("get_session", "update_session", "patch_run") if hasattr(db, name)]
+        self.names = [name for name in ("get_session", "update_session", "patch_run", "for_session")
+                      if hasattr(db, name)]
 
     def __enter__(self):
         self.real = {name: getattr(self.db, name) for name in self.names}
         self.db.get_session = self._get_session
         self.db.update_session = self._update_session
+        self.db.for_session = self._for_session
         if "patch_run" in self.real:
             self.db.patch_run = self._patch_run
         return self
@@ -55,7 +64,7 @@ class Interleave:
             run = dict(get(self.sid)["run"])
             run[INTERLEAVED] = True
             update(self.sid, run=run)
-        self.db.for_session(self.sid).write(another_writer)
+        self.real["for_session"](self.sid).write(another_writer)
 
     def _get_session(self, sid, *args, **kwargs):
         row = self.real["get_session"](sid, *args, **kwargs)
@@ -72,6 +81,24 @@ class Interleave:
         if self._outside(sid):
             self._fire()
         return self.real["patch_run"](sid, *args, **fields)
+
+    def _for_session(self, sid):
+        store, interleave = self.real["for_session"](sid), self
+
+        class Store:  # the session's store, firing before a transaction starts on it
+            def __getattr__(self, name):
+                return getattr(store, name)
+
+            def write(self, fn, *args, **kwargs):
+                if interleave._outside(sid):
+                    interleave._fire()
+                return store.write(fn, *args, **kwargs)
+
+            async def awrite(self, fn, *args, **kwargs):
+                if interleave._outside(sid):
+                    interleave._fire()
+                return await store.awrite(fn, *args, **kwargs)
+        return Store()
 
 
 @pytest.fixture
@@ -181,3 +208,121 @@ def test_split_mode_file_write_keeps_a_field_written_meanwhile(manager):
     with Interleave(manager.db, sid) as interleave:
         asyncio.run(manager.runner._split_call(s, "write_file", {"path": "a.txt", "content": "hi"}))
     _check(manager, sid, interleave, files_touched=["a.txt"])
+
+
+# --- patch_run itself -------------------------------------------------------------------------------------------------
+
+def _row(sid: str, app_id: str = "", run: dict | None = None) -> dict:
+    now = time.time()
+    return {"id": sid, "project": "scratch", "target": "tower", "model": "fake", "title": sid, "status": "done",
+            "workspace": "", "created_at": now, "updated_at": now, "context": [], "app_id": app_id,
+            "owner_id": "owner", "run": run if run is not None else {"turns": 2, "notes": "keep", "stale": 1}}
+
+
+def test_patch_run_merges_unset_run_removes_and_both_return_the_new_run(tmp_path):
+    db = Database(tmp_path / "harness.sqlite3")
+    try:
+        db.insert_session(_row("s-1"))
+        assert db.patch_run("s-1", turns=3, rate_limits={"utilization": 0.5}) == {
+            "turns": 3, "notes": "keep", "stale": 1, "rate_limits": {"utilization": 0.5}}
+        assert db.unset_run("s-1", "stale", "never-there") == {
+            "turns": 3, "notes": "keep", "rate_limits": {"utilization": 0.5}}
+        assert db.get_session("s-1")["run"] == {"turns": 3, "notes": "keep", "rate_limits": {"utilization": 0.5}}
+        assert db.patch_run("missing", turns=1) is None  # a session that is gone: nothing written, no error
+        assert db.unset_run("missing", "turns") is None
+
+        def one_transaction() -> None:  # nested in a write it joins that transaction
+            db.patch_run("s-1", a=1)
+            db.patch_run("s-1", b=2)
+        db.write(one_transaction)
+        run = db.get_session("s-1")["run"]
+        assert (run["a"], run["b"], run["turns"]) == (1, 2, 3)
+    finally:
+        db.close()
+
+
+def test_patch_run_goes_to_the_app_store_and_never_to_an_erased_session(tmp_path):
+    stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
+    try:
+        stores.insert_session(_row("app-sess", app_id="k-app1"))
+        stores.insert_session(_row("web-sess"))
+        stores.patch_run("app-sess", turns=9)
+        stores.patch_run("web-sess", turns=7)
+        assert stores.get_session("app-sess")["run"]["turns"] == 9
+        assert stores.get_session("web-sess")["run"]["turns"] == 7
+        assert stores.main.get_session("app-sess") is None  # the App's row lives in its own store only
+        stores.delete_session("app-sess")
+        with pytest.raises(sqlite3.ProgrammingError):
+            stores.patch_run("app-sess", turns=10)
+    finally:
+        stores.close()
+
+
+# --- the source audit -------------------------------------------------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCES = ("harness", "harness_modules")
+
+
+def _spread(node) -> bool:
+    """A dict display with a `**` entry: a copy of another dict with some keys set."""
+    return isinstance(node, ast.Dict) and any(key is None for key in node.keys)
+
+
+def _spreads_run(node) -> bool:
+    """A dict display that copies a `run` (`{**s["run"], ...}`, `{**run, ...}`) with some keys set."""
+    return _spread(node) and any(key is None and "run" in ast.unparse(value)
+                                 for key, value in zip(node.keys, node.values, strict=True))
+
+
+def _run_rewrites(tree: ast.AST) -> list[tuple[str, int]]:
+    """Where a function writes `run` from a copy: `run={**...}`, `"run": {**...}`, or a name holding a spread copy of
+    a run that is then passed as `run=`."""
+    found: list[tuple[str, int]] = []
+
+    def scan(function, name: str) -> None:
+        copies = {target.id for node in ast.walk(function) if isinstance(node, ast.Assign) and _spreads_run(node.value)
+                  for target in node.targets if isinstance(target, ast.Name)}
+        for node in ast.walk(function):
+            if isinstance(node, ast.Call):
+                for keyword in node.keywords:
+                    if keyword.arg == "run" and (_spread(keyword.value) or (
+                            isinstance(keyword.value, ast.Name) and keyword.value.id in copies)):
+                        found.append((name, node.lineno))
+            elif isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values, strict=True):
+                    if isinstance(key, ast.Constant) and key.value == "run" and _spread(value):
+                        found.append((name, node.lineno))
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scan(node, node.name)
+    return sorted(set(found))
+
+
+def _scan() -> list[str]:
+    hits = []
+    for top in SOURCES:
+        for path in sorted((ROOT / top).rglob("*.py")):
+            rel = path.relative_to(ROOT).as_posix()
+            hits += [f"{rel}:{line} ({name})" for name, line in _run_rewrites(ast.parse(path.read_text("utf-8")))]
+    return hits
+
+
+def test_no_code_rewrites_run_from_a_copy():
+    """#991: every write of some of `run`'s fields goes through `Database.patch_run`, which merges them into the row
+    inside one writer transaction. A whole-value write built from a spread copy of `run` would overwrite whatever
+    another write committed after that copy was read."""
+    assert _scan() == [], "write these fields with db.patch_run(sid, **fields) instead"
+
+
+def test_the_audit_flags_each_form_of_a_rewrite_from_a_copy():
+    def scan(source: str) -> list[int]:
+        return [line for _name, line in _run_rewrites(ast.parse(source))]
+
+    assert scan("def f(db, s):\n    db.update_session(s['id'], run={**s['run'], 'x': 1})\n") == [2]
+    assert scan("def f(db, sid, run):\n    marked = {'status': 'x', 'run': {**run, 'y': 2}}\n") == [2]
+    assert scan("def f(db, s):\n    run = {**s['run'], 'x': 1}\n    db.update_session(s['id'], run=run)\n") == [3]
+    assert scan("def f(db, sid):\n    db.patch_run(sid, x=1)\n") == []
+    assert scan("def f(db, sid, run):\n    db.update_session(sid, run=run)\n") == []  # not a copy it made
+    assert scan("def f(e):\n    return {**e, 'data': {}}\n") == []

@@ -1119,7 +1119,7 @@
     "file": "harness/runner.py",
     "rule": "reportOptionalMemberAccess",
     "message": "\"get\" is not a known attribute of \"None\"",
-    "count": 55
+    "count": 53
   },
   {
     "file": "harness/runner.py",
@@ -1143,7 +1143,7 @@
     "file": "harness/runner.py",
     "rule": "reportOptionalSubscript",
     "message": "Object of type \"None\" is not subscriptable",
-    "count": 121
+    "count": 109
   },
   {
     "file": "harness/runner.py",

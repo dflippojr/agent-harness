@@ -1131,8 +1131,7 @@ class Manager:
         self.unsettled.add(sid)
 
         def mark() -> None:
-            run = self.db.get_session(sid)["run"]
-            self.db.update_session(sid, run={**run, checkpoints.UNSETTLED: time.time()})
+            self.db.patch_run(sid, **{checkpoints.UNSETTLED: time.time()})
         try:
             await self.db.for_session(sid).awrite(mark)
         except Exception:  # noqa: BLE001 - the in-memory mark still refuses sends

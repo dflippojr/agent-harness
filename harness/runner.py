@@ -21,6 +21,8 @@ from pathlib import Path
 
 from . import audit_context, operation_audit, namespace_audit, claude_token, compaction, credential_sources, delegate_edit, efficiency, grounding, llm, member_keys, planning, projects, state as agent_state, stuck, taint, telemetry, tool_profiles
 from .backend_state import billing_warning
+from .backends.events import (Assistant, Delta, Error, Event, PermissionRequest, RateLimits, Result, Session,
+                              ToolResult, result_of)
 from .bus import EventBus
 from .checkpointer import Checkpointer
 from .checkpoints import MUTATING_TOOLS
@@ -574,12 +576,13 @@ class Runner:
             output = truncate_middle(output, clamp_tool_limit(args.get("max_chars"), limits.run_shell_chars,
                                                               limits.run_shell_chars_max))
         elif name in ("write_file", "edit_file") and args.get("path"):
-            run = self.db.get_session(s["id"])["run"]
-            touched = list(run.get("files_touched") or [])
-            path = str(args["path"]).replace("\\", "/")
-            if path not in touched:
-                run["files_touched"] = (touched + [path])[:agent_state.FILES_MODIFIED_MAX]
-                self.db.update_session(s["id"], run=run)
+            sid, path = s["id"], str(args["path"]).replace("\\", "/")
+
+            def touch() -> None:  # the list is read and extended in one transaction
+                touched = list(self.db.get_session(sid)["run"].get("files_touched") or [])
+                if path not in touched:
+                    self.db.patch_run(sid, files_touched=(touched + [path])[:agent_state.FILES_MODIFIED_MAX])
+            await self.db.for_session(sid).awrite(touch)
         return output
 
     async def _resume_from_app(self, sid: str) -> None:
@@ -712,13 +715,11 @@ class Runner:
 
     def _status_writer(self, sid: str, status: str, fields: dict):
         def set_status() -> None:
-            marked = fields
             clock = self._clocks.get(sid)
+            self.db.update_session(sid, status=status, **fields)
             if "run" not in fields and (status == "running" or (clock is not None and clock.since is not None)):
-                run = (self.db.get_session(sid) or {}).get("run") or {}
                 # Its first `running` marks its place; leaving `running` records the time it has spent (#524).
-                marked = {**fields, "run": {**run, HOLDS_PLACE: True, RUN_SECONDS: self._run_seconds(sid)}}
-            self.db.update_session(sid, status=status, **marked)
+                self.db.patch_run(sid, **{HOLDS_PLACE: True, RUN_SECONDS: self._run_seconds(sid)})
             self._flag_end_pending(sid, status)
             self.bus.emit(sid, "status", {"status": status, **{k: v for k, v in fields.items()
                                                                  if k in ("stop_reason", "answer")}})
@@ -753,7 +754,7 @@ class Runner:
         """Inside the write that sets `status`: mark a live run's final status as awaiting its _end_run."""
         if status in ACTIVE or sid not in self._unended:
             return
-        self.db.update_session(sid, run={**self.db.get_session(sid)["run"], END_PENDING: True})
+        self.db.patch_run(sid, **{END_PENDING: True})
 
     def set_status(self, sid: str, status: str, **fields) -> None:
         self.db.for_session(sid).write(self._status_writer(sid, status, fields))
@@ -972,9 +973,7 @@ class Runner:
         if s is None:  # deleted while running
             return
         root.set({"harness.status": s["status"]})
-        run = s["run"]
-        run["trace"] = {**(run.get("trace") or trace), "last_stop": time.time()}
-        self.db.update_session(sid, run=run)
+        self.db.patch_run(sid, trace={**(s["run"].get("trace") or trace), "last_stop": time.time()})
 
     def _session_trace(self, sid: str) -> dict:
         """The session's persisted trace ids ({} when tracing is off), created on its first traced run."""
@@ -986,7 +985,7 @@ class Runner:
         trace = s["run"].get("trace") or {}
         if not trace.get("trace_id"):
             trace = {**telemetry.tracer().new_trace(), "started_at": s["created_at"]}
-            self.db.update_session(sid, run={**s["run"], "trace": trace})
+            self.db.patch_run(sid, trace=trace)
         return trace
 
     async def _run(self, sid: str, recovered: bool = False) -> None:
@@ -1110,7 +1109,7 @@ class Runner:
             current = self.db.get_session(sid)
             if (current is not None and current["status"] in ACTIVE
                     and current["run"].get("started_at") == started_at):
-                self.db.update_session(sid, run={**current["run"], RUN_SECONDS: seconds})
+                self.db.patch_run(sid, **{RUN_SECONDS: seconds})
         try:
             await self.db.for_session(sid).awrite(keep)
         except Exception:  # noqa: BLE001 - an erased session, a closing store: nothing to keep
@@ -1131,7 +1130,7 @@ class Runner:
         def mark() -> None:
             current = self.db.get_session(sid)
             if current is not None and current["status"] in ran:
-                self.db.update_session(sid, run={**current["run"], HOLDS_PLACE: True})
+                self.db.patch_run(sid, **{HOLDS_PLACE: True})
         await self.db.for_session(sid).awrite(mark)
 
     def _stop_on_deadline(self, sid: str, run: asyncio.Task, reason: str) -> None:
@@ -1200,7 +1199,7 @@ class Runner:
     def _record_failure(self, sid: str, code: str, message: str, retryable: bool, stop_reason: str) -> None:
         s = self.db.get_session(sid)
         failure = {"code": code, "provider": s.get("backend", "local"), "message": message, "retryable": retryable}
-        self.db.update_session(sid, run={**s["run"], "failure": failure})
+        self.db.patch_run(sid, failure=failure)
         self.bus.emit(sid, "error", failure)
         self.set_status(sid, "failed", stop_reason=stop_reason)
 
@@ -1384,21 +1383,17 @@ class Runner:
             await self.aset_status(sid, "running")
         source = (credential["source"] if use_api_key or credential["source"] == "end_user_login"
                   else "subscription")
-        run = {**s["run"], "billing_mode": "api_key" if use_api_key else backend.billing,
-               "credential_source": source,
-               "credential_assignment": credential["assignment_id"]}
-        self.db.update_session(sid, run=run)
+        run = self.db.patch_run(sid, billing_mode="api_key" if use_api_key else backend.billing,
+                                credential_source=source, credential_assignment=credential["assignment_id"]) or {}
         warning = billing_warning(backend, run.get("rate_limits"), using_api_key=use_api_key)
         if warning and not run.get("billing_warned"):
-            run["billing_warned"] = True
-            self.db.update_session(sid, run=run)
+            self.db.patch_run(sid, billing_warned=True)
             await self.bus.aemit(sid, "billing_warning", {"backend": backend_name, "message": warning})
         end_user = s.get("end_user") or ""
         if backend_name == "claude" and not end_user and claude_token.uses_token(backend, s.get("app_id") or "", api_key):
             note = claude_token.reminder(backend.oauth_token_file)
             if note and not run.get("token_expiry_warned"):
-                run["token_expiry_warned"] = True
-                self.db.update_session(sid, run=run)
+                self.db.patch_run(sid, token_expiry_warned=True)
                 await self.bus.aemit(sid, "billing_warning", {"backend": backend_name, "message": note})
         from dataclasses import replace
         frozen = replace(backend, model=s["model"], effort=s.get("effort") or backend.effort)
@@ -1443,8 +1438,7 @@ class Runner:
                         if m.get("role") == "user" and isinstance(m.get("content"), str)), ""))
         await cli.initialize(prompt)
         if cli.backend_session_id and cli.backend_session_id != backend_session_id:
-            s = self.db.get_session(sid)
-            self.db.update_session(sid, run={**s["run"], "backend_session_id": cli.backend_session_id})
+            self.db.patch_run(sid, backend_session_id=cli.backend_session_id)
         return cli
 
     async def _print_mode_extra(self, sid: str, s: dict, name: str, backend) -> dict:
@@ -1541,19 +1535,16 @@ class Runner:
         s = self.db.get_session(sid)
         credential = self._backend_credential(s)
         if credential["policy"] == "subscription_then_api_key" and credential["key"] and not use_api_key:
-            run = {**s["run"], "backend_auth": "api_key"}
-
             def fall_back() -> None:  # queued for a slot again: that wait is not its running time (#524)
-                self.db.update_session(sid, run=run)
+                self.db.patch_run(sid, backend_auth="api_key")
                 self._status_writer(sid, "queued", {})()
                 self.bus.emit(sid, "backend_fallback", {"backend": backend_name, "auth": "api_key"})
             await self.db.for_session(sid).awrite(fall_back)
             return
         reset = limit.reset_at or time.time() + 300
-        run = {**s["run"], "limit_resets_at": reset}
 
         def wait_for_limit() -> None:  # one commit, so nobody sees waiting_limit without when it resets
-            self.db.update_session(sid, run=run)
+            self.db.patch_run(sid, limit_resets_at=reset)
             self._status_writer(sid, "waiting_limit", {})()
             self.bus.emit(sid, "limit_waiting", {"backend": backend_name, "resets_at": reset})
         await self.db.for_session(sid).awrite(wait_for_limit)
@@ -1646,7 +1637,10 @@ class Runner:
                                  event: dict, tool_names: dict[str, str], recovered: bool = False) -> bool:
         """Map one hosted-CLI record. Returns true when the run is complete."""
         if isinstance(cli, PrintModeSession):
-            return await self._handle_print_mode_event(sid, cli, event)
+            for neutral in cli.translator.translate(event):
+                if await self._apply(sid, cli, neutral, recovered):
+                    return True
+            return False
         if isinstance(cli, CodexSession):
             return await self._handle_codex_event(sid, cli, event, tool_names, recovered=recovered)
         if isinstance(cli, CursorSession):
@@ -1688,9 +1682,70 @@ class Runner:
         self._finish_cli_result(sid, event)
 
     def _bind_backend_session(self, sid: str, cli, backend_session_id: str) -> None:
-        s = self.db.get_session(sid)
-        self.db.update_session(sid, run={**s["run"], "backend_session_id": backend_session_id})
+        self.db.patch_run(sid, backend_session_id=backend_session_id)
         cli.backend_session_id = backend_session_id
+
+    async def _apply(self, sid: str, cli, event: Event, recovered: bool = False) -> bool:
+        """Apply one neutral event from a hosted CLI's translator (#991): the one place that records what a CLI did,
+        asks the approval policy and stops on a limit, whatever the vendor. Returns true when the run is complete."""
+        match event:
+            case Delta():
+                self.bus.ephemeral(sid, "delta", {"kind": event.kind, "text": event.text})
+            case Assistant():
+                self._emit_assistant(sid, event.content,
+                                     [self._tool_call_entry(c.id, c.name, c.args) for c in event.tool_calls])
+            case ToolResult():
+                self._record_cli_tool_result(sid, event.id, event.name, event.ok, event.output, event.seconds)
+            case Session():
+                if event.id and event.id != cli.backend_session_id:
+                    self._bind_backend_session(sid, cli, event.id)
+            case PermissionRequest():
+                await self._permission_request(sid, cli, event, recovered)
+            case RateLimits():
+                self._rate_limits(sid, event)
+            case Result():
+                return await self._cli_result(sid, cli, event)
+            case Error():
+                raise CliBackendError(event.message)
+        return False
+
+    async def _permission_request(self, sid: str, cli, event: PermissionRequest, recovered: bool) -> None:
+        if not event.decidable:  # nobody is there to fill in a server's form
+            await cli.respond_permission(event.request_id, "deny", {})
+            return
+        request = {"tool_name": event.tool, "input": event.args, "tool_use_id": event.call_id,
+                   "description": event.description}
+        await self._authorize_cli(sid, cli, event.request_id, request, recovered=recovered)
+
+    def _rate_limits(self, sid: str, event: RateLimits) -> None:
+        """Keep the provider's latest windows on the run and the backend, and stop the run at its limit, or at the
+        backend's `stop_at_utilization`, until the window resets."""
+        s = self.db.get_session(sid)
+        backend = self.cfg.backends[s["backend"]]
+        self.db.patch_run(sid, rate_limits=event.info)
+        self.db.set_backend_usage(s["backend"], event.info)
+        self.bus.emit(sid, "rate_limit", event.info)
+        if event.billing:
+            warning = billing_warning(backend, event.info, using_api_key=s["run"].get("billing_mode") == "api_key")
+            if warning:
+                self.bus.emit(sid, "billing_warning", {"backend": s["backend"], "message": warning})
+        stop = float(backend.stop_at_utilization or 0)
+        if event.limit_reached or (stop and float(event.info.get("utilization") or 0) >= stop):
+            raise CliLimitError(event.resets_at)
+
+    async def _cli_result(self, sid: str, cli, result: Result) -> bool:
+        """The CLI's turn ended: wait out a usage limit, run the messages queued meanwhile as the next turn (the
+        turn-based CLIs), or finish the run."""
+        if result.limit_reached:
+            latest = self.db.get_session(sid)["run"].get("rate_limits") or {}
+            raise CliLimitError(float(latest.get("resetsAt") or 0))
+        if getattr(cli, "has_followups", False):
+            await cli.continue_followups()
+            return False
+        if result.show_answer and result.answer:
+            self._emit_assistant(sid, result.answer)
+        self._finish_cli_result(sid, result)
+        return True
 
     def _emit_assistant(self, sid: str, content: str = "", tool_calls: list | None = None) -> None:
         self.bus.emit(sid, "assistant", {"content": content, "reasoning": "", "tool_calls": tool_calls or [],
@@ -1708,12 +1763,12 @@ class Runner:
             # `tainted`: a session_search result's banner, when it has one (#798); its text never opens with it
             output = output.removeprefix(self._context_banner(self.db.get_session(sid), bare, tainted=True))
 
-        def record_cli_tool_result() -> None:
+        def record_cli_tool_result() -> None:  # the counters are read and bumped in one transaction
             run = self.db.get_session(sid)["run"]
-            run["tool_calls"] = run.get("tool_calls", 0) + 1
+            counts = {"tool_calls": run.get("tool_calls", 0) + 1}
             if not ok:
-                run["tool_errors"] = run.get("tool_errors", 0) + 1
-            self.db.update_session(sid, run=run)
+                counts["tool_errors"] = run.get("tool_errors", 0) + 1
+            self.db.patch_run(sid, **counts)
             self.bus.emit(sid, "tool_result", {"id": call_id, "name": name, "ok": ok, "seconds": seconds,
                                                "output_chars": len(output),
                                                "output": truncate_middle(output, 20000)})
@@ -1753,7 +1808,7 @@ class Runner:
     def _claude_rate_limits(self, sid: str, event: dict, _tool_names: dict[str, str] | None = None) -> None:
         rate_limits = event.get("rate_limit_info") or {}
         s = self.db.get_session(sid)
-        self.db.update_session(sid, run={**s["run"], "rate_limits": rate_limits})
+        self.db.patch_run(sid, rate_limits=rate_limits)
         self.db.set_backend_usage(s["backend"], rate_limits)
         self.bus.emit(sid, "rate_limit", rate_limits)
         warning = billing_warning(self.cfg.backends[s["backend"]], rate_limits,
@@ -1827,40 +1882,6 @@ class Runner:
         if cli.last_answer:
             self._emit_assistant(sid, cli.last_answer)
         self._finish_cli_result(sid, combined)
-        return True
-
-    async def _handle_print_mode_event(self, sid: str, cli: PrintModeSession, event: dict) -> bool:
-        """Map a kind: cli backend's parsed events (#168 Q4). Usage is not reported."""
-        type_ = event.get("type")
-        if type_ == "session":
-            if event["id"] != cli.backend_session_id:
-                self._bind_backend_session(sid, cli, event["id"])
-        elif type_ == "text":
-            self.bus.ephemeral(sid, "delta", {"kind": "content", "text": event["text"]})
-        elif type_ == "tool":
-            # The CLI reports a tool once it has run (auto-approved in its container): the call and its result.
-            self._emit_assistant(sid, "", [self._tool_call_entry(event["id"], event["name"], event["input"])])
-            self._record_cli_tool_result(sid, event["id"], event["name"], not event["error"], event["output"])
-        elif type_ == "step":
-            cli.steps += 1
-        elif type_ == "error":
-            raise CliBackendError(f"{cli.name}: {event['message']}")
-        elif type_ == "exit":
-            return await self._print_mode_exit(sid, cli, event)
-        return False
-
-    async def _print_mode_exit(self, sid: str, cli: PrintModeSession, event: dict) -> bool:
-        """A turn's process ended: an error, the next queued turn, or the run's result."""
-        if event.get("code") != 0:
-            detail = f": {event['stderr']}" if event.get("stderr") else ""
-            raise CliBackendError(f"{cli.name} exited with code {event.get('code')}{detail}")
-        if cli.has_followups:
-            await cli.continue_followups()
-            return False
-        if cli.last_answer:
-            self._emit_assistant(sid, cli.last_answer)
-        self._finish_cli_result(sid, {"result": cli.last_answer, "usage": {}, "num_turns": cli.steps,
-                                      "total_cost_usd": 0})
         return True
 
     @staticmethod
@@ -2080,7 +2101,7 @@ class Runner:
         snapshot = params.get("rateLimits") if isinstance(params.get("rateLimits"), dict) else {}
         limits = self._codex_rate_limits(snapshot)
         s = self.db.get_session(sid)
-        self.db.update_session(sid, run={**s["run"], "rate_limits": limits})
+        self.db.patch_run(sid, rate_limits=limits)
         self.db.set_backend_usage(s["backend"], limits)
         self.bus.emit(sid, "rate_limit", limits)
         stop = float(self.cfg.backends[s["backend"]].stop_at_utilization or 0)
@@ -2204,40 +2225,41 @@ class Runner:
         if source is not None:
             self._add_taint(sid, *source)
 
-    def _finish_cli_result(self, sid: str, result: dict) -> None:
-        s = self.db.get_session(sid)
-        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    def _finish_cli_result(self, sid: str, result: Result | dict) -> None:
+        """Commit the run's end from the CLI's result (a Result, or a result record in Claude Code's shape): its usage
+        on the run, the session totals and the usage log, and its final status, in one transaction."""
+        if isinstance(result, dict):
+            result = result_of(result)
+        usage = result.usage
         prompt_tokens = sum(int(usage.get(key) or 0) for key in
                             ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
         completion_tokens = int(usage.get("output_tokens") or 0)
-        turns = int(result.get("num_turns") or 0)
-        cost = float(result.get("total_cost_usd") or 0)
-        run = {**s["run"], "turns": turns, "prompt_tokens": prompt_tokens,
-               "completion_tokens": completion_tokens, "usage": usage, "total_cost_usd": cost,
-               "executing": None}
-        totals = dict(s["totals"])
-        totals["turns"] = totals.get("turns", 0) + turns
-        totals["prompt_tokens"] = totals.get("prompt_tokens", 0) + prompt_tokens
-        totals["completion_tokens"] = totals.get("completion_tokens", 0) + completion_tokens
-        totals["total_cost_usd"] = round(float(totals.get("total_cost_usd", 0)) + cost, 10)
-        answer = str(result.get("result") or "")
-        failed = bool(result.get("is_error")) or result.get("subtype") in ("error", "failed")
-        status, reason = ("failed", "provider_error") if failed else ("done", "final_message")
-        if failed:
-            failure = {"code": "provider_error", "provider": s["backend"],
-                       "message": answer or str(result.get("subtype") or "provider failed"), "retryable": True}
-            run["failure"] = failure
+        status, reason = ("failed", "provider_error") if result.is_error else ("done", "final_message")
 
         def finish_cli_result() -> None:
-            self.db.update_session(sid, run=run, totals=totals, status=status, stop_reason=reason, answer=answer)
+            s = self.db.get_session(sid)
+            fields = {"turns": result.turns, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                      "usage": usage, "total_cost_usd": result.cost, "executing": None}
+            failure = None
+            if result.is_error:
+                failure = {"code": "provider_error", "provider": s["backend"],
+                           "message": result.answer or result.subtype or "provider failed", "retryable": True}
+                fields["failure"] = failure
+            run = self.db.patch_run(sid, **fields) or {}
+            totals = dict(s["totals"])
+            totals["turns"] = totals.get("turns", 0) + result.turns
+            totals["prompt_tokens"] = totals.get("prompt_tokens", 0) + prompt_tokens
+            totals["completion_tokens"] = totals.get("completion_tokens", 0) + completion_tokens
+            totals["total_cost_usd"] = round(float(totals.get("total_cost_usd", 0)) + result.cost, 10)
+            self.db.update_session(sid, totals=totals, status=status, stop_reason=reason, answer=result.answer)
             self._flag_end_pending(sid, status)
-            self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, cost,
-                                 str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
+            self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens,
+                                 result.cost, str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
                                  str(run.get("credential_source") or "subscription"), s.get("end_user") or "",
                                  s.get("tool_profile") or tool_profiles.DEFAULT)
-            if failed:
+            if failure is not None:
                 self.bus.emit(sid, "error", failure)
-            self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": answer})
+            self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": result.answer})
         self.db.for_session(sid).write(finish_cli_result)
 
     async def _stop_cli(self, sid: str) -> None:
@@ -2663,8 +2685,7 @@ class Runner:
             error = await self._refresh_origin(s, project, ws, remote, member)
             if error:
                 await self.bus.aemit(s["id"], "error", {"message": f"could not refresh origin: {error}"})
-            run = self.db.get_session(s["id"])["run"]
-            self.db.update_session(s["id"], run={**run, "origin_refreshed": True})
+            self.db.patch_run(s["id"], origin_refreshed=True)
 
     async def _first_prepare(self, s: dict, project, ws: Path, remote: bool, member: bool) -> dict:
         github_branch = (s.get("app_metadata") or {}).get("github_base_branch") or ""
@@ -3256,11 +3277,12 @@ class Runner:
         notes = args["notes"]
 
         def update_notes() -> None:
-            run = {**self.db.get_session(sid)["run"], "notes": notes}
-            if isinstance(run.get("state"), dict):
-                run["state"] = {**run["state"], "notes": notes}
-                self.bus.emit(sid, "state", {"state": run["state"]})
-            self.db.update_session(sid, run=run)
+            fields = {"notes": notes}
+            state = self.db.get_session(sid)["run"].get("state")
+            if isinstance(state, dict):
+                fields["state"] = {**state, "notes": notes}
+                self.bus.emit(sid, "state", {"state": fields["state"]})
+            self.db.patch_run(sid, **fields)
             self.bus.emit(sid, "notes", {"notes": notes})
         await self.db.for_session(sid).awrite(update_notes)
         await self._record_bounded(sid, call, "update_notes", f"Notes saved ({len(notes)} characters).")
@@ -3274,8 +3296,7 @@ class Runner:
             return
 
         def update_state() -> None:
-            run = {**self.db.get_session(sid)["run"], "state": payload, "notes": payload["notes"]}
-            self.db.update_session(sid, run=run)
+            self.db.patch_run(sid, state=payload, notes=payload["notes"])
             self.bus.emit(sid, "state", {"state": payload})
             if payload["notes"]:
                 self.bus.emit(sid, "notes", {"notes": payload["notes"]})
@@ -3296,8 +3317,7 @@ class Runner:
                                 "Error: call update_state first so a valid saved state exists before reset_round.",
                                 ok=False, invalid=True)
             return
-        run = {**s["run"], "pending_round_reset": True}
-        self.db.update_session(sid, run=run)
+        self.db.patch_run(sid, pending_round_reset=True)
         await self._record_bounded(sid, call, "reset_round", "Round reset scheduled.")
 
     @staticmethod
@@ -3334,7 +3354,11 @@ class Runner:
         if not self._guidance_eligible(s) or run.get("workspace_context_applied") or run.get("repo_map_applied"):
             return
         context = self._with_workspace_context(s, s["context"])
-        self.db.update_session(sid, context=context, run={**s["run"], "workspace_context_applied": True})
+
+        def applied() -> None:
+            self.db.update_session(sid, context=context)
+            self.db.patch_run(sid, workspace_context_applied=True)
+        self.db.for_session(sid).write(applied)
 
     def _snapshot_git_baseline(self, sid: str) -> None:
         s = self.db.get_session(sid)
@@ -3371,11 +3395,10 @@ class Runner:
         if self._guidance_eligible(s):  # the one place the guidance and map are refreshed after the start
             new_context = self._with_workspace_context(s, new_context)
         after = compaction.estimate_tokens(new_context, cpt) + overhead
-        run = {**self.db.get_session(sid)["run"]}
-        run.pop("pending_round_reset", None)
 
         def round_reset() -> None:
-            self.db.update_session(sid, context=new_context, run=run)
+            self.db.update_session(sid, context=new_context)
+            self.db.unset_run(sid, "pending_round_reset")
             self.bus.emit(sid, "compaction", {"tier": "round_reset", "tokens_before": before,
                                               "tokens_after": after, "context_tokens": model.context_tokens})
         self.db.for_session(s["id"]).write(round_reset)
@@ -3409,9 +3432,7 @@ class Runner:
                                                "harness.tokens_before": before}):
                 return self._round_reset(s, context, before, cpt, overhead)
         if explicit:
-            run = {**s["run"]}
-            run.pop("pending_round_reset", None)
-            self.db.update_session(sid, run=run)
+            self.db.unset_run(sid, "pending_round_reset")
             s = self.db.get_session(sid)
         if pressure < self.cfg.elide_at * n:
             return s
@@ -3464,12 +3485,10 @@ class Runner:
                       "harness.compaction_reason": data.get("reason", "threshold")})
 
             def compact() -> None:
+                self.db.update_session(sid, context=context)
                 if data["tier"] == "summary":  # the next summary request quotes it as the prior notes
-                    run = {**self.db.get_session(sid)["run"], "summary": data["summary"],
-                           "summary_notes": s["run"].get("notes", "")}  # what apply_summary framed it with
-                    self.db.update_session(sid, context=context, run=run)
-                else:
-                    self.db.update_session(sid, context=context)
+                    self.db.patch_run(sid, summary=data["summary"],
+                                      summary_notes=s["run"].get("notes", ""))  # what apply_summary framed it with
                 self.bus.emit(sid, "compaction", data)
             await self.db.for_session(s["id"]).awrite(compact)
         return self.db.get_session(sid)
@@ -3633,8 +3652,8 @@ class Runner:
 
         def ended() -> None:
             current = self.db.get_session(sid)
-            if current and current["run"].pop(END_PENDING, None) is not None:
-                self.db.update_session(sid, run=current["run"])
+            if current and END_PENDING in current["run"]:
+                self.db.unset_run(sid, END_PENDING)
         await self.db.for_session(sid).awrite(ended)
 
     def _clear_tools_only_workspace(self, s: dict) -> None:
@@ -3663,17 +3682,17 @@ class Runner:
             quotes = grounding.ungrounded_quotes(s["answer"],
                                                  grounding.session_sources(s["context"], self.db.events(sid)))
             if quotes:
-                fields["run"] = {**s["run"], "ungrounded_quotes": quotes}
                 extra["ungrounded_quotes"] = quotes
 
         def run_finished() -> dict:  # one commit, so nobody sees the job status without its run_finished
             if fields:
                 self.db.update_session(sid, **fields)
             if quotes:
+                self.db.patch_run(sid, ungrounded_quotes=quotes)
                 self.bus.emit(sid, "ungrounded_quotes", {"quotes": quotes})
             final = self.db.get_session(sid)
             run = {k: v for k, v in final["run"].items() if k != END_PENDING}
-            self.db.update_session(sid, run={**run, END_PENDING: RUN_FINISHED})
+            self.db.patch_run(sid, **{END_PENDING: RUN_FINISHED})
             self.bus.emit(sid, "run_finished", {"status": final["status"], "stop_reason": final["stop_reason"],
                                                 "answer": final["answer"], "run": run, **extra})
             return final

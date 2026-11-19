@@ -19,6 +19,7 @@ from typing import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from . import claude_token, cli_domains, credential_sources, end_users, member_keys  # noqa: F401 - these register their sources
+from .backends.print_mode import PrintModeTranslator
 from .config import BackendConfig, SandboxConfig
 from .mcp_server import TOKEN_ENV, McpRelay, McpRelayError, codex_mcp_overrides, mcp_config
 from .sandbox import run_cmd
@@ -982,17 +983,16 @@ class PrintModeSession(TurnProcess):
         self.backend_session_id = backend_session_id
         self.container = f"harness-{session_id}-{name}"
         self.parser = PRINT_MODE_PARSERS[backend.parser]()
+        self.translator = PrintModeTranslator(self.parser, name)
         self._config_dir = config_dir
         self._admit = admit
         self._popen = popen
         self._command_override = command
         self.process: subprocess.Popen | None = None
         self._events: asyncio.Queue[str | None] = asyncio.Queue()
-        self._parsed: list[dict] = []
         self._stderr: list[str] = []
         self._threads: list[threading.Thread] = []
         self._followups: list[str] = []
-        self.steps = 0
 
     @property
     def config_file(self) -> Path | None:
@@ -1055,7 +1055,6 @@ class PrintModeSession(TurnProcess):
     async def _turn(self, prompt: str) -> None:
         if self._admit is not None:
             await self._admit()
-        self._parsed = []
         self._spawn(self.command(prompt), os.environ.copy())
 
     async def initialize(self, prompt: str) -> None:
@@ -1068,21 +1067,20 @@ class PrintModeSession(TurnProcess):
     async def continue_followups(self) -> None:
         await self._turn(await self._take_followups())
 
-    async def receive(self, timeout: float | None = None) -> dict | None:
-        """The next event: the parser's, or `exit` once the process has ended. A line the parser skips is None."""
-        if self._parsed:
-            return self._parsed.pop(0)
+    @property
+    def steps(self) -> int:
+        return self.translator.steps
+
+    async def receive(self, timeout: float | None = None) -> str | dict | None:
+        """The next stdout line for the translator, or an `exit` record once the turn's process has ended."""
         line = await self._next_line(timeout)
-        if line is False:
-            return None
         if line is None:
             proc = self.process
             code = await asyncio.to_thread(proc.wait) if proc is not None else None
             for thread in self._threads:
                 await asyncio.to_thread(thread.join, 0.5)
             return {"type": "exit", "code": code, "stderr": "".join(self._stderr).strip()[-2000:]}
-        self._parsed = self.parser.parse(line)
-        return self._parsed.pop(0) if self._parsed else None
+        return line if isinstance(line, str) else None  # False: nothing within the timeout
 
     async def stop(self) -> None:
         await self._close_process(terminate=True)

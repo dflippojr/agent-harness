@@ -63,12 +63,14 @@ _BY_SESSION = frozenset({
     "add_review_comment", "list_review_comments", "add_secret_dismissal", "secret_dismissals",
     "delete_review_comments", "insert_event", "events", "pushed_heads", "last_event_seq", "session_card_bits",
     "approval_for_call", "approvals", "insert_app_tool_call", "get_app_tool_call", "app_tool_calls", "finish_app_tool_call",
+    "patch_run", "unset_run",
 })
 # The by-session calls above that write. An erased App session's id leaves the index, so they would land in the main
 # store (the owner's): they are refused for it instead.
 _SESSION_WRITES = frozenset({
     "add_checkpoint", "delete_checkpoints", "put_artifact", "add_review_comment", "add_secret_dismissal",
-    "delete_review_comments", "insert_event", "insert_app_tool_call", "finish_app_tool_call",
+    "delete_review_comments", "insert_event", "insert_app_tool_call", "finish_app_tool_call", "patch_run",
+    "unset_run",
 })
 # Session columns the in-memory index of App sessions mirrors.
 _INDEXED = ("app_id", "owner_id", "kind", "status")
