@@ -1530,39 +1530,7 @@ class Database:
             return self.conn.execute("UPDATE app_provider_credentials SET revoked_at = ? "
                                      "WHERE id = ? AND revoked_at IS NULL", (time.time(), cid)).rowcount == 1
 
-    # scheduled jobs
-    @_reads
-    def list_jobs(self) -> list[dict]:
-        with self.lock:
-            return [dict(r) for r in self.conn.execute("SELECT * FROM jobs ORDER BY name").fetchall()]
-
-    @_reads
-    def get_job(self, jid: str) -> dict | None:
-        with self.lock:
-            row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (jid,)).fetchone()
-        return dict(row) if row else None
-
-    @_writes
-    def insert_job(self, job: dict) -> None:
-        now = time.time()
-        row = {**job, "created_at": now, "updated_at": now}
-        with self.lock:
-            self.conn.execute(f"INSERT INTO jobs ({','.join(row)}) VALUES ({','.join('?' * len(row))})",
-                              [int(v) if isinstance(v, bool) else v for v in row.values()])
-
-    @_writes
-    def update_job(self, jid: str, **fields) -> None:
-        fields["updated_at"] = time.time()
-        sets = ", ".join(f"{k} = ?" for k in fields)
-        with self.lock:
-            self.conn.execute(f"UPDATE jobs SET {sets} WHERE id = ?",
-                              [*(int(v) if isinstance(v, bool) else v for v in fields.values()), jid])
-
-    @_writes
-    def delete_job(self, jid: str) -> bool:
-        with self.lock:
-            return self.conn.execute("DELETE FROM jobs WHERE id = ?", (jid,)).rowcount == 1
-
+    # a scheduled job's sessions (the job rows themselves: harness_modules/jobs/store.py)
     @_reads
     def job_sessions(self, jid: str, limit: int = 10) -> list[dict]:
         with self.lock:
@@ -1570,36 +1538,6 @@ class Database:
                                      "substr(answer, 1, 300) AS answer FROM sessions WHERE job_id = ? "
                                      "ORDER BY created_at DESC LIMIT ?", (jid, limit)).fetchall()
         return [dict(r) for r in rows]
-
-    # templates
-    @_reads
-    def list_templates(self) -> list[dict]:
-        with self.lock:
-            return [dict(r) for r in self.conn.execute("SELECT * FROM templates ORDER BY name").fetchall()]
-
-    @_reads
-    def get_template(self, tid: str) -> dict | None:
-        with self.lock:
-            row = self.conn.execute("SELECT * FROM templates WHERE id = ?", (tid,)).fetchone()
-        return dict(row) if row else None
-
-    @_writes
-    def upsert_template(self, t: dict) -> None:
-        now = time.time()
-        with self.lock:
-            self.conn.execute(
-                "INSERT INTO templates (id, name, project, backend, model, prompt, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, "
-                "project = excluded.project, backend = excluded.backend, model = excluded.model, prompt = excluded.prompt, "
-                "updated_at = excluded.updated_at",
-                (t["id"], t["name"], t["project"], t.get("backend") or "local", t.get("model") or "",
-                 t["prompt"], now, now),
-            )
-
-    @_writes
-    def delete_template(self, tid: str) -> bool:
-        with self.lock:
-            return self.conn.execute("DELETE FROM templates WHERE id = ?", (tid,)).rowcount == 1
 
     # inference endpoint keys and request log
     @_writes

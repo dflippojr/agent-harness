@@ -371,6 +371,12 @@ class ModuleRuntime:
     def metrics(self, out, db) -> None:
         """Prometheus lines for /metrics (out.metric(name, type, help, rows))."""
 
+    # scheduled jobs (harness/job_results.py is their shared result protocol)
+    def scheduled_job(self, jid: str) -> dict | None:
+        """Scheduled job `jid` (its `name` and `notify` mode among the rest) for a module that schedules jobs; None
+        here: this module schedules none."""
+        return None
+
 
 # discovery
 _discovered: dict[tuple[str, ...] | None, tuple[Module, ...]] = {}
@@ -608,6 +614,10 @@ class ModuleHost:
     def metrics(self, out, db) -> None:
         for rt in self:
             rt.metrics(out, db)
+
+    def scheduled_job(self, jid: str) -> dict | None:
+        """Scheduled job `jid` from the module that schedules it; None when there is none, or no such module."""
+        return next((job for rt in self if (job := rt.scheduled_job(jid)) is not None), None)
 
 
 # route helpers for module handlers

@@ -367,6 +367,7 @@ from datetime import datetime  # noqa: E402
 
 from harness.config import JobsConfig  # noqa: E402
 from harness_modules.jobs.service import Cron, CronError, parse_status  # noqa: E402
+from harness_modules.jobs.store import JobStore  # noqa: E402
 from harness_modules.notifications.service import Notifier  # noqa: E402
 
 
@@ -438,8 +439,8 @@ def add_job(m, **fields):
                    m.cfg.projects, m.cfg.models)
     job["id"] = new_job_id()
     job["next_run_at"] = fields.get("next_run_at", time.time() - 5)
-    m.db.insert_job(job)
-    return m.db.get_job(job["id"])
+    JobStore(m.db).insert_job(job)
+    return JobStore(m.db).get_job(job["id"])
 
 
 def test_due_job_runs_once_skips_overlap_and_records_status(tmp_path):
@@ -456,7 +457,7 @@ def test_due_job_runs_once_skips_overlap_and_records_status(tmp_path):
         assert s["job_id"] == job["id"]
         assert s["title"].startswith("⏰ Morning check")
         assert "STATUS: OK" in s["context"][1]["content"]
-        after = m.db.get_job(job["id"])
+        after = JobStore(m.db).get_job(job["id"])
         assert after["last_session_id"] == s["id"]
         assert after["next_run_at"] > now
         assert m.jobs.tick(now) == []  # not due again
@@ -467,10 +468,10 @@ def test_due_job_runs_once_skips_overlap_and_records_status(tmp_path):
         assert finished["job_id"] == job["id"]
 
         # overlap: a due job whose last run is still active skips the slot
-        m.db.update_job(job["id"], next_run_at=time.time() - 1)
+        JobStore(m.db).update_job(job["id"], next_run_at=time.time() - 1)
         m.db.update_session(s["id"], status="running")
         assert m.jobs.tick(time.time()) == []
-        skipped = m.db.get_job(job["id"])
+        skipped = JobStore(m.db).get_job(job["id"])
         assert "still going" in skipped["last_skip"]
         assert skipped["next_run_at"] > time.time()
         m.db.update_session(s["id"], status="done")
@@ -486,8 +487,8 @@ def test_catch_up_after_downtime(tmp_path):
         recent = add_job(m, name="recent", next_run_at=time.time() - 600, catch_up_minutes=60)
         stale = add_job(m, name="stale", next_run_at=time.time() - 86400, catch_up_minutes=60)
         await m.start(maintenance=False)  # start() runs the catch-up pass
-        assert m.db.get_job(stale["id"])["next_run_at"] > time.time()
-        assert "missed" in m.db.get_job(stale["id"])["last_skip"]
+        assert JobStore(m.db).get_job(stale["id"])["next_run_at"] > time.time()
+        assert "missed" in JobStore(m.db).get_job(stale["id"])["last_skip"]
         started = m.jobs.tick(time.time())
         assert [m.db.get_session(sid)["job_id"] for sid in started] == [recent["id"]]
         for sid in started:
@@ -500,7 +501,7 @@ def test_job_notifications_quiet_unless_attention(tmp_path):
     cfg = jobs_cfg(tmp_path)
     cfg.notify.enabled = True
     m = Manager(cfg, chat=Script([Completion(content="x")]))
-    n = Notifier(cfg, m.db)
+    n = m.modules.get("notifications").service  # its job lookup goes through the module host to the jobs module
     quiet = add_job(m, name="quiet", notify="attention")
     low = add_job(m, name="low", notify="low")
     loud = add_job(m, name="loud", notify="always")
@@ -523,6 +524,27 @@ def test_job_notifications_quiet_unless_attention(tmp_path):
     assert build(quiet, job_status="")["title"].startswith("Done (no status line)")
     assert build(quiet, status="failed", stop_reason="internal_error")["priority"] == 4
     assert build(quiet, status="cancelled") is None
+
+
+def test_job_notifications_without_the_jobs_module_use_the_session_title(tmp_path):
+    """Notifications never imports the jobs module: with no module answering `scheduled_job`, a scheduled run's
+    notification names the session and notifies at low priority, as for a deleted job."""
+    cfg = jobs_cfg(tmp_path)
+    cfg.notify.enabled = True
+    m = Manager(cfg, chat=Script([Completion(content="x")]))
+    job = add_job(m, name="quiet", notify="attention")
+    assert m.modules.scheduled_job(job["id"])["notify"] == "attention"
+    m.db.insert_session({"id": "s1", "project": "scratch", "target": "tower", "model": "fake", "title": "nightly run",
+                         "status": "done", "workspace": "", "created_at": 0, "updated_at": 0, "context": []})
+    del m.modules.runtimes["jobs"]
+    assert m.modules.scheduled_job(job["id"]) is None
+    note = m.modules.get("notifications").service.build({
+        "session_id": "s1", "type": "run_finished",
+        "data": {"status": "done", "stop_reason": "final_message", "answer": "fine", "job_id": job["id"],
+                 "job_status": "ok", "job_reason": ""}})
+    assert note["title"] == "OK: nightly run"
+    assert note["priority"] == 2
+    assert Notifier(cfg, m.db).scheduled_job(job["id"]) is None
 
 
 def test_jobs_api(tmp_path):

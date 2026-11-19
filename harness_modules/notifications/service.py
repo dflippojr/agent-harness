@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from typing import Callable
 
 import httpx
 
@@ -51,9 +52,11 @@ def describe_call(tool: str, args: dict) -> str:
 
 
 class Notifier:
-    def __init__(self, cfg: Config, db: Database):
+    def __init__(self, cfg: Config, db: Database, scheduled_job: Callable[[str], dict | None] | None = None):
         self.cfg = cfg
         self.db = db
+        # A scheduled job by id, from the module that schedules jobs (ModuleHost.scheduled_job); no lookup, no job.
+        self.scheduled_job = scheduled_job or (lambda jid: None)
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=500)
         self._task: asyncio.Task | None = None
         self.sent: list[dict] = []  # last payloads, for tests and /notify/test
@@ -290,7 +293,7 @@ class Notifier:
 
     def _job_finished(self, sid: str, title: str, d: dict, base: dict) -> dict | None:
         """Scheduled jobs are quiet unless something needs attention (user decision, Phase 7d)."""
-        job = self.db.get_job(d["job_id"]) or {}
+        job = self.scheduled_job(d["job_id"]) or {}
         name = _short(job.get("name") or title, 60)
         click = self.link(f"/#/s/{sid}")
         if d["status"] == "cancelled":
