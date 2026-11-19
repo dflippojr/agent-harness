@@ -247,6 +247,15 @@ module's (`ModuleRuntime.key_request_counts`, filled in by `SessionStores` on th
 revoke); it is 0 while the module is absent. `tests/test_module_stores.py` fails on any `Database` method whose SQL
 names a module table, and on any store that forwards attributes to the Database.
 
+The core's own queries split the same way, one domain store per change (#992 stage 5). A core store subclasses
+`harness.db.CoreStore`, and `Database` builds it and exposes it as an attribute. `db.credentials`
+(`harness/credential_store.py`) holds the credential queries: API keys, pairing codes, pairing requests and the Hub
+claim, stream tickets, and App provider credentials. New code calls the store. Old `db.<method>` calls keep working
+through a temporary forwarding shim on `Database`. `tests/test_database_shim.py` pins the forwarded names, so the shim
+can only shrink. `await db.aio.<method>()` and `SessionStores` reach the store through the shim too. The listing
+overrides on `SessionStores` (`list_api_keys`, `get_api_key_listing`, `restore_api_key`) still apply, so call those
+on `m.db`, not `m.db.credentials`, until they move.
+
 ## What stage (b) leaves in the core
 
 These are names, not imports, and move with the config and storage split in stages (c) and (f):

@@ -31,7 +31,7 @@ import json
 import re
 import secrets
 import time
-from typing import Literal
+from typing import Literal, cast
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -372,8 +372,8 @@ def register_app(app: FastAPI) -> None:
                                             "hub.claim.redeem" if hub else "pairing_request.redeem", "",
                                             "denied", "pairing_request", {"reason": reason})
                 return _refuse(status, detail, "pairing_pending" if status == 409 else "")
-            if hub:
-                return _redeem_hub(db, row, now)
+            if hub:  # a hub request is a row
+                return _redeem_hub(db, cast(dict, row), now)
             key, secret = db.redeem_pairing_request(rid, now)
             if key is None:
                 return _refuse(400, "this pairing request was already redeemed")
