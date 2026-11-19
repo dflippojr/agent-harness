@@ -4,11 +4,14 @@ they were before the setting existed; with it on, the prompt only grows between 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
+import yaml
 
 from bakeoff import canary as canary_cli, prefix_diff, trim_bench
 from harness import compaction, config as config_mod, fake_instance, fake_model
@@ -90,6 +93,10 @@ def receipts(request: dict) -> list[int]:
             and (message.get("content") or "").startswith(compaction.RECEIPT_PREFIX)]
 
 
+def set_off(cfg):
+    cfg.mask_batch_at = 0.0
+
+
 def test_bench_prompts_match_the_ones_recorded_before_the_setting_existed(monkeypatch):
     """The fixture was written by `trim_bench.prompt_digests` on the commit before batching. If a deliberate change
     to masking, trim, elide or the summary moves it, rewrite the fixture in that change."""
@@ -103,19 +110,31 @@ PER_TURN = [[], [], [], [5], [5, 7], [5, 7, 9], [5, 7, 9], [5, 7, 9, 13], [5, 7,
 
 
 def test_a_session_masks_each_result_one_turn_after_it_is_used(monkeypatch, tmp_path):
-    """Today's timing through the real runner, recorded before the setting existed."""
-    assert [receipts(r) for r in run_session(monkeypatch, tmp_path)] == PER_TURN
+    """Today's timing through the real runner, recorded before the setting existed, with the setting named off."""
+    assert [receipts(r) for r in run_session(monkeypatch, tmp_path, set_off)] == PER_TURN
 
 
-def test_the_shipped_setting_is_off(tmp_path):
-    assert config_mod.load(config_mod.ROOT / "config", tmp_path / "data").mask_batch_at == 0
+def test_the_shipped_setting_batches_at_0_45(tmp_path):
+    """#1027: batching at 0.45 is the default (#898, docs/compaction.md)."""
+    assert config_mod.load(config_mod.ROOT / "config", tmp_path / "data").mask_batch_at == 0.45
+
+
+def test_the_key_absent_batches_at_0_45(tmp_path):
+    config_dir = tmp_path / "config"
+    shutil.copytree(config_mod.ROOT / "config", config_dir)
+    harness = config_dir / "harness.yaml"
+    data = yaml.safe_load(harness.read_text(encoding="utf-8"))
+    del data["compaction"]["mask_batch_at"]
+    harness.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    assert config_mod.load(config_dir, tmp_path / "data").mask_batch_at == 0.45
+
+
+def test_the_config_dataclass_default_batches_at_0_45():
+    assert {f.name: f.default for f in dataclasses.fields(config_mod.Config)}["mask_batch_at"] == 0.45
 
 
 def test_a_session_with_the_setting_named_off_sends_the_same_prompts(monkeypatch, tmp_path):
-    def off(cfg):
-        cfg.mask_batch_at = 0.0
-
-    assert [receipts(r) for r in run_session(monkeypatch, tmp_path, off)] == PER_TURN
+    assert [receipts(r) for r in run_session(monkeypatch, tmp_path, set_off)] == PER_TURN
 
 
 @pytest.mark.parametrize("value, expected", [
