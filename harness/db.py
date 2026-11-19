@@ -608,7 +608,8 @@ class ModuleStore:
     Database itself (`core` inside a store method), never through the store."""
 
     def __init__(self, db):
-        self._db: Database = getattr(db, "main", db)
+        main = getattr(db, "main", None)  # a SessionStores' main Database, or `db` itself
+        self._db: Database = main if isinstance(main, Database) else db
         self.aio = AsyncDatabase(self)
 
     # `conn`, `lock` and `_local` are per thread (the writer's, or a pooled reader's inside `reading()`): looked up

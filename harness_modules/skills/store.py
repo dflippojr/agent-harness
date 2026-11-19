@@ -31,6 +31,10 @@ def _row(row: sqlite3.Row | None) -> dict | None:
     return out
 
 
+def _rows(rows: list[sqlite3.Row]) -> list[dict]:
+    return [out for r in rows if (out := _row(r)) is not None]
+
+
 class SkillRecordStore(ModuleStore):
     """Skill proposals, installed skills, their versions and project allowlists, rejected hashes and review jobs."""
 
@@ -84,11 +88,12 @@ class SkillRecordStore(ModuleStore):
             params.append(slug)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at DESC", params).fetchall()
-        return [_row(r) for r in rows]
+        return _rows(rows)
 
     @database_reads
     def skill_proposal_count(self, since: float, session_id: str | None = None) -> int:
-        query, params = "SELECT COUNT(*) FROM skill_proposals WHERE created_at >= ?", [since]
+        query = "SELECT COUNT(*) FROM skill_proposals WHERE created_at >= ?"
+        params: list = [since]
         if session_id:
             query += " AND source_session_id = ?"
             params.append(session_id)
@@ -134,7 +139,7 @@ class SkillRecordStore(ModuleStore):
     def list_skill_installed(self) -> list[dict]:
         with self.lock:
             rows = self.conn.execute("SELECT * FROM skill_installed ORDER BY slug").fetchall()
-        return [_row(r) for r in rows]
+        return _rows(rows)
 
     @database_writes
     def upsert_skill_installed(self, row: dict) -> None:
@@ -180,7 +185,7 @@ class SkillRecordStore(ModuleStore):
         with self.lock:
             rows = self.conn.execute(
                 "SELECT * FROM skill_versions WHERE slug = ? ORDER BY version", (slug,)).fetchall()
-        return [_row(r) for r in rows]
+        return _rows(rows)
 
     @database_reads
     def skill_allowlist(self, slug: str) -> list[str]:
@@ -233,4 +238,4 @@ class SkillRecordStore(ModuleStore):
             params.extend(status)
         with self.lock:
             rows = self.conn.execute(query + " ORDER BY created_at", params).fetchall()
-        return [_row(r) for r in rows]
+        return _rows(rows)
