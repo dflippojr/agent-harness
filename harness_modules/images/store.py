@@ -10,20 +10,13 @@ import json
 import sqlite3
 import time
 
-from harness.modules import AsyncDatabase, database_reads, database_writes
+from harness.modules import ModuleStore, database_reads, database_writes
 
 AND_JOIN = " AND "
 
 
-class ImageStore:
-    """Use the core writer queue and pooled readers without owning their lifetime."""
-
-    def __init__(self, db):
-        self._db = db
-        self.aio = AsyncDatabase(self)
-
-    def __getattr__(self, name):
-        return getattr(self._db, name)
+class ImageStore(ModuleStore):
+    """Use the core writer queue and pooled readers without owning their lifetime; forward nothing else (#992)."""
 
     # images
     @database_writes
