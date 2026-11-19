@@ -278,7 +278,11 @@ def scenario_settings(tmp: Path, monkeypatch):
         _ok(client.get(ADMIN + "/config/schema"))
         revision = _ok(client.get(ADMIN + "/config"))["revision"]
         _ok(client.post(ADMIN + "/config/validate", json={"revision": revision, "changes": {"sessions.max_turns": 40}}))
-        first = _ok(client.patch(ADMIN + "/config", json={"revision": revision, "changes": {"sessions.max_turns": 40}}))
+        change = {"revision": revision, "changes": {"sessions.max_turns": 40}}
+        assert _ok(client.patch(ADMIN + "/config", json={**change, "dry_run": True}))["dry_run"] is True
+        first = _ok(client.patch(ADMIN + "/config", json=change))
+        preview = _ok(client.post(ADMIN + "/config/rollback", json={"dry_run": True, "revision": first["revision"]}))
+        assert preview["changes"] and "before" in preview["changes"][0]
         rolled = _ok(client.post(ADMIN + "/config/rollback", json={"confirm": True, "revision": first["revision"]}))
         _ok(client.post(ADMIN + "/config/restart", json={"confirm": True, "revision": rolled["revision"]}), 202)
     m.db.close()

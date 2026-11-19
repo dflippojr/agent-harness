@@ -5,7 +5,7 @@ import sqlite3
 from typing import Any, NotRequired, TypedDict
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, with_config
 from harness.modules import HarnessError, RouteTable, documented, require_owner, manager as mgr
 from .service import SkillError
 
@@ -23,8 +23,9 @@ class SkillReject(BaseModel):
     reason: str = ""
 
 
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
 class _Reply(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="allow")  # documentation only: extra fields allowed
+    pass
 
 
 class InstalledSkill(_Reply):

@@ -9,7 +9,7 @@ from typing import TypedDict
 
 from fastapi import File, Form, Request, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, with_config
 
 from harness.modules import (HarnessError, RouteTable, ToolError, app_auth, documented, manager, require_owner,
                              runtime)
@@ -229,8 +229,9 @@ async def get_image(iid: str, request: Request):
     return FileResponse(path, media_type="image/png", headers=headers)
 
 
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
 class _Reply(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="allow")  # documentation only: extra fields allowed
+    pass
 
 
 class RetentionPreview(_Reply):

@@ -3168,6 +3168,63 @@
         "title": "ConfigResponse",
         "type": "object"
       },
+      "ConfigRollbackPreview": {
+        "additionalProperties": true,
+        "description": "What a rollback would restore (`dry_run`), without saving it.",
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "errors": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SettingError"
+            },
+            "title": "Errors",
+            "type": "object"
+          },
+          "live": {
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "title": "Live",
+            "type": "array"
+          },
+          "pending": {
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "title": "Pending",
+            "type": "array"
+          },
+          "restart_required": {
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "target_revision",
+          "changes",
+          "restart_required",
+          "live",
+          "pending",
+          "errors"
+        ],
+        "title": "ConfigRollbackPreview",
+        "type": "object"
+      },
       "ConfigSchemaResponse": {
         "additionalProperties": true,
         "properties": {
@@ -6451,6 +6508,44 @@
           "winner"
         ],
         "title": "PickWinner",
+        "type": "object"
+      },
+      "PlannedChange": {
+        "additionalProperties": true,
+        "description": "A change as a rollback preview lists it: the plan's own record, values as stored.",
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "after": {
+            "title": "After"
+          },
+          "apply": {
+            "title": "Apply",
+            "type": "string"
+          },
+          "before": {
+            "title": "Before"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "before",
+          "after",
+          "apply",
+          "action",
+          "source"
+        ],
+        "title": "PlannedChange",
         "type": "object"
       },
       "PopularModel": {
@@ -12772,7 +12867,7 @@
                       "$ref": "#/components/schemas/ConfigAppliedResponse"
                     },
                     {
-                      "$ref": "#/components/schemas/ConfigPlanResponse"
+                      "$ref": "#/components/schemas/ConfigRollbackPreview"
                     }
                   ],
                   "title": "Response 200 Admin Rollback Api Admin V1 Config Rollback Post"

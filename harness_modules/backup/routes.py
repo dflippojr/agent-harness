@@ -5,16 +5,16 @@ from __future__ import annotations
 from typing import NotRequired, TypedDict
 
 from fastapi import Request
-from pydantic import ConfigDict
+from pydantic import ConfigDict, with_config
 
 from harness.modules import RouteTable, documented, require_owner, runtime, operation_audit
 
 owner_routes = RouteTable()
 
 
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
 class BackupResponse(TypedDict):
     """The backup just written; `error` is empty when it succeeded."""
-    __pydantic_config__ = ConfigDict(extra="allow")  # documentation only: extra fields allowed
     ok_at: float | None
     path: str
     bytes: int

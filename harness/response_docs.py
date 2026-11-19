@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, with_config
 
 
 def documented(model: Any, status: int = 200, description: str = "Successful Response") -> dict[int | str, dict]:
@@ -21,9 +21,9 @@ def documented(model: Any, status: int = 200, description: str = "Successful Res
     return {status: {"model": model, "description": description}}
 
 
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
 class Open(TypedDict):
     """Base of every documented reply: the Server may add fields the model does not name."""
-    __pydantic_config__ = ConfigDict(extra="allow")  # pydantic reads it from the TypedDict
 
 
 # Health and identity -------------------------------------------------------------------------------------------------
@@ -319,8 +319,29 @@ class ConfigAppliedResponse(ConfigResponse):
     errors: dict[str, SettingError]
 
 
+class PlannedChange(Open):
+    """A change as a rollback preview lists it: the plan's own record, values as stored."""
+    key: str
+    before: Any
+    after: Any
+    apply: str
+    action: str
+    source: str
+
+
+class ConfigRollbackPreview(Open):
+    """What a rollback would restore (`dry_run`), without saving it."""
+    revision: int
+    target_revision: int
+    changes: list[PlannedChange]
+    restart_required: bool
+    live: list[PlannedChange]
+    pending: list[PlannedChange]
+    errors: dict[str, SettingError]
+
+
 ConfigPatchReply = ConfigAppliedResponse | ConfigDryRunResponse
-ConfigRollbackReply = ConfigAppliedResponse | ConfigPlanResponse
+ConfigRollbackReply = ConfigAppliedResponse | ConfigRollbackPreview
 
 
 class RestartResponse(Open):

@@ -2,7 +2,7 @@
 from typing import NotRequired, TypedDict
 
 from fastapi import Request
-from pydantic import ConfigDict
+from pydantic import ConfigDict, with_config
 from harness.modules import RouteTable, documented, manager, HarnessError, ToolError, app_auth
 
 owner_routes = RouteTable()
@@ -10,8 +10,9 @@ app_routes = RouteTable()
 
 
 
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
 class _Reply(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="allow")  # documentation only: extra fields allowed
+    pass
 
 
 class RemoteFolder(_Reply):

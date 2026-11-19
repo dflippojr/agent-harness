@@ -3,7 +3,7 @@ import asyncio
 from typing import NotRequired, TypedDict
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, with_config
 from harness.modules import HarnessError, RouteTable, ToolError, documented, manager
 
 owner_routes = RouteTable()
@@ -13,8 +13,9 @@ class MemoryProfileUpdate(BaseModel):
     summary: str = "Update agent profile"
 
 
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
 class _Reply(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="allow")  # documentation only: extra fields allowed
+    pass
 
 
 class MemoryCommit(_Reply):

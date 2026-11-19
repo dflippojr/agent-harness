@@ -6,7 +6,7 @@ from typing import TypedDict
 
 import httpx
 from fastapi import Request
-from pydantic import ConfigDict
+from pydantic import ConfigDict, with_config
 
 from harness.modules import HarnessError, RouteTable, documented, manager, runtime
 
@@ -15,8 +15,8 @@ from .service import DeliveryError
 owner_routes = RouteTable()
 
 
+@with_config(ConfigDict(extra="allow"))  # documentation only: a reply may carry more fields
 class NotifyTestResponse(TypedDict):
-    __pydantic_config__ = ConfigDict(extra="allow")  # documentation only: extra fields allowed
     sent: bool
 
 
