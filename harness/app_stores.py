@@ -89,6 +89,11 @@ WEB_APP_ID = "app-web"
 # sessions and serves them, as before #330 stage c).
 WEB_MIGRATION_ENV = "HARNESS_WEB_STORE_MIGRATION"
 WEB_STORE_META = "web_store"  # main-store meta: when the sessions moved into Web's store, how many, and the backup
+# Where each core store's rows live behind SessionStores (#992): "main" (the main store's, as the App registry's), or
+# None when its rows are routed per session. A wrapper hands out a "main" store's object as the main store's, and
+# refuses a routed one: its methods are called on the wrapper, which routes each to the session's store.
+# tests/test_database_shim.py checks that it names every store in `db.CORE_STORES`.
+_STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None}
 # Main-store methods that read sessions or their rows without taking a session id: they run on Web's store.
 _ON_WEB = frozenset({"group_sessions", "snippet_events", "smart_review_stats", "smart_reviews", "job_sessions",
                      "session_activity"})
@@ -194,6 +199,8 @@ class _AppStore:
         if name.startswith("__"):
             raise AttributeError(name)
         stores, app_id = self._stores, self.app_id
+        if name in _STORE_HOME:  # never the App's own copy of a core store, nor one held past its release
+            return stores.core_store(name)
         if name in ("insert_session", "update_session", "delete_session"):  # they keep the index current
             return getattr(stores, name)
         if name in ("awrite", "aread"):
@@ -292,6 +299,14 @@ class SessionStores:
         self.migrate_app_files()
 
     # stores -----------------------------------------------------------------------------------------------------------
+    def _open_store(self, app_id: str) -> Database:
+        """Open App `app_id`'s store (or Web's). Its credential queries are the main store's (#992): the App registry
+        lives there, so no route to this Database (`for_app`, `for_session`, a raw `db.credentials` or a forwarded
+        `db.<credential method>`) reads or writes its own empty copy."""
+        db = Database(self.store_path(app_id))
+        db.credentials = self.main.credentials
+        return db
+
     def store_path(self, app_id: str) -> Path:
         if not _APP_ID.fullmatch(app_id or ""):
             raise ValueError(f"not an App id: {app_id!r}")
@@ -309,7 +324,7 @@ class SessionStores:
                 raise sqlite3.ProgrammingError(f"App {app_id}'s store was erased")
             entry = self._open.get(app_id)
             if entry is None:
-                entry = self._open[app_id] = _OpenStore(Database(self.store_path(app_id)))
+                entry = self._open[app_id] = _OpenStore(self._open_store(app_id))
                 self._start_reaper()
             entry.users += 1
             entry.last_used = time.monotonic()
@@ -415,9 +430,19 @@ class SessionStores:
             entry = self._sessions.get(sid)
         return entry["app_id"] if entry else ""
 
+    def core_store(self, name: str):
+        """Core store `name` as every wrapper hands it out: the main store's, or refused for a store whose rows are
+        routed per session (the main store's `sessions` would miss every App's and, after the move, Web's)."""
+        if _STORE_HOME[name] is None:
+            raise AttributeError(f"SessionStores routes each session to its own store: call the method on this "
+                                 f"object, or on for_session(sid) or for_app(app_id), not on a `{name}` store")
+        return getattr(self.main, name)
+
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
             raise AttributeError(name)
+        if name in _STORE_HOME:
+            return self.core_store(name)
         if name in _BY_SESSION:
             def by_session(sid, *args, **kwargs):
                 if name in _SESSION_WRITES:
@@ -864,7 +889,7 @@ class SessionStores:
             if dry_run and not migrated:
                 log.warning("Web store migration (dry run): no sessions to move; the main store stays in use")
                 return main
-            web = Database(self.store_path(WEB_APP_ID))
+            web = self._open_store(WEB_APP_ID)
             if not migrated or main.get_api_key(WEB_APP_ID) is None:
                 main.write(self._record_web_store, {"sessions": 0, "backup": ""})
             return web
@@ -872,13 +897,13 @@ class SessionStores:
         if dry_run:
             log.warning("Web store migration (dry run): would move %d session(s) into %s: %s; nothing changed",
                         len(sids), self.store_path(WEB_APP_ID), json.dumps(before, sort_keys=True))
-            return Database(self.store_path(WEB_APP_ID)) if migrated else main
+            return self._open_store(WEB_APP_ID) if migrated else main
         backup = _unused(Path(main.path).parent / "pre-migration" /
                          f"harness-web-store-{time.strftime('%Y%m%dT%H%M%S')}.sqlite3")
         backup_sqlite(Path(main.path), backup)
         log.info("Web store migration: moving %d session(s) into %s: %s; main store backed up to %s", len(sids),
                  self.store_path(WEB_APP_ID), json.dumps(before, sort_keys=True), backup)
-        web = Database(self.store_path(WEB_APP_ID))
+        web = self._open_store(WEB_APP_ID)
         try:
             self._copy_to_web(web, sids, before)
 
@@ -928,7 +953,7 @@ class SessionStores:
             if after != before:
                 raise WebStoreMismatch(f"Web store row counts {after} differ from the main store's {before}")
         web.write(insert)
-        web._build_search_index()  # the moved events, indexed in Web's store
+        web.sessions.build_search_index()  # the moved events, indexed in Web's store
 
     def _record_web_store(self, info: dict) -> None:
         """In a main-store transaction: register Web in the App registry and record that its store is in use."""
@@ -1006,7 +1031,7 @@ class SessionStores:
                                             f"VALUES ({','.join('?' * len(cols))})", values)
                 db.conn.execute("DELETE FROM meta WHERE key = 'search_index'")
             db.write(insert)
-            db._build_search_index()  # the moved events, indexed in the App's store
+            db.sessions.build_search_index()  # the moved events, indexed in the App's store
 
         def delete() -> None:
             for table in (*SESSION_TABLES, "search_index"):

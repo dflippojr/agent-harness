@@ -371,7 +371,7 @@ def _searches_an_index(details: list[str]) -> bool:
 @pytest.mark.parametrize("owner_id", ["owner", None])
 def test_session_list_searches_an_index(tmp_path, owner_id):
     """#668: the list's filter is answered by `sessions_list`, not a scan past each row's `context`."""
-    from harness.db import _SESSION_LIST_COLUMNS, _session_filter
+    from harness.session_store import _SESSION_LIST_COLUMNS, _session_filter
     db = Database(tmp_path / "harness.db", migrations=_REAL_DISCOVER())
     where, params = _session_filter(owner_id, "agent", None)
     details = _plan(db, _SESSION_LIST_COLUMNS + where + " ORDER BY created_at DESC, id DESC LIMIT ?", (*params, 51))
@@ -386,7 +386,7 @@ def test_owner_session_count_searches_the_owner_status_index(tmp_path, holding):
     seen: list[str] = []
     db.conn.set_trace_callback(seen.append)  # the statement as run, its parameters bound
     # count_sessions' body on the traced writer; the public method runs on a pooled reader
-    assert db._count_sessions("owner_id", "owner", ("running", "queued"), holding) == 0
+    assert db.sessions._count_sessions("owner_id", "owner", ("running", "queued"), holding) == 0
     db.conn.set_trace_callback(None)
     [sql] = [s for s in seen if "COUNT(*)" in s]
     details = _plan(db, sql, ())

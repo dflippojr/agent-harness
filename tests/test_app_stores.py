@@ -20,6 +20,7 @@ from harness.db import Database
 from harness.llm import Completion
 from harness.manager import Manager
 from harness.policy import TOOLS_ONLY
+from harness.session_store import SessionStore
 
 from test_daemon import Script, call, make_cfg
 from test_phase6 import wait_for
@@ -268,13 +269,13 @@ def test_session_ids_stay_unique_across_stores(tmp_path):
 
 def test_an_app_session_create_that_rolls_back_leaves_no_trace_in_the_index(tmp_path, monkeypatch):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
-    real = Database.insert_event
+    real = SessionStore.insert_event  # the query's home (#992); `db.insert_event` forwards to it
 
     def failing(self, sid, type_, data):
         if type_ == "session_created":
             raise sqlite3.OperationalError("disk I/O error")
         return real(self, sid, type_, data)
-    monkeypatch.setattr(Database, "insert_event", failing)
+    monkeypatch.setattr(SessionStore, "insert_event", failing)
     seen = []
 
     def insert_created(status="queued"):  # as Manager._insert_created: the session, then its events
@@ -288,7 +289,7 @@ def test_an_app_session_create_that_rolls_back_leaves_no_trace_in_the_index(tmp_
     assert stores.count_sessions("owner", "queued") == 0
     assert stores.sessions_with_status("queued") == [] and stores.find_session_ids("a") == []
 
-    monkeypatch.setattr(Database, "insert_event", real)
+    monkeypatch.setattr(SessionStore, "insert_event", real)
     stores.for_app("k-aaaa").write(insert_created)            # the same id again
     assert stores.get_session("a1")["status"] == "queued"
     assert [e["type"] for e in stores.events("a1")] == ["session_created"]

@@ -285,7 +285,7 @@ def test_patch_run_goes_to_the_app_store_and_never_to_an_erased_session(tmp_path
 
 
 class AfterTheRead:
-    """While active, the first read of session `sid` through `Database.get_session` lets another writer job set
+    """While active, the first read of session `sid` through `SessionStore.get_session` lets another writer job set
     `run[INTERLEAVED]` as soon as the database allows (`Database.after_commit`): at once if the read is outside a
     writer transaction, or else right after that transaction commits. A write whose read is in the same transaction
     keeps the field; one that read on a pooled reader, or in an earlier transaction, writes over it."""
@@ -293,13 +293,13 @@ class AfterTheRead:
     def __init__(self, db: Database, sid: str):
         self.db, self.sid, self.fired = db, sid, False
 
-    def __enter__(self):
-        self.read = self.db.get_session
-        self.db.get_session = self._get_session
+    def __enter__(self):  # on the SessionStore, where the primitive reads (#992; `db.get_session` forwards to it)
+        self.read = self.db.sessions.get_session
+        self.db.sessions.get_session = self._get_session
         return self
 
     def __exit__(self, *exc):
-        self.db.__dict__.pop("get_session", None)
+        self.db.sessions.__dict__.pop("get_session", None)
 
     def _get_session(self, sid, *args, **kwargs):
         row = self.read(sid, *args, **kwargs)
@@ -327,7 +327,7 @@ def test_a_field_another_writer_commits_after_the_primitive_reads_survives(tmp_p
         db.insert_session(_row("s-1"))
         with AfterTheRead(db, "s-1") as after:
             assert call(db) == expected
-        assert after.fired, "the primitive never read the session through Database.get_session"
+        assert after.fired, "the primitive never read the session through SessionStore.get_session"
         run = db.get_session("s-1")["run"]
         assert run.get(INTERLEAVED) is True, f"the field another writer committed after the read was lost: {run}"
         assert run == {**expected, INTERLEAVED: True}

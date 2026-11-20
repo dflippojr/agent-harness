@@ -33,7 +33,7 @@ def test_sha256_hex_matches_fixed_vectors(text: str, expected: str):
 
 @pytest.fixture
 def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Database:
-    monkeypatch.setattr("harness.db.secrets.token_urlsafe", lambda n=None: "fixed")
+    monkeypatch.setattr("harness.credential_store.secrets.token_urlsafe", lambda n=None: "fixed")  # mints them
     return Database(tmp_path / "harness.sqlite3")
 
 
