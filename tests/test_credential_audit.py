@@ -168,7 +168,7 @@ def test_audit_failure_rolls_back_everything(hh, monkeypatch):
     assert m.db.get_api_key(app["id"])["revoked_at"] is None
     grant = {"app_id": app["id"], "backend": "claude", "secret_ref": REF, "policy": "api_key", "models": []}
     assert client.post(f"{PREFIX}/provider-credentials", json=grant, headers=H(OWNER)).status_code == 503
-    assert m.db.list_app_provider_credentials() == []
+    assert m.db.credentials.list_app_provider_credentials() == []
     assert client.put(f"{PREFIX}/apps/{app['id']}/retention", json={"retention_days": 5},
                       headers=H(OWNER)).status_code == 503
     assert m.db.get_api_key(app["id"]).get("retention_days") is None

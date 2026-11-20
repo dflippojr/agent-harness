@@ -279,7 +279,7 @@ def test_erase_app_drops_private_audit_and_only_receipts_remain(setup, monkeypat
     sid = create(client, headers[0])
     effect = AsyncMock()
     monkeypatch.setattr("harness.cli_domains.drop_app_volumes", effect)
-    m.db.revoke_api_key(scope)
+    m.db.credentials.revoke_api_key(scope)
     asyncio.run(m.erase_app(scope))
     assert not m.db.store_path(scope).exists()
     rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]

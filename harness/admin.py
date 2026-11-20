@@ -339,7 +339,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             "server": "agent-harness",
             **compat.metadata(mgr(request).cfg.capabilities()),
             "scopes": {ADMIN_SCOPE: ADMIN_SCOPE_HELP},
-            "hub": {"claimed": mgr(request).db.main.hub_claim() is not None},
+            "hub": {"claimed": mgr(request).db.main.credentials.hub_claim() is not None},
             "allowed_logins": list(mgr(request).cfg.allowed_logins),
             "auth": {
                 "tailscale_owner": True,
@@ -363,7 +363,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         ctx = _context(request, key)
 
         def commit():
-            previous = manager.db.main.app_provider_credential(body.app_id, body.backend)
+            previous = manager.db.main.credentials.app_provider_credential(body.app_id, body.backend)
             row = manager.set_app_provider_credential(body.app_id, body.backend, body.secret_ref,
                                                       body.policy, body.models)
             fields = ["backend", "policy", "models", "secret_ref"] if previous is None else [
@@ -392,7 +392,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         ctx = _context(request, key)
 
         def commit() -> bool:
-            grant = manager.db.main.app_provider_credential_by_id(credential_id)
+            grant = manager.db.main.credentials.app_provider_credential_by_id(credential_id)
             if manager.revoke_app_provider_credential(credential_id):
                 credential_audit.record(manager.db, ctx, "provider_grant.revoke", credential_id, "ok",
                                         "provider_grant", {"grant_id": credential_id, "app_id": grant["app_id"],

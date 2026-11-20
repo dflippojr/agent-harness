@@ -29,19 +29,10 @@ STORES: dict[str, type[CoreStore]] = {"credentials": CredentialStore, "sessions"
 # that, delete a name here once its last `db.<name>` caller has moved to the store, and never add one.
 PINNED_SHIM: dict[str, frozenset[str]] = {
     "credentials": frozenset({
-        # API keys
-        "create_api_key", "api_key_by_secret", "get_api_key", "touch_api_key", "list_api_keys", "get_api_key_listing",
-        "ensure_web_app", "revoke_api_key", "restore_api_key",
-        # pairing codes
-        "create_pairing_code", "list_pairing_codes", "redeem_pairing_code",
-        # pairing requests and the Hub claim
-        "insert_pairing_request", "get_pairing_request", "list_pairing_requests", "update_pairing_request",
-        "redeem_pairing_request", "hub_claim", "redeem_hub_claim",
-        # stream tickets
-        "create_stream_ticket", "stream_ticket_key", "stream_ticket_origin_active",
-        # App provider credentials
-        "set_app_provider_credential", "app_provider_credential", "app_provider_credential_by_id",
-        "app_provider_managed", "list_app_provider_credentials", "revoke_app_provider_credential",
+        # API keys: the listings that SessionStores overrides (requests, store metadata), and the three every test
+        # mints and reads keys with
+        "create_api_key", "api_key_by_secret", "get_api_key", "list_api_keys", "get_api_key_listing",
+        "restore_api_key",
     }),
     "sessions": frozenset({
         # sessions
@@ -105,11 +96,11 @@ def test_the_shim_only_shrinks():
 
 
 def test_database_forwards_these_many_names_per_store():
-    """The shim on `Database` as this change leaves it: 28 credential names (39 when the store was added) and 51
-    session names, read from the class itself."""
+    """The shim on `Database` as this change leaves it, read from the class itself: 6 credential names (39 when the
+    store was added, 28 before this change), 51 session names and no account names."""
     forwarded = _forwarded()
     sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
-    assert sizes == {"credentials": 28, "sessions": 51, "accounts": 0}
+    assert sizes == {"credentials": 6, "sessions": 51, "accounts": 0}
     assert sizes == {store: len(PINNED_SHIM.get(store, ())) for store in STORES}
 
 
@@ -203,17 +194,18 @@ def test_aio_reads_and_writes_through_the_shim_join_the_writer(db):
     async def run():
         row, secret = await db.aio.create_api_key("Owner", "admin", kind="owner")
         assert await db.aio.api_key_by_secret(secret) == db.credentials.api_key_by_secret(secret)
-        assert await db.aio.revoke_api_key(row["id"]) is True
+        assert (await db.aio.get_api_key(row["id"]))["id"] == row["id"]
+        assert await db.credentials.aio.revoke_api_key(row["id"]) is True  # a moved name: the store's own aio
         return row
     row = asyncio.run(run())
     assert db.get_api_key(row["id"])["revoked_at"] is not None
 
 
 def test_an_instance_patch_shadows_the_forwarded_name(db, monkeypatch):
-    monkeypatch.setattr(db, "touch_api_key", lambda kid: "patched")
-    assert db.touch_api_key("k-1") == "patched"
+    monkeypatch.setattr(db, "get_api_key", lambda kid: "patched")
+    assert db.get_api_key("k-1") == "patched"
     monkeypatch.undo()
-    assert db.touch_api_key.__self__ is db.credentials
+    assert db.get_api_key.__self__ is db.credentials
 
 
 def test_a_store_write_joins_the_callers_transaction(db):

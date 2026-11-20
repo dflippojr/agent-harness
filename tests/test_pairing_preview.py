@@ -179,7 +179,7 @@ def test_arm_rejects_malformed_digest_without_allocating(hh, digest):
     response = client.post(BASE, headers=H(OWNER), json={
         "catalog_app_id": CATALOG_ID, "expected_disclosures_digest": digest})
     assert response.status_code == 422, response.text
-    assert m.db.main.list_pairing_requests() == []
+    assert m.db.main.credentials.list_pairing_requests() == []
 
 
 def test_cli_previews_without_arming_and_arm_passes_preview_digest(hh, tmp_path, monkeypatch, capsys):
@@ -199,7 +199,7 @@ def test_cli_previews_without_arming_and_arm_passes_preview_digest(hh, tmp_path,
     preview = json.loads(output.out)
     assert calls == [("POST", "/pairing-requests/preview", {"json": {"scopes": ["sessions"]}})]
     assert preview == pr.disclosures(["sessions"], m.cfg)
-    assert m.db.main.list_pairing_requests() == []  # a preview arms nothing
+    assert m.db.main.credentials.list_pairing_requests() == []  # a preview arms nothing
     digest = output.err.strip().removeprefix("Disclosures digest: ")
     assert digest == Harness.disclosures_digest(preview)
     monkeypatch.setattr("sys.argv", ["harness", "pairing-requests", "arm", CATALOG_ID, "--scopes", "sessions",
@@ -221,7 +221,7 @@ def test_sdk_binds_arm_to_preview_and_surfaces_drift(hh, monkeypatch):
         with pytest.raises(HarnessError) as invalid:
             sdk.preview_pairing(["admin"])
         assert invalid.value.status == 400
-        assert m.db.main.list_pairing_requests() == []  # previews arm nothing
+        assert m.db.main.credentials.list_pairing_requests() == []  # previews arm nothing
         preview = sdk.preview_pairing(["approvals"])
         digest = sdk.disclosures_digest(preview)
         armed = sdk.arm_pairing(CATALOG_ID, ["approvals"], acknowledge_elevated=True,
@@ -233,7 +233,7 @@ def test_sdk_binds_arm_to_preview_and_surfaces_drift(hh, monkeypatch):
                            expected_disclosures_digest=digest)
         assert changed.value.status == 409
         assert changed.value.code == "disclosures_changed"
-    assert len(m.db.main.list_pairing_requests()) == 1
+    assert len(m.db.main.credentials.list_pairing_requests()) == 1
 
 
 def test_preview_arm_and_list_disclosures_match_for_every_known_scope(hh):

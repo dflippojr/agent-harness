@@ -29,7 +29,7 @@ class EndpointRequestStore(ModuleStore):
                 "completion_tokens, wait_ms, total_ms, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (r["key_id"], r["route"], r["model"], int(r["stream"]), r["status"], r.get("prompt_tokens", 0),
                  r.get("completion_tokens", 0), r.get("wait_ms", 0), r.get("total_ms", 0), time.time()))
-            self.core.touch_api_key(r["key_id"])
+            self.core.credentials.touch_api_key(r["key_id"])
 
     @database_reads
     def request_counts(self, key_ids: list[str]) -> dict[str, int]:

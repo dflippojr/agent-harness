@@ -254,7 +254,7 @@ def test_many_app_requests_never_hide_an_open_hub_claim(hh):
     client, m = hh
     asked, _ = _ask(client)
     for n in range(101):
-        m.db.main.insert_pairing_request({
+        m.db.main.credentials.insert_pairing_request({
             "id": f"pr-app{n:03d}", "kind": "app", "name": "an app", "scopes": "sessions", "state": pr.ARMED,
             "armed": 1, "created_at": pr.clock() + 1 + n, "expires_at": pr.clock() + 600, "key_id": ""})
     assert [r["id"] for r in client.get(CLAIM).json()["requests"]] == [asked.json()["id"]]
@@ -496,7 +496,7 @@ def test_migration_adds_the_role_and_the_record(tmp_path):
     assert next(k for k in db.list_api_keys() if k["id"] == "k-old")["role"] == ""
     columns = {r["name"] for r in db.conn.execute("PRAGMA table_info(hub_claim)")}
     assert columns == {"slot", "key_id", "name", "kind", "origin", "request_id", "claimed_at"}
-    assert db.hub_claim() is None
+    assert db.credentials.hub_claim() is None
     db.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, claimed_at) VALUES (1, 'k', 'n', 'native', 1)")
     with pytest.raises(sqlite3.IntegrityError):   # never a second row
         db.conn.execute("INSERT INTO hub_claim (slot, key_id, name, kind, claimed_at) VALUES (2, 'k', 'n', 'native', 1)")

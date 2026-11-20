@@ -1339,7 +1339,7 @@ async def revoke_key(kid: str, request: Request):
             credential_audit.record(m.db, ctx, "key.revoke", kid, "denied", "api_key",
                                     {"key_id": kid, "kind": before["kind"], "reason": "hub_key"})
             return None
-        if m.db.main.revoke_api_key(kid):
+        if m.db.main.credentials.revoke_api_key(kid):
             credential_audit.record(m.db, ctx, "key.revoke", kid, "ok", "api_key",
                                     {"key_id": kid, "kind": before["kind"] if before else None})
             return True

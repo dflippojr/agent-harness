@@ -51,10 +51,10 @@ def test_api_key_hash_is_the_literal_digest(db: Database):
 
 
 def test_pairing_code_and_its_key_hash_to_the_literal_digests(db: Database):
-    row, code = db.create_pairing_code("app", "https://app.example", "inference", 600)
+    row, code = db.credentials.create_pairing_code("app", "https://app.example", "inference", 600)
     assert code == "hp-fixed"
     assert _hash(db, "pairing_codes", "id", row["id"]) == HP_FIXED
-    key, secret, error = db.redeem_pairing_code(code, "https://app.example")
+    key, secret, error = db.credentials.redeem_pairing_code(code, "https://app.example")
     assert error == "" and key is not None and secret == "ha-fixed"
     assert _hash(db, "api_keys", "id", key["id"]) == HA_FIXED
 
@@ -70,11 +70,11 @@ def test_runner_pairing_code_and_its_key_hash_to_the_literal_digests(db: Databas
 
 def test_stream_ticket_hash_is_the_literal_digest(db: Database):
     row, _key = db.create_api_key("laptop")
-    ticket, _expires = db.create_stream_ticket(row["id"], "s1", "https://app.example")
+    ticket, _expires = db.credentials.create_stream_ticket(row["id"], "s1", "https://app.example")
     assert ticket == "hs-fixed"
     with db.lock:
         stored = db.conn.execute("SELECT hash FROM stream_tickets").fetchone()["hash"]
     assert stored == HS_FIXED
-    found = db.stream_ticket_key(ticket, "s1", "https://app.example")
+    found = db.credentials.stream_ticket_key(ticket, "s1", "https://app.example")
     assert found is not None and found["id"] == row["id"]
-    assert db.stream_ticket_origin_active(ticket, "https://app.example")
+    assert db.credentials.stream_ticket_origin_active(ticket, "https://app.example")

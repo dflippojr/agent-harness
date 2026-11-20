@@ -85,7 +85,7 @@ def mint(data_dir: Path, token_file: Path, harness_root: Path | None = None) -> 
     try:
         for key in db.list_api_keys():
             if not key.get("revoked_at"):
-                db.revoke_api_key(key["id"])
+                db.credentials.revoke_api_key(key["id"])
         row, secret = db.create_api_key("staging owner", scopes="admin", kind="owner")
     finally:
         db.close()

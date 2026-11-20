@@ -481,7 +481,7 @@ def test_owner_keys_have_no_erasure_and_member_storage_and_quota_are_unchanged(t
     Path(cfg.data_dir).mkdir(parents=True)
     db = Database(Path(cfg.data_dir) / "harness.sqlite3")
     owner, _ = db.create_api_key("control-center", "admin", "owner")
-    assert db.revoke_api_key(owner["id"]) and db.get_api_key(owner["id"])["erase_after"] is None
+    assert db.credentials.revoke_api_key(owner["id"]) and db.get_api_key(owner["id"])["erase_after"] is None
     assert db.pending_erasures() == []
     db.close()
 

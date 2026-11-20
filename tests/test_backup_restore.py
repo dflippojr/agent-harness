@@ -67,7 +67,7 @@ async def _seed_and_back_up(cfg) -> tuple[Path, dict]:
     for name in ("first", "gone"):
         _write(storage.transcripts_dir(cfg, "owner", apps[name]) / "s.md", f"{name} transcript")
     # Revoked and erased after the store was written: the backup still holds its store and transcripts.
-    m.db.revoke_api_key(apps["gone"])
+    m.db.credentials.revoke_api_key(apps["gone"])
     m.db.mark_app_erased(apps["gone"])
     result = await m.modules.get("backup").service.backup()
     await m.stop()

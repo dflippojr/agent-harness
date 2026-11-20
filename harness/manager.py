@@ -359,7 +359,7 @@ class Manager:
 
     async def _touch_key_activity(self, key_id: str) -> None:
         try:
-            await self.db.main.awrite(self.db.main.touch_api_key, key_id)
+            await self.db.main.awrite(self.db.main.credentials.touch_api_key, key_id)
         except Exception:
             # Neither credential data nor exception text belongs in the log.
             log.warning("key activity metadata could not be recorded")
@@ -835,9 +835,9 @@ class Manager:
         # hosted backend (#786). A kind: cli backend keeps its own rule below.
         self._refuse_hosted(app, backend)
         # A kind: cli backend is invisible to every App until the owner grants it, managed or not (#168).
-        if not self.db.app_provider_managed(app["id"]) and not self._needs_grant(backend):
+        if not self.db.credentials.app_provider_managed(app["id"]) and not self._needs_grant(backend):
             return
-        credential = self.db.app_provider_credential(app["id"], backend)
+        credential = self.db.credentials.app_provider_credential(app["id"], backend)
         if credential is None:
             raise HarnessError(403, f"this app is not allowed to use backend {backend!r}",
                                "provider_not_allowed")
@@ -2245,11 +2245,11 @@ class Manager:
         return cfg is not None and cfg.is_cli
 
     def app_provider_status(self, app_id: str, backend: str) -> dict:
-        managed = self.db.app_provider_managed(app_id)
+        managed = self.db.credentials.app_provider_managed(app_id)
         if hosted_refused(self.db.get_api_key(app_id), self.cfg.backends.get(backend)):  # as `create` refuses it
             return {"managed": managed, "allowed": False, "policy": "denied", "models": [],
                     "credential_source": "server_default", "available": False}
-        row = self.db.app_provider_credential(app_id, backend)
+        row = self.db.credentials.app_provider_credential(app_id, backend)
         if row is None:
             allowed = not managed and not self._needs_grant(backend)
             return {"managed": managed, "allowed": allowed, "policy": "server_default", "models": [],
@@ -2281,11 +2281,11 @@ class Manager:
         clean_models = list(dict.fromkeys(str(model).strip() for model in models if str(model).strip()))
         if any(len(model) > 100 for model in clean_models):
             raise HarnessError(400, "model ids must be at most 100 characters")
-        return self.db.set_app_provider_credential(app_id, backend, secret_ref, policy, clean_models)
+        return self.db.credentials.set_app_provider_credential(app_id, backend, secret_ref, policy, clean_models)
 
     def provider_credentials(self) -> list[dict]:
         rows = []
-        for row in self.db.list_app_provider_credentials():
+        for row in self.db.credentials.list_app_provider_credentials():
             path = self.cfg.provider_secret_files.get(row["secret_ref"], "") if row["secret_ref"] else ""
             needs_file = row["policy"] in ("api_key", "subscription_then_api_key")
             rows.append({k: row[k] for k in ("id", "app_id", "app_name", "backend", "secret_ref", "policy",
@@ -2294,7 +2294,7 @@ class Manager:
         return rows
 
     def revoke_app_provider_credential(self, cid: str) -> bool:
-        return self.db.revoke_app_provider_credential(cid)
+        return self.db.credentials.revoke_app_provider_credential(cid)
 
     def _scheduler_eligible(self, sid: str) -> bool:
         """May `sid` take the GPU slot (or, hosted, a backend slot) under its member's or App's `max_running`? A

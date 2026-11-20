@@ -109,7 +109,7 @@ def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
             assert ticket.status_code == 201
             reconnect_path = ticket.json()["events_url"] + "&follow=false"
             reconnect_headers = {"Origin": ORIGIN}
-            key = m.db.stream_ticket_key(ticket.json()["ticket"], "owner00001", ORIGIN)
+            key = m.db.credentials.stream_ticket_key(ticket.json()["ticket"], "owner00001", ORIGIN)
         else:
             reconnect_path = "/api/v1/events" if surface == "global" else "/api/v1/sessions/owner00001/events?follow=false"
             reconnect_headers = headers
@@ -120,7 +120,7 @@ def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
         restored = []
 
         def revoke():
-            assert m.db.revoke_api_key(key["id"])
+            assert m.db.credentials.revoke_api_key(key["id"])
             if restore:
                 fresh_key, fresh_token = m.db.restore_api_key(key["id"])
                 assert fresh_key["id"] == key["id"]
@@ -225,7 +225,7 @@ def test_revoking_an_owner_key_ends_its_admin_surface_stream(tmp_path, monkeypat
         stream = _open_admin_stream(client, monkeypatch, path, headers)
 
         def revoke_during_wait():
-            if not m.db.revoke_api_key(key["id"]):
+            if not m.db.credentials.revoke_api_key(key["id"]):
                 return  # revoked on an earlier tick, which should already have ended the stream
             if when == "during_wait":
                 m.bus.emit("owner00001", "status", {"status": "done", "answer": "must not leak"})

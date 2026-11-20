@@ -960,7 +960,7 @@ class SessionStores:
 
     def _record_web_store(self, info: dict) -> None:
         """In a main-store transaction: register Web in the App registry and record that its store is in use."""
-        self.main.ensure_web_app(WEB_APP_ID)
+        self.main.credentials.ensure_web_app(WEB_APP_ID)
         self.main.set_meta(WEB_STORE_META, json.dumps({"migrated_at": time.time(), **info}))
 
     def migrate_app_files(self) -> list[Path]:
