@@ -336,7 +336,7 @@ def test_the_maintenance_cleanup_runs_the_app_sweep(tmp_path):
         m = Manager(cfg, chat=Script([Completion(content="ok")]))
         await m.start(maintenance=False)
         key, _ = m.db.create_api_key("shop", "sessions", "app")
-        m.db.set_app_retention(key["id"], 1)
+        m.db.apps.set_app_retention(key["id"], 1)
         m.db.insert_session(_session("a1", key["id"]))
         _age(m, "a1", 3)
         report = await m.maintenance.cleanup()
@@ -460,18 +460,18 @@ def test_the_apps_own_settings_survive_an_undone_revoke_and_go_with_the_erasure(
         patched = client.patch("/api/v1/config", headers=a, json={"revision": 0,
                                                                   "changes": {"app.sessions.max_turns": 10}})
         assert patched.status_code == 200, patched.text
-        saved = m.db.get_app_settings(a_id)
+        saved = m.db.apps.get_app_settings(a_id)
         assert client.delete(f"/keys/{a_id}").status_code == 204
-        assert m.db.get_app_settings(a_id) == saved                               # kept through the grace
+        assert m.db.apps.get_app_settings(a_id) == saved                               # kept through the grace
 
         new = {"Authorization": f"Bearer {client.post(f'/api/admin/v1/apps/{a_id}/restore').json()['key']}"}
-        assert m.db.get_app_settings(a_id) == saved
+        assert m.db.apps.get_app_settings(a_id) == saved
         live = {k: v for k, v in patched.json().items() if k != "changes"}
         assert client.get("/api/v1/config", headers=new).json() == live
 
         assert client.delete(f"/keys/{a_id}").status_code == 204
         assert asyncio.run(m.sweep_app_data(time.time() + APP_ERASE_GRACE_SECONDS + 60))["apps_erased"] == [a_id]
-        assert m.db.get_app_settings(a_id) is None
+        assert m.db.apps.get_app_settings(a_id) is None
 
 
 def test_owner_keys_have_no_erasure_and_member_storage_and_quota_are_unchanged(tmp_path):
@@ -482,7 +482,7 @@ def test_owner_keys_have_no_erasure_and_member_storage_and_quota_are_unchanged(t
     db = Database(Path(cfg.data_dir) / "harness.sqlite3")
     owner, _ = db.create_api_key("control-center", "admin", "owner")
     assert db.credentials.revoke_api_key(owner["id"]) and db.get_api_key(owner["id"])["erase_after"] is None
-    assert db.pending_erasures() == []
+    assert db.apps.pending_erasures() == []
     db.close()
 
     data = Path(cfg.data_dir)

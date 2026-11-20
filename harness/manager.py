@@ -2077,7 +2077,7 @@ class Manager:
             await asyncio.to_thread(self.end_user_logins.cancel_app, app_id)
             await cli_domains.drop_end_user_volumes(app_id, end_users)
         await asyncio.to_thread(self.db.drop_app, app_id)
-        self.db.mark_app_erased(app_id)
+        self.db.apps.mark_app_erased(app_id)
 
     def restore_app(self, app_id: str) -> tuple[dict, str]:
         """Undo the revoke of App `app_id` during its erasure grace; returns its key row and new token."""
@@ -2092,7 +2092,7 @@ class Manager:
         counted from their last activity."""
         now = time.time() if now is None else now
         report: dict[str, list] = {"apps_erased": [], "sessions_expired": []}
-        for row in self.db.pending_erasures(due_by=now):
+        for row in self.db.apps.pending_erasures(due_by=now):
             try:
                 await self.erase_app(row["id"])
                 report["apps_erased"].append(row["id"])
@@ -2340,14 +2340,14 @@ class Manager:
     def app_limits(self, app_id: str, stored: dict | None = None) -> dict:
         """App `app_id`'s effective session caps: what the owner set (`stored`, read when not given), else the
         daemon's `app_max_*` defaults."""
-        stored = self.db.app_limits(app_id) if stored is None else stored
+        stored = self.db.apps.app_limits(app_id) if stored is None else stored
         defaults = {"max_running": self.cfg.app_max_running, "max_queued": self.cfg.app_max_queued}
         return {k: int(stored[k]) if stored.get(k) is not None else int(defaults[k]) for k in defaults}
 
     def app_limits_view(self, app_id: str) -> dict:
         """The owner's view: what is set for the App, what applies, and how much of it is in use."""
         count = self.db.count_app_sessions
-        stored = self.db.app_limits(app_id)
+        stored = self.db.apps.app_limits(app_id)
         return {"app_id": app_id, "configured": stored, "effective": self.app_limits(app_id, stored),
                 "running": count(app_id, "running"), "queued": count(app_id, "queued"),
                 "parked": count(app_id, *WAITING)}

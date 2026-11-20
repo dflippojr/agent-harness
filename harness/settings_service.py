@@ -942,7 +942,7 @@ class SettingsService:
     def delete_app(self, app_id: str) -> None:
         if self.db is None:
             return
-        self.db.delete_app_settings(app_id)
+        self.db.apps.delete_app_settings(app_id)
 
     def app_defaults(self, key: dict | None) -> dict[str, Any]:
         if not key or key.get("kind") != "app":
@@ -997,7 +997,7 @@ class SettingsService:
     def _app_envelope(self, app_id: str) -> AppEnvelope:
         if self.db is None:
             return AppEnvelope()
-        row = self.db.get_app_settings(app_id)
+        row = self.db.apps.get_app_settings(app_id)
         if not row:
             return AppEnvelope()
         return AppEnvelope(schema_version=row.get("schema_version", SCHEMA_VERSION),
@@ -1006,7 +1006,8 @@ class SettingsService:
                            updated_at=float(row.get("updated_at") or 0))
 
     def _save_app_envelope(self, app_id: str, envelope: AppEnvelope) -> None:
-        self.db.set_app_settings(app_id, envelope.revision, envelope.values)
+        assert self.db is not None, "App settings are stored in the database"
+        self.db.apps.set_app_settings(app_id, envelope.revision, envelope.values)
 
     def _audit(self, actor_kind: str, action: str, keys: list[str], result: str, revision: int | None = None,
                actor: dict | None = None, extra: dict | None = None) -> None:

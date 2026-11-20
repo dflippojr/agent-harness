@@ -1076,12 +1076,6 @@
   {
     "file": "harness/settings_service.py",
     "rule": "reportOptionalMemberAccess",
-    "message": "\"set_app_settings\" is not a known attribute of \"None\"",
-    "count": 1
-  },
-  {
-    "file": "harness/settings_service.py",
-    "rule": "reportOptionalMemberAccess",
     "message": "\"unconfirmed\" is not a known attribute of \"None\"",
     "count": 1
   },

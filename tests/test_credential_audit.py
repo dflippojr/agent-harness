@@ -73,7 +73,7 @@ def test_two_owner_tokens_chain_survives_restart_and_erasure(tmp_path):
         assert client.delete(f"{PREFIX}/keys/{app['id']}", headers=_bearer(k2["key"])).status_code == 204
         restored = client.post(f"{PREFIX}/apps/{app['id']}/restore", headers=_bearer(k1["key"]))
         assert restored.status_code == 200
-        m.db.mark_app_erased(app["id"])  # the App's payload is gone; the grant history must stay
+        m.db.apps.mark_app_erased(app["id"])  # the App's payload is gone; the grant history must stay
         db_path = m.cfg.db_path
     db = Database(db_path)
     rows = db.accounts.audit_page(500, target_id=app["id"])["items"][::-1]
@@ -225,7 +225,7 @@ def test_provider_grant_set_replace_revoke_and_sentinels(hh):
     dump = _dump(client)
     for sentinel in (REF, SECRET_FILE_SENTINEL, "model-sentinel-1", "grant.key"):
         assert sentinel not in dump
-    m.db.mark_app_erased(app["id"])  # erasing the payload never touches the grant history
+    m.db.apps.mark_app_erased(app["id"])  # erasing the payload never touches the grant history
     assert _by_action(client, "provider_grant.set", outcome="ok")
 
 

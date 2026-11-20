@@ -145,7 +145,7 @@ def test_the_apps_running_cap_decides_who_the_scheduler_may_admit(tmp_path, rows
     before the index of every store takes it; and the owner's sessions are no part of the App's cap."""
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
     app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-    assert m.db.set_app_limits(app_id, {"max_running": 1})
+    assert m.db.apps.set_app_limits(app_id, {"max_running": 1})
     for sid, status, owned_by in rows:  # owned_by: "app", "owner" (outside the App's cap) or "lagging"
         lagging = owned_by == "lagging"  # its row says `status` already, but the index still says `queued`
         _insert(m, sid, "queued" if lagging else status, app_id="" if owned_by == "owner" else app_id)
@@ -161,7 +161,7 @@ def test_concurrent_restarts_of_an_apps_finished_sessions_respect_max_queued(tmp
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         await m.start()
         app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-        assert m.db.set_app_limits(app_id, {"max_queued": 1})
+        assert m.db.apps.set_app_limits(app_id, {"max_queued": 1})
         m.scheduler.set_paused(True)  # a restarted session stays queued
         _insert(m, "finished01", "done", app_id=app_id)
         _insert(m, "finished02", "done", app_id=app_id)
@@ -189,7 +189,7 @@ def test_local_parked_sessions_over_a_lowered_cap_get_the_gpu_back_once_approved
         first, second = (m.create(p, project="guarded", app=app)["id"] for p in ("one", "two"))
         await wait_status(m, first, "waiting_approval")
         await wait_status(m, second, "waiting_approval")
-        assert m.db.set_app_limits(app["id"], {"max_running": 1})
+        assert m.db.apps.set_app_limits(app["id"], {"max_running": 1})
         m.decide(first, None, approve=True)
         s = await wait_status(m, first, "done", timeout=10)
         assert s["answer"] == "wrote it"
@@ -206,7 +206,7 @@ def test_a_session_back_from_an_offline_mac_keeps_its_place_under_the_cap(tmp_pa
     async def body():
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-        assert m.db.set_app_limits(app_id, {"max_running": 1})
+        assert m.db.apps.set_app_limits(app_id, {"max_running": 1})
         _insert(m, "macsess001", "running", app_id=app_id)
         m.db.update_session("macsess001", target="macbook")
         _insert(m, "queued0004", "queued", app_id=app_id)
@@ -234,7 +234,7 @@ def test_a_mac_session_recovered_after_a_restart_keeps_its_place_under_a_lowered
         _insert(m, "macsess002", "running", app_id=app_id)
         m.db.update_session("macsess002", target="macbook")
         _insert(m, "parked0005", "waiting_approval", app_id=app_id)
-        assert m.db.set_app_limits(app_id, {"max_running": 1})
+        assert m.db.apps.set_app_limits(app_id, {"max_running": 1})
         mac = m.runner.hub = OfflineMac()
         waiting = asyncio.create_task(m.runner._wait_for_target("macsess002"))  # the recovered run's setup
         await _until(lambda: m.db.get_session("macsess002")["status"] == "waiting_target")
@@ -267,7 +267,7 @@ def test_new_sessions_waiting_for_an_offline_mac_hold_no_place_under_the_cap(tmp
     async def body():
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-        assert m.db.set_app_limits(app_id, {"max_running": 2})
+        assert m.db.apps.set_app_limits(app_id, {"max_running": 2})
         _insert(m, "running007", "running", app_id=app_id)
         _insert(m, "newmac0001", "queued", app_id=app_id)
         _insert(m, "newmac0002", "queued", app_id=app_id)
@@ -373,7 +373,7 @@ def test_two_messages_at_once_to_a_finished_app_session_both_reach_its_run(tmp_p
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         await m.start()
         app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-        assert m.db.set_app_limits(app_id, {"max_queued": 1})
+        assert m.db.apps.set_app_limits(app_id, {"max_queued": 1})
         m.scheduler.set_paused(True)
         _insert(m, "finished03", "done", app_id=app_id)
         results = await asyncio.gather(m.send("finished03", "first"), m.send("finished03", "second"),
@@ -392,7 +392,7 @@ def test_runs_saved_before_places_were_recorded_get_them_before_any_run_resumes(
     async def body():
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-        assert m.db.set_app_limits(app_id, {"max_running": 1})
+        assert m.db.apps.set_app_limits(app_id, {"max_running": 1})
         _insert(m, "oldpark002", "waiting_approval", app_id=app_id, holds=False)
         pending = call("write_file", 0, path="a.txt", content="x")
         m.db.update_session("oldpark002", context=[
@@ -414,7 +414,7 @@ def test_a_message_racing_a_restart_of_the_same_session_joins_its_run(tmp_path):
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         await m.start()
         app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-        assert m.db.set_app_limits(app_id, {"max_queued": 1})
+        assert m.db.apps.set_app_limits(app_id, {"max_queued": 1})
         m.scheduler.set_paused(True)
         _insert(m, "finished04", "done", app_id=app_id)
         real, raced = m._refuse_unsettled, []
@@ -532,7 +532,7 @@ def _mixed_manager(tmp_path, max_sessions: int = 1):
     m.runner.cli_factory = factory
     key = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
     m.set_app_provider_credential(key["id"], "claude", "", "subscription", [])
-    assert m.db.set_app_limits(key["id"], {"max_running": 1})
+    assert m.db.apps.set_app_limits(key["id"], {"max_running": 1})
     return m, modes, key
 
 
@@ -572,7 +572,7 @@ def test_an_apps_hosted_sessions_waiting_on_a_slot_cannot_both_pass_its_running_
         await m.start()
         key = m.db.get_api_key(m.db.create_api_key("shop", "sessions", kind="app")[0]["id"])
         m.set_app_provider_credential(key["id"], "claude", "", "subscription", [])
-        assert m.db.set_app_limits(key["id"], {"max_running": 1})
+        assert m.db.apps.set_app_limits(key["id"], {"max_running": 1})
         owners = [m.create(p, backend="claude")["id"] for p in ("o1", "o2")]
         await _until(lambda: len(made) == 2)
         apps = [m.create(p, backend="claude", app=key)["id"] for p in ("a1", "a2")]
@@ -597,7 +597,7 @@ def test_a_session_waiting_on_its_cap_does_not_block_a_parked_one_coming_back(tm
     async def body():
         m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
         app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-        assert m.db.set_app_limits(app_id, {"max_running": 1})
+        assert m.db.apps.set_app_limits(app_id, {"max_running": 1})
         _insert(m, "queued0002", "queued", app_id=app_id)
         _insert(m, "parked0002", "waiting_approval", app_id=app_id)
         async def admit(sid):
@@ -621,7 +621,7 @@ def test_a_hosted_sessions_running_committing_mid_check_still_counts_against_its
     it counts once it holds its place, and until then as about to run (#906)."""
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
     app_id = m.db.create_api_key("shop", "sessions", kind="app")[0]["id"]
-    assert m.db.set_app_limits(app_id, {"max_running": 1})
+    assert m.db.apps.set_app_limits(app_id, {"max_running": 1})
     _insert(m, "hosted0906", "queued", app_id=app_id)
     _insert(m, "local00906", "queued", app_id=app_id)
     m.runner.admitted["hosted0906"] = admission_key(m.db, m.db.get_session("hosted0906"))

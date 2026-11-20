@@ -462,7 +462,7 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
         assert client.delete(f"/keys/{app['id']}").status_code == 204
         assert manager.db.get_api_key(app["id"])["revoked_at"]
         # Kept (unused) until the erasure grace ends, so an undo gets them back (#330 decision 5).
-        assert manager.db.get_app_settings(app["id"]) is not None
+        assert manager.db.apps.get_app_settings(app["id"]) is not None
 
         s = manager.db.get_session(sid)
         assert s["status"] in ACTIVE or s["status"] in ("done", "failed", "cancelled")
@@ -520,7 +520,7 @@ def test_never_patched_app_keeps_granted_tools_and_notifications(tmp_path):
             "name": "shop", "kind": "app", "scopes": ["sessions", "images"],
         }).json()
         h = bearer(app["key"])
-        assert manager.db.get_app_settings(app["id"]) is None
+        assert manager.db.apps.get_app_settings(app["id"]) is None
         created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
         assert created.status_code == 201, created.text
         s = manager.db.get_session(created.json()["id"])
@@ -560,7 +560,7 @@ def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
         assert created.status_code == 201, created.text
         sid = created.json()["id"]
         manager.db.update_session(sid, app_defaults={})
-        assert manager.db.get_app_settings(app["id"]) is None
+        assert manager.db.apps.get_app_settings(app["id"]) is None
         s = manager.db.get_session(sid)
         assert s["app_defaults"] == {}
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}

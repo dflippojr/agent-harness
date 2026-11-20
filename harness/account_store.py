@@ -4,7 +4,7 @@ connections, members' own provider API keys, Google identities and invitations, 
 `AccountStore` runs them on the main Database's writer queue, pooled readers and transactions. The Database builds it
 as `db.accounts`, and every Database that `SessionStores` opens (each App's and Web's) shares the main store's, so
 any route reaches the one household registry. Its callers call it directly: `Database` forwards none of these names.
-An App end user's namespace audit stays on `Database`, for the App store: its rows live in each App's own store.
+An App end user's namespace audit stays on `Database` until stage 6: its rows live in each App's own store.
 """
 
 from __future__ import annotations

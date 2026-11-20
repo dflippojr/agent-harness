@@ -285,7 +285,7 @@ class Notifier:
         key = self.db.get_api_key(app_id)
         snapshot = session.get("app_defaults") if isinstance(session.get("app_defaults"), dict) else {}
         if use_live_app_settings(key):
-            row = self.db.get_app_settings(app_id)
+            row = self.db.apps.get_app_settings(app_id)
             values = (row or {}).get("values") or {}
         else:
             values = frozen_app_defaults(snapshot)
