@@ -248,13 +248,26 @@ revoke); it is 0 while the module is absent. `tests/test_module_stores.py` fails
 names a module table, and on any store that forwards attributes to the Database.
 
 The core's own queries split the same way, one domain store per change (#992 stage 5). A core store subclasses
-`harness.db.CoreStore`, and `Database` builds it and exposes it as an attribute. `db.credentials`
-(`harness/credential_store.py`) holds the credential queries: API keys, pairing codes, pairing requests and the Hub
-claim, stream tickets, and App provider credentials. New code calls the store. Old `db.<method>` calls keep working
-through a temporary forwarding shim on `Database`. `tests/test_database_shim.py` pins the forwarded names, so the shim
-can only shrink. `await db.aio.<method>()` and `SessionStores` reach the store through the shim too. The listing
-overrides on `SessionStores` (`list_api_keys`, `get_api_key_listing`, `restore_api_key`) still apply, so call those
-on `m.db`, not `m.db.credentials`, until they move.
+`harness.db.CoreStore`, and `Database` builds it and exposes it as an attribute:
+
+- **`db.credentials`** (`harness/credential_store.py`): API keys, pairing codes, pairing requests and the Hub claim,
+  stream tickets, and App provider credentials.
+- **`db.sessions`** (`harness/session_store.py`): the `sessions` table and the rows keyed by one session. That means
+  checkpoints, artifacts, review comments, secret dismissals, events and the search index, approvals, and smart
+  reviews. It leaves out an App's tool calls and the namespace audit. Every Database builds its own: the main store,
+  Web's, and each App's.
+
+New code calls the store. Old `db.<method>` calls keep working through a temporary forwarding shim on `Database`.
+`tests/test_database_shim.py` pins the forwarded names for each store, so the shim can only shrink.
+`await db.aio.<method>()` and `SessionStores` reach the store through the shim too.
+
+Two cases still go through `m.db` rather than a store:
+
+- **Session methods.** `SessionStores` routes each session to its own store, so call them on `m.db` (or on
+  `for_session(sid)`). `m.db.sessions` raises, because the main store's `SessionStore` would miss every routed
+  session.
+- **Key listings.** The listing overrides on `SessionStores` (`list_api_keys`, `get_api_key_listing`,
+  `restore_api_key`) still apply, so call those on `m.db`, not `m.db.credentials`, until they move.
 
 ## What stage (b) leaves in the core
 
