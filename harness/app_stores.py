@@ -299,6 +299,14 @@ class SessionStores:
         self.migrate_app_files()
 
     # stores -----------------------------------------------------------------------------------------------------------
+    def _open_store(self, app_id: str) -> Database:
+        """Open App `app_id`'s store (or Web's). Its credential queries are the main store's (#992): the App registry
+        lives there, so no route to this Database (`for_app`, `for_session`, a raw `db.credentials` or a forwarded
+        `db.<credential method>`) reads or writes its own empty copy."""
+        db = Database(self.store_path(app_id))
+        db.credentials = self.main.credentials
+        return db
+
     def store_path(self, app_id: str) -> Path:
         if not _APP_ID.fullmatch(app_id or ""):
             raise ValueError(f"not an App id: {app_id!r}")
@@ -316,7 +324,7 @@ class SessionStores:
                 raise sqlite3.ProgrammingError(f"App {app_id}'s store was erased")
             entry = self._open.get(app_id)
             if entry is None:
-                entry = self._open[app_id] = _OpenStore(Database(self.store_path(app_id)))
+                entry = self._open[app_id] = _OpenStore(self._open_store(app_id))
                 self._start_reaper()
             entry.users += 1
             entry.last_used = time.monotonic()
@@ -881,7 +889,7 @@ class SessionStores:
             if dry_run and not migrated:
                 log.warning("Web store migration (dry run): no sessions to move; the main store stays in use")
                 return main
-            web = Database(self.store_path(WEB_APP_ID))
+            web = self._open_store(WEB_APP_ID)
             if not migrated or main.get_api_key(WEB_APP_ID) is None:
                 main.write(self._record_web_store, {"sessions": 0, "backup": ""})
             return web
@@ -889,13 +897,13 @@ class SessionStores:
         if dry_run:
             log.warning("Web store migration (dry run): would move %d session(s) into %s: %s; nothing changed",
                         len(sids), self.store_path(WEB_APP_ID), json.dumps(before, sort_keys=True))
-            return Database(self.store_path(WEB_APP_ID)) if migrated else main
+            return self._open_store(WEB_APP_ID) if migrated else main
         backup = _unused(Path(main.path).parent / "pre-migration" /
                          f"harness-web-store-{time.strftime('%Y%m%dT%H%M%S')}.sqlite3")
         backup_sqlite(Path(main.path), backup)
         log.info("Web store migration: moving %d session(s) into %s: %s; main store backed up to %s", len(sids),
                  self.store_path(WEB_APP_ID), json.dumps(before, sort_keys=True), backup)
-        web = Database(self.store_path(WEB_APP_ID))
+        web = self._open_store(WEB_APP_ID)
         try:
             self._copy_to_web(web, sids, before)
 

@@ -15,7 +15,7 @@ import pytest
 
 import harness.app_stores as app_stores
 import harness.db as core_db
-from harness.app_stores import SessionStores
+from harness.app_stores import WEB_APP_ID, SessionStores
 from harness.credential_store import CredentialStore
 from harness.db import CoreStore, Database
 from harness.session_store import SessionStore
@@ -62,6 +62,11 @@ PINNED_SHIM: dict[str, frozenset[str]] = {
 }
 
 
+# Forwarded store methods that are not one query but call others (so they carry no `db_kind`): `aio` runs them in a
+# worker thread. Every other forwarded name must be `_reads` or `_writes`.
+COMPOSITES = frozenset({("sessions", "read_artifact")})
+
+
 def _forwarded() -> dict[str, str]:
     """{name: store attribute} for every shim entry on `Database`, read from the class itself."""
     return {name: value.store for name, value in vars(Database).items() if isinstance(value, core_db._Forwarded)}
@@ -94,10 +99,13 @@ def test_the_shim_only_shrinks():
         assert shim_problems(names, pinned, _store_methods(STORES[store]), store) == [], store
 
 
-def test_the_pinned_shim_has_these_sizes():
-    """The set as this change leaves it: 28 credential names (39 when the store was added) and 51 session names."""
-    assert {store: len(names) for store, names in PINNED_SHIM.items()} == {"credentials": 28, "sessions": 51}
-    assert not PINNED_SHIM["credentials"] & PINNED_SHIM["sessions"]
+def test_database_forwards_these_many_names_per_store():
+    """The shim on `Database` as this change leaves it: 28 credential names (39 when the store was added) and 51
+    session names, read from the class itself."""
+    forwarded = _forwarded()
+    sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
+    assert sizes == {"credentials": 28, "sessions": 51}
+    assert sizes == {store: len(names) for store, names in PINNED_SHIM.items()}
 
 
 def test_the_ratchet_allows_a_removal_and_refuses_growth_and_a_stale_pin():
@@ -119,8 +127,12 @@ def test_every_forwarded_name_is_a_store_method():
         cls = STORES[store]
         for name in pinned:
             method = vars(cls).get(name)
-            # A query is `_reads` or `_writes`; a composite of them (`read_artifact`) carries no kind.
-            assert callable(method) and getattr(method, "db_kind", "composite") in ("read", "write", "composite"), name
+            # A query is `_reads` or `_writes`; only the named composites (of such queries) carry no kind.
+            assert callable(method), name
+            if (store, name) in COMPOSITES:
+                assert not hasattr(method, "db_kind"), f"{store}.{name} is a query now: drop it from COMPOSITES"
+            else:
+                assert method.db_kind in ("read", "write"), name
             # The class-level lookup `app_stores` routes by sees the store's decorated method.
             assert getattr(Database, name) is method, name
         # A store method is forwarded only by its own `_Forwarded` line on `Database`, never by default.
@@ -267,20 +279,33 @@ def test_every_core_store_is_declared_and_says_where_its_rows_live():
 
 
 def test_no_wrapper_hands_out_the_wrong_databases_store(tmp_path):
-    """Each `SessionStores` wrapper hands out the main store's credentials, and refuses `sessions`: one Database's
-    SessionStore would miss every session routed to another, and an App's would outlive the wrapper's hold on it."""
+    """Every route hands out the main store's credentials. A routing wrapper refuses `sessions`: one Database's
+    SessionStore would miss every session routed to another, and an App's would outlive the wrapper's hold on it.
+    A Web route is Web's Database, whose `sessions` holds the owner's and members' sessions."""
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
         key, _ = stores.create_api_key("Owner", "admin", kind="owner")
         stores.insert_session(_session("a1", "k-aaaa"))
+        stores.insert_session(_session("own"))
+        assert stores.web is not main  # the owner's sessions are in Web's own store
         wrappers = {"stores": stores, "scope(app)": stores.scope("k-aaaa"), "scope(owner)": stores.scope(""),
                     "for_app(app)": stores.for_app("k-aaaa"), "for_session(app sid)": stores.for_session("a1")}
-        for label, wrapper in wrappers.items():
+        web_routes = {"for_app('')": stores.for_app(""), "for_app(WEB_APP_ID)": stores.for_app(WEB_APP_ID),
+                      "for_session(owner sid)": stores.for_session("own")}
+        for label, wrapper in {**wrappers, **web_routes}.items():
             assert wrapper.credentials is main.credentials, label
             assert key["id"] in {k["id"] for k in wrapper.credentials.list_api_keys()}, label
+            assert wrapper.get_api_key(key["id"])["id"] == key["id"], label  # a forwarded credential call too
+        for wrapper in wrappers.values():
             with pytest.raises(AttributeError, match="routes each session"):
                 wrapper.sessions  # noqa: B018 - the access itself is the check
+        # A Web route is Web's Database itself: its `sessions` is the store that holds the owner's sessions.
+        for label, wrapper in web_routes.items():
+            assert wrapper.sessions is stores.web.sessions, label
+            assert wrapper.sessions.get_session("own")["id"] == "own", label
+        # The App's own Database, however reached, uses the main store's credentials as well.
+        assert stores._open["k-aaaa"].db.credentials is main.credentials
         # The wrappers' own session calls still route: the App's session is read from its store.
         assert stores.for_app("k-aaaa").get_session("a1")["id"] == "a1"
         assert stores.scope("k-aaaa").get_session("a1")["id"] == "a1"
