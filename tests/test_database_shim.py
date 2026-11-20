@@ -327,7 +327,7 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
 
 
 ACCOUNT_TABLES = ("accounts", "account_audit", "member_projects", "github_connections", "member_api_keys",
-                  "google_identities", "google_invitations", "web_sessions")
+                  "google_identities", "google_link_invitations", "web_sessions")
 
 
 def test_account_queries_left_the_database_class():
@@ -357,7 +357,7 @@ def _account_uses_off_the_store(root) -> list[str]:
                     (isinstance(on, ast.Name) and on.id == "accounts") or \
                     (isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store"):
                 continue
-            found.append(f"{path.relative_to(root.parent)}:{node.lineno} .{node.attr}")
+            found.append(f"{path.relative_to(root.parent).as_posix()}:{node.lineno} .{node.attr}")
     return found
 
 
