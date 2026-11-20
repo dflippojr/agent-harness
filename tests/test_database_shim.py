@@ -1,6 +1,6 @@
 """The core's domain stores sit behind a forwarding shim that may only shrink (#992 stage 5).
 
-`Database` exposes each store as an attribute (`db.credentials`, `db.sessions`). Until their call sites move, the
+`Database` exposes each store as an attribute (`db.credentials`, `db.sessions`, `db.accounts`, `db.apps`). Until their call sites move, the
 shim forwards each old `db.<method>` name to its store; this file pins those names per store, so the shim never gains
 one, and checks that a forwarded call (sync, `aio` or through `SessionStores`) runs the store's own method.
 """
@@ -17,13 +17,14 @@ import pytest
 import harness.app_stores as app_stores
 import harness.db as core_db
 from harness.account_store import AccountStore
+from harness.app_store import AppStore
 from harness.app_stores import WEB_APP_ID, SessionStores
 from harness.credential_store import CredentialStore
 from harness.db import CoreStore, Database
 from harness.session_store import SessionStore
 
 STORES: dict[str, type[CoreStore]] = {"credentials": CredentialStore, "sessions": SessionStore,
-                                      "accounts": AccountStore}
+                                      "accounts": AccountStore, "apps": AppStore}
 
 # The names `Database` forwards to each store. A store's set is written once, in the change that adds the store; after
 # that, delete a name here once its last `db.<name>` caller has moved to the store, and never add one.
@@ -62,7 +63,7 @@ COMPOSITES = frozenset({("sessions", "read_artifact")})
 
 
 # Stores that land with every caller moved, so `Database` forwards none of their names, and never will.
-NO_SHIM = frozenset({"accounts"})
+NO_SHIM = frozenset({"accounts", "apps"})
 
 
 def _forwarded() -> dict[str, str]:
@@ -102,10 +103,10 @@ def test_the_shim_only_shrinks():
 
 def test_database_forwards_these_many_names_per_store():
     """The shim on `Database` as this change leaves it, read from the class itself: 6 credential names (39 when the
-    store was added, 28 before this change), 51 session names and no account names."""
+    store was added, 28 before #1032), 51 session names, and no account or App names."""
     forwarded = _forwarded()
     sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
-    assert sizes == {"credentials": 6, "sessions": 51, "accounts": 0}
+    assert sizes == {"credentials": 6, "sessions": 51, "accounts": 0, "apps": 0}
     assert sizes == {store: len(PINNED_SHIM.get(store, ())) for store in STORES}
 
 
@@ -282,7 +283,7 @@ def test_every_core_store_is_declared_and_says_where_its_rows_live():
 
 def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
     """Driven by `app_stores._STORE_HOME`, so each new store is covered: a store whose rows live in the main store
-    (credentials, accounts) is the main store's on every route, an App's raw Database included. A store whose rows
+    (credentials, accounts, apps) is the main store's on every route, an App's raw Database included. A store whose rows
     are routed per session (sessions) is refused by every routing wrapper: one Database's would miss the sessions
     routed to another, and an App's would outlive the wrapper's hold on it. A Web route is Web's Database, whose
     `sessions` holds the owner's and members' sessions."""
@@ -294,6 +295,9 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
         main.accounts.insert_account({"user_id": "u-1", "login": "alice@example.com", "role": "member",
                                       "display_name": "Alice", "enabled": 1, "disk_quota_bytes": 1,
                                       "max_running": 1, "max_queued": 2, "created_at": now, "updated_at": now})
+        app, _ = stores.create_api_key("An App", kind="app")
+        assert main.apps.set_app_limits(app["id"], {"max_running": 2})
+        main.apps.set_app_settings(app["id"], 3, {"app.notify.completion": "never"})
         stores.insert_session(_session("a1", "k-aaaa"))
         stores.insert_session(_session("own"))
         assert stores.web is not main  # the owner's sessions are in Web's own store
@@ -304,13 +308,15 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
         databases = {"App Database": stores._open["k-aaaa"].db, "Web Database": stores.web}
         main_homed = [name for name, home in app_stores._STORE_HOME.items() if home == "main"]
         routed = [name for name, home in app_stores._STORE_HOME.items() if home is None]
-        assert set(main_homed) == {"credentials", "accounts"} and routed == ["sessions"]
+        assert set(main_homed) == {"credentials", "accounts", "apps"} and routed == ["sessions"]
         for label, route in {**wrappers, **web_routes, **databases}.items():
             for name in main_homed:
                 assert getattr(route, name) is getattr(main, name), (label, name)
             assert key["id"] in {k["id"] for k in route.credentials.list_api_keys()}, label
             assert route.get_api_key(key["id"])["id"] == key["id"], label  # a forwarded credential call too
             assert route.accounts.account_by_login("alice@example.com")["user_id"] == "u-1", label
+            assert route.apps.app_limits(app["id"])["max_running"] == 2, label
+            assert route.apps.get_app_settings(app["id"])["revision"] == 3, label
         for wrapper in wrappers.values():
             for name in routed:
                 with pytest.raises(AttributeError, match="routes each session"):
@@ -339,26 +345,37 @@ def test_account_queries_left_the_database_class():
         assert not hasattr(Database, name), f"Database.{name}: call db.accounts.{name}"
 
 
-def _account_uses_off_the_store(root) -> list[str]:
-    """Each use of an AccountStore method name (a call, or a bound method handed to `to_thread` or `awrite`) not made
-    on an account store: `<x>.accounts.<name>`, an `accounts` stand-in (`principal.resolve_human`'s), or
-    `operation_audit`'s `_audit_store(db)`."""
+def _uses_off_the_store(root, store: str) -> list[str]:
+    """Each use of a method name of core store `store` (a call, or a bound method handed to `to_thread` or `awrite`)
+    not made on that store: `<x>.<store>.<name>`. Also allowed: `self.<name>` in a file that defines `<name>` itself
+    (`Manager.app_limits`, the effective caps), and for accounts an `accounts` stand-in (`principal.resolve_human`'s)
+    or `operation_audit`'s `_audit_store(db)`."""
     import ast
-    names = _store_methods(AccountStore)
+    cls = STORES[store]
+    names = _store_methods(cls)
+    own_file = Path(inspect.getsourcefile(cls)).name
     found = []
     for path in sorted(root.rglob("*.py")):
-        if path.name == "account_store.py":
+        if path.name == own_file:
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        defined = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for node in ast.walk(tree):
             if not (isinstance(node, ast.Attribute) and node.attr in names):
                 continue
             on = node.value
-            if (isinstance(on, ast.Attribute) and on.attr == "accounts") or \
-                    (isinstance(on, ast.Name) and on.id == "accounts") or \
-                    (isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store"):
+            if (isinstance(on, ast.Attribute) and on.attr == store) or \
+                    (isinstance(on, ast.Name) and on.id == "self" and node.attr in defined):
+                continue
+            if store == "accounts" and ((isinstance(on, ast.Name) and on.id == "accounts") or (
+                    isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store")):
                 continue
             found.append(f"{path.relative_to(root.parent).as_posix()}:{node.lineno} .{node.attr}")
     return found
+
+
+def _account_uses_off_the_store(root) -> list[str]:
+    return _uses_off_the_store(root, "accounts")
 
 
 def test_every_account_call_goes_through_the_account_store():
@@ -379,6 +396,46 @@ def test_the_scan_finds_calls_and_bound_methods(tmp_path):
         "    return asyncio.to_thread(m.db.audit_page, 5)\n",  # line 6: a bound method
         encoding="utf-8")
     assert _account_uses_off_the_store(tmp_path / "pkg") == ["pkg/x.py:5 .list_audit", "pkg/x.py:6 .audit_page"]
+
+
+def test_every_app_call_goes_through_the_app_store():
+    """No production code calls or passes an App-store method of a Database (it has none): only of `db.apps`."""
+    root = Path(core_db.__file__).resolve().parent
+    for package in (root, root.parent / "harness_modules", root.parent / "scripts"):
+        assert _uses_off_the_store(package, "apps") == [], package.name
+
+
+def test_the_app_scan_allows_a_method_of_the_same_name_only_where_it_is_defined(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "manager.py").write_text(
+        "class Manager:\n"
+        "    def app_limits(self, app_id):\n"
+        "        return self.db.apps.app_limits(app_id)\n"   # on the store: fine
+        "    def cap(self, app_id):\n"
+        "        return self.app_limits(app_id)\n"           # the Manager's own method: fine
+        "    def stored(self, app_id):\n"
+        "        return self.db.app_limits(app_id)\n",       # line 7: on the Database
+        encoding="utf-8")
+    (tmp_path / "pkg" / "other.py").write_text(
+        "class Other:\n"
+        "    def go(self, kid):\n"
+        "        return self.mark_app_erased(kid)\n",        # line 3: no such method here
+        encoding="utf-8")
+    assert _uses_off_the_store(tmp_path / "pkg", "apps") == ["pkg/manager.py:7 .app_limits",
+                                                             "pkg/other.py:3 .mark_app_erased"]
+
+
+# The main store's per-App records `AppStore` owns: no `Database` query names them.
+APP_RECORDS = ("app_settings", "app_limits:", "retention_days =", "erased_at =", "erase_after =")
+
+
+def test_app_queries_left_the_database_class():
+    source = inspect.getsource(Database)
+    for record in APP_RECORDS:
+        assert record not in source, record
+    assert not hasattr(core_db, "APP_LIMITS_META") and not hasattr(core_db, "APP_LIMIT_KEYS")
+    for name in _store_methods(AppStore):
+        assert not hasattr(Database, name), f"Database.{name}: call db.apps.{name}"
 
 
 def test_operation_audit_writes_through_the_account_store_or_a_stand_in(tmp_path):

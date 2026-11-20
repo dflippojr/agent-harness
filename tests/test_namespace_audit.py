@@ -333,7 +333,7 @@ def test_shortened_app_login_retention_applies_to_reads_immediately(setup, monke
     store = m.db.for_app(key["id"])
     store.insert_namespace_audit(key["id"], "", namespace_audit.key_context(key), "attempt", "login",
                                  "login.start", "started", {}, 30)
-    m.db.set_app_retention(key["id"], 1)
+    m.db.apps.set_app_retention(key["id"], 1)
     monkeypatch.setattr("harness.db.time.time", lambda: now + 2 * DAY)
     assert page(client, headers[0])["items"] == []
     asyncio.run(m.sweep_app_data(now + 2 * DAY))
@@ -407,7 +407,7 @@ def test_member_erasure_leaves_only_account_receipt(setup):
 def test_retention_removes_private_rows_with_system_reason(setup):
     m, client, _, apps, headers = setup
     sid = create(client, headers[0])
-    m.db.set_app_retention(apps[0][0]["id"], 1)
+    m.db.apps.set_app_retention(apps[0][0]["id"], 1)
     asyncio.run(m.sweep_app_data(time.time() + 2 * DAY))
     assert page(client, headers[0])["items"] == []
     rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
@@ -419,7 +419,7 @@ def test_retention_removes_private_rows_with_system_reason(setup):
 def test_partial_provider_erase_does_not_replay_or_leak_exception(setup, monkeypatch, caplog):
     m, client, _, apps, headers = setup
     sid = create(client, headers[0])
-    m.db.set_app_retention(apps[0][0]["id"], 1)
+    m.db.apps.set_app_retention(apps[0][0]["id"], 1)
     effect = AsyncMock(side_effect=OSError(PRIVATE))
     monkeypatch.setattr(m, "_erase_cli_history", effect)
     asyncio.run(m.sweep_app_data(time.time() + 2 * DAY))

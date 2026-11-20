@@ -203,8 +203,8 @@ def test_owner_surfaces_read_webs_store(tmp_path):
         with pytest.raises(ValueError):
             m.db.drop_app(WEB_APP_ID)
         with pytest.raises(ValueError):
-            m.db.mark_app_erased(WEB_APP_ID)
-        assert not m.db.set_app_retention(WEB_APP_ID, 1)
+            m.db.apps.mark_app_erased(WEB_APP_ID)
+        assert not m.db.apps.set_app_retention(WEB_APP_ID, 1)
         assert m.db.get_api_key(WEB_APP_ID)["revoked_at"] is None
     m.db.close()
 
