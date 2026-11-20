@@ -978,13 +978,32 @@ def hanging_comfy():
     return handler
 
 
-def _delayed_interrupt_scenario(tmp_path, budget=2.0, stall_seconds=0.0):
+async def _finished_within(awaitable, budget: float):
+    """The result of `awaitable` if it has finished once `budget` seconds have passed, else an AssertionError.
+
+    Unlike asyncio.wait_for, this judges whether the task finished, not which callback ran first. When one
+    synchronous step stalls the loop past the deadline, the task's last step and the expired timer run in
+    the same loop iteration, and wait_for then raises TimeoutError for a task that already returned (#1034).
+    """
+    task = asyncio.ensure_future(awaitable)
+    done, _ = await asyncio.wait({task}, timeout=budget)
+    if task not in done:
+        message = f"{task!r} still running after {budget} s"
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise AssertionError(message)
+    return task.result()
+
+
+def _delayed_interrupt_scenario(tmp_path, budget: float | None = None, stall_seconds=0.0):
     """Cancel a running ComfyUI job whose interrupt is delayed, then check the next job is untouched.
 
     stall_seconds > 0 blocks the event loop synchronously when the next job is marked running, the step
     right after the cancelled job's boundary releases cancel(): a loaded runner does the same in any
     synchronous SQLite write (#1034).
     """
+    budget = scaled(2) if budget is None else budget
+
     async def body():
         m, _, _ = image_manager(tmp_path)
         if stall_seconds:
@@ -1049,8 +1068,8 @@ def _delayed_interrupt_scenario(tmp_path, budget=2.0, stall_seconds=0.0):
         assert state["prompts"] == ["p1"]
 
         deliver_interrupt.set()
-        cancelled = await asyncio.wait_for(cancelling, timeout=budget)
-        completed = await asyncio.wait_for(m.images.wait(second["id"]), timeout=budget)
+        cancelled = await _finished_within(cancelling, budget)
+        completed = await _finished_within(m.images.wait(second["id"]), budget)
         assert cancelled["status"] == "failed"
         assert cancelled["error"] == "cancelled"
         assert completed["status"] == "done"
