@@ -69,9 +69,11 @@ class Report:
 
 
 WALL_LIMIT = "wall_limit"  # the canary stopped the attempt at the task's wall-clock limit: a graded fail
+# The attempt asked for an approval, which nobody answers in a canary: stopped at once, a graded fail (#1026)
+APPROVAL_NEEDED = "approval_needed"
 # The only attempts that are evidence (pass rate, regression rule, confirmation): finished and graded. Everything else
 # (timeout, suspended, blocked, cancelled by someone other than the canary) is neither a pass nor a fail.
-EVIDENCE = ("done", "failed", WALL_LIMIT)
+EVIDENCE = ("done", "failed", WALL_LIMIT, APPROVAL_NEEDED)
 
 
 def valid(outcomes: list[dict]) -> list[dict]:

@@ -54,9 +54,14 @@ takes the daemon down.
   the GPU: not time queued behind a real session (including before its first turn), stepped aside, paused by the
   guard, or held up by an image batch that took the GPU over. An attempt that reaches the limit is cancelled and
   recorded as `wall_limit`, a graded fail. One that finishes in the same poll as the limit keeps its real outcome;
-  stopping a session that already ended is never an error. An attempt still waiting for the GPU when the run reaches
-  its cap is cancelled and recorded as `suspended` (excluded, never a fail). An attempt's `seconds` (and the row's
-  `wall_seconds`) are that GPU time.
+  stopping a session that already ended is never an error. An attempt still waiting when the run reaches its cap is
+  cancelled and recorded as `suspended` (excluded, never a fail); its note says what it waited on: the GPU, an image
+  job that had it, the resource guard, a usage limit, its runner machine or an App's reply. An attempt's `seconds`
+  (and the row's `wall_seconds`) are that GPU time.
+- Nobody answers a canary session's approvals (#1026). An attempt that asks for one (a command the policy sends to
+  `ask`, such as an `rm` in a command that also has `cd`) is cancelled on the poll that sees the request and recorded
+  as `approval_needed`, a graded fail like `wall_limit`. Its note names the call and the policy's reason. It is not
+  restarted, and the policy is not changed for canaries.
 - A missing web fixture or suite file is a configuration problem, not a result (#316). With `canary.enabled: true`,
   if `canary.suite` is not a file, or the suite has web tasks and `canary.fixture_dir` has no `manifest.json`, the
   loader logs one error naming the key and path and disables only the canary for that process (the nightly loop
@@ -120,7 +125,8 @@ Because the label is the commit, plot it as a table or bar gauge sorted by time,
 
 ## Regression rule
 
-Only finished, graded attempts are evidence: status `done`, `failed` or `wall_limit` (`harness.canary.valid`).
+Only finished, graded attempts are evidence: status `done`, `failed`, `wall_limit` or `approval_needed`
+(`harness.canary.valid`).
 `timeout`, `suspended`, `blocked` and `cancelled` attempts are neither a pass nor a fail, in the first run and in the
 confirmation rerun.
 
