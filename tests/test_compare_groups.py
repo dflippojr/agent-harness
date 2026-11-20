@@ -63,13 +63,13 @@ def test_group_size_project_and_owner_rules(tmp_path):
 
 def test_reported_limit_refuses_but_unknown_usage_allows(tmp_path):
     m = make_manager(tmp_path)
-    m.db.set_backend_usage("codex", {"status": "rejected"})
+    m.db.usage.set_backend_usage("codex", {"status": "rejected"})
     coro = m.create_compare("p", CHOICES, "repo")
     with pytest.raises(HarnessError) as e:
         run(coro)
     assert e.value.status == 429
     assert m.db.list_sessions() == []
-    m.db.set_backend_usage("codex", {})
+    m.db.usage.set_backend_usage("codex", {})
     run(m.create_compare("p", CHOICES, "repo"))
 
 

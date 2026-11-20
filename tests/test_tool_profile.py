@@ -210,10 +210,10 @@ def test_api_takes_tool_profile_and_lists_what_each_backend_accepts(tmp_path):
 
 def test_usage_and_cost_group_by_profile(tmp_path):
     m, _ = _manager(tmp_path)
-    m.db.record_usage("claude", "s1", "", 100, 10, 0.25, "subscription", tool_profile="bash-only")
-    m.db.record_usage("claude", "s2", "", 300, 30, 0.75, "subscription")
-    m.db.record_usage("claude", "s3", "", 100, 10, 0.5, "subscription", tool_profile="bash-only")
-    by_profile = m.db.usage_by_profile("claude", 0)
+    m.db.usage.record_usage("claude", "s1", "", 100, 10, 0.25, "subscription", tool_profile="bash-only")
+    m.db.usage.record_usage("claude", "s2", "", 300, 30, 0.75, "subscription")
+    m.db.usage.record_usage("claude", "s3", "", 100, 10, 0.5, "subscription", tool_profile="bash-only")
+    by_profile = m.db.usage.usage_by_profile("claude", 0)
     assert by_profile["bash-only"] == {"requests": 2, "prompt_tokens": 200, "completion_tokens": 20, "cost_usd": 0.75}
     assert by_profile["default"]["cost_usd"] == 0.75
     metrics = render_metrics(m)
@@ -245,8 +245,8 @@ def test_comparison_reads_the_harness_database(tmp_path, capsys):
                            "backend": "claude", "status": status, "workspace": str(tmp_path / "gone"),
                            "created_at": 1.0, "updated_at": 1.0, "context": [], "tool_profile": profile,
                            "run": {"files_touched": touched}})
-        db.record_usage("claude", sid, "", 1000, 100, 0.5, "subscription", tool_profile=profile)
-    db.record_usage("claude", "s-def", "", 500, 50, 0.25, "subscription")
+        db.usage.record_usage("claude", sid, "", 1000, 100, 0.5, "subscription", tool_profile=profile)
+    db.usage.record_usage("claude", "s-def", "", 500, 50, 0.25, "subscription")
     db.close()
     tasks = tmp_path / "tasks.json"
     tasks.write_text(json.dumps({"runs": [
@@ -276,7 +276,7 @@ def test_rerun_keeps_the_tool_profile(tmp_path):
 
 def test_comparison_reads_sessions_from_the_web_store_and_usage_from_the_main_store(tmp_path, capsys):
     main = Database(tmp_path / "harness.sqlite3")
-    main.record_usage("claude", "s-web", "", 700, 70, 0.35, "subscription", tool_profile="bash-only")
+    main.usage.record_usage("claude", "s-web", "", 700, 70, 0.35, "subscription", tool_profile="bash-only")
     main.close()
     web = Database(tmp_path / "apps" / "app-web" / "harness.sqlite3")
     web.insert_session({"id": "s-web", "title": "t", "project": "p", "target": "tower", "model": "m",

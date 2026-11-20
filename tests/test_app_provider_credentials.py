@@ -149,8 +149,8 @@ def test_app_file_key_is_used_and_usage_is_attributed_without_storing_it(tmp_pat
         usage = manager.db.conn.execute(
             "SELECT app_id, billing, credential_source FROM usage WHERE session_id = ?", (sid,)).fetchone()
         assert tuple(usage) == (app["id"], "api_key", "app_file")
-        assert manager.db.usage_tally("claude", 0, app["id"])["requests"] == 1
-        assert manager.db.usage_by_source("claude", 0, app["id"])["app_file"]["requests"] == 1
+        assert manager.db.usage.usage_tally("claude", 0, app["id"])["requests"] == 1
+        assert manager.db.usage.usage_by_source("claude", 0, app["id"])["app_file"]["requests"] == 1
         await manager.stop()
         manager.db.close()
         raw = manager.cfg.db_path.read_bytes()

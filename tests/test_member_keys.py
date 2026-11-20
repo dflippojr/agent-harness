@@ -207,8 +207,8 @@ def test_disabling_a_member_deletes_their_keys(tmp_path, monkeypatch):
 def test_a_members_usage_is_tallied_on_their_own_id(tmp_path, monkeypatch):
     with setup(tmp_path, monkeypatch) as (client, m, ids):
         mine = member_keys.end_user_id(ids[ALICE])
-        m.db.record_usage("claude", "s1", "", 100, 20, 0.5, "api_key", "member_api_key", mine)
-        m.db.record_usage("claude", "s2", "", 7, 3, 0.1, "api_key", "member_api_key", member_keys.end_user_id(ids[BOB]))
+        m.db.usage.record_usage("claude", "s1", "", 100, 20, 0.5, "api_key", "member_api_key", mine)
+        m.db.usage.record_usage("claude", "s2", "", 7, 3, 0.1, "api_key", "member_api_key", member_keys.end_user_id(ids[BOB]))
         body = client.get(KEYS, headers=H(ALICE)).json()
         assert body["usage"]["claude"] == {"sessions": 1, "prompt_tokens": 100, "completion_tokens": 20}
         assert body["usage"]["codex"]["sessions"] == 0

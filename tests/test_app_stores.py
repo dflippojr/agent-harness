@@ -149,7 +149,7 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
                               ("b1", "k-bbbb", "walrus")):
         db.insert_session(_session(sid, app_id))
         _fill(db, sid, word)
-    db.record_usage("fake", "a1", "k-aaaa", 10, 5, 0.0, "subscription")  # metadata: stays in the main store
+    db.usage.record_usage("fake", "a1", "k-aaaa", 10, 5, 0.0, "subscription")  # metadata: stays in the main store
     db.close()
 
     stores = SessionStores(Database(path), apps_dir)
@@ -448,7 +448,7 @@ def test_app_metadata_counts_sessions_usage_and_errors_without_their_content(tmp
         stores.insert_session(_session(sid, app["id"], status="running"))
     stores.update_session("s1", status="done")
     stores.update_session("s2", status="failed", stop_reason="quota_exceeded: 900 MB of checking > 500 MB")
-    stores.main.record_usage("hosted", "s1", app["id"], 10, 5, 0.25, "api")
+    stores.main.usage.record_usage("hosted", "s1", app["id"], 10, 5, 0.25, "api")
 
     meta = stores.app_metadata(app["id"])
     assert meta["sessions"] == {"done": 1, "failed": 1, "running": 1}

@@ -991,8 +991,8 @@ def test_backend_usage_tally_metrics_and_api(tmp_path, monkeypatch):
         await m.start()
         await wait_status(m, m.create("read it", backend="claude")["id"], "done")
         await asyncio.gather(*m.tasks.values())
-        assert m.db.get_backend_usage("claude")["data"]["utilization"] == 0.8
-        tally = m.db.usage_tally("claude", 0)
+        assert m.db.usage.get_backend_usage("claude")["data"]["utilization"] == 0.8
+        tally = m.db.usage.usage_tally("claude", 0)
         assert tally == {"requests": 1, "prompt_tokens": 15, "completion_tokens": 4, "cost_usd": 0.42}
         metrics = render(m)
         assert 'harness_backend_utilization{backend="claude",window="seven_day"} 0.8' in metrics

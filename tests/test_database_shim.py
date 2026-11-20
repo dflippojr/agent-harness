@@ -1,6 +1,6 @@
 """The core's domain stores sit behind a forwarding shim that may only shrink (#992 stage 5).
 
-`Database` exposes each store as an attribute (`db.credentials`, `db.sessions`, `db.accounts`, `db.apps`). Until their call sites move, the
+`Database` exposes each store as an attribute (`db.credentials`, `db.sessions`, `db.accounts`, `db.apps`, `db.usage`). Until their call sites move, the
 shim forwards each old `db.<method>` name to its store; this file pins those names per store, so the shim never gains
 one, and checks that a forwarded call (sync, `aio` or through `SessionStores`) runs the store's own method.
 """
@@ -22,9 +22,10 @@ from harness.app_stores import WEB_APP_ID, SessionStores
 from harness.credential_store import CredentialStore
 from harness.db import CoreStore, Database
 from harness.session_store import SessionStore
+from harness.usage_store import UsageStore
 
 STORES: dict[str, type[CoreStore]] = {"credentials": CredentialStore, "sessions": SessionStore,
-                                      "accounts": AccountStore, "apps": AppStore}
+                                      "accounts": AccountStore, "apps": AppStore, "usage": UsageStore}
 
 # The names `Database` forwards to each store. A store's set is written once, in the change that adds the store; after
 # that, delete a name here once its last `db.<name>` caller has moved to the store, and never add one.
@@ -63,7 +64,7 @@ COMPOSITES = frozenset({("sessions", "read_artifact")})
 
 
 # Stores that land with every caller moved, so `Database` forwards none of their names, and never will.
-NO_SHIM = frozenset({"accounts", "apps"})
+NO_SHIM = frozenset({"accounts", "apps", "usage"})
 
 
 def _forwarded() -> dict[str, str]:
@@ -103,10 +104,10 @@ def test_the_shim_only_shrinks():
 
 def test_database_forwards_these_many_names_per_store():
     """The shim on `Database` as this change leaves it, read from the class itself: 6 credential names (39 when the
-    store was added, 28 before #1032), 51 session names, and no account or App names."""
+    store was added, 28 before #1032), 51 session names, and no account, App or usage names."""
     forwarded = _forwarded()
     sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
-    assert sizes == {"credentials": 6, "sessions": 51, "accounts": 0, "apps": 0}
+    assert sizes == {"credentials": 6, "sessions": 51, "accounts": 0, "apps": 0, "usage": 0}
     assert sizes == {store: len(PINNED_SHIM.get(store, ())) for store in STORES}
 
 
@@ -283,7 +284,7 @@ def test_every_core_store_is_declared_and_says_where_its_rows_live():
 
 def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
     """Driven by `app_stores._STORE_HOME`, so each new store is covered: a store whose rows live in the main store
-    (credentials, accounts, apps) is the main store's on every route, an App's raw Database included. A store whose rows
+    (credentials, accounts, apps, usage) is the main store's on every route, an App's raw Database included. A store whose rows
     are routed per session (sessions) is refused by every routing wrapper: one Database's would miss the sessions
     routed to another, and an App's would outlive the wrapper's hold on it. A Web route is Web's Database, whose
     `sessions` holds the owner's and members' sessions."""
@@ -298,6 +299,7 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
         app, _ = stores.create_api_key("An App", kind="app")
         assert main.apps.set_app_limits(app["id"], {"max_running": 2})
         main.apps.set_app_settings(app["id"], 3, {"app.notify.completion": "never"})
+        main.usage.record_usage("fake", "a1", app["id"], 10, 5, 0.0, "subscription")
         stores.insert_session(_session("a1", "k-aaaa"))
         stores.insert_session(_session("own"))
         assert stores.web is not main  # the owner's sessions are in Web's own store
@@ -308,7 +310,7 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
         databases = {"App Database": stores._open["k-aaaa"].db, "Web Database": stores.web}
         main_homed = [name for name, home in app_stores._STORE_HOME.items() if home == "main"]
         routed = [name for name, home in app_stores._STORE_HOME.items() if home is None]
-        assert set(main_homed) == {"credentials", "accounts", "apps"} and routed == ["sessions"]
+        assert set(main_homed) == {"credentials", "accounts", "apps", "usage"} and routed == ["sessions"]
         for label, route in {**wrappers, **web_routes, **databases}.items():
             for name in main_homed:
                 assert getattr(route, name) is getattr(main, name), (label, name)
@@ -317,6 +319,7 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
             assert route.accounts.account_by_login("alice@example.com")["user_id"] == "u-1", label
             assert route.apps.app_limits(app["id"])["max_running"] == 2, label
             assert route.apps.get_app_settings(app["id"])["revision"] == 3, label
+            assert route.usage.usage_tally("fake", 0, app["id"])["prompt_tokens"] == 10, label
         for wrapper in wrappers.values():
             for name in routed:
                 with pytest.raises(AttributeError, match="routes each session"):
@@ -446,6 +449,22 @@ def test_the_account_scan_has_no_own_method_allowance(tmp_path):
         "        return self.member_count()\n",              # line 6
         encoding="utf-8")
     assert _account_uses_off_the_store(tmp_path / "pkg") == ["pkg/x.py:6 .member_count"]
+
+
+def test_every_usage_call_goes_through_the_usage_store():
+    """No production code calls or passes a usage method of a Database (it has none): only of `db.usage`."""
+    root = Path(core_db.__file__).resolve().parent
+    for package in (root, root.parent / "harness_modules", root.parent / "scripts"):
+        assert _uses_off_the_store(package, "usage") == [], package.name
+
+
+def test_usage_queries_left_the_database_class():
+    source = inspect.getsource(Database)
+    for table in ("usage", "backend_usage"):
+        for verb in ("INTO", "UPDATE", "FROM"):
+            assert f"{verb} {table} " not in source, (verb, table)
+    for name in _store_methods(UsageStore):
+        assert not hasattr(Database, name), f"Database.{name}: call db.usage.{name}"
 
 
 # The main store's per-App records `AppStore` owns: no `Database` query names them.

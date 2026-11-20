@@ -573,12 +573,12 @@ def test_app_erase_removes_every_end_users_volumes_and_the_registry(tmp_path, mo
 
 def test_usage_is_tallied_per_end_user(tmp_path):
     manager = _manager(tmp_path)
-    manager.db.record_usage("claude", "s1", "app-1", 10, 5, 0.5, "subscription", "end_user_login", "dana")
-    manager.db.record_usage("claude", "s2", "app-1", 7, 3, 0.25, "subscription", "end_user_login", "dana")
-    manager.db.record_usage("claude", "s3", "app-1", 100, 50, 5.0, "subscription", "end_user_login", "erin")
-    tally = manager.db.end_user_usage("app-1", "dana")
+    manager.db.usage.record_usage("claude", "s1", "app-1", 10, 5, 0.5, "subscription", "end_user_login", "dana")
+    manager.db.usage.record_usage("claude", "s2", "app-1", 7, 3, 0.25, "subscription", "end_user_login", "dana")
+    manager.db.usage.record_usage("claude", "s3", "app-1", 100, 50, 5.0, "subscription", "end_user_login", "erin")
+    tally = manager.db.usage.end_user_usage("app-1", "dana")
     assert (tally["sessions"], tally["prompt_tokens"], tally["completion_tokens"]) == (2, 17, 8)
-    assert manager.db.end_user_usage("app-2", "dana")["sessions"] == 0
+    assert manager.db.usage.end_user_usage("app-2", "dana")["sessions"] == 0
 
 
 # --- Docker: temporary volumes, a network-less container ---------------------------------------------------------
