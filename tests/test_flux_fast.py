@@ -978,9 +978,24 @@ def hanging_comfy():
     return handler
 
 
-def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
+def _delayed_interrupt_scenario(tmp_path, budget=2.0, stall_seconds=0.0):
+    """Cancel a running ComfyUI job whose interrupt is delayed, then check the next job is untouched.
+
+    stall_seconds > 0 blocks the event loop synchronously when the next job is marked running, the step
+    right after the cancelled job's boundary releases cancel(): a loaded runner does the same in any
+    synchronous SQLite write (#1034).
+    """
     async def body():
         m, _, _ = image_manager(tmp_path)
+        if stall_seconds:
+            update_image = m.images.db.update_image
+
+            def stalling_update(job_id, **fields):
+                result = update_image(job_id, **fields)
+                if job_id == second["id"] and fields.get("status") == "running":
+                    time.sleep(stall_seconds)
+                return result
+            m.images.db.update_image = stalling_update
         interrupt_received = asyncio.Event()
         deliver_interrupt = asyncio.Event()
         state = {"prompts": [], "running": "", "interrupted": []}
@@ -1034,8 +1049,8 @@ def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
         assert state["prompts"] == ["p1"]
 
         deliver_interrupt.set()
-        cancelled = await asyncio.wait_for(cancelling, timeout=2)
-        completed = await asyncio.wait_for(m.images.wait(second["id"]), timeout=2)
+        cancelled = await asyncio.wait_for(cancelling, timeout=budget)
+        completed = await asyncio.wait_for(m.images.wait(second["id"]), timeout=budget)
         assert cancelled["status"] == "failed"
         assert cancelled["error"] == "cancelled"
         assert completed["status"] == "done"
@@ -1044,6 +1059,15 @@ def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
         await m.stop()
 
     asyncio.run(body())
+
+
+def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
+    _delayed_interrupt_scenario(tmp_path)
+
+
+def test_delayed_interrupt_survives_event_loop_stall_past_the_budget(tmp_path):
+    # cancel() finishes in the stalled step's next loop iteration, the same one in which its deadline expires.
+    _delayed_interrupt_scenario(tmp_path, budget=0.2, stall_seconds=0.5)
 
 
 def test_cancel_deletes_comfy_prompt_while_still_pending(tmp_path):
