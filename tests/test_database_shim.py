@@ -347,9 +347,9 @@ def test_account_queries_left_the_database_class():
 
 def _uses_off_the_store(root, store: str) -> list[str]:
     """Each use of a method name of core store `store` (a call, or a bound method handed to `to_thread` or `awrite`)
-    not made on that store: `<x>.<store>.<name>`. Also allowed: `self.<name>` in a file that defines `<name>` itself
-    (`Manager.app_limits`, the effective caps), and for accounts an `accounts` stand-in (`principal.resolve_human`'s)
-    or `operation_audit`'s `_audit_store(db)`."""
+    not made on that store: `<x>.<store>.<name>`. Also allowed: for apps, `self.<name>` inside a class that defines
+    `<name>` itself (`Manager.app_limits`, the effective caps); for accounts, an `accounts` stand-in
+    (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`."""
     import ast
     cls = STORES[store]
     names = _store_methods(cls)
@@ -359,13 +359,19 @@ def _uses_off_the_store(root, store: str) -> list[str]:
         if path.name == own_file:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        defined = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        own_methods: dict[int, set[str]] = {}  # each node -> the methods its innermost enclosing class defines
+        for cls_node in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):  # outer classes first
+            methods = {n.name for n in cls_node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            for inner in ast.walk(cls_node):
+                own_methods[id(inner)] = methods
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Attribute) and node.attr in names):
                 continue
             on = node.value
-            if (isinstance(on, ast.Attribute) and on.attr == store) or \
-                    (isinstance(on, ast.Name) and on.id == "self" and node.attr in defined):
+            if isinstance(on, ast.Attribute) and on.attr == store:
+                continue
+            if store == "apps" and isinstance(on, ast.Name) and on.id == "self" and \
+                    node.attr in own_methods.get(id(node), ()):
                 continue
             if store == "accounts" and ((isinstance(on, ast.Name) and on.id == "accounts") or (
                     isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store")):
@@ -419,10 +425,27 @@ def test_the_app_scan_allows_a_method_of_the_same_name_only_where_it_is_defined(
     (tmp_path / "pkg" / "other.py").write_text(
         "class Other:\n"
         "    def go(self, kid):\n"
-        "        return self.mark_app_erased(kid)\n",        # line 3: no such method here
+        "        return self.mark_app_erased(kid)\n"         # line 3: no such method in this class
+        "class Erasing:\n"
+        "    def mark_app_erased(self, kid):\n"              # another class's method of that name
+        "        return kid\n",
         encoding="utf-8")
     assert _uses_off_the_store(tmp_path / "pkg", "apps") == ["pkg/manager.py:7 .app_limits",
                                                              "pkg/other.py:3 .mark_app_erased"]
+
+
+def test_the_account_scan_has_no_own_method_allowance(tmp_path):
+    """Only the App scan allows `self.<name>`: a class defining `member_count` hides nothing from the account scan."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "x.py").write_text(
+        "class Counter:\n"
+        "    def member_count(self):\n"
+        "        return 0\n"
+        "class Other:\n"
+        "    def go(self):\n"
+        "        return self.member_count()\n",              # line 6
+        encoding="utf-8")
+    assert _account_uses_off_the_store(tmp_path / "pkg") == ["pkg/x.py:6 .member_count"]
 
 
 # The main store's per-App records `AppStore` owns: no `Database` query names them.
