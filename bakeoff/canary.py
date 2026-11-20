@@ -37,7 +37,7 @@ from typing import Callable
 
 import yaml
 
-from harness.canary import HARD_PROJECT, WALL_LIMIT, WEB_PROJECT, CanaryConfigError, Report
+from harness.canary import APPROVAL_NEEDED, HARD_PROJECT, WALL_LIMIT, WEB_PROJECT, CanaryConfigError, Report
 from harness.config import _mask_batch_at
 
 from .tasks import Context, hash_tree, materialize
@@ -49,6 +49,9 @@ SUITE = Path(__file__).with_name("canary.yaml")
 WEB_WALL_LIMIT = 1500  # seconds of GPU time a web task attempt may use (hard tasks carry their own)
 MAX_RESTARTS = 2  # a task attempt that was suspended mid-way restarts, up to this many times
 DONE = ("done", "failed", "cancelled")
+# What a session parked in one of these statuses waits on, for the note of an attempt the run's cap stopped (#1026)
+WAITING_ON = {"waiting_approval": "an approval", "waiting_target": "its runner machine",
+              "waiting_app": "an App's reply", "waiting_limit": "a usage limit"}
 DRIVERS = ("native", "pi")  # #942: --driver on the manual runner; the nightly path builds CanaryRunner (native) only
 
 
@@ -192,20 +195,29 @@ class CanaryRunner:
             # The limit counts only time the canary had the GPU: never time queued behind a real session (even
             # before its first turn), stepped aside, paused by the guard, or held up by an image batch that took the
             # GPU over. A wait that outlasts the run's cap is no verdict on the agent: stopped, excluded as suspended.
+            # An approval request ends the attempt at once: nobody answers a canary's approvals (#1026).
             limit, ran, stopped, starved = (task.wall_limit if kind == "hard" else WEB_WALL_LIMIT), 0.0, False, False
+            asked: dict | None = None
+            waited_on = ""
             while m.db.get_session(sid)["status"] not in DONE:
                 held, before = self._has_gpu(sid), self.clock()
                 await self.sleep(1 if self.poll > 1 else self.poll)
                 if held:
                     ran += self.clock() - before
+                pending = m.db.pending_approvals(sid)  # read before the stop: cancelling the session cancels them
+                if pending:  # first, whatever the clock says: the request is why it stopped working
+                    asked = pending[0] if await self._stop(sid) else None  # None: it ended on its own meanwhile
+                    break
                 if ran > limit:
                     stopped = await self._stop(sid)  # False: it finished on its own in this poll window
                     break
                 if self.clock() >= cap and not self._has_gpu(sid):
+                    waited_on = self._waited_on(sid)  # before the stop ends the wait
                     starved = await self._stop(sid)
                     break
             final = m.db.get_session(sid)
-            status = WALL_LIMIT if stopped else "suspended" if starved else final["status"]
+            status = (APPROVAL_NEEDED if asked else WALL_LIMIT if stopped else "suspended" if starved
+                      else final["status"])
             suspended = bool(m.runner.yields.pop(sid, 0)) or any(
                 e["type"] == "gpu_paused" for e in m.db.events(sid))
             if kind == "hard":
@@ -220,7 +232,9 @@ class CanaryRunner:
             if stopped:
                 note = f"{note}; stopped at the {limit:.0f} s wall-clock limit"
             if starved:  # excluded as it is: restarting would only wait past the cap again
-                note, suspended = f"{note}; still waiting for the GPU at the run's cap", False
+                note, suspended = f"{note}; still waiting for {waited_on} at the run's cap", False
+            if asked:  # graded as it is: a restart would most likely ask again
+                note, suspended = f"{note}; {_approval_note(asked)}", False
             totals = final["totals"]
             res = {"task": task.id, "repeat": repeat, "ok": bool(ok and status == "done"), "note": note,
                    "status": status, "turns": totals.get("turns", 0),
@@ -235,6 +249,18 @@ class CanaryRunner:
         finally:
             m.scheduler.low_priority.discard(sid)
             m.runner.web_overrides.pop(sid, None)
+
+    def _waited_on(self, sid: str) -> str:
+        """What a canary session not holding the GPU waits on, in words for the note (#1026)."""
+        status = self.m.db.get_session(sid)["status"]
+        if status in WAITING_ON:
+            return WAITING_ON[status]
+        if self.m.runner.gate.exclusive or (self.m.images is not None and self.m.images.gpu_taken):
+            return "the GPU (an image job had it)"
+        g = self.m.guard
+        if g is not None and (g.manual or g.state != "clear"):
+            return f"the resource guard ({'held by hand' if g.manual else g.state})"
+        return "the GPU"
 
     def _has_gpu(self, sid: str) -> bool:
         return self.m.scheduler.holder == sid and not self.m.runner.gate.exclusive
@@ -254,6 +280,22 @@ class CanaryRunner:
         if m.db.get_session(sid)["status"] not in DONE:  # cancelled before its task ever ran: nothing marked it
             m.runner.set_status(sid, "cancelled", stop_reason="cancelled")
         return True
+
+
+def _approval_note(approval: dict) -> str:
+    """The call the attempt asked to have approved and the policy's reason, for its note (#1026)."""
+    args = approval.get("args")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except ValueError:
+            pass
+    shown = args.get("command") if isinstance(args, dict) and isinstance(args.get("command"), str) else None
+    shown = shown if shown is not None else json.dumps(args, sort_keys=True, default=str)
+    shown = shown if len(shown) <= 400 else shown[:400] + "..."
+    reason = f" ({approval['reason']})" if approval.get("reason") else ""
+    return (f"asked for an approval of {approval.get('tool', 'a tool call')} `{shown}`{reason}; nobody answers a "
+            "canary's approvals, so the attempt ended at once")
 
 
 def _missing(task_id: str, repeat: int, status: str) -> dict:

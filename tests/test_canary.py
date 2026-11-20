@@ -663,7 +663,8 @@ def test_a_task_that_never_gets_the_gpu_before_the_cap_is_excluded_not_failed(tm
 
     async def check(m, row):
         o = row["outcomes"][0]
-        assert o["status"] == "suspended" and not o["ok"] and o["seconds"] == 0 and "GPU" in o["note"]
+        assert o["status"] == "suspended" and not o["ok"] and o["seconds"] == 0
+        assert o["note"].endswith("still waiting for the GPU at the run's cap")
         assert row["attempts"] == 0 and row["pass_rate"] is None and not row["alerted"]
         m.scheduler.release("real-session")
     _hard_night(tmp_path, _blocked_chat(asyncio.Event()), nothing, check, prepare=real_wins_the_slot)
@@ -710,6 +711,34 @@ def test_an_approval_request_is_evidence_a_graded_fail():
     assert canary.valid([asked, passed]) == [asked, passed] and canary.pass_rate([asked, passed]) == 0.5
 
 
+@pytest.mark.parametrize(("status", "image", "guard", "manual", "expected"), [
+    ("waiting_limit", False, "clear", False, "a usage limit"),
+    ("waiting_target", False, "clear", False, "its runner machine"),
+    ("waiting_app", False, "clear", False, "an App's reply"),
+    ("waiting_approval", False, "clear", False, "an approval"),
+    ("queued", True, "clear", False, "the GPU (an image job had it)"),
+    ("queued", False, "paused", False, "the resource guard (paused)"),
+    ("queued", False, "clear", True, "the resource guard (held by hand)"),
+    ("queued", False, "clear", False, "the GPU"),
+])
+def test_the_cap_note_names_what_the_attempt_waited_on(tmp_path, status, image, guard, manual, expected):
+    """#1026: an attempt the run's cap stopped says what it waited on, not always the GPU."""
+    m = FakeManager(guard_state=guard)
+    m.guard.manual = manual
+    m.images = SimpleNamespace(gpu_taken=image, phase="idle")
+    m.db = SimpleNamespace(get_session=lambda sid: {"status": status})
+    runner, _ = _runner(m, tmp_path)
+    assert runner._waited_on("s1") == expected
+
+
+def test_the_approval_note_shows_a_non_shell_call_as_its_arguments_and_truncates_a_long_one():
+    from bakeoff.canary import _approval_note
+    note = _approval_note({"tool": "write_file", "args": '{"path": "/etc/x", "content": "y"}', "reason": "outside"})
+    assert note.startswith('asked for an approval of write_file `{"content": "y", "path": "/etc/x"}` (outside)')
+    long = _approval_note({"tool": "run_shell", "args": {"command": "x" * 1000}, "reason": ""})
+    assert "x" * 400 + "...`;" in long and "x" * 401 not in long and "()" not in long
+
+
 def test_time_an_image_batch_has_the_gpu_is_not_run_time(tmp_path):
     async def image_batch(m):  # images.py took the GPU over (gate.exclusive) while the canary holds the slot
         m.runner.gate.exclusive_active = True
@@ -718,6 +747,7 @@ def test_time_an_image_batch_has_the_gpu_is_not_run_time(tmp_path):
     async def check(m, row):
         o = row["outcomes"][0]
         assert o["status"] == "suspended" and o["seconds"] == 0 and row["attempts"] == 0
+        assert "still waiting for the GPU (an image job had it) at the run's cap" in o["note"]
         m.runner.gate.exclusive_active = False
     _hard_night(tmp_path, _blocked_chat(asyncio.Event()), image_batch, check)
 
