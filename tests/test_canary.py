@@ -669,6 +669,47 @@ def test_a_task_that_never_gets_the_gpu_before_the_cap_is_excluded_not_failed(tm
     _hard_night(tmp_path, _blocked_chat(asyncio.Event()), nothing, check, prepare=real_wins_the_slot)
 
 
+CD_RM = "cd /workspace && rm -f /tmp/todo.json && python -m todo list"  # the #1026 stall: cd + rm asks
+
+
+def test_an_attempt_that_asks_for_an_approval_ends_at_once_as_a_graded_fail_that_names_the_approval(tmp_path):
+    """#1026: nobody answers a canary's approvals. The attempt ends on the poll that sees the request, recorded as
+    `approval_needed` (a graded fail, like `wall_limit`), with the call and the policy's reason in the note, never
+    left to wait until the run's cap and recorded as waiting for the GPU."""
+    from harness.llm import Completion
+    from harness.policy import ASK, Policy
+    from test_daemon import Script, call
+    assert Policy().decide("run_shell", {"command": CD_RM}).action == ASK  # the trigger the issue names
+    chat = Script([Completion(tool_calls=[call("run_shell", 1, command=CD_RM)]), Completion(content="done")])
+    polls = []
+
+    async def until_it_asks(m):  # a real poll lasts seconds: by then the request is in
+        polls.append(1)
+        sid = next(iter(m.tasks), None)
+        for _ in range(400):
+            if sid is None or m.db.get_session(sid)["status"] == "waiting_approval":
+                return
+            await asyncio.sleep(0.005)
+        raise AssertionError("the scripted model's cd + rm never asked for an approval")
+
+    async def check(m, row):
+        o = row["outcomes"][0]
+        assert o["status"] == canary.APPROVAL_NEEDED and not o["ok"]
+        assert "approval" in o["note"] and CD_RM in o["note"] and "deletes files outside the scratch area" in o["note"]
+        assert "GPU" not in o["note"] and o["restarts"] == 0
+        assert len(polls) == 1  # ended on the first poll, not at the run's cap (the clock crosses a limit per poll)
+        assert row["status"] == "complete" and row["attempts"] == 1 and row["pass_rate"] == 0.0
+        sid = m.db.sessions_with_status("cancelled")[0]["id"]
+        assert not m.db.pending_approvals(sid) and len(chat.requests) == 1  # no model call after the request
+    _hard_night(tmp_path, chat, until_it_asks, check)
+
+
+def test_an_approval_request_is_evidence_a_graded_fail():
+    asked = {"task": "a", "repeat": 0, "ok": False, "status": canary.APPROVAL_NEEDED}
+    passed = {"task": "a", "repeat": 1, "ok": True, "status": "done"}
+    assert canary.valid([asked, passed]) == [asked, passed] and canary.pass_rate([asked, passed]) == 0.5
+
+
 def test_time_an_image_batch_has_the_gpu_is_not_run_time(tmp_path):
     async def image_batch(m):  # images.py took the GPU over (gate.exclusive) while the canary holds the slot
         m.runner.gate.exclusive_active = True
