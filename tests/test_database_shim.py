@@ -27,15 +27,12 @@ PINNED_SHIM: dict[str, frozenset[str]] = {
     "credentials": frozenset({
         # API keys
         "create_api_key", "api_key_by_secret", "get_api_key", "touch_api_key", "list_api_keys", "get_api_key_listing",
-        "ensure_web_app", "revoke_api_key", "restore_api_key", "origin_allowed",
+        "ensure_web_app", "revoke_api_key", "restore_api_key",
         # pairing codes
-        "create_pairing_code", "list_pairing_codes", "revoke_pairing_code", "pairing_id_for_key",
-        "pairing_origin_active", "redeem_pairing_code",
+        "create_pairing_code", "list_pairing_codes", "redeem_pairing_code",
         # pairing requests and the Hub claim
-        "insert_pairing_request", "get_pairing_request", "list_pairing_requests", "open_pairing_match_codes",
-        "pending_pairing_catalog_origins", "pairing_request_load", "update_pairing_request", "expire_pairing_requests",
-        "pairing_request_origin_known", "redeem_pairing_request", "hub_claim", "redeem_hub_claim", "release_hub",
-        "hub_minted_owner_keys",
+        "insert_pairing_request", "get_pairing_request", "list_pairing_requests", "update_pairing_request",
+        "redeem_pairing_request", "hub_claim", "redeem_hub_claim",
         # stream tickets
         "create_stream_ticket", "stream_ticket_key", "stream_ticket_origin_active",
         # App provider credentials
@@ -97,8 +94,8 @@ def test_the_shim_only_shrinks():
 
 
 def test_the_pinned_shim_has_these_sizes():
-    """The set as this change leaves it: 39 credential names and 51 session names."""
-    assert {store: len(names) for store, names in PINNED_SHIM.items()} == {"credentials": 39, "sessions": 51}
+    """The set as this change leaves it: 28 credential names (39 when the store was added) and 51 session names."""
+    assert {store: len(names) for store, names in PINNED_SHIM.items()} == {"credentials": 28, "sessions": 51}
     assert not PINNED_SHIM["credentials"] & PINNED_SHIM["sessions"]
 
 

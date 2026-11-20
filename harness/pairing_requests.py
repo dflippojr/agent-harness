@@ -170,7 +170,7 @@ def _match_code() -> str:
 
 def _unused_match_code(db) -> str:
     """Called inside the allocation write, after sweeping expired requests."""
-    used = db.open_pairing_match_codes()
+    used = db.credentials.open_pairing_match_codes()
     code = _match_code()
     while code in used:
         code = _match_code()
@@ -206,7 +206,7 @@ def app_view(row: dict) -> dict:
 
 def sweep(db, now: float) -> None:
     """Expire what ran out of time, one `pairing_request.expire` row each. Runs inside the caller's write."""
-    for row in db.expire_pairing_requests(now, ACTIVE, KEEP_SECONDS):
+    for row in db.credentials.expire_pairing_requests(now, ACTIVE, KEEP_SECONDS):
         action = "hub.claim.expire" if row["kind"] == HUB else "pairing_request.expire"
         credential_audit.record(db, audit_context.SYSTEM, action, row["id"], "ok",
                                 "pairing_request", {"request_id": row["id"], "reason": "expired"})
@@ -290,7 +290,7 @@ def register_app(app: FastAPI) -> None:
                                         {"reason": "hub_claimed", "browser": bool(origin)})
                 return _refuse(409, "this harness already has a Hub; the owner releases it on the daemon host with "
                                     "`harness hub release --confirm`", "hub_claimed")
-            recent, mine, total = db.pairing_request_load(source, now - SOURCE_RATE[1], (PENDING,))
+            recent, mine, total = db.credentials.pairing_request_load(source, now - SOURCE_RATE[1], (PENDING,))
             if recent >= SOURCE_RATE[0] or mine >= SOURCE_PENDING_CAP or total >= PENDING_CAP:
                 reason = "rate_limited" if recent >= SOURCE_RATE[0] else "too_many_pending"
                 credential_audit.record(db, unknown, action, "", "denied", "pairing_request", {"reason": reason})

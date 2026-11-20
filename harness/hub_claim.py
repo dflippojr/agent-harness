@@ -197,13 +197,13 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
 
         def commit():
             db = m.db.main
-            record = db.release_hub(pr.clock())
+            record = db.credentials.release_hub(pr.clock())
             if record is None:
                 credential_audit.record(db, ctx, "hub.release", "", "noop", "hub_claim", {"reason": "no_hub"})
                 return None
             credential_audit.record(db, ctx, "hub.release", record["key_id"], "ok", "hub_claim",
                                     {"key_id": record["key_id"], "request_id": record["request_id"]})
-            return record, db.hub_minted_owner_keys()
+            return record, db.credentials.hub_minted_owner_keys()
         out = await m.db.main.awrite(commit)
         if out is None:
             raise HarnessError(404, "no Hub is claimed")

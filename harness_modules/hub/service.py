@@ -52,7 +52,7 @@ def apps(db, now):
 
 def _snapshot(manager, now):
     paired = apps(manager.db, now)
-    pending = manager.db.main.pending_pairing_catalog_origins(now)
+    pending = manager.db.main.credentials.pending_pairing_catalog_origins(now)
     entries = []
     for manifest in load(manager.cfg.config_dir / "hub.entries.json"):
         app_id = manifest["app"]["app_id"]

@@ -73,16 +73,16 @@ def cors_origin_allowed(m, request: Request, origin: str) -> bool:
         return False
     path = request.scope.get("harness_original_path", request.url.path)
     if path == "/api/v1/pair":
-        return m.db.pairing_origin_active(origin)
+        return m.db.credentials.pairing_origin_active(origin)
     if path == "/api/v1/pair/requests":
         return True  # any exact origin may ask to pair (#519): the owner approves, and the request stays bound to it
     if path.startswith("/api/v1/pair/requests/"):
         # Any origin with a request on record, finished ones included, so a browser App can read a denial or expiry.
-        return m.db.pairing_request_origin_known(origin)
+        return m.db.credentials.pairing_request_origin_known(origin)
     ticket = request.query_params.get("ticket", "")
     if ticket and m.db.stream_ticket_origin_active(ticket, origin):
         return True
-    return m.db.origin_allowed(origin, kind="owner" if path.startswith("/api/admin/") else None)
+    return m.db.credentials.origin_allowed(origin, kind="owner" if path.startswith("/api/admin/") else None)
 
 
 def owner_key(key: dict | None) -> bool:
@@ -547,7 +547,7 @@ async def revoke_pairing_code(pid: str, request: Request):
     ctx = credential_audit.request_context(request, m)
 
     def commit() -> bool:
-        if m.db.main.revoke_pairing_code(pid):
+        if m.db.main.credentials.revoke_pairing_code(pid):
             credential_audit.record(m.db, ctx, "pairing.revoke", pid, "ok", "pairing", {"pairing_id": pid})
             return True
         credential_audit.record(m.db, ctx, "pairing.revoke", "", "noop", "pairing", {"reason": "not_found"})
@@ -574,7 +574,7 @@ async def pair_browser(body: PairRequest, request: Request):
             credential_audit.record(m.db, credential_audit.unknown_context(), "pairing.redeem", "", "denied",
                                     "pairing", {"reason": credential_audit.pairing_reason(error)})
         else:
-            pid = m.db.main.pairing_id_for_key(key["id"])
+            pid = m.db.main.credentials.pairing_id_for_key(key["id"])
             credential_audit.record(m.db, credential_audit.device_context(key["id"], key["kind"]),
                                     "pairing.redeem", key["id"], "ok", "api_key",
                                     {"key_id": key["id"], "pairing_id": pid, "kind": key["kind"],
