@@ -154,7 +154,7 @@ def test_search_index_and_tools_exclude_chat_kind(tmp_path):
         ("status", {"status": "done", "answer": f"stored {CHAT_MARKER}"}),
     ], created=2)
     db.update_session("chat000001", kind="chat")
-    db._build_search_index()
+    db.sessions.build_search_index()
     agent_hits = search(db, CHAT_MARKER)
     assert agent_hits["results"] == []
     assert search(db, AGENT_MARKER)["results"][0]["id"] == "agent00001"

@@ -418,6 +418,9 @@ class SessionStores:
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
             raise AttributeError(name)
+        if name == "sessions":  # the main store's SessionStore would miss every routed session (#992)
+            raise AttributeError("SessionStores routes each session to its own store: call the session method here, "
+                                 "or on for_session(sid) or for_app(app_id), not on a `sessions` store")
         if name in _BY_SESSION:
             def by_session(sid, *args, **kwargs):
                 if name in _SESSION_WRITES:
@@ -928,7 +931,7 @@ class SessionStores:
             if after != before:
                 raise WebStoreMismatch(f"Web store row counts {after} differ from the main store's {before}")
         web.write(insert)
-        web._build_search_index()  # the moved events, indexed in Web's store
+        web.sessions.build_search_index()  # the moved events, indexed in Web's store
 
     def _record_web_store(self, info: dict) -> None:
         """In a main-store transaction: register Web in the App registry and record that its store is in use."""
@@ -1006,7 +1009,7 @@ class SessionStores:
                                             f"VALUES ({','.join('?' * len(cols))})", values)
                 db.conn.execute("DELETE FROM meta WHERE key = 'search_index'")
             db.write(insert)
-            db._build_search_index()  # the moved events, indexed in the App's store
+            db.sessions.build_search_index()  # the moved events, indexed in the App's store
 
         def delete() -> None:
             for table in (*SESSION_TABLES, "search_index"):

@@ -15,7 +15,7 @@ import secrets
 import time
 from typing import cast
 
-from .db import AND_KIND, APP_ERASE_GRACE_SECONDS, CoreStore, _reads, _row, _writes
+from .db import AND_KIND, APP_ERASE_GRACE_SECONDS, CoreStore, _reads, _row, _rows, _writes
 from .digests import sha256_hex
 
 # An API key as `list_api_keys` and `get_api_key_listing` show it: no hash. `SessionStores` adds `requests`, the count
@@ -25,11 +25,6 @@ _API_KEY_LISTING = (
     "COALESCE(k.catalog_app_id, '') AS catalog_app_id, k.created_at, k.last_used_at, k.revoked_at, "
     "k.retention_days, k.erase_after, k.erased_at "
     "FROM api_keys k WHERE k.kind != 'web'")
-
-
-def _rows(rows: list) -> list[dict]:
-    """Each fetched row as `_row` decodes it (a fetched row is never None)."""
-    return [cast(dict, _row(r)) for r in rows]
 
 
 class CredentialStore(CoreStore):
