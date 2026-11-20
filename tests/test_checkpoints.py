@@ -224,7 +224,7 @@ def test_over_quota_prunes_then_skips_without_failing_the_turn(shared, monkeypat
     monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: usage["bytes"])
     monkeypatch.setattr("harness.checkpointer.CAP", 50)
     member = {**s, "owner_id": "member1"}
-    monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
+    monkeypatch.setattr(m.db.accounts, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
     store = cp.store(member)
     # Over quota, but pruning every older checkpoint would fit: it prunes and keeps the new one.
     usage["bytes"] = 150
@@ -767,7 +767,7 @@ def test_a_failed_take_after_a_rewind_leaves_the_rewound_past_checkpoint_redoabl
             monkeypatch.setattr(cp, "_record", record_fails)
         else:                                                        # or the account has no room for it
             monkeypatch.setattr("harness.principal.OWNER_USER_ID", "nobody")   # measure it like a member's
-            monkeypatch.setattr(m.db, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
+            monkeypatch.setattr(m.db.accounts, "account_by_id", lambda uid: {"disk_quota_bytes": 100})
             monkeypatch.setattr("harness.storage.account_usage_bytes", lambda cfg, uid: 10 ** 9)
         event = cp.take(sid)
         monkeypatch.undo()

@@ -129,7 +129,7 @@ def test_revoked_and_erased_app_usage_remains_visible(tmp_path, monkeypatch):
     db = manager.db.main
     app, _ = db.create_api_key("Former App", "sessions", "app")
     record(db, app["id"], now.timestamp(), 12, 3, .25)
-    db.revoke_api_key(app["id"])
+    db.credentials.revoke_api_key(app["id"])
     with client:
         path = PREFIX + "/apps/usage"
         revoked = client.get(path).json()["apps"]

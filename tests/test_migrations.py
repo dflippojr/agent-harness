@@ -412,6 +412,6 @@ def test_stables_registry_name_reaches_old_databases(tmp_path):
     db.close()
     assert names == {"app-web": "Stables", "k1": "Agent Harness Web"}
     fresh = Database(tmp_path / "fresh.db", migrations=shipped)
-    fresh.ensure_web_app("app-web")
+    fresh.credentials.ensure_web_app("app-web")
     assert fresh.conn.execute("SELECT name FROM api_keys WHERE id = 'app-web'").fetchone()[0] == "Stables"
     fresh.close()

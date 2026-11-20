@@ -59,7 +59,7 @@ def test_fork_moves_a_claude_session_to_codex(tmp_path):
         assert (forked["backend"], forked["model"]) == ("codex", "gpt-5.5")
         assert forked["tool_profile_reset"] == {"from": "bash-only", "to": "default"}
         assert "moved from claude" in forked["summary_note"]
-        [audit] = [a for a in m.db.main.audit_page(action="checkpoint.fork")["items"] if a["outcome"] == "ok"]
+        [audit] = [a for a in m.db.main.accounts.audit_page(action="checkpoint.fork")["items"] if a["outcome"] == "ok"]
         assert audit["metadata"]["backend"] == "codex" and audit["metadata"]["model"] == "gpt-5.5"
         assert audit["metadata"]["resulting_session_id"] == fork["id"]
         await finished(m, fork["id"])

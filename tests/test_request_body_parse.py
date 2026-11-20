@@ -99,14 +99,14 @@ def _pairing_token(client, m, _ids):
     rid = _pending_hub_request(client)
     return dict(method="POST", path=f"/api/v1/pair/requests/{rid}/token", headers={}, fields=("code_verifier",),
                 base=b"", baseline=b"invalid",
-                unchanged=lambda: m.db.get_pairing_request(rid)["state"] == "pending")
+                unchanged=lambda: m.db.credentials.get_pairing_request(rid)["state"] == "pending")
 
 
 def _hub_claim_approve(client, m, _ids):
     rid = _pending_hub_request(client)
     return dict(method="POST", path=f"{CLAIM}/requests/{rid}/approve", headers=_host(m), fields=("match",),
                 base=b"", baseline=b"invalid", audited="hub.claim.approve",
-                unchanged=lambda: m.db.get_pairing_request(rid)["state"] == "pending")
+                unchanged=lambda: m.db.credentials.get_pairing_request(rid)["state"] == "pending")
 
 
 def _hub_claim_release(client, m, _ids):

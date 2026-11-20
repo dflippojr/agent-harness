@@ -55,7 +55,7 @@ async def _seed_and_back_up(cfg) -> tuple[Path, dict]:
     second, _ = m.db.create_api_key("second", scopes="sessions", kind="app")
     gone, _ = m.db.create_api_key("gone", scopes="sessions", kind="app")
     apps = {"first": first["id"], "second": second["id"], "gone": gone["id"]}
-    m.db.insert_account({"user_id": "u-member", "role": "member", "login": "member", "display_name": "member",
+    m.db.accounts.insert_account({"user_id": "u-member", "role": "member", "login": "member", "display_name": "member",
                          "enabled": 1, "disk_quota_bytes": 0, "max_running": 1, "max_queued": 1,
                          "created_at": 1, "updated_at": 1, "last_activity_at": 0})
     for sid, app_id in (("own1", ""), ("a1", apps["first"]), ("a2", apps["first"]), ("b1", apps["second"]),
@@ -67,7 +67,7 @@ async def _seed_and_back_up(cfg) -> tuple[Path, dict]:
     for name in ("first", "gone"):
         _write(storage.transcripts_dir(cfg, "owner", apps[name]) / "s.md", f"{name} transcript")
     # Revoked and erased after the store was written: the backup still holds its store and transcripts.
-    m.db.revoke_api_key(apps["gone"])
+    m.db.credentials.revoke_api_key(apps["gone"])
     m.db.mark_app_erased(apps["gone"])
     result = await m.modules.get("backup").service.backup()
     await m.stop()

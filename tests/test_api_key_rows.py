@@ -23,7 +23,7 @@ def db(tmp_path: Path) -> Database:
 
 
 def _request(db: Database, rid: str, kind: str, origin: str, now: float, catalog_app_id: str = "") -> None:
-    db.insert_pairing_request({"id": rid, "kind": kind, "name": f"{kind} request", "scopes": "sessions",
+    db.credentials.insert_pairing_request({"id": rid, "kind": kind, "name": f"{kind} request", "scopes": "sessions",
                                "catalog_app_id": catalog_app_id, "origin": origin, "state": "approved",
                                "created_at": now, "expires_at": now + 600, "key_id": ""})
 
@@ -36,8 +36,8 @@ def _create(kind: str, origins: list[str] | None, catalog_app_id: str):
 
 def _pairing_code(catalog_app_id: str):
     def mint(db: Database):
-        _row, code = db.create_pairing_code("paired app", APP_ORIGIN, "inference", 600, catalog_app_id)
-        key, secret, error = db.redeem_pairing_code(code, APP_ORIGIN)
+        _row, code = db.credentials.create_pairing_code("paired app", APP_ORIGIN, "inference", 600, catalog_app_id)
+        key, secret, error = db.credentials.redeem_pairing_code(code, APP_ORIGIN)
         assert error == ""
         return key, secret
     return mint
@@ -47,7 +47,7 @@ def _pairing_request(origin: str, catalog_app_id: str):
     def mint(db: Database):
         now = time.time()
         _request(db, "pr-app", "app", origin, now, catalog_app_id)
-        return db.redeem_pairing_request("pr-app", now)
+        return db.credentials.redeem_pairing_request("pr-app", now)
     return mint
 
 
@@ -55,7 +55,7 @@ def _hub_claim(origin: str):
     def mint(db: Database):
         now = time.time()
         _request(db, "pr-hub", "hub", origin, now, "hub-app")
-        key, secret, error = db.redeem_hub_claim("pr-hub", now)
+        key, secret, error = db.credentials.redeem_hub_claim("pr-hub", now)
         assert error == ""
         return key, secret
     return mint

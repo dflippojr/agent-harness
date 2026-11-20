@@ -231,7 +231,7 @@ def owned_session(request: Request, ref: str, *, kind: str | None = "agent") -> 
     session = m.db.get_session(sid)
     if (session is None or session.get("owner_id", "owner") != scope
             or (kind is not None and (session.get("kind") or "agent") != kind) or session.get("app_id")):
-        m.db.insert_audit(scope, scope, "cross_user", "denied")
+        m.db.accounts.insert_audit(scope, scope, "cross_user", "denied")
         raise HarnessError(404, "no chat matches that id" if kind == "chat" else "no session matches that id")
     return m, sid, session
 
@@ -274,8 +274,8 @@ def _access_refusal(request: Request, m: Manager, ident, login: str | None,
     if not ident.allowed:
         log.warning("refused %s %s from tailnet login %s (%s)",
                     request.method, request.url.path, login, ident.detail)
-        m.db.insert_audit(ident.user_id or "unknown", ident.user_id or "", "auth", "denied",
-                          ident.detail or "not allowed")
+        m.db.accounts.insert_audit(ident.user_id or "unknown", ident.user_id or "", "auth", "denied",
+                                   ident.detail or "not allowed")
         return JSONResponse({"detail": ident.detail or "this tailnet login is not allowed"},
                             status_code=403, headers=cors_headers)
     guest_block = access_mod.guest_forbidden(ident, request.method, request.url.path)
@@ -285,7 +285,7 @@ def _access_refusal(request: Request, m: Manager, ident, login: str | None,
     member_block = access_mod.member_forbidden(ident, request.method, request.url.path, m.cfg)
     if member_block:
         log.warning("refused member %s %s from %s (%s)", request.method, request.url.path, login, member_block)
-        m.db.insert_audit(ident.user_id, ident.user_id, "cross_user", "denied", member_block)
+        m.db.accounts.insert_audit(ident.user_id, ident.user_id, "cross_user", "denied", member_block)
         return JSONResponse({"detail": member_block}, status_code=403, headers=cors_headers)
     return None
 
@@ -375,7 +375,7 @@ async def _access_guard(request: Request, call_next):
     web = request.state.web_auth
     request.state.access = ident
     if ident.kind in ("owner", "member") and ident.allowed and ident.user_id != "owner":
-        m.db.touch_account(ident.user_id)
+        m.db.accounts.touch_account(ident.user_id)
     refusal = _web_session_refusal(request, m, ident, web, public_path, info.cors_headers)
     if refusal is None and not (web.admitted and not ident.allowed):
         refusal = _access_refusal(request, m, ident, login, info.cors_headers)
@@ -531,7 +531,7 @@ async def me(request: Request):
     usage = {}
     if member and ident.allowed:
         from .storage import account_usage_bytes, quota_message
-        account = m.db.account_by_id(ident.user_id)
+        account = m.db.accounts.account_by_id(ident.user_id)
         if account:
             used = account_usage_bytes(cfg, ident.user_id)
             usage = {
@@ -1339,7 +1339,7 @@ async def revoke_key(kid: str, request: Request):
             credential_audit.record(m.db, ctx, "key.revoke", kid, "denied", "api_key",
                                     {"key_id": kid, "kind": before["kind"], "reason": "hub_key"})
             return None
-        if m.db.main.revoke_api_key(kid):
+        if m.db.main.credentials.revoke_api_key(kid):
             credential_audit.record(m.db, ctx, "key.revoke", kid, "ok", "api_key",
                                     {"key_id": kid, "kind": before["kind"] if before else None})
             return True

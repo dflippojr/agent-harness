@@ -93,7 +93,7 @@ WEB_STORE_META = "web_store"  # main-store meta: when the sessions moved into We
 # None when its rows are routed per session. A wrapper hands out a "main" store's object as the main store's, and
 # refuses a routed one: its methods are called on the wrapper, which routes each to the session's store.
 # tests/test_database_shim.py checks that it names every store in `db.CORE_STORES`.
-_STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None}
+_STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None, "accounts": "main"}
 # Main-store methods that read sessions or their rows without taking a session id: they run on Web's store.
 _ON_WEB = frozenset({"group_sessions", "snippet_events", "smart_review_stats", "smart_reviews", "job_sessions",
                      "session_activity"})
@@ -300,11 +300,14 @@ class SessionStores:
 
     # stores -----------------------------------------------------------------------------------------------------------
     def _open_store(self, app_id: str) -> Database:
-        """Open App `app_id`'s store (or Web's). Its credential queries are the main store's (#992): the App registry
-        lives there, so no route to this Database (`for_app`, `for_session`, a raw `db.credentials` or a forwarded
-        `db.<credential method>`) reads or writes its own empty copy."""
+        """Open App `app_id`'s store (or Web's). Its main-store core stores (`_STORE_HOME`: credentials, accounts) are
+        the main store's (#992): the App registry and the household live there, so no route to this Database
+        (`for_app`, `for_session`, a raw `db.credentials`/`db.accounts` or a forwarded call) reaches its own empty
+        copy."""
         db = Database(self.store_path(app_id))
-        db.credentials = self.main.credentials
+        for name, home in _STORE_HOME.items():
+            if home == "main":
+                setattr(db, name, getattr(self.main, name))
         return db
 
     def store_path(self, app_id: str) -> Path:
@@ -957,7 +960,7 @@ class SessionStores:
 
     def _record_web_store(self, info: dict) -> None:
         """In a main-store transaction: register Web in the App registry and record that its store is in use."""
-        self.main.ensure_web_app(WEB_APP_ID)
+        self.main.credentials.ensure_web_app(WEB_APP_ID)
         self.main.set_meta(WEB_STORE_META, json.dumps({"migrated_at": time.time(), **info}))
 
     def migrate_app_files(self) -> list[Path]:

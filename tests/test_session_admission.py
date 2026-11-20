@@ -124,7 +124,7 @@ def test_app_caps_are_owner_only_and_reset_to_the_default(tmp_path):
         assert partial["configured"] == {"max_running": 1, "max_queued": None}
         assert partial["effective"] == {"max_running": 1, "max_queued": m.cfg.app_max_queued}
         assert client.get(LIMITS.format(shop_id)).json()["effective"]["max_running"] == 1
-        audit = [row["outcome"] for row in m.db.main.list_audit(50) if row["action"] == "app.limits"]
+        audit = [row["outcome"] for row in m.db.main.accounts.list_audit(50) if row["action"] == "app.limits"]
         assert sorted(audit) == ["noop", "ok", "ok"]  # the unknown App is recorded as a no-op
 
 

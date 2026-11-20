@@ -148,8 +148,8 @@ def test_a_linked_end_user_session_records_the_person_and_runs_on_no_other_crede
         assert plain["policy"] == "subscription_then_api_key" and plain["key"] == "app-key-plaintext"
         # An App the owner has not granted the backend stays denied.
         manager.set_app_provider_credential(app["id"], "claude", "billing", "api_key", [])
-        manager.db.revoke_app_provider_credential(
-            manager.db.app_provider_credential(app["id"], "claude")["id"])
+        manager.db.credentials.revoke_app_provider_credential(
+            manager.db.credentials.app_provider_credential(app["id"], "claude")["id"])
         assert manager.runner._backend_credential(s)["policy"] == "denied"
 
 

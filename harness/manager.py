@@ -180,7 +180,7 @@ class Manager:
         db = db or Database(cfg.db_path)
         # App sessions live in per-App stores under data_dir/apps (#330); everything else in the main store.
         self.db = db if isinstance(db, SessionStores) else SessionStores(db, Path(cfg.data_dir) / "apps")
-        require_owner_allowlist(cfg, self.db.member_count())
+        require_owner_allowlist(cfg, self.db.accounts.member_count())
         self.local_owner_token = local_owner.ensure_token(cfg.data_dir)
         # Host-only proof for approving or releasing a Hub claim (#543): new at every start, never logged or served.
         self.hub_approval_secret = local_owner.rotate_hub_secret(cfg.data_dir)
@@ -359,7 +359,7 @@ class Manager:
 
     async def _touch_key_activity(self, key_id: str) -> None:
         try:
-            await self.db.main.awrite(self.db.main.touch_api_key, key_id)
+            await self.db.main.awrite(self.db.main.credentials.touch_api_key, key_id)
         except Exception:
             # Neither credential data nor exception text belongs in the log.
             log.warning("key activity metadata could not be recorded")
@@ -749,7 +749,7 @@ class Manager:
     def _check_member(self, owner_id: str, backend: str | None, target: str | None, spec, app: dict | None) -> str:
         """Household members run on the tower, on the local model or on a hosted CLI with their own API key (#393);
         returns the backend they get."""
-        account = self.db.account_by_id(owner_id)
+        account = self.db.accounts.account_by_id(owner_id)
         if account is None or not account.get("enabled", 1):
             raise HarnessError(403, ACCOUNT_DISABLED)
         if backend not in (None, "", "local"):
@@ -835,9 +835,9 @@ class Manager:
         # hosted backend (#786). A kind: cli backend keeps its own rule below.
         self._refuse_hosted(app, backend)
         # A kind: cli backend is invisible to every App until the owner grants it, managed or not (#168).
-        if not self.db.app_provider_managed(app["id"]) and not self._needs_grant(backend):
+        if not self.db.credentials.app_provider_managed(app["id"]) and not self._needs_grant(backend):
             return
-        credential = self.db.app_provider_credential(app["id"], backend)
+        credential = self.db.credentials.app_provider_credential(app["id"], backend)
         if credential is None:
             raise HarnessError(403, f"this app is not allowed to use backend {backend!r}",
                                "provider_not_allowed")
@@ -985,7 +985,7 @@ class Manager:
             if user_id != OWNER_USER_ID:
                 # Its queue caps are counted in the write: by then another message may have restarted the session,
                 # and this one joins that run instead (#524).
-                self._require_member_start(self.db.account_by_id(user_id), "session", caps=False)
+                self._require_member_start(self.db.accounts.account_by_id(user_id), "session", caps=False)
         # Chat: snippets the user ran since their last message reach the model with this one (the transcript keeps
         # the message as typed).
         model_content = self.snippets.context_for(sid) + content if s.get("kind") == "chat" else content
@@ -1005,7 +1005,7 @@ class Manager:
                 self.db.update_session(sid, inbox=current["inbox"] + [model_content])
             else:
                 if s["status"] in ACTIVE and session_user_id(current) != OWNER_USER_ID:
-                    self._require_member_start(self.db.account_by_id(session_user_id(current)), "session",
+                    self._require_member_start(self.db.accounts.account_by_id(session_user_id(current)), "session",
                                                caps=False)
                 self._enforce_queue_caps(current)
                 run = new_run(carry=current["run"])
@@ -1211,7 +1211,7 @@ class Manager:
         parent = self.db.get_session(sid)
         owner_id = session_user_id(parent)
         if owner_id != OWNER_USER_ID:
-            self._require_member_start(self.db.account_by_id(owner_id), "session")
+            self._require_member_start(self.db.accounts.account_by_id(owner_id), "session")
         app_id = parent.get("app_id") or ""
         self._enforce_app_caps(app_id)
         self._check_free_space(False, owner_id != OWNER_USER_ID, "tower", owner_id, app_id)
@@ -1534,7 +1534,7 @@ class Manager:
         self.db.add_secret_dismissal(sid, {
             "fingerprint": fingerprint, "rule": finding["rule"], "repo": finding["repo"], "path": finding["file"],
             "line": finding["line"], "reason": reason, "actor_id": actor_id})
-        self.db.insert_audit(actor_id, sid, "secret_finding_dismiss", "ok", json.dumps(
+        self.db.accounts.insert_audit(actor_id, sid, "secret_finding_dismiss", "ok", json.dumps(
             {"session": sid, "rule": finding["rule"], "repo": finding["repo"], "file": finding["file"],
              "line": finding["line"], "fingerprint": fingerprint, "reason": reason}))
         return {**finding, "dismissed": True,
@@ -1812,7 +1812,7 @@ class Manager:
         uid = session_user_id(s)
         if uid == OWNER_USER_ID or project is None:
             return None
-        row = self.db.get_member_project(uid, project.name)
+        row = self.db.accounts.get_member_project(uid, project.name)
         return row if row and row.get("source_auth") == "github" else None
 
     async def _push_member_github(self, s: dict, project, ws: Path, row: dict) -> str:
@@ -2245,11 +2245,11 @@ class Manager:
         return cfg is not None and cfg.is_cli
 
     def app_provider_status(self, app_id: str, backend: str) -> dict:
-        managed = self.db.app_provider_managed(app_id)
+        managed = self.db.credentials.app_provider_managed(app_id)
         if hosted_refused(self.db.get_api_key(app_id), self.cfg.backends.get(backend)):  # as `create` refuses it
             return {"managed": managed, "allowed": False, "policy": "denied", "models": [],
                     "credential_source": "server_default", "available": False}
-        row = self.db.app_provider_credential(app_id, backend)
+        row = self.db.credentials.app_provider_credential(app_id, backend)
         if row is None:
             allowed = not managed and not self._needs_grant(backend)
             return {"managed": managed, "allowed": allowed, "policy": "server_default", "models": [],
@@ -2281,11 +2281,11 @@ class Manager:
         clean_models = list(dict.fromkeys(str(model).strip() for model in models if str(model).strip()))
         if any(len(model) > 100 for model in clean_models):
             raise HarnessError(400, "model ids must be at most 100 characters")
-        return self.db.set_app_provider_credential(app_id, backend, secret_ref, policy, clean_models)
+        return self.db.credentials.set_app_provider_credential(app_id, backend, secret_ref, policy, clean_models)
 
     def provider_credentials(self) -> list[dict]:
         rows = []
-        for row in self.db.list_app_provider_credentials():
+        for row in self.db.credentials.list_app_provider_credentials():
             path = self.cfg.provider_secret_files.get(row["secret_ref"], "") if row["secret_ref"] else ""
             needs_file = row["policy"] in ("api_key", "subscription_then_api_key")
             rows.append({k: row[k] for k in ("id", "app_id", "app_name", "backend", "secret_ref", "policy",
@@ -2294,7 +2294,7 @@ class Manager:
         return rows
 
     def revoke_app_provider_credential(self, cid: str) -> bool:
-        return self.db.revoke_app_provider_credential(cid)
+        return self.db.credentials.revoke_app_provider_credential(cid)
 
     def _scheduler_eligible(self, sid: str) -> bool:
         """May `sid` take the GPU slot (or, hosted, a backend slot) under its member's or App's `max_running`? A
@@ -2304,7 +2304,7 @@ class Manager:
             # Image/device/test holders are not household sessions; do not park them forever.
             return True
         user_id = s.get("owner_id") or OWNER_USER_ID
-        account = self.db.account_by_id(user_id) if user_id != OWNER_USER_ID else None
+        account = self.db.accounts.account_by_id(user_id) if user_id != OWNER_USER_ID else None
         if user_id != OWNER_USER_ID and (account is None or not account.get("enabled", 1)):
             return False
         if holds_place(s) or sid in self.runner.admitted:
@@ -2376,7 +2376,7 @@ class Manager:
         in the request reserves nothing, so two requests can both pass it; their writes run one after the other."""
         user_id = session_user_id(s)
         if user_id != OWNER_USER_ID:
-            account = self.db.account_by_id(user_id)
+            account = self.db.accounts.account_by_id(user_id)
             if account is not None:
                 self._enforce_member_caps(account)
         self._enforce_app_caps(s.get("app_id") or "")
@@ -2406,7 +2406,7 @@ class Manager:
     def member_over_quota(self, user_id: str) -> bool:
         if user_id == OWNER_USER_ID:
             return False
-        account = self.db.account_by_id(user_id)
+        account = self.db.accounts.account_by_id(user_id)
         if account is None:
             return False
         from .storage import account_usage_bytes
@@ -2440,14 +2440,14 @@ class Manager:
                 if s["status"] in ACTIVE:
                     await self.runner.aset_status(sid, "cancelled", stop_reason="account_disabled")
                 self.scheduler.release(sid)
-            self.db.insert_audit(actor_id, user_id, "cancel", "ok")
+            self.db.accounts.insert_audit(actor_id, user_id, "cancel", "ok")
         if waiting:
             await asyncio.gather(*waiting, return_exceptions=True)
 
     def create_member_project(self, user_id: str, name: str, description: str = "", repo: str = "",
                               github: bool = False) -> dict:
         from . import catalog, storage
-        account = self.db.account_by_id(user_id)
+        account = self.db.accounts.account_by_id(user_id)
         if account is None or not account.get("enabled", 1):
             raise HarnessError(403, ACCOUNT_DISABLED)
         self._enforce_member_quota(account, "project")
@@ -2455,14 +2455,14 @@ class Manager:
         description = (description or "").strip()
         if len(description) > 240:
             raise HarnessError(400, "project description is too long")
-        if self.db.get_member_project(user_id, slug) is not None:
+        if self.db.accounts.get_member_project(user_id, slug) is not None:
             raise HarnessError(400, f"project {slug!r} already exists")
         storage.ensure_user_dirs(self.cfg, user_id)
         if github:
             managed, source_url = self._clone_member_github(user_id, slug, account, (repo or "").strip())
         else:
             managed, source_url = self._clone_member_repo(user_id, slug, account, (repo or "").strip())
-        self.db.insert_member_project({
+        self.db.accounts.insert_member_project({
             "user_id": user_id, "slug": slug, "description": description,
             "repo": managed, "source_url": source_url, "source_auth": "github" if github else "",
         })

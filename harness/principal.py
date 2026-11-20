@@ -157,7 +157,7 @@ def _guest_principal(guest, reason: str, login: str) -> Principal:
 
 
 def resolve_human(cfg: Config, login: str | None, accounts=None) -> Principal:
-    """Classify a Tailscale/localhost caller. `accounts` is a Database or any object with
+    """Classify a Tailscale/localhost caller. `accounts` is the account store (`db.accounts`) or any object with
     `member_count()` and `account_by_login(login)`."""
     if login is None:
         return _owner(None)

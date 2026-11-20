@@ -32,7 +32,7 @@ def manager(tmp_path):
 
 
 def rows(m, action):
-    return list(reversed(m.db.audit_page(action=action)["items"]))
+    return list(reversed(m.db.accounts.audit_page(action=action)["items"]))
 
 
 def pair(m, action, context=CTX):
@@ -97,7 +97,7 @@ def test_legacy_stray_token_preserves_ambient_owner(manager, token_kind):
     else:
         key, secret = manager.db.create_api_key("test", "sessions", kind="app" if token_kind == "app" else "owner")
         if token_kind == "revoked":
-            manager.db.revoke_api_key(key["id"])
+            manager.db.credentials.revoke_api_key(key["id"])
     headers = {"Authorization": "Bearer " + secret, local_owner.HEADER: manager.local_owner_token}
     with TestClient(create_app(manager)) as client:
         # Admin authentication still rejects the token before attribution runs.
@@ -148,12 +148,13 @@ def test_unknown_approval_target_is_not_audited(manager):
 
 
 def fail_write(monkeypatch, db, outcome):
-    original = db.insert_audit
+    accounts = db.accounts  # the account store writes the audit rows (#992)
+    original = accounts.insert_audit
     def insert(*args, **kwargs):
         if args[3] == outcome:
             raise OSError(SENTINEL)
         return original(*args, **kwargs)
-    monkeypatch.setattr(db, "insert_audit", insert)
+    monkeypatch.setattr(accounts, "insert_audit", insert)
 
 
 @pytest.mark.parametrize("outcome", ["started", "ok"])
@@ -194,7 +195,7 @@ def test_cancel_and_reopen_leave_unresolved_start(tmp_path):
             raise asyncio.CancelledError()
     db.close()
     db = Database(path)
-    assert [r["outcome"] for r in db.audit_page()["items"]] == ["started"]
+    assert [r["outcome"] for r in db.accounts.audit_page()["items"]] == ["started"]
     db.close()
 
 

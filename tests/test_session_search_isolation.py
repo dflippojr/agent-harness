@@ -86,7 +86,7 @@ def test_revoked_sessions_all_does_not_unrestrict(tmp_path):
     _history(db, app_a, app_b, reader)
 
     assert restrict_app_id(db, "dddd00000r") is None
-    assert db.revoke_api_key(reader["id"])
+    assert db.credentials.revoke_api_key(reader["id"])
     assert restrict_app_id(db, "dddd00000r") == reader["id"]
     with pytest.raises(ToolError, match="no session matches"):
         tools.session_read("aaaa000001", _session="dddd00000r")
@@ -94,7 +94,7 @@ def test_revoked_sessions_all_does_not_unrestrict(tmp_path):
     assert_no_hit(hidden, "aaaa000001")
 
     # A non-elevated revoked app keeps its own-app boundary; in-flight sessions are not cancelled.
-    assert db.revoke_api_key(app_a["id"])
+    assert db.credentials.revoke_api_key(app_a["id"])
     assert restrict_app_id(db, "bbbb00000a") == app_a["id"]
     own = tools.session_search(APP_A_MARKER, _session="bbbb00000a")
     assert "aaaa00000a" in own

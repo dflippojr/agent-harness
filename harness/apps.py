@@ -80,7 +80,7 @@ def cors_origin_allowed(m, request: Request, origin: str) -> bool:
         # Any origin with a request on record, finished ones included, so a browser App can read a denial or expiry.
         return m.db.credentials.pairing_request_origin_known(origin)
     ticket = request.query_params.get("ticket", "")
-    if ticket and m.db.stream_ticket_origin_active(ticket, origin):
+    if ticket and m.db.credentials.stream_ticket_origin_active(ticket, origin):
         return True
     return m.db.credentials.origin_allowed(origin, kind="owner" if path.startswith("/api/admin/") else None)
 
@@ -498,7 +498,7 @@ def view(m, s: dict) -> dict:
 @route_table.get("/pairing-codes")
 async def pairing_codes(request: Request):
     """Owner view. Codes themselves are shown only by the create response."""
-    return mgr(request).db.list_pairing_codes()
+    return mgr(request).db.credentials.list_pairing_codes()
 
 
 @route_table.post("/pairing-codes", status_code=201)
@@ -530,7 +530,7 @@ async def create_pairing_code(body: PairingCodeRequest, request: Request):
     scopes = " ".join(dict.fromkeys(body.scopes))
 
     def commit():
-        row, code = m.db.main.create_pairing_code(name, origin, scopes, body.ttl_seconds, catalog_app_id)
+        row, code = m.db.main.credentials.create_pairing_code(name, origin, scopes, body.ttl_seconds, catalog_app_id)
         credential_audit.record(m.db, ctx, "pairing.create", row["id"], "ok", "pairing",
                                 {"pairing_id": row["id"], "scopes": scopes.split(),
                                  "catalog_app_id": catalog_app_id})
@@ -569,7 +569,7 @@ async def pair_browser(body: PairRequest, request: Request):
     m = mgr(request)
 
     def commit():
-        key, secret, error = m.db.main.redeem_pairing_code(body.code, origin)
+        key, secret, error = m.db.main.credentials.redeem_pairing_code(body.code, origin)
         if key is None:  # no supplied code, origin or guessed id is recorded: only which kind of refusal it was
             credential_audit.record(m.db, credential_audit.unknown_context(), "pairing.redeem", "", "denied",
                                     "pairing", {"reason": credential_audit.pairing_reason(error)})
@@ -605,7 +605,7 @@ async def api_root(request: Request):
                 **m.modules.features(),
                 "inference": module_effective(m.cfg, "endpoint"), "web": module_effective(m.cfg, "web"),
                 "browser_pairing": True, "pairing_requests": True, "idempotent_create": True,
-                "hub_claim": True, "hub_claimed": m.db.main.hub_claim() is not None,
+                "hub_claim": True, "hub_claimed": m.db.main.credentials.hub_claim() is not None,
                 "stream_tickets": True, "scoped_projects": True, "household_accounts": True},
             **await m.modules.app_root()}
 
@@ -628,7 +628,7 @@ async def backends(request: Request):
 
 def _member_me(m, key: dict, ident) -> dict:
     from .storage import account_usage_bytes, quota_message
-    account = m.db.account_by_id(key["user_id"])
+    account = m.db.accounts.account_by_id(key["user_id"])
     used = account_usage_bytes(m.cfg, key["user_id"]) if account else 0
     limit = int(account["disk_quota_bytes"]) if account else 0
     return {
@@ -1303,7 +1303,7 @@ async def event_ticket(ref: str, request: Request):
         raise HarnessError(400, "stream tickets require the paired browser Origin header") from exc
     if origin not in (key.get("origins") or []):
         raise HarnessError(403, "stream tickets are only available to a paired browser origin")
-    ticket, expires_at = m.db.create_stream_ticket(key["id"], s["id"], origin, STREAM_TICKET_TTL_SECONDS)
+    ticket, expires_at = m.db.credentials.create_stream_ticket(key["id"], s["id"], origin, STREAM_TICKET_TTL_SECONDS)
     return JSONResponse({"ticket": ticket, "expires_at": expires_at,
                          "events_url": f"/api/v1/sessions/{s['id']}/events?ticket={ticket}"}, status_code=201,
                         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
@@ -1316,7 +1316,7 @@ def _ticket_key(request: Request, m, ref: str, ticket: str) -> dict:
         origin = normalize_origin(raw_origin)
     except ValueError:
         origin = ""
-    key = m.db.stream_ticket_key(ticket, ref, origin)
+    key = m.db.credentials.stream_ticket_key(ticket, ref, origin)
     if key is None:
         raise HarnessError(401, "invalid or expired stream ticket")
     key["scope_set"] = set((key.get("scopes") or "").split())

@@ -76,7 +76,7 @@ def test_remote_gate_dismissal_masking_and_fix(tmp_path, action, caplog):
             result = await m.review(sid, action)
             assert result["review"] == ("merged" if action == "merge" else "pushed")
             assert _leaks(m, sid, caplog) == []
-            assert any(a["action"] == "secret_finding_dismiss" for a in m.db.list_audit())
+            assert any(a["action"] == "secret_finding_dismiss" for a in m.db.accounts.list_audit())
     asyncio.run(body())
 
 

@@ -495,7 +495,7 @@ class SettingsService:
         if backend == "local" and configured not in self.cfg.models:
             return "", "models"
         if backend and backend != "local":
-            cred = self.db.app_provider_credential(key["id"], backend) if self.db else None
+            cred = self.db.credentials.app_provider_credential(key["id"], backend) if self.db else None
             if cred and cred.get("models") and configured not in cred["models"]:
                 return "", "provider_policy"
         return None
@@ -525,9 +525,9 @@ class SettingsService:
         needs_grant = self.cfg.backends[backend].is_cli
         if self.db is None:
             return not needs_grant
-        if not needs_grant and not self.db.app_provider_managed(key["id"]):
+        if not needs_grant and not self.db.credentials.app_provider_managed(key["id"]):
             return True
-        return self.db.app_provider_credential(key["id"], backend) is not None
+        return self.db.credentials.app_provider_credential(key["id"], backend) is not None
 
     # --- mutate ----------------------------------------------------------
     def validate_admin(self, changes: dict[str, Any], revision: int | None, actor: dict | None = None) -> Plan:

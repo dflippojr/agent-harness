@@ -387,7 +387,7 @@ class HostedRuns:
     def _check_cli_credential(self, credential: dict, use_api_key: bool) -> None:
         if not credential["assignment_id"]:
             return
-        current = self.db.app_provider_credential_by_id(credential["assignment_id"])
+        current = self.db.credentials.app_provider_credential_by_id(credential["assignment_id"])
         if current is None or current.get("revoked_at") is not None:
             raise CliBackendError("the app provider credential was revoked")
         if use_api_key and self._secret_marker(credential["path"]) != credential["marker"]:
@@ -444,7 +444,7 @@ class HostedRuns:
     def _backend_credential(self, s: dict) -> dict:
         backend = self.cfg.backends[s["backend"]]
         app_id = s.get("app_id") or ""
-        assignment = self.db.app_provider_credential(app_id, s["backend"]) if app_id else None
+        assignment = self.db.credentials.app_provider_credential(app_id, s["backend"]) if app_id else None
         member = member_keys.member_of(s.get("end_user") or "") if not app_id else ""
         if app_id and hosted_refused(self.db.get_api_key(app_id), backend):
             # A device key's session never runs on a built-in hosted backend (#786), not even one it started before
@@ -460,7 +460,7 @@ class HostedRuns:
         if s.get("end_user"):
             # The person's own subscription login, whatever the App or the owner has configured (#365): never a key,
             # a fallback to a key or the owner's token. An App the owner has not granted this backend is still denied.
-            granted = not (assignment is None and self.db.app_provider_managed(app_id)) and (
+            granted = not (assignment is None and self.db.credentials.app_provider_managed(app_id)) and (
                 assignment is None or assignment["policy"] != "denied")
             return {"policy": "subscription" if granted else "denied", "key": "", "source": "end_user_login",
                     "assignment_id": assignment["id"] if assignment else "", "path": "", "marker": None}
@@ -469,7 +469,7 @@ class HostedRuns:
             return {"policy": assignment["policy"], "key": self._read_secret(path),
                     "source": "app_file" if assignment["secret_ref"] else "subscription",
                     "assignment_id": assignment["id"], "path": path, "marker": self._secret_marker(path)}
-        if app_id and (backend.is_cli or self.db.app_provider_managed(app_id)):  # kind: cli needs a grant (#168)
+        if app_id and (backend.is_cli or self.db.credentials.app_provider_managed(app_id)):  # kind: cli needs a grant (#168)
             return {"policy": "denied", "key": "", "source": "app_file", "assignment_id": "",
                     "path": "", "marker": None}
         path = backend.api_key_file

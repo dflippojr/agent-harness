@@ -197,7 +197,7 @@ def test_logging_a_request_never_marks_a_revoked_key_used(tmp_path):
     _log(m, kid)
     used = m.db.get_api_key(kid)["last_used_at"]
     assert used is not None
-    assert m.db.main.revoke_api_key(kid)
+    assert m.db.main.credentials.revoke_api_key(kid)
     _log(m, kid, status=499)
     with m.db.main.reading(), m.db.main.lock:
         statuses = [r[0] for r in m.db.main.conn.execute(

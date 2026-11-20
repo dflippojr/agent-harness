@@ -68,7 +68,7 @@ def test_activity_write_failure_preserves_successful_response(tmp_path, monkeypa
     row, token = m.db.create_api_key("Owner", "admin", kind="owner")
     def failed(*args):
         raise RuntimeError("synthetic-secret-write-error")
-    monkeypatch.setattr(m.db.main, "touch_api_key", failed)
+    monkeypatch.setattr(m.db.main.credentials, "touch_api_key", failed)
     with TestClient(create_app(m)) as client:
         assert client.get("/api/admin/v1/keys", headers=headers(token)).status_code == 200
     assert "key activity metadata could not be recorded" in caplog.text
@@ -107,7 +107,7 @@ def test_burst_activity_is_background_throttled_per_key_and_pending_write(tmp_pa
         release = asyncio.Event()
 
         async def delayed(fn, *args, **kwargs):
-            if fn == m.db.main.touch_api_key:
+            if fn == m.db.main.credentials.touch_api_key:
                 calls.append(args[0])
                 await release.wait()
             return await original(fn, *args, **kwargs)

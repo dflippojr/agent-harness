@@ -23,7 +23,7 @@ def maintenance(tmp_path):
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     db = Database(cfg.db_path)
     for user_id in ("u-first", "u-second", "u-empty", "u-missing"):
-        db.insert_account({"user_id": user_id, "role": "member", "login": user_id,
+        db.accounts.insert_account({"user_id": user_id, "role": "member", "login": user_id,
                            "display_name": user_id, "enabled": 0 if user_id == "u-second" else 1,
                            "disk_quota_bytes": 0, "max_running": 1, "max_queued": 1,
                            "created_at": 1, "updated_at": 1, "last_activity_at": 0})

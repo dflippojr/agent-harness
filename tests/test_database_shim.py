@@ -10,35 +10,29 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
+from pathlib import Path
 
 import pytest
 
 import harness.app_stores as app_stores
 import harness.db as core_db
+from harness.account_store import AccountStore
 from harness.app_stores import WEB_APP_ID, SessionStores
 from harness.credential_store import CredentialStore
 from harness.db import CoreStore, Database
 from harness.session_store import SessionStore
 
-STORES: dict[str, type[CoreStore]] = {"credentials": CredentialStore, "sessions": SessionStore}
+STORES: dict[str, type[CoreStore]] = {"credentials": CredentialStore, "sessions": SessionStore,
+                                      "accounts": AccountStore}
 
 # The names `Database` forwards to each store. A store's set is written once, in the change that adds the store; after
 # that, delete a name here once its last `db.<name>` caller has moved to the store, and never add one.
 PINNED_SHIM: dict[str, frozenset[str]] = {
     "credentials": frozenset({
-        # API keys
-        "create_api_key", "api_key_by_secret", "get_api_key", "touch_api_key", "list_api_keys", "get_api_key_listing",
-        "ensure_web_app", "revoke_api_key", "restore_api_key",
-        # pairing codes
-        "create_pairing_code", "list_pairing_codes", "redeem_pairing_code",
-        # pairing requests and the Hub claim
-        "insert_pairing_request", "get_pairing_request", "list_pairing_requests", "update_pairing_request",
-        "redeem_pairing_request", "hub_claim", "redeem_hub_claim",
-        # stream tickets
-        "create_stream_ticket", "stream_ticket_key", "stream_ticket_origin_active",
-        # App provider credentials
-        "set_app_provider_credential", "app_provider_credential", "app_provider_credential_by_id",
-        "app_provider_managed", "list_app_provider_credentials", "revoke_app_provider_credential",
+        # API keys: the listings that SessionStores overrides (requests, store metadata), and the three every test
+        # mints and reads keys with
+        "create_api_key", "api_key_by_secret", "get_api_key", "list_api_keys", "get_api_key_listing",
+        "restore_api_key",
     }),
     "sessions": frozenset({
         # sessions
@@ -67,6 +61,10 @@ PINNED_SHIM: dict[str, frozenset[str]] = {
 COMPOSITES = frozenset({("sessions", "read_artifact")})
 
 
+# Stores that land with every caller moved, so `Database` forwards none of their names, and never will.
+NO_SHIM = frozenset({"accounts"})
+
+
 def _forwarded() -> dict[str, str]:
     """{name: store attribute} for every shim entry on `Database`, read from the class itself."""
     return {name: value.store for name, value in vars(Database).items() if isinstance(value, core_db._Forwarded)}
@@ -93,19 +91,22 @@ def _store_methods(cls: type) -> set[str]:
 
 def test_the_shim_only_shrinks():
     forwarded = _forwarded()
-    assert set(forwarded.values()) == set(PINNED_SHIM) == set(STORES), "a store's shim is pinned when it is added"
+    # Every store either has a pinned shim or none at all, and one added without a shim never gains one.
+    assert set(PINNED_SHIM) | NO_SHIM == set(STORES) and not set(PINNED_SHIM) & NO_SHIM
+    # A pin whose store forwards nothing any more is dropped, its store moving to NO_SHIM.
+    assert set(forwarded.values()) == set(PINNED_SHIM), "a shim for a store in NO_SHIM, or a pin with no shim left"
     for store, pinned in PINNED_SHIM.items():
         names = {n for n, s in forwarded.items() if s == store}
         assert shim_problems(names, pinned, _store_methods(STORES[store]), store) == [], store
 
 
 def test_database_forwards_these_many_names_per_store():
-    """The shim on `Database` as this change leaves it: 28 credential names (39 when the store was added) and 51
-    session names, read from the class itself."""
+    """The shim on `Database` as this change leaves it, read from the class itself: 6 credential names (39 when the
+    store was added, 28 before this change), 51 session names and no account names."""
     forwarded = _forwarded()
     sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
-    assert sizes == {"credentials": 28, "sessions": 51}
-    assert sizes == {store: len(names) for store, names in PINNED_SHIM.items()}
+    assert sizes == {"credentials": 6, "sessions": 51, "accounts": 0}
+    assert sizes == {store: len(PINNED_SHIM.get(store, ())) for store in STORES}
 
 
 def test_the_ratchet_allows_a_removal_and_refuses_growth_and_a_stale_pin():
@@ -198,17 +199,18 @@ def test_aio_reads_and_writes_through_the_shim_join_the_writer(db):
     async def run():
         row, secret = await db.aio.create_api_key("Owner", "admin", kind="owner")
         assert await db.aio.api_key_by_secret(secret) == db.credentials.api_key_by_secret(secret)
-        assert await db.aio.revoke_api_key(row["id"]) is True
+        assert (await db.aio.get_api_key(row["id"]))["id"] == row["id"]
+        assert await db.credentials.aio.revoke_api_key(row["id"]) is True  # a moved name: the store's own aio
         return row
     row = asyncio.run(run())
     assert db.get_api_key(row["id"])["revoked_at"] is not None
 
 
 def test_an_instance_patch_shadows_the_forwarded_name(db, monkeypatch):
-    monkeypatch.setattr(db, "touch_api_key", lambda kid: "patched")
-    assert db.touch_api_key("k-1") == "patched"
+    monkeypatch.setattr(db, "get_api_key", lambda kid: "patched")
+    assert db.get_api_key("k-1") == "patched"
     monkeypatch.undo()
-    assert db.touch_api_key.__self__ is db.credentials
+    assert db.get_api_key.__self__ is db.credentials
 
 
 def test_a_store_write_joins_the_callers_transaction(db):
@@ -278,14 +280,20 @@ def test_every_core_store_is_declared_and_says_where_its_rows_live():
         assert core_db._store_class(name) is cls
 
 
-def test_no_wrapper_hands_out_the_wrong_databases_store(tmp_path):
-    """Every route hands out the main store's credentials. A routing wrapper refuses `sessions`: one Database's
-    SessionStore would miss every session routed to another, and an App's would outlive the wrapper's hold on it.
-    A Web route is Web's Database, whose `sessions` holds the owner's and members' sessions."""
+def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
+    """Driven by `app_stores._STORE_HOME`, so each new store is covered: a store whose rows live in the main store
+    (credentials, accounts) is the main store's on every route, an App's raw Database included. A store whose rows
+    are routed per session (sessions) is refused by every routing wrapper: one Database's would miss the sessions
+    routed to another, and an App's would outlive the wrapper's hold on it. A Web route is Web's Database, whose
+    `sessions` holds the owner's and members' sessions."""
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
         key, _ = stores.create_api_key("Owner", "admin", kind="owner")
+        now = time.time()
+        main.accounts.insert_account({"user_id": "u-1", "login": "alice@example.com", "role": "member",
+                                      "display_name": "Alice", "enabled": 1, "disk_quota_bytes": 1,
+                                      "max_running": 1, "max_queued": 2, "created_at": now, "updated_at": now})
         stores.insert_session(_session("a1", "k-aaaa"))
         stores.insert_session(_session("own"))
         assert stores.web is not main  # the owner's sessions are in Web's own store
@@ -293,21 +301,98 @@ def test_no_wrapper_hands_out_the_wrong_databases_store(tmp_path):
                     "for_app(app)": stores.for_app("k-aaaa"), "for_session(app sid)": stores.for_session("a1")}
         web_routes = {"for_app('')": stores.for_app(""), "for_app(WEB_APP_ID)": stores.for_app(WEB_APP_ID),
                       "for_session(owner sid)": stores.for_session("own")}
-        for label, wrapper in {**wrappers, **web_routes}.items():
-            assert wrapper.credentials is main.credentials, label
-            assert key["id"] in {k["id"] for k in wrapper.credentials.list_api_keys()}, label
-            assert wrapper.get_api_key(key["id"])["id"] == key["id"], label  # a forwarded credential call too
+        databases = {"App Database": stores._open["k-aaaa"].db, "Web Database": stores.web}
+        main_homed = [name for name, home in app_stores._STORE_HOME.items() if home == "main"]
+        routed = [name for name, home in app_stores._STORE_HOME.items() if home is None]
+        assert set(main_homed) == {"credentials", "accounts"} and routed == ["sessions"]
+        for label, route in {**wrappers, **web_routes, **databases}.items():
+            for name in main_homed:
+                assert getattr(route, name) is getattr(main, name), (label, name)
+            assert key["id"] in {k["id"] for k in route.credentials.list_api_keys()}, label
+            assert route.get_api_key(key["id"])["id"] == key["id"], label  # a forwarded credential call too
+            assert route.accounts.account_by_login("alice@example.com")["user_id"] == "u-1", label
         for wrapper in wrappers.values():
-            with pytest.raises(AttributeError, match="routes each session"):
-                wrapper.sessions  # noqa: B018 - the access itself is the check
+            for name in routed:
+                with pytest.raises(AttributeError, match="routes each session"):
+                    getattr(wrapper, name)
         # A Web route is Web's Database itself: its `sessions` is the store that holds the owner's sessions.
         for label, wrapper in web_routes.items():
             assert wrapper.sessions is stores.web.sessions, label
             assert wrapper.sessions.get_session("own")["id"] == "own", label
-        # The App's own Database, however reached, uses the main store's credentials as well.
-        assert stores._open["k-aaaa"].db.credentials is main.credentials
         # The wrappers' own session calls still route: the App's session is read from its store.
         assert stores.for_app("k-aaaa").get_session("a1")["id"] == "a1"
         assert stores.scope("k-aaaa").get_session("a1")["id"] == "a1"
+    finally:
+        stores.close()
+
+
+ACCOUNT_TABLES = ("accounts", "account_audit", "member_projects", "github_connections", "member_api_keys",
+                  "google_identities", "google_link_invitations", "web_sessions")
+
+
+def test_account_queries_left_the_database_class():
+    source = inspect.getsource(Database)
+    for table in ACCOUNT_TABLES:
+        assert f"INTO {table} " not in source and f"UPDATE {table} " not in source, table
+        assert f"FROM {table} " not in source, table
+    for name in _store_methods(AccountStore):
+        assert not hasattr(Database, name), f"Database.{name}: call db.accounts.{name}"
+
+
+def _account_uses_off_the_store(root) -> list[str]:
+    """Each use of an AccountStore method name (a call, or a bound method handed to `to_thread` or `awrite`) not made
+    on an account store: `<x>.accounts.<name>`, an `accounts` stand-in (`principal.resolve_human`'s), or
+    `operation_audit`'s `_audit_store(db)`."""
+    import ast
+    names = _store_methods(AccountStore)
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "account_store.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Attribute) and node.attr in names):
+                continue
+            on = node.value
+            if (isinstance(on, ast.Attribute) and on.attr == "accounts") or \
+                    (isinstance(on, ast.Name) and on.id == "accounts") or \
+                    (isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store"):
+                continue
+            found.append(f"{path.relative_to(root.parent).as_posix()}:{node.lineno} .{node.attr}")
+    return found
+
+
+def test_every_account_call_goes_through_the_account_store():
+    """No production code calls or passes an account method of a Database (it has none): only of `db.accounts`."""
+    root = Path(core_db.__file__).resolve().parent
+    for package in (root, root.parent / "harness_modules", root.parent / "scripts"):
+        assert _account_uses_off_the_store(package) == [], package.name
+
+
+def test_the_scan_finds_calls_and_bound_methods(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "x.py").write_text(
+        "import asyncio\n"
+        "def f(db, m, accounts):\n"
+        "    db.accounts.list_audit(5)\n"          # on the store: fine
+        "    accounts.member_count()\n"            # a stand-in named accounts: fine
+        "    db.list_audit(5)\n"                   # line 5: a call on the Database
+        "    return asyncio.to_thread(m.db.audit_page, 5)\n",  # line 6: a bound method
+        encoding="utf-8")
+    assert _account_uses_off_the_store(tmp_path / "pkg") == ["pkg/x.py:5 .list_audit", "pkg/x.py:6 .audit_page"]
+
+
+def test_operation_audit_writes_through_the_account_store_or_a_stand_in(tmp_path):
+    from harness import namespace_audit
+    from harness.operation_audit import _audit_store
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        stores.insert_session(_session("a1", "k-aaaa"))
+        for label, db in {"Database": main, "SessionStores": stores, "scope(app)": stores.scope("k-aaaa"),
+                          "for_app(app)": stores.for_app("k-aaaa"), "Web Database": stores.web}.items():
+            assert _audit_store(db) is main.accounts, label
+        login = namespace_audit.LoginStore(stores, "k-aaaa", "end-user")
+        receipt = namespace_audit.ReceiptStore(stores, "login", "erase", 1)
+        assert _audit_store(login) is login and _audit_store(receipt) is receipt
     finally:
         stores.close()

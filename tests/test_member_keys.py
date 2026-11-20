@@ -63,8 +63,8 @@ def test_the_key_is_sealed_in_the_database_and_bound_to_its_member(tmp_path, mon
         assert m.member_keys.get(a, "claude") == CANARY
         assert m.member_keys.get(b, "claude") == ""
         # The row moved to another member does not open: the ciphertext is bound to (member, backend).
-        row = m.db.member_api_key(a, "claude")
-        m.db.set_member_api_key(b, "claude", bytes(row["ciphertext"]), "xxxx")
+        row = m.db.accounts.member_api_key(a, "claude")
+        m.db.accounts.set_member_api_key(b, "claude", bytes(row["ciphertext"]), "xxxx")
         assert m.member_keys.get(b, "claude") == ""
         # A lost or replaced master key leaves the member without a key rather than with a wrong one.
         (m.cfg.data_dir / member_keys.KEY_FILE).unlink()
@@ -183,7 +183,7 @@ def test_deleting_the_key_stops_new_sessions_and_removes_it(tmp_path, monkeypatc
         assert client.post("/api/v1/sessions", json={"prompt": "hi", "backend": "claude"},
                            headers=H(ALICE)).status_code == 201
         assert client.delete(f"{KEYS}/claude", headers=H(ALICE)).status_code == 200
-        assert m.db.member_api_keys(ids[ALICE]) == []
+        assert m.db.accounts.member_api_keys(ids[ALICE]) == []
         assert removed == [("", [member_keys.end_user_id(ids[ALICE])], ("claude",))]
         r = client.post("/api/v1/sessions", json={"prompt": "hi", "backend": "claude"}, headers=H(ALICE))
         assert r.status_code == 403 and r.json()["error"]["code"] == "member_api_key_required"
@@ -198,7 +198,7 @@ def test_disabling_a_member_deletes_their_keys(tmp_path, monkeypatch):
         assert put(client, BOB, "claude", OTHER).status_code == 200
         r = client.patch(f"{PREFIX}/accounts/{ids[ALICE]}", json={"enabled": False}, headers=H(OWNER))
         assert r.status_code == 200, r.text
-        assert m.db.member_api_keys(ids[ALICE]) == []
+        assert m.db.accounts.member_api_keys(ids[ALICE]) == []
         assert m.member_keys.get(ids[BOB], "claude") == OTHER
 
 

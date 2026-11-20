@@ -95,7 +95,7 @@ def test_listing_local_grants_nothing_new_any_app_could_already_start_a_local_se
         plain, _ = _key(client, name="plain")
         managed, key = _key(client, name="managed")
         manager.set_app_provider_credential(key["id"], "claude", "", "subscription", ["claude-opus-5"])
-        assert manager.db.app_provider_managed(key["id"])
+        assert manager.db.credentials.app_provider_managed(key["id"])
         for headers in (plain, managed):
             created = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hi", "backend": "local"})
             assert created.status_code == 201, created.text

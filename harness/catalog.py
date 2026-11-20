@@ -46,7 +46,7 @@ def get_project(cfg, db, user_id: str, slug: str) -> Project | None:
         return project
     if db is None:
         return None
-    row = db.get_member_project(user_id, slug)
+    row = db.accounts.get_member_project(user_id, slug)
     return member_project(row) if row else None
 
 
@@ -55,7 +55,7 @@ def list_projects(cfg, db, user_id: str) -> list[Project]:
         return [p for p in cfg.projects.values() if getattr(p, "owner_id", OWNER_USER_ID) in ("", OWNER_USER_ID)]
     if db is None:
         return []
-    return [member_project(row) for row in db.list_member_projects(user_id)]
+    return [member_project(row) for row in db.accounts.list_member_projects(user_id)]
 
 
 def public_project(project: Project, *, include_repo: bool = False) -> dict:

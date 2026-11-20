@@ -71,7 +71,7 @@ def test_two_apps_two_members_owner_guesses_and_cursor(setup):
             assert client.post(f"/api/v1/sessions/{other}/messages", json={"content": PRIVATE}, headers=auth).status_code == 404
         assert client.delete("/api/v1/audit", headers=auth).status_code == 405
     assert client.get("/api/v1/audit").status_code == 403
-    assert m.db.main.audit_page(action="session.create")["items"] == []
+    assert m.db.main.accounts.audit_page(action="session.create")["items"] == []
     assert m.db.main.conn.execute("SELECT COUNT(*) FROM namespace_audit").fetchone()[0] == 0
     # sessions:all never grants another namespace's audit, including Web/member detail.
     _, broad = m.db.main.create_api_key("broad", "sessions:all", kind="app")
@@ -118,26 +118,26 @@ def test_explicit_delete_removes_detail_only_aggregate_receipt(setup, monkeypatc
     assert client.delete(f"/api/v1/sessions/{sid}", headers=headers[0]).status_code == 204
     assert page(client, headers[0])["items"] == []
     assert page(client, headers[1])["items"][0]["target_id"] == foreign
-    receipts = m.db.main.audit_page(action="namespace.erase")["items"]
+    receipts = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert [r["outcome"] for r in receipts] == ["ok", "started"]
     assert all(r["target_id"] == apps[0][0]["id"] for r in receipts)
     assert all(r["metadata"]["reason"] == "manual" and r["metadata"]["count"] == 1 for r in receipts)
     assert sid not in json.dumps(receipts) and PRIVATE not in json.dumps(receipts)
     assert sid not in caplog.text
     assert client.delete(f"/api/v1/sessions/{sid}", headers=headers[0]).status_code == 204
-    assert len(m.db.main.audit_page(action="namespace.erase")["items"]) == 2
+    assert len(m.db.main.accounts.audit_page(action="namespace.erase")["items"]) == 2
 
 
 @pytest.mark.parametrize("outcome", ["started", "ok"])
 def test_delete_intent_and_settlement_failure_no_repeat(setup, monkeypatch, outcome):
     m, client, _, _, headers = setup
     sid = create(client, headers[0])
-    original = m.db.main.insert_audit
+    original = m.db.main.accounts.insert_audit
     def fail(*args, **kwargs):
         if args[2] == "namespace.erase" and args[3] == outcome:
             raise OSError(PRIVATE)
         return original(*args, **kwargs)
-    monkeypatch.setattr(m.db.main, "insert_audit", fail)
+    monkeypatch.setattr(m.db.main.accounts, "insert_audit", fail)
     effect = AsyncMock()
     monkeypatch.setattr(m, "_erase_cli_history", effect)
     response = client.delete(f"/api/v1/sessions/{sid}", headers=headers[0])
@@ -216,7 +216,7 @@ def test_login_protocol_audit_failure_refuses_or_reports_effect(setup, monkeypat
         asyncio.run(run())
     assert caught.value.code == ("audit_unavailable" if outcome == "started" else "audit_record_incomplete")
     assert effect.await_count == (0 if outcome == "started" else 1)
-    assert m.db.main.audit_page(action="login.start")["items"] == []
+    assert m.db.main.accounts.audit_page(action="login.start")["items"] == []
 
 
 def test_sdk_incomplete_is_not_retryable():
@@ -250,7 +250,7 @@ def test_interrupted_erase_survives_restart_blocks_automatic_repeat(setup, monke
         with pytest.raises(HarnessError) as caught:
             namespace_audit.refuse_unresolved_erase(SimpleNamespace(main=reopened), scope)
         assert caught.value.may_have_completed
-        assert reopened.audit_page(action="namespace.erase")["items"][0]["actor_kind"] == "system"
+        assert reopened.accounts.audit_page(action="namespace.erase")["items"][0]["actor_kind"] == "system"
     finally:
         reopened.close()
 
@@ -279,10 +279,10 @@ def test_erase_app_drops_private_audit_and_only_receipts_remain(setup, monkeypat
     sid = create(client, headers[0])
     effect = AsyncMock()
     monkeypatch.setattr("harness.cli_domains.drop_app_volumes", effect)
-    m.db.revoke_api_key(scope)
+    m.db.credentials.revoke_api_key(scope)
     asyncio.run(m.erase_app(scope))
     assert not m.db.store_path(scope).exists()
-    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert len(rows) == 2
     assert all(r["actor_id"] == "system" and r["metadata"]["reason"] == "revoked_app" for r in rows)
     assert sid not in json.dumps(rows) and PRIVATE not in json.dumps(rows)
@@ -322,7 +322,7 @@ def test_concurrent_delete_runs_effect_once_and_refuses_message(setup, monkeypat
         assert await asyncio.gather(first, second) == [True, False]
         fake.assert_awaited_once()
     asyncio.run(run())
-    assert len(m.db.main.audit_page(action="namespace.erase")["items"]) == 2
+    assert len(m.db.main.accounts.audit_page(action="namespace.erase")["items"]) == 2
     assert not m.erase_locks  # waiters retained the same lock, but erased namespaces are not cached forever
 
 
@@ -388,7 +388,7 @@ def test_private_auto_approval_is_system_agent_and_never_in_main(setup):
     row = page(client, headers[0], action="approval.auto_decide")["items"][0]
     assert (row["actor_id"], row["actor_kind"], row["source"]) == ("system", "system", "agent")
     assert PRIVATE not in json.dumps(row)
-    assert m.db.main.audit_page(action="approval.auto_decide")["items"] == []
+    assert m.db.main.accounts.audit_page(action="approval.auto_decide")["items"] == []
 
 
 def test_member_erasure_leaves_only_account_receipt(setup):
@@ -399,7 +399,7 @@ def test_member_erasure_leaves_only_account_receipt(setup):
     asyncio.run(m.erase_session(sid, context=ctx))
     assert not m.erase_locks
     assert page(client, auth)["items"] == []
-    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert all(r["target_kind"] == "account" and r["target_id"] == members[0]["user_id"] for r in rows)
     assert sid not in json.dumps(rows) and PRIVATE not in json.dumps(rows)
 
@@ -410,7 +410,7 @@ def test_retention_removes_private_rows_with_system_reason(setup):
     m.db.set_app_retention(apps[0][0]["id"], 1)
     asyncio.run(m.sweep_app_data(time.time() + 2 * DAY))
     assert page(client, headers[0])["items"] == []
-    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert [r["outcome"] for r in rows] == ["ok", "started"]
     assert all(r["metadata"]["reason"] == "retention" and r["actor_id"] == "system" for r in rows)
     assert sid not in json.dumps(rows)
@@ -425,7 +425,7 @@ def test_partial_provider_erase_does_not_replay_or_leak_exception(setup, monkeyp
     asyncio.run(m.sweep_app_data(time.time() + 2 * DAY))
     asyncio.run(m.sweep_app_data(time.time() + 3 * DAY))
     effect.assert_awaited_once()
-    rows = m.db.main.audit_page(action="namespace.erase")["items"]
+    rows = m.db.main.accounts.audit_page(action="namespace.erase")["items"]
     assert [r["outcome"] for r in rows] == ["unknown", "started"]
     assert PRIVATE not in caplog.text and sid not in caplog.text
 
