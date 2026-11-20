@@ -525,7 +525,7 @@ def test_hub_key_cannot_mint_an_owner_key_and_release_names_any_it_did(hh):
 
     # An owner key a Hub minted before this rule existed is named by release, for the owner to revoke.
     row, _ = m.db.main.create_api_key("legacy spare", "admin", "owner")
-    m.db.main.write(lambda: m.db.main.insert_audit(
+    m.db.main.write(lambda: m.db.main.accounts.insert_audit(
         "owner", row["id"], "key.create", "ok", context=audit_context.owner_context(key), target_kind="api_key"))
     released = client.post(f"{CLAIM}/release", headers=_host(m), json={"confirm": True})
     assert released.status_code == 200, released.text

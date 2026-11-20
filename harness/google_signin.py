@@ -532,7 +532,7 @@ class GoogleSignin:
                 tuple(g.login for g in self.cfg.guests), self._member_logins(), file_key)
 
     def _member_logins(self) -> tuple:
-        return tuple(sorted(a["login"] for a in self.db.list_accounts() if a.get("login")))
+        return tuple(sorted(a["login"] for a in self.db.accounts.list_accounts() if a.get("login")))
 
     def problems(self) -> list[str]:
         key = self._static_key()
@@ -574,7 +574,7 @@ class GoogleSignin:
         return request.headers.get("sec-fetch-site", "same-origin") in ("same-origin", "none")
 
     def resolve(self, request, login: str | None) -> Principal:
-        base = resolve_human(self.cfg, login, self.db)
+        base = resolve_human(self.cfg, login, self.db.accounts)
         web = WebAuth()
         request.state.web_auth = web
         token = request.cookies.get(SESSION_COOKIE, "")
@@ -604,7 +604,7 @@ class GoogleSignin:
             return base  # a login mapped to one member never switches members through Google
         if not web.admitted:
             return base  # owner, guest, and refused logins ignore Google sessions
-        account = self.db.account_by_id(row["user_id"])
+        account = self.db.accounts.account_by_id(row["user_id"])
         if account is None or account.get("role") != "member":
             web.clear_cookie = True
             return _pre_auth(login)
@@ -638,56 +638,56 @@ class GoogleSignin:
         if not token or len(token) > 128:
             return None
         id_hash = sha256_hex(token)
-        row = self.db.web_session(id_hash)
+        row = self.db.accounts.web_session(id_hash)
         now = self.clock()
         if (row is None or row.get("revoked_at") is not None or now >= row["expires_at"]
                 or now - row["last_seen_at"] >= IDLE_SECONDS):
             return None
-        account = self.db.account_by_id(row["user_id"])
-        if account is None or not bool(account.get("enabled", 1)) or self.db.google_identity(row["user_id"]) is None:
+        account = self.db.accounts.account_by_id(row["user_id"])
+        if account is None or not bool(account.get("enabled", 1)) or self.db.accounts.google_identity(row["user_id"]) is None:
             return None
         if now - row["last_seen_at"] >= TOUCH_SECONDS:
-            self.db.touch_web_session(id_hash, now)
+            self.db.accounts.touch_web_session(id_hash, now)
         return row
 
     def issue_session(self, user_id: str, replacing: str = "") -> str:
         now = self.clock()
         if replacing:
-            self.db.revoke_web_session(sha256_hex(replacing), now)
+            self.db.accounts.revoke_web_session(sha256_hex(replacing), now)
         token = secrets.token_urlsafe(32)
-        self.db.insert_web_session(sha256_hex(token), user_id, now, now + ABSOLUTE_SECONDS)
-        self.db.purge_web_sessions(now - ABSOLUTE_SECONDS)
+        self.db.accounts.insert_web_session(sha256_hex(token), user_id, now, now + ABSOLUTE_SECONDS)
+        self.db.accounts.purge_web_sessions(now - ABSOLUTE_SECONDS)
         return token
 
     def logout(self, token: str, actor_id: str) -> None:
-        user_id = self.db.revoke_web_session(sha256_hex(token), self.clock()) if token else None
+        user_id = self.db.accounts.revoke_web_session(sha256_hex(token), self.clock()) if token else None
         if user_id:
-            self.db.insert_audit(actor_id, user_id, "google_logout", "ok")
+            self.db.accounts.insert_audit(actor_id, user_id, "google_logout", "ok")
             self.m.revoke_member_streams(user_id)
 
     def revoke_sessions(self, actor_id: str, user_id: str, reason: str = "revoke_sessions") -> int:
-        count = self.db.revoke_web_sessions(user_id, self.clock())
+        count = self.db.accounts.revoke_web_sessions(user_id, self.clock())
         self.m.revoke_member_streams(user_id)
-        self.db.insert_audit(actor_id, user_id, f"google_{reason}", "ok", f"{count} sessions")
+        self.db.accounts.insert_audit(actor_id, user_id, f"google_{reason}", "ok", f"{count} sessions")
         return count
 
     def member_disabled(self, user_id: str) -> None:
-        self.db.cancel_google_invitation(user_id)
-        self.db.revoke_web_sessions(user_id, self.clock())
+        self.db.accounts.cancel_google_invitation(user_id)
+        self.db.accounts.revoke_web_sessions(user_id, self.clock())
 
     def member_rebound(self, user_id: str) -> None:
-        self.db.revoke_web_sessions(user_id, self.clock())
+        self.db.accounts.revoke_web_sessions(user_id, self.clock())
 
     # views
     def member_view(self, user_id: str, web: WebAuth | None = None) -> dict:
-        ident = self.db.google_identity(user_id)
+        ident = self.db.accounts.google_identity(user_id)
         now = self.clock()
         via_session = bool(web and web.via_session)
         return {
             "available": self.enabled(), "linked": ident is not None,
             "email": ident["email"] if ident else "", "linked_at": ident["linked_at"] if ident else None,
             "last_sign_in_at": ident["last_sign_in_at"] if ident else None,
-            "active_web_sessions": self.db.count_web_sessions(user_id, now, IDLE_SECONDS),
+            "active_web_sessions": self.db.accounts.count_web_sessions(user_id, now, IDLE_SECONDS),
             "signed_in_with_google": via_session,
             # Unlinking from a device that Tailscale admits only for Google removes this device's way in.
             "unlink_removes_this_device": via_session,
@@ -695,43 +695,43 @@ class GoogleSignin:
         }
 
     def owner_member_view(self, user_id: str) -> dict:
-        ident = self.db.google_identity(user_id)
+        ident = self.db.accounts.google_identity(user_id)
         now = self.clock()
-        invitation = self.db.google_invitation(user_id, now)
+        invitation = self.db.accounts.google_invitation(user_id, now)
         return {
             "linked": ident is not None, "email": ident["email"] if ident else "",
             "linked_at": ident["linked_at"] if ident else None,
             "last_sign_in_at": ident["last_sign_in_at"] if ident else None,
-            "active_web_sessions": self.db.count_web_sessions(user_id, now, IDLE_SECONDS),
+            "active_web_sessions": self.db.accounts.count_web_sessions(user_id, now, IDLE_SECONDS),
             "invitation_expires_at": invitation["expires_at"] if invitation else None,
         }
 
     # owner and member account actions
     def create_invitation(self, actor_id: str, user_id: str) -> dict:
-        account = self.db.account_by_id(user_id)
+        account = self.db.accounts.account_by_id(user_id)
         if account is None or account.get("role") != "member":
             raise GoogleSigninError(404, "no household account matches that id", code="not_found")
         if not bool(account.get("enabled", 1)):
             raise GoogleSigninError(409, "enable this household account first", code="account_disabled")
-        if self.db.google_identity(user_id) is not None:
+        if self.db.accounts.google_identity(user_id) is not None:
             raise GoogleSigninError(409, "unlink the current Google account first", code="already_linked")
         code = "ahg-" + secrets.token_urlsafe(32)  # 256 bits
         now = self.clock()
-        self.db.put_google_invitation(user_id, sha256_hex(code), now, now + INVITE_SECONDS)
-        self.db.insert_audit(actor_id, user_id, "google_invite", "ok")
+        self.db.accounts.put_google_invitation(user_id, sha256_hex(code), now, now + INVITE_SECONDS)
+        self.db.accounts.insert_audit(actor_id, user_id, "google_invite", "ok")
         return {"code": code, "expires_at": now + INVITE_SECONDS}
 
     def cancel_invitation(self, actor_id: str, user_id: str) -> bool:
-        cancelled = self.db.cancel_google_invitation(user_id)
-        self.db.insert_audit(actor_id, user_id, "google_invite_cancel", "ok" if cancelled else "noop")
+        cancelled = self.db.accounts.cancel_google_invitation(user_id)
+        self.db.accounts.insert_audit(actor_id, user_id, "google_invite_cancel", "ok" if cancelled else "noop")
         return cancelled
 
     def unlink(self, actor_id: str, user_id: str) -> bool:
-        removed = self.db.unlink_google_identity(user_id)
-        self.db.cancel_google_invitation(user_id)
-        self.db.revoke_web_sessions(user_id, self.clock())
+        removed = self.db.accounts.unlink_google_identity(user_id)
+        self.db.accounts.cancel_google_invitation(user_id)
+        self.db.accounts.revoke_web_sessions(user_id, self.clock())
         self.m.revoke_member_streams(user_id)
-        self.db.insert_audit(actor_id, user_id, "google_unlink", "ok" if removed else "noop")
+        self.db.accounts.insert_audit(actor_id, user_id, "google_unlink", "ok" if removed else "noop")
         return removed
 
     # authorization flow
@@ -740,7 +740,7 @@ class GoogleSignin:
             del self._attempts[key]
 
     def _enabled_member(self, user_id: str) -> dict | None:
-        account = self.db.account_by_id(user_id)
+        account = self.db.accounts.account_by_id(user_id)
         if account is None or account.get("role") != "member" or not bool(account.get("enabled", 1)):
             return None
         return account
@@ -766,16 +766,16 @@ class GoogleSignin:
                 raise GoogleSigninError(403, "only a signed-in household member can link their own Google account",
                                         code="not_member")
             user_id = ident.user_id
-            if self.db.google_identity(user_id) is not None:
+            if self.db.accounts.google_identity(user_id) is not None:
                 raise GoogleSigninError(409, "unlink the current Google account first", code="already_linked")
         else:
             code = (code or "").strip()
             invite_hash = sha256_hex(code) if 0 < len(code) <= 128 else ""
-            user_id = self.db.google_invitation_user(invite_hash, self.clock()) if invite_hash else None
-            if (not user_id or not self._enabled_member(user_id) or self.db.google_identity(user_id) is not None
+            user_id = self.db.accounts.google_invitation_user(invite_hash, self.clock()) if invite_hash else None
+            if (not user_id or not self._enabled_member(user_id) or self.db.accounts.google_identity(user_id) is not None
                     or not (web.admitted or (ident.is_member and ident.user_id == user_id))):
-                self.db.insert_audit(ident.user_id if ident.allowed else "unknown", "", "google_invite_redeem",
-                                     "denied")
+                self.db.accounts.insert_audit(ident.user_id if ident.allowed else "unknown", "", "google_invite_redeem",
+                                              "denied")
                 raise GoogleSigninError(400, INVITE_ERROR, code="invalid_invitation")
         discovery = self.oidc.discovery()
         now = self.clock()
@@ -841,11 +841,11 @@ class GoogleSignin:
     def _finish_signin(self, web: WebAuth, claims: dict, now: float) -> str:
         if not web.admitted:
             raise GoogleSigninError(403, GENERIC_ERROR, "not_admitted")
-        identity = self.db.google_identity_by_sub(claims["sub"])
+        identity = self.db.accounts.google_identity_by_sub(claims["sub"])
         if identity is None or not self._enabled_member(identity["user_id"]):
             raise GoogleSigninError(403, GENERIC_ERROR, "no_linked_member")
-        self.db.touch_google_sign_in(identity["user_id"], claims["email"], now)
-        self.db.insert_audit(identity["user_id"], identity["user_id"], "google_signin", "ok")
+        self.db.accounts.touch_google_sign_in(identity["user_id"], claims["email"], now)
+        self.db.accounts.insert_audit(identity["user_id"], identity["user_id"], "google_signin", "ok")
         return identity["user_id"]
 
     def _finish_link(self, web: WebAuth, ident: Principal, attempt: Attempt, claims: dict, now: float) -> str:
@@ -856,19 +856,19 @@ class GoogleSignin:
             def link() -> None:
                 if self._enabled_member(user_id) is None:
                     raise GoogleSigninError(403, GENERIC_ERROR, "member_unavailable")
-                if attempt.mode == "invite" and not self.db.consume_google_invitation(
+                if attempt.mode == "invite" and not self.db.accounts.consume_google_invitation(
                         user_id, attempt.invite_hash, now):
                     raise GoogleSigninError(400, GENERIC_ERROR, "invitation_used_or_expired")
-                if not self.db.link_google_identity(user_id, claims["sub"], claims["email"], now):
+                if not self.db.accounts.link_google_identity(user_id, claims["sub"], claims["email"], now):
                     raise GoogleSigninError(409, GENERIC_ERROR, "already_linked")
             self.db.write(link)
         except GoogleSigninError as e:
-            self.db.insert_audit(user_id, user_id, f"google_{attempt.mode}", "denied", e.reason)
+            self.db.accounts.insert_audit(user_id, user_id, f"google_{attempt.mode}", "denied", e.reason)
             raise
         # Linking is identity-sensitive: earlier Web sessions for this member do not survive it.
-        self.db.revoke_web_sessions(user_id, now)
+        self.db.accounts.revoke_web_sessions(user_id, now)
         self.m.revoke_member_streams(user_id)
-        self.db.insert_audit(user_id, user_id, f"google_{attempt.mode}", "ok")
+        self.db.accounts.insert_audit(user_id, user_id, f"google_{attempt.mode}", "ok")
         return user_id
 
 

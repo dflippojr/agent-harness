@@ -148,7 +148,7 @@ class MemberKeys:
     # --- reads -------------------------------------------------------------------------------------------------
     def get(self, user_id: str, backend: str) -> str:
         """The member's key for `backend`, or "" (none stored, or unreadable: a restored backup, a new master key)."""
-        row = self.db.member_api_key(user_id, backend) if backend in BACKENDS else None
+        row = self.db.accounts.member_api_key(user_id, backend) if backend in BACKENDS else None
         if not row:
             return ""
         blob = bytes(row["ciphertext"])
@@ -162,7 +162,7 @@ class MemberKeys:
         return bool(self.get(user_id, backend))
 
     def status(self, user_id: str) -> dict:
-        rows = {r["backend"]: r for r in self.db.member_api_keys(user_id)}
+        rows = {r["backend"]: r for r in self.db.accounts.member_api_keys(user_id)}
         return {"keys": [{"backend": b, "provider": meta["provider"], "env": meta["env"],
                           "configured": b in rows, "last4": rows[b]["last4"] if b in rows else "",
                           "updated_at": rows[b]["updated_at"] if b in rows else None}
@@ -197,8 +197,8 @@ class MemberKeys:
         sealed = self._seal(user_id, backend, key)  # encrypted first; the stored change and its audit commit together
 
         def commit() -> None:
-            replaced = self.db.member_api_key(user_id, backend) is not None
-            self.db.set_member_api_key(user_id, backend, sealed, key[-4:])
+            replaced = self.db.accounts.member_api_key(user_id, backend) is not None
+            self.db.accounts.set_member_api_key(user_id, backend, sealed, key[-4:])
             self._audit(ctx, user_id, "member_key.set", "ok",
                         {"backend": backend, "configured": True, "replaced": replaced})
         self._write(commit)
@@ -212,7 +212,7 @@ class MemberKeys:
             raise
 
         def commit() -> None:
-            removed = self.db.delete_member_api_keys(user_id, backend)
+            removed = self.db.accounts.delete_member_api_keys(user_id, backend)
             self._audit(ctx, user_id, "member_key.delete", "ok" if removed else "noop",
                         {"backend": backend, "configured": False})
         self._write(commit)
@@ -220,7 +220,7 @@ class MemberKeys:
 
     def purge(self, user_id: str) -> int:
         """Delete every key of the member (the account is removed or cut off)."""
-        return self.db.delete_member_api_keys(user_id)
+        return self.db.accounts.delete_member_api_keys(user_id)
 
     def test(self, user_id: str, backend: str, ctx=None) -> dict:
         """One cheap validation call with the stored key."""

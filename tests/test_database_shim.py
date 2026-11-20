@@ -10,17 +10,20 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
+from pathlib import Path
 
 import pytest
 
 import harness.app_stores as app_stores
 import harness.db as core_db
+from harness.account_store import AccountStore
 from harness.app_stores import WEB_APP_ID, SessionStores
 from harness.credential_store import CredentialStore
 from harness.db import CoreStore, Database
 from harness.session_store import SessionStore
 
-STORES: dict[str, type[CoreStore]] = {"credentials": CredentialStore, "sessions": SessionStore}
+STORES: dict[str, type[CoreStore]] = {"credentials": CredentialStore, "sessions": SessionStore,
+                                      "accounts": AccountStore}
 
 # The names `Database` forwards to each store. A store's set is written once, in the change that adds the store; after
 # that, delete a name here once its last `db.<name>` caller has moved to the store, and never add one.
@@ -93,7 +96,9 @@ def _store_methods(cls: type) -> set[str]:
 
 def test_the_shim_only_shrinks():
     forwarded = _forwarded()
-    assert set(forwarded.values()) == set(PINNED_SHIM) == set(STORES), "a store's shim is pinned when it is added"
+    # A store's shim is pinned when the store is added; a store added without one (its callers moved with it, as
+    # AccountStore's did) never gains one.
+    assert set(forwarded.values()) <= set(PINNED_SHIM) <= set(STORES), "a shim for a store with no pin"
     for store, pinned in PINNED_SHIM.items():
         names = {n for n, s in forwarded.items() if s == store}
         assert shim_problems(names, pinned, _store_methods(STORES[store]), store) == [], store
@@ -104,8 +109,8 @@ def test_database_forwards_these_many_names_per_store():
     session names, read from the class itself."""
     forwarded = _forwarded()
     sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
-    assert sizes == {"credentials": 28, "sessions": 51}
-    assert sizes == {store: len(names) for store, names in PINNED_SHIM.items()}
+    assert sizes == {"credentials": 28, "sessions": 51, "accounts": 0}
+    assert sizes == {store: len(PINNED_SHIM.get(store, ())) for store in STORES}
 
 
 def test_the_ratchet_allows_a_removal_and_refuses_growth_and_a_stale_pin():
@@ -309,5 +314,70 @@ def test_no_wrapper_hands_out_the_wrong_databases_store(tmp_path):
         # The wrappers' own session calls still route: the App's session is read from its store.
         assert stores.for_app("k-aaaa").get_session("a1")["id"] == "a1"
         assert stores.scope("k-aaaa").get_session("a1")["id"] == "a1"
+    finally:
+        stores.close()
+
+
+ACCOUNT_TABLES = ("accounts", "account_audit", "member_projects", "github_connections", "member_api_keys",
+                  "google_identities", "google_invitations", "web_sessions")
+
+
+def test_account_queries_left_the_database_class():
+    source = inspect.getsource(Database)
+    for table in ACCOUNT_TABLES:
+        assert f"INTO {table} " not in source and f"UPDATE {table} " not in source, table
+        assert f"FROM {table} " not in source, table
+    for name in _store_methods(AccountStore):
+        assert not hasattr(Database, name), f"Database.{name}: call db.accounts.{name}"
+
+
+def _account_calls_off_the_store(root) -> list[str]:
+    """Calls of an AccountStore method name not made on an account store: `<x>.accounts.<name>(...)`, an
+    `accounts` stand-in (`principal.resolve_human`'s), or `operation_audit`'s `_audit_store(db)`."""
+    import ast
+    names = _store_methods(AccountStore)
+    found = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "account_store.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in names):
+                continue
+            on = node.func.value
+            if (isinstance(on, ast.Attribute) and on.attr == "accounts") or \
+                    (isinstance(on, ast.Name) and on.id == "accounts") or \
+                    (isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store") or \
+                    (isinstance(on, ast.Name) and on.id == "self" and path.name == "namespace_audit.py"):
+                continue
+            found.append(f"{path.relative_to(root.parent)}:{node.lineno} .{node.func.attr}(")
+    return found
+
+
+def test_every_account_call_goes_through_the_account_store():
+    """No production code calls an account method on a Database (it has none): only on `db.accounts`. The one
+    protocol exception, namespace_audit's stand-in stores, call their own `insert_audit`."""
+    root = Path(core_db.__file__).resolve().parent
+    assert _account_calls_off_the_store(root) == []
+    assert _account_calls_off_the_store(root.parent / "harness_modules") == []
+
+
+def test_every_route_reaches_the_main_account_store(tmp_path):
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        now = time.time()
+        main.accounts.insert_account({"user_id": "u-1", "login": "alice@example.com", "role": "member",
+                                      "display_name": "Alice", "enabled": 1, "disk_quota_bytes": 1,
+                                      "max_running": 1, "max_queued": 2, "created_at": now,
+                                      "updated_at": now})
+        stores.insert_session(_session("a1", "k-aaaa"))
+        stores.insert_session(_session("own"))
+        assert stores.web is not main
+        routes = {"stores": stores, "scope(app)": stores.scope("k-aaaa"), "for_app(app)": stores.for_app("k-aaaa"),
+                  "for_session(app sid)": stores.for_session("a1"), "for_app('')": stores.for_app(""),
+                  "for_session(owner sid)": stores.for_session("own"), "App Database": stores._open["k-aaaa"].db}
+        for label, route in routes.items():
+            assert route.accounts is main.accounts, label
+            assert route.accounts.account_by_login("alice@example.com")["user_id"] == "u-1", label
     finally:
         stores.close()

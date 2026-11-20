@@ -527,7 +527,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
     async def account_audit(request: Request, limit: int = 200):
         """List recent account audit rows, newest first; `limit` is clamped to 1 through 500."""
         require_admin(request, mgr)
-        return await asyncio.to_thread(mgr(request).db.list_audit, limit)
+        return await asyncio.to_thread(mgr(request).db.accounts.list_audit, limit)
 
     @app.get(PREFIX + "/audit", responses=documented(docs.AuditPage))
     async def audit_review(request: Request, limit: int = 200, before_id: int | None = None,
@@ -546,7 +546,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         if since is not None and until is not None and since >= until:
             raise HarnessError(400, "since must be earlier than until")
         return await asyncio.to_thread(
-            mgr(request).db.audit_page, limit, before_id, actor_id=actor_id, key_id=key_id, target_id=target_id,
+            mgr(request).db.accounts.audit_page, limit, before_id, actor_id=actor_id, key_id=key_id, target_id=target_id,
             action=action, outcome=outcome, since=since, until=until)
 
     @app.get(PREFIX + "/accounts/{user_id}", responses=documented(docs.AccountResponse))

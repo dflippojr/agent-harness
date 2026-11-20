@@ -309,7 +309,7 @@ class Runner(HostedRuns):
         limit = None
         if user_id != OWNER_USER_ID:
             from .storage import account_usage_bytes
-            account = await asyncio.to_thread(self.db.account_by_id, user_id)
+            account = await asyncio.to_thread(self.db.accounts.account_by_id, user_id)
             limit = AccountLimit(int(account["disk_quota_bytes"]) if account is not None else 0,
                                  functools.partial(account_usage_bytes, self.cfg, user_id))
         return DiskLimits(quota_bytes=self.quota_mb(s) * 2**20,
@@ -662,7 +662,7 @@ class Runner(HostedRuns):
         """Bytes a member clone may still write. None means uncapped (owner)."""
         if user_id == OWNER_USER_ID:
             return None
-        account = self.db.account_by_id(user_id)
+        account = self.db.accounts.account_by_id(user_id)
         if account is None:
             return 0
         from .storage import account_usage_bytes
@@ -1608,7 +1608,7 @@ class Runner(HostedRuns):
         user_id = session_user_id(s)
         if user_id != OWNER_USER_ID:
             from .storage import account_usage_bytes, quota_message
-            account = self.db.account_by_id(user_id)
+            account = self.db.accounts.account_by_id(user_id)
             if account is not None:
                 used = await asyncio.to_thread(account_usage_bytes, self.cfg, user_id)
                 limit = int(account["disk_quota_bytes"])
@@ -1708,7 +1708,7 @@ class Runner(HostedRuns):
         """
         gh = self.github_auth
         uid = session_user_id(s)
-        row = self.db.get_member_project(uid, project.name) if gh is not None else None
+        row = self.db.accounts.get_member_project(uid, project.name) if gh is not None else None
         if not row or row.get("source_auth") != "github":
             return
         from . import storage

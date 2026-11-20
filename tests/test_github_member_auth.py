@@ -399,7 +399,7 @@ def test_disconnect_reset_and_isolation_matrix(tmp_path, fake):
         assert r.status_code in (401, 403)
         r = client.delete(ME, headers={**H(ALICE), "Sec-Fetch-Site": "cross-site"})
         assert r.status_code == 403
-        audit = json.dumps(m.db.list_audit(500))
+        audit = json.dumps(m.db.accounts.list_audit(500))
         assert "github_erase" in audit and CODE not in audit
     finally:
         close(client)
@@ -459,7 +459,7 @@ def test_restart_reconciles_missing_credentials_and_drops_attempts(tmp_path, fak
     m2 = Manager(m.cfg, db=m.db, chat=Script([]))
     client2 = TestClient(create_app(m2))
     with client2:
-        assert wait_for(lambda: m.db.get_github_connection(a)["status"] == "reconnect_required")
+        assert wait_for(lambda: m.db.accounts.get_github_connection(a)["status"] == "reconnect_required")
         assert client2.get(ME, headers=H(ALICE)).json()["status"] == "reconnect_required"
         assert client2.get(ME, headers=H(BOB)).json()["status"] == "disconnected"
 
@@ -484,7 +484,7 @@ def test_private_clone_fetch_push_and_refused_retry_after_revocation(tmp_path, f
         connect(client, fake, ALICE, a)
         r = _project(client, ALICE, "secret", url)
         assert r.status_code == 201, r.text
-        row = m.db.get_member_project(a, "secret")
+        row = m.db.accounts.get_member_project(a, "secret")
         assert row["source_auth"] == "github" and row["source_url"] == "https://github.com/alice-gh/secret.git"
         managed = Path(row["repo"])
         assert (managed / "README.md").read_text(encoding="utf-8") == "private\n"
@@ -521,7 +521,7 @@ def test_private_clone_fetch_push_and_refused_retry_after_revocation(tmp_path, f
         for bad in ("main", "agent/../main", "refs/heads/x", "+agent/s1", "agent/s1:main"):
             with pytest.raises(GitHubAuthError):
                 m.github_auth.push(a, row["source_url"], managed, repos_dir(m.cfg, a), bad)
-        assert m.db.get_github_connection(a)["last_used_at"]
+        assert m.db.accounts.get_github_connection(a)["last_used_at"]
         # GitHub-side revocation: the next push fails closed and the credential is erased
         fake.revoke_all()
         with pytest.raises(GitHubAuthError) as e:
@@ -558,7 +558,7 @@ def test_unauthorized_repo_redirect_and_tampered_config(tmp_path, fake):
             assert r.status_code == 400 and r.json()["detail"] == ga.ERRORS["policy_rejected"]
         fake.add_repo("alice/ok", allowed=["alice"])
         assert _project(client, ALICE, "ok", "https://github.com/alice/ok").status_code == 201
-        row = m.db.get_member_project(a, "ok")
+        row = m.db.accounts.get_member_project(a, "ok")
         managed = Path(row["repo"])
         from harness.storage import repos_dir
         root = repos_dir(m.cfg, a)
@@ -637,7 +637,7 @@ def test_racing_disconnect_stops_inflight_git(tmp_path, fake):
         assert result.get("code") == "cancelled" and elapsed < scaled(25), f"{state()} elapsed={elapsed:.1f}"
         assert not (repos_dir(m.cfg, a) / "slow").exists()
         assert wait_for(lambda: fake.namespaces() == set())
-        assert wait_for(lambda: m.db.get_github_connection(a)["status"] == "disconnected")
+        assert wait_for(lambda: m.db.accounts.get_github_connection(a)["status"] == "disconnected")
     finally:
         close(client)
 
@@ -663,7 +663,7 @@ def test_member_review_push_uses_managed_repo_and_stored_origin(tmp_path, fake):
         connect(client, fake, ALICE, a)
         fake.add_repo("alice/app", allowed=["alice"])
         assert _project(client, ALICE, "app", "https://github.com/alice/app").status_code == 201
-        row = m.db.get_member_project(a, "app")
+        row = m.db.accounts.get_member_project(a, "app")
         from harness import catalog, clone
         from harness.storage import workspaces_dir
         project = catalog.get_project(m.cfg, m.db, a, "app")
@@ -734,7 +734,7 @@ def _assert_no_secrets(m, fake, tmp_path):
             for secret in secrets:
                 assert secret.encode() not in data, f"{secret[:6]}… found in {path}"
     assert scanned
-    rows = json.dumps([m.db.list_audit(500), m.db.list_github_connections()])
+    rows = json.dumps([m.db.accounts.list_audit(500), m.db.accounts.list_github_connections()])
     for secret in secrets:
         assert secret not in rows
 
@@ -777,7 +777,7 @@ def test_managed_repo_behind_link_is_refused(tmp_path, fake):
         connect(client, fake, ALICE, a)
         fake.add_repo("alice/ok", allowed=["alice"])
         assert _project(client, ALICE, "ok", "https://github.com/alice/ok").status_code == 201
-        row = m.db.get_member_project(a, "ok")
+        row = m.db.accounts.get_member_project(a, "ok")
         from harness.storage import repos_dir
         root = repos_dir(m.cfg, a)
         link = root / "linked"
@@ -834,7 +834,7 @@ def test_startup_retries_owed_erase_even_with_the_feature_disabled(tmp_path, fak
 
     monkeypatch.setattr(ga, "erase", broken_erase)
     assert client.delete(ME, headers=H(ALICE)).status_code >= 400
-    row = m.db.get_github_connection(a)
+    row = m.db.accounts.get_github_connection(a)
     assert row["status"] == "disconnected" and row["last_error"] == "erase_failed"
     assert fake.namespaces() == {f"agent-harness/v1/{a}"}  # the credential really is still there
     with pytest.raises(GitHubAuthError):
@@ -852,7 +852,7 @@ def test_startup_retries_owed_erase_even_with_the_feature_disabled(tmp_path, fak
         # the startup retry is a background thread: wait for its completion, then check what it did
         reconcile = m2._github_reconcile
         reconcile.join(scaled(60))
-        row = m.db.get_github_connection(a)
+        row = m.db.accounts.get_github_connection(a)
         state = {"alive": reconcile.is_alive(), "namespaces": fake.namespaces(), "row": row,
                  "preflight": m2.github_auth.cached_preflight()}
         assert not reconcile.is_alive(), state
@@ -868,7 +868,7 @@ def test_failed_erase_after_a_rejected_credential_is_owed(tmp_path, fake, monkey
         fake.add_repo("alice-gh/secret", allowed=["alice"])
         connect(client, fake, ALICE, a)
         assert _project(client, ALICE, "secret", "https://github.com/alice-gh/secret").status_code == 201
-        row = m.db.get_member_project(a, "secret")
+        row = m.db.accounts.get_member_project(a, "secret")
         managed = Path(row["repo"])
         _git(managed, "checkout", "-q", "-b", "agent/s1")
         _git(managed, "-c", "user.name=Agent", "-c", "user.email=a@x", "commit", "--allow-empty", "-qm", "work")
@@ -883,13 +883,13 @@ def test_failed_erase_after_a_rejected_credential_is_owed(tmp_path, fake, monkey
         with pytest.raises(GitHubAuthError) as e:
             m.github_auth.push(a, row["source_url"], managed, repos_dir(m.cfg, a), "agent/s1")
         assert e.value.code == "reconnect_required"
-        row = m.db.get_github_connection(a)
+        row = m.db.accounts.get_github_connection(a)
         assert row["status"] == "reconnect_required" and row["last_error"] == "erase_failed"
         assert m.github_auth.owes_erase()
         monkeypatch.setattr(ga, "erase", real_erase)
         m.github_auth.reconcile()
         assert fake.namespaces() == set()
-        row = m.db.get_github_connection(a)
+        row = m.db.accounts.get_github_connection(a)
         assert row["status"] == "reconnect_required" and row["last_error"] == ""
     finally:
         close(client)

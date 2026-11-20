@@ -11,6 +11,7 @@ from harness import credential_audit
 from harness.admin import PREFIX
 from harness.api import create_app
 from harness.config import BackendConfig, RunnerConfig
+from harness.account_store import AccountStore
 from harness.db import Database
 from harness.manager import Manager
 
@@ -75,7 +76,7 @@ def test_two_owner_tokens_chain_survives_restart_and_erasure(tmp_path):
         m.db.mark_app_erased(app["id"])  # the App's payload is gone; the grant history must stay
         db_path = m.cfg.db_path
     db = Database(db_path)
-    rows = db.audit_page(500, target_id=app["id"])["items"][::-1]
+    rows = db.accounts.audit_page(500, target_id=app["id"])["items"][::-1]
     assert [(r["action"], r["key_id"], r["outcome"]) for r in rows] == [
         ("key.create", k1["id"], "ok"), ("key.revoke", k2["id"], "ok"), ("app.restore", k1["id"], "ok")]
     assert rows[0]["metadata"] == {"key_id": app["id"], "kind": "app", "scopes": ["sessions"]}
@@ -157,7 +158,7 @@ def test_audit_failure_rolls_back_everything(hh, monkeypatch):
     approved = client.post("/pairing-codes", json={"name": "n", "origin": ORIGIN, "scopes": ["sessions"]}).json()
     app = client.post("/keys", json={"name": "a", "kind": "app", "scopes": ["sessions"]}).json()
     keys_before = len(m.db.list_api_keys())
-    monkeypatch.setattr(Database, "insert_audit", _boom)
+    monkeypatch.setattr(AccountStore, "insert_audit", _boom)
     assert client.post("/keys", json={"name": "b", "kind": "app", "scopes": ["sessions"]}).status_code == 503
     assert len(m.db.list_api_keys()) == keys_before
     r = client.post("/api/v1/pair", headers={"Origin": ORIGIN}, json={"code": approved["code"]})
@@ -262,10 +263,10 @@ def test_member_key_audit_failure_keeps_old_ciphertext(hh, monkeypatch):
     a = create_member(client, ALICE, "Alice")["user_id"]
     url = "/api/v1/me/api-keys/claude"
     assert client.put(url, json={"key": SENTINEL_KEY}, headers=H(ALICE)).status_code == 200
-    before = bytes(m.db.member_api_key(a, "claude")["ciphertext"])
-    monkeypatch.setattr(Database, "insert_audit", _boom)
+    before = bytes(m.db.accounts.member_api_key(a, "claude")["ciphertext"])
+    monkeypatch.setattr(AccountStore, "insert_audit", _boom)
     assert client.put(url, json={"key": SENTINEL_KEY[:-1] + "Z"}, headers=H(ALICE)).status_code == 503
-    assert bytes(m.db.member_api_key(a, "claude")["ciphertext"]) == before
+    assert bytes(m.db.accounts.member_api_key(a, "claude")["ciphertext"]) == before
 
 
 def test_runner_pairing_lifecycle(tmp_path):
@@ -283,7 +284,7 @@ def test_runner_pairing_lifecycle(tmp_path):
         paired = client.post("/api/v1/runner-pair", json={"code": approved["code"]})
         assert paired.status_code == 201
         assert client.post("/api/v1/runner-pair", json={"code": approved["code"]}).status_code == 400
-        rows = m.db.audit_page(500)["items"]
+        rows = m.db.accounts.audit_page(500)["items"]
         assert len([r for r in rows if r["action"] == "runner_pairing.create"]) == 2
         assert sorted(r["outcome"] for r in rows if r["action"] == "runner_pairing.revoke") == ["noop", "ok"]
         ok = [r for r in rows if r["action"] == "runner_pairing.redeem" and r["outcome"] == "ok"]

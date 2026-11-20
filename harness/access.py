@@ -74,7 +74,7 @@ MEMBER_FORBIDDEN_DETAILS = (
 
 def resolve_access(cfg, login: str | None, db=None) -> Access:
     """Classify a Tailscale login. Missing login (localhost) is always the owner."""
-    return resolve_human(cfg, login, db)
+    return resolve_human(cfg, login, None if db is None else db.accounts)
 
 
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")

@@ -62,8 +62,8 @@ class AccountService:
         """One audit row with the actor's context. Inside a `db.write` it commits or rolls back with the change."""
         ctx = audit_context.coerce(actor)
         try:
-            self._db().insert_audit(ctx.actor_id, target_id, action, outcome, detail, context=ctx,
-                                    target_kind="account", metadata=metadata)
+            self._db().accounts.insert_audit(ctx.actor_id, target_id, action, outcome, detail, context=ctx,
+                                             target_kind="account", metadata=metadata)
         except Exception:
             log.exception("audit write failed for %s", action)
             raise HarnessError(503, "audit record could not be written; the change was not applied",
@@ -80,7 +80,7 @@ class AccountService:
         cfg = self._cfg()
         occupied = set(cfg.allowed_logins)
         occupied.update(g.login for g in cfg.guests if g.login)
-        occupied.update(a["login"] for a in self._db().list_accounts())
+        occupied.update(a["login"] for a in self._db().accounts.list_accounts())
         return occupied
 
     def require_open_owner_safe(self) -> None:
@@ -104,7 +104,7 @@ class AccountService:
         if login in self._cfg().google_signin.admitted_logins:
             self._deny(actor_id, "", "create", "login is a Google-admitted device", "login_is_google_device")
             raise HarnessError(400, ONE_ROLE_ONLY)
-        if self._db().account_by_login(login) is not None:
+        if self._db().accounts.account_by_login(login) is not None:
             self._deny(actor_id, "", "create", "login already a member", "login_already_member")
             raise HarnessError(409, "a household account already uses that login")
         quota = DEFAULT_DISK_QUOTA_BYTES if disk_quota_bytes is None else int(disk_quota_bytes)
@@ -126,8 +126,8 @@ class AccountService:
         ensure_user_dirs(self._cfg(), user_id)
 
         def commit() -> None:
-            self._db().insert_account(row)
-            self._db().insert_member_project({
+            self._db().accounts.insert_account(row)
+            self._db().accounts.insert_member_project({
                 "user_id": user_id, "slug": "scratch", "description": "Empty workspace for this account",
                 "repo": "", "source_url": "",
             })
@@ -145,10 +145,10 @@ class AccountService:
         account = self._require(user_id)
         display_name = validate_display_name(display_name)
         def commit() -> None:
-            self._db().update_account(user_id, display_name=display_name)
+            self._db().accounts.update_account(user_id, display_name=display_name)
             self._audit(actor_id, user_id, "rename", "ok", metadata={"fields": ["display_name"]})
         self._apply(commit)
-        return self.public_account(self._db().account_by_id(user_id) or account)
+        return self.public_account(self._db().accounts.account_by_id(user_id) or account)
 
     def rebind_login(self, actor_id: str, user_id: str, login: str) -> dict:
         account = self._require(user_id)
@@ -159,17 +159,17 @@ class AccountService:
                 or login in self._cfg().google_signin.admitted_logins):
             self._deny(actor_id, user_id, "rebind", "login occupies another role", "login_occupies_role")
             raise HarnessError(400, ONE_ROLE_ONLY)
-        existing = self._db().account_by_login(login)
+        existing = self._db().accounts.account_by_login(login)
         if existing is not None and existing["user_id"] != user_id:
             self._deny(actor_id, user_id, "rebind", "login already a member", "login_already_member")
             raise HarnessError(409, "a household account already uses that login")
         def commit() -> None:
-            self._db().update_account(user_id, login=login)
+            self._db().accounts.update_account(user_id, login=login)
             self._audit(actor_id, user_id, "rebind", "ok", metadata={"fields": ["login"]})
         self._apply(commit)
         self.m.google_signin.member_rebound(user_id)
         self.m.revoke_member_streams(user_id)
-        return self.public_account(self._db().account_by_id(user_id))
+        return self.public_account(self._db().accounts.account_by_id(user_id))
 
     async def set_enabled(self, actor_id: str, user_id: str, enabled: bool) -> dict:
         account = self._require(user_id)
@@ -177,13 +177,13 @@ class AccountService:
         if was == enabled:
             return self.public_account(account)
         def commit() -> None:
-            self._db().update_account(user_id, enabled=int(enabled))
+            self._db().accounts.update_account(user_id, enabled=int(enabled))
             self._audit(actor_id, user_id, "enable" if enabled else "disable", "ok",
                         metadata={"fields": ["enabled"], "old_enabled": not enabled, "new_enabled": enabled})
         await self._db().awrite(commit)
         if not enabled:
             await self.m.disable_member(user_id, actor_id=audit_context.coerce(actor_id).actor_id)
-        return self.public_account(self._db().account_by_id(user_id))
+        return self.public_account(self._db().accounts.account_by_id(user_id))
 
     def set_quota(self, actor_id: str, user_id: str, disk_quota_bytes: int) -> dict:
         account = self._require(user_id)
@@ -192,13 +192,13 @@ class AccountService:
             raise HarnessError(400, "disk quota must be at least 1 byte")
 
         def commit() -> None:
-            current = self._db().account_by_id(user_id) or account  # read inside the transaction
-            self._db().update_account(user_id, disk_quota_bytes=quota)
+            current = self._db().accounts.account_by_id(user_id) or account  # read inside the transaction
+            self._db().accounts.update_account(user_id, disk_quota_bytes=quota)
             self._audit(actor_id, user_id, "quota", "ok", metadata={
                 "fields": ["disk_quota_bytes"], "old_disk_quota_bytes": int(current["disk_quota_bytes"]),
                 "new_disk_quota_bytes": quota})
         self._apply(commit)
-        return self.public_account(self._db().account_by_id(user_id))
+        return self.public_account(self._db().accounts.account_by_id(user_id))
 
     def set_concurrency(self, actor_id: str, user_id: str, max_running: int | None = None,
                         max_queued: int | None = None) -> dict:
@@ -214,18 +214,18 @@ class AccountService:
             fields["max_queued"] = int(max_queued)
         if fields:
             def commit() -> None:
-                current = self._db().account_by_id(user_id) or account  # read inside the transaction
+                current = self._db().accounts.account_by_id(user_id) or account  # read inside the transaction
                 metadata: dict = {"fields": list(fields)}
                 for name, value in fields.items():
                     metadata["old_" + name] = int(current[name])
                     metadata["new_" + name] = value
-                self._db().update_account(user_id, **fields)
+                self._db().accounts.update_account(user_id, **fields)
                 self._audit(actor_id, user_id, "concurrency", "ok", metadata=metadata)
             self._apply(commit)
-        return self.public_account(self._db().account_by_id(user_id))
+        return self.public_account(self._db().accounts.account_by_id(user_id))
 
     def _require(self, user_id: str) -> dict:
-        account = self._db().account_by_id(user_id)
+        account = self._db().accounts.account_by_id(user_id)
         if account is None or account.get("role") != "member":
             raise HarnessError(404, "no household account matches that id")
         return account
@@ -254,7 +254,7 @@ class AccountService:
         }
 
     def list_public(self) -> list[dict]:
-        return [self.public_account(row) for row in self._db().list_accounts()]
+        return [self.public_account(row) for row in self._db().accounts.list_accounts()]
 
     def member_usage(self, user_id: str) -> dict:
         account = self._require(user_id) if user_id != OWNER_USER_ID else None
@@ -269,5 +269,5 @@ class AccountService:
         }
 
 
-# Silence unused import in type checkers; retention is documented and applied in Database.insert_audit.
+# Silence unused import in type checkers; retention is documented and applied in AccountStore.insert_audit.
 _ = AUDIT_RETENTION_DAYS

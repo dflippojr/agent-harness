@@ -64,8 +64,8 @@ def test_open_owner_legacy_only_without_members(tmp_path):
     cfg = make_cfg(tmp_path)
     assert cfg.allowed_logins == []
     db = Database(cfg.db_path)
-    assert open_owner_mode(cfg, db.member_count())
-    ident = resolve_human(cfg, "anyone@example.com", db)
+    assert open_owner_mode(cfg, db.accounts.member_count())
+    ident = resolve_human(cfg, "anyone@example.com", db.accounts)
     assert ident.kind == "owner"
     assert ident.allowed
     db.close()
@@ -489,7 +489,7 @@ def test_member_clone_allows_only_public_https(tmp_path):
                 "name": "pub", "repo": "https://github.com/org/repo",
             }, headers=ah)
             assert created.status_code == 201, created.text
-            dest = Path(m.db.get_member_project(
+            dest = Path(m.db.accounts.get_member_project(
                 client.get("/api/v1/me", headers=ah).json()["user_id"], "pub")["repo"])
             assert dest.is_relative_to(user_root(m.cfg, client.get("/api/v1/me", headers=ah).json()["user_id"]))
             assert dest.name == "pub"
@@ -532,7 +532,7 @@ def test_project_clone_is_removed_when_it_exceeds_quota(tmp_path):
                 "name": "linux", "repo": "https://github.com/org/repo",
             }, headers=ah)
             assert r.status_code == 507, r.text
-            assert m.db.get_member_project(alice["user_id"], "linux") is None
+            assert m.db.accounts.get_member_project(alice["user_id"], "linux") is None
             dest = repos_dir(m.cfg, alice["user_id"]) / "linux"
             assert not dest.exists()
         finally:
@@ -546,8 +546,8 @@ def test_filesystem_isolation_duplicate_slugs_and_containment(tmp_path):
         bob = create_member(client, BOB, "Bob")
         client.post("/api/v1/projects", json={"name": "notes"}, headers=H(ALICE))
         client.post("/api/v1/projects", json={"name": "notes"}, headers=H(BOB))
-        assert m.db.get_member_project(alice["user_id"], "notes")
-        assert m.db.get_member_project(bob["user_id"], "notes")
+        assert m.db.accounts.get_member_project(alice["user_id"], "notes")
+        assert m.db.accounts.get_member_project(bob["user_id"], "notes")
         ar = user_root(m.cfg, alice["user_id"])
         br = user_root(m.cfg, bob["user_id"])
         assert ar != br
@@ -697,7 +697,7 @@ def test_max_queued_zero_is_rejected(tmp_path):
         patch = client.patch(f"{PREFIX}/accounts/{alice['user_id']}",
                              json={"max_queued": 0}, headers=H(OWNER))
         assert patch.status_code == 400, patch.text
-        assert m.db.account_by_id(alice["user_id"])["max_queued"] == 2
+        assert m.db.accounts.account_by_id(alice["user_id"])["max_queued"] == 2
 
 
 def test_disable_member_awaits_cancel_before_granting_gpu(tmp_path):
@@ -774,7 +774,7 @@ def test_disable_member_cancelled_mid_write_still_cancels_all_its_work(tmp_path)
         with pytest.raises(asyncio.CancelledError):
             await request
         assert [m.db.get_session(sid)["status"] for sid in ("aliceq01", "aliceq02")] == ["cancelled", "cancelled"]
-        assert sum(1 for a in m.db.list_audit() if a["action"] == "cancel") == 2
+        assert sum(1 for a in m.db.accounts.list_audit() if a["action"] == "cancel") == 2
     asyncio.run(body())
 
 
@@ -1030,7 +1030,7 @@ def test_guest_stays_non_durable(tmp_path):
         assert me["role"] == "guest"
         assert me["user_id"] is None
         assert client.post("/sessions", json={"prompt": "x"}, headers=H(GUEST)).status_code == 403
-        assert m.db.member_count() == 0
+        assert m.db.accounts.member_count() == 0
         assert client.post("/api/v1/projects", json={"name": "g"}, headers=H(GUEST)).status_code in (401, 403)
 
 
@@ -1043,7 +1043,7 @@ def test_no_secrets_in_sqlite(tmp_path):
         raw = m.cfg.db_path.read_bytes()
         assert app["key"].encode() not in raw
         assert b"Tailscale" not in raw
-        accounts = list(m.db.list_accounts())
+        accounts = list(m.db.accounts.list_accounts())
         assert "token" not in accounts[0]
         assert ALICE in accounts[0]["login"]
 
@@ -1122,7 +1122,7 @@ def test_member_refresh_passes_remaining_quota_as_max_bytes(tmp_path):
         (ws_path / "keep.txt").write_text("stay", encoding="utf-8")
         repo = repos_dir(m.cfg, uid) / "notes"
         repo.mkdir(parents=True, exist_ok=True)
-        m.db.insert_member_project({
+        m.db.accounts.insert_member_project({
             "user_id": uid, "slug": "notes", "description": "", "repo": str(repo), "source_url": "",
         })
         now = 1_700_000_000.0

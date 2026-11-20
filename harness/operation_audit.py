@@ -72,12 +72,19 @@ def owner_session(session):
     return bool(session and not session.get("app_id") and session_user_id(session) == OWNER_USER_ID)
 
 
+def _audit_store(db):
+    """Where an operation's audit rows go: a Database's (or `SessionStores`') account store (#992), or a stand-in
+    store with its own `insert_audit` (namespace_audit's `LoginStore` and `ReceiptStore`)."""
+    accounts = getattr(db, "accounts", None)
+    return db if accounts is None else accounts
+
+
 def append(db, context, target, action, outcome, metadata=None):
     kind = {"approval": "approval", "job": "job", "maintenance": "operation"}.get(action.split(".")[0], "session")
     data = dict(metadata or {})
     data.setdefault("operation_id", uuid.uuid4().hex)
-    db.insert_audit(context.actor_id, target, action, outcome, context=context, target_kind=kind,
-                    metadata=data)
+    _audit_store(db).insert_audit(context.actor_id, target, action, outcome, context=context, target_kind=kind,
+                                  metadata=data)
 
 
 def _incomplete(operation_id):

@@ -143,9 +143,9 @@ class ReceiptStore:
         self.db, self.category, self.reason, self.count = db, category, reason, count
 
     def insert_audit(self, actor, target, action, outcome, *, context, target_kind, metadata):
-        self.db.main.insert_audit(actor, target, "namespace.erase", outcome, context=context,
-                                  target_kind=self.category,
-                                  metadata={"operation_id": metadata["operation_id"], "count": self.count,
+        self.db.main.accounts.insert_audit(actor, target, "namespace.erase", outcome, context=context,
+                                           target_kind=self.category,
+                                           metadata={"operation_id": metadata["operation_id"], "count": self.count,
                                             "reason": self.reason, "category": self.category})
 
 
@@ -167,7 +167,7 @@ def refuse_unresolved_erase(db, scope):
     before = None
     settled = set()
     while True:
-        page = db.main.audit_page(target_id=scope, action="namespace.erase", before_id=before, limit=500)
+        page = db.main.accounts.audit_page(target_id=scope, action="namespace.erase", before_id=before, limit=500)
         for row in page["items"]:
             op = row["metadata"].get("operation_id")
             if row["outcome"] == "ok":

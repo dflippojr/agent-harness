@@ -628,7 +628,7 @@ async def backends(request: Request):
 
 def _member_me(m, key: dict, ident) -> dict:
     from .storage import account_usage_bytes, quota_message
-    account = m.db.account_by_id(key["user_id"])
+    account = m.db.accounts.account_by_id(key["user_id"])
     used = account_usage_bytes(m.cfg, key["user_id"]) if account else 0
     limit = int(account["disk_quota_bytes"]) if account else 0
     return {

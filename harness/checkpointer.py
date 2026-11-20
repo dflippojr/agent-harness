@@ -173,7 +173,7 @@ class Checkpointer:
         """(account, limit) for a member's session; None for the owner, who is only measured."""
         from .principal import OWNER_USER_ID, session_user_id
         uid = session_user_id(s)
-        account = self.db.account_by_id(uid) if uid != OWNER_USER_ID else None
+        account = self.db.accounts.account_by_id(uid) if uid != OWNER_USER_ID else None
         return None if account is None else (uid, int(account["disk_quota_bytes"]))
 
     def _room_for(self, s: dict, store: Store, sha: str, context_bytes: int) -> bool:

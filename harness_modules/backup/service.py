@@ -229,7 +229,7 @@ class BackupService:
 
     def _backup_other_transcripts(self, dest: Path, warnings: list[str]) -> int:
         count = 0
-        for account in self.db.list_accounts():
+        for account in self.db.accounts.list_accounts():
             user_id = account["user_id"]
             if user_id != OWNER_USER_ID:
                 count += self._archive_transcripts(storage.transcripts_dir(self.cfg, user_id),

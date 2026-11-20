@@ -107,12 +107,12 @@ def register(app: FastAPI, mgr) -> list[dict]:
         try:
             user_id, token = await asyncio.to_thread(m.google_signin.finish, request, request.state.access, params)
         except gs.GoogleSigninError as e:
-            m.db.insert_audit(_actor(request), "", "google_callback", "denied", e.reason)
+            m.db.accounts.insert_audit(_actor(request), "", "google_callback", "denied", e.reason)
             target = FAILED
             token = ""
         except Exception as e:  # noqa: BLE001 - never surface details (or a traceback) from the callback
             log.warning("Google sign-in callback failed (%s)", type(e).__name__)
-            m.db.insert_audit(_actor(request), "", "google_callback", "denied", "internal_error")
+            m.db.accounts.insert_audit(_actor(request), "", "google_callback", "denied", "internal_error")
             target = FAILED
             token = ""
         else:
