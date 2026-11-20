@@ -264,9 +264,12 @@ New code calls the store. Old `db.<method>` calls keep working through a tempora
 Two cases still go through `m.db` rather than a store:
 
 - **Session methods.** `SessionStores` routes each session to its own store, so call them on `m.db` (or on
-  `for_session(sid)`). `sessions` raises on every wrapper (`m.db`, `scope`, `for_app` and `for_session`), because one
-  Database's `SessionStore` would miss the sessions routed to another. Each wrapper hands out `credentials` from the
-  main store. `app_stores._STORE_HOME` records where each store's rows live, and a new store must add itself there.
+  `for_session(sid)`). `sessions` raises on the routing wrappers (`m.db`, `scope`, and `for_app` or `for_session` for
+  an App), because one Database's `SessionStore` would miss the sessions routed to another. A Web route
+  (`for_app("")`, `for_app(WEB_APP_ID)`, or `for_session` of an owner or member session) returns Web's Database
+  itself, so its `sessions` is Web's own: the store that holds those sessions. Every route, and every Database that
+  `SessionStores` opens, hands out the main store's `credentials`. `app_stores._STORE_HOME` records where each store's
+  rows live, and a new store must add itself there.
 - **Key listings.** The listing overrides on `SessionStores` (`list_api_keys`, `get_api_key_listing`,
   `restore_api_key`) still apply, so call those on `m.db`, not `m.db.credentials`, until they move.
 
