@@ -31,6 +31,7 @@ from .telemetry import TimedLock
 
 if TYPE_CHECKING:
     from .account_store import AccountStore
+    from .app_store import AppStore
     from .credential_store import CredentialStore
     from .session_store import SessionStore
 
@@ -476,8 +477,6 @@ READ_CONNECTIONS = 4
 # A revoked App's (or device's) store and folder are erased this long after the revoke, unless the owner undoes it
 # first (#330 decision 5). The nightly maintenance does the erasing (maintenance.py).
 APP_ERASE_GRACE_SECONDS = 7 * 86400
-APP_LIMITS_META = "app_limits:"           # meta key prefix: an App's owner-set session caps (#524)
-APP_LIMIT_KEYS = ("max_running", "max_queued")
 
 
 def _writes(fn):
@@ -653,17 +652,19 @@ class CoreStore(_Store):
 
 
 # The core stores a Database builds, by attribute (#992 stage 5). `app_stores` says where each one's rows live.
-CORE_STORES = ("credentials", "sessions", "accounts")
+CORE_STORES = ("credentials", "sessions", "accounts", "apps")
 
 
 def _store_class(attribute: str) -> type[CoreStore]:
     """The class of the core store a Database exposes as `attribute`. Imported on first use: each store module
     imports this one."""
     from .account_store import AccountStore
+    from .app_store import AppStore
     from .credential_store import CredentialStore
     from .session_store import SessionStore
 
-    return {"credentials": CredentialStore, "sessions": SessionStore, "accounts": AccountStore}[attribute]
+    return {"credentials": CredentialStore, "sessions": SessionStore, "accounts": AccountStore,
+            "apps": AppStore}[attribute]
 
 
 class _Forwarded:
@@ -790,12 +791,14 @@ class Database:
         self._finalizer = weakref.finalize(self, self._writer.stop)
         self.aio = AsyncDatabase(self)
         from .account_store import AccountStore  # each store module imports this one
+        from .app_store import AppStore
         from .credential_store import CredentialStore
         from .session_store import SessionStore
 
         self.credentials: CredentialStore = CredentialStore(self)
         self.sessions: SessionStore = SessionStore(self)
         self.accounts: AccountStore = AccountStore(self)
+        self.apps: AppStore = AppStore(self)
         self.sessions.build_search_index()
 
     @property
@@ -1187,92 +1190,8 @@ class Database:
                 "WHERE session_id = ? AND call_id = ? AND status = 'pending'",
                 (status, output, int(ok), time.time(), sid, call_id)).rowcount == 1
 
-    @_reads
-    def pending_erasures(self, due_by: float | None = None) -> list[dict]:
-        """Revoked Apps (and devices) whose store and folder are still to be erased, soonest first; with `due_by`,
-        only those due by then."""
-        with self.lock:
-            rows = self.conn.execute(
-                "SELECT id, name, kind, revoked_at, erase_after FROM api_keys WHERE erase_after IS NOT NULL AND "
-                "erased_at IS NULL AND erase_after <= ? ORDER BY erase_after",
-                (float("inf") if due_by is None else due_by,)).fetchall()
-        return [dict(r) for r in rows]
-
-    @_writes
-    def mark_app_erased(self, kid: str) -> None:
-        """Leave only a tombstone of an erased App in the registry: its id, name, kind and dates. Its settings,
-        provider credentials and error counts go with its store."""
-        with self.lock:
-            if self.conn.execute("SELECT 1 FROM api_keys WHERE id = ? AND kind = 'web'", (kid,)).fetchone():
-                raise ValueError("Stables is never erased")
-            self.conn.execute("UPDATE api_keys SET erased_at = ?, erase_after = NULL, scopes = '', origins = '[]', "
-                              "retention_days = NULL WHERE id = ?", (time.time(), kid))
-            self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (kid,))
-            self.conn.execute("DELETE FROM app_provider_credentials WHERE app_id = ?", (kid,))
-            self.conn.execute("DELETE FROM meta WHERE key IN (?, ?)", ("app_error:" + kid, APP_LIMITS_META + kid))
-
-    @_writes
-    def set_app_retention(self, kid: str, days: float | None) -> bool:
-        """An App's default retention for its sessions, in days (None: keep them until deleted)."""
-        with self.lock:
-            return self.conn.execute("UPDATE api_keys SET retention_days = ? WHERE id = ? "
-                                     "AND kind NOT IN ('owner', 'web') "
-                                     "AND erased_at IS NULL", (days, kid)).rowcount == 1
-
-    @_reads
-    def app_limits(self, kid: str) -> dict:
-        """The session caps the owner set for App `kid` (#524): `max_running` and `max_queued`, each None when unset."""
-        with self.lock:
-            row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (APP_LIMITS_META + kid,)).fetchone()
-        stored = json.loads(row["value"]) if row else {}
-        return {k: (int(stored[k]) if stored.get(k) is not None else None) for k in APP_LIMIT_KEYS}
-
-    @_writes
-    def set_app_limits(self, kid: str, limits: dict) -> bool:
-        """Replace App `kid`'s session caps (None: the daemon default). False when no live App has that id."""
-        with self.lock:
-            if self.conn.execute("SELECT 1 FROM api_keys WHERE id = ? AND kind = 'app' AND erased_at IS NULL",
-                                 (kid,)).fetchone() is None:
-                return False
-            values = {k: limits.get(k) for k in APP_LIMIT_KEYS if limits.get(k) is not None}
-            if values:
-                self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                                  (APP_LIMITS_META + kid, json.dumps(values)))
-            else:
-                self.conn.execute("DELETE FROM meta WHERE key = ?", (APP_LIMITS_META + kid,))
-            return True
-
-    @_reads
-    def get_app_settings(self, app_id: str) -> dict | None:
-        with self.lock:
-            row = self.conn.execute("SELECT * FROM app_settings WHERE app_id = ?", (app_id,)).fetchone()
-        if row is None:
-            return None
-        out = dict(row)
-        try:
-            out["values"] = json.loads(out["payload"])
-        except (ValueError, KeyError):
-            out["values"] = {}
-        return out
-
-    @_writes
-    def set_app_settings(self, app_id: str, revision: int, values: dict) -> None:
-        payload = json.dumps(values)
-        now = time.time()
-        with self.lock:
-            self.conn.execute(
-                "INSERT INTO app_settings (app_id, revision, payload, updated_at) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(app_id) DO UPDATE SET revision = excluded.revision, payload = excluded.payload, "
-                "updated_at = excluded.updated_at",
-                (app_id, revision, payload, now),
-            )
-
-    @_writes
-    def delete_app_settings(self, app_id: str) -> None:
-        with self.lock:
-            self.conn.execute("DELETE FROM app_settings WHERE app_id = ?", (app_id,))
-
-    # an App end user's namespace audit (#470): its rows are in the App's own store, so they wait for the App store
+    # an App end user's namespace audit (#470): its rows are in each App's own store, so they move with the routed
+    # stores in stage 6 (#992), not to the main-homed `AppStore`
     @_writes
     def insert_namespace_audit(self, namespace: str, session_id: str, context, target: str, kind: str,
                                action: str, outcome: str, metadata: dict, days: float = 30) -> None:

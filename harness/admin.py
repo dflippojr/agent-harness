@@ -416,7 +416,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
     async def app_erasures(request: Request):
         """List revoked Apps and devices still waiting for their store and folder to be erased, soonest first."""
         require_admin(request, mgr)
-        return mgr(request).db.pending_erasures()
+        return mgr(request).db.apps.pending_erasures()
 
     @app.post(PREFIX + "/apps/{app_id}/restore")
     async def restore_app(app_id: str, request: Request):
@@ -451,7 +451,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
 
         def commit() -> bool:
             before = m.db.main.get_api_key(app_id)
-            if m.db.main.set_app_retention(app_id, body.retention_days):
+            if m.db.main.apps.set_app_retention(app_id, body.retention_days):
                 credential_audit.record(m.db, ctx, "app.retention", app_id, "ok", "api_key", {
                     "app_id": app_id, "old_retention_days": before.get("retention_days"),
                     "new_retention_days": body.retention_days})
@@ -485,9 +485,9 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         sent = {k: getattr(body, k) for k in body.model_fields_set}
 
         def commit() -> bool:
-            before = m.db.main.app_limits(app_id)
+            before = m.db.main.apps.app_limits(app_id)
             limits = {**before, **sent}
-            if m.db.main.set_app_limits(app_id, limits):
+            if m.db.main.apps.set_app_limits(app_id, limits):
                 credential_audit.record(m.db, ctx, "app.limits", app_id, "ok", "api_key", {
                     "app_id": app_id, **{f"old_{k}": v for k, v in before.items()},
                     **{f"new_{k}": v for k, v in limits.items()}})
