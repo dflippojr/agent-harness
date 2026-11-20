@@ -8,12 +8,12 @@
 # wheel leaves out (scripts/packaging/agent_harness_build.py ships .py sources and listed files only).
 
 # The wheels: the in-tree backend needs only the standard library.
-FROM python:3.12-slim AS wheels
+FROM python:3.15-slim AS wheels
 WORKDIR /src
 COPY . .
 RUN python scripts/packaging/agent_harness_build.py --out wheels
 
-FROM python:3.12-slim
+FROM python:3.15-slim
 # git for project workspaces and checkpoints. No Docker client: hosted sessions need Docker access, which the image
 # leaves to the owner to grant or not.
 RUN apt-get update \
