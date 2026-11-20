@@ -74,7 +74,7 @@ def snapshot(db, days: int = 30) -> dict:
     week_start = (today - timedelta(days=6)).isoformat()
     end_date = today.isoformat()
     apps = {}
-    for row in db.app_usage_daily(since, now):
+    for row in db.usage.app_usage_daily(since, now):
         app_id = row["app_id"]
         if app_id not in apps:
             apps[app_id] = {"app_id": app_id, "name": row["name"], "kind": row["kind"],

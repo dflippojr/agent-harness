@@ -640,7 +640,7 @@ class Manager:
         return status
 
     def _member_usage(self, user_id: str, backend: str) -> dict:
-        usage = self.db.member_backend_usage(member_keys.end_user_id(user_id), backend)
+        usage = self.db.usage.member_backend_usage(member_keys.end_user_id(user_id), backend)
         return {"sessions": usage["sessions"], "prompt_tokens": usage["prompt_tokens"],
                 "completion_tokens": usage["completion_tokens"]}
 
@@ -1547,7 +1547,7 @@ class Manager:
         """Refuse only when the backend's own usage report says its limit is reached; unknown usage is allowed."""
         if backend == "local":
             return ""
-        status = str((self.db.get_backend_usage(backend).get("data") or {}).get("status") or "").lower()
+        status = str((self.db.usage.get_backend_usage(backend).get("data") or {}).get("status") or "").lower()
         return f"{backend} reports its usage limit is reached" if status in ("rejected", "exceeded", "limit_reached") else ""
 
     def _check_compare_choices(self, choices: list[dict]) -> None:
