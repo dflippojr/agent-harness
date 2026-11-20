@@ -93,7 +93,8 @@ WEB_STORE_META = "web_store"  # main-store meta: when the sessions moved into We
 # None when its rows are routed per session. A wrapper hands out a "main" store's object as the main store's, and
 # refuses a routed one: its methods are called on the wrapper, which routes each to the session's store.
 # tests/test_database_shim.py checks that it names every store in `db.CORE_STORES`.
-_STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None, "accounts": "main", "apps": "main"}
+_STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None, "accounts": "main", "apps": "main",
+                                     "usage": "main"}
 # Main-store methods that read sessions or their rows without taking a session id: they run on Web's store.
 _ON_WEB = frozenset({"group_sessions", "snippet_events", "smart_review_stats", "smart_reviews", "job_sessions",
                      "session_activity"})
@@ -301,8 +302,8 @@ class SessionStores:
     # stores -----------------------------------------------------------------------------------------------------------
     def _open_store(self, app_id: str) -> Database:
         """Open App `app_id`'s store (or Web's). Its main-store core stores (`_STORE_HOME`: credentials, accounts,
-        apps) are the main store's (#992): the App registry, its per-App records and the household live there, so no
-        route to this Database (`for_app`, `for_session`, a raw `db.credentials`/`db.accounts`/`db.apps` or a
+        apps, usage) are the main store's (#992): the App registry, its per-App records, the usage log and the
+        household live there, so no route to this Database (`for_app`, `for_session`, a raw `db.<store>` or a
         forwarded call) reaches its own empty copy."""
         db = Database(self.store_path(app_id))
         for name, home in _STORE_HOME.items():
@@ -554,8 +555,9 @@ class SessionStores:
         for _, e in self._indexed(lambda e: e["app_id"] == app_id):
             sessions[e["status"]] = sessions.get(e["status"], 0) + 1
         error = json.loads(self.main.get_meta(_APP_ERROR + app_id) or "{}")
-        return {"sessions": sessions, "usage": self.main.app_usage(app_id), "errors": int(error.get("errors") or 0),
-                "last_error": error.get("last_error") or "", "last_error_at": error.get("last_error_at")}
+        return {"sessions": sessions, "usage": self.main.usage.app_usage(app_id),
+                "errors": int(error.get("errors") or 0), "last_error": error.get("last_error") or "",
+                "last_error_at": error.get("last_error_at")}
 
     def app_session_counts(self) -> dict[str, int]:
         """Every App's sessions counted by status, from the index: totals only, with no App named, and nothing read

@@ -259,16 +259,20 @@ The core's own queries split the same way, one domain store per change (#992 sta
 - **`db.accounts`** (`harness/account_store.py`): household accounts and the account audit, member projects, GitHub
   connections, members' own provider keys, Google identities and invitations, and Stables web sessions.
 - **`db.apps`** (`harness/app_store.py`): the main store's per-App records beside the App registry. That means each
-  App's settings, the session caps the owner set, its retention, and the erasure of a revoked App.
+  App's settings, the session caps the owner set, its retention, and the erasure of a revoked App. Erasing an App is
+  one transaction across stores on purpose: the tombstone and provider credentials (CredentialStore's tables), the
+  settings and the meta keys commit together or not at all.
+- **`db.usage`** (`harness/usage_store.py`): the usage log (`usage`) and each hosted backend's reported usage
+  (`backend_usage`), both in the main store.
 - **Still on `Database`:** the rows each App keeps in its own store, which are its end users, its tool calls and its
-  namespace audit. They are reached through `for_app(app_id)` and by-session routing, so they move in stage 6 with
-  routed store access. The usage log, backend usage, idempotency keys and `meta` also stay for now.
+  namespace audit, and the idempotency keys. They are reached through `for_app(app_id)` and by-session routing, so
+  they move into `SessionStore` behind one per-session routing proxy (#992 stage 6). `meta` stays on `Database`.
 
 New code calls the store. Old `db.<method>` calls keep working through a temporary forwarding shim on `Database`.
 `tests/test_database_shim.py` pins the forwarded names for each store, so the shim can only shrink.
 `await db.aio.<method>()` and `SessionStores` reach the store through the shim too. A store can land with its callers
-moved and no shim: `db.accounts` and `db.apps` forward nothing, and a source scan in that test fails on a call
-to either store's methods that isn't made on that store. `operation_audit` writes through the account store of the database it is given.
+moved and no shim: `db.accounts`, `db.apps` and `db.usage` forward nothing, and a source scan in that test fails
+on a call to any of their methods that isn't made on that store. `operation_audit` writes through the account store of the database it is given.
 
 Two cases still go through `m.db` rather than a store:
 
@@ -277,7 +281,7 @@ Two cases still go through `m.db` rather than a store:
   an App), because one Database's `SessionStore` would miss the sessions routed to another. A Web route
   (`for_app("")`, `for_app(WEB_APP_ID)`, or `for_session` of an owner or member session) returns Web's Database
   itself, so its `sessions` is Web's own: the store that holds those sessions. Every route, and every Database that
-  `SessionStores` opens, hands out the main store's `credentials`, `accounts` and `apps`. `app_stores._STORE_HOME` records where each store's
+  `SessionStores` opens, hands out the main store's `credentials`, `accounts`, `apps` and `usage`. `app_stores._STORE_HOME` records where each store's
   rows live, and a new store must add itself there.
 - **Key listings.** The listing overrides on `SessionStores` (`list_api_keys`, `get_api_key_listing`,
   `restore_api_key`) still apply, so call those on `m.db`, not `m.db.credentials`, until they move.

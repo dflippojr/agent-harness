@@ -532,7 +532,7 @@ class HostedRuns:
         s = self._live(sid)
         backend = self.cfg.backends[s["backend"]]
         self.db.patch_run(sid, rate_limits=event.info)
-        self.db.set_backend_usage(s["backend"], event.info)
+        self.db.usage.set_backend_usage(s["backend"], event.info)
         self.bus.emit(sid, "rate_limit", event.info)
         if event.billing:
             warning = billing_warning(backend, event.info, using_api_key=s["run"].get("billing_mode") == "api_key")
@@ -709,10 +709,11 @@ class HostedRuns:
             totals["total_cost_usd"] = round(float(totals.get("total_cost_usd", 0)) + result.cost, 10)
             self.db.update_session(sid, totals=totals, status=status, stop_reason=reason, answer=result.answer)
             self._flag_end_pending(sid, status)
-            self.db.record_usage(s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens,
-                                 result.cost, str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
-                                 str(run.get("credential_source") or "subscription"), s.get("end_user") or "",
-                                 s.get("tool_profile") or tool_profiles.DEFAULT)
+            self.db.usage.record_usage(
+                s["backend"], sid, s.get("app_id", ""), prompt_tokens, completion_tokens, result.cost,
+                str(run.get("billing_mode") or self.cfg.backends[s["backend"]].billing),
+                str(run.get("credential_source") or "subscription"), s.get("end_user") or "",
+                s.get("tool_profile") or tool_profiles.DEFAULT)
             if failure is not None:
                 self.bus.emit(sid, "error", failure)
             self.bus.emit(sid, "status", {"status": status, "stop_reason": reason, "answer": result.answer})

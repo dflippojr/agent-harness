@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from .app_store import AppStore
     from .credential_store import CredentialStore
     from .session_store import SessionStore
+    from .usage_store import UsageStore
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -652,7 +653,7 @@ class CoreStore(_Store):
 
 
 # The core stores a Database builds, by attribute (#992 stage 5). `app_stores` says where each one's rows live.
-CORE_STORES = ("credentials", "sessions", "accounts", "apps")
+CORE_STORES = ("credentials", "sessions", "accounts", "apps", "usage")
 
 
 def _store_class(attribute: str) -> type[CoreStore]:
@@ -662,9 +663,10 @@ def _store_class(attribute: str) -> type[CoreStore]:
     from .app_store import AppStore
     from .credential_store import CredentialStore
     from .session_store import SessionStore
+    from .usage_store import UsageStore
 
     return {"credentials": CredentialStore, "sessions": SessionStore, "accounts": AccountStore,
-            "apps": AppStore}[attribute]
+            "apps": AppStore, "usage": UsageStore}[attribute]
 
 
 class _Forwarded:
@@ -794,11 +796,13 @@ class Database:
         from .app_store import AppStore
         from .credential_store import CredentialStore
         from .session_store import SessionStore
+        from .usage_store import UsageStore
 
         self.credentials: CredentialStore = CredentialStore(self)
         self.sessions: SessionStore = SessionStore(self)
         self.accounts: AccountStore = AccountStore(self)
         self.apps: AppStore = AppStore(self)
+        self.usage: UsageStore = UsageStore(self)
         self.sessions.build_search_index()
 
     @property
@@ -1003,51 +1007,6 @@ class Database:
         with self.lock:
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
 
-    # hosted backend usage and limits
-    @_writes
-    def set_backend_usage(self, backend: str, data: dict) -> None:
-        with self.lock:
-            self.conn.execute("INSERT INTO backend_usage (backend, data, updated_at) VALUES (?, ?, ?) "
-                              "ON CONFLICT(backend) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
-                              (backend, json.dumps(data), time.time()))
-
-    @_reads
-    def get_backend_usage(self, backend: str) -> dict:
-        with self.lock:
-            row = self.conn.execute("SELECT * FROM backend_usage WHERE backend = ?", (backend,)).fetchone()
-        return _row(row) or {"backend": backend, "data": {}, "updated_at": None}
-
-    @_writes
-    def record_usage(self, backend: str, sid: str, app_id: str, prompt_tokens: int,
-                     completion_tokens: int, cost_usd: float, billing: str,
-                     credential_source: str = "subscription", end_user: str = "",
-                     tool_profile: str = "default") -> None:
-        with self.lock:
-            self.conn.execute("INSERT INTO usage (backend, session_id, app_id, prompt_tokens, completion_tokens, "
-                              "cost_usd, billing, credential_source, end_user, tool_profile, created_at) "
-                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                              (backend, sid, app_id, prompt_tokens, completion_tokens, cost_usd, billing,
-                               credential_source, end_user, tool_profile, time.time()))
-
-    @_reads
-    def end_user_usage(self, app_id: str, end_user: str) -> dict:
-        """What one end user's sessions used (#365): the usage log's tally for that (App, end user)."""
-        with self.lock:
-            row = self.conn.execute("SELECT COUNT(*) sessions, COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
-                                    "COALESCE(SUM(completion_tokens),0) completion_tokens, "
-                                    "COALESCE(SUM(cost_usd),0) cost_usd FROM usage WHERE app_id = ? AND end_user = ?",
-                                    (app_id, end_user)).fetchone()
-        return dict(row)
-
-    @_reads
-    def member_backend_usage(self, end_user: str, backend: str) -> dict:
-        """What a member's hosted sessions on `backend` used (#393): the usage log's tally for their end user id."""
-        with self.lock:
-            row = self.conn.execute("SELECT COUNT(*) sessions, COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
-                                    "COALESCE(SUM(completion_tokens),0) completion_tokens FROM usage "
-                                    "WHERE app_id = '' AND end_user = ? AND backend = ?", (end_user, backend)).fetchone()
-        return dict(row)
-
     @_writes
     def register_end_user(self, end_user: str) -> None:
         """Record an App's end user in the store it is called on (the App's own, `db.for_app(app_id)`)."""
@@ -1064,69 +1023,6 @@ class Database:
     def forget_end_user(self, end_user: str) -> None:
         with self.lock:
             self.conn.execute("DELETE FROM end_users WHERE id = ?", (end_user,))
-
-    @_reads
-    def app_usage(self, app_id: str) -> dict:
-        """What App `app_id`'s sessions used, from the usage log (metadata the main store keeps, #330)."""
-        with self.lock:
-            row = self.conn.execute("SELECT COALESCE(SUM(requests),0) requests, "
-                                    "COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
-                                    "COALESCE(SUM(completion_tokens),0) completion_tokens, "
-                                    "COALESCE(SUM(cost_usd),0) cost_usd FROM usage WHERE app_id = ?",
-                                    (app_id,)).fetchone()
-        return dict(row)
-
-    @_reads
-    def app_usage_daily(self, since: float, until: float) -> list[dict]:
-        """One metadata-only scan for registered Apps/devices, including revoked/erased keys and idle Apps."""
-        # SQLite rounds fractional epochs to milliseconds; truncate so 23:59:59.9999 stays on its own day.
-        with self.lock:
-            rows = self.conn.execute(
-                "SELECT k.id app_id, k.name, k.kind, date(CAST(u.created_at AS INTEGER), 'unixepoch', 'localtime') day, u.billing, "
-                "COALESCE(SUM(u.requests),0) requests, COALESCE(SUM(u.prompt_tokens),0) prompt_tokens, "
-                "COALESCE(SUM(u.completion_tokens),0) completion_tokens, COALESCE(SUM(u.cost_usd),0) cost_usd "
-                "FROM api_keys k LEFT JOIN usage u ON u.app_id = k.id AND u.created_at >= ? AND u.created_at <= ? "
-                "WHERE k.kind IN ('app', 'device') GROUP BY k.id, day, u.billing ORDER BY k.id, day, u.billing",
-                (since, until)).fetchall()
-        return [dict(row) for row in rows]
-
-    @_reads
-    def usage_tally(self, backend: str, since: float, app_id: str | None = None) -> dict:
-        app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
-        with self.lock:
-            row = self.conn.execute("SELECT COALESCE(SUM(requests),0) requests, "
-                                    "COALESCE(SUM(prompt_tokens),0) prompt_tokens, "
-                                    "COALESCE(SUM(completion_tokens),0) completion_tokens, "
-                                    "COALESCE(SUM(cost_usd),0) cost_usd FROM usage "
-                                    f"WHERE backend = ? AND created_at >= ?{app_clause}", params).fetchone()
-        return dict(row)
-
-    @_reads
-    def usage_by_source(self, backend: str, since: float, app_id: str | None = None) -> dict[str, dict]:
-        app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
-        with self.lock:
-            rows = self.conn.execute(
-                "SELECT credential_source, COALESCE(SUM(requests),0) requests, "
-                "COALESCE(SUM(prompt_tokens),0) prompt_tokens, COALESCE(SUM(completion_tokens),0) completion_tokens, "
-                "COALESCE(SUM(cost_usd),0) cost_usd FROM usage WHERE backend = ? AND created_at >= ?"
-                f"{app_clause} GROUP BY credential_source", params).fetchall()
-        return {row["credential_source"]: {k: row[k] for k in
-                                            ("requests", "prompt_tokens", "completion_tokens", "cost_usd")}
-                for row in rows}
-
-    @_reads
-    def usage_by_profile(self, backend: str, since: float, app_id: str | None = None) -> dict[str, dict]:
-        """The usage log's tally per tool profile (#638): `default` or `bash-only`."""
-        app_clause, params = (AND_APP, [backend, since, app_id]) if app_id is not None else ("", [backend, since])
-        with self.lock:
-            rows = self.conn.execute(
-                "SELECT tool_profile, COALESCE(SUM(requests),0) requests, "
-                "COALESCE(SUM(prompt_tokens),0) prompt_tokens, COALESCE(SUM(completion_tokens),0) completion_tokens, "
-                "COALESCE(SUM(cost_usd),0) cost_usd FROM usage WHERE backend = ? AND created_at >= ?"
-                f"{app_clause} GROUP BY tool_profile", params).fetchall()
-        return {row["tool_profile"]: {k: row[k] for k in
-                                       ("requests", "prompt_tokens", "completion_tokens", "cost_usd")}
-                for row in rows}
 
     # idempotent App session creation (#462, harness/idempotency.py): the hash of the key and a digest of the
     # request, never the request itself

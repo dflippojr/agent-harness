@@ -44,7 +44,7 @@ def _seed(path: Path) -> None:
     db.add_checkpoint("own1", 1, "abc123", "abc123", "main")
     db.add_review_comment("own1", {"repo": "", "path": "x", "side": "new", "start_line": 1, "end_line": 1,
                                    "quoted": [], "comment": "c", "base": "", "head": ""})
-    db.record_usage("fake", "own1", "", 10, 5, 0.0, "subscription")
+    db.usage.record_usage("fake", "own1", "", 10, 5, 0.0, "subscription")
     db.set_meta("profile_emoji", "🦉")
     db.close()
 

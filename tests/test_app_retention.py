@@ -519,3 +519,38 @@ def test_the_cleanup_sweeps_app_workspace_roots(tmp_path):
     m.maintenance._workspaces(time.time(), report)
     assert report["orphans_removed"] == ["gone1"] and not orphan.exists()
     m.db.close()
+
+
+def test_erasing_an_app_is_all_or_nothing_across_its_stores(tmp_path):
+    """`mark_app_erased` writes CredentialStore rows, AppStore rows and meta keys in one transaction (#992 decision 4):
+    when one statement fails, none of it lands."""
+    db = Database(tmp_path / "state.sqlite")
+    try:
+        app, _ = db.credentials.create_api_key("Gone", kind="app")
+        kid = app["id"]
+        db.credentials.set_app_provider_credential(kid, "claude", "secret-ref", "app_only", [])
+        db.apps.set_app_settings(kid, 2, {"app.notify.completion": "never"})
+        assert db.apps.set_app_limits(kid, {"max_running": 1})
+        db.set_meta("app_error:" + kid, '{"errors": 2}')
+
+        def state():
+            key = db.credentials.get_api_key(kid)
+            return (key["erased_at"], key["scopes"], db.apps.get_app_settings(kid) is not None,
+                    db.credentials.app_provider_credential(kid, "claude") is not None,
+                    db.apps.app_limits(kid)["max_running"], db.get_meta("app_error:" + kid))
+
+        before = state()
+        assert before[0] is None and before[2:] == (True, True, 1, '{"errors": 2}')
+        # The provider credentials' delete comes after the tombstone and the settings' delete: refuse it.
+        db.write(lambda: db.conn.execute("CREATE TRIGGER refuse_erase BEFORE DELETE ON app_provider_credentials "
+                                         "BEGIN SELECT RAISE(ABORT, 'refused'); END"))
+        with pytest.raises(sqlite3.DatabaseError, match="refused"):
+            db.apps.mark_app_erased(kid)
+        assert state() == before                       # nothing landed: no tombstone, settings and keys kept
+
+        db.write(lambda: db.conn.execute("DROP TRIGGER refuse_erase"))
+        db.apps.mark_app_erased(kid)
+        erased_at, scopes, *rest = state()
+        assert erased_at is not None and scopes == "" and rest == [False, False, None, ""]
+    finally:
+        db.close()

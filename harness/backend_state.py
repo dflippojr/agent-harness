@@ -245,7 +245,7 @@ def view(manager, name: str, check_auth: bool = True, app_id: str | None = None,
     cfg = manager.cfg.backends[name]
     if cfg.is_cli:
         return cli_view(manager, name, check_auth, app_id)
-    state = manager.db.get_backend_usage(name)
+    state = manager.db.usage.get_backend_usage(name)
     now = time.time()
     local_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     week = now - 7 * 86400
@@ -264,10 +264,10 @@ def view(manager, name: str, check_auth: bool = True, app_id: str | None = None,
     # rate-limit events on their sessions instead of this shared cache; public discovery gets no limit data.
     hide_shared_limits = not include_usage or bool(provider_policy and provider_policy["managed"])
     limits = {} if hide_shared_limits else state["data"]
-    today = manager.db.usage_tally(name, local_midnight, app_id) if include_usage else {}
-    week_tally = manager.db.usage_tally(name, week, app_id) if include_usage else {}
-    sources = manager.db.usage_by_source(name, week, app_id) if include_usage else {}
-    profiles = manager.db.usage_by_profile(name, week, app_id) if include_usage else {}
+    today = manager.db.usage.usage_tally(name, local_midnight, app_id) if include_usage else {}
+    week_tally = manager.db.usage.usage_tally(name, week, app_id) if include_usage else {}
+    sources = manager.db.usage.usage_by_source(name, week, app_id) if include_usage else {}
+    profiles = manager.db.usage.usage_by_profile(name, week, app_id) if include_usage else {}
     return {
         "name": name, "available": cfg.enabled and allowed, "logged_in": logged_in, "auth": cfg.auth,
         "billing": cfg.billing, "model": cfg.model, "effort": cfg.effort,

@@ -38,7 +38,12 @@ class AppStore(CoreStore):
     @_writes
     def mark_app_erased(self, kid: str) -> None:
         """Leave only a tombstone of an erased App in the registry: its id, name, kind and dates. Its settings,
-        provider credentials and error counts go with its store."""
+        provider credentials and error counts go with its store.
+
+        One transaction across stores, on purpose (#992 decision 4): the tombstone (`api_keys`, CredentialStore's), the
+        provider credentials (`app_provider_credentials`, CredentialStore's), the settings (this store's) and the
+        `app_error:`/`app_limits:` meta keys commit together or not at all, so a failed erase never leaves an App
+        half-erased. `tests/test_app_retention.py` checks that."""
         with self.lock:
             if self.conn.execute("SELECT 1 FROM api_keys WHERE id = ? AND kind = 'web'", (kid,)).fetchone():
                 raise ValueError("Stables is never erased")

@@ -230,7 +230,7 @@ def _smart_review_metrics(out: _Out, db) -> None:
 def _backend_metrics(m: Manager, out: _Out, db) -> None:
     backend_limits, backend_costs = [], []
     for name in m.cfg.backends:
-        state = db.get_backend_usage(name)["data"]
+        state = db.usage.get_backend_usage(name)["data"]
         windows = state.get("unifiedWindows") or {}
         if state.get("rateLimitType") and state.get("utilization") is not None:
             windows = {**windows, state["rateLimitType"]: {"utilization": state["utilization"]}}
@@ -238,7 +238,7 @@ def _backend_metrics(m: Manager, out: _Out, db) -> None:
             if isinstance(value, dict) and value.get("utilization") is not None:
                 backend_limits.append(({"backend": name, "window": window}, value["utilization"]))
         # One series per tool profile (#638); a backend with no usage yet still shows a zero default series.
-        by_profile = db.usage_by_profile(name, 0) or {"default": {"cost_usd": 0}}
+        by_profile = db.usage.usage_by_profile(name, 0) or {"default": {"cost_usd": 0}}
         backend_costs += [({"backend": name, "tool_profile": profile}, tally["cost_usd"])
                           for profile, tally in sorted(by_profile.items())]
     out.metric("harness_backend_utilization", "gauge", "Latest hosted-backend utilization from 0 to 1.",
