@@ -995,14 +995,16 @@ async def _finished_within(awaitable, budget: float):
     return task.result()
 
 
-def _delayed_interrupt_scenario(tmp_path, budget: float | None = None, stall_seconds=0.0):
+def _delayed_interrupt_scenario(tmp_path, cancel_budget: float | None = None, stall_seconds=0.0):
     """Cancel a running ComfyUI job whose interrupt is delayed, then check the next job is untouched.
 
     stall_seconds > 0 blocks the event loop synchronously when the next job is marked running, the step
     right after the cancelled job's boundary releases cancel(): a loaded runner does the same in any
-    synchronous SQLite write (#1034).
+    synchronous SQLite write (#1034). cancel_budget bounds only cancel(); the next job, which writes its
+    image through a thread with fsync, keeps the scaled deadline.
     """
-    budget = scaled(2) if budget is None else budget
+    budget = scaled(2)
+    cancel_budget = budget if cancel_budget is None else cancel_budget
 
     async def body():
         m, _, _ = image_manager(tmp_path)
@@ -1068,7 +1070,7 @@ def _delayed_interrupt_scenario(tmp_path, budget: float | None = None, stall_sec
         assert state["prompts"] == ["p1"]
 
         deliver_interrupt.set()
-        cancelled = await _finished_within(cancelling, budget)
+        cancelled = await _finished_within(cancelling, cancel_budget)
         completed = await _finished_within(m.images.wait(second["id"]), budget)
         assert cancelled["status"] == "failed"
         assert cancelled["error"] == "cancelled"
@@ -1086,7 +1088,7 @@ def test_delayed_interrupt_cannot_cancel_next_comfy_job(tmp_path):
 
 def test_delayed_interrupt_survives_event_loop_stall_past_the_budget(tmp_path):
     # cancel() finishes in the stalled step's next loop iteration, the same one in which its deadline expires.
-    _delayed_interrupt_scenario(tmp_path, budget=0.2, stall_seconds=0.5)
+    _delayed_interrupt_scenario(tmp_path, cancel_budget=0.2, stall_seconds=0.5)
 
 
 def test_cancel_deletes_comfy_prompt_while_still_pending(tmp_path):
