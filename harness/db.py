@@ -651,6 +651,10 @@ class CoreStore(_Store):
         return self._db._tx(label)
 
 
+# The core stores a Database builds, by attribute (#992 stage 5). `app_stores` says where each one's rows live.
+CORE_STORES = ("credentials", "sessions")
+
+
 def _store_class(attribute: str) -> type[CoreStore]:
     """The class of the core store a Database exposes as `attribute`. Imported on first use: each store module
     imports this one."""

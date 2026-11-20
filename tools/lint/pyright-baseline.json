@@ -301,15 +301,39 @@
   },
   {
     "file": "harness/db.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"int | None\" cannot be assigned to parameter \"seq\" of type \"int\" in function \"_index_event\"\n  Type \"int | None\" is not assignable to type \"int\"\n    \"None\" is not assignable to \"int\"",
+    "count": 1
+  },
+  {
+    "file": "harness/db.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"int\" cannot be assigned to parameter \"object\" of type \"str\" in function \"append\"\n  \"int\" is not assignable to \"str\"",
+    "count": 1
+  },
+  {
+    "file": "harness/db.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"list[dict[Unknown, Unknown] | None]\" cannot be assigned to parameter \"lists\" of type \"list[dict[Unknown, Unknown]]\" in function \"merge_newest_first\"\n  \"list[dict[Unknown, Unknown] | None]\" is not assignable to \"list[dict[Unknown, Unknown]]\"\n    Type parameter \"_T@list\" is invariant, but \"dict[Unknown, Unknown] | None\" is not the same as \"dict[Unknown, Unknown]\"\n    Consider switching from \"list\" to \"Sequence\" which is covariant",
+    "count": 1
+  },
+  {
+    "file": "harness/db.py",
     "rule": "reportAttributeAccessIssue",
     "message": "Cannot assign to attribute \"db_kind\" for class \"_Wrapped[..., Unknown, (self: Unknown, ...), Unknown]\"\n  Attribute \"db_kind\" is unknown",
     "count": 2
   },
   {
     "file": "harness/db.py",
+    "rule": "reportOptionalSubscript",
+    "message": "Object of type \"None\" is not subscriptable",
+    "count": 2
+  },
+  {
+    "file": "harness/db.py",
     "rule": "reportReturnType",
     "message": "Type \"list[dict[Unknown, Unknown] | None]\" is not assignable to return type \"list[dict[Unknown, Unknown]]\"",
-    "count": 1
+    "count": 10
   },
   {
     "file": "harness/disk_watch.py",
@@ -403,8 +427,20 @@
   },
   {
     "file": "harness/maintenance.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"session_dirs\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/maintenance.py",
     "rule": "reportGeneralTypeIssues",
     "message": "\"Never\" is not awaitable",
+    "count": 1
+  },
+  {
+    "file": "harness/maintenance.py",
+    "rule": "reportOptionalSubscript",
+    "message": "Object of type \"None\" is not subscriptable",
     "count": 1
   },
   {
@@ -691,9 +727,105 @@
   },
   {
     "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"approval\" of type \"dict[Unknown, Unknown]\" in function \"_approval_time_left\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"approval\" of type \"dict[Unknown, Unknown]\" in function \"_expire_approval\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"_cli_failure_code\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"_context_banner\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"_dispatch_mcp\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"_guidance_eligible\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"_maybe_compact\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"_resolve_calls\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"_run_local\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"_taint_from_result\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"_with_workspace_context\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"has_valid_saved_state\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"quota_mb\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 2
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"dict[Unknown, Unknown] | None\" cannot be assigned to parameter \"s\" of type \"dict[Unknown, Unknown]\" in function \"workspace\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportArgumentType",
+    "message": "Argument of type \"tuple[dict[Unknown, Unknown] | None, int]\" cannot be assigned to parameter \"at\" of type \"tuple[dict[Unknown, Unknown], int]\" in function \"_take_checkpoint\"\n  \"tuple[dict[Unknown, Unknown] | None, int]\" is not assignable to \"tuple[dict[Unknown, Unknown], int]\"\n    Tuple entry 1 is incorrect type\n      Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n        \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 2
+  },
+  {
+    "file": "harness/runner.py",
     "rule": "reportAssignmentType",
     "message": "Type \"None\" is not assignable to declared type \"(rel: str, data: bytes) -> CoroutineType[Any, Any, str]\"\n  Type \"None\" is not assignable to type \"(rel: str, data: bytes) -> CoroutineType[Any, Any, str]\"",
     "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportAssignmentType",
+    "message": "Type \"dict[Unknown, Unknown] | None\" is not assignable to declared type \"dict[Unknown, Unknown]\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 5
   },
   {
     "file": "harness/runner.py",
@@ -764,6 +896,12 @@
   {
     "file": "harness/runner.py",
     "rule": "reportOptionalMemberAccess",
+    "message": "\"get\" is not a known attribute of \"None\"",
+    "count": 12
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportOptionalMemberAccess",
     "message": "\"prompt_tokens\" is not a known attribute of \"None\"",
     "count": 4
   },
@@ -775,9 +913,21 @@
   },
   {
     "file": "harness/runner.py",
+    "rule": "reportOptionalSubscript",
+    "message": "Object of type \"None\" is not subscriptable",
+    "count": 69
+  },
+  {
+    "file": "harness/runner.py",
     "rule": "reportReturnType",
     "message": "Type \"Workspace | RemoteWorkspace\" is not assignable to return type \"Workspace\"\n  Type \"Workspace | RemoteWorkspace\" is not assignable to type \"Workspace\"\n    \"RemoteWorkspace\" is not assignable to \"Workspace\"",
     "count": 1
+  },
+  {
+    "file": "harness/runner.py",
+    "rule": "reportReturnType",
+    "message": "Type \"dict[Unknown, Unknown] | None\" is not assignable to return type \"dict[Unknown, Unknown]\"\n  Type \"dict[Unknown, Unknown] | None\" is not assignable to type \"dict[Unknown, Unknown]\"\n    \"None\" is not assignable to \"dict[Unknown, Unknown]\"",
+    "count": 4
   },
   {
     "file": "harness/sandbox.py",

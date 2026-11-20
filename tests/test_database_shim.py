@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+import harness.app_stores as app_stores
 import harness.db as core_db
 from harness.app_stores import SessionStores
 from harness.credential_store import CredentialStore
@@ -255,8 +256,33 @@ def test_each_store_keeps_its_own_sessions_behind_session_stores(tmp_path):
         assert [e["type"] for e in app_db.sessions.events("a1")] == ["user_message"]
         assert main.sessions.get_session("a1") is None and main.sessions.events("a1") == []
         assert stores.get_session("a1")["id"] == "a1" and stores.get_session("own")["id"] == "own"
-        # The main store's SessionStore would miss the routed session, so SessionStores does not hand it out.
-        with pytest.raises(AttributeError, match="routes each session"):
-            stores.sessions  # noqa: B018 - the access itself is the check
+    finally:
+        stores.close()
+
+
+def test_every_core_store_is_declared_and_says_where_its_rows_live():
+    assert set(core_db.CORE_STORES) == set(STORES) == set(app_stores._STORE_HOME)
+    for name, cls in STORES.items():
+        assert core_db._store_class(name) is cls
+
+
+def test_no_wrapper_hands_out_the_wrong_databases_store(tmp_path):
+    """Each `SessionStores` wrapper hands out the main store's credentials, and refuses `sessions`: one Database's
+    SessionStore would miss every session routed to another, and an App's would outlive the wrapper's hold on it."""
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        key, _ = stores.create_api_key("Owner", "admin", kind="owner")
+        stores.insert_session(_session("a1", "k-aaaa"))
+        wrappers = {"stores": stores, "scope(app)": stores.scope("k-aaaa"), "scope(owner)": stores.scope(""),
+                    "for_app(app)": stores.for_app("k-aaaa"), "for_session(app sid)": stores.for_session("a1")}
+        for label, wrapper in wrappers.items():
+            assert wrapper.credentials is main.credentials, label
+            assert key["id"] in {k["id"] for k in wrapper.credentials.list_api_keys()}, label
+            with pytest.raises(AttributeError, match="routes each session"):
+                wrapper.sessions  # noqa: B018 - the access itself is the check
+        # The wrappers' own session calls still route: the App's session is read from its store.
+        assert stores.for_app("k-aaaa").get_session("a1")["id"] == "a1"
+        assert stores.scope("k-aaaa").get_session("a1")["id"] == "a1"
     finally:
         stores.close()

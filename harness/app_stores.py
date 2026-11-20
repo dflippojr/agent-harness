@@ -89,6 +89,11 @@ WEB_APP_ID = "app-web"
 # sessions and serves them, as before #330 stage c).
 WEB_MIGRATION_ENV = "HARNESS_WEB_STORE_MIGRATION"
 WEB_STORE_META = "web_store"  # main-store meta: when the sessions moved into Web's store, how many, and the backup
+# Where each core store's rows live behind SessionStores (#992): "main" (the main store's, as the App registry's), or
+# None when its rows are routed per session. A wrapper hands out a "main" store's object as the main store's, and
+# refuses a routed one: its methods are called on the wrapper, which routes each to the session's store.
+# tests/test_database_shim.py checks that it names every store in `db.CORE_STORES`.
+_STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None}
 # Main-store methods that read sessions or their rows without taking a session id: they run on Web's store.
 _ON_WEB = frozenset({"group_sessions", "snippet_events", "smart_review_stats", "smart_reviews", "job_sessions",
                      "session_activity"})
@@ -194,6 +199,8 @@ class _AppStore:
         if name.startswith("__"):
             raise AttributeError(name)
         stores, app_id = self._stores, self.app_id
+        if name in _STORE_HOME:  # never the App's own copy of a core store, nor one held past its release
+            return stores.core_store(name)
         if name in ("insert_session", "update_session", "delete_session"):  # they keep the index current
             return getattr(stores, name)
         if name in ("awrite", "aread"):
@@ -415,12 +422,19 @@ class SessionStores:
             entry = self._sessions.get(sid)
         return entry["app_id"] if entry else ""
 
+    def core_store(self, name: str):
+        """Core store `name` as every wrapper hands it out: the main store's, or refused for a store whose rows are
+        routed per session (the main store's `sessions` would miss every App's and, after the move, Web's)."""
+        if _STORE_HOME[name] is None:
+            raise AttributeError(f"SessionStores routes each session to its own store: call the method on this "
+                                 f"object, or on for_session(sid) or for_app(app_id), not on a `{name}` store")
+        return getattr(self.main, name)
+
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
             raise AttributeError(name)
-        if name == "sessions":  # the main store's SessionStore would miss every routed session (#992)
-            raise AttributeError("SessionStores routes each session to its own store: call the session method here, "
-                                 "or on for_session(sid) or for_app(app_id), not on a `sessions` store")
+        if name in _STORE_HOME:
+            return self.core_store(name)
         if name in _BY_SESSION:
             def by_session(sid, *args, **kwargs):
                 if name in _SESSION_WRITES:
