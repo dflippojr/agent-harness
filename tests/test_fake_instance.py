@@ -223,6 +223,30 @@ def test_stop_cleans_up_a_definitively_gone_or_unrelated_process(monkeypatch, tm
     kill.assert_not_called()
 
 
+@pytest.mark.parametrize("case, wall_clock, boot_start, killed", [
+    ("clock-stepped", 43, 4200, True),   # the wall clock moved a second since start: still the same process
+    ("reused", 42, 4300, False),         # another start since boot, whatever the wall clock says: never killed
+])
+def test_stop_judges_the_process_by_its_start_since_boot(monkeypatch, tmp_path, case, wall_clock, boot_start, killed):
+    """#1040: on Linux psutil's create_time() adds the current boot time from /proc/stat, which is whole seconds off the
+    wall clock, so a clock adjustment moves it. stop() then took its own instance for a reused pid, deleted the
+    directory, reported success and left the process running."""
+    import psutil
+    from unittest.mock import Mock
+    instance = tmp_path / "instance"
+    fake_instance.write_instance(instance, 0)
+    fake_instance.write_handle(instance, {"pid": 123, "pid_created": 42, "pid_started": 4200})
+    proc = Mock(pid=123)
+    proc.create_time.return_value = wall_clock
+    proc.cmdline.return_value = ["python", "-m", "harness.fake_instance"]
+    monkeypatch.setattr(psutil, "Process", Mock(return_value=proc))
+    monkeypatch.setattr(fake_instance, "_boot_start", lambda pid: boot_start, raising=False)
+    kill = Mock(return_value=True)
+    monkeypatch.setattr(fake_instance, "_kill", kill)
+    assert fake_instance.stop(instance) == 0 and not instance.exists()
+    assert kill.called is killed, case
+
+
 @pytest.mark.parametrize("failure", ["alive", "inspection"])
 def test_stop_preserves_directory_when_shutdown_fails(monkeypatch, tmp_path, failure):
     import psutil
