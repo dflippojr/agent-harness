@@ -413,10 +413,11 @@ def test_the_routing_proxy_refuses_what_it_cannot_route(tmp_path):
             for name in ("end_users", "insert_namespace_audit", "find_idempotency_key"):
                 with pytest.raises(AttributeError, match=r"for_app\(app_id\)\.sessions"):
                     getattr(proxy, name)
-        # The stage 6 names were never forwarded: the wrappers refuse them at the attribute, before opening a store.
-        for name in ("get_app_tool_call", "end_users", "namespace_audit_page"):
-            with pytest.raises(AttributeError):
-                getattr(stores, name)
+        # The stage 6 names were never forwarded: no wrapper hands them out, only its `sessions` proxy.
+        for wrapper in (stores, stores.scope("k-aaaa"), stores.for_app("k-aaaa")):
+            for name in ("get_app_tool_call", "end_users", "namespace_audit_page"):
+                with pytest.raises(AttributeError):
+                    getattr(wrapper, name)
         # A write about an erased App session is refused through the proxy too: its id now routes to Web's store.
         stores.delete_session("a1")
         with pytest.raises(sqlite3.ProgrammingError, match="was erased"):
@@ -425,6 +426,38 @@ def test_the_routing_proxy_refuses_what_it_cannot_route(tmp_path):
     finally:
         stores.close()
 
+
+def test_the_proxys_routing_tables_cover_every_session_method():
+    """Every `SessionStore` method that takes a session id first routes by it (or is one of SessionStores' own),
+    since the main store holds no sessions once they are in Web's store; every such write is refused for an erased
+    App session; and the App's own rows the proxy refuses unscoped are exactly the stage 6 names without a session id."""
+    for name in sorted(app_stores._SESSION_METHODS - app_stores._OWN_SESSION_METHODS):
+        method = getattr(SessionStore, name)
+        params = list(inspect.signature(method).parameters)
+        if params[1:2] == ["sid"]:
+            assert name in app_stores._BY_SESSION, f"{name} takes a session id: add it to _BY_SESSION"
+        if name in app_stores._BY_SESSION and getattr(method, "db_kind", None) == "write":
+            assert name in app_stores._SESSION_WRITES, f"{name} writes: add it to _SESSION_WRITES"
+    assert app_stores._BY_SESSION <= app_stores._SESSION_METHODS
+    assert app_stores._SESSION_WRITES <= app_stores._BY_SESSION
+    assert app_stores._APP_ROWS | {"insert_app_tool_call", "get_app_tool_call", "app_tool_calls",
+                                   "finish_app_tool_call"} == APP_STORE_NAMES
+
+
+def test_has_tool_result_reads_the_sessions_own_store(tmp_path):
+    """`has_tool_result` (whether a session's sandbox ran a tool before, for the "environment recreated" notice) once
+    read the main store, which holds no sessions after the move into Web's store: it routes by session id now."""
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        assert stores.web is not main
+        for sid, app_id in (("own", ""), ("a1", "k-aaaa")):
+            stores.insert_session(_agent_session(sid, app_id))
+            assert not stores.has_tool_result(sid) and not stores.sessions.has_tool_result(sid)
+            stores.insert_event(sid, "tool_result", {"id": "t1", "output": "ok"})
+            assert stores.has_tool_result(sid) and stores.sessions.has_tool_result(sid), sid
+    finally:
+        stores.close()
 
 def test_an_app_route_holds_its_store_per_call_and_writes_only_from_its_own_writer(tmp_path):
     main = Database(tmp_path / "state.sqlite")
