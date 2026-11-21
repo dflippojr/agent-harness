@@ -57,8 +57,9 @@ def record(db, session, context, action, *, target=None, kind="session", outcome
         store = db.for_app(session.get("app_id") or "")
         def commit():
             if store.get_session(session["id"]) is not None:
-                store.insert_namespace_audit(scope, session["id"], context or audit_context.SYSTEM,
-                                             session["id"] if target is None else target, kind, action, outcome, data)
+                store.sessions.insert_namespace_audit(scope, session["id"], context or audit_context.SYSTEM,
+                                                      session["id"] if target is None else target, kind, action,
+                                                      outcome, data)
         store.write(commit)
     except Exception:
         warning = gap.get()
@@ -122,7 +123,7 @@ class LoginStore:
                 "subject_trust": "caller_asserted"}
         if self.backend in {"claude", "codex"}:
             data["backend"] = self.backend
-        self.db.for_app(self.app_id).insert_namespace_audit(
+        self.db.for_app(self.app_id).sessions.insert_namespace_audit(
             self.app_id, "", context, target, "login", action, outcome, data, self.days)
 
     def finish(self, context, operation_id):

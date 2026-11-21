@@ -579,7 +579,7 @@ class Manager:
             attempt_id = secrets.token_urlsafe(16)
             async with namespace_audit.login_operation(self.db, app_id, end_user, context, "login.start",
                                                        attempt_id, backend) as audit:
-                await asyncio.to_thread(self.db.for_app(app_id).register_end_user, end_user)
+                await asyncio.to_thread(self.db.for_app(app_id).sessions.register_end_user, end_user)
                 app = self.db.main.get_api_key(app_id) or {}
                 store = namespace_audit.LoginStore(self.db, app_id, end_user, app.get("retention_days"), backend)
                 return await self.end_user_logins.start(app_id, end_user, backend,
@@ -695,7 +695,7 @@ class Manager:
             self._enforce_queue_caps(session)
             self.db.insert_session(session)
             if idempotency:  # same commit as the session: a crash before the response still finds it on retry
-                store.insert_idempotency_key({**idempotency, "session_id": sid})
+                store.sessions.insert_idempotency_key({**idempotency, "session_id": sid})
             self.bus.emit(sid, "session_created", {**{k: session[k] for k in
                                                        ("project", "target", "model", "backend", "title")},
                                                    **({"app": app["name"], "app_tools": [t["name"] for t in tools]}
@@ -2072,7 +2072,7 @@ class Manager:
                 await sandbox.remove()
         if self.cfg.backends:
             await cli_domains.drop_app_volumes(self.cfg.backends, app_id)
-        end_users = await asyncio.to_thread(self.db.for_app(app_id).end_users)
+        end_users = await asyncio.to_thread(self.db.for_app(app_id).sessions.end_users)
         if end_users:  # every end user's login and CLI state goes with the App (#365)
             await asyncio.to_thread(self.end_user_logins.cancel_app, app_id)
             await cli_domains.drop_end_user_volumes(app_id, end_users)
@@ -2102,7 +2102,8 @@ class Manager:
         for app_id in defaults:
             if not self.db.store_path(app_id).is_file() or app_id == "app-web":
                 continue
-            await asyncio.to_thread(self.db.for_app(app_id).prune_namespace_audit, now, defaults.get(app_id) or 30)
+            await asyncio.to_thread(self.db.for_app(app_id).sessions.prune_namespace_audit, now,
+                                    defaults.get(app_id) or 30)
         for app_id in self.db.indexed_apps():
             for r in await asyncio.to_thread(self.db.for_app(app_id).session_activity):
                 days = r["retention_days"] or defaults.get(app_id)

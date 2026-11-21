@@ -11,6 +11,8 @@ per-App usage and error counters, provider credentials, settings, jobs, skills, 
 ...)`, ...) runs on that session's store; anything else runs on the main store. A transaction (`write`/`awrite`) that
 touches a session must run on that session's writer: `db.for_session(sid).write(fn)`, or `db.for_app(app_id)` for a
 session not created yet. An App store opens on first use and closes after `APP_STORE_IDLE_SECONDS` without one.
+`db.sessions` (on `SessionStores`, `for_app(app_id)` and `scope(app_id)`) is the one per-session routing proxy
+(`_RoutedSessions`, #992 stage 6): `SessionStore`'s methods, each routed the same way.
 
 The owner and members never read another App's store (#330 decision 3): their lists, searches and id lookups cover
 Web's store only, and an App's cover its own (`db.scope(app_id)`), plus Web's for an owner-granted `sessions:all` read.
@@ -42,6 +44,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .db import Database, merge_newest_first
+from .session_store import SessionStore
 from .fileops import remove_tree
 from .sqlite_backup import backup_sqlite
 
@@ -56,7 +59,7 @@ _APP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 # events; `usage` (metadata) and `stream_tickets` (auth) stay in the main store.
 SESSION_TABLES = ("events", "artifacts", "approvals", "app_tool_calls", "smart_reviews", "review_comments",
                   "secret_dismissals", "checkpoints", "namespace_audit")
-# Database methods whose first argument is a session id: they run on that session's store.
+# Session methods whose first argument is a session id: they run on that session's store.
 _BY_SESSION = frozenset({
     "get_session", "get_session_for_user", "session_brief", "add_checkpoint", "checkpoints",
     "show_checkpoints_through", "delete_checkpoints", "put_artifact", "read_artifact", "full_artifact",
@@ -90,14 +93,22 @@ WEB_APP_ID = "app-web"
 WEB_MIGRATION_ENV = "HARNESS_WEB_STORE_MIGRATION"
 WEB_STORE_META = "web_store"  # main-store meta: when the sessions moved into Web's store, how many, and the backup
 # Where each core store's rows live behind SessionStores (#992): "main" (the main store's, as the App registry's), or
-# None when its rows are routed per session. A wrapper hands out a "main" store's object as the main store's, and
-# refuses a routed one: its methods are called on the wrapper, which routes each to the session's store.
+# None when its rows are routed per session. A wrapper hands out a "main" store's object as the main store's. For a
+# routed one it hands out its own routing proxy (`sessions`, `_RoutedSessions`) and never one Database's store.
 # tests/test_database_shim.py checks that it names every store in `db.CORE_STORES`.
 _STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None, "accounts": "main", "apps": "main",
                                      "usage": "main"}
 # Main-store methods that read sessions or their rows without taking a session id: they run on Web's store.
 _ON_WEB = frozenset({"group_sessions", "snippet_events", "smart_review_stats", "smart_reviews", "job_sessions",
                      "session_activity"})
+# SessionStore's own methods: what a routing proxy (`<wrapper>.sessions`) hands out.
+_SESSION_METHODS = frozenset(n for n, v in vars(SessionStore).items() if callable(v) and not n.startswith("_"))
+# SessionStore methods about one App's own rows that take no session id (#992 stage 6): its end users, idempotency keys
+# and namespace audit. They run on an App's route (`for_app(app_id).sessions`); `SessionStores.sessions` refuses them,
+# since it cannot tell whose rows they are.
+_APP_ROWS = frozenset({"register_end_user", "end_users", "forget_end_user", "insert_idempotency_key",
+                       "drop_expired_idempotency_keys", "find_idempotency_key", "insert_namespace_audit",
+                       "prune_namespace_audit", "namespace_audit_page"})
 
 
 class WebStoreMismatch(RuntimeError):
@@ -156,6 +167,10 @@ def _kind(name: str) -> str | None:
     return getattr(getattr(Database, name, None), "db_kind", None)
 
 
+def _session_kind(name: str) -> str | None:
+    return getattr(getattr(SessionStore, name, None), "db_kind", None)
+
+
 def _like(prefix: str) -> re.Pattern:
     """`Database.find_session_ids`'s case-insensitive literal prefix match as a regex (#785)."""
     return re.compile(re.escape(prefix) + ".*", re.IGNORECASE | re.DOTALL)
@@ -182,6 +197,30 @@ class _ThreadAio:
         return call
 
 
+class _RoutedSessions:
+    """`<wrapper>.sessions` behind `SessionStores`: the one per-session routing proxy (#992 stage 6, decision 1). It
+    has `SessionStore`'s methods, and its wrapper routes each call to the store that holds the rows, held for that call
+    only (never a method bound to one Database's store, which could outlive the hold):
+
+    - `SessionStores.sessions` by session id, as `SessionStores` routes the forwarded names (a write about an erased
+      App session refused), Web's store for `_ON_WEB`, the main store otherwise; an App's own rows (`_APP_ROWS`)
+      refused.
+    - `for_app(app_id).sessions` (and `for_session(sid).sessions` for an App session) on that App's store.
+    - `scope(app_id).sessions` as `SessionStores.sessions`, with lists, searches and id lookups narrowed to what that
+      App (or, for "", the owner) may see.
+
+    A Web route is Web's own Database, whose `sessions` is its store."""
+
+    def __init__(self, route: Callable[[str], Callable[..., Any]]):
+        self._route = route
+        self.aio = _ThreadAio(self)
+
+    def __getattr__(self, name: str) -> Any:
+        if name not in _SESSION_METHODS:
+            raise AttributeError(f"SessionStore has no method {name!r}")
+        return self._route(name)
+
+
 class _AppStore:
     """One App's store with the Database interface. It holds no connection: each call opens the store if it was
     closed and keeps it open until the call returns (a write until it has committed)."""
@@ -189,6 +228,18 @@ class _AppStore:
     def __init__(self, stores: SessionStores, app_id: str):
         self._stores, self.app_id = stores, app_id
         self.aio = _ThreadAio(self)
+        self.sessions = _RoutedSessions(self._session_route)
+
+    def _session_route(self, name: str) -> Callable[..., Any]:
+        stores, app_id = self._stores, self.app_id
+        if name in ("insert_session", "update_session", "delete_session"):  # they keep the index current
+            return getattr(stores, name)
+        write = _session_kind(name) == "write"
+
+        def call(*args, **kwargs):
+            with stores._using(app_id, write=write) as db:
+                return getattr(db.sessions, name)(*args, **kwargs)
+        return call
 
     def for_session(self, sid: str):
         return self._stores.for_session(sid)
@@ -229,6 +280,11 @@ class _Scoped:
 
     def __init__(self, stores: SessionStores, app_id: str):
         self._stores, self.app_id = stores, app_id
+        self.sessions = _RoutedSessions(self._session_route)
+
+    def _session_route(self, name: str) -> Callable[..., Any]:
+        method = self._stores._session_route(name)
+        return functools.partial(method, with_app=self.app_id) if name in _SCOPED else method
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
@@ -280,6 +336,7 @@ class SessionStores:
         self.apps_dir = Path(apps_dir)
         self.idle_seconds = idle_seconds
         self.aio = _ThreadAio(self)
+        self.sessions = _RoutedSessions(self._session_route)
         self._lock = threading.RLock()
         self._open: dict[str, _OpenStore] = {}
         self._proxies: dict[str, _AppStore] = {}
@@ -435,19 +492,36 @@ class SessionStores:
         return entry["app_id"] if entry else ""
 
     def core_store(self, name: str):
-        """Core store `name` as every wrapper hands it out: the main store's, or refused for a store whose rows are
-        routed per session (the main store's `sessions` would miss every App's and, after the move, Web's)."""
+        """Core store `name` as every wrapper hands it out: the main store's. A store whose rows are routed per session
+        is refused here (the main store's `sessions` would miss every App's and, after the move, Web's): each wrapper
+        defines its own routing proxy for it (`sessions`), so a wrapper that lacks one fails instead of misrouting."""
         if _STORE_HOME[name] is None:
-            raise AttributeError(f"SessionStores routes each session to its own store: call the method on this "
-                                 f"object, or on for_session(sid) or for_app(app_id), not on a `{name}` store")
+            raise AttributeError(f"SessionStores routes each session to its own store: use this wrapper's own "
+                                 f"`{name}` routing proxy, or for_session(sid) or for_app(app_id), not a `{name}` "
+                                 "store")
         return getattr(self.main, name)
+
+    def _session_route(self, name: str) -> Callable[..., Any]:
+        """SessionStore method `name` as `self.sessions` runs it: SessionStores' own (they keep the index current, or
+        read several stores), by session id, on Web's store, or on the main store."""
+        if name in _OWN_SESSION_METHODS:
+            return getattr(self, name)
+        if name in _BY_SESSION:
+            def by_session(sid, *args, **kwargs):
+                if name in _SESSION_WRITES:
+                    self._refuse_erased(sid)
+                return getattr(self.for_session(sid).sessions, name)(sid, *args, **kwargs)
+            return by_session
+        if name in _APP_ROWS:
+            raise AttributeError(f"{name} reads or writes one App's own rows: call it on for_app(app_id).sessions")
+        return getattr((self.web if name in _ON_WEB else self.main).sessions, name)
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
             raise AttributeError(name)
         if name in _STORE_HOME:
             return self.core_store(name)
-        if name in _BY_SESSION:
+        if name in _BY_SESSION and hasattr(Database, name):  # a forwarded name; the newer ones only on `sessions`
             def by_session(sid, *args, **kwargs):
                 if name in _SESSION_WRITES:
                     self._refuse_erased(sid)
@@ -1043,3 +1117,7 @@ class SessionStores:
                 main.conn.execute(f"DELETE FROM {table} WHERE session_id IN ({marks})", sids)
             main.conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", sids)
         main.write(delete)
+
+
+# SessionStore methods that SessionStores defines itself: `sessions` runs these, not one store's.
+_OWN_SESSION_METHODS = _SESSION_METHODS & frozenset(vars(SessionStores))

@@ -16,7 +16,6 @@ import json
 import queue
 import sqlite3
 import threading
-import time
 import weakref
 from concurrent.futures import Future
 from contextlib import contextmanager
@@ -24,7 +23,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence, cast
 
 from . import migrations as migrations_mod
-from .digests import sha256_hex
 from .migrations.baseline import BASELINE_VERSION, LEGACY_COLUMNS
 
 from .telemetry import TimedLock
@@ -1006,133 +1004,3 @@ class Database:
     def set_meta(self, key: str, value: str) -> None:
         with self.lock:
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
-
-    @_writes
-    def register_end_user(self, end_user: str) -> None:
-        """Record an App's end user in the store it is called on (the App's own, `db.for_app(app_id)`)."""
-        with self.lock:
-            self.conn.execute("INSERT OR IGNORE INTO end_users (id, created_at) VALUES (?, ?)",
-                              (end_user, time.time()))
-
-    @_reads
-    def end_users(self) -> list[str]:
-        with self.lock:
-            return [r["id"] for r in self.conn.execute("SELECT id FROM end_users ORDER BY created_at, id")]
-
-    @_writes
-    def forget_end_user(self, end_user: str) -> None:
-        with self.lock:
-            self.conn.execute("DELETE FROM end_users WHERE id = ?", (end_user,))
-
-    # idempotent App session creation (#462, harness/idempotency.py): the hash of the key and a digest of the
-    # request, never the request itself
-    @_writes
-    def insert_idempotency_key(self, row: dict) -> None:
-        """Record a key in the transaction creating its session; a key still protected raises IntegrityError and the
-        session's insert rolls back with it. Start the protection window at this successful insert."""
-        from . import idempotency
-
-        now = idempotency.clock()
-        self.drop_expired_idempotency_keys(now)
-        with self.lock:
-            self.conn.execute("INSERT INTO idempotency_keys (key_hash, request_digest, session_id, created_at, "
-                              "expires_at) VALUES (?, ?, ?, ?, ?)",
-                              (row["key_hash"], row["request_digest"], row["session_id"], now,
-                               now + idempotency.WINDOW_SECONDS))
-
-    @_writes
-    def drop_expired_idempotency_keys(self, now: float) -> None:
-        """Expired keys (tombstones included) are free again: their rows go."""
-        with self.lock:
-            self.conn.execute("DELETE FROM idempotency_keys WHERE expires_at <= ?", (now,))
-
-    @_reads
-    def find_idempotency_key(self, key_hash: str, now: float) -> dict | None:
-        """The key's row while it is protected; None once it has expired or was never used."""
-        with self.lock:
-            row = self.conn.execute("SELECT * FROM idempotency_keys WHERE key_hash = ? AND expires_at > ?",
-                                    (key_hash, now)).fetchone()
-        return dict(row) if row else None
-
-    # app tool calls
-    @_writes
-    def insert_app_tool_call(self, sid: str, call_id: str, name: str, args: dict) -> None:
-        with self.lock:
-            self.conn.execute("INSERT OR IGNORE INTO app_tool_calls (session_id, call_id, name, args, status, "
-                              "created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
-                              (sid, call_id, name, json.dumps(args), time.time()))
-
-    @_reads
-    def get_app_tool_call(self, sid: str, call_id: str) -> dict | None:
-        with self.lock:
-            row = self.conn.execute("SELECT * FROM app_tool_calls WHERE session_id = ? AND call_id = ?",
-                                    (sid, call_id)).fetchone()
-        return _row(row)
-
-    @_reads
-    def app_tool_calls(self, sid: str, status: str | None = None) -> list[dict]:
-        query, params = "SELECT * FROM app_tool_calls WHERE session_id = ?", [sid]
-        if status:
-            query += " AND status = ?"
-            params.append(status)
-        with self.lock:
-            return [_row(r) for r in self.conn.execute(query + " ORDER BY created_at", params).fetchall()]
-
-    @_writes
-    def finish_app_tool_call(self, sid: str, call_id: str, status: str, output: str, ok: bool) -> bool:
-        with self.lock:
-            return self.conn.execute(
-                "UPDATE app_tool_calls SET status = ?, output = ?, ok = ?, finished_at = ? "
-                "WHERE session_id = ? AND call_id = ? AND status = 'pending'",
-                (status, output, int(ok), time.time(), sid, call_id)).rowcount == 1
-
-    # an App end user's namespace audit (#470): its rows are in each App's own store, so they move with the routed
-    # stores in stage 6 (#992), not to the main-homed `AppStore`
-    @_writes
-    def insert_namespace_audit(self, namespace: str, session_id: str, context, target: str, kind: str,
-                               action: str, outcome: str, metadata: dict, days: float = 30) -> None:
-        now = time.time()
-        values = (now, namespace, session_id, context.actor_id, context.actor_kind, context.key_id, context.source,
-                  target, kind, action, outcome, json.dumps(metadata, sort_keys=True, separators=(',', ':')),
-                  None if session_id else now + min(30, days) * 86400)
-        checksum = sha256_hex(json.dumps(values, separators=(',', ':')))
-        with self.lock:
-            self.conn.execute(
-                "INSERT INTO namespace_audit (ts, namespace, session_id, actor_id, actor_kind, key_id, source, "
-                "target_id, target_kind, action, outcome, metadata, expires_at, checksum) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (*values, checksum))
-            self.conn.execute("DELETE FROM namespace_audit WHERE expires_at <= ?", (now,))
-
-    @_writes
-    def prune_namespace_audit(self, now: float | None = None, days: float = 30) -> None:
-        now = time.time() if now is None else now
-        with self.lock:
-            self.conn.execute("DELETE FROM namespace_audit WHERE session_id = '' AND "
-                              "(expires_at <= ? OR ts <= ?)", (now, now - min(30, days or 30) * 86400))
-
-    @_reads
-    def namespace_audit_page(self, namespace: str, limit: int = 200, before_id: int | None = None, *,
-                             target_id: str | None = None, actor_id: str | None = None, key_id: str | None = None,
-                             action: str | None = None, login_days: float = 30,
-                             outcome: str | None = None, since: float | None = None,
-                             until: float | None = None) -> dict:
-        limit = max(1, min(int(limit), 500))
-        now = time.time()
-        where = ["namespace = ?", "(expires_at IS NULL OR expires_at > ?)", "(session_id <> '' OR ts > ?)"]
-        args = [namespace, now, now - min(30, login_days or 30) * 86400]
-        for column, operator, value in (("id", "<", before_id), ("target_id", "=", target_id),
-                                         ("actor_id", "=", actor_id), ("key_id", "=", key_id),
-                                         ("action", "=", action), ("outcome", "=", outcome),
-                                         ("ts", ">=", since), ("ts", "<", until)):
-            if value is not None:
-                where.append(f"{column} {operator} ?")
-                args.append(value)
-        with self.lock:
-            rows = self.conn.execute("SELECT id, ts, actor_id, actor_kind, key_id, source, target_id, "
-                                     "target_kind, action, outcome, metadata FROM namespace_audit WHERE "
-                                     + " AND ".join(where) + " ORDER BY id DESC LIMIT ?",
-                                     [*args, limit + 1]).fetchall()
-        items = [dict(row) for row in rows[:limit]]
-        for item in items:
-            item["metadata"] = json.loads(item["metadata"])
-        return {"items": items, "next_before_id": items[-1]["id"] if len(rows) > limit else None}
