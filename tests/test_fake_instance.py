@@ -125,7 +125,8 @@ def test_stop_ends_the_recorded_instance_process(tmp_path):
         fake_instance.write_handle(instance, {"pid": proc.pid, "pid_created": created - 60})
         assert fake_instance._instance_process({"pid": proc.pid, "pid_created": created - 60}) is None
         identity = fake_instance.process_identity(proc.pid)  # what serve() records (#1040)
-        assert identity["pid"] == proc.pid and identity["pid_created"] == created
+        # Only the clock-free fields are compared: two create_time() reads may differ after a clock adjustment.
+        assert identity["pid"] == proc.pid and identity["pid_started"] == fake_instance._boot_start(proc.pid)
         fake_instance.write_handle(instance, identity)
         assert fake_instance.stop(instance) == 0
         assert proc.wait(timeout=30) is not None and not instance.exists()
