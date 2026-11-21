@@ -1167,11 +1167,11 @@ def test_member_approval_cannot_grant_owner_only_tool(tmp_path):
         "context": [], "run": {}, "totals": {}, "inbox": [], "owner_id": alice["user_id"],
     }
     m.db.insert_session(row)
-    m.db.insert_approval({
+    m.db.sessions.insert_approval({
         "id": "a-fake01", "session_id": sid, "tool_call_id": "c1",
         "tool": "homelab_services", "args": {}, "reason": "injected",
     })
-    assert m.db.decide_approval("a-fake01", "approved", "")
+    assert m.db.sessions.decide_approval("a-fake01", "approved", "")
     ws = m.runner.workspace(row)
     out = asyncio.run(m.runner._authorize(row, {"id": "c1"}, "homelab_services", {}, ws))
     assert out

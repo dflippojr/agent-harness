@@ -255,7 +255,7 @@ class Maintenance:
             return
         remove_tree(path)
         remove_tree(dirs["checkpoints"] / sid)
-        self.db.delete_checkpoints(sid, [c["turn"] for c in self.db.checkpoints(sid, hidden=None)])
+        self.db.sessions.delete_checkpoints(sid, [c["turn"] for c in self.db.sessions.checkpoints(sid, hidden=None)])
         self.db.update_session(sid, workspace_removed=1)
 
     # reporting

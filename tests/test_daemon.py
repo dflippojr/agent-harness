@@ -234,7 +234,7 @@ def test_approval_survives_restart(tmp_path):
         await m.start()
         s = m.create("write secret", project="guarded")
         await wait_status(m, s["id"], "waiting_approval")
-        pending = m.db.pending_approvals(s["id"])
+        pending = m.db.sessions.pending_approvals(s["id"])
         assert len(pending) == 1
         assert "+x" in pending[0]["detail"]
         assert m.scheduler.holder is None  # the GPU is free while waiting
@@ -400,7 +400,7 @@ def test_cancel_and_follow_up_message(tmp_path):
         s = await m.cancel(s["id"])
         assert s["status"] == "cancelled"
         assert s["context"][-1]["content"].startswith("Not run")
-        assert m.db.pending_approvals(s["id"]) == []
+        assert m.db.sessions.pending_approvals(s["id"]) == []
         await m.send(s["id"], "never mind, just say hi")
         s = await wait_status(m, s["id"], "done")
         assert s["answer"] == "continued"

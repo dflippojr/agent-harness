@@ -91,7 +91,7 @@ def test_every_failure_branch_answers_the_calls_it_leaves(tmp_path, monkeypatch,
             results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg["role"] == "tool"}
             assert results == {"c0-run_shell": STOPPED, "c1-list_files": NOT_RUN}
             assert (s["run"].get("executing") or None) is None
-            assert m.db.pending_approvals(sid) == []
+            assert m.db.sessions.pending_approvals(sid) == []
         finally:
             await m.stop()
     asyncio.run(body())
@@ -112,8 +112,8 @@ def test_a_failed_run_cancels_its_pending_approval(tmp_path, monkeypatch):
             sid = m.create("write it", project="guarded")["id"]
             s = await wait_status(m, sid, "failed")
             assert s["run"]["failure"]["code"] == "internal_error"
-            assert m.db.pending_approvals(sid) == []
-            approval = m.db.approval_for_call(sid, "c0-write_file")
+            assert m.db.sessions.pending_approvals(sid) == []
+            approval = m.db.sessions.approval_for_call(sid, "c0-write_file")
             assert approval is not None and approval["status"] == "cancelled"
             results = {msg["tool_call_id"]: msg["content"] for msg in s["context"] if msg["role"] == "tool"}
             assert results == {"c0-write_file": NOT_RUN}

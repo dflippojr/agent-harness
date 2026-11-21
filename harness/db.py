@@ -720,20 +720,6 @@ class Database:
     delete_session = _Forwarded("sessions")
     job_sessions = _Forwarded("sessions")
     session_activity = _Forwarded("sessions")
-    # sessions: checkpoints and artifacts
-    add_checkpoint = _Forwarded("sessions")
-    checkpoints = _Forwarded("sessions")
-    show_checkpoints_through = _Forwarded("sessions")
-    delete_checkpoints = _Forwarded("sessions")
-    put_artifact = _Forwarded("sessions")
-    read_artifact = _Forwarded("sessions")
-    full_artifact = _Forwarded("sessions")
-    # sessions: review comments and secret dismissals
-    add_review_comment = _Forwarded("sessions")
-    list_review_comments = _Forwarded("sessions")
-    add_secret_dismissal = _Forwarded("sessions")
-    secret_dismissals = _Forwarded("sessions")
-    delete_review_comments = _Forwarded("sessions")
     # sessions: events and search
     insert_event = _Forwarded("sessions")
     search_events = _Forwarded("sessions")
@@ -744,17 +730,6 @@ class Database:
     snippet_events = _Forwarded("sessions")
     session_card_bits = _Forwarded("sessions")
     last_event_seq = _Forwarded("sessions")
-    # sessions: approvals and smart reviews
-    insert_approval = _Forwarded("sessions")
-    approval_by_token = _Forwarded("sessions")
-    get_approval = _Forwarded("sessions")
-    approval_for_call = _Forwarded("sessions")
-    pending_approvals = _Forwarded("sessions")
-    approvals = _Forwarded("sessions")
-    decide_approval = _Forwarded("sessions")
-    insert_smart_review = _Forwarded("sessions")
-    smart_review_stats = _Forwarded("sessions")
-    smart_reviews = _Forwarded("sessions")
 
     def __init__(self, path: Path, migrations: Sequence[migrations_mod.Step] | None = None):
         """Open (creating if needed) and migrate the database. `migrations` overrides the discovered steps."""

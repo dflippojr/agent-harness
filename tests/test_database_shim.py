@@ -22,6 +22,7 @@ from harness.app_store import AppStore
 from harness.app_stores import WEB_APP_ID, SessionStores
 from harness.credential_store import CredentialStore
 from harness.db import CoreStore, Database
+from harness.manager import Manager
 from harness.session_store import SessionStore
 from harness.usage_store import UsageStore
 
@@ -43,25 +44,11 @@ PINNED_SHIM: dict[str, frozenset[str]] = {
         "find_session_ids", "list_sessions", "session_page", "active_sessions", "group_sessions",
         "sessions_with_status", "sessions_with_run_flag", "count_sessions", "count_app_sessions",
         "count_stored_sessions", "count_stored_app_sessions", "delete_session", "job_sessions", "session_activity",
-        # checkpoints and artifacts
-        "add_checkpoint", "checkpoints", "show_checkpoints_through", "delete_checkpoints", "put_artifact",
-        "read_artifact", "full_artifact",
-        # review comments and secret dismissals
-        "add_review_comment", "list_review_comments", "add_secret_dismissal", "secret_dismissals",
-        "delete_review_comments",
         # events and search
         "insert_event", "search_events", "session_brief", "events", "has_tool_result", "pushed_heads",
         "snippet_events", "session_card_bits", "last_event_seq",
-        # approvals and smart reviews
-        "insert_approval", "approval_by_token", "get_approval", "approval_for_call", "pending_approvals", "approvals",
-        "decide_approval", "insert_smart_review", "smart_review_stats", "smart_reviews",
     }),
 }
-
-
-# Forwarded store methods that are not one query but call others (so they carry no `db_kind`): `aio` runs them in a
-# worker thread. Every other forwarded name must be `_reads` or `_writes`.
-COMPOSITES = frozenset({("sessions", "read_artifact")})
 
 
 # Stores that land with every caller moved, so `Database` forwards none of their names, and never will.
@@ -105,10 +92,11 @@ def test_the_shim_only_shrinks():
 
 def test_database_forwards_these_many_names_per_store():
     """The shim on `Database` as this change leaves it, read from the class itself: 6 credential names (39 when the
-    store was added, 28 before #1032), 51 session names, and no account, App or usage names."""
+    store was added, 28 before #1032), 29 session names (51 before #992 stage 6 moved the checkpoint, artifact,
+    review-comment, secret-dismissal, approval and smart-review callers), and no account, App or usage names."""
     forwarded = _forwarded()
     sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
-    assert sizes == {"credentials": 6, "sessions": 51, "accounts": 0, "apps": 0, "usage": 0}
+    assert sizes == {"credentials": 6, "sessions": 29, "accounts": 0, "apps": 0, "usage": 0}
     assert sizes == {store: len(PINNED_SHIM.get(store, ())) for store in STORES}
 
 
@@ -131,12 +119,10 @@ def test_every_forwarded_name_is_a_store_method():
         cls = STORES[store]
         for name in pinned:
             method = vars(cls).get(name)
-            # A query is `_reads` or `_writes`; only the named composites (of such queries) carry no kind.
+            # A query is `_reads` or `_writes`. The one composite forwarded (`read_artifact`, which calls others and
+            # carries no kind) left the shim with its callers (#992 stage 6).
             assert callable(method), name
-            if (store, name) in COMPOSITES:
-                assert not hasattr(method, "db_kind"), f"{store}.{name} is a query now: drop it from COMPOSITES"
-            else:
-                assert method.db_kind in ("read", "write"), name
+            assert method.db_kind in ("read", "write"), name
             # The class-level lookup `app_stores` routes by sees the store's decorated method.
             assert getattr(Database, name) is method, name
         # A store method is forwarded only by its own `_Forwarded` line on `Database`, never by default.
@@ -502,6 +488,26 @@ def test_an_approval_inserted_on_an_apps_route_is_indexed(tmp_path):
     finally:
         stores.close()
 
+
+def test_an_app_approvals_decision_holds_its_store_as_a_write(tmp_path):
+    """SessionStores decides an App approval on that App's store as a write, its kind read from `SessionStore` (the
+    forwarders on `Database` go, #992 stage 6): from the main store's transaction it raises instead of writing past
+    the hold, and the approval stays pending."""
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        stores.insert_session(_agent_session("a1", "k-aaaa"))
+        stores.sessions.insert_approval({"id": "ap-1", "session_id": "a1", "tool_call_id": "c1", "tool": "write_file",
+                                         "args": {"path": "x"}, "reason": "ask"})
+        with pytest.raises(RuntimeError, match="another store's transaction"):
+            main.write(lambda: stores.sessions.decide_approval("ap-1", "approved"))
+        assert stores.sessions.get_approval("ap-1")["status"] == "pending"
+        assert stores.sessions.decide_approval("ap-1", "approved")
+        assert stores.sessions.get_approval("ap-1")["status"] == "approved"
+    finally:
+        stores.close()
+
+
 def test_has_tool_result_reads_the_sessions_own_store(tmp_path):
     """`has_tool_result` (whether a session's sandbox ran a tool before, for the "environment recreated" notice) once
     read the main store, which holds no sessions after the move into Web's store: it routes by session id now."""
@@ -535,12 +541,22 @@ def test_an_app_route_holds_its_store_per_call_and_writes_only_from_its_own_writ
         stores.close()
 
 
-def test_every_call_of_an_app_store_row_goes_through_a_sessions_proxy():
-    """No production code calls or passes one of the stage 6 `SessionStore` names on anything but a `sessions`
-    store or proxy (`<x>.sessions.<name>` or `<x>.sessions.aio.<name>`)."""
+def _moved_session_names() -> frozenset[str]:
+    """`SessionStore`'s methods that `Database` does not forward (#992 stage 6): the App's own rows that joined the
+    store, and each name whose callers moved to a `sessions` proxy. It grows as the `sessions` pin shrinks."""
+    return frozenset(_store_methods(SessionStore) - PINNED_SHIM["sessions"])
+
+
+def test_every_call_of_a_moved_session_method_goes_through_a_sessions_proxy():
+    """No production code calls or passes a `SessionStore` name that `Database` no longer forwards on anything but a
+    `sessions` store or proxy (`<x>.sessions.<name>` or `<x>.sessions.aio.<name>`). Six of them (the approval reads
+    and decision, `insert_approval`, `insert_smart_review` and `pending_approvals`) are also SessionStores' own
+    overrides, so a call left on `m.db` would still run: only this scan refuses it."""
+    moved = _moved_session_names()
+    assert APP_STORE_NAMES <= moved and not moved & set(_forwarded())
     root = Path(core_db.__file__).resolve().parent
     for package in (root, root.parent / "harness_modules", root.parent / "scripts"):
-        assert _uses_off_the_store(package, "sessions", APP_STORE_NAMES) == [], package.name
+        assert _uses_off_the_store(package, "sessions", moved) == [], package.name
 
 
 def test_the_session_scan_allows_the_store_and_its_aio_only(tmp_path):
@@ -559,6 +575,25 @@ def test_the_session_scan_allows_the_store_and_its_aio_only(tmp_path):
         "pkg/x.py:6 .app_tool_calls", "pkg/x.py:7 .namespace_audit_page", "pkg/x.py:8 .end_users"]
 
 
+def test_the_session_scan_allows_a_managers_and_a_classs_own_methods(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "x.py").write_text(
+        "class Stores:\n"
+        "    def get_approval(self, aid):\n"
+        "        return self.web.sessions.get_approval(aid)\n"
+        "    def decide(self, aid):\n"
+        "        return self.get_approval(aid)\n"          # the class's own override: fine
+        "def f(m, sid):\n"
+        "    m.checkpoints(sid)\n"                         # Manager.checkpoints, the listing: fine
+        "    m.db.sessions.checkpoints(sid)\n"             # on the proxy: fine
+        "    m.db.checkpoints(sid)\n"                      # line 9: on the wrapper
+        "    m.get_approval('ap-1')\n"                     # line 10: Manager has no get_approval
+        "    return m.db.get_approval('ap-1')\n",          # line 11: SessionStores' override, off the proxy
+        encoding="utf-8")
+    assert sorted(_uses_off_the_store(tmp_path / "pkg", "sessions", frozenset({"checkpoints", "get_approval"}))) == [
+        "pkg/x.py:10 .get_approval", "pkg/x.py:11 .get_approval", "pkg/x.py:9 .checkpoints"]
+
+
 ACCOUNT_TABLES = ("accounts", "account_audit", "member_projects", "github_connections", "member_api_keys",
                   "google_identities", "google_link_invitations", "web_sessions")
 
@@ -575,9 +610,10 @@ def test_account_queries_left_the_database_class():
 def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -> list[str]:
     """Each use of a method name of core store `store` (or of `names`, some of them: a call, or a bound method handed
     to `to_thread` or `awrite`) not made on that store: `<x>.<store>.<name>` or `<x>.<store>.aio.<name>`. Also
-    allowed: for apps, `self.<name>` inside a class that defines `<name>` itself (`Manager.app_limits`, the effective
-    caps); for accounts, an `accounts` stand-in (`principal.resolve_human`'s) or `operation_audit`'s
-    `_audit_store(db)`."""
+    allowed: for apps and sessions, `self.<name>` inside a class that defines `<name>` itself (`Manager.app_limits`,
+    the effective caps; SessionStores' own overrides); for sessions, `m.<name>` for a method of the Manager (`m`) of
+    that name (`checkpoints`, the listing, and `add_review_comment`); for accounts, an `accounts` stand-in
+    (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`."""
     import ast
     cls = STORES[store]
     names = _store_methods(cls) if names is None else names
@@ -600,8 +636,10 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -
                 on = on.value
             if isinstance(on, ast.Attribute) and on.attr == store:
                 continue
-            if store == "apps" and isinstance(on, ast.Name) and on.id == "self" and \
+            if store in ("apps", "sessions") and isinstance(on, ast.Name) and on.id == "self" and \
                     node.attr in own_methods.get(id(node), ()):
+                continue
+            if store == "sessions" and isinstance(on, ast.Name) and on.id == "m" and node.attr in vars(Manager):
                 continue
             if store == "accounts" and ((isinstance(on, ast.Name) and on.id == "accounts") or (
                     isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store")):

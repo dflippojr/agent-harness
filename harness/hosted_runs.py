@@ -589,7 +589,7 @@ class HostedRuns:
         args = obj(request, "input")
         call_id = str(request.get("tool_use_id") or request_id)
         s = self._live(sid)
-        existing = self.db.approval_for_call(sid, call_id)
+        existing = self.db.sessions.approval_for_call(sid, call_id)
         if existing is None and recovered and s["status"] == "waiting_approval":
             existing = self._recovery_approval(sid, name, args)
         if existing is None:
@@ -613,7 +613,7 @@ class HostedRuns:
 
     def _note_unanswered(self, sid: str) -> None:
         """Before a recovered run's CLI starts: the approvals still pending are the ones the restart left unanswered."""
-        self._recovery_unanswered[sid] = {approval["id"] for approval in self.db.pending_approvals(sid)}
+        self._recovery_unanswered[sid] = {approval["id"] for approval in self.db.sessions.pending_approvals(sid)}
 
     def _recovery_approval(self, sid: str, name: str, args: dict | None) -> dict | None:
         """The approval a regenerated CLI request binds to after a restart, or None to ask anew. Claude regenerates
@@ -622,7 +622,7 @@ class HostedRuns:
         no live request waits on, can bind; it keeps a decision made since (the owner may answer the card before the
         request comes back) and binds once. The same command asked and decided before the restart is history (#925)."""
         unanswered = self._recovery_unanswered.get(sid, set())
-        matches = [approval for approval in self.db.approvals(sid)
+        matches = [approval for approval in self.db.sessions.approvals(sid)
                    if approval["id"] in unanswered and approval["id"] not in self.approval_events
                    and approval["tool"] == name and approval["args"] == args]
         if len(matches) != 1:
@@ -633,7 +633,7 @@ class HostedRuns:
     def _hosted_status(self, sid: str) -> str:
         """A hosted session's status while it runs: parked on an approval or an App's reply while any is pending (its
         clock stops), else `running`. Its MCP calls and permission requests can overlap (#524)."""
-        if self.db.pending_approvals(sid):
+        if self.db.sessions.pending_approvals(sid):
             return "waiting_approval"
         return "waiting_app" if self._app_waits.get(sid) else "running"
 

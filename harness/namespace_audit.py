@@ -104,7 +104,7 @@ def failure_target(db, session, action, approval_id):
     if action != "approval.decide":
         return None, "session"
     store = db.for_app(session.get("app_id") or "")
-    approval = store.get_approval(approval_id) if approval_id else None
+    approval = store.sessions.get_approval(approval_id) if approval_id else None
     if approval and approval["session_id"] == session["id"]:
         return approval["id"], "approval"
     # Do not persist unverified caller targets or correlate a sibling member's approval.

@@ -466,4 +466,4 @@ def test_changes_and_review_comments_report_the_refusal(tmp_path, monkeypatch):
                          client.post(f"/sessions/{sid}/review-comments/send")):
             assert response.status_code == 409, response.text
             assert REFUSAL in response.json()["error"]["message"]
-        assert len(m.db.list_review_comments(sid)) == 1  # nothing was sent
+        assert len(m.db.sessions.list_review_comments(sid)) == 1  # nothing was sent

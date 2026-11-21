@@ -912,7 +912,7 @@ def test_claude_shadow_recommends_but_still_asks(tmp_path):
         await m.start()
         sid = m.create("run it", backend="claude")["id"]
         await wait_status(m, sid, "waiting_approval")
-        pending = m.db.pending_approvals(sid)
+        pending = m.db.sessions.pending_approvals(sid)
         assert len(pending) == 1
         assert pending[0]["smart"]["recommendation"] == "approve"
         assert pending[0]["smart"]["mode"] == "shadow"
@@ -941,8 +941,8 @@ def test_claude_auto_approves_and_renders_badge(tmp_path):
         s = await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
         assert s["answer"] == "allow"
-        assert m.db.pending_approvals(sid) == []
-        rows = m.db.approvals(sid)
+        assert m.db.sessions.pending_approvals(sid) == []
+        rows = m.db.sessions.approvals(sid)
         assert len(rows) == 1
         assert rows[0]["status"] == "approved"
         badge = events(m, sid, "approval_auto_approved")[0]
@@ -965,13 +965,13 @@ def test_claude_failures_and_denies_still_ask_once(tmp_path):
         await m.start()
         sid = m.create("run it", backend="claude")["id"]
         await wait_status(m, sid, "waiting_approval")
-        pending = m.db.pending_approvals(sid)
+        pending = m.db.sessions.pending_approvals(sid)
         assert len(pending) == 1
         assert pending[0]["smart"].get("escalate_reason") == escalate or pending[0]["smart"]["recommendation"] in (
             "deny", "escalate")
         m.decide(sid, pending[0]["id"], approve=True)
         await wait_status(m, sid, "done")
-        assert len(m.db.approvals(sid)) == 1
+        assert len(m.db.sessions.approvals(sid)) == 1
         await m.stop()
 
     asyncio.run(one(tmp_path / "timeout", lambda _p: (_ for _ in ()).throw(TimeoutError("timed out")), "timeout"))
@@ -1015,7 +1015,7 @@ def test_claude_restart_keeps_one_approval_with_recommendation(tmp_path):
         await m1.start()
         sid = m1.create("run it", backend="claude")["id"]
         await wait_status(m1, sid, "waiting_approval")
-        aid = m1.db.pending_approvals(sid)[0]["id"]
+        aid = m1.db.sessions.pending_approvals(sid)[0]["id"]
         await m1.stop()
         m1.db.close()
 
@@ -1028,14 +1028,14 @@ def test_claude_restart_keeps_one_approval_with_recommendation(tmp_path):
                 break
             await asyncio.sleep(0.02)
         await wait_status(m2, sid, "waiting_approval")
-        pending = m2.db.pending_approvals(sid)
+        pending = m2.db.sessions.pending_approvals(sid)
         assert len(pending) == 1
         assert pending[0]["id"] == aid
         assert pending[0]["smart"]["recommendation"] == "approve"
         m2.decide(sid, aid, approve=True)
         s = await wait_status(m2, sid, "done")
         assert s["answer"] == "allow"
-        assert len(m2.db.approvals(sid)) == 1
+        assert len(m2.db.sessions.approvals(sid)) == 1
         await m2.stop()
     asyncio.run(body())
 
@@ -1049,7 +1049,7 @@ def test_codex_untagged_project_ask_never_calls_reviewer(tmp_path):
         sid = m.create("test it", backend="codex")["id"]
         await wait_status(m, sid, "waiting_approval")
         assert m.runner.smart.calls == []
-        m.decide(sid, m.db.pending_approvals(sid)[0]["id"], approve=True)
+        m.decide(sid, m.db.sessions.pending_approvals(sid)[0]["id"], approve=True)
         await wait_status(m, sid, "done")
         await m.stop()
     asyncio.run(body())
@@ -1097,7 +1097,7 @@ def test_put_auto_then_live_settings_off_does_not_call_reviewer(tmp_path):
             assert time.monotonic() < deadline, "the session never asked for approval"
             time.sleep(0.05)
         assert m.runner.smart.calls == []
-        assert m.db.pending_approvals(sid)
+        assert m.db.sessions.pending_approvals(sid)
 
 
 def test_member_gets_403_on_every_smart_approvals_route(tmp_path):
@@ -1192,7 +1192,7 @@ def test_missing_credential_fails_closed(tmp_path):
         await m.start()
         sid = m.create("run it", backend="claude")["id"]
         await wait_status(m, sid, "waiting_approval")
-        pending = m.db.pending_approvals(sid)
+        pending = m.db.sessions.pending_approvals(sid)
         assert len(pending) == 1
         assert pending[0]["smart"]["escalate_reason"] == "missing credential"
         await m.stop()

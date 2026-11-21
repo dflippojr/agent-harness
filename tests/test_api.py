@@ -242,7 +242,7 @@ def test_approval_notification_and_token_buttons(tmp_path):
     with client:
         sid = client.post("/sessions", json={"prompt": "write a file", "project": "guarded"}).json()["id"]
         note = wait_for(lambda: next((p for p in sent if p.get("actions")), None))
-        approval = m.db.pending_approvals(sid)[0]
+        approval = m.db.sessions.pending_approvals(sid)[0]
         assert note["title"].startswith("Approve?")
         assert note["sequence_id"] == approval["id"]
         assert note["click"] == f"{PUBLIC}/#/s/{sid}/approval/{approval['id']}"

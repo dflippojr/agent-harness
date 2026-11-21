@@ -83,7 +83,7 @@ def test_same_app_lifecycle_contract_across_providers(tmp_path, backend):
         accepted = client.post(f"/api/v1/sessions/{first['id']}/tool_calls/app-call-1", headers=headers,
                                json={"output": "fixture", "ok": True})
         assert accepted.json() == {"accepted": True}
-        manager.db.insert_approval({"id": "a-contract", "session_id": first["id"], "tool_call_id": "native-1",
+        manager.db.sessions.insert_approval({"id": "a-contract", "session_id": first["id"], "tool_call_id": "native-1",
                                     "tool": "run_shell", "args": {"command": "echo ok"},
                                     "reason": "contract", "detail": "same approval shape"})
         pending = client.get(f"/api/v1/sessions/{first['id']}/approvals", headers=headers).json()

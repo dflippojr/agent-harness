@@ -135,10 +135,10 @@ def _session(sid: str, app_id: str = "", **extra) -> dict:
 
 def _fill(db: Database, sid: str, word: str) -> None:
     db.insert_event(sid, "user_message", {"content": f"find the {word}"})
-    db.insert_approval({"id": f"ap-{sid}", "session_id": sid, "tool_call_id": "c1", "tool": "write_file",
+    db.sessions.insert_approval({"id": f"ap-{sid}", "session_id": sid, "tool_call_id": "c1", "tool": "write_file",
                         "args": {"path": "x"}, "reason": "ask"})
     db.sessions.insert_app_tool_call(sid, "c2", "get_balance", {"account": "checking"})
-    db.put_artifact(sid, "h1", "artifact body")
+    db.sessions.put_artifact(sid, "h1", "artifact body")
 
 
 def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
@@ -159,8 +159,8 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
     assert len(web_backups) == 1 and session_ids(web_backups[0]) == {"own1"}  # the App sessions had moved
     assert stores.get_session("a1")["app_id"] == "k-aaaa"
     assert [e["data"]["content"] for e in stores.events("b1")] == ["find the walrus"]
-    assert stores.get_approval("ap-a2")["session_id"] == "a2"
-    assert stores.full_artifact("a1", "h1") == "artifact body"
+    assert stores.sessions.get_approval("ap-a2")["session_id"] == "a2"
+    assert stores.sessions.full_artifact("a1", "h1") == "artifact body"
     assert stores.sessions.get_app_tool_call("b1", "c2")["name"] == "get_balance"
     found = stores.search_events("osprey", app_id="k-aaaa")
     assert [r["session_id"] for r in found] == ["a2"]
@@ -336,14 +336,14 @@ def test_an_app_approval_insert_that_rolls_back_is_not_routed(tmp_path):
                 "reason": "", "status": "pending", "created_at": time.time()}
 
     def persist_ask():
-        stores.insert_approval(dict(approval))
-        assert stores.get_approval("ap1") is not None         # routed inside its transaction
+        stores.sessions.insert_approval(dict(approval))
+        assert stores.sessions.get_approval("ap1") is not None         # routed inside its transaction
         raise sqlite3.OperationalError("disk I/O error")
     with pytest.raises(sqlite3.OperationalError):
         stores.for_session("a1").write(persist_ask)
     assert "ap1" not in stores._approvals and stores._tokens == {}
-    stores.insert_approval(dict(approval))
-    assert stores.get_approval("ap1")["session_id"] == "a1" and stores.pending_approvals("a1")
+    stores.sessions.insert_approval(dict(approval))
+    assert stores.sessions.get_approval("ap1")["session_id"] == "a1" and stores.sessions.pending_approvals("a1")
     stores.close()
 
 
@@ -431,8 +431,8 @@ def test_lists_searches_and_lookups_reach_only_the_app_they_name(tmp_path):
     assert {r["session_id"] for r in owner.search_events("ledger")} == {"abc1"}
     assert {r["session_id"] for r in app_a.search_events("ledger")} == {"abc1", "abc2"}
     assert {r["session_id"] for r in stores.search_events("ledger", app_id="k-bbbb")} == {"abc3"}
-    assert {a["id"] for a in owner.pending_approvals()} == {"ap-abc1"}
-    assert {a["id"] for a in app_a.pending_approvals()} == {"ap-abc1", "ap-abc2"}
+    assert {a["id"] for a in owner.sessions.pending_approvals()} == {"ap-abc1"}
+    assert {a["id"] for a in app_a.sessions.pending_approvals()} == {"ap-abc1", "ap-abc2"}
     assert {s["id"] for s in stores.sessions_with_status("running")} == {"abc1", "abc2", "abc3"}  # sweeps
     stores.close()
 
@@ -466,9 +466,9 @@ def test_owner_totals_count_the_main_store_and_apps_only_as_metadata(tmp_path):
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="ok")]))
     for sid, app_id in (("own1", ""), ("a1", "k-aaaa"), ("a2", "k-aaaa")):
         m.db.insert_session(_session(sid, app_id))
-        m.db.insert_smart_review(f"sr-{sid}", sid, "", {"outcome": "auto_approved", "tool": "write_file"})
+        m.db.sessions.insert_smart_review(f"sr-{sid}", sid, "", {"outcome": "auto_approved", "tool": "write_file"})
     assert 'harness_sessions{status="done"} 1' in render(m)
-    assert m.db.smart_review_stats()["attempts"] == 1
+    assert m.db.sessions.smart_review_stats()["attempts"] == 1
     assert m.db.app_metadata("k-aaaa")["sessions"] == {"done": 2}
     m.db.close()
 
@@ -562,13 +562,13 @@ def test_an_apps_approvals_never_reach_the_owners_phone_or_one_tap_links(tmp_pat
         sid = client.post("/api/v1/sessions", headers=auth, json={
             "prompt": "write the secret", "project": "guarded", "tools": [BALANCE]}).json()["id"]
         pending = wait_for(lambda: client.get(f"/api/v1/sessions/{sid}/approvals", headers=auth).json())
-        approval = m.db.get_approval(pending[0]["id"])
+        approval = m.db.sessions.get_approval(pending[0]["id"])
         cfg.notify.enabled = True
         notifier = Notifier(cfg, m.db)
         notifier.listener({"type": "approval_requested", "session_id": sid, "data": {"id": approval["id"]}})
         assert notifier.queue.empty()
         assert client.post(f"/a/{approval['token']}/approve").status_code == 404
-        assert m.db.get_approval(approval["id"])["status"] == "pending"
+        assert m.db.sessions.get_approval(approval["id"])["status"] == "pending"
 
 
 def test_a_session_id_prefix_is_matched_literally_not_as_a_like_pattern(tmp_path):

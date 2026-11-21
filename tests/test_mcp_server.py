@@ -433,7 +433,7 @@ def test_an_ask_rule_prompts_for_an_mcp_call_and_denial_blocks_it(tmp_path):
         await m.start()
         sid = m.create("search", backend="claude", project="guarded")["id"]
         await wait_status(m, sid, "waiting_approval")
-        pending = m.db.pending_approvals(sid)
+        pending = m.db.sessions.pending_approvals(sid)
         assert [(p["tool"], p["reason"]) for p in pending] == [("mcp__harness__web_search", "check searches")]
         m.decide(sid, pending[0]["id"], approve=approve)
         await wait_status(m, sid, "done")
@@ -657,7 +657,7 @@ def test_codex_mcp_calls_follow_ask_and_deny_rules(tmp_path, rule, approve, ran)
         sid = m.create("search", backend="codex", project="guarded")["id"]
         if rule == "ask":
             await wait_status(m, sid, "waiting_approval")
-            pending = m.db.pending_approvals(sid)
+            pending = m.db.sessions.pending_approvals(sid)
             assert [(p["tool"], p["reason"]) for p in pending] == [("mcp__harness__web_search", "check searches")]
             m.decide(sid, pending[0]["id"], approve=approve)
         await wait_status(m, sid, "done")

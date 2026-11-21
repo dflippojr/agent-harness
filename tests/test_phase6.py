@@ -1072,9 +1072,9 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
         assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(a),
                            json={"output": "yes"}).status_code == 200
 
-        m.db.insert_approval({"id": "appr-a", "session_id": a_sid, "tool_call_id": "native-1",
+        m.db.sessions.insert_approval({"id": "appr-a", "session_id": a_sid, "tool_call_id": "native-1",
                               "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
-        m.db.insert_approval({"id": "appr-o", "session_id": owner_sid, "tool_call_id": "native-2",
+        m.db.sessions.insert_approval({"id": "appr-o", "session_id": owner_sid, "tool_call_id": "native-2",
                               "tool": "run_shell", "args": {"command": "echo"}, "reason": "ask"})
         assert client.get(f"/api/v1/sessions/{a_sid}/approvals", headers=H(broad)).status_code == 404
         assert client.post(f"/api/v1/sessions/{a_sid}/approvals/appr-a", headers=H(wide),

@@ -701,7 +701,7 @@ def test_an_attempt_that_asks_for_an_approval_ends_at_once_as_a_graded_fail_that
         assert len(polls) == 1  # ended on the first poll, not at the run's cap (the clock crosses a limit per poll)
         assert row["status"] == "complete" and row["attempts"] == 1 and row["pass_rate"] == 0.0
         sid = m.db.sessions_with_status("cancelled")[0]["id"]
-        assert not m.db.pending_approvals(sid) and len(chat.requests) == 1  # no model call after the request
+        assert not m.db.sessions.pending_approvals(sid) and len(chat.requests) == 1  # no model call after the request
     _hard_night(tmp_path, chat, until_it_asks, check)
 
 

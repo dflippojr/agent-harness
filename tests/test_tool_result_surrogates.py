@@ -76,7 +76,7 @@ def test_lone_surrogate_result_is_recorded_hashed_and_shown(tmp_path, monkeypatc
             (result,) = events(m, sid, "tool_result")
             assert result["ok"] is True
             assert LONE not in result["output"] and "\ufffd" in result["output"]
-            stored = m.db.full_artifact(sid, result["artifact_id"])
+            stored = m.db.sessions.full_artifact(sid, result["artifact_id"])
             assert stored is not None and result["artifact_id"] == _digest(stored)
             assert CLEAN in stored  # the whole result, every lone surrogate replaced
             seen = script.requests[1][-1]["content"]  # the model saw the result
