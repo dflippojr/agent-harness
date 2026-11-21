@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -591,28 +592,44 @@ def test_the_session_scan_allows_a_managers_and_a_classs_own_methods(tmp_path):
         "pkg/x.py:10 .get_approval", "pkg/x.py:11 .get_approval", "pkg/x.py:9 .checkpoints"]
 
 
-def test_the_session_scan_allows_a_declared_data_attribute_only_uncalled(tmp_path):
-    (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "lane.py").write_text(
+def test_the_session_scan_allows_only_the_listed_data_reads(tmp_path):
+    """Only the reads `DATA_READS` lists pass, by file, receiver and name: a Database or store of any name (`m.db`,
+    `self._db`), a call, another receiver in the same file, or the same read in another file is reported."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "real_env_lane.py").write_text(
         "import asyncio\n"
-        "class Run:\n"
-        "    events: list[dict]\n"                         # a field of that name
-        "def f(run, db, m, stores, self, sid):\n"
-        "    [e for e in run.events]\n"                    # the field, read: fine
-        "    db.sessions.events(sid)\n"                    # on the proxy: fine
-        "    db.events(sid)\n"                             # line 7: a call is never a field
-        "    asyncio.to_thread(m.db.events, sid)\n"        # line 8: a Database's bound method, field or not
-        "    asyncio.to_thread(stores.for_session(sid).events, sid)\n"  # line 9: nor a route's
-        "    reversed(self.events)\n"                      # the field, handed on: fine
-        "    return run.events\n",                         # the field again: fine
+        "class SessionRun:\n"
+        "    events: list[dict]\n"
+        "    pending_approvals: list[dict]\n"             # a field of that name gives no pass
+        "    def text(self):\n"
+        "        return [e for e in self.events]\n"       # listed: fine
+        "def f(run, m, sid, result):\n"
+        "    [e for e in run.events]\n"                   # listed: fine
+        "    asyncio.to_thread(m.db.events, sid)\n"       # line 9: a Database's bound method
+        "    asyncio.to_thread(m.db.pending_approvals, sid)\n"  # line 10
+        "    result.events\n"                             # line 11: not listed for this file
+        "class Lane:\n"
+        "    def g(self, sid):\n"
+        "        return asyncio.to_thread(self._db.pending_approvals, sid)\n",  # line 14: a Database of any name
         encoding="utf-8")
-    (tmp_path / "pkg" / "other.py").write_text(
-        "import asyncio\n"
-        "def g(m, sid):\n"
-        "    return asyncio.to_thread(m.db.events, sid)\n",  # line 3: no field here, a bound method
+    (tmp_path / "scripts" / "other.py").write_text(
+        "def h(run):\n"
+        "    return run.events\n",                        # line 2: listed only for real_env_lane.py
         encoding="utf-8")
-    assert sorted(_uses_off_the_store(tmp_path / "pkg", "sessions", frozenset({"events"}))) == [
-        "pkg/lane.py:7 .events", "pkg/lane.py:8 .events", "pkg/lane.py:9 .events", "pkg/other.py:3 .events"]
+    allowed: set[tuple[str, str, str]] = set()
+    found = _uses_off_the_store(tmp_path / "scripts", "sessions", frozenset({"events", "pending_approvals"}), allowed)
+    assert sorted(found) == ["scripts/other.py:2 .events", "scripts/real_env_lane.py:10 .pending_approvals",
+                             "scripts/real_env_lane.py:11 .events", "scripts/real_env_lane.py:14 .pending_approvals",
+                             "scripts/real_env_lane.py:9 .events"]
+    assert allowed == {("scripts/real_env_lane.py", "run", "events"), ("scripts/real_env_lane.py", "self", "events")}
+
+
+def test_every_allowed_data_read_is_still_there():
+    """Each `DATA_READS` entry matches a read in the production code, so the list can only shrink to what is used."""
+    allowed: set[tuple[str, str, str]] = set()
+    for package in _production_packages():
+        _uses_off_the_store(package, "sessions", _moved_session_names(), allowed)
+    assert allowed == DATA_READS
 
 
 ACCOUNT_TABLES = ("accounts", "account_audit", "member_projects", "github_connections", "member_api_keys",
@@ -632,10 +649,11 @@ _NOT_PRODUCTION = frozenset({"tests", "node_modules", "build", "dist", "__pycach
 
 
 def _py_files(root: Path):
-    """The Python files under `root`, skipping installed and generated trees (`node_modules`, a hidden `.venv`)."""
-    for path in sorted(root.rglob("*.py")):
-        if not any(part in _NOT_PRODUCTION or part.startswith(".") for part in path.relative_to(root).parts[:-1]):
-            yield path
+    """The Python files under `root`, never walking into installed or generated trees (`node_modules`, a hidden
+    `.venv`)."""
+    for folder, subfolders, files in os.walk(root):
+        subfolders[:] = sorted(d for d in subfolders if d not in _NOT_PRODUCTION and not d.startswith("."))
+        yield from (Path(folder) / f for f in sorted(files) if f.endswith(".py"))
 
 
 def _production_packages() -> list[Path]:
@@ -653,27 +671,27 @@ def test_the_scans_cover_every_package_with_python_in_it():
     assert not names & {"tests", ".venv", ".git"}
 
 
-# What a Database or session store is held as: `db`, `m.db`, `self.web`, `stores`, `store`. A use on one is never a
-# data attribute, even where a class in the file declares one of that name (review r1 on #1039).
-_DATABASES = frozenset({"db", "web", "main", "store", "stores"})
+# Reads of a data attribute that shares a session method's name, each by file, receiver and name: the scan allows these
+# and nothing else (#992 Decisions, PR #1039, option 1). Add one only after review, one line each; a stale one fails
+# `test_every_allowed_data_read_is_still_there`.
+DATA_READS = frozenset({
+    ("scripts/real_env_lane.py", "run", "events"),     # SessionRun.events, a dataclass field: the streamed events
+    ("scripts/real_env_lane.py", "self", "events"),    # the same field, inside SessionRun
+    ("sdk/harness_client.py", "self", "events"),       # the SDK run result's events field, inside that class
+    ("sdk/harness_client.py", "result", "events"),     # the same field, filled while the client follows a run
+})
 
 
-def _data_receiver(on) -> bool:
-    """`on` is a plain name or attribute (`run`, `self`, `result`) that does not hold a Database or store."""
-    import ast
-    last = on.id if isinstance(on, ast.Name) else on.attr if isinstance(on, ast.Attribute) else None
-    return last is not None and last not in _DATABASES
-
-
-def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -> list[str]:
+def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
+                        allowed: set[tuple[str, str, str]] | None = None) -> list[str]:
     """Each use of a method name of core store `store` (or of `names`, some of them: a call, or a bound method handed
     to `to_thread` or `awrite`) not made on that store: `<x>.<store>.<name>` or `<x>.<store>.aio.<name>`. Also
     allowed: for apps and sessions, `self.<name>` inside a class that defines `<name>` itself (`Manager.app_limits`,
     the effective caps; SessionStores' own overrides); for sessions, `m.<name>` for a method of the Manager (`m`) of
-    that name (`checkpoints`, the listing, and `add_review_comment`), and, uncalled, a data attribute that a class in
-    the same file declares, on a receiver that is not a Database or store (`real_env_lane.SessionRun.events`, a
-    field: `run.events`; never `m.db.events`); for accounts, an `accounts`
-    stand-in (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`."""
+    that name (`checkpoints`, the listing, and `add_review_comment`), and the data reads `DATA_READS` names (file,
+    receiver and name: `run.events` in `scripts/real_env_lane.py`); for accounts, an `accounts` stand-in
+    (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`. Each allowed data read is added to
+    `allowed`, when given."""
     import ast
     cls = STORES[store]
     names = _store_methods(cls) if names is None else names
@@ -688,13 +706,7 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -
             methods = {n.name for n in cls_node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
             for inner in ast.walk(cls_node):
                 own_methods[id(inner)] = methods
-        # Data attributes the file's classes declare: a field (`events: list[dict]`) or `self.<name> = ...`.
-        fields = {t.target.id for c in ast.walk(tree) if isinstance(c, ast.ClassDef)
-                  for t in c.body if isinstance(t, ast.AnnAssign) and isinstance(t.target, ast.Name)}
-        fields |= {t.attr for a in ast.walk(tree) if isinstance(a, (ast.Assign, ast.AnnAssign))
-                   for t in (a.targets if isinstance(a, ast.Assign) else [a.target])
-                   if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == "self"}
-        called = {id(c.func) for c in ast.walk(tree) if isinstance(c, ast.Call)}
+        rel = path.relative_to(root.parent).as_posix()
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Attribute) and node.attr in names):
                 continue
@@ -708,12 +720,14 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -
                 continue
             if store == "sessions" and isinstance(on, ast.Name) and on.id == "m" and node.attr in vars(Manager):
                 continue
-            if store == "sessions" and node.attr in fields and id(node) not in called and _data_receiver(on):
+            if store == "sessions" and (read := (rel, ast.unparse(on), node.attr)) in DATA_READS:
+                if allowed is not None:
+                    allowed.add(read)
                 continue
             if store == "accounts" and ((isinstance(on, ast.Name) and on.id == "accounts") or (
                     isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store")):
                 continue
-            found.append(f"{path.relative_to(root.parent).as_posix()}:{node.lineno} .{node.attr}")
+            found.append(f"{rel}:{node.lineno} .{node.attr}")
     return found
 
 
