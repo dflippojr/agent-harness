@@ -124,7 +124,10 @@ def test_stop_ends_the_recorded_instance_process(tmp_path):
         # The same pid with another start time is a reused pid (another instance, say): never killed.
         fake_instance.write_handle(instance, {"pid": proc.pid, "pid_created": created - 60})
         assert fake_instance._instance_process({"pid": proc.pid, "pid_created": created - 60}) is None
-        fake_instance.write_handle(instance, {"pid": proc.pid, "pid_created": created})
+        identity = fake_instance.process_identity(proc.pid)  # what serve() records (#1040)
+        # Only the clock-free fields are compared: two create_time() reads may differ after a clock adjustment.
+        assert identity["pid"] == proc.pid and identity["pid_started"] == fake_instance._boot_start(proc.pid)
+        fake_instance.write_handle(instance, identity)
         assert fake_instance.stop(instance) == 0
         assert proc.wait(timeout=30) is not None and not instance.exists()
     finally:
@@ -221,6 +224,64 @@ def test_stop_cleans_up_a_definitively_gone_or_unrelated_process(monkeypatch, tm
     monkeypatch.setattr(fake_instance, "_kill", kill)
     assert fake_instance.stop(instance) == 0 and not instance.exists()
     kill.assert_not_called()
+
+
+@pytest.mark.parametrize("case, wall_clock, boot_start, killed", [
+    ("clock-stepped", 43, 4200, True),   # the wall clock moved a second since start: still the same process
+    ("reused", 42, 4300, False),         # another start since boot, whatever the wall clock says: never killed
+])
+def test_stop_judges_the_process_by_its_start_since_boot(monkeypatch, tmp_path, case, wall_clock, boot_start, killed):
+    """#1040: on Linux psutil's create_time() adds the current boot time from /proc/stat, which is whole seconds off the
+    wall clock, so a clock adjustment moves it. stop() then took its own instance for a reused pid, deleted the
+    directory, reported success and left the process running."""
+    import psutil
+    from unittest.mock import Mock
+    instance = tmp_path / "instance"
+    fake_instance.write_instance(instance, 0)
+    fake_instance.write_handle(instance, {"pid": 123, "pid_created": 42, "pid_started": 4200})
+    proc = Mock(pid=123)
+    proc.create_time.return_value = wall_clock
+    proc.cmdline.return_value = ["python", "-m", "harness.fake_instance"]
+    monkeypatch.setattr(psutil, "Process", Mock(return_value=proc))
+    monkeypatch.setattr(fake_instance, "_boot_start", lambda pid: boot_start, raising=False)
+    kill = Mock(return_value=True)
+    monkeypatch.setattr(fake_instance, "_kill", kill)
+    assert fake_instance.stop(instance) == 0 and not instance.exists()
+    assert kill.called is killed, case
+
+
+def test_the_start_since_boot_is_read_past_a_command_name_with_spaces_and_parentheses():
+    rest = " ".join(str(n) for n in range(4, 53))   # fields 4 to 52; field 22, the start, holds 22
+    assert fake_instance._stat_start(f"123 (a b) c) S {rest}\n") == 22
+    assert fake_instance._stat_start(f"7 (sleep) R {rest}") == 22
+
+
+def test_the_start_since_boot_is_recorded_on_linux_only(monkeypatch):
+    import os
+    import sys
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert fake_instance._boot_start(os.getpid()) is None
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert fake_instance.process_identity(os.getpid())["pid_started"] is None
+
+
+@pytest.mark.parametrize("error, expected", [(FileNotFoundError, "NoSuchProcess"), (PermissionError, "Error")])
+def test_an_unreadable_start_since_boot_is_an_inspection_error(monkeypatch, error, expected):
+    """A gone process is gone (stop cleans up); any other failure to read it leaves the directory (stop returns 1)."""
+    import builtins
+    import sys
+    import psutil
+    monkeypatch.setattr(sys, "platform", "linux")
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):
+        if str(path) == "/proc/123/stat":
+            raise error(path)
+        return real_open(path, *args, **kwargs)
+    monkeypatch.setattr(builtins, "open", fake_open)
+    with pytest.raises(psutil.Error) as caught:
+        fake_instance._boot_start(123)
+    assert type(caught.value).__name__ == expected
 
 
 @pytest.mark.parametrize("failure", ["alive", "inspection"])

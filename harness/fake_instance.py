@@ -201,8 +201,7 @@ async def serve(args, root: Path) -> None:
     if port is None or web_port is None:
         raise StartError("a port is in use; this command never reuses a running server")
     server, web = f"http://127.0.0.1:{port}", f"http://127.0.0.1:{web_port}"
-    import psutil
-    state = {"status": "starting", "pid": os.getpid(), "pid_created": psutil.Process().create_time(),
+    state = {"status": "starting", **process_identity(os.getpid()),
              "server": server, "web": web, "connect": f"{web}/connect", "dir": str(root),
              "fixtures": str(Path(args.fixtures).resolve()), "started_at": time.time()}
     config_dir, data_dir = write_instance(root, port)  # the marker first: it is what lets `stop` delete the dir
@@ -265,18 +264,53 @@ def owned(root: Path) -> bool:
     return (root / "data" / fake_model.MARKER).is_file() or (root.is_dir() and not any(root.iterdir()))
 
 
+def _stat_start(stat: str) -> int:
+    """The start field of a /proc/<pid>/stat line: clock ticks since boot. The command name before it is in
+    parentheses and may itself hold spaces and ')', so the fields are counted from the last ')'."""
+    return int(stat[stat.rindex(")") + 2:].split()[19])  # field 22; the fields after ')' start at field 3
+
+
+def _boot_start(pid: int) -> int | None:
+    """When `pid` started, in clock ticks since boot, on Linux; None elsewhere. #1040: on Linux psutil's create_time()
+    is this plus the boot time /proc/stat reports now, a whole number of seconds off the wall clock, so any clock
+    adjustment moves it. Elsewhere the kernel keeps the start as a fixed time, and create_time() does not move."""
+    import psutil
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            return _stat_start(f.read())
+    except FileNotFoundError:
+        raise psutil.NoSuchProcess(pid) from None
+    except (OSError, ValueError, IndexError) as e:
+        raise psutil.Error(f"could not read the start of process {pid}: {e}") from e
+
+
+def process_identity(pid: int) -> dict:
+    """What the handle records to find this process again, and to tell it from a later one with the same pid. Keep
+    `pid_created` (wall clock, seconds since the epoch): the verify skill reads it."""
+    import psutil
+    return {"pid": pid, "pid_created": psutil.Process(pid).create_time(), "pid_started": _boot_start(pid)}
+
+
 def _instance_process(handle: dict):
-    """The live process the handle recorded, or None: the pid must still be that same process (its start time
-    matches), so a reused pid, even another instance's, is never killed. Inspection errors propagate: an
-    unverifiable process is not evidence that the instance exited."""
+    """The live process the handle recorded, or None: the pid must still be that same process (its start matches),
+    so a reused pid, even another instance's, is never killed. The start since boot decides when the handle has it,
+    since the wall clock may have moved since (#1040). Inspection errors propagate: an unverifiable process is not
+    evidence that the instance exited."""
     import psutil
     try:
         pid, created = int(handle["pid"]), float(handle["pid_created"])
+        started = handle.get("pid_started")
+        started = None if started is None else int(started)
     except (KeyError, TypeError, ValueError):
         return None
     try:
         proc = psutil.Process(pid)
-        if abs(proc.create_time() - created) > 0.01:
+        if started is not None:
+            if _boot_start(pid) != started:
+                return None
+        elif abs(proc.create_time() - created) > 0.01:
             return None
         return proc if "harness.fake_instance" in " ".join(proc.cmdline()) else None
     except psutil.NoSuchProcess:
