@@ -266,14 +266,13 @@ The core's own queries split the same way, one domain store per change (#992 sta
   (`backend_usage`), both in the main store.
 - **Still on `Database`:** `meta`, which stays there as infrastructure.
 
-New code calls the store. Old `db.<method>` calls keep working through a temporary forwarding shim on `Database`.
-`tests/test_database_shim.py` pins the forwarded names for each store, so the shim can only shrink.
-`await db.aio.<method>()` and `SessionStores` reach the store through the shim too. A store can land with its callers
-moved and no shim: `db.accounts`, `db.apps` and `db.usage` forward nothing, and since #992 stage 6 neither does
-`db.sessions`, and a source scan in that test fails
-on a call to any of their methods that isn't made on that store. `operation_audit` writes through the account store of the database it is given.
+Every caller calls the store: `db.credentials.get_api_key(kid)`, `await db.credentials.aio.create_api_key(...)`.
+`Database` forwards nothing. The temporary forwarding shim that stage 5 added while call sites moved was deleted in
+stage 6 (#992). `tests/test_database_shim.py` checks that `Database` has only its infrastructure and `meta`, and a
+source scan there fails on a call to any store method that isn't made on that store (for sessions, a routing proxy).
+`operation_audit` writes through the account store of the database it is given.
 
-Session methods go through a routing proxy, and the key listings still go through `m.db`:
+Session methods go through a routing proxy, and SessionStores adds its own key listings:
 
 - **Session methods.** `SessionStores` routes each session to its own store. On the routing wrappers (`m.db`,
   `scope(app_id)`, and `for_app` or `for_session` for an App), `sessions` is the one per-session routing proxy
@@ -301,8 +300,10 @@ Session methods go through a routing proxy, and the key listings still go throug
   proxy. Every route, and
   every Database that `SessionStores` opens, hands out the main store's `credentials`, `accounts`, `apps` and
   `usage`. `app_stores._STORE_HOME` records where each store's rows live, and a new store must add itself there.
-- **Key listings.** The listing overrides on `SessionStores` (`list_api_keys`, `get_api_key_listing`,
-  `restore_api_key`) still apply, so call those on `m.db`, not `m.db.credentials`, until they move.
+- **Key listings.** `SessionStores.listed_api_keys()`, `listed_api_key(kid)` and `restore_listed_api_key(kid)` are
+  the key list as Settings and the Hub show it: `CredentialStore`'s rows with each key's request count and, for an
+  App, its store's metadata, which only SessionStores can read. Call them on `m.db`. Their names differ from the
+  store's (`list_api_keys`, `get_api_key_listing`, `restore_api_key`), so a credential name is only ever the store's.
 
 ## What stage (b) leaves in the core
 

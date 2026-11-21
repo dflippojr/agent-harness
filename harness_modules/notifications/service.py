@@ -282,7 +282,7 @@ class Notifier:
         app_id = session.get("app_id") or ""
         if not app_id:
             return False
-        key = self.db.get_api_key(app_id)
+        key = self.db.credentials.get_api_key(app_id)
         snapshot = session.get("app_defaults") if isinstance(session.get("app_defaults"), dict) else {}
         if use_live_app_settings(key):
             row = self.db.apps.get_app_settings(app_id)

@@ -288,7 +288,7 @@ def test_hosted_claude_reaches_only_app_tools_and_builtins_are_denied(tmp_path):
                 {"tool": "get_balance", "input": {"account": "savings"}}]
         m, made, state = _hosted_manager(tmp_path, plan)
         await m.start()
-        app, _ = m.db.create_api_key("finance-bot", "sessions", kind="app")
+        app, _ = m.db.credentials.create_api_key("finance-bot", "sessions", kind="app")
         sid = m.create("savings?", backend="claude", app=app, app_tools=[AppTool(**BALANCE)], kind=TOOLS_ONLY)["id"]
         pending = []
         for _ in range(600):
@@ -326,7 +326,7 @@ def test_hosted_cli_without_tool_limits_refuses_at_run_time(tmp_path):
         m.runner.cli_factory = lambda **kw: started.append(kw)
         m.runner.mcp_tool_schemas = lambda sid: []
         await m.start()
-        app, _ = m.db.create_api_key("finance-bot", "sessions", kind="app")
+        app, _ = m.db.credentials.create_api_key("finance-bot", "sessions", kind="app")
         sid = m.create("hi", backend="claude", app=app, app_tools=[AppTool(**BALANCE)], kind=TOOLS_ONLY)["id"]
         s = await wait_status(m, sid, "failed")
         await m.stop()
@@ -357,7 +357,7 @@ def _tools_only_codex(tmp_path, plan):
     async def body():
         m, made, state, _ = _codex_manager(tmp_path, plan)
         await m.start()
-        app, _ = m.db.create_api_key("finance-bot", "sessions", kind="app")
+        app, _ = m.db.credentials.create_api_key("finance-bot", "sessions", kind="app")
         sid = m.create("savings?", backend="codex", app=app, app_tools=[AppTool(**BALANCE)], kind=TOOLS_ONLY)["id"]
         if any(step.get("tool") == "get_balance" for step in plan):
             pending = []

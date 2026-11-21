@@ -380,7 +380,7 @@ def test_staging_token_is_minted_in_staging_only_and_rotates(tmp_path):
 
     db = Database(data_dir / "harness.sqlite3")
     try:
-        keys = db.list_api_keys()
+        keys = db.credentials.list_api_keys()
     finally:
         db.close()
     assert [bool(key["revoked_at"]) for key in keys] == [True, False]

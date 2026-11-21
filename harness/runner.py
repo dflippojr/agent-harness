@@ -132,7 +132,7 @@ def capped_app(db, app_id: str) -> bool:
     (device and owner keys) do not (#524)."""
     if not app_id:
         return False
-    key = db.get_api_key(app_id)
+    key = db.credentials.get_api_key(app_id)
     return key is not None and key.get("kind") == "app"
 
 

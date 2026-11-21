@@ -460,7 +460,7 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
         assert kit_tools == {"session_search", "session_read"}
 
         assert client.delete(f"/keys/{app['id']}").status_code == 204
-        assert manager.db.get_api_key(app["id"])["revoked_at"]
+        assert manager.db.credentials.get_api_key(app["id"])["revoked_at"]
         # Kept (unused) until the erasure grace ends, so an undo gets them back (#330 decision 5).
         assert manager.db.apps.get_app_settings(app["id"]) is not None
 

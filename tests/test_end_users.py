@@ -478,7 +478,7 @@ def test_two_concurrent_sessions_of_one_end_user_never_run_at_once(tmp_path, mon
 
     with TestClient(create_app(manager)) as client:
         row, headers = _app(client)
-    app_row = manager.db.get_api_key(row["id"])
+    app_row = manager.db.credentials.get_api_key(row["id"])
 
     async def run():
         first = manager.create("one", backend="claude", app=app_row, end_user="dana")["id"]

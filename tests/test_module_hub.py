@@ -130,7 +130,7 @@ def test_inventory_states_errors_metrics_and_secret_exclusion(tmp_path, monkeypa
     rows[6].update(revoked_at=now - 10, erase_after=now + 100)
     rows[7]["store"]["last_error_at"] = now - 2 * 3600
     rows[8]["store"]["last_error_at"] = now - 2 * 86400
-    monkeypatch.setattr(m.db, "list_api_keys", lambda: rows)
+    monkeypatch.setattr(m.db, "listed_api_keys", lambda: rows)
     with TestClient(create_app(m)) as client:
         result = client.get(PATH)
         assert result.status_code == 200, result.text
@@ -155,9 +155,9 @@ def test_entries_match_ids_pending_and_do_not_open_app_stores(tmp_path, monkeypa
     doc = document()
     doc["entries"][0]["app"]["browser_origins"] = ["https://web.example.invalid"]
     (m.cfg.config_dir / "hub.entries.json").write_text(json.dumps(doc), encoding="utf-8")
-    key, token = m.db.create_api_key("display name intentionally different", "sessions", kind="app",
+    key, token = m.db.credentials.create_api_key("display name intentionally different", "sessions", kind="app",
                                     catalog_app_id=CATALOG, origins=["https://web.example.invalid"])
-    unmatched, _ = m.db.create_api_key("Stables", "sessions", kind="app")
+    unmatched, _ = m.db.credentials.create_api_key("Stables", "sessions", kind="app")
     now = time.time()
     def add_requests():
         # Beyond the ordinary list's newest-100 limit, with secrets the inventory must not project.
@@ -188,10 +188,10 @@ def test_entries_match_ids_pending_and_do_not_open_app_stores(tmp_path, monkeypa
 def test_owner_and_hub_keys_read_the_inventory_and_apps_and_devices_do_not(tmp_path):
     m = make(tmp_path)
     with TestClient(create_app(m)) as client:
-        owner, owner_token = m.db.create_api_key("owner", "admin", kind="owner")
-        hub, hub_token = m.db.create_api_key("hub", "admin", kind="owner")
-        app, app_token = m.db.create_api_key("app", "sessions", kind="app")
-        device, device_token = m.db.create_api_key("device", "inference", kind="device")
+        owner, owner_token = m.db.credentials.create_api_key("owner", "admin", kind="owner")
+        hub, hub_token = m.db.credentials.create_api_key("hub", "admin", kind="owner")
+        app, app_token = m.db.credentials.create_api_key("app", "sessions", kind="app")
+        device, device_token = m.db.credentials.create_api_key("device", "inference", kind="device")
         m.db.main.write(lambda: m.db.main.conn.execute("UPDATE api_keys SET role = 'hub' WHERE id = ?", (hub["id"],)))
         client.local_owner = False
         assert client.get(PATH).status_code == 401
@@ -199,7 +199,7 @@ def test_owner_and_hub_keys_read_the_inventory_and_apps_and_devices_do_not(tmp_p
             assert client.get(PATH, headers={"Authorization": f"Bearer {token}"}).status_code == 200
             from test_key_activity import drain_activity
             drain_activity(client, m)
-            assert m.db.api_key_by_secret(token)["last_used_at"] is not None
+            assert m.db.credentials.api_key_by_secret(token)["last_used_at"] is not None
         for token in (app_token, device_token):
             assert client.get(PATH, headers={"Authorization": f"Bearer {token}"}).status_code == 403
 
@@ -335,7 +335,7 @@ def test_entry_attribution_requires_manifest_origins(tmp_path, origins, pending_
     doc = document()
     doc["entries"][0]["app"]["browser_origins"] = [manifest_origin]
     (m.cfg.config_dir / "hub.entries.json").write_text(json.dumps(doc), encoding="utf-8")
-    key, _ = m.db.create_api_key("Stables", "sessions", kind="app", origins=origins,
+    key, _ = m.db.credentials.create_api_key("Stables", "sessions", kind="app", origins=origins,
                                catalog_app_id=CATALOG)
     now = time.time()
     m.db.main.write(m.db.main.credentials.insert_pairing_request, {

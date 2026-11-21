@@ -51,9 +51,9 @@ def _quiet(*_args) -> None:
 async def _seed_and_back_up(cfg) -> tuple[Path, dict]:
     m = Manager(cfg, chat=Script([Completion(content="ok")]))
     await m.start(maintenance=False)
-    first, _ = m.db.create_api_key("first", scopes="sessions", kind="app")
-    second, _ = m.db.create_api_key("second", scopes="sessions", kind="app")
-    gone, _ = m.db.create_api_key("gone", scopes="sessions", kind="app")
+    first, _ = m.db.credentials.create_api_key("first", scopes="sessions", kind="app")
+    second, _ = m.db.credentials.create_api_key("second", scopes="sessions", kind="app")
+    gone, _ = m.db.credentials.create_api_key("gone", scopes="sessions", kind="app")
     apps = {"first": first["id"], "second": second["id"], "gone": gone["id"]}
     m.db.accounts.insert_account({"user_id": "u-member", "role": "member", "login": "member", "display_name": "member",
                          "enabled": 1, "disk_quota_bytes": 0, "max_running": 1, "max_queued": 1,

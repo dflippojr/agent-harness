@@ -179,7 +179,7 @@ def require_admin(request: Request, mgr) -> dict | None:
     header = request.headers.get("authorization") or ""
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
     if token:
-        key = m.db.api_key_by_secret(token)
+        key = m.db.credentials.api_key_by_secret(token)
         if key is None:
             raise HarnessError(401, "missing or invalid owner token")
         scopes = set((key.get("scopes") or "").split())
@@ -450,7 +450,7 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
         ctx = _context(request, admin_key)
 
         def commit() -> bool:
-            before = m.db.main.get_api_key(app_id)
+            before = m.db.main.credentials.get_api_key(app_id)
             if m.db.main.apps.set_app_retention(app_id, body.retention_days):
                 credential_audit.record(m.db, ctx, "app.retention", app_id, "ok", "api_key", {
                     "app_id": app_id, "old_retention_days": before.get("retention_days"),
@@ -460,10 +460,10 @@ def register(app: FastAPI, mgr, module_paths: frozenset[str] = frozenset(), cfg=
             return False
         if not await m.db.main.awrite(commit):
             raise HarnessError(404, "no App or device key has that id")
-        return m.db.get_api_key_listing(app_id)
+        return m.db.listed_api_key(app_id)
 
     def _live_app(m, app_id: str) -> None:
-        key = m.db.main.get_api_key(app_id)
+        key = m.db.main.credentials.get_api_key(app_id)
         if key is None or key.get("kind") != "app" or key.get("erased_at") is not None:
             raise HarnessError(404, "no App has that id")
 

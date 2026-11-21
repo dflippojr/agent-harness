@@ -73,9 +73,9 @@ def test_owner_pairs_native_client_and_runner_once_without_storing_runner_secret
 
         expired = client.post("/runner-pairing-codes", json={"name": "Late", "runner": "macbook"}).json()
         manager.db.conn.execute("UPDATE runner_pairing_codes SET expires_at = 0 WHERE id = ?", (expired["id"],))
-        keys_before = len(manager.db.list_api_keys())
+        keys_before = len(manager.db.listed_api_keys())
         assert client.post("/api/v1/runner-pair", json={"code": expired["code"]}).status_code == 400
-        assert len(manager.db.list_api_keys()) == keys_before
+        assert len(manager.db.listed_api_keys()) == keys_before
 
         cancelled = client.post("/runner-pairing-codes", json={"name": "Nope", "runner": "macbook"}).json()
         assert client.delete(f"/api/admin/v1/runner-pairing-codes/{cancelled['id']}").status_code == 204

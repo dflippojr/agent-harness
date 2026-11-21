@@ -217,7 +217,7 @@ def matrix(tmp_path_factory, gitleaks_tools):
             assert owner["scopes"] == ADMIN_SCOPE
             for kind in ("app", "device"):  # only an owner key can carry the admin scope
                 assert client.post("/keys", json={"name": "nope", "kind": kind, "scopes": [ADMIN_SCOPE]}).status_code == 400
-            _, noadmin = m.db.main.create_api_key("owner-without-admin", "sessions", OWNER_KIND)
+            _, noadmin = m.db.main.credentials.create_api_key("owner-without-admin", "sessions", OWNER_KIND)
             hub, _, _ = _claim(client, m)
             client.local_owner = False  # each caller sends only the headers it is given
             # A tainted member session and App session, so a taint clear that reached either would change them.

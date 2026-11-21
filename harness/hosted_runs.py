@@ -446,7 +446,7 @@ class HostedRuns:
         app_id = s.get("app_id") or ""
         assignment = self.db.credentials.app_provider_credential(app_id, s["backend"]) if app_id else None
         member = member_keys.member_of(s.get("end_user") or "") if not app_id else ""
-        if app_id and hosted_refused(self.db.get_api_key(app_id), backend):
+        if app_id and hosted_refused(self.db.credentials.get_api_key(app_id), backend):
             # A device key's session never runs on a built-in hosted backend (#786), not even one it started before
             # `create` refused that, when it is resumed.
             return {"policy": "denied", "key": "", "source": DEVICE_KEY, "assignment_id": "", "path": "",

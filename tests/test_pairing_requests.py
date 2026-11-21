@@ -77,7 +77,7 @@ def _audit(client, action: str, **params) -> list[dict]:
 
 
 def _app_keys(m) -> list[dict]:
-    return [k for k in m.db.list_api_keys() if k["kind"] == "app"]
+    return [k for k in m.db.listed_api_keys() if k["kind"] == "app"]
 
 
 def _assert_no_secrets(texts, *secrets_seen):

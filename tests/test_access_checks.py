@@ -42,12 +42,12 @@ def test_guest_allowlist_denies_unknown_and_status_subroutes(tmp_path, method):
 def test_device_search_queue_and_global_events_require_read_all(tmp_path, monkeypatch, read_all):
     client, m = make_client(tmp_path)
     m.cfg.search.enabled = True
-    key, token = m.db.create_api_key("device", "sessions" + (" sessions:all" if read_all else ""), "device")
-    key = m.db.api_key_by_secret(token)
+    key, token = m.db.credentials.create_api_key("device", "sessions" + (" sessions:all" if read_all else ""), "device")
+    key = m.db.credentials.api_key_by_secret(token)
     key["scope_set"] = set(key["scopes"].split())
     with client:
         seed(m.db, "owner00001", "scratch", "owner secret", [("user_message", {"content": "boundarymarker"})])
-        foreign, _ = m.db.create_api_key("foreign", "sessions", "app")
+        foreign, _ = m.db.credentials.create_api_key("foreign", "sessions", "app")
         seed(m.db, "foreign001", "scratch", "foreign secret", [("user_message", {"content": "boundarymarker"})],
              app_id=foreign["id"])
         monkeypatch.setattr(m.scheduler, "positions", lambda: {"owner00001": 1, "foreign001": 2})
@@ -97,9 +97,9 @@ REVOCATION_CASES = (
 def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
         tmp_path, monkeypatch, kind, restore, surface, tick):
     client, m = make_client(tmp_path)
-    key, token = m.db.create_api_key("reader", "admin" if kind == "owner" else "sessions sessions:all", kind,
+    key, token = m.db.credentials.create_api_key("reader", "admin" if kind == "owner" else "sessions sessions:all", kind,
                                      origins=[ORIGIN])
-    key = m.db.api_key_by_secret(token)
+    key = m.db.credentials.api_key_by_secret(token)
     key["scope_set"] = set(key["scopes"].split())
     with client:
         seed(m.db, "owner00001", "scratch", "stream", [("status", {"status": "done"})])
@@ -122,7 +122,7 @@ def test_revocation_closes_stream_on_next_tick_and_reconnect_is_unauthorized(
         def revoke():
             assert m.db.credentials.revoke_api_key(key["id"])
             if restore:
-                fresh_key, fresh_token = m.db.restore_api_key(key["id"])
+                fresh_key, fresh_token = m.db.restore_listed_api_key(key["id"])
                 assert fresh_key["id"] == key["id"]
                 restored.append(fresh_token)
 
@@ -218,7 +218,7 @@ def _seeded_stream_path(m, surface: str) -> tuple[str, str]:
 @pytest.mark.parametrize("when", ["before_wait", "during_wait", "keepalive"])
 def test_revoking_an_owner_key_ends_its_admin_surface_stream(tmp_path, monkeypatch, surface, when):
     client, m = make_client(tmp_path)
-    key, token = m.db.create_api_key("reader", "admin", "owner", origins=[ORIGIN])
+    key, token = m.db.credentials.create_api_key("reader", "admin", "owner", origins=[ORIGIN])
     headers = {"Authorization": f"Bearer {token}", "Origin": ORIGIN}
     with client:
         path, subscription = _seeded_stream_path(m, surface)
@@ -277,7 +277,7 @@ def test_releasing_the_hub_ends_the_admin_surface_stream_its_key_holds(tmp_path,
 @pytest.mark.parametrize("surface", sorted(ADMIN_STREAMS))
 def test_ambient_owner_admin_stream_survives_revoking_an_unrelated_key(tmp_path, monkeypatch, surface):
     client, m = make_client(tmp_path)
-    other, _ = m.db.create_api_key("other", "admin", "owner", origins=[ORIGIN])
+    other, _ = m.db.credentials.create_api_key("other", "admin", "owner", origins=[ORIGIN])
     with client:
         path, _ = _seeded_stream_path(m, surface)
         stream = _open_admin_stream(client, monkeypatch, path, {})

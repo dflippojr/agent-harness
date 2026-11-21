@@ -43,10 +43,10 @@ def _hash(db: Database, table: str, column: str, value: str) -> str:
 
 
 def test_api_key_hash_is_the_literal_digest(db: Database):
-    row, key = db.create_api_key("laptop")
+    row, key = db.credentials.create_api_key("laptop")
     assert key == "hk-fixed"
     assert _hash(db, "api_keys", "id", row["id"]) == HK_FIXED
-    found = db.api_key_by_secret(key)
+    found = db.credentials.api_key_by_secret(key)
     assert found is not None and found["id"] == row["id"]
 
 
@@ -69,7 +69,7 @@ def test_runner_pairing_code_and_its_key_hash_to_the_literal_digests(db: Databas
 
 
 def test_stream_ticket_hash_is_the_literal_digest(db: Database):
-    row, _key = db.create_api_key("laptop")
+    row, _key = db.credentials.create_api_key("laptop")
     ticket, _expires = db.credentials.create_stream_ticket(row["id"], "s1", "https://app.example")
     assert ticket == "hs-fixed"
     with db.lock:

@@ -41,7 +41,7 @@ MESSAGES = {
 
 def _manager(kind: str):
     key = {"id": "k1", "kind": kind, "scopes": "admin" if kind == "owner" else "sessions", "origins": [BOUND]}
-    db = SimpleNamespace(api_key_by_secret=lambda token: dict(key) if token == TOKEN else None)
+    db = SimpleNamespace(credentials=SimpleNamespace(api_key_by_secret=lambda token: dict(key) if token == TOKEN else None))
     return SimpleNamespace(cfg=SimpleNamespace(public_url=PUBLIC, port=PORT), db=db)
 
 

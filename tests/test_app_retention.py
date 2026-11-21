@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from harness import storage
 from harness.api import create_app
 from harness.app_stores import APP_STORE_FILE, SessionStores
+from harness.credential_store import CredentialStore
 from harness.db import APP_ERASE_GRACE_SECONDS, Database
 from harness.llm import Completion
 from harness.manager import Manager
@@ -335,7 +336,7 @@ def test_the_maintenance_cleanup_runs_the_app_sweep(tmp_path):
     async def body():
         m = Manager(cfg, chat=Script([Completion(content="ok")]))
         await m.start(maintenance=False)
-        key, _ = m.db.create_api_key("shop", "sessions", "app")
+        key, _ = m.db.credentials.create_api_key("shop", "sessions", "app")
         m.db.apps.set_app_retention(key["id"], 1)
         m.db.sessions.insert_session(_session("a1", key["id"]))
         _age(m, "a1", 3)
@@ -381,7 +382,7 @@ def test_revoke_erases_the_apps_store_and_folder_after_the_grace_leaving_a_tombs
         assert report["apps_erased"] == [a_id]
         assert not folder.exists()
         assert m.db.app_session_ids(a_id) == [] and m.db.sessions.get_session(a_sid) is None
-        tomb = m.db.get_api_key(a_id)
+        tomb = m.db.credentials.get_api_key(a_id)
         assert tomb["erased_at"] and tomb["revoked_at"] and tomb["erase_after"] is None and tomb["scopes"] == ""
         assert client.get("/api/admin/v1/apps/erasures").json() == []
         assert "store" not in {k["id"]: k for k in client.get("/keys").json()}[a_id]
@@ -412,7 +413,7 @@ def test_undo_during_the_grace_keeps_everything_and_issues_a_new_token(tmp_path)
         assert [s["id"] for s in client.get("/api/v1/sessions", headers=new).json()] == [sid]
         assert client.get(f"/api/v1/sessions/{sid}", headers=new).json()["status"] == "done"
         assert client.get("/api/admin/v1/apps/erasures").json() == []
-        assert m.db.get_api_key(a_id)["retention_days"] == 90
+        assert m.db.credentials.get_api_key(a_id)["retention_days"] == 90
         assert asyncio.run(m.sweep_app_data(time.time() + 2 * APP_ERASE_GRACE_SECONDS))["apps_erased"] == []
         assert (Path(cfg.data_dir) / "apps" / a_id / APP_STORE_FILE).is_file()
         assert client.post(f"/api/admin/v1/apps/{a_id}/restore").status_code == 404   # nothing pending any more
@@ -435,18 +436,18 @@ def test_the_retention_route_and_an_undone_revoke_read_one_key_not_the_whole_lis
         def no_listing(self, *args, **kwargs):
             raise AssertionError("listed every key to return one")
 
-        monkeypatch.setattr(Database, "list_api_keys", no_listing)
+        monkeypatch.setattr(CredentialStore, "list_api_keys", no_listing)
         retention = client.put(f"/api/admin/v1/apps/{a_id}/retention", json={"retention_days": 90})
         monkeypatch.undo()
         assert retention.status_code == 200 and retention.json() == listed()
 
         assert client.delete(f"/keys/{a_id}").status_code == 204
-        monkeypatch.setattr(Database, "list_api_keys", no_listing)
+        monkeypatch.setattr(CredentialStore, "list_api_keys", no_listing)
         restored = client.post(f"/api/admin/v1/apps/{a_id}/restore")
         monkeypatch.undo()
         # The restore answers with the main store's row and its request count, as it always has: no App store
         # metadata.
-        main_row = {k["id"]: k for k in m.db.main.list_api_keys()}[a_id]
+        main_row = {k["id"]: k for k in m.db.main.credentials.list_api_keys()}[a_id]
         assert restored.status_code == 200
         assert {k: v for k, v in restored.json().items() if k != "key"} == {**main_row, "requests": 0}
 
@@ -480,8 +481,8 @@ def test_owner_keys_have_no_erasure_and_member_storage_and_quota_are_unchanged(t
     cfg = make_cfg(tmp_path)
     Path(cfg.data_dir).mkdir(parents=True)
     db = Database(Path(cfg.data_dir) / "harness.sqlite3")
-    owner, _ = db.create_api_key("control-center", "admin", "owner")
-    assert db.credentials.revoke_api_key(owner["id"]) and db.get_api_key(owner["id"])["erase_after"] is None
+    owner, _ = db.credentials.create_api_key("control-center", "admin", "owner")
+    assert db.credentials.revoke_api_key(owner["id"]) and db.credentials.get_api_key(owner["id"])["erase_after"] is None
     assert db.apps.pending_erasures() == []
     db.close()
 

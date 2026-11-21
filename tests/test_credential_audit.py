@@ -157,21 +157,21 @@ def test_audit_failure_rolls_back_everything(hh, monkeypatch):
     client, m = hh
     approved = client.post("/pairing-codes", json={"name": "n", "origin": ORIGIN, "scopes": ["sessions"]}).json()
     app = client.post("/keys", json={"name": "a", "kind": "app", "scopes": ["sessions"]}).json()
-    keys_before = len(m.db.list_api_keys())
+    keys_before = len(m.db.listed_api_keys())
     monkeypatch.setattr(AccountStore, "insert_audit", _boom)
     assert client.post("/keys", json={"name": "b", "kind": "app", "scopes": ["sessions"]}).status_code == 503
-    assert len(m.db.list_api_keys()) == keys_before
+    assert len(m.db.listed_api_keys()) == keys_before
     r = client.post("/api/v1/pair", headers={"Origin": ORIGIN}, json={"code": approved["code"]})
     assert r.status_code == 503 and "token" not in r.text
-    assert len(m.db.list_api_keys()) == keys_before
+    assert len(m.db.listed_api_keys()) == keys_before
     assert client.delete(f"/keys/{app['id']}").status_code == 503
-    assert m.db.get_api_key(app["id"])["revoked_at"] is None
+    assert m.db.credentials.get_api_key(app["id"])["revoked_at"] is None
     grant = {"app_id": app["id"], "backend": "claude", "secret_ref": REF, "policy": "api_key", "models": []}
     assert client.post(f"{PREFIX}/provider-credentials", json=grant, headers=H(OWNER)).status_code == 503
     assert m.db.credentials.list_app_provider_credentials() == []
     assert client.put(f"{PREFIX}/apps/{app['id']}/retention", json={"retention_days": 5},
                       headers=H(OWNER)).status_code == 503
-    assert m.db.get_api_key(app["id"]).get("retention_days") is None
+    assert m.db.credentials.get_api_key(app["id"]).get("retention_days") is None
     monkeypatch.undo()
     assert client.post("/api/v1/pair", headers={"Origin": ORIGIN}, json={"code": approved["code"]}).status_code == 201
 

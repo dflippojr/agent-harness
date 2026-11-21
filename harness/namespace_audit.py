@@ -151,7 +151,7 @@ class ReceiptStore:
 
 
 def login_operation(db, app_id, end_user, context, action, target="", backend=""):
-    app = db.main.get_api_key(app_id) or {}
+    app = db.main.credentials.get_api_key(app_id) or {}
     return operation_audit.async_operation(LoginStore(db, app_id, end_user, app.get("retention_days"), backend),
                                            context or audit_context.SYSTEM, target, action)
 

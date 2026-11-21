@@ -234,7 +234,7 @@ def test_session_read_taints_from_the_session_it_read_in_the_readers_scope(tmp_p
     client, m = household(tmp_path, steps=[router])
     with client:
         uid = create_member(client, ALICE, "Alice")["user_id"]
-        app, _ = m.db.create_api_key("shop", "sessions", "app")
+        app, _ = m.db.credentials.create_api_key("shop", "sessions", "app")
         now = 1_700_000_000.0
         for sid, owner_id, app_id in (("7mmember01", uid, ""), ("7mowner001", "owner", ""),
                                       ("7mapp00001", "owner", app["id"])):
@@ -448,7 +448,7 @@ def test_session_search_taints_only_from_hits_in_the_readers_scope(tmp_path):
     client, m = household(tmp_path, steps=[_search_router])
     with client:
         uid = create_member(client, ALICE, "Alice")["user_id"]
-        app, _ = m.db.create_api_key("shop", "sessions", "app")
+        app, _ = m.db.credentials.create_api_key("shop", "sessions", "app")
         _earlier(m, "7mmember01", SRC, owner_id=uid)
         _earlier(m, "7mmember02", [], owner_id=uid)
         _earlier(m, "7mowner001", EVIL2)

@@ -79,7 +79,7 @@ def _pending_hub_request(client) -> str:
 
 
 def _owner_keys(m) -> int:
-    return len(m.db.list_api_keys())
+    return len(m.db.listed_api_keys())
 
 
 # Each route: (method, path, headers, the fields it reads, the fixed fields sent beside the nested one, the baseline

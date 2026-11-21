@@ -472,7 +472,7 @@ def test_full_stack_approval_and_compaction(monkeypatch, fake_manager):
     from harness import sandbox
     monkeypatch.setattr(sandbox, "run_cmd", fail_on_docker)
     m = fake_manager
-    _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+    _, token = m.db.main.credentials.create_api_key("ui-testing", "admin", "owner")
     headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
     with TestClient(create_app(m)) as client:
         made = client.post("/api/v1/sessions", headers=headers,
@@ -505,7 +505,7 @@ def test_full_stack_stuck_loop_nudges_then_ends_the_run(monkeypatch, fake_manage
     from harness import sandbox
     monkeypatch.setattr(sandbox, "run_cmd", fail_on_docker)
     m = fake_manager
-    _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+    _, token = m.db.main.credentials.create_api_key("ui-testing", "admin", "owner")
     headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
     with TestClient(create_app(m)) as client:
         made = client.post("/api/v1/sessions", headers=headers,
@@ -565,7 +565,7 @@ def test_full_stack_trim_runs_before_the_summary(monkeypatch, tmp_path):
     monkeypatch.setattr(fake_model.FakeModel, "__call__", recording)
     m = Manager(config_mod.load(config_dir, data_dir))
     try:
-        _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+        _, token = m.db.main.credentials.create_api_key("ui-testing", "admin", "owner")
         headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
         with TestClient(create_app(m)) as client:
             made = client.post("/api/v1/sessions", headers=headers,

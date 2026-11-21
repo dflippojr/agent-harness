@@ -416,7 +416,7 @@ def test_authorization_on_every_discovery_endpoint(tmp_path, monkeypatch):
         app = client.post('/keys', json=dict(name='app', kind='app', scopes=['sessions', 'sessions:all',
                             'approvals', 'images', 'inference', 'remote_control'])).json()
         device = client.post('/keys', json=dict(name='device')).json()
-        _, runner_token = manager.db.create_api_key('runner', 'admin remote_control', kind='runner')
+        _, runner_token = manager.db.credentials.create_api_key('runner', 'admin remote_control', kind='runner')
         owner = client.post('/keys', json=dict(name='owner', kind='owner', scopes=['admin'])).json()
         member = client.post(PREFIX + '/accounts', json=dict(login='member@example.com', display_name='Member'))
         assert member.status_code == 201

@@ -210,7 +210,7 @@ def test_cli_previews_without_arming_and_arm_passes_preview_digest(hh, tmp_path,
 
 def test_sdk_binds_arm_to_preview_and_surfaces_drift(hh, monkeypatch):
     client, m = hh
-    _, token = m.db.main.create_api_key("owner", "admin", "owner")
+    _, token = m.db.main.credentials.create_api_key("owner", "admin", "owner")
     with Harness("http://testserver", token) as sdk:
         sdk.client.close()
         sdk.client = httpx.Client(base_url=sdk.base, headers=_bearer(token), transport=httpx.MockTransport(

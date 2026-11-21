@@ -36,10 +36,10 @@ def test_usage_windows_billing_zero_days_and_metadata_only(tmp_path, monkeypatch
     now = datetime(2026, 10, 15, 12)
     freeze(monkeypatch, now)
     db = manager.db.main
-    app, _ = db.create_api_key("Shop", "sessions", "app")
-    idle, _ = db.create_api_key("Idle", "sessions", "app")
-    device, _ = db.create_api_key("Phone", "inference", "device")
-    owner, _ = db.create_api_key("Hub", "admin", "owner")
+    app, _ = db.credentials.create_api_key("Shop", "sessions", "app")
+    idle, _ = db.credentials.create_api_key("Idle", "sessions", "app")
+    device, _ = db.credentials.create_api_key("Phone", "inference", "device")
+    owner, _ = db.credentials.create_api_key("Hub", "admin", "owner")
     first = datetime(2026, 9, 16)
     week = datetime(2026, 10, 9)
     record(db, app["id"], now.timestamp(), 10, 5, billing="local", requests=2)
@@ -102,7 +102,7 @@ def test_fractional_timestamps_do_not_round_into_the_next_day(tmp_path, monkeypa
     now = datetime(2026, 10, 15, 12)
     freeze(monkeypatch, now)
     db = manager.db.main
-    app, _ = db.create_api_key("Midnight", "sessions", "app")
+    app, _ = db.credentials.create_api_key("Midnight", "sessions", "app")
     midnight = datetime(2026, 10, 15)
     week = midnight - timedelta(days=6)
     first = midnight - timedelta(days=29)
@@ -127,7 +127,7 @@ def test_revoked_and_erased_app_usage_remains_visible(tmp_path, monkeypatch):
     now = datetime(2026, 10, 15, 12)
     freeze(monkeypatch, now)
     db = manager.db.main
-    app, _ = db.create_api_key("Former App", "sessions", "app")
+    app, _ = db.credentials.create_api_key("Former App", "sessions", "app")
     record(db, app["id"], now.timestamp(), 12, 3, .25)
     db.credentials.revoke_api_key(app["id"])
     with client:
@@ -154,7 +154,7 @@ def test_usage_auth_discovery_empty_and_validation(tmp_path):
             assert client.get(path, params={"days": days}).status_code == 422
         for kind, scopes, status in [("owner", "admin", 200), ("owner", "sessions", 403),
                                       ("app", "admin", 403), ("device", "admin", 403)]:
-            _, token = db.create_api_key(kind, scopes, kind)
+            _, token = db.credentials.create_api_key(kind, scopes, kind)
             assert client.get(path, headers=bearer(token)).status_code == status
         assert client.get(path, headers=bearer("invalid")).status_code == 401
         assert client.get(path, headers={"Tailscale-User-Login": "stranger@example.com"}).status_code == 403
@@ -171,7 +171,7 @@ def test_local_calendar_boundaries_across_dst(tmp_path, monkeypatch, now):
         freeze(monkeypatch, now)
         db = Database(tmp_path / "usage.sqlite3")
         try:
-            app, _ = db.create_api_key("DST", "sessions", "app")
+            app, _ = db.credentials.create_api_key("DST", "sessions", "app")
             first = datetime.combine(now.date() - timedelta(days=29), datetime.min.time())
             record(db, app["id"], first.timestamp(), 10, 2)
             record(db, app["id"], (first - timedelta(seconds=1)).timestamp(), 999, 999)

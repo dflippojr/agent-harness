@@ -209,7 +209,7 @@ async def serve(args, root: Path) -> None:
     os.environ[fake_model.ENV] = state["fixtures"]
     manager = Manager(config_mod.load(config_dir, data_dir))
     try:
-        key, token = manager.db.main.create_api_key("ui-testing", "admin", "owner", origins=[normalize_origin(web)])
+        key, token = manager.db.main.credentials.create_api_key("ui-testing", "admin", "owner", origins=[normalize_origin(web)])
         state["key_id"] = key["id"]  # the actor key_id of this instance's audit rows
         # A bounded graceful shutdown: Web's open event streams would otherwise hold Ctrl+C (and cleanup) forever.
         servers = [uvicorn.Server(uvicorn.Config(create_app(manager), host="127.0.0.1", port=port,

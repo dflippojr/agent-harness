@@ -1103,7 +1103,7 @@ def serve(args) -> int:
         # the live instance's.
         await real_start(maintenance=False)
     manager.start = start_without_maintenance  # type: ignore[method-assign]
-    _key, token = manager.db.main.create_api_key("real-env-lane", "admin", "owner")
+    _key, token = manager.db.main.credentials.create_api_key("real-env-lane", "admin", "owner")
     class Server(uvicorn.Server):
         """Sets `ready` once it listens, so the handle is written only then."""
         ready: asyncio.Event

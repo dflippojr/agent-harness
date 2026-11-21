@@ -1,8 +1,10 @@
-"""The core's domain stores sit behind a forwarding shim that may only shrink (#992 stage 5).
+"""The core's domain stores, and `Database` without the forwarding shim (#992).
 
-`Database` exposes each store as an attribute (`db.credentials`, `db.sessions`, `db.accounts`, `db.apps`, `db.usage`). Until their call sites move, the
-shim forwards each old `db.<method>` name to its store; this file pins those names per store, so the shim never gains
-one, and checks that a forwarded call (sync, `aio` or through `SessionStores`) runs the store's own method.
+`Database` is infrastructure (the writer thread, pooled readers, transactions, migrations and `meta`) and exposes each
+core store as an attribute (`db.credentials`, `db.sessions`, `db.accounts`, `db.apps`, `db.usage`). Stage 5 added a
+forwarding shim so old `db.<method>` calls kept working while their call sites moved; stage 6 moved the last of them
+and deleted it. This file checks that `Database` forwards nothing, that every production call of a store method is
+made on its store (or, for sessions, a routing proxy), and that each route hands out the right Database's store.
 """
 
 from __future__ import annotations
@@ -30,97 +32,46 @@ from harness.usage_store import UsageStore
 STORES: dict[str, type[CoreStore]] = {"credentials": CredentialStore, "sessions": SessionStore,
                                       "accounts": AccountStore, "apps": AppStore, "usage": UsageStore}
 
-# The names `Database` forwards to each store. A store's set is written once, in the change that adds the store; after
-# that, delete a name here once its last `db.<name>` caller has moved to the store, and never add one.
-PINNED_SHIM: dict[str, frozenset[str]] = {
-    "credentials": frozenset({
-        # API keys: the listings that SessionStores overrides (requests, store metadata), and the three every test
-        # mints and reads keys with
-        "create_api_key", "api_key_by_secret", "get_api_key", "list_api_keys", "get_api_key_listing",
-        "restore_api_key",
-    }),
-}
-
-
-# Stores whose names `Database` does not forward, and never will again: those that landed with every caller moved, and
-# `sessions`, whose pin emptied when #992 stage 6 moved its last callers (batch 3).
-NO_SHIM = frozenset({"accounts", "apps", "usage", "sessions"})
-
-
-def _forwarded() -> dict[str, str]:
-    """{name: store attribute} for every shim entry on `Database`, read from the class itself."""
-    return {name: value.store for name, value in vars(Database).items() if isinstance(value, core_db._Forwarded)}
-
-
-def shim_problems(forwarded: set[str], pinned: frozenset[str], store_methods: set[str],
-                  store: str = "credentials") -> list[str]:
-    """Why one store's shim breaks its ratchet: it forwards a name the pin lacks (it grew), the pin names one it no
-    longer forwards (shrink the pin), or it forwards a name the store lacks."""
-    problems = []
-    if added := sorted(forwarded - pinned):
-        problems.append(f"the forwarding shim grew: {added}. Call the store (`db.{store}.<name>`) instead.")
-    if removed := sorted(pinned - forwarded):
-        problems.append(f"the shim no longer forwards {removed}: delete them from PINNED_SHIM[{store!r}], so they "
-                        "cannot come back.")
-    if missing := sorted(forwarded - store_methods):
-        problems.append(f"the shim forwards {missing}, which the store does not define.")
-    return problems
+# Everything public on the `Database` class: the infrastructure, and `meta`, which stays here (#992 decision 3). A
+# query belongs on a store; a name added here needs a reason it is infrastructure.
+INFRASTRUCTURE = frozenset({
+    "conn", "lock", "reading", "read", "aread", "write", "awrite", "in_transaction", "after_commit", "after_rollback",
+    "close", "for_session", "for_app", "get_meta", "set_meta",
+})
+# The six names the shim forwarded last (credentials, #992 stage 6 part 4).
+LAST_FORWARDED = ("create_api_key", "api_key_by_secret", "get_api_key", "list_api_keys", "get_api_key_listing",
+                  "restore_api_key")
+# A store class stays below this many lines (#992's "no store class exceeds about 800 lines").
+STORE_CLASS_LINES = 800
 
 
 def _store_methods(cls: type) -> set[str]:
     return {n for n, v in vars(cls).items() if callable(v) and not n.startswith("_")}
 
 
-def test_the_shim_only_shrinks():
-    forwarded = _forwarded()
-    # Every store either has a pinned shim or none at all, and one added without a shim never gains one.
-    assert set(PINNED_SHIM) | NO_SHIM == set(STORES) and not set(PINNED_SHIM) & NO_SHIM
-    # A pin whose store forwards nothing any more is dropped, its store moving to NO_SHIM.
-    assert set(forwarded.values()) == set(PINNED_SHIM), "a shim for a store in NO_SHIM, or a pin with no shim left"
-    for store, pinned in PINNED_SHIM.items():
-        names = {n for n, s in forwarded.items() if s == store}
-        assert shim_problems(names, pinned, _store_methods(STORES[store]), store) == [], store
+def test_database_is_infrastructure_plus_store_attributes(tmp_path):
+    """`Database` forwards nothing (#992 stage 6): the shim class is gone, its class has only the infrastructure, no
+    store method is reachable on it, and an instance's public attributes are the core stores, `aio` and `path`."""
+    assert not hasattr(core_db, "_Forwarded") and not hasattr(core_db, "_store_class")
+    assert {n for n in vars(Database) if not n.startswith("_")} == INFRASTRUCTURE
+    assert set(core_db.CORE_STORES) == set(STORES)
+    db = Database(tmp_path / "state.sqlite")
+    try:
+        assert {k for k in vars(db) if not k.startswith("_")} == set(STORES) | {"aio", "path"}
+        for name, cls in STORES.items():
+            store = getattr(db, name)
+            assert type(store) is cls and store.core is db, name
+            for method in _store_methods(cls):
+                assert not hasattr(Database, method) and not hasattr(db, method), f"Database.{method}"
+                with pytest.raises(AttributeError):
+                    getattr(db.aio, method)
+    finally:
+        db.close()
 
 
-def test_database_forwards_these_many_names_per_store():
-    """The shim on `Database` as this change leaves it, read from the class itself: 6 credential names (39 when the
-    store was added, 28 before #1032), and no session names (51 before #992 stage 6 moved the checkpoint, artifact,
-    review-comment, secret-dismissal, approval and smart-review callers, 29 before it moved the event and search
-    callers, 20 before it moved the session row, list and count callers), account, App or usage names."""
-    forwarded = _forwarded()
-    sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
-    assert sizes == {"credentials": 6, "sessions": 0, "accounts": 0, "apps": 0, "usage": 0}
-    assert sizes == {store: len(PINNED_SHIM.get(store, ())) for store in STORES}
-
-
-def test_the_ratchet_allows_a_removal_and_refuses_growth_and_a_stale_pin():
-    pinned = frozenset({"a", "b"})
-    store = {"a", "b", "c"}
-    assert shim_problems({"a", "b"}, pinned, store) == []
-    # A caller moved: its name leaves the shim and the pin, and stays a store method.
-    assert shim_problems({"a"}, frozenset({"a"}), store) == []
-    grew = shim_problems({"a", "b", "c"}, pinned, store, "sessions")
-    assert len(grew) == 1 and "grew: ['c']" in grew[0] and "db.sessions" in grew[0]
-    stale = shim_problems({"a"}, pinned, store)
-    assert len(stale) == 1 and "no longer forwards ['b']" in stale[0]
-    assert shim_problems({"a", "d"}, frozenset({"a", "d"}), store) == [
-        "the shim forwards ['d'], which the store does not define."]
-
-
-def test_every_forwarded_name_is_a_store_method():
-    for store, pinned in PINNED_SHIM.items():
-        cls = STORES[store]
-        for name in pinned:
-            method = vars(cls).get(name)
-            # A query is `_reads` or `_writes`. The one composite forwarded (`read_artifact`, which calls others and
-            # carries no kind) left the shim with its callers (#992 stage 6).
-            assert callable(method), name
-            assert method.db_kind in ("read", "write"), name
-            # The class-level lookup `app_stores` routes by sees the store's decorated method.
-            assert getattr(Database, name) is method, name
-        # A store method is forwarded only by its own `_Forwarded` line on `Database`, never by default.
-        assert pinned <= _store_methods(cls)
-        assert issubclass(cls, CoreStore)
+def test_no_core_store_class_exceeds_about_800_lines():
+    sizes = {cls.__name__: len(inspect.getsourcelines(cls)[0]) for cls in STORES.values()}
+    assert all(lines <= STORE_CLASS_LINES for lines in sizes.values()), sizes
 
 
 def test_credential_queries_left_the_database_class():
@@ -166,18 +117,24 @@ def db(tmp_path):
         database.close()
 
 
-def test_a_forwarded_call_runs_on_the_databases_credential_store(db):
+def test_a_credential_call_runs_on_the_databases_credential_store(db):
+    """The six names the shim forwarded last are the store's only (#992 stage 6, part 4): on `db.credentials`, sync
+    and `aio`, and not on the Database or its `aio`."""
     assert isinstance(db.credentials, CredentialStore) and db.credentials.core is db
-    row, secret = db.create_api_key("Device", "inference")
+    row, secret = db.credentials.create_api_key("Device", "inference")
     assert db.credentials.api_key_by_secret(secret)["id"] == row["id"]
-    assert db.api_key_by_secret(secret)["id"] == row["id"]
-    assert db.list_api_keys() == db.credentials.list_api_keys()
-    # A bound forwarded method is the store's own.
-    assert db.get_api_key.__self__ is db.credentials
+    assert db.credentials.get_api_key(row["id"])["id"] == row["id"]
+    assert [k["id"] for k in db.credentials.list_api_keys()] == [row["id"]]
+    assert db.credentials.get_api_key_listing(row["id"])["id"] == row["id"]
+    for name in LAST_FORWARDED:
+        assert not hasattr(db, name) and not hasattr(Database, name), name
+        with pytest.raises(AttributeError):
+            getattr(db.aio, name)
 
 
-def test_aio_routes_a_forwarded_name_to_the_store(db, monkeypatch):
-    """`await db.aio.<forwarded>(...)` runs the store's method with the store as `self`, on the writer queue."""
+def test_the_credential_stores_aio_runs_a_write_on_the_writer(db, monkeypatch):
+    """`await db.credentials.aio.<write>(...)` runs the store's method with the store as `self`, on the writer
+    queue."""
     seen: list[tuple] = []
     inner = vars(CredentialStore)["create_api_key"].__wrapped__
 
@@ -187,49 +144,50 @@ def test_aio_routes_a_forwarded_name_to_the_store(db, monkeypatch):
 
     # The store's aio looks a write up on its class and sends the unwrapped function to the writer: patch the class.
     monkeypatch.setattr(CredentialStore, "create_api_key", core_db._writes(create_api_key))
-    row, secret = asyncio.run(db.aio.create_api_key("App", "sessions", kind="app"))
+    row, secret = asyncio.run(db.credentials.aio.create_api_key("App", "sessions", kind="app"))
     assert len(seen) == 1 and seen[0][0] is db.credentials and seen[0][1:] == ("App", "sessions")
-    assert row["kind"] == "app" and db.api_key_by_secret(secret)["id"] == row["id"]
+    assert row["kind"] == "app" and db.credentials.api_key_by_secret(secret)["id"] == row["id"]
 
 
-def test_aio_reads_and_writes_through_the_shim_join_the_writer(db):
+def test_the_credential_stores_aio_reads_and_writes(db):
     async def run():
-        row, secret = await db.aio.create_api_key("Owner", "admin", kind="owner")
-        assert await db.aio.api_key_by_secret(secret) == db.credentials.api_key_by_secret(secret)
-        assert (await db.aio.get_api_key(row["id"]))["id"] == row["id"]
-        assert await db.credentials.aio.revoke_api_key(row["id"]) is True  # a moved name: the store's own aio
+        row, secret = await db.credentials.aio.create_api_key("Owner", "admin", kind="owner")
+        assert await db.credentials.aio.api_key_by_secret(secret) == db.credentials.api_key_by_secret(secret)
+        assert (await db.credentials.aio.get_api_key(row["id"]))["id"] == row["id"]
+        assert await db.credentials.aio.revoke_api_key(row["id"]) is True
         return row
     row = asyncio.run(run())
-    assert db.get_api_key(row["id"])["revoked_at"] is not None
-
-
-def test_an_instance_patch_shadows_the_forwarded_name(db, monkeypatch):
-    monkeypatch.setattr(db, "get_api_key", lambda kid: "patched")
-    assert db.get_api_key("k-1") == "patched"
-    monkeypatch.undo()
-    assert db.get_api_key.__self__ is db.credentials
+    assert db.credentials.get_api_key(row["id"])["revoked_at"] is not None
 
 
 def test_a_store_write_joins_the_callers_transaction(db):
-    """A forwarded write inside `db.write` is part of that transaction: it rolls back with it."""
+    """A store write inside `db.write` is part of that transaction: it rolls back with it."""
     def mint_then_fail():
-        db.create_api_key("Rolled back", "inference")
+        db.credentials.create_api_key("Rolled back", "inference")
         raise RuntimeError("abort")
 
     with pytest.raises(RuntimeError):
         db.write(mint_then_fail)
-    assert [k["name"] for k in db.list_api_keys()] == []
+    assert [k["name"] for k in db.credentials.list_api_keys()] == []
 
 
-def test_session_stores_forward_to_the_main_databases_store(tmp_path):
+def test_session_stores_hand_out_the_main_databases_credential_store(tmp_path):
+    """Every SessionStores route hands out the main store's `credentials`. Its own key listings, which add each key's
+    request count (and an App's store metadata), have names of their own (`listed_api_keys`, `listed_api_key`,
+    `restore_listed_api_key`), so a credential name asked of a wrapper is never answered by them."""
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
         assert stores.credentials is main.credentials
-        row, _ = stores.create_api_key("App", "sessions", kind="app")
-        listed = {k["id"]: k for k in stores.list_api_keys()}
-        assert listed[row["id"]]["requests"] == 0  # SessionStores' own listing still adds the count
+        row, _ = stores.credentials.create_api_key("App", "sessions", kind="app")
+        listed = {k["id"]: k for k in stores.listed_api_keys()}
+        assert listed[row["id"]]["requests"] == 0  # SessionStores' own listing adds the count
+        assert stores.listed_api_key(row["id"])["requests"] == 0
         assert "requests" not in {k["id"]: k for k in main.credentials.list_api_keys()}[row["id"]]
+        for wrapper in (stores, stores.scope(""), stores.scope("k-aaaa"), stores.for_app("k-aaaa")):
+            assert wrapper.credentials is main.credentials
+            for name in LAST_FORWARDED:
+                assert not hasattr(wrapper, name), name
     finally:
         stores.close()
 
@@ -273,8 +231,7 @@ def test_each_store_keeps_its_own_sessions_behind_session_stores(tmp_path):
 
 def test_every_core_store_is_declared_and_says_where_its_rows_live():
     assert set(core_db.CORE_STORES) == set(STORES) == set(app_stores._STORE_HOME)
-    for name, cls in STORES.items():
-        assert core_db._store_class(name) is cls
+    assert all(issubclass(cls, CoreStore) for cls in STORES.values())
 
 
 def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
@@ -287,12 +244,12 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
-        key, _ = stores.create_api_key("Owner", "admin", kind="owner")
+        key, _ = stores.credentials.create_api_key("Owner", "admin", kind="owner")
         now = time.time()
         main.accounts.insert_account({"user_id": "u-1", "login": "alice@example.com", "role": "member",
                                       "display_name": "Alice", "enabled": 1, "disk_quota_bytes": 1,
                                       "max_running": 1, "max_queued": 2, "created_at": now, "updated_at": now})
-        app, _ = stores.create_api_key("An App", kind="app")
+        app, _ = stores.credentials.create_api_key("An App", kind="app")
         assert main.apps.set_app_limits(app["id"], {"max_running": 2})
         main.apps.set_app_settings(app["id"], 3, {"app.notify.completion": "never"})
         main.usage.record_usage("fake", "a1", app["id"], 10, 5, 0.0, "subscription")
@@ -311,7 +268,7 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
             for name in main_homed:
                 assert getattr(route, name) is getattr(main, name), (label, name)
             assert key["id"] in {k["id"] for k in route.credentials.list_api_keys()}, label
-            assert route.get_api_key(key["id"])["id"] == key["id"], label  # a forwarded credential call too
+            assert route.credentials.get_api_key(key["id"])["id"] == key["id"], label
             assert route.accounts.account_by_login("alice@example.com")["user_id"] == "u-1", label
             assert route.apps.app_limits(app["id"])["max_running"] == 2, label
             assert route.apps.get_app_settings(app["id"])["revision"] == 3, label
@@ -581,9 +538,9 @@ def test_an_app_route_holds_its_store_per_call_and_writes_only_from_its_own_writ
 
 
 def _moved_session_names() -> frozenset[str]:
-    """`SessionStore`'s methods that `Database` does not forward (#992 stage 6): since batch 3 moved the session row,
-    list and count callers, every one of them. It grew as the `sessions` pin shrank, and the pin is gone."""
-    return frozenset(_store_methods(SessionStore) - PINNED_SHIM.get("sessions", frozenset()))
+    """Every `SessionStore` method: `Database` forwards none (#992 stage 6). The scan grew as the `sessions` pin shrank
+    from 51, and the pin and the shim are gone."""
+    return frozenset(_store_methods(SessionStore))
 
 
 def test_every_call_of_a_moved_session_method_goes_through_a_sessions_proxy():
@@ -592,7 +549,7 @@ def test_every_call_of_a_moved_session_method_goes_through_a_sessions_proxy():
     and decision, `insert_approval`, `insert_smart_review` and `pending_approvals`) are also SessionStores' own
     overrides, so a call left on `m.db` would still run: only this scan refuses it."""
     moved = _moved_session_names()
-    assert APP_STORE_NAMES <= moved and not moved & set(_forwarded())
+    assert APP_STORE_NAMES <= moved
     for package in _production_packages():
         assert _uses_off_the_store(package, "sessions", moved) == [], package.name
 
@@ -731,6 +688,16 @@ DATA_READS = frozenset({
 })
 
 
+# Calls of a Manager method that shares a `CredentialStore` method's name, each by file, receiver and name: the
+# Manager's method (it checks the App and the backend, then calls `db.credentials`) is the API there. The scan allows
+# these calls and no other (#992 stage 6, part 4, as `DATA_READS`); add one only after review, one line each. A stale
+# entry, or one that is not a Manager method, fails `test_every_allowed_manager_call_is_still_there`.
+MANAGER_CALLS = frozenset({
+    ("harness/admin.py", "manager", "set_app_provider_credential"),
+    ("harness/admin.py", "manager", "revoke_app_provider_credential"),
+})
+
+
 def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
                         allowed: set[tuple[str, str, str]] | None = None) -> list[str]:
     """Each use of a method name of core store `store` (or of `names`, some of them: a call, or a bound method handed
@@ -739,9 +706,10 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
     the effective caps; SessionStores' own overrides); for sessions, `m.<name>` for a method of the Manager (`m`) of
     that name (`checkpoints`, the listing, and `add_review_comment`), and the data reads `DATA_READS` names (file,
     receiver and name: `run.events` in `scripts/real_env_lane.py`), only as a plain read: not called, not handed to
-    `to_thread` or `awrite`, and not through `.aio`; for accounts, an `accounts` stand-in
-    (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`. Each allowed data read is added to
-    `allowed`, when given."""
+    `to_thread` or `awrite`, and not through `.aio`; for credentials, the Manager calls `MANAGER_CALLS` names (file,
+    receiver and name: `manager.set_app_provider_credential` in `harness/admin.py`); for accounts, an `accounts`
+    stand-in (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`. Each allowed data read or
+    Manager call is added to `allowed`, when given."""
     import ast
     cls = STORES[store]
     names = _store_methods(cls) if names is None else names
@@ -779,6 +747,11 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
                     (read := (rel, ast.unparse(on), node.attr)) in DATA_READS:
                 if allowed is not None:
                     allowed.add(read)
+                continue
+            if store == "credentials" and isinstance(on, ast.Name) and node.attr in vars(Manager) and \
+                    (call := (rel, on.id, node.attr)) in MANAGER_CALLS:
+                if allowed is not None:
+                    allowed.add(call)
                 continue
             if store == "accounts" and ((isinstance(on, ast.Name) and on.id == "accounts") or (
                     isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store")):
@@ -851,6 +824,59 @@ def test_the_account_scan_has_no_own_method_allowance(tmp_path):
         "        return self.member_count()\n",              # line 6
         encoding="utf-8")
     assert _account_uses_off_the_store(tmp_path / "pkg") == ["pkg/x.py:6 .member_count"]
+
+
+def test_every_credential_call_goes_through_the_credential_store():
+    """No production code calls or passes a `CredentialStore` method on anything but `db.credentials` (or its `aio`):
+    `Database` forwards none (#992 stage 6, part 4), and SessionStores' key listings have names of their own."""
+    for package in _production_packages():
+        assert _uses_off_the_store(package, "credentials") == [], package.name
+
+
+def test_the_credential_scan_allows_the_store_and_only_the_listed_manager_calls(tmp_path):
+    """The store and its `aio` pass, and a SessionStores listing (not a store method) is not looked at. Everything
+    else is reported: a Database or wrapper of any name (`m.db`, `self.db.main`, `stores`), its `aio`, a bound
+    method handed to `to_thread`, a credential name on the listed receiver that the list does not name, a listed name
+    on another receiver, and a listed call in another file."""
+    (tmp_path / "harness").mkdir()
+    (tmp_path / "harness" / "admin.py").write_text(
+        "import asyncio\n"
+        "async def f(m, manager, stores, sid, t):\n"
+        "    m.db.credentials.get_api_key(sid)\n"                    # on the store: fine
+        "    await m.db.credentials.aio.create_api_key('a')\n"       # its aio: fine
+        "    stores.listed_api_keys()\n"                             # SessionStores' own listing: not a store name
+        "    manager.set_app_provider_credential(sid, 'b', 'r', 'p', [])\n"  # listed: fine
+        "    m.db.get_api_key(sid)\n"                                # line 7
+        "    m.db.main.create_api_key('a')\n"                        # line 8
+        "    await m.db.aio.api_key_by_secret(t)\n"                  # line 9
+        "    await asyncio.to_thread(m.db.api_key_by_secret, t)\n"   # line 10
+        "    stores.list_api_keys()\n"                               # line 11
+        "    manager.get_api_key(sid)\n"                             # line 12: not listed for this receiver
+        "    m.set_app_provider_credential(sid, 'b', 'r', 'p', [])\n"  # line 13: listed only for `manager`
+        "    manager.db.revoke_app_provider_credential(sid)\n",      # line 14: a Database's, not the Manager's
+        encoding="utf-8")
+    (tmp_path / "harness" / "other.py").write_text(
+        "def g(manager, cid):\n"
+        "    return manager.revoke_app_provider_credential(cid)\n",  # line 2: listed only for admin.py
+        encoding="utf-8")
+    allowed: set[tuple[str, str, str]] = set()
+    found = _uses_off_the_store(tmp_path / "harness", "credentials", None, allowed)
+    assert sorted(found) == sorted([
+        "harness/admin.py:7 .get_api_key", "harness/admin.py:8 .create_api_key", "harness/admin.py:9 .api_key_by_secret",
+        "harness/admin.py:10 .api_key_by_secret", "harness/admin.py:11 .list_api_keys",
+        "harness/admin.py:12 .get_api_key", "harness/admin.py:13 .set_app_provider_credential",
+        "harness/admin.py:14 .revoke_app_provider_credential", "harness/other.py:2 .revoke_app_provider_credential"])
+    assert allowed == {("harness/admin.py", "manager", "set_app_provider_credential")}
+
+
+def test_every_allowed_manager_call_is_still_there():
+    """Each `MANAGER_CALLS` entry is a Manager method and matches a call in the production code, so the list can only
+    shrink to what is used."""
+    assert all(callable(vars(Manager).get(name)) for _, _, name in MANAGER_CALLS)
+    allowed: set[tuple[str, str, str]] = set()
+    for package in _production_packages():
+        _uses_off_the_store(package, "credentials", None, allowed)
+    assert allowed == MANAGER_CALLS
 
 
 def test_every_usage_call_goes_through_the_usage_store():
