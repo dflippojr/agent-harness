@@ -230,7 +230,7 @@ def test_the_runner_reports_a_missing_api_key_in_the_documented_shape(tmp_path):
         manager.runner._backend_credential = lambda _s: {"policy": "api_key", "source": "app", "key": ""}
         with pytest.raises(CliBackendError, match="no key is available"):
             manager.runner._cli_credentials(sid, manager.db.get_session(sid), "claude")
-    event = manager.db.events(sid)[-1]
+    event = manager.db.sessions.events(sid)[-1]
     assert event["type"] == "backend_auth_required"
     assert event["data"] == {"backend": "claude", "auth": "api_key"}
     assert event_schema.mismatch(json.loads(json.dumps(event))) is None
@@ -297,7 +297,7 @@ def test_an_aemit_whose_awaiter_is_cancelled_is_still_checked(tmp_path, monkeypa
             await task
     try:
         asyncio.run(body())
-        assert [e["type"] for e in db.events("s1")] == ["status"]  # committed despite the cancel
+        assert [e["type"] for e in db.sessions.events("s1")] == ["status"]  # committed despite the cancel
         found, sse_event_capture.problems[:] = list(sse_event_capture.problems), []
         assert any("status.data.status" in problem for problem in found), found
     finally:

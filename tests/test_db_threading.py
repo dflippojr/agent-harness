@@ -46,12 +46,12 @@ def test_writes_run_on_the_writer_thread_and_reads_on_a_read_only_connection(db)
 def test_write_is_one_transaction_and_rolls_back_on_error(db):
     def fail():
         db.update_session("s1", status="done")
-        db.insert_event("s1", "status", {"status": "done"})
+        db.sessions.insert_event("s1", "status", {"status": "done"})
         raise RuntimeError("boom")
     with pytest.raises(RuntimeError):
         db.write(fail)
     assert db.get_session("s1")["status"] == "running"
-    assert db.events("s1") == []
+    assert db.sessions.events("s1") == []
 
 
 def test_nested_write_joins_the_outer_transaction(db):
@@ -98,7 +98,7 @@ def test_emit_is_dropped_with_a_rolled_back_transaction(db):
         raise RuntimeError("abort")
     with pytest.raises(RuntimeError):
         db.write(change)
-    assert heard == [] and db.events("s1") == []
+    assert heard == [] and db.sessions.events("s1") == []
 
 
 def test_a_slow_write_does_not_block_reads_or_the_event_loop(db):
@@ -136,13 +136,13 @@ def test_aio_methods_and_aemit(db):
 
     event, s, published = asyncio.run(run())
     assert s["status"] == "done"
-    assert published["seq"] == event["seq"] == db.last_event_seq("s1")
+    assert published["seq"] == event["seq"] == db.sessions.last_event_seq("s1")
 
 
 def test_awrite_returns_the_callable_result(db):
     async def run():
-        return await db.awrite(lambda: db.insert_event("s1", "note", {"text": "x"})["seq"])
-    assert asyncio.run(run()) == db.last_event_seq("s1")
+        return await db.awrite(lambda: db.sessions.insert_event("s1", "note", {"text": "x"})["seq"])
+    assert asyncio.run(run()) == db.sessions.last_event_seq("s1")
 
 
 def test_cancelling_an_awrite_still_delivers_its_events_once(db):
@@ -171,7 +171,7 @@ def test_cancelling_an_awrite_still_delivers_its_events_once(db):
 
     asyncio.run(run())
     assert heard == [("status", "done")]
-    assert [e["type"] for e in db.events("s1")] == ["status"]
+    assert [e["type"] for e in db.sessions.events("s1")] == ["status"]
 
 
 def test_cancelling_aemit_still_publishes_the_event(db):
@@ -191,7 +191,7 @@ def test_cancelling_aemit_still_publishes_the_event(db):
 
     cancelled, published = asyncio.run(run())
     assert cancelled
-    assert published["type"] == "run_finished" and published["seq"] == db.last_event_seq("s1")
+    assert published["type"] == "run_finished" and published["seq"] == db.sessions.last_event_seq("s1")
     assert sub.queue.empty()
 
 
@@ -216,7 +216,7 @@ def test_metrics_aggregates_run_on_a_read_connection_and_are_cached(db, monkeypa
     monkeypatch.setattr(metrics, "_core_rows", counting)
     with db.reading():
         metrics._cached_core_rows(db)
-        db.insert_event("s1", "error", {"message": "x"})
+        db.sessions.insert_event("s1", "error", {"message": "x"})
         rows = metrics._cached_core_rows(db)
     assert calls == [True]
     assert rows["kinds"].get("error", 0) == 0  # served from the cache
@@ -243,13 +243,13 @@ def _observe_between_statements(db, marker: str, look):
 
 def test_a_reader_never_sees_an_event_without_its_search_index_row(db):
     def look():
-        return (len(db.events("s1")),
+        return (len(db.sessions.events("s1")),
                 db.conn.execute("SELECT COUNT(*) FROM search_index WHERE session_id = 's1'").fetchone()[0])
     seen = _observe_between_statements(db, "INSERT INTO search_index", look)
-    db.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "needle"})
+    db.sessions.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "needle"})
     assert seen == [(0, 0)]  # not (1, 0): the event and its index row commit together
-    assert db.read(look) == (1, 1) and [h["seq"] for h in db.search_events("needle")]
-    asyncio.run(db.aio.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "haystack"}))
+    assert db.read(look) == (1, 1) and [h["seq"] for h in db.sessions.search_events("needle")]
+    asyncio.run(db.sessions.aio.insert_event("s1", "tool_result", {"name": "run_cmd", "output": "haystack"}))
     assert seen == [(0, 0), (1, 1)] and db.read(look) == (2, 2)  # the awaitable path is atomic too
 
 

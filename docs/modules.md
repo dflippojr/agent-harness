@@ -290,11 +290,11 @@ Session methods go through a routing proxy, and the key listings still go throug
 
   `core_store("sessions")` still refuses, so a wrapper without its own proxy fails instead of misrouting. A Web route
   (`for_app("")`, `for_app(WEB_APP_ID)`, or `for_session` of an owner or member session) returns Web's Database
-  itself, so its `sessions` is Web's own store: the one that holds those sessions. Checkpoints, artifacts, review
-  comments, secret dismissals, approvals and smart reviews are called only through a `sessions` store or proxy, as
-  are the names added in stage 6. A scan fails on any call to a `SessionStore` method that `Database` no longer
-  forwards, if it isn't made on a `sessions` store or proxy. The session rows, counts and lists, and the events and
-  search, still work on `m.db` through the shim until their callers move. Every route, and
+  itself, so its `sessions` is Web's own store: the one that holds those sessions. Events and search, checkpoints,
+  artifacts, review comments, secret dismissals, approvals and smart reviews are called only through a `sessions`
+  store or proxy, as are the names added in stage 6. A scan fails on any call to a `SessionStore` method that
+  `Database` no longer forwards, if it isn't made on a `sessions` store or proxy. The session rows, counts and lists
+  still work on `m.db` through the shim until their callers move. Every route, and
   every Database that `SessionStores` opens, hands out the main store's `credentials`, `accounts`, `apps` and
   `usage`. `app_stores._STORE_HOME` records where each store's rows live, and a new store must add itself there.
 - **Key listings.** The listing overrides on `SessionStores` (`list_api_keys`, `get_api_key_listing`,

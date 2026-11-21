@@ -51,8 +51,8 @@ def test_session_event_replay_order_and_last_event_id(tmp_path):
     manager._spawn = lambda *_a, **_k: None
     with client:
         sid = client.post("/api/v1/sessions", json={"prompt": "stream"}).json()["id"]
-        first = manager.db.insert_event(sid, "characterization_first", {"n": 1})
-        manager.db.insert_event(sid, "characterization_second", {"n": 2})
+        first = manager.db.sessions.insert_event(sid, "characterization_first", {"n": 1})
+        manager.db.sessions.insert_event(sid, "characterization_second", {"n": 2})
 
         replay = client.get(f"/api/v1/sessions/{sid}/events?after={first['seq'] - 1}&follow=false")
         resumed = client.get(f"/api/v1/sessions/{sid}/events?after=0&follow=false",
@@ -76,7 +76,7 @@ def test_session_event_live_replay_deduplicates_and_closes(tmp_path):
     manager._spawn = lambda *_a, **_k: None
     with client:
         sid = client.post("/api/v1/sessions", json={"prompt": "stream"}).json()["id"]
-        historical = manager.db.insert_event(sid, "historical", {"n": 1})
+        historical = manager.db.sessions.insert_event(sid, "historical", {"n": 1})
 
         async def disconnected():
             return False

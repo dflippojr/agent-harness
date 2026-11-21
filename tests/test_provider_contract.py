@@ -121,5 +121,5 @@ def test_provider_failures_have_one_normalized_shape(tmp_path, backend):
     assert public["stop_reason"] == "provider_error"
     assert public["failure"] == {"code": "provider_error", "provider": backend,
                                  "message": "provider rejected the turn", "retryable": True}
-    error = [event for event in manager.db.events(session["id"]) if event["type"] == "error"][-1]
+    error = [event for event in manager.db.sessions.events(session["id"]) if event["type"] == "error"][-1]
     assert error["data"] == public["failure"]

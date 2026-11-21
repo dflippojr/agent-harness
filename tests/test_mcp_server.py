@@ -403,7 +403,7 @@ def test_hosted_claude_calls_harness_tools_through_policy_and_relay(tmp_path):
         assert [t["kind"] for t in s["taint"]] == ["web_search"]  # MCP results taint like native web tools
         assert made[0]["mcp_token"] and m.runner.mcp_tokens.session_for(made[0]["mcp_token"]) is None
         assert sid not in m.runner._mcp_grants
-        for record in m.db.events(sid):
+        for record in m.db.sessions.events(sid):
             assert made[0]["mcp_token"] not in json.dumps(record)
         await m.stop()
     asyncio.run(body())
@@ -640,7 +640,7 @@ def test_hosted_codex_calls_harness_tools_through_policy_and_relay(tmp_path):
         assert [t["kind"] for t in s["taint"]] == ["web_search"]  # MCP results taint like native web tools
         assert m.runner.mcp_tokens.session_for(made[0]["mcp_token"]) is None
         assert sid not in m.runner._mcp_grants
-        for record in m.db.events(sid):
+        for record in m.db.sessions.events(sid):
             assert made[0]["mcp_token"] not in json.dumps(record)
         await m.stop()
     asyncio.run(body())

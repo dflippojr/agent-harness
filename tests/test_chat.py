@@ -161,8 +161,8 @@ def test_search_index_and_tools_exclude_chat_kind(tmp_path):
     chat_hits = search(db, CHAT_MARKER, session_kind="chat")
     assert [r["id"] for r in chat_hits["results"]] == ["chat000001"]
     assert search(db, AGENT_MARKER, session_kind="chat")["results"] == []
-    assert db.session_brief("chat000001") is None
-    assert db.session_brief("chat000001", kind="chat")["id"] == "chat000001"
+    assert db.sessions.session_brief("chat000001") is None
+    assert db.sessions.session_brief("chat000001", kind="chat")["id"] == "chat000001"
     assert db.find_session_ids("chat000001", kind="agent") == []
     assert db.find_session_ids("agent00001", kind="agent") == ["agent00001"]
     tools = SessionSearch(db)

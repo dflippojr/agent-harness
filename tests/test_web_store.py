@@ -109,7 +109,7 @@ def test_the_migration_moves_every_owner_and_member_session_with_a_backup_once(t
 
     # Reads route there: the routing wrapper finds each session, its events, approvals and artifacts.
     assert stores.get_session("own1")["owner_id"] == "owner"
-    assert [e["data"]["content"] for e in stores.events("mem2")] == ["find the merlin"]
+    assert [e["data"]["content"] for e in stores.sessions.events("mem2")] == ["find the merlin"]
     assert stores.sessions.get_approval("ap-own2")["session_id"] == "own2"
     assert stores.sessions.full_artifact("own3", "h1") == "artifact body"
     assert stores.sessions.checkpoints("own1")
@@ -216,7 +216,7 @@ def test_members_stay_isolated_in_webs_store(tmp_path):
     view = stores.scope("")
     assert {s["id"] for s in view.list_sessions(owner_id="u-ann")} == {"mem1"}
     assert {s["id"] for s in view.list_sessions(owner_id="owner")} == {"own1", "own2", "own3"}
-    assert {r["session_id"] for r in view.search_events("find", user_id="u-bob")} == {"mem2"}
+    assert {r["session_id"] for r in view.sessions.search_events("find", user_id="u-bob")} == {"mem2"}
     assert view.find_session_ids("mem", user_id="u-ann") == ["mem1"]
     assert stores.get_session_for_user("own1", "u-ann") is None
     assert stores.get_session_for_user("mem2", "u-ann") is None

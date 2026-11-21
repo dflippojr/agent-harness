@@ -88,7 +88,7 @@ def test_turn_metrics_by_session_keeps_only_turn_metrics_rows():
     db = SimpleNamespace(
         sessions_with_status=lambda *statuses: [{"id": i, "title": f"canary {i}", "status": "done"} for i in "ab"]
         if statuses == canary_cli.DONE else [],
-        events=lambda sid: events[sid])
+        sessions=SimpleNamespace(events=lambda sid: events[sid]))
     out = canary_cli.turn_metrics_by_session(db)
     assert [s["session"] for s in out] == ["a", "b"]
     assert out[0]["turns"] == [{"turn": 1, "cache_tokens": 0}, {"turn": 2, "cache_tokens": 90}]

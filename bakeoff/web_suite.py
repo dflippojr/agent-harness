@@ -110,9 +110,9 @@ async def run_one(task: WebTask, fixture: Path, repeat: int, repo_map: bool = Fa
                 await m.cancel(s["id"])
                 break
         final = m.db.get_session(s["id"])
-        results = [e["data"] for e in m.db.events(s["id"]) if e["type"] == "tool_result"]
+        results = [e["data"] for e in m.db.sessions.events(s["id"]) if e["type"] == "tool_result"]
         calls = [r["name"] for r in results]
-        requests = [c["function"] for e in m.db.events(s["id"]) if e["type"] == "assistant"
+        requests = [c["function"] for e in m.db.sessions.events(s["id"]) if e["type"] == "assistant"
                     for c in e["data"].get("tool_calls") or []]
         ok, note = task.check(final["answer"])
         made_up = ungrounded_quotes(final["answer"], [r["output"] for r in results])

@@ -973,8 +973,8 @@ def test_the_next_model_call_does_not_wait_for_the_checkpoint(tmp_path, monkeypa
         assert steps == ["take", "taken", "take", "taken"]   # one at a time, in turn order
         assert [c["turn"] for c in m.db.sessions.checkpoints(sid)] == [1, 2]       # all there once the session reads as done
         seqs = [c["event_seq"] for c in m.db.sessions.checkpoints(sid)]
-        first_reply = [e["seq"] for e in m.db.events(sid) if e["type"] == "tool_result"][0]
-        assert seqs[0] >= first_reply and seqs[0] < [e["seq"] for e in m.db.events(sid) if e["type"] == "assistant"][1]
+        first_reply = [e["seq"] for e in m.db.sessions.events(sid) if e["type"] == "tool_result"][0]
+        assert seqs[0] >= first_reply and seqs[0] < [e["seq"] for e in m.db.sessions.events(sid) if e["type"] == "assistant"][1]
         await m.rewind(sid, 1)                                              # rewind right after a mutating turn
         assert (Path(s["workspace"]) / "app.py").read_text() == "VALUE = 2\n"
         assert not (Path(s["workspace"]) / "extra.txt").exists()

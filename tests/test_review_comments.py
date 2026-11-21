@@ -104,7 +104,7 @@ def test_draft_survives_restart_and_sends_one_followup(tmp_path):
         sent = client.post(url + "/send")
         assert sent.status_code == 200
         wait_for(lambda: m.db.get_session(s["id"])["status"] == "done")
-        msgs = [e["data"]["content"] for e in m.db.events(s["id"]) if e["type"] == "user_message"]
+        msgs = [e["data"]["content"] for e in m.db.sessions.events(s["id"]) if e["type"] == "user_message"]
         assert len(msgs) == 2
         assert "new.txt, line 1-2 in the new lines" in msgs[1]
         assert "greet better" in msgs[1]

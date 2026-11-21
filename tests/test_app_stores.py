@@ -134,7 +134,7 @@ def _session(sid: str, app_id: str = "", **extra) -> dict:
 
 
 def _fill(db: Database, sid: str, word: str) -> None:
-    db.insert_event(sid, "user_message", {"content": f"find the {word}"})
+    db.sessions.insert_event(sid, "user_message", {"content": f"find the {word}"})
     db.sessions.insert_approval({"id": f"ap-{sid}", "session_id": sid, "tool_call_id": "c1", "tool": "write_file",
                         "args": {"path": "x"}, "reason": "ask"})
     db.sessions.insert_app_tool_call(sid, "c2", "get_balance", {"account": "checking"})
@@ -158,11 +158,11 @@ def test_startup_migration_moves_app_sessions_with_a_backup_once(tmp_path):
     web_backups = sorted((tmp_path / "pre-migration").glob("harness-web-store-*.sqlite3"))
     assert len(web_backups) == 1 and session_ids(web_backups[0]) == {"own1"}  # the App sessions had moved
     assert stores.get_session("a1")["app_id"] == "k-aaaa"
-    assert [e["data"]["content"] for e in stores.events("b1")] == ["find the walrus"]
+    assert [e["data"]["content"] for e in stores.sessions.events("b1")] == ["find the walrus"]
     assert stores.sessions.get_approval("ap-a2")["session_id"] == "a2"
     assert stores.sessions.full_artifact("a1", "h1") == "artifact body"
     assert stores.sessions.get_app_tool_call("b1", "c2")["name"] == "get_balance"
-    found = stores.search_events("osprey", app_id="k-aaaa")
+    found = stores.sessions.search_events("osprey", app_id="k-aaaa")
     assert [r["session_id"] for r in found] == ["a2"]
     stores.close()
 
@@ -214,7 +214,7 @@ def test_a_store_in_use_is_not_closed(tmp_path):
     with stores._using("k-aaaa"):
         assert stores.close_idle(now=time.monotonic() + 61) == []           # busy: kept
     assert stores.close_idle(now=time.monotonic() + 61) == ["k-aaaa"]
-    assert stores.events("a1") == []                                        # reopened on use
+    assert stores.sessions.events("a1") == []                                        # reopened on use
     stores.close()
 
 
@@ -245,7 +245,7 @@ def test_one_writer_per_store_and_no_write_across_stores(tmp_path):
     assert stores.get_session("a1")["title"] == "renamed"
 
     async def reads_off_the_loop():
-        return await stores.aio.get_session("a1"), await stores.for_session("a1").aio.events("a1")
+        return await stores.aio.get_session("a1"), await stores.for_session("a1").sessions.aio.events("a1")
     s, events = asyncio.run(reads_off_the_loop())
     assert s["id"] == "a1" and events == []
     stores.close()
@@ -269,7 +269,7 @@ def test_session_ids_stay_unique_across_stores(tmp_path):
 
 def test_an_app_session_create_that_rolls_back_leaves_no_trace_in_the_index(tmp_path, monkeypatch):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
-    real = SessionStore.insert_event  # the query's home (#992); `db.insert_event` forwards to it
+    real = SessionStore.insert_event  # the query's home (#992); every `sessions` proxy reaches it
 
     def failing(self, sid, type_, data):
         if type_ == "session_created":
@@ -281,7 +281,7 @@ def test_an_app_session_create_that_rolls_back_leaves_no_trace_in_the_index(tmp_
     def insert_created(status="queued"):  # as Manager._insert_created: the session, then its events
         stores.insert_session(_session("a1", "k-aaaa", status=status))
         seen.append((stores.app_of("a1"), stores.count_sessions("owner", status)))
-        stores.insert_event("a1", "session_created", {})
+        stores.sessions.insert_event("a1", "session_created", {})
     with pytest.raises(sqlite3.OperationalError):
         stores.for_app("k-aaaa").write(insert_created)
     assert seen == [("k-aaaa", 0)]                            # routed inside its transaction, not counted yet
@@ -292,7 +292,7 @@ def test_an_app_session_create_that_rolls_back_leaves_no_trace_in_the_index(tmp_
     monkeypatch.setattr(SessionStore, "insert_event", real)
     stores.for_app("k-aaaa").write(insert_created)            # the same id again
     assert stores.get_session("a1")["status"] == "queued"
-    assert [e["type"] for e in stores.events("a1")] == ["session_created"]
+    assert [e["type"] for e in stores.sessions.events("a1")] == ["session_created"]
     assert stores.count_sessions("owner", "queued") == 1
     stores.close()
     assert session_ids(tmp_path / "apps" / "k-aaaa" / APP_STORE_FILE) == {"a1"}
@@ -428,9 +428,9 @@ def test_lists_searches_and_lookups_reach_only_the_app_they_name(tmp_path):
     assert sorted(stores.find_session_ids("abc")) == ["abc1", "abc2", "abc3"]  # the daemon's own lookups
     assert {s["id"] for s in owner.list_sessions()} == {"abc1"}
     assert {s["id"] for s in app_a.list_sessions()} == {"abc1", "abc2"}
-    assert {r["session_id"] for r in owner.search_events("ledger")} == {"abc1"}
-    assert {r["session_id"] for r in app_a.search_events("ledger")} == {"abc1", "abc2"}
-    assert {r["session_id"] for r in stores.search_events("ledger", app_id="k-bbbb")} == {"abc3"}
+    assert {r["session_id"] for r in owner.sessions.search_events("ledger")} == {"abc1"}
+    assert {r["session_id"] for r in app_a.sessions.search_events("ledger")} == {"abc1", "abc2"}
+    assert {r["session_id"] for r in stores.sessions.search_events("ledger", app_id="k-bbbb")} == {"abc3"}
     assert {a["id"] for a in owner.sessions.pending_approvals()} == {"ap-abc1"}
     assert {a["id"] for a in app_a.sessions.pending_approvals()} == {"ap-abc1", "ap-abc2"}
     assert {s["id"] for s in stores.sessions_with_status("running")} == {"abc1", "abc2", "abc3"}  # sweeps
@@ -528,7 +528,7 @@ def test_app_tool_arguments_and_results_never_reach_logs_spans_or_the_audit_log(
                                 json={"output": f"balance {result}"})
                 return m.db.get_session(sid)["status"] == "done"
             wait_for(answer, timeout=60)
-            held = json.dumps([e["data"] for e in m.db.events(sid)])
+            held = json.dumps([e["data"] for e in m.db.sessions.events(sid)])
             audit = m.db.main.read(lambda: [tuple(r) for r in
                                             m.db.main.conn.execute("SELECT * FROM account_audit").fetchall()])
     finally:

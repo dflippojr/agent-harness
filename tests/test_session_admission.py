@@ -817,7 +817,7 @@ def test_a_local_approval_past_its_deadline_is_denied_and_the_run_ends(tmp_path)
         assert (s["status"], s["stop_reason"]) == ("done", "approval_expired")
         assert m.db.sessions.approvals(s["id"])[0]["status"] == "denied"
         assert unresolved_calls(s["context"]) == []
-        assert any(e["data"].get("expired") for e in m.db.events(s["id"]) if e["type"] == "approval_decided")
+        assert any(e["data"].get("expired") for e in m.db.sessions.events(s["id"]) if e["type"] == "approval_decided")
         assert m.scheduler.holder is None
         await m.stop()
     asyncio.run(body())

@@ -47,9 +47,9 @@ def seed(db: Database, sid: str, project: str, title: str, texts: list[tuple[str
     db.insert_session({"id": sid, "project": project, "target": "tower", "model": "fake", "title": title,
                        "status": "done", "workspace": "", "created_at": now, "updated_at": now, "context": [],
                        "answer": "", "app_id": app_id})
-    db.insert_event(sid, "session_created", {"title": title, "project": project})
+    db.sessions.insert_event(sid, "session_created", {"title": title, "project": project})
     for type_, data in texts:
-        db.insert_event(sid, type_, data)
+        db.sessions.insert_event(sid, type_, data)
 
 
 def test_search_ranks_groups_and_falls_back(tmp_path):

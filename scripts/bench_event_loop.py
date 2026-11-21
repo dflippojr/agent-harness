@@ -57,12 +57,12 @@ async def fake_session(db: Database, sid: str, stop: asyncio.Event, large_every:
     i = 0
     while not stop.is_set():
         i += 1
-        await db.aio.insert_event(sid, "assistant", {"text": _text(60, i), "tool_calls": []})
+        await db.sessions.aio.insert_event(sid, "assistant", {"text": _text(60, i), "tool_calls": []})
         if i % large_every == 0:
-            await db.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": blob})
+            await db.sessions.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": blob})
             stats["large"] += 1
         else:
-            await db.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": _text(300, i)})
+            await db.sessions.aio.insert_event(sid, "tool_result", {"name": "bash", "ok": True, "output": _text(300, i)})
         stats["events"] += 1
         await asyncio.sleep(0.005)  # model latency stand-in; the loop is otherwise free
 

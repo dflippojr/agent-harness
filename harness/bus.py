@@ -29,7 +29,7 @@ class EventBus:
     def emit(self, sid: str, type_: str, data: dict) -> dict:
         """Persist and publish. Inside a `db.write(fn)` transaction, subscribers and listeners hear of the event
         only after the commit, in the thread that called `write` (never on the writer thread)."""
-        event = self.db.insert_event(sid, type_, data)
+        event = self.db.sessions.insert_event(sid, type_, data)
         self.db.after_commit(lambda: self._deliver(sid, event))
         return event
 

@@ -290,7 +290,7 @@ class Runner(HostedRuns):
             self._sandboxes[sid] = sandbox_class(
                 sid, Path(s["workspace"]), sb_cfg, project=project.name if project else "",
                 user_id=session_user_id(s),
-                setup=project.setup if project else "", known=self.db.has_tool_result(sid),
+                setup=project.setup if project else "", known=self.db.sessions.has_tool_result(sid),
                 on_event=lambda type_, data: self._sandbox_event(sid, type_, data),
                 disk_limits=lambda: self._disk_limits(sid))
         return self._sandboxes[s["id"]]
@@ -1335,7 +1335,7 @@ class Runner(HostedRuns):
         pending = (s.get("run") or {}).get("pending_turn_metrics")
         if not pending and (not final or s.get("backend", "local") != "local"):
             return  # hosted runs have no native turns: their retry aggregate stays null
-        counts = efficiency.turn_counts(self.db.events(sid))
+        counts = efficiency.turn_counts(self.db.sessions.events(sid))
         if not pending:
             # The run ended after a compaction or a tool result that no model turn committed (the next call failed or
             # was cancelled). Keep those counts in a row with no turn data, so totals and the metrics still hold them.
@@ -1450,7 +1450,7 @@ class Runner(HostedRuns):
         position are taken now, so the checkpoint is of this turn whatever runs meanwhile, and the files are
         safe to read because only a mutating tool changes them. `_join_checkpoint` waits for it."""
         await self._join_checkpoint(sid)        # one at a time: the turn numbers and the store's index are shared
-        at = (self.db.get_session(sid), self.db.last_event_seq(sid))
+        at = (self.db.get_session(sid), self.db.sessions.last_event_seq(sid))
         stats: dict = {}
         if defer:
             # No trace span of its own: it would outlive the turn that owns it. `_join_checkpoint` records the wait.
@@ -1822,7 +1822,7 @@ class Runner(HostedRuns):
         if name != "read_artifact":
             return self._context_banner(s, name, tainted)
         digest = args.get("artifact_id")
-        sources = {(e["data"].get("name", ""), bool(e["data"].get("tainted"))) for e in self.db.events(s["id"])
+        sources = {(e["data"].get("name", ""), bool(e["data"].get("tainted"))) for e in self.db.sessions.events(s["id"])
                    if e["type"] == "tool_result" and e["data"].get("artifact_id") == digest}
         return next((b for b in sorted(self._context_banner(s, n, t) for n, t in sources) if b), "")
 
@@ -2480,7 +2480,7 @@ class Runner(HostedRuns):
 
     def _tool_outcomes(self, sid: str) -> dict:
         """tool_call_id -> its tool_result event data, for this session's history."""
-        return {e["data"].get("id"): e["data"] for e in self.db.events(sid) if e["type"] == "tool_result"}
+        return {e["data"].get("id"): e["data"] for e in self.db.sessions.events(sid) if e["type"] == "tool_result"}
 
     def _mask_used_results(self, s: dict, outcomes: dict) -> tuple[list, dict, int]:
         """Replace this session's used, oversized tool results with receipts (see compaction.mask_used_results).
@@ -2545,7 +2545,7 @@ class Runner(HostedRuns):
         them (returns them and marks `run`); after that the answer is accepted and _end_run flags what's left."""
         if run.get("quote_check") or not self.cfg.web.quote_check:
             return []
-        quotes = grounding.ungrounded_quotes(answer, grounding.session_sources(s["context"], self.db.events(s["id"])))
+        quotes = grounding.ungrounded_quotes(answer, grounding.session_sources(s["context"], self.db.sessions.events(s["id"])))
         if quotes:
             run["quote_check"] = 1
         return quotes
@@ -2652,7 +2652,7 @@ class Runner(HostedRuns):
             extra = {"job_id": s["job_id"], "job_status": job_status, "job_reason": reason}
         if s["status"] == "done" and s["answer"] and self.cfg.web.quote_check:
             quotes = grounding.ungrounded_quotes(s["answer"],
-                                                 grounding.session_sources(s["context"], self.db.events(sid)))
+                                                 grounding.session_sources(s["context"], self.db.sessions.events(sid)))
             if quotes:
                 extra["ungrounded_quotes"] = quotes
 
@@ -2713,7 +2713,7 @@ class Runner(HostedRuns):
             return
 
         def branch_saved() -> None:
-            reviewed = next((e["data"] for e in reversed(self.db.events(sid)) if e["type"] == "review"), None)
+            reviewed = next((e["data"] for e in reversed(self.db.sessions.events(sid)) if e["type"] == "review"), None)
             if s["review"] and reviewed and reviewed.get("head") != info["head"]:
                 self.db.update_session(sid, review="", review_detail="")  # new work since the last review action
             self.bus.emit(sid, "branch_saved", {"branch": s["branch"], **info})

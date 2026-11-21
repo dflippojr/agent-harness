@@ -720,16 +720,6 @@ class Database:
     delete_session = _Forwarded("sessions")
     job_sessions = _Forwarded("sessions")
     session_activity = _Forwarded("sessions")
-    # sessions: events and search
-    insert_event = _Forwarded("sessions")
-    search_events = _Forwarded("sessions")
-    session_brief = _Forwarded("sessions")
-    events = _Forwarded("sessions")
-    has_tool_result = _Forwarded("sessions")
-    pushed_heads = _Forwarded("sessions")
-    snippet_events = _Forwarded("sessions")
-    session_card_bits = _Forwarded("sessions")
-    last_event_seq = _Forwarded("sessions")
 
     def __init__(self, path: Path, migrations: Sequence[migrations_mod.Step] | None = None):
         """Open (creating if needed) and migrate the database. `migrations` overrides the discovered steps."""

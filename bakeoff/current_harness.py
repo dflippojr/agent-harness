@@ -77,7 +77,7 @@ async def run_current(task, run_dir: Path, model: str, base_url: str, chat=None)
                     "stop_reason": report.status, "adapter_error": "Manager did not create a session",
                     "wall_seconds": time.monotonic() - started}
         final = manager.db.get_session(workspace.name)
-        events = manager.db.events(final["id"])
+        events = manager.db.sessions.events(final["id"])
         result = session_result(final, events)
         if report.outcomes[0]["status"] == "wall_limit":
             result.update(status="timeout", stop_reason="wall_limit", finished=False)

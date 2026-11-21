@@ -9,6 +9,7 @@ import pytest
 
 from harness.db import Database
 from harness.manager import Manager
+from harness.session_store import SessionStore
 
 from test_api import LOGIN, make_client
 from test_daemon import Script, make_cfg
@@ -23,7 +24,7 @@ def _session(sid: str, answer: str) -> dict:
 
 def _reference_summary(db: Database, sid: str) -> str:
     """The card text as `list_summary` built it before #667, from every event and the whole session row."""
-    user_messages = [" ".join(e["data"].get("content", "").split()) for e in db.events(sid)
+    user_messages = [" ".join(e["data"].get("content", "").split()) for e in db.sessions.events(sid)
                      if e["type"] == "user_message" and e["data"].get("content", "").strip()]
     asks = " · ".join(text[:90] + ("…" if len(text) > 90 else "") for text in user_messages[:3])
     if len(user_messages) > 3:
@@ -61,8 +62,8 @@ def manager(tmp_path):
     for sid, (asks, answer) in CASES.items():
         m.db.insert_session(_session(sid, answer))
         for text in asks:
-            m.db.insert_event(sid, "user_message", {"content": text})
-        m.db.insert_event(sid, "user_message", {"attachments": []})  # a message without content counts for nothing
+            m.db.sessions.insert_event(sid, "user_message", {"content": text})
+        m.db.sessions.insert_event(sid, "user_message", {"attachments": []})  # a message without content counts for nothing
     yield m
     m.db.close()
 
@@ -76,13 +77,13 @@ def test_card_bits_hold_the_answer_and_every_user_message(tmp_path):
     db = Database(tmp_path / "bits.db")
     try:
         db.insert_session(_session("s1", "Finished the change. " * 20))
-        db.insert_event("s1", "user_message", {"content": "Make dark mode black"})
-        db.insert_event("s1", "tool_result", {"id": "c0", "output": "out\n" * 50})
-        db.insert_event("s1", "user_message", {"content": "Also move the profile control"})
-        bits = db.session_card_bits("s1")
+        db.sessions.insert_event("s1", "user_message", {"content": "Make dark mode black"})
+        db.sessions.insert_event("s1", "tool_result", {"id": "c0", "output": "out\n" * 50})
+        db.sessions.insert_event("s1", "user_message", {"content": "Also move the profile control"})
+        bits = db.sessions.session_card_bits("s1")
         assert bits["asks"] == ["Make dark mode black", "Also move the profile control"]
         assert bits["answer_length"] == len("Finished the change. " * 20)
-        assert db.session_card_bits("missing") == {"answer": "", "answer_length": 0, "asks": []}
+        assert db.sessions.session_card_bits("missing") == {"answer": "", "answer_length": 0, "asks": []}
     finally:
         db.close()
 
@@ -90,19 +91,19 @@ def test_card_bits_hold_the_answer_and_every_user_message(tmp_path):
 def test_a_card_reads_neither_events_nor_the_full_session(manager, monkeypatch):
     sid = "big"
     manager.db.insert_session(_session(sid, "Finished."))
-    manager.db.insert_event(sid, "user_message", {"content": "Do the thing"})
+    manager.db.sessions.insert_event(sid, "user_message", {"content": "Do the thing"})
     for n in range(250):
-        manager.db.insert_event(sid, "tool_result", {"id": f"c{n}", "output": "out\n" * 100})
+        manager.db.sessions.insert_event(sid, "tool_result", {"id": f"c{n}", "output": "out\n" * 100})
     row = manager.db.get_session(sid)
     expected = _reference_summary(manager.db, sid)
 
     def refuse(*_args, **_kwargs):
         raise AssertionError("a list card must not read every event or the whole session row")
-    monkeypatch.setattr(Database, "events", refuse)
+    monkeypatch.setattr(SessionStore, "events", refuse)
     monkeypatch.setattr(Database, "get_session", refuse)
     card = manager.list_summary(row)
     assert card["chat_summary"] == expected
-    assert card["last_event_seq"] == manager.db.last_event_seq(sid)
+    assert card["last_event_seq"] == manager.db.sessions.last_event_seq(sid)
 
 
 def test_session_list_builds_cards_off_the_event_loop(tmp_path, monkeypatch):
