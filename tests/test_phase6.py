@@ -1060,7 +1060,7 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
             assert client.post(f"/api/v1/sessions/{sid}/cancel", headers=H(reader)).status_code == 403
             assert event_count(sid, "user_message") == before
 
-        m.db.insert_app_tool_call(a_sid, "call-a", "lookup", {"x": 1})
+        m.db.sessions.insert_app_tool_call(a_sid, "call-a", "lookup", {"x": 1})
         assert client.get(f"/api/v1/sessions/{a_sid}/tool_calls", headers=H(broad)).status_code == 404
         assert client.post(f"/api/v1/sessions/{a_sid}/tool_calls/call-a", headers=H(broad),
                            json={"output": "nope"}).status_code == 404

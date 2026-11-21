@@ -345,7 +345,7 @@ def test_the_claude_popup_flow_url_out_code_in_once_then_linked(tmp_path, monkey
         assert all(CANARY not in str(x) for x in everything)
     assert CANARY not in caplog.text
     assert CANARY.encode() not in _durable(manager)
-    assert manager.db.for_app(app["id"]).end_users() == ["dana"]
+    assert manager.db.for_app(app["id"]).sessions.end_users() == ["dana"]
     events = manager.db.conn.execute("SELECT COUNT(*) FROM events WHERE data LIKE ?", (f"%{CANARY}%",)).fetchone()[0]
     assert events == 0
 
@@ -561,9 +561,9 @@ def test_app_erase_removes_every_end_users_volumes_and_the_registry(tmp_path, mo
         app, _ = _app(client)
         store = manager.db.for_app(app["id"])
         for person in ("dana", "erin"):
-            store.register_end_user(person)
-        store.register_end_user("dana")  # registering twice is harmless
-        assert store.end_users() == ["dana", "erin"]
+            store.sessions.register_end_user(person)
+        store.sessions.register_end_user("dana")  # registering twice is harmless
+        assert store.sessions.end_users() == ["dana", "erin"]
         asyncio.run(manager.erase_app(app["id"]))
     names = {n for command in removed if command[:4] == ["docker", "volume", "rm", "-f"] for n in command[4:]}
     expected = {v for person in ("dana", "erin") for v in cli_domains.end_user_volumes(app["id"], person)}

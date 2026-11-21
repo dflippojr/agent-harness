@@ -259,6 +259,10 @@ def test_replayed_session_raises_harness_errors_without_a_store_write():
     class Store:
         row: dict | None = None
 
+        @property
+        def sessions(self):  # the key is read from the routed session store, the session from the store itself
+            return self
+
         def find_idempotency_key(self, _key_hash, _now):
             return self.row
 
@@ -341,7 +345,7 @@ def test_insert_uses_the_current_clock_for_cleanup_and_the_new_protection_window
 
         fresh = client.portal.call(create)
         assert fresh["id"] != first
-        kept = m.db.for_app(app_id).find_idempotency_key(record["key_hash"], clock[0])
+        kept = m.db.for_app(app_id).sessions.find_idempotency_key(record["key_hash"], clock[0])
         assert kept["session_id"] == fresh["id"]
         assert kept["created_at"] == clock[0]
         assert kept["expires_at"] == clock[0] + idempotency.WINDOW_SECONDS

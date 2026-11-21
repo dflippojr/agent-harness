@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sqlite3
 import time
 from pathlib import Path
 
@@ -152,11 +153,26 @@ def test_credential_queries_left_the_database_class():
     assert "_insert_api_key" not in vars(Database)
 
 
+# The rows each App keeps in its own store beside its sessions, and their `SessionStore` methods (#992 stage 6,
+# decisions 1 and 3). They were never forwarded: every caller reaches them through a `sessions` routing proxy.
+APP_STORE_TABLES = ("app_tool_calls", "end_users", "idempotency_keys", "namespace_audit")
+APP_STORE_NAMES = frozenset({"insert_app_tool_call", "get_app_tool_call", "app_tool_calls", "finish_app_tool_call",
+                             "register_end_user", "end_users", "forget_end_user", "insert_idempotency_key",
+                             "drop_expired_idempotency_keys", "find_idempotency_key", "insert_namespace_audit",
+                             "prune_namespace_audit", "namespace_audit_page"})
+
+
 def test_session_queries_left_the_database_class():
     source = inspect.getsource(Database)
     for table in ("sessions", "events", "artifacts", "approvals", "checkpoints", "review_comments",
                   "secret_dismissals", "smart_reviews"):
         assert f"INTO {table} " not in source and f"UPDATE {table} " not in source, table
+    for table in APP_STORE_TABLES:
+        for verb in ("INTO", "UPDATE", "FROM"):
+            assert f"{verb} {table} " not in source, (verb, table)
+    assert APP_STORE_NAMES <= _store_methods(SessionStore)
+    for name in APP_STORE_NAMES:
+        assert not hasattr(Database, name), f"Database.{name}: call db.sessions.{name} (or for_app(app_id).sessions)"
     for private in ("_index_event", "_session_user_id", "_count_sessions", "_active_sessions", "_build_search_index"):
         assert private not in vars(Database), private
     assert not hasattr(core_db, "_session_filter") and not hasattr(core_db, "_SESSION_LIST_COLUMNS")
@@ -285,9 +301,10 @@ def test_every_core_store_is_declared_and_says_where_its_rows_live():
 def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
     """Driven by `app_stores._STORE_HOME`, so each new store is covered: a store whose rows live in the main store
     (credentials, accounts, apps, usage) is the main store's on every route, an App's raw Database included. A store whose rows
-    are routed per session (sessions) is refused by every routing wrapper: one Database's would miss the sessions
-    routed to another, and an App's would outlive the wrapper's hold on it. A Web route is Web's Database, whose
-    `sessions` holds the owner's and members' sessions."""
+    are routed per session (sessions) is never one Database's on a routing wrapper (it would miss the sessions routed
+    to another, and an App's would outlive the wrapper's hold on it): each wrapper hands out its own routing proxy,
+    and `core_store` refuses it, so a wrapper without one fails instead of misrouting. A Web route is Web's Database,
+    whose `sessions` holds the owner's and members' sessions."""
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
@@ -320,10 +337,11 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
             assert route.apps.app_limits(app["id"])["max_running"] == 2, label
             assert route.apps.get_app_settings(app["id"])["revision"] == 3, label
             assert route.usage.usage_tally("fake", 0, app["id"])["prompt_tokens"] == 10, label
-        for wrapper in wrappers.values():
+        for label, wrapper in wrappers.items():
             for name in routed:
+                assert isinstance(getattr(wrapper, name), app_stores._RoutedSessions), (label, name)
                 with pytest.raises(AttributeError, match="routes each session"):
-                    getattr(wrapper, name)
+                    stores.core_store(name)
         # A Web route is Web's Database itself: its `sessions` is the store that holds the owner's sessions.
         for label, wrapper in web_routes.items():
             assert wrapper.sessions is stores.web.sessions, label
@@ -333,6 +351,121 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
         assert stores.scope("k-aaaa").get_session("a1")["id"] == "a1"
     finally:
         stores.close()
+
+
+def _count(db: Database, table: str) -> int:
+    return db.read(lambda: db.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def _agent_session(sid: str, app_id: str = "") -> dict:
+    return {**_session(sid, app_id), "kind": "agent"}
+
+
+def test_the_routing_proxy_keeps_each_apps_rows_in_its_own_store(tmp_path):
+    """#992 stage 6, decision 1: the rows an App keeps in its own store (tool calls, end users, idempotency keys and
+    the namespace audit) are `SessionStore`'s, reached through each wrapper's `sessions` proxy. They land in the App's
+    store, never the main store's or Web's, and the proxies read them back (sync and `aio`)."""
+    from harness import audit_context, idempotency
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        stores.insert_session(_agent_session("a1", "k-aaaa"))
+        stores.insert_session(_agent_session("own"))
+        app = stores.for_app("k-aaaa").sessions
+        stores.for_session("a1").sessions.register_end_user("dana")
+        app.register_end_user("dana")  # the same App's store on both routes: registering twice is harmless
+        app.insert_namespace_audit("k-aaaa", "a1", audit_context.SYSTEM, "a1", "session", "session.create", "ok", {})
+        app.insert_idempotency_key({"key_hash": "h1", "request_digest": "d1", "session_id": "a1"})
+        stores.sessions.insert_app_tool_call("a1", "c1", "lookup", {"x": 1})  # by session id
+        stores.sessions.insert_app_tool_call("own", "c1", "lookup", {"x": 2})
+        assert stores.sessions.finish_app_tool_call("a1", "c1", "done", "42", True)
+
+        app_db = stores._open["k-aaaa"].db
+        for table in APP_STORE_TABLES:
+            assert _count(app_db, table) == 1, table
+            assert _count(main, table) == 0, table
+            assert _count(stores.web, table) == (table == "app_tool_calls"), table  # only the owner's tool call
+        assert app.end_users() == ["dana"]
+        assert app.find_idempotency_key("h1", idempotency.clock())["session_id"] == "a1"
+        assert asyncio.run(app.aio.namespace_audit_page("k-aaaa"))["items"][0]["action"] == "session.create"
+        assert stores.sessions.get_app_tool_call("a1", "c1")["output"] == "42"
+        assert asyncio.run(stores.sessions.aio.app_tool_calls("own"))[0]["args"] == {"x": 2}
+        assert stores.for_app("").sessions is stores.web.sessions  # a Web route is Web's own store
+        # A scope's proxy narrows lists and searches as the scope does.
+        assert {s["id"] for s in stores.scope("k-aaaa").sessions.list_sessions()} == {"a1", "own"}
+        assert {s["id"] for s in stores.scope("").sessions.list_sessions()} == {"own"}
+        assert {s["id"] for s in stores.sessions.list_sessions()} == {"own"}
+        assert stores.scope("").sessions.find_session_ids("a") == []
+        assert stores.sessions.find_session_ids("a") == ["a1"]  # the daemon's own lookup reaches every App
+    finally:
+        stores.close()
+
+
+def test_the_routing_proxy_refuses_what_it_cannot_route(tmp_path):
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        stores.insert_session(_agent_session("a1", "k-aaaa"))
+        with pytest.raises(AttributeError, match="SessionStore has no method 'create_api_key'"):
+            stores.sessions.create_api_key  # noqa: B018 - the attribute access is what is refused
+        # An App's own rows take no session id: the unscoped proxy (and a scope's) cannot tell whose they are.
+        for proxy in (stores.sessions, stores.scope("k-aaaa").sessions):
+            for name in ("end_users", "insert_namespace_audit", "find_idempotency_key"):
+                with pytest.raises(AttributeError, match=r"for_app\(app_id\)\.sessions"):
+                    getattr(proxy, name)
+        # The stage 6 names were never forwarded: the wrappers refuse them at the attribute, before opening a store.
+        for name in ("get_app_tool_call", "end_users", "namespace_audit_page"):
+            with pytest.raises(AttributeError):
+                getattr(stores, name)
+        # A write about an erased App session is refused through the proxy too: its id now routes to Web's store.
+        stores.delete_session("a1")
+        with pytest.raises(sqlite3.ProgrammingError, match="was erased"):
+            stores.sessions.insert_app_tool_call("a1", "c1", "lookup", {})
+        assert _count(stores.web, "app_tool_calls") == 0
+    finally:
+        stores.close()
+
+
+def test_an_app_route_holds_its_store_per_call_and_writes_only_from_its_own_writer(tmp_path):
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        stores.insert_session(_agent_session("a1", "k-aaaa"))
+        register = stores.for_app("k-aaaa").sessions.register_end_user  # kept past any hold, as `to_thread` does
+        assert stores.close_idle(time.monotonic() + 10_000) == ["k-aaaa"]
+        register("dana")  # reopens the App's store for this call, then lets it go
+        assert stores._open["k-aaaa"].users == 0
+        assert stores.for_app("k-aaaa").sessions.end_users() == ["dana"]
+        # A write to the App's store from the main store's transaction raises instead of waiting on its writer.
+        with pytest.raises(RuntimeError, match="another store's transaction"):
+            main.write(lambda: register("erin"))
+        assert stores.for_app("k-aaaa").sessions.end_users() == ["dana"]
+    finally:
+        stores.close()
+
+
+def test_every_call_of_an_app_store_row_goes_through_a_sessions_proxy():
+    """No production code calls or passes one of the stage 6 `SessionStore` names on anything but a `sessions`
+    store or proxy (`<x>.sessions.<name>` or `<x>.sessions.aio.<name>`)."""
+    root = Path(core_db.__file__).resolve().parent
+    for package in (root, root.parent / "harness_modules", root.parent / "scripts"):
+        assert _uses_off_the_store(package, "sessions", APP_STORE_NAMES) == [], package.name
+
+
+def test_the_session_scan_allows_the_store_and_its_aio_only(tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "x.py").write_text(
+        "from . import end_users\n"
+        "async def f(db, store, sid):\n"
+        "    db.sessions.app_tool_calls(sid)\n"                # on the proxy: fine
+        "    await store.sessions.aio.namespace_audit_page('k')\n"  # its aio: fine
+        "    end_users.LoginError\n"                          # the module of that name: fine
+        "    db.app_tool_calls(sid)\n"                        # line 6: on the Database
+        "    await store.aio.namespace_audit_page('k')\n"     # line 7: the wrapper's aio
+        "    return db.for_app('k').end_users\n",             # line 8: a bound method of the wrapper
+        encoding="utf-8")
+    assert sorted(_uses_off_the_store(tmp_path / "pkg", "sessions", APP_STORE_NAMES)) == [
+        "pkg/x.py:6 .app_tool_calls", "pkg/x.py:7 .namespace_audit_page", "pkg/x.py:8 .end_users"]
 
 
 ACCOUNT_TABLES = ("accounts", "account_audit", "member_projects", "github_connections", "member_api_keys",
@@ -348,14 +481,15 @@ def test_account_queries_left_the_database_class():
         assert not hasattr(Database, name), f"Database.{name}: call db.accounts.{name}"
 
 
-def _uses_off_the_store(root, store: str) -> list[str]:
-    """Each use of a method name of core store `store` (a call, or a bound method handed to `to_thread` or `awrite`)
-    not made on that store: `<x>.<store>.<name>`. Also allowed: for apps, `self.<name>` inside a class that defines
-    `<name>` itself (`Manager.app_limits`, the effective caps); for accounts, an `accounts` stand-in
-    (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`."""
+def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -> list[str]:
+    """Each use of a method name of core store `store` (or of `names`, some of them: a call, or a bound method handed
+    to `to_thread` or `awrite`) not made on that store: `<x>.<store>.<name>` or `<x>.<store>.aio.<name>`. Also
+    allowed: for apps, `self.<name>` inside a class that defines `<name>` itself (`Manager.app_limits`, the effective
+    caps); for accounts, an `accounts` stand-in (`principal.resolve_human`'s) or `operation_audit`'s
+    `_audit_store(db)`."""
     import ast
     cls = STORES[store]
-    names = _store_methods(cls)
+    names = _store_methods(cls) if names is None else names
     own_file = Path(inspect.getsourcefile(cls)).name
     found = []
     for path in sorted(root.rglob("*.py")):
@@ -371,6 +505,8 @@ def _uses_off_the_store(root, store: str) -> list[str]:
             if not (isinstance(node, ast.Attribute) and node.attr in names):
                 continue
             on = node.value
+            if isinstance(on, ast.Attribute) and on.attr == "aio":
+                on = on.value
             if isinstance(on, ast.Attribute) and on.attr == store:
                 continue
             if store == "apps" and isinstance(on, ast.Name) and on.id == "self" and \

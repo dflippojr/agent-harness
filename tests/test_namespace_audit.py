@@ -16,6 +16,7 @@ from harness import audit_context, namespace_audit
 from harness.accounts import AccountService
 from harness.api import create_app
 from harness.db import Database
+from harness.session_store import SessionStore
 from harness.manager import HarnessError, Manager
 from sdk.harness_client import Harness, HarnessError as SDKError
 from test_daemon import Script, make_cfg
@@ -162,7 +163,7 @@ def test_ordinary_gap_warns_keeps_mutation(setup, monkeypatch, caplog):
     _, client, _, _, headers = setup
     def fail(*args, **kwargs):
         raise OSError(PRIVATE)
-    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    monkeypatch.setattr(SessionStore, "insert_namespace_audit", fail)
     response = client.post("/api/v1/sessions", headers=headers[0], json={"prompt": PRIVATE})
     assert response.status_code == 201
     assert response.headers["X-Agent-Harness-Audit-Warning"] == "audit_gap"
@@ -175,12 +176,12 @@ def test_private_login_retention_clock_restart_and_shorter_policy(setup, monkeyp
     store = m.db.for_app(scope)
     context = namespace_audit.key_context(apps[0][0])
     now = time.time()
-    monkeypatch.setattr("harness.db.time.time", lambda: now)
-    store.insert_namespace_audit(scope, "", context, "attempt-a", "login", "login.start", "started", {}, 2)
+    monkeypatch.setattr("harness.session_store.time.time", lambda: now)
+    store.sessions.insert_namespace_audit(scope, "", context, "attempt-a", "login", "login.start", "started", {}, 2)
     sid = create(client, headers[0])
-    monkeypatch.setattr("harness.db.time.time", lambda: now + 3 * DAY)
+    monkeypatch.setattr("harness.session_store.time.time", lambda: now + 3 * DAY)
     assert len(page(client, headers[0])["items"]) == 1  # session rows do not have the login TTL
-    store.prune_namespace_audit()
+    store.sessions.prune_namespace_audit()
     assert store.conn.execute("SELECT COUNT(*) FROM namespace_audit WHERE session_id = ''").fetchone()[0] == 0
     m.db.close_idle(time.monotonic() + 1000)
     assert page(client, headers[0])["items"][0]["target_id"] == sid
@@ -202,12 +203,12 @@ def test_parallel_private_rows_and_filters(setup):
 def test_login_protocol_audit_failure_refuses_or_reports_effect(setup, monkeypatch, outcome):
     m, _, _, apps, _ = setup
     scope = apps[0][0]["id"]
-    original = Database.insert_namespace_audit
+    original = SessionStore.insert_namespace_audit
     def fail(self, *args, **kwargs):
         if args[6] == outcome:
             raise OSError(PRIVATE)
         return original(self, *args, **kwargs)
-    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    monkeypatch.setattr(SessionStore, "insert_namespace_audit", fail)
     effect = AsyncMock()
     async def run():
         async with namespace_audit.login_operation(m.db, scope, "delegated-person", None, "login.start"):
@@ -268,7 +269,7 @@ def test_login_finish_truthful_and_settlement_error_visible(setup, monkeypatch):
     assert row["actor_id"] == scope
     def fail(*args, **kwargs):
         raise OSError(PRIVATE)
-    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    monkeypatch.setattr(SessionStore, "insert_namespace_audit", fail)
     store.finish(context, "operation-b")(attempt)
     assert attempt.audit_incomplete == "operation-b"
 
@@ -331,10 +332,10 @@ def test_shortened_app_login_retention_applies_to_reads_immediately(setup, monke
     key = apps[0][0]
     now = time.time()
     store = m.db.for_app(key["id"])
-    store.insert_namespace_audit(key["id"], "", namespace_audit.key_context(key), "attempt", "login",
-                                 "login.start", "started", {}, 30)
+    store.sessions.insert_namespace_audit(key["id"], "", namespace_audit.key_context(key), "attempt", "login",
+                                          "login.start", "started", {}, 30)
     m.db.apps.set_app_retention(key["id"], 1)
-    monkeypatch.setattr("harness.db.time.time", lambda: now + 2 * DAY)
+    monkeypatch.setattr("harness.session_store.time.time", lambda: now + 2 * DAY)
     assert page(client, headers[0])["items"] == []
     asyncio.run(m.sweep_app_data(now + 2 * DAY))
     assert store.conn.execute("SELECT COUNT(*) FROM namespace_audit").fetchone()[0] == 0
@@ -453,7 +454,7 @@ def test_cross_origin_app_can_read_audit_gap_warning(setup, monkeypatch):
     _, secret = m.db.main.create_api_key("paired-browser", "sessions", "app", ["https://app.example"])
     def fail(*args, **kwargs):
         raise OSError(PRIVATE)
-    monkeypatch.setattr(Database, "insert_namespace_audit", fail)
+    monkeypatch.setattr(SessionStore, "insert_namespace_audit", fail)
     response = client.post("/api/v1/sessions", json={"prompt": PRIVATE},
                            headers={"Authorization": "Bearer " + secret, "Origin": "https://app.example"})
     assert response.status_code == 201
@@ -505,7 +506,7 @@ def test_app_rerun_reconstructs_stored_tools_and_tool_result_audit(setup):
     new_sid = again.json()["id"]
     assert m.db.get_session(new_sid)["app_tools"] == m.db.get_session(sid)["app_tools"]
     assert m.db.app_of(new_sid) == apps[0][0]["id"]
-    m.db.insert_app_tool_call(new_sid, "lookup-call", "lookup", {"secret": PRIVATE})
+    m.db.sessions.insert_app_tool_call(new_sid, "lookup-call", "lookup", {"secret": PRIVATE})
     result = client.post(f"/api/v1/sessions/{new_sid}/tool_calls/lookup-call", headers=headers[0],
                          json={"output": PRIVATE, "ok": False})
     assert result.status_code == 200, result.text

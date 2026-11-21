@@ -79,7 +79,7 @@ def test_same_app_lifecycle_contract_across_providers(tmp_path, backend):
         assert final["answer"]
 
         # Tool results and approvals use the same durable broker contract regardless of the model adapter.
-        manager.db.insert_app_tool_call(first["id"], "app-call-1", "lookup_contract", {"key": "x"})
+        manager.db.sessions.insert_app_tool_call(first["id"], "app-call-1", "lookup_contract", {"key": "x"})
         accepted = client.post(f"/api/v1/sessions/{first['id']}/tool_calls/app-call-1", headers=headers,
                                json={"output": "fixture", "ok": True})
         assert accepted.json() == {"accepted": True}

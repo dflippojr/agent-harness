@@ -254,8 +254,8 @@ The core's own queries split the same way, one domain store per change (#992 sta
   stream tickets, and App provider credentials.
 - **`db.sessions`** (`harness/session_store.py`): the `sessions` table and the rows keyed by one session. That means
   checkpoints, artifacts, review comments, secret dismissals, events and the search index, approvals, and smart
-  reviews. It leaves out an App's tool calls and the namespace audit. Every Database builds its own: the main store,
-  Web's, and each App's.
+  reviews. It also holds the other rows each App keeps in its own store: its tool calls, end users, idempotency keys
+  and namespace audit (#992 stage 6). Every Database builds its own: the main store, Web's, and each App's.
 - **`db.accounts`** (`harness/account_store.py`): household accounts and the account audit, member projects, GitHub
   connections, members' own provider keys, Google identities and invitations, and Stables web sessions.
 - **`db.apps`** (`harness/app_store.py`): the main store's per-App records beside the App registry. That means each
@@ -264,9 +264,7 @@ The core's own queries split the same way, one domain store per change (#992 sta
   settings and the meta keys commit together or not at all.
 - **`db.usage`** (`harness/usage_store.py`): the usage log (`usage`) and each hosted backend's reported usage
   (`backend_usage`), both in the main store.
-- **Still on `Database`:** the rows each App keeps in its own store, which are its end users, its tool calls and its
-  namespace audit, and the idempotency keys. They are reached through `for_app(app_id)` and by-session routing, so
-  they move into `SessionStore` behind one per-session routing proxy (#992 stage 6). `meta` stays on `Database`.
+- **Still on `Database`:** `meta`, which stays there as infrastructure.
 
 New code calls the store. Old `db.<method>` calls keep working through a temporary forwarding shim on `Database`.
 `tests/test_database_shim.py` pins the forwarded names for each store, so the shim can only shrink.
@@ -274,15 +272,25 @@ New code calls the store. Old `db.<method>` calls keep working through a tempora
 moved and no shim: `db.accounts`, `db.apps` and `db.usage` forward nothing, and a source scan in that test fails
 on a call to any of their methods that isn't made on that store. `operation_audit` writes through the account store of the database it is given.
 
-Two cases still go through `m.db` rather than a store:
+Session methods go through a routing proxy, and the key listings still go through `m.db`:
 
-- **Session methods.** `SessionStores` routes each session to its own store, so call them on `m.db` (or on
-  `for_session(sid)`). `sessions` raises on the routing wrappers (`m.db`, `scope`, and `for_app` or `for_session` for
-  an App), because one Database's `SessionStore` would miss the sessions routed to another. A Web route
+- **Session methods.** `SessionStores` routes each session to its own store. On the routing wrappers (`m.db`,
+  `scope(app_id)`, and `for_app` or `for_session` for an App), `sessions` is the one per-session routing proxy
+  (`app_stores._RoutedSessions`, #992 stage 6). It has `SessionStore`'s methods, and each call runs on the store
+  that holds the rows, held for that call only:
+  - `m.db.sessions` routes by session id, and still refuses a write about an erased App session.
+  - `for_app(app_id).sessions` runs on that App's store. Call an App's end users, idempotency keys and namespace
+    audit there, since they take no session id. `m.db.sessions` refuses them, because it can't tell whose rows they
+    are.
+  - `scope(app_id).sessions` narrows lists, searches and id lookups to what that App, or the owner for `""`, may see.
+
+  `core_store("sessions")` still refuses, so a wrapper without its own proxy fails instead of misrouting. A Web route
   (`for_app("")`, `for_app(WEB_APP_ID)`, or `for_session` of an owner or member session) returns Web's Database
-  itself, so its `sessions` is Web's own: the store that holds those sessions. Every route, and every Database that
-  `SessionStores` opens, hands out the main store's `credentials`, `accounts`, `apps` and `usage`. `app_stores._STORE_HOME` records where each store's
-  rows live, and a new store must add itself there.
+  itself, so its `sessions` is Web's own store: the one that holds those sessions. The older session names still
+  work on `m.db` through the shim until their callers move to the proxy. The names added in stage 6 were never
+  forwarded, and a scan fails on any call to them that isn't made on a `sessions` store or proxy. Every route, and
+  every Database that `SessionStores` opens, hands out the main store's `credentials`, `accounts`, `apps` and
+  `usage`. `app_stores._STORE_HOME` records where each store's rows live, and a new store must add itself there.
 - **Key listings.** The listing overrides on `SessionStores` (`list_api_keys`, `get_api_key_listing`,
   `restore_api_key`) still apply, so call those on `m.db`, not `m.db.credentials`, until they move.
 
