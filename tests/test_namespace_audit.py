@@ -147,12 +147,12 @@ def test_delete_intent_and_settlement_failure_no_repeat(setup, monkeypatch, outc
     if outcome == "started":
         assert error["code"] == "audit_unavailable"
         effect.assert_not_awaited()
-        assert m.db.get_session(sid)
+        assert m.db.sessions.get_session(sid)
     else:
         assert error["code"] == "audit_record_incomplete" and error["may_have_completed"]
         assert error["operation_id"] and not error["retryable"]
         effect.assert_awaited_once()
-        assert m.db.get_session(sid) is None
+        assert m.db.sessions.get_session(sid) is None
         another = create(client, headers[0])
         assert client.delete(f"/api/v1/sessions/{another}", headers=headers[0]).status_code == 503
         effect.assert_awaited_once()
@@ -190,7 +190,7 @@ def test_private_login_retention_clock_restart_and_shorter_policy(setup, monkeyp
 def test_parallel_private_rows_and_filters(setup):
     m, client, _, apps, headers = setup
     sid = create(client, headers[0])
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     ctx = namespace_audit.key_context(apps[0][0])
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda _: namespace_audit.record(m.db, session, ctx, "session.message"), range(30)))
@@ -292,13 +292,13 @@ def test_erase_app_drops_private_audit_and_only_receipts_remain(setup, monkeypat
 def test_checksums_and_record_does_not_resurrect_erased_detail(setup):
     m, client, _, apps, headers = setup
     sid = create(client, headers[0])
-    session = m.db.get_session(sid)
+    session = m.db.sessions.get_session(sid)
     store = m.db.for_app(apps[0][0]["id"])
     row = dict(store.conn.execute("SELECT * FROM namespace_audit").fetchone())
     values = [row[k] for k in ("ts", "namespace", "session_id", "actor_id", "actor_kind", "key_id", "source",
                               "target_id", "target_kind", "action", "outcome", "metadata", "expires_at")]
     assert row["checksum"] == hashlib.sha256(json.dumps(values, separators=(',', ':')).encode()).hexdigest()
-    m.db.delete_session(sid)
+    m.db.sessions.delete_session(sid)
     namespace_audit.record(m.db, session, None, "session.cancel")
     assert page(client, headers[0])["items"] == []
     assert m.db.web.conn.execute("SELECT COUNT(*) FROM namespace_audit").fetchone()[0] == 0
@@ -504,7 +504,7 @@ def test_app_rerun_reconstructs_stored_tools_and_tool_result_audit(setup):
     again = client.post(f"/api/v1/sessions/{sid}/rerun", headers=headers[0])
     assert again.status_code == 201, again.text
     new_sid = again.json()["id"]
-    assert m.db.get_session(new_sid)["app_tools"] == m.db.get_session(sid)["app_tools"]
+    assert m.db.sessions.get_session(new_sid)["app_tools"] == m.db.sessions.get_session(sid)["app_tools"]
     assert m.db.app_of(new_sid) == apps[0][0]["id"]
     m.db.sessions.insert_app_tool_call(new_sid, "lookup-call", "lookup", {"secret": PRIVATE})
     result = client.post(f"/api/v1/sessions/{new_sid}/tool_calls/lookup-call", headers=headers[0],

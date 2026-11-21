@@ -39,18 +39,12 @@ PINNED_SHIM: dict[str, frozenset[str]] = {
         "create_api_key", "api_key_by_secret", "get_api_key", "list_api_keys", "get_api_key_listing",
         "restore_api_key",
     }),
-    "sessions": frozenset({
-        # sessions
-        "insert_session", "update_session", "patch_run", "unset_run", "get_session", "get_session_for_user",
-        "find_session_ids", "list_sessions", "session_page", "active_sessions", "group_sessions",
-        "sessions_with_status", "sessions_with_run_flag", "count_sessions", "count_app_sessions",
-        "count_stored_sessions", "count_stored_app_sessions", "delete_session", "job_sessions", "session_activity",
-    }),
 }
 
 
-# Stores that land with every caller moved, so `Database` forwards none of their names, and never will.
-NO_SHIM = frozenset({"accounts", "apps", "usage"})
+# Stores whose names `Database` does not forward, and never will again: those that landed with every caller moved, and
+# `sessions`, whose pin emptied when #992 stage 6 moved its last callers (batch 3).
+NO_SHIM = frozenset({"accounts", "apps", "usage", "sessions"})
 
 
 def _forwarded() -> dict[str, str]:
@@ -90,12 +84,12 @@ def test_the_shim_only_shrinks():
 
 def test_database_forwards_these_many_names_per_store():
     """The shim on `Database` as this change leaves it, read from the class itself: 6 credential names (39 when the
-    store was added, 28 before #1032), 20 session names (51 before #992 stage 6 moved the checkpoint, artifact,
+    store was added, 28 before #1032), and no session names (51 before #992 stage 6 moved the checkpoint, artifact,
     review-comment, secret-dismissal, approval and smart-review callers, 29 before it moved the event and search
-    callers), and no account, App or usage names."""
+    callers, 20 before it moved the session row, list and count callers), account, App or usage names."""
     forwarded = _forwarded()
     sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
-    assert sizes == {"credentials": 6, "sessions": 20, "accounts": 0, "apps": 0, "usage": 0}
+    assert sizes == {"credentials": 6, "sessions": 0, "accounts": 0, "apps": 0, "usage": 0}
     assert sizes == {store: len(PINNED_SHIM.get(store, ())) for store in STORES}
 
 
@@ -249,30 +243,30 @@ def _session(sid: str, app_id: str = "") -> dict:
 
 def test_a_forwarded_session_call_runs_on_the_databases_session_store(db):
     assert isinstance(db.sessions, SessionStore) and db.sessions.core is db
-    db.insert_session(_session("s1"))
+    db.sessions.insert_session(_session("s1"))
     event = db.sessions.insert_event("s1", "user_message", {"content": "find the walrus"})
     assert db.sessions.events("s1")[0]["seq"] == event["seq"]
-    assert db.get_session.__self__ is db.sessions
+    assert db.sessions.get_session.__self__ is db.sessions
     # The search index is the store's: an event is indexed in the same write.
     assert [r["session_id"] for r in db.sessions.search_events('"walrus"')] == ["s1"]
-    assert asyncio.run(db.aio.get_session("s1"))["id"] == "s1"
-    assert asyncio.run(db.aio.update_session("s1", status="failed")) is None
-    assert db.get_session("s1")["status"] == "failed"
+    assert asyncio.run(db.sessions.aio.get_session("s1"))["id"] == "s1"
+    assert asyncio.run(db.sessions.aio.update_session("s1", status="failed")) is None
+    assert db.sessions.get_session("s1")["status"] == "failed"
 
 
 def test_each_store_keeps_its_own_sessions_behind_session_stores(tmp_path):
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
-        stores.insert_session(_session("own"))
-        stores.insert_session(_session("a1", "k-aaaa"))
+        stores.sessions.insert_session(_session("own"))
+        stores.sessions.insert_session(_session("a1", "k-aaaa"))
         stores.sessions.insert_event("a1", "user_message", {"content": "hello"})
         app_db = stores._open["k-aaaa"].db
         assert app_db.sessions is not main.sessions and app_db.sessions.core is app_db
         assert app_db.sessions.get_session("a1")["app_id"] == "k-aaaa"
         assert [e["type"] for e in app_db.sessions.events("a1")] == ["user_message"]
         assert main.sessions.get_session("a1") is None and main.sessions.events("a1") == []
-        assert stores.get_session("a1")["id"] == "a1" and stores.get_session("own")["id"] == "own"
+        assert stores.sessions.get_session("a1")["id"] == "a1" and stores.sessions.get_session("own")["id"] == "own"
     finally:
         stores.close()
 
@@ -302,8 +296,8 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
         assert main.apps.set_app_limits(app["id"], {"max_running": 2})
         main.apps.set_app_settings(app["id"], 3, {"app.notify.completion": "never"})
         main.usage.record_usage("fake", "a1", app["id"], 10, 5, 0.0, "subscription")
-        stores.insert_session(_session("a1", "k-aaaa"))
-        stores.insert_session(_session("own"))
+        stores.sessions.insert_session(_session("a1", "k-aaaa"))
+        stores.sessions.insert_session(_session("own"))
         assert stores.web is not main  # the owner's sessions are in Web's own store
         wrappers = {"stores": stores, "scope(app)": stores.scope("k-aaaa"), "scope(owner)": stores.scope(""),
                     "for_app(app)": stores.for_app("k-aaaa"), "for_session(app sid)": stores.for_session("a1")}
@@ -332,8 +326,8 @@ def test_no_route_hands_out_the_wrong_databases_store(tmp_path):
             assert wrapper.sessions is stores.web.sessions, label
             assert wrapper.sessions.get_session("own")["id"] == "own", label
         # The wrappers' own session calls still route: the App's session is read from its store.
-        assert stores.for_app("k-aaaa").get_session("a1")["id"] == "a1"
-        assert stores.scope("k-aaaa").get_session("a1")["id"] == "a1"
+        assert stores.for_app("k-aaaa").sessions.get_session("a1")["id"] == "a1"
+        assert stores.scope("k-aaaa").sessions.get_session("a1")["id"] == "a1"
     finally:
         stores.close()
 
@@ -354,8 +348,8 @@ def test_the_routing_proxy_keeps_each_apps_rows_in_its_own_store(tmp_path):
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
-        stores.insert_session(_agent_session("a1", "k-aaaa"))
-        stores.insert_session(_agent_session("own"))
+        stores.sessions.insert_session(_agent_session("a1", "k-aaaa"))
+        stores.sessions.insert_session(_agent_session("own"))
         app = stores.for_app("k-aaaa").sessions
         stores.for_session("a1").sessions.register_end_user("dana")
         app.register_end_user("dana")  # the same App's store on both routes: registering twice is harmless
@@ -390,7 +384,7 @@ def test_the_routing_proxy_refuses_what_it_cannot_route(tmp_path):
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
-        stores.insert_session(_agent_session("a1", "k-aaaa"))
+        stores.sessions.insert_session(_agent_session("a1", "k-aaaa"))
         with pytest.raises(AttributeError, match="SessionStore has no method 'create_api_key'"):
             stores.sessions.create_api_key  # noqa: B018 - the attribute access is what is refused
         # An App's own rows take no session id: the unscoped proxy (and a scope's) cannot tell whose they are.
@@ -404,7 +398,7 @@ def test_the_routing_proxy_refuses_what_it_cannot_route(tmp_path):
                 with pytest.raises(AttributeError):
                     getattr(wrapper, name)
         # A write about an erased App session is refused through the proxy too: its id now routes to Web's store.
-        stores.delete_session("a1")
+        stores.sessions.delete_session("a1")
         with pytest.raises(sqlite3.ProgrammingError, match="was erased"):
             stores.sessions.insert_app_tool_call("a1", "c1", "lookup", {})
         assert _count(stores.web, "app_tool_calls") == 0
@@ -441,9 +435,9 @@ def test_the_unscoped_proxy_runs_every_other_session_method_on_webs_store(tmp_pa
         assert {"active_sessions", "build_search_index", "group_sessions"} <= rest
         for name in sorted(rest):
             assert getattr(stores.sessions, name).__self__ is stores.web.sessions, name
-        stores.insert_session({**_agent_session("own"), "status": "running"})
+        stores.sessions.insert_session({**_agent_session("own"), "status": "running"})
         assert [s["id"] for s in stores.sessions.active_sessions("owner")] == ["own"]
-        assert [s["id"] for s in stores.active_sessions("owner")] == ["own"]  # the forwarded name too
+        assert [s["id"] for s in stores.sessions.active_sessions("owner")] == ["own"]  # the forwarded name too
     finally:
         stores.close()
 
@@ -454,13 +448,13 @@ def test_the_proxy_counts_keep_the_stores_holding_filter(tmp_path):
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
-        stores.insert_session({**_agent_session("own"), "status": "running"})
-        stores.insert_session({**_agent_session("a1", "k-aaaa"), "status": "running"})
-        stores.insert_session({**_agent_session("a2", "k-aaaa"), "status": "queued"})
+        stores.sessions.insert_session({**_agent_session("own"), "status": "running"})
+        stores.sessions.insert_session({**_agent_session("a1", "k-aaaa"), "status": "running"})
+        stores.sessions.insert_session({**_agent_session("a2", "k-aaaa"), "status": "queued"})
         assert stores.sessions.count_sessions("owner", "running", "queued") == 3
         assert stores.sessions.count_sessions("owner", "running", "queued", holding=True) == 2
         assert stores.sessions.count_sessions("owner", "running", "queued", holding=True) == \
-            stores.count_stored_sessions("owner", "running", "queued", holding=True)
+            stores.sessions.count_stored_sessions("owner", "running", "queued", holding=True)
         assert stores.sessions.count_app_sessions("k-aaaa", "running", "queued") == 2
         assert stores.sessions.count_app_sessions("k-aaaa", "running", "queued", holding=True) == 1
         assert stores.for_app("k-aaaa").sessions.count_app_sessions("k-aaaa", "running", "queued", holding=True) == 1
@@ -474,7 +468,7 @@ def test_an_approval_inserted_on_an_apps_route_is_indexed(tmp_path):
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
-        stores.insert_session(_agent_session("a1", "k-aaaa"))
+        stores.sessions.insert_session(_agent_session("a1", "k-aaaa"))
         stores.for_app("k-aaaa").sessions.insert_approval(
             {"id": "ap-1", "session_id": "a1", "tool_call_id": "c1", "tool": "write_file", "args": {"path": "x"},
              "reason": "ask"})
@@ -495,7 +489,7 @@ def test_an_app_approvals_decision_holds_its_store_as_a_write(tmp_path):
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
-        stores.insert_session(_agent_session("a1", "k-aaaa"))
+        stores.sessions.insert_session(_agent_session("a1", "k-aaaa"))
         stores.sessions.insert_approval({"id": "ap-1", "session_id": "a1", "tool_call_id": "c1", "tool": "write_file",
                                          "args": {"path": "x"}, "reason": "ask"})
         with pytest.raises(RuntimeError, match="another store's transaction"):
@@ -503,6 +497,47 @@ def test_an_app_approvals_decision_holds_its_store_as_a_write(tmp_path):
         assert stores.sessions.get_approval("ap-1")["status"] == "pending"
         assert stores.sessions.decide_approval("ap-1", "approved")
         assert stores.sessions.get_approval("ap-1")["status"] == "approved"
+    finally:
+        stores.close()
+
+
+def test_a_session_method_asked_of_a_wrapper_itself_is_refused(tmp_path):
+    """With the session forwarders gone (#992 stage 6, batch 3), a `SessionStore` method asked of a Database or a
+    wrapper itself, not of its `sessions` proxy, fails on every route: no older route (by session id, Web's store,
+    SessionStores' index, an App's narrowed view) still answers it. SessionStores' own overrides, which its proxy runs
+    (`stores.list_sessions`), are the one exception: `test_every_call_of_a_moved_session_method_goes_through_a_sessions_
+    proxy` refuses those in production code."""
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        stores.sessions.insert_session(_agent_session("own", ""))
+        stores.sessions.insert_session(_agent_session("a1", "k-aaaa"))
+        for name in ("get_session", "list_sessions", "patch_run"):
+            with pytest.raises(AttributeError):
+                getattr(main, name)
+        routes = {
+            "SessionStores": (stores, ("get_session", "get_session_for_user", "patch_run", "unset_run",
+                                       "active_sessions", "group_sessions", "job_sessions", "session_activity")),
+            "for_app": (stores.for_app("k-aaaa"), ("insert_session", "update_session", "delete_session", "get_session",
+                                                   "list_sessions", "count_sessions")),
+            "for_app.aio": (stores.for_app("k-aaaa").aio, ("get_session", "insert_session")),
+            "for_session": (stores.for_session("a1"), ("get_session", "patch_run")),
+            "scope": (stores.scope("k-aaaa"), ("list_sessions", "session_page", "find_session_ids", "get_session",
+                                               "insert_session")),
+        }
+        for route, (wrapper, names) in routes.items():
+            for name in names:
+                try:
+                    getattr(wrapper, name)
+                except AttributeError as e:
+                    assert "sessions` routing proxy" in str(e), (route, name, str(e))
+                else:
+                    pytest.fail(f"{route}.{name} answered")
+        # The same names through each proxy still answer, as each route has its rows.
+        assert stores.sessions.get_session("a1")["app_id"] == "k-aaaa"
+        assert stores.for_app("k-aaaa").sessions.get_session("a1")["id"] == "a1"
+        assert {s["id"] for s in stores.scope("k-aaaa").sessions.list_sessions()} == {"own", "a1"}
+        assert {s["id"] for s in stores.scope("").sessions.list_sessions()} == {"own"}
     finally:
         stores.close()
 
@@ -515,7 +550,7 @@ def test_has_tool_result_reads_the_sessions_own_store(tmp_path):
     try:
         assert stores.web is not main
         for sid, app_id in (("own", ""), ("a1", "k-aaaa")):
-            stores.insert_session(_agent_session(sid, app_id))
+            stores.sessions.insert_session(_agent_session(sid, app_id))
             assert not stores.sessions.has_tool_result(sid) and not stores.for_session(sid).sessions.has_tool_result(sid)
             stores.sessions.insert_event(sid, "tool_result", {"id": "t1", "output": "ok"})
             assert stores.sessions.has_tool_result(sid) and stores.for_session(sid).sessions.has_tool_result(sid), sid
@@ -526,7 +561,7 @@ def test_an_app_route_holds_its_store_per_call_and_writes_only_from_its_own_writ
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
-        stores.insert_session(_agent_session("a1", "k-aaaa"))
+        stores.sessions.insert_session(_agent_session("a1", "k-aaaa"))
         register = stores.for_app("k-aaaa").sessions.register_end_user  # kept past any hold, as `to_thread` does
         assert stores.close_idle(time.monotonic() + 10_000) == ["k-aaaa"]
         register("dana")  # reopens the App's store for this call, then lets it go
@@ -541,9 +576,9 @@ def test_an_app_route_holds_its_store_per_call_and_writes_only_from_its_own_writ
 
 
 def _moved_session_names() -> frozenset[str]:
-    """`SessionStore`'s methods that `Database` does not forward (#992 stage 6): the App's own rows that joined the
-    store, and each name whose callers moved to a `sessions` proxy. It grows as the `sessions` pin shrinks."""
-    return frozenset(_store_methods(SessionStore) - PINNED_SHIM["sessions"])
+    """`SessionStore`'s methods that `Database` does not forward (#992 stage 6): since batch 3 moved the session row,
+    list and count callers, every one of them. It grew as the `sessions` pin shrank, and the pin is gone."""
+    return frozenset(_store_methods(SessionStore) - PINNED_SHIM.get("sessions", frozenset()))
 
 
 def test_every_call_of_a_moved_session_method_goes_through_a_sessions_proxy():
@@ -847,7 +882,7 @@ def test_operation_audit_writes_through_the_account_store_or_a_stand_in(tmp_path
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
-        stores.insert_session(_session("a1", "k-aaaa"))
+        stores.sessions.insert_session(_session("a1", "k-aaaa"))
         for label, db in {"Database": main, "SessionStores": stores, "scope(app)": stores.scope("k-aaaa"),
                           "for_app(app)": stores.for_app("k-aaaa"), "Web Database": stores.web}.items():
             assert _audit_store(db) is main.accounts, label

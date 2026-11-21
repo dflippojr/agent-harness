@@ -138,7 +138,7 @@ def test_a_linked_end_user_session_records_the_person_and_runs_on_no_other_crede
                               json={"prompt": "hi", "backend": "claude", "end_user": "dana"})
         assert created.status_code == 201, created.text
         assert created.json()["end_user"] == "dana"
-        s = manager.db.get_session(created.json()["id"])
+        s = manager.db.sessions.get_session(created.json()["id"])
         assert s["end_user"] == "dana"
         # The App's API key and its fallback never apply to an end user's request.
         credential = manager.runner._backend_credential(s)
@@ -488,7 +488,7 @@ def test_two_concurrent_sessions_of_one_end_user_never_run_at_once(tmp_path, mon
         await _alive(manager, third)                              # another person's session runs beside it
         await asyncio.sleep(0.6)
         assert second not in manager.runner._cli_sessions         # the same person's next one waits its turn
-        assert manager.db.get_session(second)["status"] == "queued"
+        assert manager.db.sessions.get_session(second)["status"] == "queued"
         await manager.cancel(first)
         await _alive(manager, second)                             # and runs once the first has ended
         await manager.cancel(second)

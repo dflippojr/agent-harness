@@ -322,7 +322,7 @@ def test_verify_and_run_shell_store_full_output_not_the_view(tmp_path):
         assert m.db.sessions.full_artifact(s["id"], shell_digest).startswith("exit code 0\n" + full[:20])
         assert "the next page" not in shell_ev["output"]
         # Compaction masks the used shell result; the receipt must recover the full string, not the view.
-        receipts = [m["content"] for m in m.db.get_session(s["id"])["context"]
+        receipts = [m["content"] for m in m.db.sessions.get_session(s["id"])["context"]
                     if m.get("role") == "tool" and (m.get("content") or "").startswith("[Observation receipt]")]
         assert any(shell_digest in r for r in receipts)
         verify_id = verify_ev["artifact_id"]
@@ -397,7 +397,7 @@ def test_run_shell_put_artifact_failure_does_not_point_at_unstored_id(tmp_path):
         m.runner.workspace = wrapped
         await m.start()
         s = await wait_status(m, m.create("check")["id"], "done")
-        ctx = "\n".join(msg.get("content") or "" for msg in m.db.get_session(s["id"])["context"])
+        ctx = "\n".join(msg.get("content") or "" for msg in m.db.sessions.get_session(s["id"])["context"])
         assert digest not in ctx
         assert "recovery unavailable" in ctx
         ev = events(m, s["id"], "tool_result")[0]
@@ -447,8 +447,8 @@ def test_verify_footer_follows_artifact_tool_availability(tmp_path):
         digest = hashlib.sha256(f"=== lint (exit 1) ===\n{noisy}".encode("utf-8")).hexdigest()
         assert "recover with read_artifact" in offered_out
         assert digest in offered_out
-        assert m.runner.artifact_tool_available(m.db.get_session(offered["id"]))
-        assert not m.runner.artifact_tool_available(m.db.get_session(denied["id"]))
+        assert m.runner.artifact_tool_available(m.db.sessions.get_session(offered["id"]))
+        assert not m.runner.artifact_tool_available(m.db.sessions.get_session(denied["id"]))
         assert "read_artifact" not in denied_out
         assert len(denied_out) <= 200
         assert events(m, denied["id"], "tool_result")[0]["artifact_id"] is None

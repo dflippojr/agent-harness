@@ -163,11 +163,11 @@ def test_web_tools_reach_sessions_and_projects_can_opt_out(tmp_path):
         result = events(m, s["id"], "tool_result")[0]
         assert result["ok"]
         assert "https://x.example/" in result["output"]
-        assert "web_fetch" in m.db.get_session(s["id"])["context"][0]["content"]
+        assert "web_fetch" in m.db.sessions.get_session(s["id"])["context"][0]["content"]
         offline = m.create("no web", project="offline")
-        assert "web_fetch" not in m.db.get_session(offline["id"])["context"][0]["content"]
-        names = {t["function"]["name"] for t in m.runner.tool_schemas(m.db.get_session(offline["id"]),
-                                                                       m.runner.workspace(m.db.get_session(offline["id"])))}
+        assert "web_fetch" not in m.db.sessions.get_session(offline["id"])["context"][0]["content"]
+        names = {t["function"]["name"] for t in m.runner.tool_schemas(m.db.sessions.get_session(offline["id"]),
+                                                                       m.runner.workspace(m.db.sessions.get_session(offline["id"])))}
         assert "web_search" not in names
         await m.stop()
     asyncio.run(body())
@@ -942,7 +942,7 @@ def test_app_session_with_context_and_app_tool(tmp_path):
         sid = s["id"]
         assert s["app_tools"] == ["lookup_order"]
         assert s["metadata"] == {"ticket": 991}
-        system = m.db.get_session(sid)["context"][0]["content"]
+        system = m.db.sessions.get_session(sid)["context"][0]["content"]
         assert 'Context from the app "shop-bot"' in system
         assert "Dana, premium plan" in system
 
@@ -959,7 +959,7 @@ def test_app_session_with_context_and_app_tool(tmp_path):
         done = wait_for(lambda: (lambda d: d if d["status"] == "done" else None)(
             client.get(f"/api/v1/sessions/{sid}", headers=auth).json()))
         assert done["answer"] == "Order A-17 ships Friday."
-        tool_msg = [c for c in m.db.get_session(sid)["context"] if c["role"] == "tool"][0]
+        tool_msg = [c for c in m.db.sessions.get_session(sid)["context"] if c["role"] == "tool"][0]
         assert tool_msg["content"] == "ships Friday"
 
         text = client.get(f"/api/v1/sessions/{sid}/events?follow=false", headers=auth).text
@@ -1000,7 +1000,7 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
         b_sid = client.post("/api/v1/sessions", headers=H(b), json={"prompt": "b task"}).json()["id"]
         sessions = {"owner": owner_sid, "a": a_sid, "b": b_sid}
         for sid in sessions.values():
-            wait_for(lambda sid=sid: m.db.get_session(sid)["status"] == "done")
+            wait_for(lambda sid=sid: m.db.sessions.get_session(sid)["status"] == "done")
 
         def event_count(sid, type_):
             return sum(1 for e in m.db.sessions.events(sid) if e["type"] == type_)

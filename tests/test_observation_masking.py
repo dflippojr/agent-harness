@@ -112,7 +112,7 @@ def test_artifact_cap_scoping_and_ranges(tmp_path):
     assert db.sessions.read_artifact("s1", digest, 29990, 40000) == (text[29990:], False)
     assert db.sessions.read_artifact("s2", digest) == ("other session", False)
     assert db.sessions.read_artifact("s3", digest) is None
-    db.delete_session("s1")
+    db.sessions.delete_session("s1")
     assert db.sessions.read_artifact("s1", digest) is None
     assert db.sessions.read_artifact("s2", digest) is not None
 
@@ -152,5 +152,5 @@ def test_artifact_with_embedded_nuls_round_trips(tmp_path):
     recovered = "".join(chunks)
     assert recovered == text
     assert hashlib.sha256(recovered.encode("utf-8")).hexdigest() == digest
-    db.delete_session("s1")
+    db.sessions.delete_session("s1")
     assert db.sessions.read_artifact("s1", digest) is None

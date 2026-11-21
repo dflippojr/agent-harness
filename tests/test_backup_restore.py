@@ -60,7 +60,7 @@ async def _seed_and_back_up(cfg) -> tuple[Path, dict]:
                          "created_at": 1, "updated_at": 1, "last_activity_at": 0})
     for sid, app_id in (("own1", ""), ("a1", apps["first"]), ("a2", apps["first"]), ("b1", apps["second"]),
                         ("g1", apps["gone"])):
-        m.db.insert_session(_session(sid, app_id))
+        m.db.sessions.insert_session(_session(sid, app_id))
         m.db.sessions.insert_event(sid, "user_message", {"content": f"hello {sid}"})
     _write(storage.transcripts_dir(cfg, "owner") / "own1.md", "owner transcript")
     _write(storage.transcripts_dir(cfg, "u-member") / "m1.md", "member transcript")
@@ -80,7 +80,7 @@ async def _booted_sessions(cfg) -> tuple[dict, list]:
     m = Manager(cfg, chat=Script([Completion(content="ok")]))
     await m.start(maintenance=False)
     try:
-        return {sid: (m.db.get_session(sid) or {}).get("app_id")
+        return {sid: (m.db.sessions.get_session(sid) or {}).get("app_id")
                 for sid in ("own1", "a1", "a2", "b1")}, [e["data"] for e in m.db.sessions.events("a1")]
     finally:
         await m.stop()
@@ -189,7 +189,7 @@ def backed_up(tmp_path):
     cfg = _cfg(tmp_path)
     cfg.data_dir.mkdir(parents=True)
     db = Database(cfg.db_path)
-    db.insert_session(_session("s1"))
+    db.sessions.insert_session(_session("s1"))
     _write(storage.transcripts_dir(cfg, "owner") / "nested" / "s1.md", "x" * 4000)
     result = asyncio.run(BackupService(cfg, db).backup())
     db.close()
@@ -308,7 +308,7 @@ def _light_backup(cfg) -> Path:
     Path(cfg.data_dir).mkdir(parents=True, exist_ok=True)
     db = Database(cfg.db_path)
     try:
-        db.insert_session(_session("s1"))
+        db.sessions.insert_session(_session("s1"))
         return Path(asyncio.run(BackupService(cfg, db).backup())["path"])
     finally:
         db.close()

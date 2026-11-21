@@ -586,8 +586,8 @@ def test_api_fix_drafts_and_owner_only_dismiss(tmp_path):
     with client:
         s = client.post("/sessions", json={"prompt": "bump", "project": "proj"}).json()
         sid = s["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done" and sid not in m.tasks)
-        ws = Path(m.db.get_session(sid)["workspace"])
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done" and sid not in m.tasks)
+        ws = Path(m.db.sessions.get_session(sid)["workspace"])
         (ws / "deploy.sh").write_text(f"#!/bin/sh\nexport AWS_ACCESS_KEY_ID={KEY}\n")
 
         changes = client.get(f"/sessions/{sid}/changes")
@@ -608,7 +608,7 @@ def test_api_fix_drafts_and_owner_only_dismiss(tmp_path):
         assert again["message"].startswith("The findings in the diff already have draft comments")
         assert client.post(f"/sessions/{sid}/review-comments/send").status_code == 200
         # Final git/checkpoint work continues after the terminal status is written.
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done" and sid not in m.tasks)
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done" and sid not in m.tasks)
         sent = [e["data"]["content"] for e in m.db.sessions.events(sid) if e["type"] == "user_message"][-1]
         assert "deploy.sh, line 2" in sent and "aws-access-token" in sent and KEY not in sent
 

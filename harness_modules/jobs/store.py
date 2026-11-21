@@ -2,7 +2,7 @@
 
 The jobs and templates tables stay in the core's frozen baseline, so existing installs and backups keep their schema
 while this add-on is absent (#334). Their queries live here: `JobStore(db)` runs them on the core's writer queue and
-pooled readers. A job's sessions are core session rows, read through the core (`Database.job_sessions`).
+pooled readers. A job's sessions are core session rows, read through the core (`db.sessions.job_sessions`).
 """
 
 from __future__ import annotations

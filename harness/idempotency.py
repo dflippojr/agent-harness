@@ -57,7 +57,7 @@ def replayed_session(store, record: dict) -> str | None:
         return None
     if row["request_digest"] != record["request_digest"]:
         raise HarnessError(409, f"this {HEADER} was already used for a different request", CONFLICT)
-    if not row["session_id"] or store.get_session(row["session_id"]) is None:
+    if not row["session_id"] or store.sessions.get_session(row["session_id"]) is None:
         raise HarnessError(410, f"the session this {HEADER} created was erased; it is not created again",
                            ERASED)
     return row["session_id"]

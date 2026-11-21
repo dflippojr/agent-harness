@@ -292,7 +292,7 @@ class Manager:
         sessions would hold the GPU at full priority on the live web. Cancel them and finish the claimed row instead.
         Runs whether or not the canary is still enabled."""
         from . import canary
-        for s in self.db.sessions_with_status(*ACTIVE):
+        for s in self.db.sessions.sessions_with_status(*ACTIVE):
             if s["project"] in canary.PROJECTS:
                 log.warning("cancelling canary session %s (%s) left by a restart", s["id"], s["status"])
                 self.runner.set_status(s["id"], "cancelled", stop_reason="cancelled: daemon restarted mid-canary")
@@ -300,12 +300,12 @@ class Manager:
             log.warning("canary %s was running at a restart; finished from what it had", row["sha"][:canary.SHORT_SHA])
 
     def _is_active(self, sid: str) -> bool:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         return bool(s) and s["status"] in ACTIVE
 
     def _keep_awake(self, target: str) -> bool:
         """A runner holds off idle sleep while one of its sessions is actually running."""
-        return any(s["target"] == target for s in self.db.sessions_with_status("running"))
+        return any(s["target"] == target for s in self.db.sessions.sessions_with_status("running"))
 
     def _queue_changed(self, positions: dict[str, int]) -> None:
         for sid, position in positions.items():
@@ -319,11 +319,11 @@ class Manager:
             self.maintenance.start()
         self.modules.start()
         self._end_interrupted_canary()
-        for s in self.db.sessions_with_run_flag(END_PENDING):
+        for s in self.db.sessions.sessions_with_run_flag(END_PENDING):
             if s["status"] not in ACTIVE:
                 log.info("ending session %s (%s): the daemon stopped before its run ended", s["id"], s["status"])
                 self._spawn_task(s["id"], self.runner.end_pending_run(s["id"]))
-        recovering = self.db.sessions_with_status(*ACTIVE)
+        recovering = self.db.sessions.sessions_with_status(*ACTIVE)
         # Before any of them runs: a run saved before places were recorded gets its place first, so no other run's
         # admission can count without it (#524).
         for s in recovering:
@@ -399,7 +399,7 @@ class Manager:
         """The one session `ref` (an id or its prefix) names. `app` is whose App sessions it may name: "" for the
         owner and members (none: #330 decision 3), an App's id for that App (its own, plus the owner's and members'
         in Web's store unless `app_only`), every App's for the daemon."""
-        ids = self.db.find_session_ids(ref, user_id=user_id, kind=kind, with_app=app,
+        ids = self.db.sessions.find_session_ids(ref, user_id=user_id, kind=kind, with_app=app,
                                        **({"app_id": app} if app_only and app else {}))
         if ref in ids:
             return ref
@@ -411,7 +411,7 @@ class Manager:
         return ids[0]
 
     def get(self, ref: str, user_id: str | None = None, kind: str | None = None) -> dict:
-        return self.db.get_session(self.resolve_id(ref, user_id=user_id, kind=kind))
+        return self.db.sessions.get_session(self.resolve_id(ref, user_id=user_id, kind=kind))
 
     @staticmethod
     def _hosted_chat_option(name: str, v: dict) -> dict:
@@ -452,7 +452,7 @@ class Manager:
         if self.snippets.running_in(s["id"]):
             raise HarnessError(409, "cancel the running snippet before deleting this chat")
         self.maintenance.remove_workspace(s["id"])
-        self.db.delete_session(s["id"])
+        self.db.sessions.delete_session(s["id"])
 
     @namespace_audit.failures("session.rename")
     def rename(self, ref: str, title: str, *, context=None) -> dict:
@@ -463,10 +463,10 @@ class Manager:
         if len(title) > 120:
             raise HarnessError(400, "title is too long")
         def commit():
-            self.db.update_session(s["id"], title=title)
+            self.db.sessions.update_session(s["id"], title=title)
             namespace_audit.record(self.db, s, context, "session.rename", metadata={"fields": ["title"]})
         self.db.for_session(s["id"]).write(commit)
-        return self.db.get_session(s["id"])
+        return self.db.sessions.get_session(s["id"])
 
     # operations
     def create(self, prompt: str, project: str = "scratch", target: str | None = None, model: str | None = None,
@@ -543,7 +543,7 @@ class Manager:
                 remove_tree(workspace)
             raise
         self._spawn(sid)
-        return self.db.get_session(sid)
+        return self.db.sessions.get_session(sid)
 
     @staticmethod
     def check_end_user(end_user: str, app: dict | None, backend: str | None) -> None:
@@ -618,7 +618,7 @@ class Manager:
             self.end_user_logins.check(backend, end_user)
             async with namespace_audit.login_operation(self.db, app_id, end_user, context, "login.unlink", backend=backend):
                 for sid in self.db.app_session_ids(app_id):
-                    s = self.db.get_session(sid)
+                    s = self.db.sessions.get_session(sid)
                     if s and s.get("end_user") == end_user and s["backend"] == backend and s["status"] in ACTIVE:
                         await self._stop_run(sid)
                 await self.end_user_logins.unlink(app_id, end_user, backend)
@@ -668,7 +668,7 @@ class Manager:
 
     async def _stop_member_sessions(self, user_id: str, backends) -> None:
         end_user = member_keys.end_user_id(user_id)
-        for s in self.db.sessions_with_status(*ACTIVE, user_id=user_id):
+        for s in self.db.sessions.sessions_with_status(*ACTIVE, user_id=user_id):
             if s.get("end_user") == end_user and s["backend"] in backends:
                 await self._stop_run(s["id"])
         try:
@@ -693,7 +693,7 @@ class Manager:
 
         def insert_created() -> None:
             self._enforce_queue_caps(session)
-            self.db.insert_session(session)
+            self.db.sessions.insert_session(session)
             if idempotency:  # same commit as the session: a crash before the response still finds it on retry
                 store.sessions.insert_idempotency_key({**idempotency, "session_id": sid})
             self.bus.emit(sid, "session_created", {**{k: session[k] for k in
@@ -969,13 +969,13 @@ class Manager:
         sid = self.resolve_id(ref)
         if not content.strip():
             raise HarnessError(400, "message is empty")
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s["workspace_removed"]:
             raise HarnessError(409, "this session's workspace was cleaned up or discarded; run it again as a new session")
         task = self.tasks.get(sid)
         if task and s["status"] not in ACTIVE:
             await asyncio.gather(task, return_exceptions=True)  # a finished run still wrapping up
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
         self._refuse_during_operation(sid)
         self._refuse_unsettled(s)
         # A device's hosted session from before `create` refused it would only fail when it runs: say so now (#786).
@@ -994,7 +994,7 @@ class Manager:
             self._refuse_during_operation(sid)      # in the write: a rewind claims the session in one too
             # The session as it is now, not as the request first read it: another message may have restarted it
             # meanwhile (this one then joins that run), or its run ended (this one restarts it).
-            current = self.db.get_session(sid)
+            current = self.db.sessions.get_session(sid)
             ending = self.tasks.get(sid)
             if current["status"] not in ACTIVE and ending is not None and not ending.done():
                 raise _RunStillEnding()  # nothing written: the ended run's results stay as they are until it is over
@@ -1002,7 +1002,7 @@ class Manager:
             self.bus.emit(sid, kind, {"content": content})
             if current["status"] in ACTIVE:
                 # Delivered before the agent's next model call.
-                self.db.update_session(sid, inbox=current["inbox"] + [model_content])
+                self.db.sessions.update_session(sid, inbox=current["inbox"] + [model_content])
             else:
                 if s["status"] in ACTIVE and session_user_id(current) != OWNER_USER_ID:
                     self._require_member_start(self.db.accounts.account_by_id(session_user_id(current)), "session",
@@ -1015,7 +1015,7 @@ class Manager:
                     run["max_turns"] = turns
                     run["max_completion_tokens"] = tokens
                 context_ = current["context"] + [{"role": "user", "content": model_content}]
-                self.db.update_session(sid, context=context_, run=run, status="queued", stop_reason="", answer="")
+                self.db.sessions.update_session(sid, context=context_, run=run, status="queued", stop_reason="", answer="")
                 self.bus.emit(sid, "status", {"status": "queued"})
             # With the commit, not after the await: a request cancelled mid-write still gets its run.
             self.db.after_commit(lambda: sid in self.tasks or self._spawn(sid))
@@ -1030,13 +1030,13 @@ class Manager:
                 ending = self.tasks.get(sid)
                 if ending is not None:
                     await asyncio.gather(ending, return_exceptions=True)
-        return self.db.get_session(sid)
+        return self.db.sessions.get_session(sid)
 
     def original_prompt(self, sid: str) -> str:
         for e in self.db.sessions.events(sid):
             if e["type"] == "user_message":
                 return e["data"]["content"]
-        return self.db.get_session(sid)["context"][1]["content"]
+        return self.db.sessions.get_session(sid)["context"][1]["content"]
 
     # checkpoints (issue #261): rewind and fork
     def checkpoints(self, ref: str) -> dict:
@@ -1069,7 +1069,7 @@ class Manager:
 
         def claim() -> None:
             nonlocal claimed
-            if self.db.get_session(sid)["status"] in ACTIVE:
+            if self.db.sessions.get_session(sid)["status"] in ACTIVE:
                 raise HarnessError(409, busy)
             self._refuse_during_operation(sid)
             self.operations[sid] = op
@@ -1082,7 +1082,7 @@ class Manager:
                 self.operations.pop(sid, None)
 
     async def _idle_for_checkpoint(self, sid: str) -> dict:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s["target"] != "tower" or s.get("kind", "agent") != "agent":
             raise HarnessError(409, "checkpoints are only kept for tower agent sessions")
         if s["workspace_removed"]:
@@ -1090,7 +1090,7 @@ class Manager:
         task = self.tasks.get(sid)
         if task and s["status"] not in ACTIVE:
             await asyncio.gather(task, return_exceptions=True)
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
         if s["status"] in ACTIVE:
             raise HarnessError(409, CHECKPOINT_IDLE)
         return s
@@ -1124,7 +1124,7 @@ class Manager:
                     raise HarnessError(error.status, str(error)) from e
                 finally:
                     await asyncio.to_thread(cp.release, done)
-        return self.db.get_session(sid)
+        return self.db.sessions.get_session(sid)
 
     async def _unsettle(self, sid: str) -> None:
         """A rewind left files that match neither the recorded conversation nor the checkpoint: refuse sends
@@ -1132,7 +1132,7 @@ class Manager:
         self.unsettled.add(sid)
 
         def mark() -> None:
-            self.db.patch_run(sid, **{checkpoints.UNSETTLED: time.time()})
+            self.db.sessions.patch_run(sid, **{checkpoints.UNSETTLED: time.time()})
         try:
             await self.db.for_session(sid).awrite(mark)
         except Exception:  # noqa: BLE001 - the in-memory mark still refuses sends
@@ -1146,16 +1146,16 @@ class Manager:
         await self._idle_for_checkpoint(sid)
         if not prompt.strip():
             raise HarnessError(400, "prompt is empty")
-        choice = self._fork_choice(self.db.get_session(sid), backend, model)
+        choice = self._fork_choice(self.db.sessions.get_session(sid), backend, model)
         override = {"backend": choice["backend"], "model": choice["model"]} if choice else {}
         async with self._exclusive(sid, "fork", CHECKPOINT_IDLE):
             async with operation_audit.async_operation(self.db, context, sid, "checkpoint.fork",
                                            {"session_id": sid, "turn": int(turn), **override},
-                                           enabled=operation_audit.owner_session(self.db.get_session(sid))) as audit:
+                                           enabled=operation_audit.owner_session(self.db.sessions.get_session(sid))) as audit:
                 new_sid = await self._fork(sid, int(turn), prompt, choice)
                 audit["resulting_session_id"] = new_sid
                 self._spawn(new_sid)
-        return self.db.get_session(new_sid)
+        return self.db.sessions.get_session(new_sid)
 
     @staticmethod
     def _refuse_override(s: dict) -> None:
@@ -1208,7 +1208,7 @@ class Manager:
 
     async def _fork(self, sid: str, turn: int, prompt: str, choice: dict | None = None) -> str:
         """`fork` while it holds the parent; returns the new session's id, recorded but not yet started."""
-        parent = self.db.get_session(sid)
+        parent = self.db.sessions.get_session(sid)
         owner_id = session_user_id(parent)
         if owner_id != OWNER_USER_ID:
             self._require_member_start(self.db.accounts.account_by_id(owner_id), "session")
@@ -1590,15 +1590,15 @@ class Manager:
             except Exception:
                 log.warning("compare rollback could not discard %s cleanly", sid, exc_info=True)
                 try:
-                    if not self.db.get_session(sid)["workspace_removed"]:
+                    if not self.db.sessions.get_session(sid)["workspace_removed"]:
                         await asyncio.to_thread(self.maintenance.remove_workspace, sid)
-                    self.db.update_session(sid, review="discarded", review_detail="compare group failed to start")
+                    self.db.sessions.update_session(sid, review="discarded", review_detail="compare group failed to start")
                 except Exception:
                     log.warning("compare rollback could not remove %s", sid, exc_info=True)
-            self.db.update_session(sid, compare_group="")
+            self.db.sessions.update_session(sid, compare_group="")
 
     def compare_view(self, group: str, owner_id: str = "owner") -> dict:
-        members = self.db.group_sessions(group, owner_id)
+        members = self.db.sessions.group_sessions(group, owner_id)
         if not members:
             raise HarnessError(404, "no compare group matches that id")
         rows = []
@@ -1638,7 +1638,7 @@ class Manager:
             return await self._compare_pick(group, winner, action, discard_rest, owner_id, context)
 
     async def _compare_pick(self, group: str, winner: str, action: str, discard_rest: bool, owner_id: str, context=None) -> dict:
-        members = self.db.group_sessions(group, owner_id)
+        members = self.db.sessions.group_sessions(group, owner_id)
         if winner not in {s["id"] for s in members}:
             raise HarnessError(404, "the winner is not a member of this group")
         if action not in ("merge", "push"):
@@ -1647,7 +1647,7 @@ class Manager:
         if next(s for s in members if s["id"] == winner)["review"] not in ("merged", "pushed"):
             await self.review(winner, action, context=context)
             # a merge that hit a conflict returns normally with no review state; never discard on an unverified pick
-            current = self.db.get_session(winner)
+            current = self.db.sessions.get_session(winner)
             if current["review"] not in ("merged", "pushed"):
                 raise HarnessError(409, f"the {action} of the winner did not complete "
                                         f"({current['review_detail'] or 'no detail'}); "
@@ -1659,7 +1659,7 @@ class Manager:
         return self.compare_view(group, owner_id)
 
     async def compare_discard(self, group: str, owner_id: str = "owner", *, context=None) -> dict:
-        members = self.db.group_sessions(group, owner_id)
+        members = self.db.sessions.group_sessions(group, owner_id)
         if not members:
             raise HarnessError(404, "no compare group matches that id")
         with self._compare_exclusive(group, owner_id):
@@ -1674,7 +1674,7 @@ class Manager:
         for member in members:
             sid = member["id"]
             try:
-                if self.db.get_session(sid)["review"] in ("merged", "pushed", "discarded"):
+                if self.db.sessions.get_session(sid)["review"] in ("merged", "pushed", "discarded"):
                     continue
                 await self._compare_drop(sid, context)
             except Exception as e:
@@ -1690,24 +1690,24 @@ class Manager:
         try:
             await self.review(sid, "discard", context=context)
         except HarnessError as e:
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
             if e.status != 409 or s["base_commit"] or s["status"] in ACTIVE:
                 raise
             await asyncio.to_thread(self.maintenance.remove_workspace, sid)
-            self.db.update_session(sid, review="discarded",
+            self.db.sessions.update_session(sid, review="discarded",
                                    review_detail="stopped before its repository was checked out")
 
     async def _compare_stop(self, sid: str) -> None:
         """Cancel a member that is still running. A run that ends on its own first is just as stopped."""
-        if self.db.get_session(sid)["status"] not in ACTIVE:
+        if self.db.sessions.get_session(sid)["status"] not in ACTIVE:
             return
         try:
             await self.cancel(sid)
         except HarnessError:
-            if self.db.get_session(sid)["status"] in ACTIVE:
+            if self.db.sessions.get_session(sid)["status"] in ACTIVE:
                 raise
             return
-        if self.db.get_session(sid)["status"] in ACTIVE:
+        if self.db.sessions.get_session(sid)["status"] in ACTIVE:
             # cancelled before its first step, so the run's own cleanup never ran and it would be resumed on restart
             self.runner.user_cancelled.discard(sid)
             await self.runner.aset_status(sid, "cancelled", stop_reason="cancelled")
@@ -1749,11 +1749,11 @@ class Manager:
             if action not in ("merge", "push", "discard"):
                 raise HarnessError(404, "unknown review action")
             async with operation_audit.async_operation(self.db, context, sid, "review." + action, {"session_id": sid},
-                                           enabled=operation_audit.owner_session(self.db.get_session(sid))):
+                                           enabled=operation_audit.owner_session(self.db.sessions.get_session(sid))):
                 return await self._review(sid, action)
 
     async def _review(self, sid: str, action: str) -> dict:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         project = self.project_for_session(s)
         if not project or not project.repo or not s["branch"]:
             raise HarnessError(400, "this session isn't on a git project branch")
@@ -1761,7 +1761,7 @@ class Manager:
             raise HarnessError(409, REVIEW_BUSY)
         if sid in self.tasks:  # the run ended and is still saving its branch
             await asyncio.gather(self.tasks[sid], return_exceptions=True)
-            s = self.db.get_session(sid)
+            s = self.db.sessions.get_session(sid)
         if s["review"] == "discarded" or (s["workspace_removed"] and action != "discard"):
             raise HarnessError(409, "the session's workspace is gone")
         if not s["base_commit"]:
@@ -1777,11 +1777,11 @@ class Manager:
         head = "" if action == "discard" else await asyncio.to_thread(projects.head, ws)
 
         def record_review() -> None:
-            self.db.update_session(sid, review=state, review_detail=detail)
+            self.db.sessions.update_session(sid, review=state, review_detail=detail)
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail, "head": head[:12]})
             self.db.after_commit(lambda: self.runner.write_transcript(sid))  # even if the request is cancelled
         await self.db.for_session(sid).awrite(record_review)
-        return self.db.get_session(sid)
+        return self.db.sessions.get_session(sid)
 
     async def _review_local(self, sid: str, s: dict, project, ws: Path, action: str) -> tuple[str, str]:
         """Run a review action on the tower; returns the resulting review state and detail."""
@@ -1853,16 +1853,16 @@ class Manager:
             fields = {"review": state, "review_detail": detail}
             if action == "discard":
                 fields["workspace_removed"] = 1
-            self.db.update_session(sid, **fields)
+            self.db.sessions.update_session(sid, **fields)
             self.bus.emit(sid, "review", {"action": action, "state": state, "detail": detail,
                                           "head": result.get("head", "")[:12]})
             self.db.after_commit(lambda: self.runner.write_transcript(sid))  # even if the request is cancelled
         await self.db.for_session(sid).awrite(record_review)
-        return self.db.get_session(sid)
+        return self.db.sessions.get_session(sid)
 
     def decide_by_token(self, token: str, approve: bool) -> dict:
         approval = self.db.sessions.approval_by_token(token)
-        session = self.db.get_session(approval["session_id"]) if approval else None
+        session = self.db.sessions.get_session(approval["session_id"]) if approval else None
         if approval is None or (session and session.get("app_id")):
             # The link is the owner's credential from an owner notification; an App decides its own approvals (#330).
             raise HarnessError(404, "unknown approval link")
@@ -1884,7 +1884,7 @@ class Manager:
         if approval is None or approval["session_id"] != sid:
             raise HarnessError(404, f"no approval {approval_id} in session {sid}")
         if approval["status"] != "pending":
-            if operation_audit.owner_session(self.db.get_session(sid)):
+            if operation_audit.owner_session(self.db.sessions.get_session(sid)):
                 try:
                     operation_audit.append(self.db, context or audit_context.AuditContext("unknown"), approval_id,
                                            "approval.decide", "failure", {"session_id": sid, "reason": "already_decided"})
@@ -1898,11 +1898,11 @@ class Manager:
             if not self.db.sessions.decide_approval(approval_id, status, note):
                 raise HarnessError(409, f"approval is already {self.db.sessions.get_approval(approval_id)['status']}")
             self.bus.emit(sid, "approval_decided", {"id": approval_id, "status": status, "note": note})
-            namespace_audit.record(self.db, self.db.get_session(sid), context, "approval.decide",
+            namespace_audit.record(self.db, self.db.sessions.get_session(sid), context, "approval.decide",
                                    target=approval_id, kind="approval", metadata={"decision": status})
         with operation_audit.operation(self.db, context, approval_id, "approval.decide",
                                        {"session_id": sid, "decision": status},
-                                       enabled=operation_audit.owner_session(self.db.get_session(sid))):
+                                       enabled=operation_audit.owner_session(self.db.sessions.get_session(sid))):
             self.db.for_session(sid).write(decide)
             event = self.runner.approval_events.get(approval_id)
             if event:
@@ -1912,44 +1912,44 @@ class Manager:
     def clear_taint(self, ref: str, *, context=None) -> dict:
         """Owner action: forget the untrusted sources this session has read, and record that it happened."""
         sid = self.resolve_id(ref)
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         cleared = list(s.get("taint") or [])
 
         def clear_taint() -> None:
-            self.db.update_session(sid, taint=[])
+            self.db.sessions.update_session(sid, taint=[])
             self.bus.emit(sid, "taint_cleared", {"cleared": [t["origin"] for t in cleared]})
         with operation_audit.operation(self.db, context, sid, "session.taint_clear", {"session_id": sid},
                                        enabled=operation_audit.owner_session(s)):
             self.db.for_session(sid).write(clear_taint)
-        return self.db.get_session(sid)
+        return self.db.sessions.get_session(sid)
 
     @namespace_audit.failures("session.cancel")
     async def cancel(self, ref: str, *, context=None) -> dict:
         sid = self.resolve_id(ref)
         task = self.tasks.get(sid)
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s["status"] not in ACTIVE:
             raise HarnessError(409, f"session is {s['status']}, nothing to cancel")
         if task is None:  # no live task (shouldn't happen); fix the record anyway
             await self.runner.aset_status(sid, "cancelled", stop_reason="cancelled")
             await asyncio.to_thread(namespace_audit.record, self.db, s, context, "session.cancel")
-            return self.db.get_session(sid)
+            return self.db.sessions.get_session(sid)
         self.runner.user_cancelled.add(sid)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await asyncio.to_thread(namespace_audit.record, self.db, s, context, "session.cancel")
-        return self.db.get_session(sid)
+        return self.db.sessions.get_session(sid)
 
     # erasing App data (#330 decision 5)
     async def erase_session(self, sid: str, *, context=None, reason="manual") -> bool:
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is None:
             return False
         scope = namespace_audit.namespace(s)
         if not scope:
             return await self._erase_session(sid)
         async with self.erase_locks.setdefault(scope, asyncio.Lock()):
-            if self.db.get_session(sid) is None:
+            if self.db.sessions.get_session(sid) is None:
                 return False
             await asyncio.to_thread(namespace_audit.refuse_unresolved_erase, self.db, scope)
             async with namespace_audit.erase_operation(self.db, scope, context,
@@ -1978,18 +1978,18 @@ class Manager:
         branch, then its rows (events, tool calls and results, approvals, artifacts, checkpoints,
         search entries). Rows go last; an interrupted private erasure retains its unresolved aggregate evidence
         and blocks automatic replay pending inspection. False when already erased."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if s is None:
             return False
         await self._stop_run(sid)
-        s = self.db.get_session(sid) or s
+        s = self.db.sessions.get_session(sid) or s
         sandbox = self.runner._sandboxes.pop(sid, None)
         if sandbox is not None:
             await sandbox.remove()
         await self._erase_cli_history(s)
         await self._erase_remote_app_branch(s)
         await asyncio.to_thread(self._erase_files, s)
-        await asyncio.to_thread(self.db.delete_session, sid)
+        await asyncio.to_thread(self.db.sessions.delete_session, sid)
         log.info("session erasure completed")
         return True
 
@@ -2105,7 +2105,7 @@ class Manager:
             await asyncio.to_thread(self.db.for_app(app_id).sessions.prune_namespace_audit, now,
                                     defaults.get(app_id) or 30)
         for app_id in self.db.indexed_apps():
-            for r in await asyncio.to_thread(self.db.for_app(app_id).session_activity):
+            for r in await asyncio.to_thread(self.db.for_app(app_id).sessions.session_activity):
                 days = r["retention_days"] or defaults.get(app_id)
                 if not days or r["active_at"] + float(days) * 86400 > now:
                     continue
@@ -2300,7 +2300,7 @@ class Manager:
     def _scheduler_eligible(self, sid: str) -> bool:
         """May `sid` take the GPU slot (or, hosted, a backend slot) under its member's or App's `max_running`? A
         session parked on an approval, the Mac, the App or a provider limit still counts against that cap (#524)."""
-        s = self.db.get_session(sid)
+        s = self.db.sessions.get_session(sid)
         if not s:
             # Image/device/test holders are not household sessions; do not park them forever.
             return True
@@ -2317,10 +2317,10 @@ class Manager:
         # between twice (until the recheck that commit brings) rather than not at all (#906).
         about = self._about_to_run(sid, admission_key(self.db, s))
         if account is not None:
-            occupied = self.db.count_stored_sessions(user_id, *ACTIVE, holding=True)
+            occupied = self.db.sessions.count_stored_sessions(user_id, *ACTIVE, holding=True)
             cap = int(account["max_running"])
         else:
-            occupied = self.db.count_stored_app_sessions(s["app_id"], *ACTIVE, holding=True)
+            occupied = self.db.sessions.count_stored_app_sessions(s["app_id"], *ACTIVE, holding=True)
             cap = self.app_limits(s["app_id"])["max_running"]
         return occupied + about < cap
 
@@ -2333,7 +2333,7 @@ class Manager:
         others.discard(sid)
         n = 0
         for other in others:
-            row = self.db.get_session(other)
+            row = self.db.sessions.get_session(other)
             if row and row["status"] in ACTIVE and not holds_place(row) and admission_key(self.db, row) == key:
                 n += 1
         return n
@@ -2347,7 +2347,7 @@ class Manager:
 
     def app_limits_view(self, app_id: str) -> dict:
         """The owner's view: what is set for the App, what applies, and how much of it is in use."""
-        count = self.db.count_app_sessions
+        count = self.db.sessions.count_app_sessions
         stored = self.db.apps.app_limits(app_id)
         return {"app_id": app_id, "configured": stored, "effective": self.app_limits(app_id, stored),
                 "running": count(app_id, "running"), "queued": count(app_id, "queued"),
@@ -2366,7 +2366,7 @@ class Manager:
 
     def _enforce_member_caps(self, account: dict) -> None:
         user_id = account["user_id"]
-        queued = self.db.count_stored_sessions(user_id, "queued", *WAITING)
+        queued = self.db.sessions.count_stored_sessions(user_id, "queued", *WAITING)
         max_q = int(account["max_queued"])
         if queued >= max_q:
             raise HarnessError(429, f"this account already has {queued} queued or waiting sessions (limit {max_q})")
@@ -2387,7 +2387,7 @@ class Manager:
         (#524). Sessions parked on an approval or a reply count as queued."""
         if not capped_app(self.db, app_id):
             return
-        queued = self.db.count_stored_app_sessions(app_id, "queued", *WAITING)
+        queued = self.db.sessions.count_stored_app_sessions(app_id, "queued", *WAITING)
         max_q = self.app_limits(app_id)["max_queued"]
         if queued >= max_q:
             raise HarnessError(429, f"this App already has {queued} queued or waiting sessions (limit {max_q})",
@@ -2430,7 +2430,7 @@ class Manager:
     async def _cancel_member_work(self, user_id: str, actor_id: str) -> None:
         from .runner import ACTIVE
         waiting = []
-        for s in self.db.sessions_with_status(*ACTIVE, user_id=user_id):
+        for s in self.db.sessions.sessions_with_status(*ACTIVE, user_id=user_id):
             sid = s["id"]
             task = self.tasks.get(sid)
             if task is not None:

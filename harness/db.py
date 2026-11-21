@@ -699,27 +699,6 @@ class Database:
     list_api_keys = _Forwarded("credentials")
     get_api_key_listing = _Forwarded("credentials")
     restore_api_key = _Forwarded("credentials")
-    # sessions
-    insert_session = _Forwarded("sessions")
-    update_session = _Forwarded("sessions")
-    patch_run = _Forwarded("sessions")
-    unset_run = _Forwarded("sessions")
-    get_session = _Forwarded("sessions")
-    get_session_for_user = _Forwarded("sessions")
-    find_session_ids = _Forwarded("sessions")
-    list_sessions = _Forwarded("sessions")
-    session_page = _Forwarded("sessions")
-    active_sessions = _Forwarded("sessions")
-    group_sessions = _Forwarded("sessions")
-    sessions_with_status = _Forwarded("sessions")
-    sessions_with_run_flag = _Forwarded("sessions")
-    count_sessions = _Forwarded("sessions")
-    count_app_sessions = _Forwarded("sessions")
-    count_stored_sessions = _Forwarded("sessions")
-    count_stored_app_sessions = _Forwarded("sessions")
-    delete_session = _Forwarded("sessions")
-    job_sessions = _Forwarded("sessions")
-    session_activity = _Forwarded("sessions")
 
     def __init__(self, path: Path, migrations: Sequence[migrations_mod.Step] | None = None):
         """Open (creating if needed) and migrate the database. `migrations` overrides the discovered steps."""

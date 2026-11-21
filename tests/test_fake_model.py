@@ -487,7 +487,7 @@ def test_full_stack_approval_and_compaction(monkeypatch, fake_manager):
         assert decided.status_code == 200, decided.text
         done = wait_session(client, sid, headers, "done", "failed")
         assert done["status"] == "done", done
-        workspace = Path(m.db.get_session(sid)["workspace"])
+        workspace = Path(m.db.sessions.get_session(sid)["workspace"])
         assert json.loads((workspace / "protected" / "settings.json").read_text(encoding="utf-8"))["theme"] == "system"
 
         made = client.post("/api/v1/sessions", headers=headers, json={
@@ -496,7 +496,7 @@ def test_full_stack_approval_and_compaction(monkeypatch, fake_manager):
         assert wait_session(client, sid, headers, "done", "failed")["status"] == "done"
         tiers = [e["data"]["tier"] for e in m.db.sessions.events(sid) if e["type"] == "compaction"]
         assert "summary" in tiers
-        assert m.db.get_session(sid)["answer"].startswith("Done.")
+        assert m.db.sessions.get_session(sid)["answer"].startswith("Done.")
 
 
 def test_full_stack_stuck_loop_nudges_then_ends_the_run(monkeypatch, fake_manager):
@@ -521,7 +521,7 @@ def test_full_stack_stuck_loop_nudges_then_ends_the_run(monkeypatch, fake_manage
     assert "failed 3 times" in results[2]["output"] and "will not work" in results[2]["output"]
     assert [e["data"] for e in events if e["type"] == "stuck"] == [
         {"reason": "stuck_repeat", "tool": "read_file", "count": 8}]
-    context = m.db.get_session(sid)["context"]
+    context = m.db.sessions.get_session(sid)["context"]
     assert "will not work" in [msg for msg in context if msg["role"] == "tool"][2]["content"]
 
 

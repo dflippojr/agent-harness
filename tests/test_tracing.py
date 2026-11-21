@@ -136,7 +136,7 @@ async def _wait_for_approval(m, sid, timeout=30):
     deadline = time.monotonic() + scaled(timeout)
     while not m.runner.approval_events:
         task = m.tasks.get(sid)
-        status = m.db.get_session(sid)["status"]
+        status = m.db.sessions.get_session(sid)["status"]
         assert task is not None and not task.done(), f"recovery task exited before approval (status={status})"
         assert status not in ("failed", "done", "cancelled"), f"recovery ended before approval (status={status})"
         assert time.monotonic() < deadline, f"recovery never reached approval (status={status})"
@@ -192,9 +192,9 @@ async def body():
     await m.start()
     sid = m.create("try")["id"]
     deadline = time.monotonic() + 60
-    while m.db.get_session(sid)["status"] not in ("done", "failed") and time.monotonic() < deadline:
+    while m.db.sessions.get_session(sid)["status"] not in ("done", "failed") and time.monotonic() < deadline:
         await asyncio.sleep(0.02)
-    s = m.db.get_session(sid)
+    s = m.db.sessions.get_session(sid)
     assert s["status"] == "done", s["status"]
     assert m.summary(s)["trace_id"] == "" and "trace_url" not in m.summary(s)
     assert "trace" not in s["run"]

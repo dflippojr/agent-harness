@@ -115,7 +115,7 @@ def test_stream_tickets_resume_expire_and_follow_key_revocation(tmp_path):
         token, kid = paired["token"], paired["app"]["id"]
         headers = {"Authorization": f"Bearer {token}", "Origin": ORIGIN}
         sid = client.post("/api/v1/sessions", headers=headers, json={"prompt": "hello"}).json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
 
         # Native EventSource has no Authorization header, so an unauthenticated stream is still rejected.
         bare = client.get(f"/api/v1/sessions/{sid}/events?follow=false", headers={"Origin": ORIGIN})

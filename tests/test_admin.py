@@ -101,7 +101,7 @@ def test_taint_clear_never_reaches_a_members_or_an_apps_session(tmp_path):
                               headers=bearer(app["key"])).json()["id"]
         own_sid = client.post("/sessions", json={"prompt": "owner zebra"}, headers=H(OWNER)).json()["id"]
         for sid in (member_sid, app_sid, own_sid):
-            m.db.update_session(sid, taint=taint)
+            m.db.sessions.update_session(sid, taint=taint)
         for sid in (member_sid, app_sid):
             hidden = client.get(f"/sessions/{sid}", headers=H(OWNER))
             assert hidden.status_code == 404
@@ -110,12 +110,12 @@ def test_taint_clear_never_reaches_a_members_or_an_apps_session(tmp_path):
                     r = client.post(f"{path}/sessions/{ref}/taint/clear", headers=H(OWNER))
                     assert (r.status_code, r.json()) == (404, hidden.json()), (path, ref, r.text)
                     assert "mango" not in r.text and "papaya" not in r.text
-            assert m.db.get_session(sid)["taint"] == taint
+            assert m.db.sessions.get_session(sid)["taint"] == taint
         assert m.db.accounts.audit_page(action="session.taint_clear")["items"] == []
 
         cleared = client.post(f"/sessions/{own_sid[:6]}/taint/clear", headers=H(OWNER))
         assert cleared.status_code == 200 and cleared.json()["id"] == own_sid and cleared.json()["taint"] == []
-        m.db.update_session(own_sid, taint=taint)
+        m.db.sessions.update_session(own_sid, taint=taint)
         cleared = client.post(f"{PREFIX}/sessions/{own_sid}/taint/clear", headers=H(OWNER))
         assert cleared.status_code == 200 and cleared.json()["taint"] == []
 

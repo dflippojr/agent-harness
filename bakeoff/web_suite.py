@@ -104,12 +104,12 @@ async def run_one(task: WebTask, fixture: Path, repeat: int, repo_map: bool = Fa
     started = time.monotonic()
     s = m.create(task.prompt, title=f"web suite {task.id} #{repeat}")
     try:
-        while m.db.get_session(s["id"])["status"] not in ("done", "failed", "cancelled"):
+        while m.db.sessions.get_session(s["id"])["status"] not in ("done", "failed", "cancelled"):
             await asyncio.sleep(1)
             if time.monotonic() - started > 1500:
                 await m.cancel(s["id"])
                 break
-        final = m.db.get_session(s["id"])
+        final = m.db.sessions.get_session(s["id"])
         results = [e["data"] for e in m.db.sessions.events(s["id"]) if e["type"] == "tool_result"]
         calls = [r["name"] for r in results]
         requests = [c["function"] for e in m.db.sessions.events(s["id"]) if e["type"] == "assistant"

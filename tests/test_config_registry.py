@@ -387,7 +387,7 @@ def test_app_capabilities_narrow_toolkits_not_just_prompts(tmp_path):
         assert patched.status_code == 200, patched.text
         created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
         assert created.status_code == 201, created.text
-        s = manager.db.get_session(created.json()["id"])
+        s = manager.db.sessions.get_session(created.json()["id"])
         prompt = s["context"][0]["content"]
         assert "Web access" not in prompt
         assert "Homelab access" not in prompt
@@ -405,7 +405,7 @@ def test_app_capabilities_narrow_toolkits_not_just_prompts(tmp_path):
         assert empty.status_code == 200, empty.text
         created_empty = client.post("/api/v1/sessions", headers=h, json={"prompt": "again", "project": "lab"})
         assert created_empty.status_code == 201, created_empty.text
-        s_empty = manager.db.get_session(created_empty.json()["id"])
+        s_empty = manager.db.sessions.get_session(created_empty.json()["id"])
         assert "Past work:" not in s_empty["context"][0]["content"]
         assert manager.runner.daemon_toolkits(s_empty) == []
         empty_ws = {t["function"]["name"] for t in manager.runner.workspace(s_empty).schemas()}
@@ -413,7 +413,7 @@ def test_app_capabilities_narrow_toolkits_not_just_prompts(tmp_path):
 
         owner = client.post("/sessions", json={"prompt": "owner hello", "project": "lab"})
         assert owner.status_code == 201, owner.text
-        owner_s = manager.db.get_session(owner.json()["id"])
+        owner_s = manager.db.sessions.get_session(owner.json()["id"])
         owner_tools = {name for kit in manager.runner.daemon_toolkits(owner_s) for name in kit.tool_names}
         assert {"web_search", "memory_index", "generate_image", "session_search"} <= owner_tools
         owner_ws = {t["function"]["name"] for t in manager.runner.workspace(owner_s).schemas()}
@@ -454,7 +454,7 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
         created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
         assert created.status_code == 201, created.text
         sid = created.json()["id"]
-        s = manager.db.get_session(sid)
+        s = manager.db.sessions.get_session(sid)
         assert s["run"]["max_turns"] == 10
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
         assert kit_tools == {"session_search", "session_read"}
@@ -464,7 +464,7 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
         # Kept (unused) until the erasure grace ends, so an undo gets them back (#330 decision 5).
         assert manager.db.apps.get_app_settings(app["id"]) is not None
 
-        s = manager.db.get_session(sid)
+        s = manager.db.sessions.get_session(sid)
         assert s["status"] in ACTIVE or s["status"] in ("done", "failed", "cancelled")
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
         assert kit_tools == {"session_search", "session_read"}
@@ -473,12 +473,12 @@ def test_revoked_app_in_flight_session_keeps_narrowed_settings(tmp_path):
         assert "homelab_services" not in ws_tools
 
         deadline = time.time() + 10
-        while time.time() < deadline and manager.db.get_session(sid)["status"] in ACTIVE:
+        while time.time() < deadline and manager.db.sessions.get_session(sid)["status"] in ACTIVE:
             time.sleep(0.05)
         # The owner can't reach an App's session (#330 decision 3); a run the daemon continues stays narrowed.
         assert client.post(f"/sessions/{sid}/messages", json={"content": "continue"}).status_code == 404
         client.portal.call(manager.send, sid, "continue")
-        assert manager.db.get_session(sid)["run"]["max_turns"] == 10
+        assert manager.db.sessions.get_session(sid)["run"]["max_turns"] == 10
 
         note = Notifier(manager.cfg, manager.db).build({
             "session_id": sid, "type": "run_finished",
@@ -523,7 +523,7 @@ def test_never_patched_app_keeps_granted_tools_and_notifications(tmp_path):
         assert manager.db.apps.get_app_settings(app["id"]) is None
         created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
         assert created.status_code == 201, created.text
-        s = manager.db.get_session(created.json()["id"])
+        s = manager.db.sessions.get_session(created.json()["id"])
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
         assert {"web_search", "generate_image", "session_search"} <= kit_tools
         assert "memory_index" not in kit_tools  # memory_library is its own scope
@@ -559,9 +559,9 @@ def test_pre_upgrade_empty_snapshot_follows_live_defaults(tmp_path):
         created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
         assert created.status_code == 201, created.text
         sid = created.json()["id"]
-        manager.db.update_session(sid, app_defaults={})
+        manager.db.sessions.update_session(sid, app_defaults={})
         assert manager.db.apps.get_app_settings(app["id"]) is None
-        s = manager.db.get_session(sid)
+        s = manager.db.sessions.get_session(sid)
         assert s["app_defaults"] == {}
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
         assert {"web_search", "generate_image", "session_search"} <= kit_tools
@@ -597,7 +597,7 @@ def test_active_app_follows_live_config_patch(tmp_path):
         created = client.post("/api/v1/sessions", headers=h, json={"prompt": "hello", "project": "lab"})
         assert created.status_code == 201, created.text
         sid = created.json()["id"]
-        s = manager.db.get_session(sid)
+        s = manager.db.sessions.get_session(sid)
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
         assert {"web_search", "session_search"} <= kit_tools
 
@@ -606,7 +606,7 @@ def test_active_app_follows_live_config_patch(tmp_path):
             "changes": {"app.capabilities": ["search"], "app.notify.completion": "never"},
         })
         assert patched.status_code == 200, patched.text
-        s = manager.db.get_session(sid)
+        s = manager.db.sessions.get_session(sid)
         kit_tools = {name for kit in manager.runner.daemon_toolkits(s) for name in kit.tool_names}
         assert kit_tools == {"session_search", "session_read"}
         ws_tools = {t["function"]["name"] for t in manager.runner.workspace(s).schemas()}

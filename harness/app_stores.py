@@ -98,9 +98,6 @@ WEB_STORE_META = "web_store"  # main-store meta: when the sessions moved into We
 # tests/test_database_shim.py checks that it names every store in `db.CORE_STORES`.
 _STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None, "accounts": "main", "apps": "main",
                                      "usage": "main"}
-# Main-store methods that read sessions or their rows without taking a session id: they run on Web's store.
-_ON_WEB = frozenset({"group_sessions", "snippet_events", "smart_review_stats", "smart_reviews", "job_sessions",
-                     "session_activity", "active_sessions"})
 # SessionStores' own session methods that keep its index current (sessions and approvals): an App's route runs these
 # rather than its store's.
 _INDEXING = frozenset({"insert_session", "update_session", "delete_session", "insert_approval"})
@@ -174,8 +171,15 @@ def _session_kind(name: str) -> str | None:
     return getattr(getattr(SessionStore, name, None), "db_kind", None)
 
 
+def _refuse_session_name(name: str) -> None:
+    """A `SessionStore` method asked of a wrapper itself rather than of its `sessions` proxy: refused, so a call left
+    over from the forwarding shim (#992 stage 6) fails rather than taking an older route."""
+    if name in _SESSION_METHODS:
+        raise AttributeError(f"{name} is a SessionStore method: call it on this wrapper's `sessions` routing proxy")
+
+
 def _like(prefix: str) -> re.Pattern:
-    """`Database.find_session_ids`'s case-insensitive literal prefix match as a regex (#785)."""
+    """`SessionStore.find_session_ids`'s case-insensitive literal prefix match as a regex (#785)."""
     return re.compile(re.escape(prefix) + ".*", re.IGNORECASE | re.DOTALL)
 
 
@@ -256,8 +260,7 @@ class _AppStore:
         stores, app_id = self._stores, self.app_id
         if name in _STORE_HOME:  # never the App's own copy of a core store, nor one held past its release
             return stores.core_store(name)
-        if name in _INDEXING:
-            return getattr(stores, name)
+        _refuse_session_name(name)
         if name in ("awrite", "aread"):
             async def call_async(*args, **kwargs):
                 db = await stores._aacquire(app_id)
@@ -278,8 +281,9 @@ class _AppStore:
 
 
 class _Scoped:
-    """`SessionStores.scope(app_id)`: lists, searches and id lookups as one App (or, for "", the owner) may see
-    them; everything else as `SessionStores`."""
+    """`SessionStores.scope(app_id)`: through its `sessions` proxy, lists, searches and id lookups as one App (or, for
+    "", the owner) may see them; everything else as `SessionStores`. A session method asked of it directly is
+    refused."""
 
     def __init__(self, stores: SessionStores, app_id: str):
         self._stores, self.app_id = stores, app_id
@@ -292,8 +296,8 @@ class _Scoped:
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
             raise AttributeError(name)
-        method = getattr(self._stores, name)
-        return functools.partial(method, with_app=self.app_id) if name in _SCOPED else method
+        _refuse_session_name(name)
+        return getattr(self._stores, name)
 
 
 def scoped(db, app_id: str):
@@ -330,7 +334,7 @@ class SessionStores:
     App's, so nothing the owner or a member asks for reads an App store (#330 decision 3). `find_session_ids` reads
     only the index for App sessions; it reaches every App unless `with_app` narrows it, since the daemon resolves its
     own full ids with it. The daemon's sweeps (sessions_with_status, sessions_with_run_flag, count_sessions) cover
-    every store. Group, job and chat lists, the metrics and the smart-review stats read Web's store only (`_ON_WEB`):
+    every store. Group, job and chat lists, the metrics and the smart-review stats read Web's store only:
     App sessions are counted in `app_metadata` instead, and in total by status from the index (`app_session_counts`).
     """
 
@@ -526,13 +530,8 @@ class SessionStores:
             raise AttributeError(name)
         if name in _STORE_HOME:
             return self.core_store(name)
-        if name in _BY_SESSION and hasattr(Database, name):  # a forwarded name; the newer ones only on `sessions`
-            def by_session(sid, *args, **kwargs):
-                if name in _SESSION_WRITES:
-                    self._refuse_erased(sid)
-                return getattr(self.for_session(sid), name)(sid, *args, **kwargs)
-            return by_session
-        return getattr(self.web if name in _ON_WEB else self.main, name)
+        _refuse_session_name(name)
+        return getattr(self.main, name)
 
     def _refuse_erased(self, sid: str) -> None:
         """Refuse a write about an erased App session: nothing of it may be written again, least of all into the
@@ -578,16 +577,16 @@ class SessionStores:
             if app_id and not taken:  # routes the id from here on, counts once committed
                 self._sessions[sid] = {k: s.get(k) or "" for k in _INDEXED} | {"app_id": app_id, "seq": 0,
                                                                                 "committed": False}
-        if taken or (app_id and self.web.get_session(sid) is not None):
+        if taken or (app_id and self.web.sessions.get_session(sid) is not None):
             if app_id and not taken:
                 self._forget(sid)
             raise sqlite3.IntegrityError(f"session id {sid} is already in use")
         if not app_id:
-            return self.web.insert_session(s)
+            return self.web.sessions.insert_session(s)
 
         def insert(db: Database) -> None:
             db.after_rollback(lambda: self._forget(sid))
-            db.insert_session(s)
+            db.sessions.insert_session(s)
             self._stage(db, sid)
         try:
             with self._using(app_id, write=True) as db:
@@ -600,10 +599,10 @@ class SessionStores:
         self._refuse_erased(sid)
         app_id = self.app_of(sid)
         if not app_id:
-            return self.web.update_session(sid, **fields)
+            return self.web.sessions.update_session(sid, **fields)
 
         def update(db: Database) -> None:
-            db.update_session(sid, **fields)
+            db.sessions.update_session(sid, **fields)
             if any(k in fields for k in _INDEXED):
                 self._stage(db, sid)
             if fields.get("status") == "failed":
@@ -678,11 +677,11 @@ class SessionStores:
     def delete_session(self, sid: str) -> None:
         app_id = self.app_of(sid)
         if not app_id:
-            return self.web.delete_session(sid)
+            return self.web.sessions.delete_session(sid)
 
         def delete(db: Database) -> None:
             approvals = db.conn.execute("SELECT id, token FROM approvals WHERE session_id = ?", (sid,)).fetchall()
-            db.delete_session(sid)
+            db.sessions.delete_session(sid)
 
             def forget() -> None:
                 self._forget(sid, committed=True)
@@ -728,7 +727,7 @@ class SessionStores:
     def _stage(self, db: Database, sid: str) -> None:
         """In `db`'s transaction: once it commits, the index holds the session's row as this transaction left it.
         A transaction that ran later wins, whichever of their callbacks runs first."""
-        row, seq = db.get_session(sid) or {}, next(_SEQ)
+        row, seq = db.sessions.get_session(sid) or {}, next(_SEQ)
 
         def apply() -> None:
             with self._lock:
@@ -749,7 +748,7 @@ class SessionStores:
 
     def find_session_ids(self, prefix: str, user_id: str | None = None, app_id: str | None = None,
                          kind: str | None = None, with_app: str | None = EVERY_APP) -> list[str]:
-        ids = self.web.find_session_ids(prefix, user_id=user_id, kind=kind) if self._reads_web(app_id) else []
+        ids = self.web.sessions.find_session_ids(prefix, user_id=user_id, kind=kind) if self._reads_web(app_id) else []
         apps = set(self._reach(app_id, with_app))
         like = _like(prefix)
         return ids + [sid for sid, _ in self._indexed(
@@ -758,7 +757,7 @@ class SessionStores:
             if like.fullmatch(sid)]
 
     def sessions_with_status(self, *statuses: str, user_id: str | None = None) -> list[dict]:
-        rows = self.web.sessions_with_status(*statuses, user_id=user_id)
+        rows = self.web.sessions.sessions_with_status(*statuses, user_id=user_id)
         apps = self._apps(lambda e: e["status"] in statuses and (user_id is None or e["owner_id"] == user_id))
         if not apps:
             return rows
@@ -767,7 +766,7 @@ class SessionStores:
         return sorted(rows, key=lambda r: r["updated_at"])
 
     def sessions_with_run_flag(self, flag: str) -> list[dict]:
-        rows = self.web.sessions_with_run_flag(flag)
+        rows = self.web.sessions.sessions_with_run_flag(flag)
         apps = self._apps()
         if not apps:
             return rows
@@ -780,7 +779,7 @@ class SessionStores:
         as `count_stored_sessions` does."""
         if holding:
             return self.count_stored_sessions(user_id, *statuses, holding=True)
-        return self.web.count_sessions(user_id, *statuses) + len(
+        return self.web.sessions.count_sessions(user_id, *statuses) + len(
             self._indexed(lambda e: e["owner_id"] == user_id and e["status"] in statuses))
 
     def count_app_sessions(self, app_id: str, *statuses: str, holding: bool = False) -> int:
@@ -793,7 +792,7 @@ class SessionStores:
         only once its callbacks run: what admission caps count (#524). Inside a write, its store's own rows."""
         apps = self._stores_with(lambda e: e["owner_id"] == user_id and (e["status"] in statuses
                                                                             or e["status"] not in _ENDED))
-        return self.web.count_sessions(user_id, *statuses, holding=holding) + sum(
+        return self.web.sessions.count_sessions(user_id, *statuses, holding=holding) + sum(
             self._call(app_id, "count_sessions", user_id, *statuses, holding=holding) for app_id in apps)
 
     def count_stored_app_sessions(self, app_id: str, *statuses: str, holding: bool = False) -> int:
@@ -817,20 +816,20 @@ class SessionStores:
                      with_app: str | None = None, *, before: tuple[float, str] | None = None,
                      target: str | None = None,
                      include_active: bool = False) -> tuple[list[dict], tuple[float, str] | None]:
-        """`Database.session_page` across Web's store and the App stores the scope reaches: one page of the newest
+        """`SessionStore.session_page` across Web's store and the App stores the scope reaches: one page of the newest
         rows of them all, and the active ones of each (#663)."""
         apps = self._reach(None, with_app, lambda e: e["kind"] == kind
                            and (owner_id is None or e["owner_id"] == owner_id))
         if not apps:
-            return self.web.session_page(limit, owner_id, kind, before=before, target=target,
+            return self.web.sessions.session_page(limit, owner_id, kind, before=before, target=target,
                                          include_active=include_active)
         pages, active, more = [], [], False
         for store in (self.web, *(self.for_app(a) for a in apps)):
-            rows, cursor = store.session_page(limit, owner_id, kind, before=before, target=target)
+            rows, cursor = store.sessions.session_page(limit, owner_id, kind, before=before, target=target)
             pages += rows
             more = more or cursor is not None
             if include_active:
-                active += store.active_sessions(owner_id, kind, target)
+                active += store.sessions.active_sessions(owner_id, kind, target)
         merged = merge_newest_first(pages)
         page = merged[:limit]
         more = more or len(merged) > limit

@@ -129,7 +129,7 @@ def test_a_crash_after_the_commit_but_before_the_response_replays_after_a_restar
             patch.setattr(apps, "view", lost)
             assert _post(client, auth, "order-7").status_code == 500
         [sid] = m.db.app_session_ids(app_id)
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
 
     again = _manager(cfg)
     client = TestClient(create_app(again))
@@ -260,7 +260,7 @@ def test_replayed_session_raises_harness_errors_without_a_store_write():
         row: dict | None = None
 
         @property
-        def sessions(self):  # the key is read from the routed session store, the session from the store itself
+        def sessions(self):  # the key and the session are both read from the routed session store
             return self
 
         def find_idempotency_key(self, _key_hash, _now):
@@ -380,13 +380,13 @@ def test_erasure_between_the_replay_lookup_and_view_returns_gone(tmp_path, monke
     with TestClient(create_app(m), raise_server_exceptions=False) as client:
         app_id, auth = _key(client, "shop", "sessions")
         sid = _post(client, auth, "k").json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
         replayed_session = idempotency.replayed_session
 
         def erase_before_view(store, record):
             replayed = replayed_session(store, record)
             assert replayed == sid
-            m.db.delete_session(sid)
+            m.db.sessions.delete_session(sid)
             return replayed
 
         monkeypatch.setattr(idempotency, "replayed_session", erase_before_view)
@@ -401,13 +401,13 @@ def test_replay_view_uses_its_snapshot_if_erasure_commits_during_rendering(tmp_p
     with TestClient(create_app(m), raise_server_exceptions=False) as client:
         app_id, auth = _key(client, "shop", "sessions")
         sid = _post(client, auth, "k").json()["id"]
-        wait_for(lambda: m.db.get_session(sid)["status"] == "done")
-        snapshot = m.db.get_session(sid)
+        wait_for(lambda: m.db.sessions.get_session(sid)["status"] == "done")
+        snapshot = m.db.sessions.get_session(sid)
         summary = m.summary
 
         def erase_during_view(session):
             result = summary(session)
-            m.db.delete_session(sid)
+            m.db.sessions.delete_session(sid)
             return result
 
         monkeypatch.setattr(m, "summary", erase_during_view)

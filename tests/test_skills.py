@@ -879,7 +879,7 @@ def test_injection_only_when_enabled_and_scoped(tmp_path):
         assert app["skills"] == []
         job = m.create("hello", project="scratch", job_id="job1")
         assert job["skills"] == []
-        assert m.db.get_session(before["id"])["skills"] == []
+        assert m.db.sessions.get_session(before["id"])["skills"] == []
         store.set_enabled("commit-style", False)
         later = m.create("hello", project="scratch")
         assert later["skills"] == []
@@ -905,7 +905,7 @@ def test_propose_skill_tool_on_owner_session_only(tmp_path):
     async def body():
         s = m.create("Please draft a commit-style skill.")
         await wait_status(m, s["id"], "done")
-        names = [t["function"]["name"] for t in m.runner.tool_schemas(m.db.get_session(s["id"]), m.runner.workspace(m.db.get_session(s["id"])))]
+        names = [t["function"]["name"] for t in m.runner.tool_schemas(m.db.sessions.get_session(s["id"]), m.runner.workspace(m.db.sessions.get_session(s["id"])))]
         assert "propose_skill" in names
         proposals = m.skills.db.list_skill_proposals()
         assert proposals

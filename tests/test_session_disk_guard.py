@@ -26,7 +26,7 @@ def test_a_low_temp_filesystem_does_not_refuse_sessions(monkeypatch, tmp_path):
 
     async def body():
         sid = m.create("hello")["id"]
-        assert m.db.get_session(sid) is not None
+        assert m.db.sessions.get_session(sid) is not None
         await m.stop()
     asyncio.run(body())
 

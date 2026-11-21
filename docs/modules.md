@@ -241,7 +241,7 @@ redeem mints the owner key with `create_api_key`). A store is cheap to build, so
 | images | `ImageStore` | `images` |
 
 The tables themselves stay in the core's frozen baseline and migrations, so existing installs and backups keep their
-schema while a module is absent (#334). `Database.job_sessions` stays in the core: it reads a scheduled job's sessions,
+schema while a module is absent (#334). `SessionStore.job_sessions` stays in the core: it reads a scheduled job's sessions,
 which are session rows on Web's store, not job rows. The `/keys` listing's per-key `requests` count is the endpoint
 module's (`ModuleRuntime.key_request_counts`, filled in by `SessionStores` on the list, the one-key read and an undone
 revoke); it is 0 while the module is absent. `tests/test_module_stores.py` fails on any `Database` method whose SQL
@@ -269,7 +269,8 @@ The core's own queries split the same way, one domain store per change (#992 sta
 New code calls the store. Old `db.<method>` calls keep working through a temporary forwarding shim on `Database`.
 `tests/test_database_shim.py` pins the forwarded names for each store, so the shim can only shrink.
 `await db.aio.<method>()` and `SessionStores` reach the store through the shim too. A store can land with its callers
-moved and no shim: `db.accounts`, `db.apps` and `db.usage` forward nothing, and a source scan in that test fails
+moved and no shim: `db.accounts`, `db.apps` and `db.usage` forward nothing, and since #992 stage 6 neither does
+`db.sessions`, and a source scan in that test fails
 on a call to any of their methods that isn't made on that store. `operation_audit` writes through the account store of the database it is given.
 
 Session methods go through a routing proxy, and the key listings still go through `m.db`:
@@ -291,10 +292,13 @@ Session methods go through a routing proxy, and the key listings still go throug
   `core_store("sessions")` still refuses, so a wrapper without its own proxy fails instead of misrouting. A Web route
   (`for_app("")`, `for_app(WEB_APP_ID)`, or `for_session` of an owner or member session) returns Web's Database
   itself, so its `sessions` is Web's own store: the one that holds those sessions. Events and search, checkpoints,
-  artifacts, review comments, secret dismissals, approvals and smart reviews are called only through a `sessions`
-  store or proxy, as are the names added in stage 6. A scan fails on any call to a `SessionStore` method that
-  `Database` no longer forwards, if it isn't made on a `sessions` store or proxy. The session rows, counts and lists
-  still work on `m.db` through the shim until their callers move. Every route, and
+  artifacts, review comments, secret dismissals, approvals and smart reviews, and the session rows, lists and counts
+  (`get_session`, `update_session`, `list_sessions`, `count_sessions` and the rest) are called only through a
+  `sessions` store or proxy: `Database` forwards no session method. A wrapper asked for a `SessionStore` method
+  itself (`m.db.get_session`, `for_app(app_id).insert_session`, `scope(app_id).list_sessions`) raises, pointing at
+  its `sessions` proxy. SessionStores' own overrides (`m.db.list_sessions`) are real methods the proxy runs, so
+  they still answer; a scan fails on any call to a `SessionStore` method that isn't made on a `sessions` store or
+  proxy. Every route, and
   every Database that `SessionStores` opens, hands out the main store's `credentials`, `accounts`, `apps` and
   `usage`. `app_stores._STORE_HOME` records where each store's rows live, and a new store must add itself there.
 - **Key listings.** The listing overrides on `SessionStores` (`list_api_keys`, `get_api_key_listing`,
@@ -402,7 +406,7 @@ These are names, not imports, and move with the config and storage split in stag
   `harness_modules.skills.service`, `harness_modules.skills.skill_review`, and `harness_modules.skills.skill_validate`.
 
 - Jobs: `JobsConfig`, the `jobs:` YAML section and profile switch, the jobs/templates tables' schema (their queries
-  are the module's `JobStore`, #992), `Database.job_sessions`, scheduled-session fields, and the `/jobs` and `/templates` access rules remain core names.
+  are the module's `JobStore`, #992), `SessionStore.job_sessions`, scheduled-session fields, and the `/jobs` and `/templates` access rules remain core names.
   `harness/job_results.py` is the shared STATUS and notification-summary protocol: the runner still records
   results for existing scheduled sessions even when the jobs package is absent, and notifications does not
   import the jobs add-on: it reads a run's job through `ModuleHost.scheduled_job`. Scheduling, owner/admin routes, settings and CLI rows live in `harness_modules/jobs`.

@@ -84,7 +84,7 @@ def test_local_session_sends_only_app_tools_and_denies_a_builtin_the_model_tries
             "prompt": "How much is in checking?", "tools_only": True, "tools": [BALANCE]})
         assert s.status_code == 201, s.text
         sid = s.json()["id"]
-        row = m.db.get_session(sid)
+        row = m.db.sessions.get_session(sid)
         assert row["kind"] == TOOLS_ONLY and row["project"] == "" and row["app_id"] == key["id"]
         assert "only tools are the App's own tools" in row["context"][0]["content"]
 
@@ -101,9 +101,9 @@ def test_local_session_sends_only_app_tools_and_denies_a_builtin_the_model_tries
         assert decided["run_shell"]["decision"] == DENY
         assert decided["get_balance"]["decision"] == ALLOW
         assert ran == [] and m.db.sessions.pending_approvals(sid) == []
-        denied = next(c for c in m.db.get_session(sid)["context"] if c.get("tool_call_id") == "c0-run_shell")
+        denied = next(c for c in m.db.sessions.get_session(sid)["context"] if c.get("tool_call_id") == "c0-run_shell")
         assert "App-tools-only" in denied["content"]
-        final = m.db.get_session(sid)
+        final = m.db.sessions.get_session(sid)
         assert [t["kind"] for t in final["taint"]] == ["app_tool"]  # App tool results are untrusted (#262)
         wait_for(lambda: not Path(final["workspace"]).exists())  # the throwaway working directory goes with the run
         assert m.cfg.projects == projects_before
@@ -133,7 +133,7 @@ def test_local_session_answers_the_hosted_alias_instead_of_leaving_it_pending(tm
             client.get(f"/api/v1/sessions/{sid}", headers=auth).json()))
         assert done["answer"] == "I could not check the balance."
         assert client.get(f"/api/v1/sessions/{sid}/tool_calls", headers=auth).json() == []
-        result = next(c for c in m.db.get_session(sid)["context"]
+        result = next(c for c in m.db.sessions.get_session(sid)["context"]
                       if c.get("tool_call_id") == "c0-mcp__harness__get_balance")
         assert "unknown tool 'mcp__harness__get_balance'" in result["content"]
 
@@ -166,7 +166,7 @@ def test_refusals(tmp_path, credential, body, status, code):
         assert r.status_code == status, r.text
         if code:
             assert r.json()["error"]["code"] == code
-        assert m.db.list_sessions(50, kind=TOOLS_ONLY) == []
+        assert m.db.sessions.list_sessions(50, kind=TOOLS_ONLY) == []
 
 
 def test_capability_discovery_lists_supporting_backends(tmp_path):
@@ -311,7 +311,7 @@ def test_hosted_claude_reaches_only_app_tools_and_builtins_are_denied(tmp_path):
         decided = [(e["name"], e["decision"]) for e in events(m, sid, "tool_call")]
         assert decided == [("Bash", DENY), ("mcp__harness__web_search", DENY), ("mcp__harness__get_balance", ALLOW)]
         assert m.db.sessions.pending_approvals(sid) == []
-        assert not Path(m.db.get_session(sid)["workspace"]).exists()
+        assert not Path(m.db.sessions.get_session(sid)["workspace"]).exists()
         await m.stop()
     asyncio.run(body())
 

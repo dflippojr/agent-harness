@@ -79,7 +79,7 @@ def jobs_on(request: Request):
 
 
 def job_view(m, job: dict, runs: int = 1) -> dict:
-    recent = m.db.job_sessions(job["id"], limit=runs)
+    recent = m.db.sessions.job_sessions(job["id"], limit=runs)
     return {**job, "enabled": bool(job["enabled"]), "recent": recent}
 
 
@@ -187,7 +187,7 @@ async def run_job(jid: str, request: Request):
     if job["last_session_id"] and m._is_active(job["last_session_id"]):
         raise HarnessError(409, "the previous run is still going")
     sid = m.jobs.run(job, manual=True, context=operation_audit.request_context(request, m))
-    return m.summary(m.db.get_session(sid))
+    return m.summary(m.db.sessions.get_session(sid))
 
 
 # templates

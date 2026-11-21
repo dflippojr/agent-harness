@@ -3,7 +3,7 @@ place.
 
 - `harness/runner.py`, and the hosted half it mixes in (`harness/hosted_runs.py`), have no vendor-named methods and no
   dispatch on a transport's class: every backend's records go through its translator to `Runner._apply`.
-- That code writes the session's `run` only through `Database.patch_run` (or `unset_run`), never as a whole value.
+- That code writes the session's `run` only through `SessionStore.patch_run` (or `unset_run`), never as a whole value.
 - The transports' old names still import from `harness.cli_backends` for one release, as the same objects.
 """
 from __future__ import annotations
