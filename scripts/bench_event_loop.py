@@ -1,7 +1,7 @@
 """Benchmark how long SQLite work blocks the daemon's event loop (#257, #294).
 
 Runs in one process on one asyncio loop against a temp database, the way the daemon does: fake sessions await
-`db.aio.insert_event` (what `EventBus.aemit` does; some events are ~1 MB tool results), a searcher runs
+`db.sessions.aio.insert_event` (what `EventBus.aemit` does; some events are ~1 MB tool results), a searcher runs
 `search.search` and the `session_search` tool in worker threads (as `api.search` and `SessionSearch.call` do), and a
 scraper renders `/metrics` in a worker thread (as `api.metrics` does). Before #294 the sessions and the searcher
 called the Database synchronously on the loop. The always-on loop-lag probe and the per-method lock-hold histograms

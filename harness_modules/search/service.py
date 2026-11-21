@@ -1,8 +1,9 @@
 """Full-text search over past sessions (SQLite FTS5, no model involved).
 
 Every persisted event that carries text the user or an agent might look for later is indexed as it's written
-(`Database.insert_event`): session titles, user messages, assistant replies and the tools they called, tool results
-(capped), final answers, and app context. The index lives in the session database, so backups carry it.
+(`SessionStore.insert_event`, called as `db.sessions.insert_event`): session titles, user messages, assistant replies
+and the tools they called, tool results (capped), final answers, and app context. The index lives in the session
+database, so backups carry it.
 
 Used by the phone app (GET /search) and by agents through two daemon-side tools:
 - `session_search` finds sessions and shows the best-matching passages;

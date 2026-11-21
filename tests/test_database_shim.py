@@ -594,7 +594,8 @@ def test_the_session_scan_allows_a_managers_and_a_classs_own_methods(tmp_path):
 
 def test_the_session_scan_allows_only_the_listed_data_reads(tmp_path):
     """Only the reads `DATA_READS` lists pass, by file, receiver and name: a Database or store of any name (`m.db`,
-    `self._db`), a call, another receiver in the same file, or the same read in another file is reported."""
+    `self._db`), another receiver in the same file, the same read in another file, and a listed receiver's name when
+    it is called, handed to `to_thread` or `awrite`, or reached through `.aio` are reported."""
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "real_env_lane.py").write_text(
         "import asyncio\n"
@@ -610,7 +611,13 @@ def test_the_session_scan_allows_only_the_listed_data_reads(tmp_path):
         "    result.events\n"                             # line 11: not listed for this file
         "class Lane:\n"
         "    def g(self, sid):\n"
-        "        return asyncio.to_thread(self._db.pending_approvals, sid)\n",  # line 14: a Database of any name
+        "        return asyncio.to_thread(self._db.pending_approvals, sid)\n"  # line 14: a Database of any name
+        "async def k(run, sid, db):\n"
+        "    run.events(sid)\n"                           # line 16: a listed receiver, called
+        "    await run.aio.events(sid)\n"                 # line 17: a listed receiver, through .aio
+        "    run.aio.events\n"                            # line 18: through .aio, uncalled
+        "    await asyncio.to_thread(run.events, sid)\n"  # line 19: a listed receiver's bound method, handed off
+        "    await db.awrite(run.events, sid)\n",         # line 20: the same, handed to awrite
         encoding="utf-8")
     (tmp_path / "scripts" / "other.py").write_text(
         "def h(run):\n"
@@ -620,7 +627,9 @@ def test_the_session_scan_allows_only_the_listed_data_reads(tmp_path):
     found = _uses_off_the_store(tmp_path / "scripts", "sessions", frozenset({"events", "pending_approvals"}), allowed)
     assert sorted(found) == ["scripts/other.py:2 .events", "scripts/real_env_lane.py:10 .pending_approvals",
                              "scripts/real_env_lane.py:11 .events", "scripts/real_env_lane.py:14 .pending_approvals",
-                             "scripts/real_env_lane.py:9 .events"]
+                             "scripts/real_env_lane.py:16 .events", "scripts/real_env_lane.py:17 .events",
+                             "scripts/real_env_lane.py:18 .events", "scripts/real_env_lane.py:19 .events",
+                             "scripts/real_env_lane.py:20 .events", "scripts/real_env_lane.py:9 .events"]
     assert allowed == {("scripts/real_env_lane.py", "run", "events"), ("scripts/real_env_lane.py", "self", "events")}
 
 
@@ -689,7 +698,8 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
     allowed: for apps and sessions, `self.<name>` inside a class that defines `<name>` itself (`Manager.app_limits`,
     the effective caps; SessionStores' own overrides); for sessions, `m.<name>` for a method of the Manager (`m`) of
     that name (`checkpoints`, the listing, and `add_review_comment`), and the data reads `DATA_READS` names (file,
-    receiver and name: `run.events` in `scripts/real_env_lane.py`); for accounts, an `accounts` stand-in
+    receiver and name: `run.events` in `scripts/real_env_lane.py`), only as a plain read: not called, not handed to
+    `to_thread` or `awrite`, and not through `.aio`; for accounts, an `accounts` stand-in
     (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`. Each allowed data read is added to
     `allowed`, when given."""
     import ast
@@ -707,6 +717,11 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
             for inner in ast.walk(cls_node):
                 own_methods[id(inner)] = methods
         rel = path.relative_to(root.parent).as_posix()
+        used = set()  # each node called, or handed as a bound method to `to_thread` or `awrite`: never a data read
+        for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+            used.add(id(call.func))
+            if getattr(call.func, "attr", getattr(call.func, "id", None)) in ("to_thread", "awrite"):
+                used.update(id(a) for a in call.args)
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Attribute) and node.attr in names):
                 continue
@@ -720,7 +735,8 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
                 continue
             if store == "sessions" and isinstance(on, ast.Name) and on.id == "m" and node.attr in vars(Manager):
                 continue
-            if store == "sessions" and (read := (rel, ast.unparse(on), node.attr)) in DATA_READS:
+            if store == "sessions" and on is node.value and id(node) not in used and \
+                    (read := (rel, ast.unparse(on), node.attr)) in DATA_READS:
                 if allowed is not None:
                     allowed.add(read)
                 continue
