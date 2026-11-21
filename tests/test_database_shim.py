@@ -597,10 +597,13 @@ def test_the_session_scan_allows_a_declared_data_attribute_only_uncalled(tmp_pat
         "import asyncio\n"
         "class Run:\n"
         "    events: list[dict]\n"                         # a field of that name
-        "def f(run, db, sid):\n"
+        "def f(run, db, m, stores, self, sid):\n"
         "    [e for e in run.events]\n"                    # the field, read: fine
         "    db.sessions.events(sid)\n"                    # on the proxy: fine
         "    db.events(sid)\n"                             # line 7: a call is never a field
+        "    asyncio.to_thread(m.db.events, sid)\n"        # line 8: a Database's bound method, field or not
+        "    asyncio.to_thread(stores.for_session(sid).events, sid)\n"  # line 9: nor a route's
+        "    reversed(self.events)\n"                      # the field, handed on: fine
         "    return run.events\n",                         # the field again: fine
         encoding="utf-8")
     (tmp_path / "pkg" / "other.py").write_text(
@@ -609,7 +612,7 @@ def test_the_session_scan_allows_a_declared_data_attribute_only_uncalled(tmp_pat
         "    return asyncio.to_thread(m.db.events, sid)\n",  # line 3: no field here, a bound method
         encoding="utf-8")
     assert sorted(_uses_off_the_store(tmp_path / "pkg", "sessions", frozenset({"events"}))) == [
-        "pkg/lane.py:7 .events", "pkg/other.py:3 .events"]
+        "pkg/lane.py:7 .events", "pkg/lane.py:8 .events", "pkg/lane.py:9 .events", "pkg/other.py:3 .events"]
 
 
 ACCOUNT_TABLES = ("accounts", "account_audit", "member_projects", "github_connections", "member_api_keys",
@@ -650,13 +653,26 @@ def test_the_scans_cover_every_package_with_python_in_it():
     assert not names & {"tests", ".venv", ".git"}
 
 
+# What a Database or session store is held as: `db`, `m.db`, `self.web`, `stores`, `store`. A use on one is never a
+# data attribute, even where a class in the file declares one of that name (review r1 on #1039).
+_DATABASES = frozenset({"db", "web", "main", "store", "stores"})
+
+
+def _data_receiver(on) -> bool:
+    """`on` is a plain name or attribute (`run`, `self`, `result`) that does not hold a Database or store."""
+    import ast
+    last = on.id if isinstance(on, ast.Name) else on.attr if isinstance(on, ast.Attribute) else None
+    return last is not None and last not in _DATABASES
+
+
 def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -> list[str]:
     """Each use of a method name of core store `store` (or of `names`, some of them: a call, or a bound method handed
     to `to_thread` or `awrite`) not made on that store: `<x>.<store>.<name>` or `<x>.<store>.aio.<name>`. Also
     allowed: for apps and sessions, `self.<name>` inside a class that defines `<name>` itself (`Manager.app_limits`,
     the effective caps; SessionStores' own overrides); for sessions, `m.<name>` for a method of the Manager (`m`) of
     that name (`checkpoints`, the listing, and `add_review_comment`), and, uncalled, a data attribute that a class in
-    the same file declares (`real_env_lane.SessionRun.events`, a field: `run.events`); for accounts, an `accounts`
+    the same file declares, on a receiver that is not a Database or store (`real_env_lane.SessionRun.events`, a
+    field: `run.events`; never `m.db.events`); for accounts, an `accounts`
     stand-in (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`."""
     import ast
     cls = STORES[store]
@@ -692,7 +708,7 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -
                 continue
             if store == "sessions" and isinstance(on, ast.Name) and on.id == "m" and node.attr in vars(Manager):
                 continue
-            if store == "sessions" and node.attr in fields and id(node) not in called:
+            if store == "sessions" and node.attr in fields and id(node) not in called and _data_receiver(on):
                 continue
             if store == "accounts" and ((isinstance(on, ast.Name) and on.id == "accounts") or (
                     isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store")):
