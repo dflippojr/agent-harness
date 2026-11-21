@@ -580,7 +580,7 @@ class Manager:
             async with namespace_audit.login_operation(self.db, app_id, end_user, context, "login.start",
                                                        attempt_id, backend) as audit:
                 await asyncio.to_thread(self.db.for_app(app_id).sessions.register_end_user, end_user)
-                app = self.db.main.get_api_key(app_id) or {}
+                app = self.db.main.credentials.get_api_key(app_id) or {}
                 store = namespace_audit.LoginStore(self.db, app_id, end_user, app.get("retention_days"), backend)
                 return await self.end_user_logins.start(app_id, end_user, backend,
                     on_finish=store.finish(context, audit["operation_id"]), attempt_id=attempt_id)
@@ -979,7 +979,7 @@ class Manager:
         self._refuse_during_operation(sid)
         self._refuse_unsettled(s)
         # A device's hosted session from before `create` refused it would only fail when it runs: say so now (#786).
-        self._refuse_hosted(self.db.get_api_key(s["app_id"]) if s.get("app_id") else None, s.get("backend") or "local")
+        self._refuse_hosted(self.db.credentials.get_api_key(s["app_id"]) if s.get("app_id") else None, s.get("backend") or "local")
         if s["status"] not in ACTIVE:
             user_id = session_user_id(s)
             if user_id != OWNER_USER_ID:
@@ -1009,7 +1009,7 @@ class Manager:
                                                caps=False)
                 self._enforce_queue_caps(current)
                 run = new_run(carry=current["run"])
-                app_key = self.db.get_api_key(current["app_id"]) if current.get("app_id") else None
+                app_key = self.db.credentials.get_api_key(current["app_id"]) if current.get("app_id") else None
                 if getattr(self, "settings", None):
                     turns, tokens = self.settings.session_budgets(app_key, session=current)
                     run["max_turns"] = turns
@@ -1314,7 +1314,7 @@ class Manager:
                            model=model, backend=backend, title=s["title"], owner_id=s.get("owner_id", "owner"),
                            skills=[item["slug"] for item in (s.get("skills") or []) if item.get("slug")],
                            skill_missing="skip", context=context,
-                           app=self.db.get_api_key(s["app_id"]) if s.get("app_id") else None,
+                           app=self.db.credentials.get_api_key(s["app_id"]) if s.get("app_id") else None,
                            app_tools=[AppTool.model_validate(tool) for tool in (s.get("app_tools") or [])],
                            app_context="", app_metadata=s.get("app_metadata"),
                            retention_days=s.get("retention_days"),
@@ -2081,7 +2081,7 @@ class Manager:
 
     def restore_app(self, app_id: str) -> tuple[dict, str]:
         """Undo the revoke of App `app_id` during its erasure grace; returns its key row and new token."""
-        restored = self.db.restore_api_key(app_id)
+        restored = self.db.restore_listed_api_key(app_id)
         if restored is None:
             raise HarnessError(404, "no App with a pending erasure has that id")
         return restored
@@ -2098,7 +2098,7 @@ class Manager:
                 report["apps_erased"].append(row["id"])
             except Exception:  # noqa: BLE001 - unresolved intent prevents repeating external effects
                 log.warning("App erasure incomplete; inspect aggregate receipt")
-        defaults = {k["id"]: k.get("retention_days") for k in self.db.main.list_api_keys()}
+        defaults = {k["id"]: k.get("retention_days") for k in self.db.main.credentials.list_api_keys()}
         for app_id in defaults:
             if not self.db.store_path(app_id).is_file() or app_id == "app-web":
                 continue
@@ -2247,7 +2247,7 @@ class Manager:
 
     def app_provider_status(self, app_id: str, backend: str) -> dict:
         managed = self.db.credentials.app_provider_managed(app_id)
-        if hosted_refused(self.db.get_api_key(app_id), self.cfg.backends.get(backend)):  # as `create` refuses it
+        if hosted_refused(self.db.credentials.get_api_key(app_id), self.cfg.backends.get(backend)):  # as `create` refuses it
             return {"managed": managed, "allowed": False, "policy": "denied", "models": [],
                     "credential_source": "server_default", "available": False}
         row = self.db.credentials.app_provider_credential(app_id, backend)
@@ -2263,7 +2263,7 @@ class Manager:
 
     def set_app_provider_credential(self, app_id: str, backend: str, secret_ref: str, policy: str,
                                     models: list[str]) -> dict:
-        app = self.db.get_api_key(app_id)
+        app = self.db.credentials.get_api_key(app_id)
         if app is None or app.get("kind") != "app" or app.get("revoked_at") is not None:
             raise HarnessError(404, "no active app with that id")
         if backend not in self.cfg.backends or not self.cfg.backends[backend].enabled:

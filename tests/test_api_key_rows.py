@@ -30,7 +30,7 @@ def _request(db: Database, rid: str, kind: str, origin: str, now: float, catalog
 
 def _create(kind: str, origins: list[str] | None, catalog_app_id: str):
     def mint(db: Database):
-        return db.create_api_key("laptop", "inference sessions", kind, origins, catalog_app_id)
+        return db.credentials.create_api_key("laptop", "inference sessions", kind, origins, catalog_app_id)
     return mint
 
 

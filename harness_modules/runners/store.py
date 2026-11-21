@@ -58,7 +58,7 @@ class RunnerPairingStore(ModuleStore):
             if pairing["expires_at"] <= now:
                 return None, None, "", "runner pairing code expired"
             # The core's one api_keys insert (#843), in this transaction; a runner's owner key has a NULL catalog id.
-            key, secret = self.core.create_api_key(pairing["name"], "admin", "owner", [], catalog_app_id=None, now=now)
+            key, secret = self.core.credentials.create_api_key(pairing["name"], "admin", "owner", [], catalog_app_id=None, now=now)
             self.conn.execute("UPDATE runner_pairing_codes SET used_at = ?, key_id = ? WHERE id = ?",
                               (now, key["id"], pairing["id"]))
         return dict(pairing), key, secret, ""

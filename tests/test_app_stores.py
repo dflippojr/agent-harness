@@ -439,8 +439,8 @@ def test_lists_searches_and_lookups_reach_only_the_app_they_name(tmp_path):
 
 def test_app_metadata_counts_sessions_usage_and_errors_without_their_content(tmp_path):
     stores = SessionStores(Database(tmp_path / "harness.sqlite3"), tmp_path / "apps")
-    app, _ = stores.main.create_api_key("shop", "sessions", "app")
-    stores.main.create_api_key("control-center", "admin", "owner")
+    app, _ = stores.main.credentials.create_api_key("shop", "sessions", "app")
+    stores.main.credentials.create_api_key("control-center", "admin", "owner")
     assert stores.app_metadata(app["id"]) == {"sessions": {}, "usage": {"requests": 0, "prompt_tokens": 0,
                                               "completion_tokens": 0, "cost_usd": 0}, "errors": 0,
                                               "last_error": "", "last_error_at": None}
@@ -455,7 +455,7 @@ def test_app_metadata_counts_sessions_usage_and_errors_without_their_content(tmp
     assert meta["usage"] == {"requests": 1, "prompt_tokens": 10, "completion_tokens": 5, "cost_usd": 0.25}
     assert meta["errors"] == 1 and meta["last_error"] == "quota_exceeded" and meta["last_error_at"]
     assert "checking" not in json.dumps(meta)
-    keys = {k["kind"]: k for k in stores.list_api_keys()}
+    keys = {k["kind"]: k for k in stores.listed_api_keys()}
     assert keys["app"]["store"] == meta and "store" not in keys["owner"]
     stores.close()
 

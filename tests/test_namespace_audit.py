@@ -32,7 +32,7 @@ def setup(tmp_path, monkeypatch):
     m = Manager(cfg, chat=Script([]))
     monkeypatch.setattr(m, "_spawn", lambda sid: None)
     members = [AccountService(m).create("owner", f"{name}@example.com", name) for name in ("alice", "bob")]
-    apps = [m.db.main.create_api_key(name, "sessions approvals", kind="app") for name in ("app-a", "app-b")]
+    apps = [m.db.main.credentials.create_api_key(name, "sessions approvals", kind="app") for name in ("app-a", "app-b")]
     headers = [{"Authorization": "Bearer " + secret} for _, secret in apps]
     with TestClient(create_app(m)) as client:
         yield m, client, members, apps, headers
@@ -75,7 +75,7 @@ def test_two_apps_two_members_owner_guesses_and_cursor(setup):
     assert m.db.main.accounts.audit_page(action="session.create")["items"] == []
     assert m.db.main.conn.execute("SELECT COUNT(*) FROM namespace_audit").fetchone()[0] == 0
     # sessions:all never grants another namespace's audit, including Web/member detail.
-    _, broad = m.db.main.create_api_key("broad", "sessions:all", kind="app")
+    _, broad = m.db.main.credentials.create_api_key("broad", "sessions:all", kind="app")
     assert page(client, {"Authorization": "Bearer " + broad})["items"] == []
 
 
@@ -451,7 +451,7 @@ def test_failed_approval_uses_verified_approval_target_and_drops_guesses(setup):
 
 def test_cross_origin_app_can_read_audit_gap_warning(setup, monkeypatch):
     m, client, _, _, _ = setup
-    _, secret = m.db.main.create_api_key("paired-browser", "sessions", "app", ["https://app.example"])
+    _, secret = m.db.main.credentials.create_api_key("paired-browser", "sessions", "app", ["https://app.example"])
     def fail(*args, **kwargs):
         raise OSError(PRIVATE)
     monkeypatch.setattr(SessionStore, "insert_namespace_audit", fail)

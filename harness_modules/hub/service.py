@@ -37,7 +37,7 @@ def connection_state(row, now):
 
 def apps(db, now):
     out = []
-    for row in db.list_api_keys():
+    for row in db.listed_api_keys():
         item = {key: row.get(key) for key in KEY_FIELDS}
         store = row.get("store") or {}
         item["store"] = {key: store.get(key) for key in STORE_FIELDS}

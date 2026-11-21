@@ -78,7 +78,7 @@ def test_routes_use_fake_service_and_preserve_error_codes(tmp_path):
             return dict(project=project, **kwargs)
 
     m.modules.get('remote_control').service = Fake()
-    app_record = m.db.create_api_key('rc-test', 'remote_control', kind='app')
+    app_record = m.db.credentials.create_api_key('rc-test', 'remote_control', kind='app')
     # create_api_key returns the record and the raw bearer token.
     headers = {'Authorization': 'Bearer ' + app_record[1]}
     with TestClient(create_app(m)) as client:
@@ -125,8 +125,8 @@ def test_a_device_key_needs_the_owner_granted_scope(tmp_path):
             return dict(project=project, **kwargs)
 
     m.modules.get('remote_control').service = Fake()
-    scoped = {'Authorization': 'Bearer ' + m.db.create_api_key('rc-phone', 'remote_control', kind='device')[1]}
-    unscoped = {'Authorization': 'Bearer ' + m.db.create_api_key('phone', 'sessions', kind='device')[1]}
+    scoped = {'Authorization': 'Bearer ' + m.db.credentials.create_api_key('rc-phone', 'remote_control', kind='device')[1]}
+    unscoped = {'Authorization': 'Bearer ' + m.db.credentials.create_api_key('phone', 'sessions', kind='device')[1]}
     with TestClient(create_app(m)) as client:
         for path in ('/api/v1/remote-control/fake', '/api/v1/remote-control/fake/stop'):
             refused = client.post(path, headers=unscoped)

@@ -62,7 +62,7 @@ def restrict_app_id(db, caller_session_id: str) -> str | None:
     app_id = caller.get("app_id") or ""
     if not app_id:
         return None
-    key = db.get_api_key(app_id)
+    key = db.credentials.get_api_key(app_id)
     if key is None or key.get("revoked_at") is not None:
         return app_id
     scopes = set((key.get("scopes") or "").split())

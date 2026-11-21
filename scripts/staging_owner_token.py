@@ -83,10 +83,10 @@ def mint(data_dir: Path, token_file: Path, harness_root: Path | None = None) -> 
 
     db = Database(Path(data_dir_raw) / "harness.sqlite3")
     try:
-        for key in db.list_api_keys():
+        for key in db.credentials.list_api_keys():
             if not key.get("revoked_at"):
                 db.credentials.revoke_api_key(key["id"])
-        row, secret = db.create_api_key("staging owner", scopes="admin", kind="owner")
+        row, secret = db.credentials.create_api_key("staging owner", scopes="admin", kind="owner")
     finally:
         db.close()
 

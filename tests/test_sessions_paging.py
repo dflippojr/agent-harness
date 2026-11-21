@@ -131,7 +131,7 @@ def test_cross_origin_web_can_read_the_page_cursor(tmp_path):
     from test_daemon import Script, make_cfg
 
     m = Manager(make_cfg(tmp_path), chat=Script([Completion(content="hi")]))
-    _, token = m.db.main.create_api_key("web", "admin", "owner", origins=["https://web.example"])
+    _, token = m.db.main.credentials.create_api_key("web", "admin", "owner", origins=["https://web.example"])
     with TestClient(create_app(m)) as client:
         _seed(m.db, 5)
         response = client.get("/api/admin/v1/sessions", params={"limit": 2}, headers={

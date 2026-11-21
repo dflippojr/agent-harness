@@ -164,12 +164,12 @@ def test_every_key_listing_counts_its_requests_from_the_endpoint_module(tmp_path
         assert all(k["requests"] == 0 for kid, k in listed.items() if kid not in (a_id, b_id))
         one = client.put(f"/api/admin/v1/apps/{a_id}/retention", json={"retention_days": 30})
         assert one.status_code == 200 and one.json()["requests"] == want_a
-        assert m.db.get_api_key_listing(b_id)["requests"] == want_b
+        assert m.db.listed_api_key(b_id)["requests"] == want_b
 
         assert client.delete(f"/keys/{a_id}").status_code == 204
         restored = client.post(f"/api/admin/v1/apps/{a_id}/restore")
         assert restored.status_code == 200 and restored.json()["requests"] == want_a
-        assert "requests" not in m.db.main.get_api_key_listing(a_id)  # the core's own row counts nothing
+        assert "requests" not in m.db.main.credentials.get_api_key_listing(a_id)  # the core's own row counts nothing
     m.db.close()
 
 
@@ -195,7 +195,7 @@ def test_logging_a_request_never_marks_a_revoked_key_used(tmp_path):
     with TestClient(create_app(m)) as client:
         kid = client.post("/keys", json={"name": "fake"}).json()["id"]
     _log(m, kid)
-    used = m.db.get_api_key(kid)["last_used_at"]
+    used = m.db.credentials.get_api_key(kid)["last_used_at"]
     assert used is not None
     assert m.db.main.credentials.revoke_api_key(kid)
     _log(m, kid, status=499)
@@ -203,5 +203,5 @@ def test_logging_a_request_never_marks_a_revoked_key_used(tmp_path):
         statuses = [r[0] for r in m.db.main.conn.execute(
             "SELECT status FROM endpoint_requests WHERE key_id = ? ORDER BY id", (kid,)).fetchall()]
     assert statuses == [200, 499]
-    assert m.db.main.get_api_key(kid)["last_used_at"] == used
+    assert m.db.main.credentials.get_api_key(kid)["last_used_at"] == used
     m.db.close()

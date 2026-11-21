@@ -173,7 +173,7 @@ def _session_kind(name: str) -> str | None:
 
 def _refuse_session_name(name: str) -> None:
     """A `SessionStore` method asked of a wrapper itself rather than of its `sessions` proxy: refused, so a call left
-    over from the forwarding shim (#992 stage 6) fails rather than taking an older route."""
+    over from the removed forwarding shim (#992 stage 6) fails rather than taking an older route."""
     if name in _SESSION_METHODS:
         raise AttributeError(f"{name} is a SessionStore method: call it on this wrapper's `sessions` routing proxy")
 
@@ -213,9 +213,8 @@ class _RoutedSessions:
     has `SessionStore`'s methods, and its wrapper routes each call to the store that holds the rows, held for that call
     only (never a method bound to one Database's store, which could outlive the hold):
 
-    - `SessionStores.sessions` by session id, as `SessionStores` routes the forwarded names (a write about an erased
-      App session refused), SessionStores' own overrides, and Web's store otherwise; an App's own rows (`_APP_ROWS`)
-      refused.
+    - `SessionStores.sessions` by session id (a write about an erased App session refused), SessionStores' own
+      overrides, and Web's store otherwise; an App's own rows (`_APP_ROWS`) refused.
     - `for_app(app_id).sessions` (and `for_session(sid).sessions` for an App session) on that App's store.
     - `scope(app_id).sessions` as `SessionStores.sessions`, with lists, searches and id lookups narrowed to what that
       App (or, for "", the owner) may see.
@@ -371,8 +370,8 @@ class SessionStores:
     def _open_store(self, app_id: str) -> Database:
         """Open App `app_id`'s store (or Web's). Its main-store core stores (`_STORE_HOME`: credentials, accounts,
         apps, usage) are the main store's (#992): the App registry, its per-App records, the usage log and the
-        household live there, so no route to this Database (`for_app`, `for_session`, a raw `db.<store>` or a
-        forwarded call) reaches its own empty copy."""
+        household live there, so no route to this Database (`for_app`, `for_session` or a raw `db.<store>`) reaches
+        its own empty copy."""
         db = Database(self.store_path(app_id))
         for name, home in _STORE_HOME.items():
             if home == "main":
@@ -649,18 +648,19 @@ class SessionStores:
             counts[e["status"]] = counts.get(e["status"], 0) + 1
         return counts
 
-    def list_api_keys(self) -> list[dict]:
-        """The key list (Settings → Apps), each App's and device's with its request count and its store's metadata."""
-        return [self._with_store(k) for k in self._with_requests(self.main.list_api_keys())]
+    def listed_api_keys(self) -> list[dict]:
+        """The key list (Settings → Apps), each App's and device's with its request count and its store's metadata:
+        `CredentialStore.list_api_keys` with what only SessionStores can add."""
+        return [self._with_store(k) for k in self._with_requests(self.main.credentials.list_api_keys())]
 
-    def get_api_key_listing(self, kid: str) -> dict | None:
-        """Key `kid` as `list_api_keys` lists it, read alone (#669)."""
-        key = self.main.get_api_key_listing(kid)
+    def listed_api_key(self, kid: str) -> dict | None:
+        """Key `kid` as `listed_api_keys` lists it, read alone (#669)."""
+        key = self.main.credentials.get_api_key_listing(kid)
         return self._with_store(self._with_requests([key])[0]) if key else None
 
-    def restore_api_key(self, kid: str) -> tuple[dict, str] | None:
-        """`Database.restore_api_key`, its row with the request count (and, as always, no store metadata)."""
-        restored = self.main.restore_api_key(kid)
+    def restore_listed_api_key(self, kid: str) -> tuple[dict, str] | None:
+        """`CredentialStore.restore_api_key`, its row with the request count (and, as always, no store metadata)."""
+        restored = self.main.credentials.restore_api_key(kid)
         if restored is None:
             return None
         row, key = restored
@@ -983,7 +983,7 @@ class SessionStores:
                 log.warning("Web store migration (dry run): no sessions to move; the main store stays in use")
                 return main
             web = self._open_store(WEB_APP_ID)
-            if not migrated or main.get_api_key(WEB_APP_ID) is None:
+            if not migrated or main.credentials.get_api_key(WEB_APP_ID) is None:
                 main.write(self._record_web_store, {"sessions": 0, "backup": ""})
             return web
         before = main.read(_session_row_counts, main, sids)

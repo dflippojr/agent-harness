@@ -3,9 +3,10 @@ claim, EventSource stream tickets, and App provider credentials.
 
 `CredentialStore` runs them on the main Database's writer queue, pooled readers and transactions; the Database
 builds it as `db.credentials`. Every key-minting path writes its row through `_insert_api_key` (#843), so the
-methods that mint a key live here with it. `Database` still forwards the few names whose call sites have not moved
-(`harness.db._Forwarded`, pinned in `tests/test_database_shim.py`). The App registry's per-App records (erasure,
-retention, session caps and settings) are `AppStore`'s (`db.apps`).
+methods that mint a key live here with it. Every caller calls them on the store (`db.credentials.<name>`): `Database`
+forwards nothing (#992 stage 6). SessionStores' key listings (`listed_api_keys`, `listed_api_key`,
+`restore_listed_api_key`) add each key's request count and App store metadata to this store's rows. The App
+registry's per-App records (erasure, retention, session caps and settings) are `AppStore`'s (`db.apps`).
 """
 
 from __future__ import annotations

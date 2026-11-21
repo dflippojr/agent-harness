@@ -143,7 +143,7 @@ def test_migration_adds_an_empty_column_to_existing_rows(tmp_path):
     assert db.conn.execute("PRAGMA user_version").fetchone()[0] == 55
     db.close()
     db = Database(path)  # and the later steps, which today's queries read
-    assert next(k for k in db.list_api_keys() if k["id"] == "k-old")["catalog_app_id"] == ""
+    assert next(k for k in db.credentials.list_api_keys() if k["id"] == "k-old")["catalog_app_id"] == ""
     assert next(p for p in db.credentials.list_pairing_codes() if p["id"] == "p-old")["catalog_app_id"] == ""
     assert list((tmp_path / "pre-migration").glob("harness-v54-*.sqlite3"))
     db.close()

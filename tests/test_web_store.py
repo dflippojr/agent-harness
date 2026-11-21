@@ -99,9 +99,9 @@ def test_the_migration_moves_every_owner_and_member_session_with_a_backup_once(t
     assert rows(path, "SELECT session_id FROM usage") == [("own1",)]
     assert stores.get_meta("profile_emoji") == "🦉"
     # Web is registered in the App registry under its reserved id, without a usable key, and the move is recorded.
-    web_app = stores.get_api_key(WEB_APP_ID)
+    web_app = stores.credentials.get_api_key(WEB_APP_ID)
     assert web_app["kind"] == "web" and web_app["revoked_at"] is None
-    assert WEB_APP_ID not in {k["id"] for k in stores.list_api_keys()}
+    assert WEB_APP_ID not in {k["id"] for k in stores.listed_api_keys()}
     record = json.loads(stores.get_meta(WEB_STORE_META))
     assert record["sessions"] == len(EVERYONE) and record["backup"] == str(backup)
     logged = " ".join(r.getMessage() for r in caplog.records)
@@ -205,7 +205,7 @@ def test_owner_surfaces_read_webs_store(tmp_path):
         with pytest.raises(ValueError):
             m.db.apps.mark_app_erased(WEB_APP_ID)
         assert not m.db.apps.set_app_retention(WEB_APP_ID, 1)
-        assert m.db.get_api_key(WEB_APP_ID)["revoked_at"] is None
+        assert m.db.credentials.get_api_key(WEB_APP_ID)["revoked_at"] is None
     m.db.close()
 
 

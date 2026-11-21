@@ -133,7 +133,7 @@ def test_full_stack_fake_model_failure_fixture_is_a_model_failure(monkeypatch, c
     monkeypatch.setenv(fake_model.ENV, str(fake_model.DEFAULT_FIXTURES))
     m = Manager(config_mod.load(config_dir, data_dir))
     try:
-        _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+        _, token = m.db.main.credentials.create_api_key("ui-testing", "admin", "owner")
         headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
         with TestClient(create_app(m)) as client:
             made = client.post("/api/v1/sessions", headers=headers,

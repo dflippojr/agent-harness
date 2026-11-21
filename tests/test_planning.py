@@ -243,7 +243,7 @@ def test_fake_model_receives_the_plan_and_nothing_stores_it(monkeypatch, tmp_pat
     monkeypatch.setattr(fake_model.FakeModel, "__call__", recording)
     m = Manager(config_mod.load(config_dir, data_dir))
     try:
-        _, token = m.db.main.create_api_key("ui-testing", "admin", "owner")
+        _, token = m.db.main.credentials.create_api_key("ui-testing", "admin", "owner")
         headers = {"Authorization": f"Bearer {token}", **fake_instance.CLIENT}
         with TestClient(create_app(m)) as client:
             made = client.post("/api/v1/sessions", headers=headers,

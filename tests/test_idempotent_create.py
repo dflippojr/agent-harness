@@ -104,7 +104,7 @@ def test_the_key_row_commits_with_the_session_and_a_second_insert_rolls_back(tmp
     client = TestClient(create_app(m))
     with client:
         app_id, _ = _key(client, "shop", "sessions")
-        app = m.db.get_api_key(app_id)
+        app = m.db.credentials.get_api_key(app_id)
         record = idempotency.new_record(app_id, "k1", BODY)
 
         async def create() -> dict:
@@ -341,7 +341,7 @@ def test_insert_uses_the_current_clock_for_cleanup_and_the_new_protection_window
         clock[0] += 61
 
         async def create():
-            return m.create("plan dinner", app=m.db.get_api_key(app_id), idempotency=record)
+            return m.create("plan dinner", app=m.db.credentials.get_api_key(app_id), idempotency=record)
 
         fresh = client.portal.call(create)
         assert fresh["id"] != first

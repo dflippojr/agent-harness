@@ -57,7 +57,7 @@ def register_admin(app: FastAPI, mgr, require_admin) -> list[dict]:
         header = request.headers.get("authorization") or ""
         token = header[7:].strip() if header.lower().startswith("bearer ") else ""
         if token:
-            key = mgr(request).db.api_key_by_secret(token)
+            key = mgr(request).db.credentials.api_key_by_secret(token)
             if key:
                 return key
         ident = getattr(request.state, "access", None)

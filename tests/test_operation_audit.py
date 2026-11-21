@@ -58,7 +58,7 @@ def approval(m, aid="a-test", sid="session1"):
 def test_approval_aliases(manager, path, source, approve):
     m = manager
     approval(m)
-    key, secret = m.db.create_api_key("test", "admin sessions approvals", kind="owner")
+    key, secret = m.db.credentials.create_api_key("test", "admin sessions approvals", kind="owner")
     with TestClient(create_app(m)) as client:
         response = client.post(path + "/sessions/session1/approvals/a-test",
                                json={"decision": "approve" if approve else "deny", "note": SENTINEL},
@@ -95,7 +95,7 @@ def test_legacy_stray_token_preserves_ambient_owner(manager, token_kind):
     if token_kind == "invalid":
         secret = "invalid-token"
     else:
-        key, secret = manager.db.create_api_key("test", "sessions", kind="app" if token_kind == "app" else "owner")
+        key, secret = manager.db.credentials.create_api_key("test", "sessions", kind="app" if token_kind == "app" else "owner")
         if token_kind == "revoked":
             manager.db.credentials.revoke_api_key(key["id"])
     headers = {"Authorization": "Bearer " + secret, local_owner.HEADER: manager.local_owner_token}
@@ -120,7 +120,7 @@ def test_rejected_approval_audit_failure_preserves_conflict(manager, monkeypatch
     approval(manager)
     manager.decide("session1", "a-test", True, context=CTX)
     fail_write(monkeypatch, manager.db, "failure")
-    _, secret = manager.db.create_api_key("test", "admin sessions approvals", kind="owner")
+    _, secret = manager.db.credentials.create_api_key("test", "admin sessions approvals", kind="owner")
     with TestClient(create_app(manager)) as client:
         response = client.post(path + "/sessions/session1/approvals/a-test", json={"decision": "deny"},
                                headers={"Authorization": "Bearer " + secret})
@@ -255,7 +255,7 @@ def test_auto_decision_is_system(manager):
 @pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api")])
 def test_job_mutation_aliases(manager, path, source, monkeypatch):
     m = manager
-    key, secret = m.db.create_api_key("test", "admin", kind="owner")
+    key, secret = m.db.credentials.create_api_key("test", "admin", kind="owner")
     headers = {"Authorization": "Bearer " + secret}
     body = {"name": SENTINEL, "prompt": SENTINEL, "cron": "@daily"}
     with TestClient(create_app(m)) as client:
@@ -286,7 +286,7 @@ def test_job_mutation_aliases(manager, path, source, monkeypatch):
 @pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api")])
 def test_checkpoint_aliases(manager, monkeypatch, kind, path, source):
     m = manager
-    key, secret = m.db.create_api_key("test", "admin", kind="owner")
+    key, secret = m.db.credentials.create_api_key("test", "admin", kind="owner")
     monkeypatch.setattr(m, "_idle_for_checkpoint", AsyncMock(return_value=m.db.sessions.get_session("session1")))
     if kind == "fork":
         seed(m.db, "new-session", "scratch", SENTINEL, [])
@@ -311,7 +311,7 @@ def test_checkpoint_aliases(manager, monkeypatch, kind, path, source):
 @pytest.mark.parametrize("action", ["merge", "push", "discard"])
 def test_review_aliases_and_error_contract(manager, monkeypatch, path, source, action):
     m = manager
-    key, secret = m.db.create_api_key("test", "admin sessions", kind="owner")
+    key, secret = m.db.credentials.create_api_key("test", "admin sessions", kind="owner")
     monkeypatch.setattr(m, "_review", AsyncMock(return_value=m.db.sessions.get_session("session1")))
     with TestClient(create_app(m)) as client:
         response = client.post(path + "/sessions/session1/review/" + action,
@@ -357,7 +357,7 @@ def test_async_cancellation_preserves_intent(manager):
 @pytest.mark.parametrize("path,source", [("", "legacy_api"), (PREFIX, "admin_api")])
 def test_taint_and_maintenance_route_contexts(manager, monkeypatch, path, source):
     m = manager
-    key, secret = m.db.create_api_key("test", "admin", kind="owner")
+    key, secret = m.db.credentials.create_api_key("test", "admin", kind="owner")
     headers = {"Authorization": "Bearer " + secret}
     cleanup = m.maintenance
     monkeypatch.setattr(cleanup, "_containers", AsyncMock())

@@ -31,9 +31,9 @@ def _tools(tmp_path) -> tuple[Database, SessionSearch]:
 
 
 def _apps(db: Database):
-    app_a, _ = db.create_api_key("shop", "sessions", "app")
-    app_b, _ = db.create_api_key("other", "sessions", "app")
-    reader, _ = db.create_api_key("dash", "sessions sessions:all", "app")
+    app_a, _ = db.credentials.create_api_key("shop", "sessions", "app")
+    app_b, _ = db.credentials.create_api_key("other", "sessions", "app")
+    reader, _ = db.credentials.create_api_key("dash", "sessions sessions:all", "app")
     return app_a, app_b, reader
 
 
@@ -179,9 +179,9 @@ def test_agent_tool_path_owner_two_apps_own_session_and_read_all(tmp_path):
         await m.start(maintenance=False)
         owner = m.create(f"keep {OWNER_MARKER} secret")
         await wait_status(m, owner["id"], "done")
-        app_a, app_a_secret = m.db.create_api_key("shop", "sessions", "app")
-        app_b, _ = m.db.create_api_key("other", "sessions", "app")
-        reader, _ = m.db.create_api_key("dash", "sessions sessions:all", "app")
+        app_a, app_a_secret = m.db.credentials.create_api_key("shop", "sessions", "app")
+        app_b, _ = m.db.credentials.create_api_key("other", "sessions", "app")
+        reader, _ = m.db.credentials.create_api_key("dash", "sessions sessions:all", "app")
         a_hist = m.create(f"buy {APP_A_MARKER} milk", app=app_a)
         await wait_status(m, a_hist["id"], "done")
         b_hist = m.create(f"fly {APP_B_MARKER} tomorrow", app=app_b)

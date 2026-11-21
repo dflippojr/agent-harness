@@ -416,7 +416,7 @@ def auth(request: Request, scope: str) -> dict:
     m = mgr(request)
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-    key = m.db.api_key_by_secret(token)
+    key = m.db.credentials.api_key_by_secret(token)
     if key is None:
         return _bundled_identity(request, m, token)
     scopes = set((key.get("scopes") or "").split())
@@ -862,7 +862,7 @@ def _stream_active(m, key: dict, user_id: str, epoch: int) -> bool:
         return False
     if key.get("bundled"):
         return True
-    current = m.db.get_api_key(key["id"])
+    current = m.db.credentials.get_api_key(key["id"])
     return (current is not None and current.get("revoked_at") is None
             and current["hash"] == key["hash"])
 

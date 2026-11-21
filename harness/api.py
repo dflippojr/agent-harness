@@ -1142,7 +1142,7 @@ def _stream_key(request: Request, m: Manager) -> dict | None:
     """The bearer key `require_admin` admitted this stream with on the admin surface, or None for an ambient Web
     identity (Tailscale owner, local owner token), whose streams end only on an epoch bump (#787)."""
     kid = getattr(request.state, "authenticated_key_id", None)
-    return m.db.get_api_key(kid) if kid else None
+    return m.db.credentials.get_api_key(kid) if kid else None
 
 
 def _stream_live(m: Manager, scope: str, epoch: int, key: dict | None) -> bool:
@@ -1293,7 +1293,7 @@ def _key_catalog_app_id(body: dict) -> str:
 @api_router.get("/keys", responses=documented(list[docs.KeyResponse]))
 async def list_keys(request: Request):
     """Key metadata only; a key's secret is returned once, by the create response."""
-    return mgr(request).db.list_api_keys()
+    return mgr(request).db.listed_api_keys()
 
 
 @api_router.post("/keys", status_code=201)
@@ -1318,7 +1318,7 @@ async def create_key(request: Request):
         await refuse_owner_key(m, ctx, "key.create", "api_key")
 
     def commit():
-        row, key = m.db.main.create_api_key(name, scopes, kind, origins, catalog_app_id)
+        row, key = m.db.main.credentials.create_api_key(name, scopes, kind, origins, catalog_app_id)
         credential_audit.record(m.db, ctx, "key.create", row["id"], "ok", "api_key",
                                 {"key_id": row["id"], "kind": kind, "scopes": scopes.split(),
                                  "catalog_app_id": catalog_app_id})
@@ -1334,7 +1334,7 @@ async def revoke_key(kid: str, request: Request):
     ctx = credential_audit.request_context(request, m)
 
     def commit() -> bool | None:
-        before = m.db.main.get_api_key(kid)
+        before = m.db.main.credentials.get_api_key(kid)
         if before is not None and before.get("role") == "hub" and before.get("revoked_at") is None:
             credential_audit.record(m.db, ctx, "key.revoke", kid, "denied", "api_key",
                                     {"key_id": kid, "kind": before["kind"], "reason": "hub_key"})

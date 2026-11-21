@@ -256,8 +256,8 @@ def test_manual_browser_origins_are_owner_only(tmp_path):
 def test_cross_origin_admin_request_never_falls_back_to_ambient_owner(tmp_path, name, scopes, kind, preflight_status):
     client, manager = make_client(tmp_path)
     with client:
-        key, _ = manager.db.create_api_key(name, scopes, kind, [ORIGIN])
-        assert manager.db.get_api_key(key["id"])["name"] == name
+        key, _ = manager.db.credentials.create_api_key(name, scopes, kind, [ORIGIN])
+        assert manager.db.credentials.get_api_key(key["id"])["name"] == name
         preflight = client.options("/api/admin/v1/me", headers={
             "Origin": ORIGIN,
             "Access-Control-Request-Method": "GET",

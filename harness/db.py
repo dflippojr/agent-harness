@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
-import inspect
 import json
 import queue
 import sqlite3
@@ -20,7 +19,7 @@ import weakref
 from concurrent.futures import Future
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence, cast
+from typing import TYPE_CHECKING, Sequence, cast
 
 from . import migrations as migrations_mod
 from .migrations.baseline import BASELINE_VERSION, LEGACY_COLUMNS
@@ -567,9 +566,6 @@ class AsyncDatabase:
 
     def __getattr__(self, name: str):
         db = self._db
-        forwarded = inspect.getattr_static(type(db), name, None)
-        if isinstance(forwarded, _Forwarded):  # the store's own method, on the store (#992 stage 5)
-            return getattr(getattr(db, forwarded.store).aio, name)
         method = getattr(type(db), name)
         if getattr(method, "db_kind", None) == "write":
             inner = method.__wrapped__
@@ -654,51 +650,10 @@ class CoreStore(_Store):
 CORE_STORES = ("credentials", "sessions", "accounts", "apps", "usage")
 
 
-def _store_class(attribute: str) -> type[CoreStore]:
-    """The class of the core store a Database exposes as `attribute`. Imported on first use: each store module
-    imports this one."""
-    from .account_store import AccountStore
-    from .app_store import AppStore
-    from .credential_store import CredentialStore
-    from .session_store import SessionStore
-    from .usage_store import UsageStore
-
-    return {"credentials": CredentialStore, "sessions": SessionStore, "accounts": AccountStore,
-            "apps": AppStore, "usage": UsageStore}[attribute]
-
-
-class _Forwarded:
-    """One name of the temporary forwarding shim (#992 stage 5): `db.<name>` is `db.<store>.<name>`, so call sites
-    keep working while they move to the store. On the class, it is the store's method, whose `db_kind` routes a call
-    (`app_stores`); it has no `__set__`, so an instance attribute of that name (a test's patch) wins.
-    `tests/test_database_shim.py` pins the forwarded names: the set may only shrink."""
-
-    __slots__ = ("store", "name")
-
-    def __init__(self, store: str):
-        self.store = store
-        self.name = ""
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        self.name = name
-
-    def __get__(self, db: object, owner: type | None = None) -> Any:
-        if db is None:
-            return getattr(_store_class(self.store), self.name)
-        return getattr(getattr(db, self.store), self.name)
-
-
 class Database:
-    # The temporary forwarding shim (#992 stage 5): these `db.<name>` calls run on a core store (`db.credentials`,
-    # `db.sessions`) until their call sites move there. tests/test_database_shim.py pins the names; remove one once
-    # nothing calls it here, and never add one.
-    # credentials: API keys
-    create_api_key = _Forwarded("credentials")
-    api_key_by_secret = _Forwarded("credentials")
-    get_api_key = _Forwarded("credentials")
-    list_api_keys = _Forwarded("credentials")
-    get_api_key_listing = _Forwarded("credentials")
-    restore_api_key = _Forwarded("credentials")
+    """The core's one SQLite file (#992): the writer thread, the pooled readers, transactions, migrations and the
+    `meta` table, with each core store as an attribute (`db.credentials`, `db.sessions`, `db.accounts`, `db.apps`,
+    `db.usage`). It forwards nothing: a query is called on its store (`tests/test_database_shim.py`)."""
 
     def __init__(self, path: Path, migrations: Sequence[migrations_mod.Step] | None = None):
         """Open (creating if needed) and migrate the database. `migrations` overrides the discovered steps."""

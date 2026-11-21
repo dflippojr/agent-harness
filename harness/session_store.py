@@ -9,8 +9,8 @@ idempotency keys and namespace audit (#992 stage 6, decisions 1 and 3).
 
 Behind `SessionStores`, `db.sessions` (and `db.for_app(app_id).sessions`, `db.scope(app_id).sessions`) is a routing
 proxy with this store's methods: each call runs on the store that holds the session, or the App's rows
-(`app_stores._RoutedSessions`). Until their call sites move, `Database` forwards the older session names to the store
-(`harness.db._Forwarded`); the names added in stage 6 were never forwarded.
+(`app_stores._RoutedSessions`). `Database` forwards none of them: every caller calls the store or a proxy (#992 stage
+6).
 """
 
 from __future__ import annotations

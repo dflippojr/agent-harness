@@ -960,7 +960,7 @@ class SettingsService:
         app_id = session.get("app_id") or ""
         if not app_id or self.db is None:
             return {}
-        key = self.db.get_api_key(app_id)
+        key = self.db.credentials.get_api_key(app_id)
         snapshot = session.get("app_defaults") if isinstance(session.get("app_defaults"), dict) else {}
         if use_live_app_settings(key):
             return self.app_defaults(key)

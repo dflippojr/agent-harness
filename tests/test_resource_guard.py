@@ -2055,7 +2055,7 @@ def _count_tokens_request(m, model):
     """A real Starlette request for the endpoint's tokenizer route, as an editor sends it."""
     import json
     from starlette.requests import Request
-    _, secret = m.db.create_api_key("editor")
+    _, secret = m.db.credentials.create_api_key("editor")
     body = json.dumps({"model": model.name, "messages": [{"role": "user", "content": "hi"}]}).encode()
 
     async def receive():

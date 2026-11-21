@@ -26,7 +26,7 @@ def request_context(request, m, *, source: str | None = None) -> audit_context.A
     src = source or ("admin_api" if path.startswith("/api/admin/") else "legacy_api")
     header = request.headers.get("authorization") or ""
     token = header[7:].strip() if header.lower().startswith("bearer ") else ""
-    key = m.db.api_key_by_secret(token) if token else None
+    key = m.db.credentials.api_key_by_secret(token) if token else None
     if key is not None and key.get("kind") == "owner" and "admin" in (key.get("scopes") or "").split():
         return audit_context.owner_context(key, src)
     return audit_context.access_context(getattr(request.state, "access", None), src)
