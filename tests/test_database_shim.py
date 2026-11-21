@@ -241,7 +241,7 @@ def _session(sid: str, app_id: str = "") -> dict:
             "owner_id": "owner"}
 
 
-def test_a_forwarded_session_call_runs_on_the_databases_session_store(db):
+def test_a_session_call_runs_on_the_databases_session_store(db):
     assert isinstance(db.sessions, SessionStore) and db.sessions.core is db
     db.sessions.insert_session(_session("s1"))
     event = db.sessions.insert_event("s1", "user_message", {"content": "find the walrus"})
@@ -437,7 +437,6 @@ def test_the_unscoped_proxy_runs_every_other_session_method_on_webs_store(tmp_pa
             assert getattr(stores.sessions, name).__self__ is stores.web.sessions, name
         stores.sessions.insert_session({**_agent_session("own"), "status": "running"})
         assert [s["id"] for s in stores.sessions.active_sessions("owner")] == ["own"]
-        assert [s["id"] for s in stores.sessions.active_sessions("owner")] == ["own"]  # the forwarded name too
     finally:
         stores.close()
 
