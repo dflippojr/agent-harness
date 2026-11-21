@@ -191,12 +191,16 @@ class _OpenStore:
 
 
 class _ThreadAio:
-    """`await store.aio.<method>(...)`: the method in a worker thread, off the event loop."""
+    """`await store.aio.<method>(...)`: the method in a worker thread, off the event loop. A wrapper's own `aio`
+    (`refuse_sessions`) refuses a `SessionStore` method as the wrapper does, even one SessionStores defines itself:
+    those run through `<wrapper>.sessions.aio`."""
 
-    def __init__(self, target):
-        self._target = target
+    def __init__(self, target, refuse_sessions: bool = False):
+        self._target, self._refuse_sessions = target, refuse_sessions
 
     def __getattr__(self, name: str):
+        if self._refuse_sessions:
+            _refuse_session_name(name)
         method = getattr(self._target, name)
 
         async def call(*args, **kwargs):
@@ -234,7 +238,7 @@ class _AppStore:
 
     def __init__(self, stores: SessionStores, app_id: str):
         self._stores, self.app_id = stores, app_id
-        self.aio = _ThreadAio(self)
+        self.aio = _ThreadAio(self)  # its own __getattr__ refuses a session method
         self.sessions = _RoutedSessions(self._session_route)
 
     def _session_route(self, name: str) -> Callable[..., Any]:
@@ -342,7 +346,7 @@ class SessionStores:
         self.main = main
         self.apps_dir = Path(apps_dir)
         self.idle_seconds = idle_seconds
-        self.aio = _ThreadAio(self)
+        self.aio = _ThreadAio(self, refuse_sessions=True)
         self.sessions = _RoutedSessions(self._session_route)
         self._lock = threading.RLock()
         self._open: dict[str, _OpenStore] = {}

@@ -502,28 +502,33 @@ def test_an_app_approvals_decision_holds_its_store_as_a_write(tmp_path):
 
 
 def test_a_session_method_asked_of_a_wrapper_itself_is_refused(tmp_path):
-    """With the session forwarders gone (#992 stage 6, batch 3), a `SessionStore` method asked of a Database or a
-    wrapper itself, not of its `sessions` proxy, fails on every route: no older route (by session id, Web's store,
-    SessionStores' index, an App's narrowed view) still answers it. SessionStores' own overrides, which its proxy runs
-    (`stores.list_sessions`), are the one exception: `test_every_call_of_a_moved_session_method_goes_through_a_sessions_
-    proxy` refuses those in production code."""
+    """With the session forwarders gone (#992 stage 6, batch 3), a `SessionStore` method asked of a Database (the main
+    store, or Web's from a Web route) has no attribute, and one asked of a wrapper itself rather than its `sessions`
+    proxy raises, pointing at the proxy: `SessionStores` (`m.db`) for the methods it doesn't define, `for_app` and
+    `for_session` for an App, `scope`, and the `aio` of each of those, for every name, so `scope(app).aio` never
+    reads unnarrowed through SessionStores. SessionStores' own overrides, which its proxy runs, still answer on it
+    directly (`stores.list_sessions`); `test_every_call_of_a_moved_session_method_goes_through_a_sessions_proxy`
+    refuses those in production code. Through each proxy, the same names answer, narrowed as before."""
     main = Database(tmp_path / "state.sqlite")
     stores = SessionStores(main, tmp_path / "apps")
     try:
         stores.sessions.insert_session(_agent_session("own", ""))
         stores.sessions.insert_session(_agent_session("a1", "k-aaaa"))
-        for name in ("get_session", "list_sessions", "patch_run"):
-            with pytest.raises(AttributeError):
-                getattr(main, name)
+        for db in (main, stores.for_session("own")):
+            for name in ("get_session", "list_sessions", "patch_run"):
+                assert not hasattr(db, name), name
         routes = {
             "SessionStores": (stores, ("get_session", "get_session_for_user", "patch_run", "unset_run",
                                        "active_sessions", "group_sessions", "job_sessions", "session_activity")),
+            "SessionStores.aio": (stores.aio, ("get_session", "list_sessions", "count_sessions", "insert_session")),
             "for_app": (stores.for_app("k-aaaa"), ("insert_session", "update_session", "delete_session", "get_session",
                                                    "list_sessions", "count_sessions")),
-            "for_app.aio": (stores.for_app("k-aaaa").aio, ("get_session", "insert_session")),
+            "for_app.aio": (stores.for_app("k-aaaa").aio, ("get_session", "insert_session", "list_sessions")),
             "for_session": (stores.for_session("a1"), ("get_session", "patch_run")),
             "scope": (stores.scope("k-aaaa"), ("list_sessions", "session_page", "find_session_ids", "get_session",
                                                "insert_session")),
+            "scope.aio": (stores.scope("k-aaaa").aio, ("list_sessions", "session_page", "find_session_ids",
+                                                       "get_session")),
         }
         for route, (wrapper, names) in routes.items():
             for name in names:
@@ -533,11 +538,12 @@ def test_a_session_method_asked_of_a_wrapper_itself_is_refused(tmp_path):
                     assert "sessions` routing proxy" in str(e), (route, name, str(e))
                 else:
                     pytest.fail(f"{route}.{name} answered")
-        # The same names through each proxy still answer, as each route has its rows.
+        assert callable(stores.list_sessions)  # an override: the scan, not this route, refuses it
         assert stores.sessions.get_session("a1")["app_id"] == "k-aaaa"
         assert stores.for_app("k-aaaa").sessions.get_session("a1")["id"] == "a1"
         assert {s["id"] for s in stores.scope("k-aaaa").sessions.list_sessions()} == {"own", "a1"}
         assert {s["id"] for s in stores.scope("").sessions.list_sessions()} == {"own"}
+        assert {s["id"] for s in asyncio.run(stores.scope("").sessions.aio.list_sessions())} == {"own"}
     finally:
         stores.close()
 
