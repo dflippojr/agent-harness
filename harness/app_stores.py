@@ -100,7 +100,10 @@ _STORE_HOME: dict[str, str | None] = {"credentials": "main", "sessions": None, "
                                      "usage": "main"}
 # Main-store methods that read sessions or their rows without taking a session id: they run on Web's store.
 _ON_WEB = frozenset({"group_sessions", "snippet_events", "smart_review_stats", "smart_reviews", "job_sessions",
-                     "session_activity"})
+                     "session_activity", "active_sessions"})
+# SessionStores' own session methods that keep its index current (sessions and approvals): an App's route runs these
+# rather than its store's.
+_INDEXING = frozenset({"insert_session", "update_session", "delete_session", "insert_approval"})
 # SessionStore's own methods: what a routing proxy (`<wrapper>.sessions`) hands out.
 _SESSION_METHODS = frozenset(n for n, v in vars(SessionStore).items() if callable(v) and not n.startswith("_"))
 # SessionStore methods about one App's own rows that take no session id (#992 stage 6): its end users, idempotency keys
@@ -203,7 +206,7 @@ class _RoutedSessions:
     only (never a method bound to one Database's store, which could outlive the hold):
 
     - `SessionStores.sessions` by session id, as `SessionStores` routes the forwarded names (a write about an erased
-      App session refused), Web's store for `_ON_WEB`, the main store otherwise; an App's own rows (`_APP_ROWS`)
+      App session refused), SessionStores' own overrides, and Web's store otherwise; an App's own rows (`_APP_ROWS`)
       refused.
     - `for_app(app_id).sessions` (and `for_session(sid).sessions` for an App session) on that App's store.
     - `scope(app_id).sessions` as `SessionStores.sessions`, with lists, searches and id lookups narrowed to what that
@@ -232,7 +235,7 @@ class _AppStore:
 
     def _session_route(self, name: str) -> Callable[..., Any]:
         stores, app_id = self._stores, self.app_id
-        if name in ("insert_session", "update_session", "delete_session"):  # they keep the index current
+        if name in _INDEXING:
             return getattr(stores, name)
         write = _session_kind(name) == "write"
 
@@ -253,7 +256,7 @@ class _AppStore:
         stores, app_id = self._stores, self.app_id
         if name in _STORE_HOME:  # never the App's own copy of a core store, nor one held past its release
             return stores.core_store(name)
-        if name in ("insert_session", "update_session", "delete_session"):  # they keep the index current
+        if name in _INDEXING:
             return getattr(stores, name)
         if name in ("awrite", "aread"):
             async def call_async(*args, **kwargs):
@@ -503,7 +506,8 @@ class SessionStores:
 
     def _session_route(self, name: str) -> Callable[..., Any]:
         """SessionStore method `name` as `self.sessions` runs it: SessionStores' own (they keep the index current, or
-        read several stores), by session id, on Web's store, or on the main store."""
+        read several stores), by session id, or on Web's store, which holds every session not routed to an App (the
+        main store holds none once they have moved there)."""
         if name in _OWN_SESSION_METHODS:
             return getattr(self, name)
         if name in _BY_SESSION:
@@ -514,7 +518,7 @@ class SessionStores:
             return by_session
         if name in _APP_ROWS:
             raise AttributeError(f"{name} reads or writes one App's own rows: call it on for_app(app_id).sessions")
-        return getattr((self.web if name in _ON_WEB else self.main).sessions, name)
+        return getattr(self.web.sessions, name)
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("__"):
@@ -770,11 +774,17 @@ class SessionStores:
             rows += self._call(app_id, "sessions_with_run_flag", flag)
         return sorted(rows, key=lambda r: r["updated_at"])
 
-    def count_sessions(self, user_id: str, *statuses: str) -> int:
+    def count_sessions(self, user_id: str, *statuses: str, holding: bool = False) -> int:
+        """From the index for App sessions; `holding` (the sessions that hold a place) needs their rows, so it counts
+        as `count_stored_sessions` does."""
+        if holding:
+            return self.count_stored_sessions(user_id, *statuses, holding=True)
         return self.web.count_sessions(user_id, *statuses) + len(
             self._indexed(lambda e: e["owner_id"] == user_id and e["status"] in statuses))
 
-    def count_app_sessions(self, app_id: str, *statuses: str) -> int:
+    def count_app_sessions(self, app_id: str, *statuses: str, holding: bool = False) -> int:
+        if holding:
+            return self.count_stored_app_sessions(app_id, *statuses, holding=True)
         return len(self._indexed(lambda e: e["app_id"] == app_id and e["status"] in statuses))
 
     def count_stored_sessions(self, user_id: str, *statuses: str, holding: bool = False) -> int:

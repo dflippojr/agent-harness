@@ -444,6 +444,64 @@ def test_the_proxys_routing_tables_cover_every_session_method():
                                    "finish_app_tool_call"} == APP_STORE_NAMES
 
 
+def test_the_unscoped_proxy_runs_every_other_session_method_on_webs_store(tmp_path):
+    """Once the sessions are in Web's store, the main store holds none: a session method that is neither
+    SessionStores' own, by session id nor an App's row runs on Web's store (review r1: `active_sessions`)."""
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        assert stores.web is not main
+        rest = app_stores._SESSION_METHODS - app_stores._OWN_SESSION_METHODS - app_stores._BY_SESSION \
+            - app_stores._APP_ROWS
+        assert {"active_sessions", "build_search_index", "group_sessions"} <= rest
+        for name in sorted(rest):
+            assert getattr(stores.sessions, name).__self__ is stores.web.sessions, name
+        stores.insert_session({**_agent_session("own"), "status": "running"})
+        assert [s["id"] for s in stores.sessions.active_sessions("owner")] == ["own"]
+        assert [s["id"] for s in stores.active_sessions("owner")] == ["own"]  # the forwarded name too
+    finally:
+        stores.close()
+
+
+def test_the_proxy_counts_keep_the_stores_holding_filter(tmp_path):
+    """SessionStores' index counts take SessionStore's `holding` too (review r1): it needs the rows, so it counts
+    them as `count_stored_*` does."""
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        stores.insert_session({**_agent_session("own"), "status": "running"})
+        stores.insert_session({**_agent_session("a1", "k-aaaa"), "status": "running"})
+        stores.insert_session({**_agent_session("a2", "k-aaaa"), "status": "queued"})
+        assert stores.sessions.count_sessions("owner", "running", "queued") == 3
+        assert stores.sessions.count_sessions("owner", "running", "queued", holding=True) == 2
+        assert stores.sessions.count_sessions("owner", "running", "queued", holding=True) == \
+            stores.count_stored_sessions("owner", "running", "queued", holding=True)
+        assert stores.sessions.count_app_sessions("k-aaaa", "running", "queued") == 2
+        assert stores.sessions.count_app_sessions("k-aaaa", "running", "queued", holding=True) == 1
+        assert stores.for_app("k-aaaa").sessions.count_app_sessions("k-aaaa", "running", "queued", holding=True) == 1
+    finally:
+        stores.close()
+
+
+def test_an_approval_inserted_on_an_apps_route_is_indexed(tmp_path):
+    """`for_app(app_id).sessions.insert_approval` runs SessionStores' own insert, which indexes the approval and its
+    token, so the unscoped proxy finds and decides it (review r1)."""
+    main = Database(tmp_path / "state.sqlite")
+    stores = SessionStores(main, tmp_path / "apps")
+    try:
+        stores.insert_session(_agent_session("a1", "k-aaaa"))
+        stores.for_app("k-aaaa").sessions.insert_approval(
+            {"id": "ap-1", "session_id": "a1", "tool_call_id": "c1", "tool": "write_file", "args": {"path": "x"},
+             "reason": "ask"})
+        approval = stores.sessions.get_approval("ap-1")
+        assert approval is not None and approval["session_id"] == "a1"
+        assert stores.sessions.approval_by_token(approval["token"])["id"] == "ap-1"
+        assert stores.sessions.decide_approval("ap-1", "approved")
+        assert stores.for_app("k-aaaa").sessions.get_approval("ap-1")["status"] == "approved"
+        assert stores.web.sessions.get_approval("ap-1") is None
+    finally:
+        stores.close()
+
 def test_has_tool_result_reads_the_sessions_own_store(tmp_path):
     """`has_tool_result` (whether a session's sandbox ran a tool before, for the "environment recreated" notice) once
     read the main store, which holds no sessions after the move into Web's store: it routes by session id now."""

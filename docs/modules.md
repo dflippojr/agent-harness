@@ -278,7 +278,11 @@ Session methods go through a routing proxy, and the key listings still go throug
   `scope(app_id)`, and `for_app` or `for_session` for an App), `sessions` is the one per-session routing proxy
   (`app_stores._RoutedSessions`, #992 stage 6). It has `SessionStore`'s methods, and each call runs on the store
   that holds the rows, held for that call only:
-  - `m.db.sessions` routes by session id, and still refuses a write about an erased App session.
+  - `m.db.sessions` routes by session id, and still refuses a write about an erased App session. It runs
+    SessionStores' own overrides, such as the index upkeep and the multi-store lists, and sends every other
+    method to Web's store. The main store holds no sessions once they have moved there.
+  - `for_app(app_id).sessions` runs the index-keeping writes (`insert_session`, `update_session`,
+    `delete_session` and `insert_approval`) through SessionStores, so the index stays current.
   - `for_app(app_id).sessions` runs on that App's store. Call an App's end users, idempotency keys and namespace
     audit there, since they take no session id. `m.db.sessions` refuses them, because it can't tell whose rows they
     are.
