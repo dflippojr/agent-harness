@@ -583,10 +583,16 @@ def test_the_session_scan_allows_a_managers_and_a_classs_own_methods(tmp_path):
         "    m.db.sessions.checkpoints(sid)\n"             # on the proxy: fine
         "    m.db.checkpoints(sid)\n"                      # line 9: on the wrapper
         "    m.get_approval('ap-1')\n"                     # line 10: Manager has no get_approval
-        "    return m.db.get_approval('ap-1')\n",          # line 11: SessionStores' override, off the proxy
+        "    return m.db.get_approval('ap-1')\n"           # line 11: SessionStores' override, off the proxy
+        "async def g(m, sid):\n"
+        "    await m.aio.checkpoints(sid)\n"               # line 13: a Manager's name, through `.aio`
+        "class Async:\n"
+        "    def get_approval(self, aid):\n"
+        "        return self.aio.get_approval(aid)\n",     # line 16: a class's own name, through `.aio`
         encoding="utf-8")
     assert sorted(_uses_off_the_store(tmp_path / "pkg", "sessions", frozenset({"checkpoints", "get_approval"}))) == [
-        "pkg/x.py:10 .get_approval", "pkg/x.py:11 .get_approval", "pkg/x.py:9 .checkpoints"]
+        "pkg/x.py:10 .get_approval", "pkg/x.py:11 .get_approval", "pkg/x.py:13 .checkpoints",
+        "pkg/x.py:16 .get_approval", "pkg/x.py:9 .checkpoints"]
 
 
 def test_the_session_scan_allows_only_the_listed_data_reads(tmp_path):
@@ -702,12 +708,13 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
                         allowed: set[tuple[str, str, str]] | None = None) -> list[str]:
     """Each use of a method name of core store `store` (or of `names`, some of them: a call, or a bound method handed
     to `to_thread` or `awrite`) not made on that store: `<x>.<store>.<name>` or `<x>.<store>.aio.<name>`. Also
-    allowed: for apps and sessions, `self.<name>` inside a class that defines `<name>` itself (`Manager.app_limits`,
+    allowed, each on the receiver itself, never through its `.aio`: for apps and sessions, `self.<name>` inside a
+    class that defines `<name>` itself (`Manager.app_limits`,
     the effective caps; SessionStores' own overrides); for sessions, `m.<name>` for a method of the Manager (`m`) of
     that name (`checkpoints`, the listing, and `add_review_comment`), and the data reads `DATA_READS` names (file,
     receiver and name: `run.events` in `scripts/real_env_lane.py`), only as a plain read: not called, not handed to
     `to_thread` or `awrite`, and not through `.aio`; for credentials, the Manager calls `MANAGER_CALLS` names (file,
-    receiver and name: `manager.set_app_provider_credential` in `harness/admin.py`); for accounts, an `accounts`
+    receiver and name: `manager.set_app_provider_credential` in `harness/admin.py`), not through `.aio`; for accounts, an `accounts`
     stand-in (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`. Each allowed data read or
     Manager call is added to `allowed`, when given."""
     import ast
@@ -738,22 +745,26 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
                 on = on.value
             if isinstance(on, ast.Attribute) and on.attr == store:
                 continue
-            if store in ("apps", "sessions") and isinstance(on, ast.Name) and on.id == "self" and \
+            # Each allowance below names the receiver itself, never one reached through `.aio` (only the store's own
+            # `aio` passes, above).
+            direct = on is node.value
+            if store in ("apps", "sessions") and direct and isinstance(on, ast.Name) and on.id == "self" and \
                     node.attr in own_methods.get(id(node), ()):
                 continue
-            if store == "sessions" and isinstance(on, ast.Name) and on.id == "m" and node.attr in vars(Manager):
+            if store == "sessions" and direct and isinstance(on, ast.Name) and on.id == "m" and \
+                    node.attr in vars(Manager):
                 continue
-            if store == "sessions" and on is node.value and id(node) not in used and \
+            if store == "sessions" and direct and id(node) not in used and \
                     (read := (rel, ast.unparse(on), node.attr)) in DATA_READS:
                 if allowed is not None:
                     allowed.add(read)
                 continue
-            if store == "credentials" and isinstance(on, ast.Name) and node.attr in vars(Manager) and \
-                    (call := (rel, on.id, node.attr)) in MANAGER_CALLS:
+            if store == "credentials" and direct and isinstance(on, ast.Name) and \
+                    node.attr in vars(Manager) and (call := (rel, on.id, node.attr)) in MANAGER_CALLS:
                 if allowed is not None:
                     allowed.add(call)
                 continue
-            if store == "accounts" and ((isinstance(on, ast.Name) and on.id == "accounts") or (
+            if store == "accounts" and direct and ((isinstance(on, ast.Name) and on.id == "accounts") or (
                     isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store")):
                 continue
             found.append(f"{rel}:{node.lineno} .{node.attr}")
@@ -778,9 +789,11 @@ def test_the_scan_finds_calls_and_bound_methods(tmp_path):
         "    db.accounts.list_audit(5)\n"          # on the store: fine
         "    accounts.member_count()\n"            # a stand-in named accounts: fine
         "    db.list_audit(5)\n"                   # line 5: a call on the Database
-        "    return asyncio.to_thread(m.db.audit_page, 5)\n",  # line 6: a bound method
+        "    asyncio.to_thread(m.db.audit_page, 5)\n"  # line 6: a bound method
+        "    return accounts.aio.member_count()\n",  # line 7: the stand-in's name, through `.aio`
         encoding="utf-8")
-    assert _account_uses_off_the_store(tmp_path / "pkg") == ["pkg/x.py:5 .list_audit", "pkg/x.py:6 .audit_page"]
+    assert _account_uses_off_the_store(tmp_path / "pkg") == ["pkg/x.py:5 .list_audit", "pkg/x.py:6 .audit_page",
+                                                             "pkg/x.py:7 .member_count"]
 
 
 def test_every_app_call_goes_through_the_app_store():
@@ -798,7 +811,9 @@ def test_the_app_scan_allows_a_method_of_the_same_name_only_where_it_is_defined(
         "    def cap(self, app_id):\n"
         "        return self.app_limits(app_id)\n"           # the Manager's own method: fine
         "    def stored(self, app_id):\n"
-        "        return self.db.app_limits(app_id)\n",       # line 7: on the Database
+        "        return self.db.app_limits(app_id)\n"        # line 7: on the Database
+        "    async def later(self, app_id):\n"
+        "        return await self.aio.app_limits(app_id)\n",  # line 9: its own name, through `.aio`
         encoding="utf-8")
     (tmp_path / "pkg" / "other.py").write_text(
         "class Other:\n"
@@ -809,6 +824,7 @@ def test_the_app_scan_allows_a_method_of_the_same_name_only_where_it_is_defined(
         "        return kid\n",
         encoding="utf-8")
     assert _uses_off_the_store(tmp_path / "pkg", "apps") == ["pkg/manager.py:7 .app_limits",
+                                                             "pkg/manager.py:9 .app_limits",
                                                              "pkg/other.py:3 .mark_app_erased"]
 
 
@@ -837,7 +853,7 @@ def test_the_credential_scan_allows_the_store_and_only_the_listed_manager_calls(
     """The store and its `aio` pass, and a SessionStores listing (not a store method) is not looked at. Everything
     else is reported: a Database or wrapper of any name (`m.db`, `self.db.main`, `stores`), its `aio`, a bound
     method handed to `to_thread`, a credential name on the listed receiver that the list does not name, a listed name
-    on another receiver, and a listed call in another file."""
+    on another receiver or reached through the listed receiver's `.aio`, and a listed call in another file."""
     (tmp_path / "harness").mkdir()
     (tmp_path / "harness" / "admin.py").write_text(
         "import asyncio\n"
@@ -853,7 +869,9 @@ def test_the_credential_scan_allows_the_store_and_only_the_listed_manager_calls(
         "    stores.list_api_keys()\n"                               # line 11
         "    manager.get_api_key(sid)\n"                             # line 12: not listed for this receiver
         "    m.set_app_provider_credential(sid, 'b', 'r', 'p', [])\n"  # line 13: listed only for `manager`
-        "    manager.db.revoke_app_provider_credential(sid)\n",      # line 14: a Database's, not the Manager's
+        "    manager.db.revoke_app_provider_credential(sid)\n"       # line 14: a Database's, not the Manager's
+        "    manager.aio.set_app_provider_credential(sid, 'b', 'r', 'p', [])\n"  # line 15: through `.aio`
+        "    await manager.aio.revoke_app_provider_credential(sid)\n",  # line 16: the same
         encoding="utf-8")
     (tmp_path / "harness" / "other.py").write_text(
         "def g(manager, cid):\n"
@@ -865,7 +883,8 @@ def test_the_credential_scan_allows_the_store_and_only_the_listed_manager_calls(
         "harness/admin.py:7 .get_api_key", "harness/admin.py:8 .create_api_key", "harness/admin.py:9 .api_key_by_secret",
         "harness/admin.py:10 .api_key_by_secret", "harness/admin.py:11 .list_api_keys",
         "harness/admin.py:12 .get_api_key", "harness/admin.py:13 .set_app_provider_credential",
-        "harness/admin.py:14 .revoke_app_provider_credential", "harness/other.py:2 .revoke_app_provider_credential"])
+        "harness/admin.py:14 .revoke_app_provider_credential", "harness/admin.py:15 .set_app_provider_credential",
+        "harness/admin.py:16 .revoke_app_provider_credential", "harness/other.py:2 .revoke_app_provider_credential"])
     assert allowed == {("harness/admin.py", "manager", "set_app_provider_credential")}
 
 
