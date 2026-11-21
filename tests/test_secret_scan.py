@@ -176,7 +176,7 @@ def test_doctor_ok_with_the_pinned_binary(gitleaks_tools, capsys):
 def _leaks(m: Manager, sid: str, caplog) -> list[str]:
     """Every place the fixture value must never reach."""
     places = {
-        "events": json.dumps(m.db.events(sid)),
+        "events": json.dumps(m.db.sessions.events(sid)),
         "audit": json.dumps(m.db.accounts.list_audit()),
         "transcript": transcript.render(m.db, sid),
         "logs": caplog.text,
@@ -325,7 +325,7 @@ def test_key_removed_by_a_later_commit_blocks_push_until_dismissed(tmp_path, cap
 
 
 def _user_messages(m: Manager, sid: str) -> list[str]:
-    return [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"]
+    return [e["data"]["content"] for e in m.db.sessions.events(sid) if e["type"] == "user_message"]
 
 
 @needs_host_git
@@ -609,7 +609,7 @@ def test_api_fix_drafts_and_owner_only_dismiss(tmp_path):
         assert client.post(f"/sessions/{sid}/review-comments/send").status_code == 200
         # Final git/checkpoint work continues after the terminal status is written.
         wait_for(lambda: m.db.get_session(sid)["status"] == "done" and sid not in m.tasks)
-        sent = [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"][-1]
+        sent = [e["data"]["content"] for e in m.db.sessions.events(sid) if e["type"] == "user_message"][-1]
         assert "deploy.sh, line 2" in sent and "aws-access-token" in sent and KEY not in sent
 
         app = client.post("/keys", json={"name": "shop", "kind": "app", "scopes": ["sessions", "sessions:all"]}).json()

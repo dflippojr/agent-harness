@@ -494,7 +494,7 @@ def test_full_stack_approval_and_compaction(monkeypatch, fake_manager):
             "prompt": "Run a long task that triggers compaction.", "project": fake_instance.PROJECT})
         sid = made.json()["id"]
         assert wait_session(client, sid, headers, "done", "failed")["status"] == "done"
-        tiers = [e["data"]["tier"] for e in m.db.events(sid) if e["type"] == "compaction"]
+        tiers = [e["data"]["tier"] for e in m.db.sessions.events(sid) if e["type"] == "compaction"]
         assert "summary" in tiers
         assert m.db.get_session(sid)["answer"].startswith("Done.")
 
@@ -514,7 +514,7 @@ def test_full_stack_stuck_loop_nudges_then_ends_the_run(monkeypatch, fake_manage
         sid = made.json()["id"]
         done = wait_session(client, sid, headers, "done", "failed")
     assert (done["status"], done["stop_reason"]) == ("done", "stuck_repeat"), done
-    events = m.db.events(sid)
+    events = m.db.sessions.events(sid)
     results = [e["data"] for e in events if e["type"] == "tool_result"]
     assert len(results) == 8 and not any(r["ok"] for r in results)
     assert "will not work" not in results[1]["output"]
@@ -574,7 +574,7 @@ def test_full_stack_trim_runs_before_the_summary(monkeypatch, tmp_path):
             sid = made.json()["id"]
             done = wait_session(client, sid, headers, "done", "failed")
         assert done["status"] == "done", done
-        compactions = [e["data"] for e in m.db.events(sid) if e["type"] == "compaction"]
+        compactions = [e["data"] for e in m.db.sessions.events(sid) if e["type"] == "compaction"]
         tiers = [c["tier"] for c in compactions]
         assert "trim" in tiers and "summary" in tiers and tiers.index("trim") < tiers.index("summary"), tiers
         assert compactions[tiers.index("trim")]["characters_saved"] > 1000

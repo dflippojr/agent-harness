@@ -211,7 +211,7 @@ def _seeded_stream_path(m, surface: str) -> tuple[str, str]:
     """Seed owner00001 and return (path, bus subscription); a session stream starts after its persisted events."""
     seed(m.db, "owner00001", "scratch", "stream", [("status", {"status": "done"})])
     path, subscription = ADMIN_STREAMS[surface]
-    return path.format(last=m.db.events("owner00001")[-1]["seq"]), subscription
+    return path.format(last=m.db.sessions.events("owner00001")[-1]["seq"]), subscription
 
 
 @pytest.mark.parametrize("surface", sorted(ADMIN_STREAMS))

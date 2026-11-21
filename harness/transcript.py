@@ -268,7 +268,7 @@ def render(db: Database, sid: str) -> str:
         lines += [f"- Frozen skills: {names}"]
     lines += ["",]
     last_content = ""
-    for e in db.events(sid):
+    for e in db.sessions.events(sid):
         d, t, at = e["data"], e["type"], _clock(e["ts"])
         if t == "assistant":
             last_content = d.get("content", "").strip()

@@ -407,7 +407,7 @@ def test_device_keys_reach_no_built_in_hosted_backend_by_any_route(tmp_path, mon
         sid = local.json()["id"]
         m.db.for_app(device["id"]).update_session(sid, backend="claude", model="claude-opus-5")
         before = m.db.get_session(sid)
-        events = len(m.db.events(sid))
+        events = len(m.db.sessions.events(sid))
         for path, body in (("messages", {"content": "go on"}), ("rerun", None)):
             r = client.post(f"/api/v1/sessions/{sid}/{path}", headers=bearer, json=body)
             assert r.status_code == 403, (path, r.text)
@@ -416,7 +416,7 @@ def test_device_keys_reach_no_built_in_hosted_backend_by_any_route(tmp_path, mon
         after = m.db.get_session(sid)
         assert (after["inbox"], after["context"], after["status"]) == (before["inbox"], before["context"],
                                                                         before["status"])
-        assert len(m.db.events(sid)) == events
+        assert len(m.db.sessions.events(sid)) == events
         assert [s["id"] for s in m.db.for_app(device["id"]).list_sessions(50, owner_id="owner")] == [sid]
 
         m.cfg.modules.local_model = False  # no backend named: the default is the first enabled hosted one

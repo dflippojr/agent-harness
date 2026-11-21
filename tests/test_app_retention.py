@@ -313,7 +313,7 @@ def test_nothing_about_an_erased_app_session_is_written_to_the_owners_files_or_s
         m.runner.write_transcript(sid)
         client.portal.call(m.runner._end_run, sid)
         client.portal.call(m.runner.save_branch, sid)
-        for write in (lambda: m.db.insert_event(sid, "error", {"message": "pelican"}),
+        for write in (lambda: m.db.sessions.insert_event(sid, "error", {"message": "pelican"}),
                       lambda: m.db.sessions.put_artifact(sid, "h1", "pelican"),
                       lambda: m.db.update_session(sid, title="pelican"),
                       lambda: m.db.sessions.insert_approval({"id": "ap-x", "session_id": sid, "tool_call_id": "c1",
@@ -324,7 +324,7 @@ def test_nothing_about_an_erased_app_session_is_written_to_the_owners_files_or_s
             storage.session_dirs(cfg, None)
         owner_sid = client.post("/sessions", json={"prompt": "owner task"}).json()["id"]
         wait_for(lambda: _done(client, owner_sid))
-        m.db.insert_event(owner_sid, "error", {"message": "still written"})  # other sessions are unaffected
+        m.db.sessions.insert_event(owner_sid, "error", {"message": "still written"})  # other sessions are unaffected
     assert not (storage.transcripts_dir(cfg, "owner") / f"{sid}.md").exists()
     assert not any(rows_of(main, {sid}).values())
 

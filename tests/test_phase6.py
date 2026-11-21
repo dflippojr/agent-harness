@@ -969,7 +969,7 @@ def test_app_session_with_context_and_app_tool(tmp_path):
         # context mid-session, delivered as its own event
         client.post(f"/api/v1/sessions/{sid}/context", headers=auth,
                     json={"context": [{"title": "Update", "content": "carrier changed"}]})
-        assert any(e["type"] == "app_context" for e in m.db.events(sid))
+        assert any(e["type"] == "app_context" for e in m.db.sessions.events(sid))
 
 
 def test_sessions_all_read_vs_mutation_matrix(tmp_path):
@@ -1003,7 +1003,7 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
             wait_for(lambda sid=sid: m.db.get_session(sid)["status"] == "done")
 
         def event_count(sid, type_):
-            return sum(1 for e in m.db.events(sid) if e["type"] == type_)
+            return sum(1 for e in m.db.sessions.events(sid) if e["type"] == type_)
 
         read_rows = [
             ("a", a, {"owner": 404, "a": 200, "b": 404}, {a_sid}),
@@ -1047,7 +1047,7 @@ def test_sessions_all_read_vs_mutation_matrix(tmp_path):
                     assert cancel.status_code == 404
                     assert event_count(sid, "user_message") == before_msg
                     assert event_count(sid, "app_context") == before_ctx
-                    assert not any(payload in (e["data"].get("content") or "") for e in m.db.events(sid)
+                    assert not any(payload in (e["data"].get("content") or "") for e in m.db.sessions.events(sid)
                                    if e["type"] in ("user_message", "app_context"))
 
         reader_msg, reader_ctx = {"content": "reader-inject"}, {"context": [{"title": "x", "content": "y"}]}

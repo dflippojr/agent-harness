@@ -149,7 +149,7 @@ def run_session(tmp_path: Path, reinject: bool, kind: str = "agent") -> tuple[Sc
         m = Manager(cfg, chat=script)
         await m.start(maintenance=False)
         s = await finished(m, m.create("Fix the parser.", project="scratch", kind=kind)["id"])
-        events = m.db.events(s["id"])
+        events = m.db.sessions.events(s["id"])
         await m.stop()
         return s, events
 
@@ -251,7 +251,7 @@ def test_fake_model_receives_the_plan_and_nothing_stores_it(monkeypatch, tmp_pat
             assert made.status_code == 201, made.text
             sid = made.json()["id"]
             done = wait_session(client, sid, headers, "done", "failed")
-        events = json.dumps(m.db.events(sid))
+        events = json.dumps(m.db.sessions.events(sid))
         assert (done["status"], done["answer"]) == ("done", "Done."), done
         plan = "Plan:\n1. write notes.md\n2. answer\n\nNext step: write notes.md"
         assert len(requests) == 3 and planning.MARKER not in json.dumps(requests[0])

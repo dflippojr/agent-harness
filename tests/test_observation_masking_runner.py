@@ -90,7 +90,7 @@ def test_masking_and_recovery_through_a_scripted_session(tmp_path):
         assert recovered == full[100:9100]  # over the mask threshold, and still verbatim after later turns
         assert _result_event(m, sid, "c6-read_artifact")["artifact_id"] is None  # no receipt of its own to loop on
         assert any(recovered in src for src in grounding.session_sources(
-            m.db.get_session(sid)["context"], m.db.events(sid)))
+            m.db.get_session(sid)["context"], m.db.sessions.events(sid)))
 
         chunk = _ctx_text(m, sid, "c7-read_artifact")  # no range: the first 20,000 characters, flagged as truncated
         assert chunk.startswith(full[:20000]) and "[truncated; request a smaller range" in chunk
@@ -104,7 +104,7 @@ def test_read_artifact_tool_ranges_missing_and_other_session(tmp_path):
     async def read(m, sid, idx, **args):
         c = call("read_artifact", idx, **args)
         await m.runner._resolve_call(m.db.get_session(sid), c, [], {}, 10**9, [])
-        ok = [e["data"]["ok"] for e in m.db.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == c["id"]]
+        ok = [e["data"]["ok"] for e in m.db.sessions.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == c["id"]]
         # The context holds the full text the model sees; the event's copy is shortened for the UI.
         text = next(x["content"] for x in m.db.get_session(sid)["context"] if x.get("tool_call_id") == c["id"])
         return text, ok[-1]
@@ -151,7 +151,7 @@ def _ctx_text(m: Manager, sid: str, call_id: str) -> str:
 
 
 def _result_event(m: Manager, sid: str, call_id: str) -> dict:
-    return next(e["data"] for e in m.db.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == call_id)
+    return next(e["data"] for e in m.db.sessions.events(sid) if e["type"] == "tool_result" and e["data"]["id"] == call_id)
 
 
 def test_parallel_read_artifact_calls_share_the_turn_budget(tmp_path):
@@ -186,7 +186,7 @@ def test_read_artifact_goes_through_policy_and_emits_tool_call(tmp_path):
         m.db.sessions.put_artifact(sid, digest, BIG)
         allowed = call("read_artifact", 1, artifact_id=digest, start=0, end=5)
         await m.runner._resolve_calls(s, [allowed])
-        decision = next(e["data"] for e in m.db.events(sid) if e["type"] == "tool_call" and e["data"]["id"] == allowed["id"])
+        decision = next(e["data"] for e in m.db.sessions.events(sid) if e["type"] == "tool_call" and e["data"]["id"] == allowed["id"])
         assert decision["name"] == "read_artifact" and decision["decision"] == "allow"
         assert _ctx_text(m, sid, allowed["id"]) == BIG[:5]
 

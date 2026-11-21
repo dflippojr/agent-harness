@@ -42,7 +42,7 @@ def _spawned(m: Manager) -> list[str]:
 
 
 def _created_events(m: Manager, sid: str) -> int:
-    return sum(e["type"] == "session_created" for e in m.db.events(sid))
+    return sum(e["type"] == "session_created" for e in m.db.sessions.events(sid))
 
 
 def _post(client, auth: dict, key: str | bytes | None, body: dict = BODY):

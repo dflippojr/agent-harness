@@ -320,7 +320,7 @@ def test_sleeping_model_is_announced_and_warmed(tmp_path):
         states["now"] = SLEEPING  # asleep again when the task starts
         sid = client.post("/sessions", json={"prompt": "hi"}).json()["id"]
         wait_for(lambda: m.db.get_session(sid)["status"] == "done")
-        types = [e["type"] for e in m.db.events(sid)]
+        types = [e["type"] for e in m.db.sessions.events(sid)]
         assert types.index("model_waking") < types.index("model_ready") < types.index("assistant")
         note = wait_for(lambda: next((p for p in sent if p["title"].startswith("Waking the model")), None))
         assert note["priority"] == 2

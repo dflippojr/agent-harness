@@ -61,7 +61,7 @@ async def _seed_and_back_up(cfg) -> tuple[Path, dict]:
     for sid, app_id in (("own1", ""), ("a1", apps["first"]), ("a2", apps["first"]), ("b1", apps["second"]),
                         ("g1", apps["gone"])):
         m.db.insert_session(_session(sid, app_id))
-        m.db.insert_event(sid, "user_message", {"content": f"hello {sid}"})
+        m.db.sessions.insert_event(sid, "user_message", {"content": f"hello {sid}"})
     _write(storage.transcripts_dir(cfg, "owner") / "own1.md", "owner transcript")
     _write(storage.transcripts_dir(cfg, "u-member") / "m1.md", "member transcript")
     for name in ("first", "gone"):
@@ -81,7 +81,7 @@ async def _booted_sessions(cfg) -> tuple[dict, list]:
     await m.start(maintenance=False)
     try:
         return {sid: (m.db.get_session(sid) or {}).get("app_id")
-                for sid in ("own1", "a1", "a2", "b1")}, [e["data"] for e in m.db.events("a1")]
+                for sid in ("own1", "a1", "a2", "b1")}, [e["data"] for e in m.db.sessions.events("a1")]
     finally:
         await m.stop()
         m.db.close()

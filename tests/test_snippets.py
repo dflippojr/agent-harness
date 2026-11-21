@@ -63,7 +63,7 @@ def new_chat(client, m):
 
 
 def snippet_events(m, sid):
-    return [e for e in m.db.events(sid) if e["type"].startswith("snippet_")]
+    return [e for e in m.db.sessions.events(sid) if e["type"].startswith("snippet_")]
 
 
 # ---------- isolation contract (no Docker needed) ----------
@@ -384,7 +384,7 @@ def test_results_reach_the_model_with_the_next_message_only(tmp_path):
         assert "<b>hi</b>" in users[-2]
         assert users[-2].endswith("why?")
         assert users[-1] == "thanks"
-        typed = [e["data"]["content"] for e in m.db.events(sid) if e["type"] == "user_message"]
+        typed = [e["data"]["content"] for e in m.db.sessions.events(sid) if e["type"] == "user_message"]
         assert typed[-2:] == ["why?", "thanks"]
 
 

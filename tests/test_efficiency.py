@@ -397,7 +397,7 @@ def test_native_loop_records_schema_overhead_per_turn_and_in_totals(tmp_path):
             assert row["schema_count"] == expected["schema_count"]
             assert row["schema_tokens"] == expected["schema_tokens"]
         assert s["totals"]["schema_tokens"] == 2 * expected["schema_tokens"]
-        payload = session_payload(s["id"], m.db.events(s["id"]))
+        payload = session_payload(s["id"], m.db.sessions.events(s["id"]))
         assert payload["aggregate"]["schema_tokens"] == 2 * expected["schema_tokens"]
         await m.stop()
     asyncio.run(body())
@@ -437,7 +437,7 @@ def test_native_loop_records_retries_output_chars_and_prometheus(tmp_path):
         assert 'harness_compaction_correlated_retries_total{tier="round_reset"} 0' in text
         assert "harness_prompt_cache_tokens_total{kind=\"cached\"} 0" in text
         assert "harness_prompt_cache_tokens_total{kind=\"recomputed\"}" in text
-        payload = session_payload(s["id"], m.db.events(s["id"]))
+        payload = session_payload(s["id"], m.db.sessions.events(s["id"]))
         assert payload["aggregate"]["dead_end_retries"] == 1
         assert payload["aggregate"]["largest_tool_output_chars"] >= read_ok["output_chars"]
         await m.stop()
@@ -527,7 +527,7 @@ def test_native_loop_counts_read_artifact_edit_mismatch_and_elide_only(tmp_path)
         text = render(m)
         assert "harness_edit_mismatch_total 1" in text
         assert f"harness_compaction_elide_only_total {len(elides)}" in text
-        aggregate = session_payload(sid, m.db.events(sid))["aggregate"]
+        aggregate = session_payload(sid, m.db.sessions.events(sid))["aggregate"]
         assert aggregate["read_artifact_calls"] == 2
         assert aggregate["read_artifact_repeats"] == 1
         assert aggregate["edit_mismatches"] == 1
@@ -602,7 +602,7 @@ def test_metrics_survive_manager_restart(tmp_path):
         m = Manager(cfg, db=db, chat=script)
         await m.start()
         assert "harness_dead_end_retries_total 1" in render(m)
-        payload = session_payload(sid, db.events(sid))
+        payload = session_payload(sid, db.sessions.events(sid))
         assert payload["aggregate"]["dead_end_retries"] == 1
         await m.stop()
 
@@ -660,10 +660,10 @@ def test_hosted_run_end_adds_no_native_retry_metrics(tmp_path):
                 m.runner.bus.emit(sid, "tool_call", {"id": call_id, "name": "Bash", "args": args, "decision": "allow"})
                 m.runner.bus.emit(sid, "tool_result", {"id": call_id, "name": "Bash", "ok": False, "output": "exit 1"})
         m.db.for_session(sid).write(hosted_retries)
-        assert efficiency.turn_counts(m.db.events(sid))["dead_end_retries"] == 1
+        assert efficiency.turn_counts(m.db.sessions.events(sid))["dead_end_retries"] == 1
         m.runner._emit_turn_metrics(sid, final=True)
         assert len(events(m, sid, "turn_metrics")) == before
-        assert session_payload(sid, m.db.events(sid))["aggregate"]["dead_end_retries"] in (None, 0)
+        assert session_payload(sid, m.db.sessions.events(sid))["aggregate"]["dead_end_retries"] in (None, 0)
         assert "harness_dead_end_retries_total 1" not in render(m)
         await m.stop()
 

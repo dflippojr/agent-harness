@@ -1033,7 +1033,7 @@ class Manager:
         return self.db.get_session(sid)
 
     def original_prompt(self, sid: str) -> str:
-        for e in self.db.events(sid):
+        for e in self.db.sessions.events(sid):
             if e["type"] == "user_message":
                 return e["data"]["content"]
         return self.db.get_session(sid)["context"][1]["content"]
@@ -1477,7 +1477,7 @@ class Manager:
         branch = s["branch"] if finding["repo"] == "." else repo.get("branch", "")
         tips = [f"refs/remotes/origin/{branch}"] if branch and branch != "HEAD" else []
         if finding["repo"] == ".":
-            tips += self.db.pushed_heads(s["id"])
+            tips += self.db.sessions.pushed_heads(s["id"])
         if s["target"] != "tower":
             return await self.remote(s, "secret_published", {"path": finding["repo"],
                                                            "commit": finding["commit"], "tips": tips}, timeout=120)
@@ -2144,7 +2144,7 @@ class Manager:
         model = self.cfg.models.get(s["model"])
         out["context_used"] = (s.get("run") or {}).get("context_tokens", 0)
         out["context_limit"] = model.context_tokens if model else 0
-        out["last_event_seq"] = self.db.last_event_seq(s["id"])
+        out["last_event_seq"] = self.db.sessions.last_event_seq(s["id"])
         out["trace_id"] = ((s.get("run") or {}).get("trace") or {}).get("trace_id", "")
         trace_url = telemetry.trace_url(self.cfg.telemetry.trace_url_template, out["trace_id"])
         if trace_url:
@@ -2204,7 +2204,7 @@ class Manager:
     def list_summary(self, s: dict, positions: dict[str, int] | None = None) -> dict:
         """Session-card view shared by the owner UI and first-party app API client."""
         item = self.summary(s, positions)
-        bits = self.db.session_card_bits(s["id"])
+        bits = self.db.sessions.session_card_bits(s["id"])
         user_messages = [" ".join(text.split()) for text in bits["asks"] if text.strip()]
         asks = " · ".join(text[:90] + ("…" if len(text) > 90 else "") for text in user_messages[:3])
         if len(user_messages) > 3:
@@ -2212,7 +2212,7 @@ class Manager:
         answer = " ".join(bits["answer"].split())
         if len(answer) <= 110 and bits["answer_length"] > len(bits["answer"]):
             # The prefix was mostly whitespace, so it can't tell whether the outcome needs its "…": read it all.
-            answer = " ".join(self.db.session_card_bits(s["id"], bits["answer_length"])["answer"].split())
+            answer = " ".join(self.db.sessions.session_card_bits(s["id"], bits["answer_length"])["answer"].split())
         if answer:
             outcome = answer[:110] + ("…" if len(answer) > 110 else "")
             item["chat_summary"] = f"{asks} — {outcome}" if asks else outcome

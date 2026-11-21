@@ -528,7 +528,7 @@ def _notification_titles(manager, sid):
     from harness_modules.notifications.service import Notifier
     notifier = Notifier(manager.cfg, manager.db)
     titles = []
-    for event in manager.db.events(sid):
+    for event in manager.db.sessions.events(sid):
         note = notifier.build(event)
         if note:
             titles.append(note["title"])
@@ -1062,13 +1062,13 @@ def test_waiting_limit_status_commits_with_its_limit_waiting_event(tmp_path):
     """Whoever sees `waiting_limit` also sees when the limit resets: one commit, even with a slow writer (#294)."""
     async def body():
         m, _, _ = _claude_manager(tmp_path, "limit")
-        insert_event = m.db.insert_event
+        insert_event = m.db.sessions.insert_event
 
         def slow_insert(sid, type_, data):
             if type_ == "limit_waiting":
                 time.sleep(0.3)
             return insert_event(sid, type_, data)
-        m.db.insert_event = slow_insert
+        m.db.sessions.insert_event = slow_insert
         await m.start()
         sid = m.create("hit the limit", backend="claude")["id"]
         sub = m.bus.subscribe(sid)

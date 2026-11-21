@@ -1118,7 +1118,7 @@ async def session_metrics(ref: str, request: Request):
     session = m.db.get_session(sid)
     if session is None or session.get("app_id"):
         raise HarnessError(404, "no session matches that id")
-    return efficiency.session_payload(sid, m.db.events(sid))
+    return efficiency.session_payload(sid, m.db.sessions.events(sid))
 
 
 # event streams
@@ -1202,7 +1202,7 @@ def _resync_after_overflow(m: Manager, sub, sid: str, last: int) -> list[dict]:
     sub.overflowed = False
     while not sub.queue.empty():
         sub.queue.get_nowait()
-    return m.db.events(sid, last)
+    return m.db.sessions.events(sid, last)
 
 
 def _advance_seq(last: int, e: dict) -> int | None:
@@ -1221,7 +1221,7 @@ async def _conversation_events(request: Request, m: Manager, sid: str, after: in
     key = _stream_key(request, m)
     try:
         yield ": connected\n\n"
-        for e in m.db.events(sid, after):
+        for e in m.db.sessions.events(sid, after):
             if not _stream_live(m, scope, epoch, key):
                 return
             last = e["seq"]

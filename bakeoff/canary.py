@@ -204,7 +204,7 @@ class CanaryRunner:
                 await self.sleep(1 if self.poll > 1 else self.poll)
                 if held:
                     ran += self.clock() - before
-                pending = m.db.pending_approvals(sid)  # read before the stop: cancelling the session cancels them
+                pending = m.db.sessions.pending_approvals(sid)  # read before the stop: cancelling the session cancels them
                 if pending:  # first, whatever the clock says: the request is why it stopped working
                     asked = pending[0] if await self._stop(sid) else None  # None: it ended on its own meanwhile
                     break
@@ -219,13 +219,13 @@ class CanaryRunner:
             status = (APPROVAL_NEEDED if asked else WALL_LIMIT if stopped else "suspended" if starved
                       else final["status"])
             suspended = bool(m.runner.yields.pop(sid, 0)) or any(
-                e["type"] == "gpu_paused" for e in m.db.events(sid))
+                e["type"] == "gpu_paused" for e in m.db.sessions.events(sid))
             if kind == "hard":
                 ok, note = await asyncio.to_thread(self._grade_hard, task, Path(final["workspace"]), final["answer"],
                                                    baseline)
             else:
                 ok, note = task.check(final["answer"])
-                results = [e["data"] for e in m.db.events(sid) if e["type"] == "tool_result"]
+                results = [e["data"] for e in m.db.sessions.events(sid) if e["type"] == "tool_result"]
                 made_up = ungrounded_quotes(final["answer"], [r["output"] for r in results])
                 if made_up:
                     ok, note = False, f"{note}; quotes not in any fetched text"
@@ -241,7 +241,7 @@ class CanaryRunner:
                    "prompt_tokens": totals.get("prompt_tokens", 0), "seconds": round(ran, 1),
                    "suspended": suspended}
             if self._measure is not None and kind == "hard":
-                res.update(self._measure(final, m.db.events(sid), set(baseline)))
+                res.update(self._measure(final, m.db.sessions.events(sid), set(baseline)))
             return res
         except BaseException:  # setup failed (Docker down) or the run was cancelled: leave no canary on the GPU
             await self._stop(sid)
@@ -366,7 +366,7 @@ class PromptCapture:
 def turn_metrics_by_session(db) -> list[dict]:
     """Every finished session's persisted `turn_metrics` rows, oldest session first (--keep-metrics)."""
     return [{"session": s["id"], "title": s["title"], "status": s["status"],
-             "turns": [e["data"] for e in db.events(s["id"]) if e["type"] == "turn_metrics"]}
+             "turns": [e["data"] for e in db.sessions.events(s["id"]) if e["type"] == "turn_metrics"]}
             for s in db.sessions_with_status(*DONE)]
 
 

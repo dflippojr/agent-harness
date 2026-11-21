@@ -840,7 +840,7 @@ class SessionStores:
     def search_events(self, fts_query: str, exclude: str = "", max_rows: int = 600, user_id: str | None = None,
                       app_id: str | None = None, session_kind: str | None = "agent",
                       with_app: str | None = None) -> list[dict]:
-        rows = self.web.search_events(fts_query, exclude, max_rows, user_id=user_id,
+        rows = self.web.sessions.search_events(fts_query, exclude, max_rows, user_id=user_id,
                                       session_kind=session_kind) if self._reads_web(app_id) else []
         apps = self._reach(app_id, with_app, lambda e: (app_id is None or e["app_id"] == app_id)
                            and (user_id is None or e["owner_id"] == user_id)

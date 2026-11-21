@@ -107,7 +107,7 @@ async def wait_status(m: Manager, sid: str, *statuses: str, timeout: float = 30)
 
 
 def events(m: Manager, sid: str, type_: str) -> list[dict]:
-    return [e["data"] for e in m.db.events(sid) if e["type"] == type_]
+    return [e["data"] for e in m.db.sessions.events(sid) if e["type"] == type_]
 
 
 # policy
@@ -421,7 +421,7 @@ def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write
         m = Manager(make_cfg(tmp_path), chat=script)
         await m.start()
         entered, release = threading.Event(), threading.Event()
-        update_session, insert_event = m.db.update_session, m.db.insert_event
+        update_session, insert_event = m.db.update_session, m.db.sessions.insert_event
 
         def hold(name: str) -> None:
             if name == final_write:
@@ -437,7 +437,7 @@ def test_cancel_during_the_final_writes_still_ends_the_run(tmp_path, final_write
             if type_ == "run_finished":
                 hold("run_finished")
             return insert_event(sid, type_, data)
-        m.db.update_session, m.db.insert_event = slow_update, slow_insert
+        m.db.update_session, m.db.sessions.insert_event = slow_update, slow_insert
         saved = []
         save_branch = m.runner.save_branch
 

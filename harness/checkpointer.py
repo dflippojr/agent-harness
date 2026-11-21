@@ -357,7 +357,7 @@ class Checkpointer:
         none (answered, or never answered because the run hit its limit, #664) is still of that checkpoint's files.
         A skipped snapshot since means the files did change, so then it stops at the checkpoint."""
         ckpt = self.checkpoint(parent["id"], turn)
-        events = self.db.events(parent["id"])
+        events = self.db.sessions.events(parent["id"])
         visible = self.db.sessions.checkpoints(parent["id"])
         later = [e for e in events if e["seq"] > ckpt["event_seq"]]
         to_end = bool(visible) and visible[-1]["turn"] == turn and not any(

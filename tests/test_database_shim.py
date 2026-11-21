@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -44,9 +45,6 @@ PINNED_SHIM: dict[str, frozenset[str]] = {
         "find_session_ids", "list_sessions", "session_page", "active_sessions", "group_sessions",
         "sessions_with_status", "sessions_with_run_flag", "count_sessions", "count_app_sessions",
         "count_stored_sessions", "count_stored_app_sessions", "delete_session", "job_sessions", "session_activity",
-        # events and search
-        "insert_event", "search_events", "session_brief", "events", "has_tool_result", "pushed_heads",
-        "snippet_events", "session_card_bits", "last_event_seq",
     }),
 }
 
@@ -92,11 +90,12 @@ def test_the_shim_only_shrinks():
 
 def test_database_forwards_these_many_names_per_store():
     """The shim on `Database` as this change leaves it, read from the class itself: 6 credential names (39 when the
-    store was added, 28 before #1032), 29 session names (51 before #992 stage 6 moved the checkpoint, artifact,
-    review-comment, secret-dismissal, approval and smart-review callers), and no account, App or usage names."""
+    store was added, 28 before #1032), 20 session names (51 before #992 stage 6 moved the checkpoint, artifact,
+    review-comment, secret-dismissal, approval and smart-review callers, 29 before it moved the event and search
+    callers), and no account, App or usage names."""
     forwarded = _forwarded()
     sizes = {store: sum(1 for s in forwarded.values() if s == store) for store in STORES}
-    assert sizes == {"credentials": 6, "sessions": 29, "accounts": 0, "apps": 0, "usage": 0}
+    assert sizes == {"credentials": 6, "sessions": 20, "accounts": 0, "apps": 0, "usage": 0}
     assert sizes == {store: len(PINNED_SHIM.get(store, ())) for store in STORES}
 
 
@@ -251,11 +250,11 @@ def _session(sid: str, app_id: str = "") -> dict:
 def test_a_forwarded_session_call_runs_on_the_databases_session_store(db):
     assert isinstance(db.sessions, SessionStore) and db.sessions.core is db
     db.insert_session(_session("s1"))
-    event = db.insert_event("s1", "user_message", {"content": "find the walrus"})
-    assert db.sessions.events("s1") == db.events("s1") and db.events("s1")[0]["seq"] == event["seq"]
+    event = db.sessions.insert_event("s1", "user_message", {"content": "find the walrus"})
+    assert db.sessions.events("s1")[0]["seq"] == event["seq"]
     assert db.get_session.__self__ is db.sessions
     # The search index is the store's: an event is indexed in the same write.
-    assert [r["session_id"] for r in db.search_events('"walrus"')] == ["s1"]
+    assert [r["session_id"] for r in db.sessions.search_events('"walrus"')] == ["s1"]
     assert asyncio.run(db.aio.get_session("s1"))["id"] == "s1"
     assert asyncio.run(db.aio.update_session("s1", status="failed")) is None
     assert db.get_session("s1")["status"] == "failed"
@@ -267,7 +266,7 @@ def test_each_store_keeps_its_own_sessions_behind_session_stores(tmp_path):
     try:
         stores.insert_session(_session("own"))
         stores.insert_session(_session("a1", "k-aaaa"))
-        stores.insert_event("a1", "user_message", {"content": "hello"})
+        stores.sessions.insert_event("a1", "user_message", {"content": "hello"})
         app_db = stores._open["k-aaaa"].db
         assert app_db.sessions is not main.sessions and app_db.sessions.core is app_db
         assert app_db.sessions.get_session("a1")["app_id"] == "k-aaaa"
@@ -517,9 +516,9 @@ def test_has_tool_result_reads_the_sessions_own_store(tmp_path):
         assert stores.web is not main
         for sid, app_id in (("own", ""), ("a1", "k-aaaa")):
             stores.insert_session(_agent_session(sid, app_id))
-            assert not stores.has_tool_result(sid) and not stores.sessions.has_tool_result(sid)
-            stores.insert_event(sid, "tool_result", {"id": "t1", "output": "ok"})
-            assert stores.has_tool_result(sid) and stores.sessions.has_tool_result(sid), sid
+            assert not stores.sessions.has_tool_result(sid) and not stores.for_session(sid).sessions.has_tool_result(sid)
+            stores.sessions.insert_event(sid, "tool_result", {"id": "t1", "output": "ok"})
+            assert stores.sessions.has_tool_result(sid) and stores.for_session(sid).sessions.has_tool_result(sid), sid
     finally:
         stores.close()
 
@@ -554,8 +553,7 @@ def test_every_call_of_a_moved_session_method_goes_through_a_sessions_proxy():
     overrides, so a call left on `m.db` would still run: only this scan refuses it."""
     moved = _moved_session_names()
     assert APP_STORE_NAMES <= moved and not moved & set(_forwarded())
-    root = Path(core_db.__file__).resolve().parent
-    for package in (root, root.parent / "harness_modules", root.parent / "scripts"):
+    for package in _production_packages():
         assert _uses_off_the_store(package, "sessions", moved) == [], package.name
 
 
@@ -594,6 +592,55 @@ def test_the_session_scan_allows_a_managers_and_a_classs_own_methods(tmp_path):
         "pkg/x.py:10 .get_approval", "pkg/x.py:11 .get_approval", "pkg/x.py:9 .checkpoints"]
 
 
+def test_the_session_scan_allows_only_the_listed_data_reads(tmp_path):
+    """Only the reads `DATA_READS` lists pass, by file, receiver and name: a Database or store of any name (`m.db`,
+    `self._db`), another receiver in the same file, the same read in another file, and a listed receiver's name when
+    it is called, handed to `to_thread` or `awrite`, or reached through `.aio` are reported."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "real_env_lane.py").write_text(
+        "import asyncio\n"
+        "class SessionRun:\n"
+        "    events: list[dict]\n"
+        "    pending_approvals: list[dict]\n"             # a field of that name gives no pass
+        "    def text(self):\n"
+        "        return [e for e in self.events]\n"       # listed: fine
+        "def f(run, m, sid, result):\n"
+        "    [e for e in run.events]\n"                   # listed: fine
+        "    asyncio.to_thread(m.db.events, sid)\n"       # line 9: a Database's bound method
+        "    asyncio.to_thread(m.db.pending_approvals, sid)\n"  # line 10
+        "    result.events\n"                             # line 11: not listed for this file
+        "class Lane:\n"
+        "    def g(self, sid):\n"
+        "        return asyncio.to_thread(self._db.pending_approvals, sid)\n"  # line 14: a Database of any name
+        "async def k(run, sid, db):\n"
+        "    run.events(sid)\n"                           # line 16: a listed receiver, called
+        "    await run.aio.events(sid)\n"                 # line 17: a listed receiver, through .aio
+        "    run.aio.events\n"                            # line 18: through .aio, uncalled
+        "    await asyncio.to_thread(run.events, sid)\n"  # line 19: a listed receiver's bound method, handed off
+        "    await db.awrite(run.events, sid)\n",         # line 20: the same, handed to awrite
+        encoding="utf-8")
+    (tmp_path / "scripts" / "other.py").write_text(
+        "def h(run):\n"
+        "    return run.events\n",                        # line 2: listed only for real_env_lane.py
+        encoding="utf-8")
+    allowed: set[tuple[str, str, str]] = set()
+    found = _uses_off_the_store(tmp_path / "scripts", "sessions", frozenset({"events", "pending_approvals"}), allowed)
+    assert sorted(found) == ["scripts/other.py:2 .events", "scripts/real_env_lane.py:10 .pending_approvals",
+                             "scripts/real_env_lane.py:11 .events", "scripts/real_env_lane.py:14 .pending_approvals",
+                             "scripts/real_env_lane.py:16 .events", "scripts/real_env_lane.py:17 .events",
+                             "scripts/real_env_lane.py:18 .events", "scripts/real_env_lane.py:19 .events",
+                             "scripts/real_env_lane.py:20 .events", "scripts/real_env_lane.py:9 .events"]
+    assert allowed == {("scripts/real_env_lane.py", "run", "events"), ("scripts/real_env_lane.py", "self", "events")}
+
+
+def test_every_allowed_data_read_is_still_there():
+    """Each `DATA_READS` entry matches a read in the production code, so the list can only shrink to what is used."""
+    allowed: set[tuple[str, str, str]] = set()
+    for package in _production_packages():
+        _uses_off_the_store(package, "sessions", _moved_session_names(), allowed)
+    assert allowed == DATA_READS
+
+
 ACCOUNT_TABLES = ("accounts", "account_audit", "member_projects", "github_connections", "member_api_keys",
                   "google_identities", "google_link_invitations", "web_sessions")
 
@@ -607,19 +654,60 @@ def test_account_queries_left_the_database_class():
         assert not hasattr(Database, name), f"Database.{name}: call db.accounts.{name}"
 
 
-def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -> list[str]:
+_NOT_PRODUCTION = frozenset({"tests", "node_modules", "build", "dist", "__pycache__"})
+
+
+def _py_files(root: Path):
+    """The Python files under `root`, never walking into installed or generated trees (`node_modules`, a hidden
+    `.venv`)."""
+    for folder, subfolders, files in os.walk(root):
+        subfolders[:] = sorted(d for d in subfolders if d not in _NOT_PRODUCTION and not d.startswith("."))
+        yield from (Path(folder) / f for f in sorted(files) if f.endswith(".py"))
+
+
+def _production_packages() -> list[Path]:
+    """Every top-level folder of the checkout with Python in it, except the tests: `harness`, `harness_modules` and
+    `scripts`, and also `bakeoff`, `ops`, `tools`, `sdk`, `.claude` and the rest. Stage 6 batch 2 (#992) found
+    `bakeoff` calls that a scan of the first three missed."""
+    repo = Path(core_db.__file__).resolve().parent.parent
+    return [p for p in sorted(repo.iterdir()) if p.is_dir() and p.name not in _NOT_PRODUCTION
+            and (p.name == ".claude" or not p.name.startswith(".")) and next(_py_files(p), None) is not None]
+
+
+def test_the_scans_cover_every_package_with_python_in_it():
+    names = {p.name for p in _production_packages()}
+    assert {"harness", "harness_modules", "scripts", "bakeoff", "sdk", ".claude"} <= names
+    assert not names & {"tests", ".venv", ".git"}
+
+
+# Reads of a data attribute that shares a session method's name, each by file, receiver and name: the scan allows these
+# and nothing else (#992 Decisions, PR #1039, option 1). Add one only after review, one line each; a stale one fails
+# `test_every_allowed_data_read_is_still_there`.
+DATA_READS = frozenset({
+    ("scripts/real_env_lane.py", "run", "events"),     # SessionRun.events, a dataclass field: the streamed events
+    ("scripts/real_env_lane.py", "self", "events"),    # the same field, inside SessionRun
+    ("sdk/harness_client.py", "self", "events"),       # the SDK run result's events field, inside that class
+    ("sdk/harness_client.py", "result", "events"),     # the same field, filled while the client follows a run
+})
+
+
+def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None,
+                        allowed: set[tuple[str, str, str]] | None = None) -> list[str]:
     """Each use of a method name of core store `store` (or of `names`, some of them: a call, or a bound method handed
     to `to_thread` or `awrite`) not made on that store: `<x>.<store>.<name>` or `<x>.<store>.aio.<name>`. Also
     allowed: for apps and sessions, `self.<name>` inside a class that defines `<name>` itself (`Manager.app_limits`,
     the effective caps; SessionStores' own overrides); for sessions, `m.<name>` for a method of the Manager (`m`) of
-    that name (`checkpoints`, the listing, and `add_review_comment`); for accounts, an `accounts` stand-in
-    (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`."""
+    that name (`checkpoints`, the listing, and `add_review_comment`), and the data reads `DATA_READS` names (file,
+    receiver and name: `run.events` in `scripts/real_env_lane.py`), only as a plain read: not called, not handed to
+    `to_thread` or `awrite`, and not through `.aio`; for accounts, an `accounts` stand-in
+    (`principal.resolve_human`'s) or `operation_audit`'s `_audit_store(db)`. Each allowed data read is added to
+    `allowed`, when given."""
     import ast
     cls = STORES[store]
     names = _store_methods(cls) if names is None else names
     own_file = Path(inspect.getsourcefile(cls)).name
     found = []
-    for path in sorted(root.rglob("*.py")):
+    for path in _py_files(root):
         if path.name == own_file:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -628,6 +716,12 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -
             methods = {n.name for n in cls_node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
             for inner in ast.walk(cls_node):
                 own_methods[id(inner)] = methods
+        rel = path.relative_to(root.parent).as_posix()
+        used = set()  # each node called, or handed as a bound method to `to_thread` or `awrite`: never a data read
+        for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+            used.add(id(call.func))
+            if getattr(call.func, "attr", getattr(call.func, "id", None)) in ("to_thread", "awrite"):
+                used.update(id(a) for a in call.args)
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Attribute) and node.attr in names):
                 continue
@@ -641,10 +735,15 @@ def _uses_off_the_store(root, store: str, names: frozenset[str] | None = None) -
                 continue
             if store == "sessions" and isinstance(on, ast.Name) and on.id == "m" and node.attr in vars(Manager):
                 continue
+            if store == "sessions" and on is node.value and id(node) not in used and \
+                    (read := (rel, ast.unparse(on), node.attr)) in DATA_READS:
+                if allowed is not None:
+                    allowed.add(read)
+                continue
             if store == "accounts" and ((isinstance(on, ast.Name) and on.id == "accounts") or (
                     isinstance(on, ast.Call) and isinstance(on.func, ast.Name) and on.func.id == "_audit_store")):
                 continue
-            found.append(f"{path.relative_to(root.parent).as_posix()}:{node.lineno} .{node.attr}")
+            found.append(f"{rel}:{node.lineno} .{node.attr}")
     return found
 
 
@@ -654,8 +753,7 @@ def _account_uses_off_the_store(root) -> list[str]:
 
 def test_every_account_call_goes_through_the_account_store():
     """No production code calls or passes an account method of a Database (it has none): only of `db.accounts`."""
-    root = Path(core_db.__file__).resolve().parent
-    for package in (root, root.parent / "harness_modules", root.parent / "scripts"):
+    for package in _production_packages():
         assert _account_uses_off_the_store(package) == [], package.name
 
 
@@ -674,8 +772,7 @@ def test_the_scan_finds_calls_and_bound_methods(tmp_path):
 
 def test_every_app_call_goes_through_the_app_store():
     """No production code calls or passes an App-store method of a Database (it has none): only of `db.apps`."""
-    root = Path(core_db.__file__).resolve().parent
-    for package in (root, root.parent / "harness_modules", root.parent / "scripts"):
+    for package in _production_packages():
         assert _uses_off_the_store(package, "apps") == [], package.name
 
 
@@ -718,8 +815,7 @@ def test_the_account_scan_has_no_own_method_allowance(tmp_path):
 
 def test_every_usage_call_goes_through_the_usage_store():
     """No production code calls or passes a usage method of a Database (it has none): only of `db.usage`."""
-    root = Path(core_db.__file__).resolve().parent
-    for package in (root, root.parent / "harness_modules", root.parent / "scripts"):
+    for package in _production_packages():
         assert _uses_off_the_store(package, "usage") == [], package.name
 
 

@@ -136,7 +136,7 @@ def test_stream_tickets_resume_expire_and_follow_key_revocation(tmp_path):
         assert streamed.headers["referrer-policy"] == "no-referrer"
 
         # EventSource reconnects can reuse the ticket briefly and resume from Last-Event-ID.
-        seq = max(e["seq"] for e in m.db.events(sid))
+        seq = max(e["seq"] for e in m.db.sessions.events(sid))
         resumed = client.get(ticket_url, headers={"Origin": ORIGIN, "Last-Event-ID": str(seq)})
         assert resumed.status_code == 200
         assert "id: " not in resumed.text

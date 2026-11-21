@@ -282,7 +282,7 @@ def test_threshold_resets_the_round_only_when_state_is_saved(tmp_path):
         sid = m.create(prompt)["id"]
         await wait_status(m, sid, "done")
         await asyncio.gather(*m.tasks.values())
-        log = m.db.events(sid)
+        log = m.db.sessions.events(sid)
         start = next((i for i, e in enumerate(log) if e["type"] == "tool_result" and e["data"]["name"] == after_tool), 0)
         return sid, [e["data"]["tier"] for e in log[start:] if e["type"] == "compaction"]
 
@@ -368,10 +368,10 @@ def test_scheduled_reset_skipped_if_state_cleared(tmp_path):
             {"role": "assistant", "content": "used it"},
         ]
         m.db.update_session(sid, context=padded, run=run)
-        before = len(m.db.events(sid))
+        before = len(m.db.sessions.events(sid))
         await m.runner._maybe_compact(m.db.get_session(sid))
         s = m.db.get_session(sid)
-        tiers = [e["data"]["tier"] for e in m.db.events(sid)[before:] if e["type"] == "compaction"]
+        tiers = [e["data"]["tier"] for e in m.db.sessions.events(sid)[before:] if e["type"] == "compaction"]
         assert "round_reset" not in tiers
         assert any(tier in ("elide", "summary") for tier in tiers)
         assert "pending_round_reset" not in s["run"]

@@ -60,7 +60,7 @@ async def run_hosted(task, backend_name: str, mode: str, run_dir: Path, backend,
         final = m.db.get_session(sid)
         ok, note = await asyncio.to_thread(grade_hard_task, task, Path(final["workspace"]), final["answer"], baseline)
         totals = final["totals"]
-        tools = [e for e in m.db.events(sid) if e["type"] == "tool_call"]
+        tools = [e for e in m.db.sessions.events(sid) if e["type"] == "tool_call"]
         return {"backend": backend_name, "mode": mode, "task": task.id, "ok": bool(ok and final["status"] == "done"),
                 "note": note + ("; stopped at the wall limit" if stopped else ""), "status": final["status"],
                 "turns": totals.get("turns", 0),

@@ -1333,7 +1333,7 @@ async def _session_events_stream(request: Request, m, sid: str, owner: str, afte
     epoch = m.stream_epoch.get(owner, 0)
     try:
         yield ": connected\n\n"
-        for e in m.db.events(sid, after):
+        for e in m.db.sessions.events(sid, after):
             if not _stream_active(m, key, owner, epoch):
                 return
             last = e["seq"]
