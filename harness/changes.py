@@ -38,12 +38,15 @@ def find_repos(root: Path, depth: int = 2) -> list[Path]:
 
 
 def _status_files(repo: Path, strict: bool = False) -> list[dict]:
-    status = _git(repo, "status", "--porcelain=v1", "--untracked-files=all", strict=strict)
+    # -z: paths come raw, never C-quoted (a quoted name would not resolve for the untracked-file diff).
+    entries = iter(_git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all", strict=strict).split("\0"))
     files = []
-    for line in status.splitlines():
-        code, path = line[:2], line[3:]
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
+    for entry in entries:
+        if not entry:
+            continue
+        code, path = entry[:2], entry[3:]
+        if "R" in code or "C" in code:
+            next(entries, None)  # a rename or copy is followed by its source path
         files.append({"path": path, "status": code.strip() or "?"})
     return files
 

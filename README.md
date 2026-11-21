@@ -107,7 +107,7 @@ stateDiagram-v2
     state "Image generation" as Images
 
     [*] --> Agent
-    Agent --> Sleeping: idle 30 min
+    Agent --> Sleeping: idle 10 min
     Sleeping --> Agent: next request, or web app opened
     Agent --> Images: image batch queued
     Images --> Agent: batch done
@@ -309,7 +309,7 @@ of a web page.
 ### Quick start (development)
 
 ```powershell
-python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
+python -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt pytest-xdist
 .\.venv\Scripts\python -m harness                  # daemon on 127.0.0.1:8100
 .\.venv\Scripts\python -m harness.cli new "Clone local:invoice-tools, fix the failing test, and report back"
 .\.venv\Scripts\python -m pytest tests -q -n 4 --dist loadfile

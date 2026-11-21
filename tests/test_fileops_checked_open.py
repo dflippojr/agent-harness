@@ -54,6 +54,7 @@ def test_ordinary_files_read_write_edit_and_search_as_before(tmp_path):
     assert files.write_file("deep/new/a.txt", "one\r\ntwo\n") == "wrote 9 characters to deep/new/a.txt"
     assert (tmp_path / "deep" / "new" / "a.txt").read_bytes() == b"one\r\ntwo\n"
     assert files.read_file("deep/new/a.txt") == "1\tone\n2\ttwo"
+    assert files.read_file("deep/new/a.txt", start_line=5) == "start_line=5 is past the end of the file (2 lines total)"
     assert files.search("tw") == "deep/new/a.txt:2: two"
     assert files.edit_file("deep/new/a.txt", "two", "three") == "edited deep/new/a.txt"
     assert (tmp_path / "deep" / "new" / "a.txt").read_bytes() == b"one\nthree\n"
